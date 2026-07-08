@@ -1,3 +1,4 @@
+import { untrack } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { reduce } from "./reducer";
 import { type Action, type AppState, initialState } from "./types";
@@ -52,15 +53,23 @@ function appSnapshot(): AppState {
 /** Apply the same pure `reduce` used by the tests, then push the result into
  * the fine-grained store. The two rendered arrays (messages, inbox) go through
  * `reconcile` keyed by `id` so only the DOM bound to genuinely-changed rows
- * re-renders; the small scalar/never-rendered fields are set directly. */
+ * re-renders; the small scalar/never-rendered fields are set directly.
+ *
+ * The whole body is `untrack`ed: dispatch is an imperative command, and it is
+ * sometimes invoked synchronously from inside a reactive scope (e.g. the App
+ * effect that opens the socket immediately dispatches connection_status). Its
+ * internal `appSnapshot()` reads must NOT subscribe that caller to the store,
+ * or the subsequent writes here would re-trigger it in an infinite loop. */
 export function dispatch(action: Action): void {
-  const next = reduce(appSnapshot(), action);
-  setState("messages", reconcile(next.messages, { key: "id" }));
-  setState("inbox", reconcile(next.inbox, { key: "id" }));
-  setState("pendingSends", next.pendingSends);
-  setState("agentActivity", next.agentActivity);
-  setState("connection", next.connection);
-  setState("lastSeenMsgId", next.lastSeenMsgId);
+  untrack(() => {
+    const next = reduce(appSnapshot(), action);
+    setState("messages", reconcile(next.messages, { key: "id" }));
+    setState("inbox", reconcile(next.inbox, { key: "id" }));
+    setState("pendingSends", next.pendingSends);
+    setState("agentActivity", next.agentActivity);
+    setState("connection", next.connection);
+    setState("lastSeenMsgId", next.lastSeenMsgId);
+  });
 }
 
 export function goToChat(opts?: {

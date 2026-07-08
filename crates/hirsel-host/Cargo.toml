@@ -1,0 +1,42 @@
+[package]
+name = "hirsel-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum = { version = "0.7.9", features = ["ws", "macros"] }
+chrono.workspace = true
+futures-util.workspace = true
+hirsel-drivers.workspace = true
+hirsel-proto.workspace = true
+lash-core = { path = "/workspace/code/lash/crates/lash-core" }
+lash = { package = "lash-runtime", path = "/workspace/code/lash/crates/lash", features = ["rlm"] }
+lash-provider-anthropic = { path = "/workspace/code/lash/crates/lash-provider-anthropic" }
+lash-provider-openai = { path = "/workspace/code/lash/crates/lash-provider-openai" }
+lash-protocol-rlm = { path = "/workspace/code/lash/crates/lash-protocol-rlm" }
+lash-sqlite-store = { path = "/workspace/code/lash/crates/lash-sqlite-store" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http = { version = "0.6.6", features = ["fs"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-tungstenite = "0.24.0"
+
+[lib]
+name = "hirsel_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hirsel-host"
+path = "src/main.rs"

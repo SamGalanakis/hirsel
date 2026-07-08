@@ -1,0 +1,32 @@
+[workspace]
+members = [
+  "crates/hirsel-proto",
+  "crates/hirsel-drivers",
+  "crates/hirsel-host",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+chrono = { version = "0.4.42", features = ["serde", "clock"] }
+futures-util = "0.3.31"
+hirsel-drivers = { path = "crates/hirsel-drivers" }
+hirsel-proto = { path = "crates/hirsel-proto" }
+libc = "0.2.177"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["full"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+uuid = { version = "1.18.1", features = ["v4", "serde"] }

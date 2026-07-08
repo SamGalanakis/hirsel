@@ -1,0 +1,60 @@
+.row {
+  display: flex;
+  padding: 0 var(--space-3);
+  scroll-margin: var(--space-4);
+}
+
+.row.owner {
+  justify-content: flex-end;
+}
+
+.row.agent {
+  justify-content: flex-start;
+}
+
+.bubble {
+  max-width: 82%;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  position: relative;
+}
+
+.owner .bubble {
+  background: var(--owner-bubble);
+  border-bottom-right-radius: 4px;
+}
+
+.agent .bubble {
+  background: var(--agent-bubble);
+  border-bottom-left-radius: 4px;
+}
+
+.meta {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-1);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+}
+
+.owner .meta {
+  justify-content: flex-end;
+}
+
+.pending {
+  font-style: italic;
+}
+
+.highlight .bubble {
+  animation: flash 1.6s ease-out;
+}
+
+@keyframes flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}

@@ -1,0 +1,57 @@
+.md {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  word-wrap: break-word;
+}
+
+.md > *:first-child {
+  margin-top: 0;
+}
+
+.md > *:last-child {
+  margin-bottom: 0;
+}
+
+.md p {
+  margin: 0 0 var(--space-2);
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 var(--space-2);
+  padding-left: 1.25em;
+}
+
+.md a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--text-faint);
+}
+
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+.md pre {
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  overflow-x: auto;
+  margin: 0 0 var(--space-2);
+}
+
+.md pre code {
+  background: none;
+  padding: 0;
+}
+
+.md blockquote {
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+}

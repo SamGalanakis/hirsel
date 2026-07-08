@@ -1,0 +1,36 @@
+.quote {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: rgba(0, 0, 0, 0.18);
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+  padding: var(--space-1) var(--space-2);
+  margin-bottom: var(--space-1);
+  cursor: pointer;
+  color: inherit;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+}
+
+.author {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.snippet {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.missing {
+  font-style: italic;
+  color: var(--text-faint);
+}

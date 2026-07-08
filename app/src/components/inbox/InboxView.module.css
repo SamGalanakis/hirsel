@@ -1,0 +1,39 @@
+.view {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 var(--space-5);
+}
+
+.empty {
+  margin: auto;
+  color: var(--text-faint);
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 0 var(--space-5);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.archivedSection {
+  margin-top: var(--space-2);
+}
+
+.archivedToggle {
+  width: calc(100% - var(--space-6));
+  margin: 0 var(--space-3);
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  padding: var(--space-3) 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}

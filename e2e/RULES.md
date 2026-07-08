@@ -12,9 +12,12 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 
 - `POST /debug/reset` wipes Chat, Inbox, process debug state, and starts from a clean session.
 - `POST /debug/upload { "name": "...", "mime": "...", "data_b64": "..." }` stores a blob and returns its Blob JSON.
-- `POST /debug/owner-message { "body": "...", "ref": null | message_id, "attachments": ["blob-id"] }` injects an Owner Chat message through the same host ingress path as the WebSocket; `attachments` is optional and defaults to `[]`.
+- `POST /debug/owner-message { "client_id": "optional-stable-id", "body": "...", "ref": null | message_id, "attachments": ["blob-id"], "mode": "send" | "next_turn" }` injects an Owner Chat message through the same host ingress path as the WebSocket; `client_id`, `attachments`, and `mode` are optional, and `mode` defaults to `send`.
+- `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
+- `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
 - `GET /debug/chat` returns persisted Chat messages.
 - `GET /debug/inbox` returns persisted Inbox Items.
+- `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
 - `GET /debug/processes` returns Sub-agent process records and normalized events.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.

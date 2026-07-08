@@ -14,7 +14,6 @@ use crate::{
     attachments::{
         MAX_BLOB_BASE64_BYTES, decode_blob_data_b64, normalize_mime, sanitize_blob_name,
     },
-    lash_runtime::OwnerTurn,
 };
 
 const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -174,29 +173,26 @@ async fn handle_client_frame(
             body,
             r#ref,
             attachments,
+            mode,
         } => {
-            let (message, inserted) = state
-                .storage
-                .append_owner_message(&client_id, body, r#ref, &attachments)
+            let submission = state
+                .submit_owner_message(client_id, body, r#ref, attachments, mode)
                 .await?;
-            if inserted {
-                let stored_attachments = state.storage.blobs_for_message(message.id).await?;
-                let _ = state.broadcaster.send(HostToClient::Msg {
-                    message: message.clone(),
-                });
-                state
-                    .agent
-                    .enqueue(OwnerTurn {
-                        message_id: message.id,
-                        client_id,
-                        body: message.body.clone(),
-                        anchor: message.r#ref,
-                        attachments: stored_attachments,
-                    })
-                    .await?;
-            } else {
-                send_json_sink(sink, &HostToClient::Msg { message }).await?;
+            if !submission.inserted {
+                send_json_sink(
+                    sink,
+                    &HostToClient::Msg {
+                        message: submission.message,
+                    },
+                )
+                .await?;
             }
+        }
+        ClientToHost::CancelTurn {} => {
+            state.cancel_turn().await?;
+        }
+        ClientToHost::CancelQueued { client_id } => {
+            state.cancel_queued_message(&client_id).await?;
         }
         ClientToHost::UploadBlob {
             client_id,
@@ -225,7 +221,7 @@ async fn handle_client_frame(
         }
         ClientToHost::ArchiveItem { item_id } => {
             if let Some(item) = state.storage.archive_inbox_item(item_id).await? {
-                let _ = state.broadcaster.send(HostToClient::InboxUpsert { item });
+                state.broadcast(HostToClient::InboxUpsert { item });
             }
         }
     }

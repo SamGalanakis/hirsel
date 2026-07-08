@@ -52,6 +52,20 @@ pub struct InboxItem {
     pub ts: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendMode {
+    #[default]
+    Send,
+    NextTurn,
+}
+
+impl SendMode {
+    pub fn is_send(&self) -> bool {
+        matches!(self, Self::Send)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +81,12 @@ pub enum ClientToHost {
         r#ref: Option<u64>,
         #[serde(default)]
         attachments: Vec<String>,
+        #[serde(default, skip_serializing_if = "SendMode::is_send")]
+        mode: SendMode,
+    },
+    CancelTurn {},
+    CancelQueued {
+        client_id: String,
     },
     UploadBlob {
         client_id: String,
@@ -97,6 +117,9 @@ pub enum HostToClient {
     },
     Msg {
         message: ChatMessage,
+    },
+    MsgRemoved {
+        id: u64,
     },
     AgentActivity {
         state: AgentActivityState,
@@ -157,6 +180,7 @@ mod tests {
                 body: "hello".to_string(),
                 r#ref: Some(42),
                 attachments: vec!["blob-1".to_string()],
+                mode: SendMode::Send,
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
@@ -179,8 +203,50 @@ mod tests {
                 body: "hello".to_string(),
                 r#ref: None,
                 attachments: Vec::new(),
+                mode: SendMode::Send,
             }
         );
+    }
+
+    #[test]
+    fn send_message_mode_next_turn_round_trips() {
+        let value = json!({
+            "type": "send_message",
+            "client_id": "client-1",
+            "body": "hello",
+            "ref": null,
+            "attachments": [],
+            "mode": "next_turn"
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::SendMessage {
+                client_id: "client-1".to_string(),
+                body: "hello".to_string(),
+                r#ref: None,
+                attachments: Vec::new(),
+                mode: SendMode::NextTurn,
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn cancel_frames_round_trip() {
+        let cancel_turn = ClientToHost::CancelTurn {};
+        let encoded = serde_json::to_string(&cancel_turn).unwrap();
+        assert_eq!(encoded, r#"{"type":"cancel_turn"}"#);
+        let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, cancel_turn);
+
+        let cancel_queued = ClientToHost::CancelQueued {
+            client_id: "client-1".to_string(),
+        };
+        let encoded = serde_json::to_string(&cancel_queued).unwrap();
+        let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, cancel_queued);
     }
 
     #[test]
@@ -205,6 +271,15 @@ mod tests {
             },
         };
         let encoded = serde_json::to_string(&response).unwrap();
+        let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn msg_removed_round_trips() {
+        let response = HostToClient::MsgRemoved { id: 42 };
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert_eq!(encoded, r#"{"type":"msg_removed","id":42}"#);
         let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, response);
     }

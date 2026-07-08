@@ -19,7 +19,7 @@ use tokio::{
     time::{Duration, timeout},
 };
 
-use crate::{config::DriverMode, processes::ProcessStore, storage::Storage};
+use crate::{BroadcastLog, config::DriverMode, processes::ProcessStore, storage::Storage};
 
 #[derive(Clone, Debug)]
 pub struct ToolsConfig {
@@ -32,6 +32,7 @@ pub struct ToolSuite {
     config: ToolsConfig,
     storage: Storage,
     broadcaster: broadcast::Sender<HostToClient>,
+    broadcast_log: BroadcastLog,
     processes: ProcessStore,
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
@@ -66,6 +67,7 @@ impl ToolSuite {
         config: ToolsConfig,
         storage: Storage,
         broadcaster: broadcast::Sender<HostToClient>,
+        broadcast_log: BroadcastLog,
         processes: ProcessStore,
     ) -> Self {
         let (terminal_tx, _) = broadcast::channel(128);
@@ -73,6 +75,7 @@ impl ToolSuite {
             config,
             storage,
             broadcaster,
+            broadcast_log,
             processes,
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
@@ -102,7 +105,7 @@ impl ToolSuite {
             .storage
             .append_chat(ChatAuthor::Agent, body_md.into(), anchor)
             .await?;
-        let _ = self.broadcaster.send(HostToClient::Msg {
+        self.broadcast(HostToClient::Msg {
             message: message.clone(),
         });
         self.visible_sends.fetch_add(1, Ordering::Relaxed);
@@ -120,9 +123,7 @@ impl ToolSuite {
             .storage
             .create_inbox_item(content_md.into(), anchor, requires_response, quick_replies)
             .await?;
-        let _ = self
-            .broadcaster
-            .send(HostToClient::InboxUpsert { item: item.clone() });
+        self.broadcast(HostToClient::InboxUpsert { item: item.clone() });
         self.visible_sends.fetch_add(1, Ordering::Relaxed);
         Ok(item)
     }
@@ -130,11 +131,14 @@ impl ToolSuite {
     pub async fn inbox_archive(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
         let item = self.storage.archive_inbox_item(item_id).await?;
         if let Some(item) = &item {
-            let _ = self
-                .broadcaster
-                .send(HostToClient::InboxUpsert { item: item.clone() });
+            self.broadcast(HostToClient::InboxUpsert { item: item.clone() });
         }
         Ok(item)
+    }
+
+    fn broadcast(&self, event: HostToClient) {
+        self.broadcast_log.record(event.clone());
+        let _ = self.broadcaster.send(event);
     }
 
     pub async fn subagents_spawn(

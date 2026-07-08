@@ -167,6 +167,30 @@ impl Storage {
         )?)
     }
 
+    pub async fn message_id_for_client_id(&self, client_id: &str) -> anyhow::Result<Option<u64>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT msg_id FROM client_messages WHERE client_id = ?1",
+            params![client_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub async fn delete_chat_message(&self, id: u64) -> anyhow::Result<bool> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM message_attachments WHERE message_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM client_messages WHERE msg_id = ?1", params![id])?;
+        let changed = tx.execute("DELETE FROM chat_messages WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
     pub async fn replay_messages(
         &self,
         last_seen_msg_id: Option<u64>,
@@ -734,6 +758,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![text.path.as_path(), image.path.as_path()]
         );
+    }
+
+    #[tokio::test]
+    async fn delete_chat_message_removes_client_id_and_attachment_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let blob = storage
+            .store_blob("text-upload", "note.txt", "text/plain", b"hello".to_vec())
+            .await
+            .unwrap();
+        let attachment_ids = vec![blob.blob.id.clone()];
+        let (message, inserted) = storage
+            .append_owner_message("client-1", "queued", None, &attachment_ids)
+            .await
+            .unwrap();
+
+        assert!(inserted);
+        assert_eq!(
+            storage.message_id_for_client_id("client-1").await.unwrap(),
+            Some(message.id)
+        );
+        assert!(
+            !storage
+                .blobs_for_message(message.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(storage.delete_chat_message(message.id).await.unwrap());
+        assert_eq!(storage.all_chat().await.unwrap(), Vec::<ChatMessage>::new());
+        assert_eq!(
+            storage.message_id_for_client_id("client-1").await.unwrap(),
+            None
+        );
+        assert!(
+            storage
+                .blobs_for_message(message.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(storage.blob(&blob.blob.id).await.unwrap().is_some());
+        assert!(!storage.delete_chat_message(message.id).await.unwrap());
     }
 
     #[tokio::test]

@@ -1,10 +1,18 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::Context;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
-use hirsel_proto::{AgentActivityState, HostToClient, QuickReply};
+use hirsel_proto::{AgentActivityState, HostToClient, QuickReply, SendMode};
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
     observe::RemoteSessionObservationStreamItem,
@@ -29,13 +37,15 @@ use lash::{
 use lash_core::{
     DurabilityTier, ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
     ProcessEventSemanticsSpec, ProcessOriginator, ProcessTerminalSpec, ProcessValueSelector,
-    SessionPolicy, plugin::ProcessEngineContributionContext,
+    SessionPolicy, TurnInputCheckpointBoundary, TurnInputIngress,
+    plugin::ProcessEngineContributionContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, Notify, broadcast, mpsc};
+use tokio::sync::{Mutex, Notify, broadcast};
 
 use crate::{
+    BroadcastLog,
     config::{AgentMode, DriverMode, ProviderMode},
     storage::StoredBlob,
     tools::ToolSuite,
@@ -70,10 +80,17 @@ pub struct OwnerTurn {
     pub body: String,
     pub anchor: Option<u64>,
     pub attachments: Vec<StoredBlob>,
+    pub mode: SendMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelQueuedResult {
+    Cancelled,
+    AlreadyClaimed,
 }
 
 enum AgentBackend {
-    Scripted(mpsc::Sender<OwnerTurn>),
+    Scripted(Arc<ScriptedAgentRuntime>),
     Lash(Arc<LashAgentRuntime>),
     Degraded(Arc<DegradedAgentRuntime>),
 }
@@ -83,6 +100,7 @@ impl AgentRuntime {
         config: RuntimeConfig,
         tools: ToolSuite,
         broadcaster: broadcast::Sender<HostToClient>,
+        broadcast_log: BroadcastLog,
     ) -> anyhow::Result<Self> {
         match config.agent_mode {
             AgentMode::Scripted => Ok(Self {
@@ -90,33 +108,43 @@ impl AgentRuntime {
                     config,
                     tools,
                     broadcaster,
+                    broadcast_log,
                 ))),
             }),
-            AgentMode::Lash => match LashAgentRuntime::start(config, tools, broadcaster).await? {
-                LashStartup::Ready(runtime) => Ok(Self {
-                    backend: Arc::new(AgentBackend::Lash(runtime)),
-                }),
-                LashStartup::Unavailable(runtime) => Ok(Self {
-                    backend: Arc::new(AgentBackend::Degraded(runtime)),
-                }),
-            },
+            AgentMode::Lash => {
+                match LashAgentRuntime::start(config, tools, broadcaster, broadcast_log).await? {
+                    LashStartup::Ready(runtime) => Ok(Self {
+                        backend: Arc::new(AgentBackend::Lash(runtime)),
+                    }),
+                    LashStartup::Unavailable(runtime) => Ok(Self {
+                        backend: Arc::new(AgentBackend::Degraded(runtime)),
+                    }),
+                }
+            }
         }
     }
 
     pub async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
         match self.backend.as_ref() {
-            AgentBackend::Scripted(tx) => tx
-                .send(turn)
-                .await
-                .map_err(|_| anyhow::anyhow!("Agent runtime queue is closed")),
-            AgentBackend::Lash(runtime) => {
-                let runtime = Arc::clone(runtime);
-                tokio::spawn(async move {
-                    runtime.enqueue_or_report(turn).await;
-                });
-                Ok(())
-            }
+            AgentBackend::Scripted(runtime) => runtime.enqueue(turn).await,
+            AgentBackend::Lash(runtime) => runtime.enqueue_inner(turn).await,
             AgentBackend::Degraded(runtime) => runtime.enqueue(turn).await,
+        }
+    }
+
+    pub async fn cancel_turn(&self) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(runtime) => runtime.cancel_turn().await,
+            AgentBackend::Lash(runtime) => runtime.cancel_turn().await,
+            AgentBackend::Degraded(runtime) => runtime.cancel_turn().await,
+        }
+    }
+
+    pub async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(runtime) => runtime.cancel_queued(client_id).await,
+            AgentBackend::Lash(runtime) => runtime.cancel_queued(client_id).await,
+            AgentBackend::Degraded(runtime) => runtime.cancel_queued(client_id).await,
         }
     }
 }
@@ -125,16 +153,21 @@ fn start_scripted_runtime(
     config: RuntimeConfig,
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
-) -> mpsc::Sender<OwnerTurn> {
-    let (tx, rx) = mpsc::channel(64);
-    let worker = ScriptedAgentWorker {
+    broadcast_log: BroadcastLog,
+) -> Arc<ScriptedAgentRuntime> {
+    let runtime = Arc::new(ScriptedAgentRuntime {
         config,
         tools,
         broadcaster,
-        rx,
-    };
-    tokio::spawn(worker.run());
-    tx
+        broadcast_log,
+        state: Arc::new(Mutex::new(ScriptedQueueState::default())),
+        notify: Arc::new(Notify::new()),
+    });
+    let worker = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        worker.run().await;
+    });
+    runtime
 }
 
 enum LashStartup {
@@ -146,9 +179,12 @@ struct LashAgentRuntime {
     session: lash::LashSession,
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
+    broadcast_log: BroadcastLog,
     notify: Arc<Notify>,
     pump_lock: Mutex<()>,
     anchors: Arc<Mutex<Option<TurnAnchors>>>,
+    active_turn_id: Arc<Mutex<Option<String>>>,
+    drain_seq: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +198,7 @@ impl LashAgentRuntime {
         config: RuntimeConfig,
         tools: ToolSuite,
         broadcaster: broadcast::Sender<HostToClient>,
+        broadcast_log: BroadcastLog,
     ) -> anyhow::Result<LashStartup> {
         let provider = match build_provider(&config).await {
             Ok(provider) => provider,
@@ -171,6 +208,7 @@ impl LashAgentRuntime {
                     reason: message,
                     tools,
                     broadcaster,
+                    broadcast_log,
                 })));
             }
         };
@@ -242,9 +280,12 @@ impl LashAgentRuntime {
             session,
             tools: tools.clone(),
             broadcaster: broadcaster.clone(),
+            broadcast_log,
             notify: Arc::new(Notify::new()),
             pump_lock: Mutex::new(()),
             anchors,
+            active_turn_id: Arc::new(Mutex::new(None)),
+            drain_seq: AtomicU64::new(0),
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
@@ -259,28 +300,6 @@ impl LashAgentRuntime {
         Ok(LashStartup::Ready(runtime))
     }
 
-    async fn enqueue_or_report(self: Arc<Self>, turn: OwnerTurn) {
-        let message_id = turn.message_id;
-        if let Err(error) = self.enqueue_inner(turn).await {
-            tracing::warn!(%error, "failed to enqueue Owner turn into Lash session");
-            match self
-                .tools
-                .chat_send(format!("Agent turn failed: {error}"), Some(message_id))
-                .await
-            {
-                Ok(message) => {
-                    let mut anchors = self.anchors.lock().await;
-                    if let Some(anchors) = anchors.as_mut() {
-                        anchors.latest_agent_message_id = Some(message.id);
-                    }
-                }
-                Err(chat_error) => {
-                    tracing::warn!(%chat_error, "failed to write Agent enqueue error to Chat");
-                }
-            }
-        }
-    }
-
     async fn enqueue_inner(&self, turn: OwnerTurn) -> anyhow::Result<()> {
         {
             let mut anchors = self.anchors.lock().await;
@@ -289,14 +308,32 @@ impl LashAgentRuntime {
                 latest_agent_message_id: None,
             });
         }
+        let ingress = self.ingress_for_mode(turn.mode).await;
         let input = owner_turn_input(&turn).await?;
         self.session
             .enqueue(input)
             .id(turn.client_id)
+            .ingress(ingress)
             .send()
             .await?;
         self.notify.notify_one();
         Ok(())
+    }
+
+    async fn ingress_for_mode(&self, mode: SendMode) -> TurnInputIngress {
+        match mode {
+            SendMode::NextTurn => TurnInputIngress::next_turn(),
+            SendMode::Send => {
+                let active_turn_id = self.active_turn_id.lock().await.clone();
+                match active_turn_id {
+                    Some(turn_id) => TurnInputIngress::active_turn(
+                        turn_id,
+                        TurnInputCheckpointBoundary::AfterWork,
+                    ),
+                    None => TurnInputIngress::next_turn(),
+                }
+            }
+        }
     }
 
     async fn notify_if_work_pending(&self) {
@@ -327,7 +364,16 @@ impl LashAgentRuntime {
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
                     let sends_before = runtime.tools.visible_sends();
-                    match runtime.session.queued_turn().run().await {
+                    let drain_id = runtime.next_drain_id();
+                    runtime.set_active_turn_id(Some(drain_id.clone())).await;
+                    let result = runtime
+                        .session
+                        .queued_turn()
+                        .drain_id(drain_id.clone())
+                        .run()
+                        .await;
+                    runtime.clear_active_turn_id(&drain_id).await;
+                    match result {
                         Ok(Some(output)) => {
                             // Safety net: a turn that never called chat.send /
                             // inbox.file left Sam with nothing visible. Deliver
@@ -354,6 +400,53 @@ impl LashAgentRuntime {
                 }
             }
         });
+    }
+
+    fn next_drain_id(&self) -> String {
+        let seq = self.drain_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        format!("host-queue-drain:{seq}")
+    }
+
+    async fn set_active_turn_id(&self, id: Option<String>) {
+        *self.active_turn_id.lock().await = id;
+    }
+
+    async fn clear_active_turn_id(&self, id: &str) {
+        let mut active = self.active_turn_id.lock().await;
+        if active.as_deref() == Some(id) {
+            *active = None;
+        }
+    }
+
+    async fn cancel_turn(&self) -> anyhow::Result<()> {
+        self.session.cancel_running_turns();
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
+        let target = lash::PendingTurnInputCancelTarget::source_key(format!("host:{client_id}"));
+        let mut results = self.session.cancel_pending_turn_inputs([target]).await?;
+        let outcome = results
+            .pop()
+            .map(|result| result.outcome)
+            .unwrap_or(lash::PendingTurnInputCancelOutcome::NotFound);
+        match outcome {
+            lash::PendingTurnInputCancelOutcome::Cancelled(_) => Ok(CancelQueuedResult::Cancelled),
+            lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. }
+            | lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_)
+            | lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_)
+            | lash::PendingTurnInputCancelOutcome::NotFound => {
+                Ok(CancelQueuedResult::AlreadyClaimed)
+            }
+        }
     }
 
     async fn deliver_fallback_chat(&self, text: String) {
@@ -388,10 +481,14 @@ impl LashAgentRuntime {
                 tracing::warn!(%chat_error, "failed to write Agent turn error to Chat");
             }
         }
-        let _ = self.broadcaster.send(HostToClient::AgentActivity {
-            state: AgentActivityState::Idle,
-            text: None,
-        });
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
     }
 
     async fn current_anchor(&self) -> Option<u64> {
@@ -405,6 +502,7 @@ impl LashAgentRuntime {
     fn spawn_observation_bridge(self: &Arc<Self>) {
         let session = self.session.clone();
         let broadcaster = self.broadcaster.clone();
+        let broadcast_log = self.broadcast_log.clone();
         tokio::spawn(async move {
             let observable = session.observe();
             let current = observable.current_remote_observation();
@@ -420,14 +518,18 @@ impl LashAgentRuntime {
                 match item {
                     Ok(RemoteSessionObservationStreamItem::Event(event)) => {
                         if let Some(activity) = activity_from_observation(&event.event) {
-                            let _ = broadcaster.send(activity);
+                            publish(&broadcast_log, &broadcaster, activity);
                         }
                     }
                     Ok(RemoteSessionObservationStreamItem::Gap { .. }) => {
-                        let _ = broadcaster.send(HostToClient::AgentActivity {
-                            state: AgentActivityState::Idle,
-                            text: None,
-                        });
+                        publish(
+                            &broadcast_log,
+                            &broadcaster,
+                            HostToClient::AgentActivity {
+                                state: AgentActivityState::Idle,
+                                text: None,
+                            },
+                        );
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Lash observation stream failed");
@@ -573,6 +675,34 @@ fn owner_turn_text(turn: &OwnerTurn) -> String {
     text
 }
 
+fn slow_turn_duration(body: &str) -> anyhow::Result<Option<Duration>> {
+    let Some(rest) = body.trim_start().strip_prefix("slow:") else {
+        return Ok(None);
+    };
+    let seconds_text = rest
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("slow turn hook requires seconds after `slow:`"))?;
+    let seconds: f64 = seconds_text
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid slow turn seconds `{seconds_text}`: {error}"))?;
+    if !(0.0..=600.0).contains(&seconds) {
+        anyhow::bail!("slow turn seconds must be between 0 and 600");
+    }
+    Ok(Some(Duration::from_secs_f64(seconds)))
+}
+
+async fn sleep_until_done_or_cancelled(
+    duration: Duration,
+    cancel: &lash::CancellationToken,
+) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(duration) => true,
+        () = cancel.cancelled() => false,
+    }
+}
+
 fn activity_from_observation(event: &RemoteSessionObservationEventPayload) -> Option<HostToClient> {
     match event {
         RemoteSessionObservationEventPayload::TurnActivity { activity } => match &activity.event {
@@ -610,6 +740,15 @@ fn agent_activity(state: AgentActivityState, text: Option<String>) -> HostToClie
     HostToClient::AgentActivity { state, text }
 }
 
+fn publish(
+    broadcast_log: &BroadcastLog,
+    broadcaster: &broadcast::Sender<HostToClient>,
+    event: HostToClient,
+) {
+    broadcast_log.record(event.clone());
+    let _ = broadcaster.send(event);
+}
+
 fn latest_line(text: &str) -> Option<String> {
     text.lines()
         .rev()
@@ -632,25 +771,50 @@ struct DegradedAgentRuntime {
     reason: String,
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
+    broadcast_log: BroadcastLog,
 }
 
 impl DegradedAgentRuntime {
     async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
-        let _ = self.broadcaster.send(HostToClient::AgentActivity {
-            state: AgentActivityState::Thinking,
-            text: Some("provider unavailable".to_string()),
-        });
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Thinking,
+                text: Some("provider unavailable".to_string()),
+            },
+        );
         self.tools
             .chat_send(
                 format!("Agent turn failed: {}", self.reason),
                 Some(turn.message_id),
             )
             .await?;
-        let _ = self.broadcaster.send(HostToClient::AgentActivity {
-            state: AgentActivityState::Idle,
-            text: None,
-        });
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
         Ok(())
+    }
+
+    async fn cancel_turn(&self) -> anyhow::Result<()> {
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn cancel_queued(&self, _client_id: &str) -> anyhow::Result<CancelQueuedResult> {
+        Ok(CancelQueuedResult::AlreadyClaimed)
     }
 }
 
@@ -1368,41 +1532,139 @@ fn short_label(text: &str) -> String {
     }
 }
 
-struct ScriptedAgentWorker {
+struct ScriptedAgentRuntime {
     config: RuntimeConfig,
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
-    rx: mpsc::Receiver<OwnerTurn>,
+    broadcast_log: BroadcastLog,
+    state: Arc<Mutex<ScriptedQueueState>>,
+    notify: Arc<Notify>,
 }
 
-impl ScriptedAgentWorker {
-    async fn run(mut self) {
+#[derive(Default)]
+struct ScriptedQueueState {
+    queue: VecDeque<OwnerTurn>,
+    active: Option<ScriptedActiveTurn>,
+}
+
+struct ScriptedActiveTurn {
+    cancel: lash::CancellationToken,
+}
+
+impl ScriptedAgentRuntime {
+    async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+        self.state.lock().await.queue.push_back(turn);
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    async fn cancel_turn(&self) -> anyhow::Result<()> {
+        if let Some(cancel) = self
+            .state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|active| active.cancel.clone())
+        {
+            cancel.cancel();
+        }
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
+        let mut state = self.state.lock().await;
+        if let Some(position) = state
+            .queue
+            .iter()
+            .position(|turn| turn.client_id == client_id)
+        {
+            state.queue.remove(position);
+            return Ok(CancelQueuedResult::Cancelled);
+        }
+        Ok(CancelQueuedResult::AlreadyClaimed)
+    }
+
+    async fn run(self: Arc<Self>) {
         tracing::info!(
             model = %self.config.model,
             data_dir = %self.config.data_dir.display(),
             "Scripted Agent test double opened session agent"
         );
-        while let Some(turn) = self.rx.recv().await {
-            if let Err(error) = self.handle_turn(turn).await {
+        loop {
+            let (turn, cancel) = loop {
+                if let Some(next) = self.claim_next_turn().await {
+                    break next;
+                }
+                self.notify.notified().await;
+            };
+            if let Err(error) = self.handle_turn(turn, cancel.clone()).await {
                 tracing::error!(%error, "scripted Agent turn failed");
             }
+            self.clear_active_turn(&cancel).await;
         }
     }
 
-    async fn handle_turn(&self, turn: OwnerTurn) -> anyhow::Result<()> {
-        let _ = self.broadcaster.send(HostToClient::AgentActivity {
-            state: AgentActivityState::Thinking,
-            text: Some("processing owner message".to_string()),
+    async fn claim_next_turn(&self) -> Option<(OwnerTurn, lash::CancellationToken)> {
+        let mut state = self.state.lock().await;
+        let turn = state.queue.pop_front()?;
+        let cancel = lash::CancellationToken::new();
+        state.active = Some(ScriptedActiveTurn {
+            cancel: cancel.clone(),
         });
-        let result = self.handle_turn_inner(&turn).await;
-        let _ = self.broadcaster.send(HostToClient::AgentActivity {
-            state: AgentActivityState::Idle,
-            text: None,
-        });
+        Some((turn, cancel))
+    }
+
+    async fn clear_active_turn(&self, _cancel: &lash::CancellationToken) {
+        self.state.lock().await.active = None;
+    }
+
+    async fn handle_turn(
+        &self,
+        turn: OwnerTurn,
+        cancel: lash::CancellationToken,
+    ) -> anyhow::Result<()> {
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Thinking,
+                text: Some("processing owner message".to_string()),
+            },
+        );
+        let result = self.handle_turn_inner(&turn, &cancel).await;
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
         result
     }
 
-    async fn handle_turn_inner(&self, turn: &OwnerTurn) -> anyhow::Result<()> {
+    async fn handle_turn_inner(
+        &self,
+        turn: &OwnerTurn,
+        cancel: &lash::CancellationToken,
+    ) -> anyhow::Result<()> {
+        if let Some(duration) = slow_turn_duration(&turn.body)? {
+            if !sleep_until_done_or_cancelled(duration, cancel).await {
+                return Ok(());
+            }
+        }
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
         let turn_text = owner_turn_text(turn);
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
@@ -1527,6 +1789,7 @@ mod tests {
             body: "see attached".to_string(),
             anchor: None,
             attachments: vec![text.clone(), image.clone()],
+            mode: SendMode::Send,
         };
 
         let rendered = owner_turn_text(&turn);

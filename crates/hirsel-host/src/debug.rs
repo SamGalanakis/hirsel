@@ -7,14 +7,13 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hirsel_proto::{Blob, ChatMessage, HostToClient, InboxItem};
+use hirsel_proto::{Blob, ChatMessage, HostToClient, InboxItem, SendMode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
-    lash_runtime::OwnerTurn,
 };
 
 pub fn routes(state: AppState) -> Router {
@@ -22,6 +21,9 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/reset", post(reset))
         .route("/debug/upload", post(upload_blob))
         .route("/debug/owner-message", post(owner_message))
+        .route("/debug/cancel-turn", post(cancel_turn))
+        .route("/debug/cancel-queued", post(cancel_queued))
+        .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
         .route("/debug/inbox", get(inbox))
         .route("/debug/processes", get(processes))
@@ -31,11 +33,20 @@ pub fn routes(state: AppState) -> Router {
 
 #[derive(Debug, Deserialize)]
 struct OwnerMessageRequest {
+    #[serde(default)]
+    client_id: Option<String>,
     body: String,
     #[serde(rename = "ref")]
     anchor: Option<u64>,
     #[serde(default)]
     attachments: Vec<String>,
+    #[serde(default)]
+    mode: SendMode,
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelQueuedRequest {
+    client_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,7 +58,14 @@ struct UploadBlobRequest {
 
 #[derive(Debug, Serialize)]
 struct OwnerMessageResponse {
+    client_id: String,
     message: ChatMessage,
+}
+
+#[derive(Debug, Serialize)]
+struct CancelQueuedResponse {
+    ok: bool,
+    id: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +79,11 @@ struct InboxResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct BroadcastsResponse {
+    events: Vec<HostToClient>,
+}
+
+#[derive(Debug, Serialize)]
 struct HealthResponse {
     ok: bool,
     latest_msg_id: u64,
@@ -71,6 +94,7 @@ struct HealthResponse {
 async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
     state.storage.reset().await?;
     state.processes.reset()?;
+    state.broadcast_log.clear();
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -78,33 +102,35 @@ async fn owner_message(
     State(state): State<AppState>,
     Json(request): Json<OwnerMessageRequest>,
 ) -> Result<Json<OwnerMessageResponse>, DebugError> {
-    let client_id = format!("debug-{}", Uuid::new_v4());
-    let (message, inserted) = state
-        .storage
-        .append_owner_message(
-            &client_id,
+    let client_id = request
+        .client_id
+        .unwrap_or_else(|| format!("debug-{}", Uuid::new_v4()));
+    let submission = state
+        .submit_owner_message(
+            client_id,
             request.body,
             request.anchor,
-            &request.attachments,
+            request.attachments,
+            request.mode,
         )
         .await?;
-    if inserted {
-        let stored_attachments = state.storage.blobs_for_message(message.id).await?;
-        let _ = state.broadcaster.send(HostToClient::Msg {
-            message: message.clone(),
-        });
-        state
-            .agent
-            .enqueue(OwnerTurn {
-                message_id: message.id,
-                client_id,
-                body: message.body.clone(),
-                anchor: message.r#ref,
-                attachments: stored_attachments,
-            })
-            .await?;
-    }
-    Ok(Json(OwnerMessageResponse { message }))
+    Ok(Json(OwnerMessageResponse {
+        client_id: submission.client_id,
+        message: submission.message,
+    }))
+}
+
+async fn cancel_turn(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
+    state.cancel_turn().await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn cancel_queued(
+    State(state): State<AppState>,
+    Json(request): Json<CancelQueuedRequest>,
+) -> Result<Json<CancelQueuedResponse>, DebugError> {
+    let id = state.cancel_queued_message(&request.client_id).await?;
+    Ok(Json(CancelQueuedResponse { ok: true, id }))
 }
 
 async fn upload_blob(
@@ -135,6 +161,12 @@ async fn inbox(State(state): State<AppState>) -> Result<Json<InboxResponse>, Deb
     Ok(Json(InboxResponse {
         items: state.storage.all_inbox().await?,
     }))
+}
+
+async fn broadcasts(State(state): State<AppState>) -> Json<BroadcastsResponse> {
+    Json(BroadcastsResponse {
+        events: state.broadcast_log.recent(),
+    })
 }
 
 async fn processes(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {

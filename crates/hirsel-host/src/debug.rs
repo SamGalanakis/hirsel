@@ -7,15 +7,20 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hirsel_proto::{ChatMessage, HostToClient, InboxItem};
+use hirsel_proto::{Blob, ChatMessage, HostToClient, InboxItem};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{AppState, lash_runtime::OwnerTurn};
+use crate::{
+    AppState,
+    attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
+    lash_runtime::OwnerTurn,
+};
 
 pub fn routes(state: AppState) -> Router {
     Router::new()
         .route("/debug/reset", post(reset))
+        .route("/debug/upload", post(upload_blob))
         .route("/debug/owner-message", post(owner_message))
         .route("/debug/chat", get(chat))
         .route("/debug/inbox", get(inbox))
@@ -29,6 +34,15 @@ struct OwnerMessageRequest {
     body: String,
     #[serde(rename = "ref")]
     anchor: Option<u64>,
+    #[serde(default)]
+    attachments: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadBlobRequest {
+    name: String,
+    mime: String,
+    data_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,9 +81,15 @@ async fn owner_message(
     let client_id = format!("debug-{}", Uuid::new_v4());
     let (message, inserted) = state
         .storage
-        .append_owner_message(&client_id, request.body, request.anchor)
+        .append_owner_message(
+            &client_id,
+            request.body,
+            request.anchor,
+            &request.attachments,
+        )
         .await?;
     if inserted {
+        let stored_attachments = state.storage.blobs_for_message(message.id).await?;
         let _ = state.broadcaster.send(HostToClient::Msg {
             message: message.clone(),
         });
@@ -80,10 +100,29 @@ async fn owner_message(
                 client_id,
                 body: message.body.clone(),
                 anchor: message.r#ref,
+                attachments: stored_attachments,
             })
             .await?;
     }
     Ok(Json(OwnerMessageResponse { message }))
+}
+
+async fn upload_blob(
+    State(state): State<AppState>,
+    Json(request): Json<UploadBlobRequest>,
+) -> Result<Json<Blob>, DebugError> {
+    let client_id = format!("debug-upload-{}", Uuid::new_v4());
+    let data = decode_blob_data_b64(&request.data_b64)?;
+    let stored = state
+        .storage
+        .store_blob(
+            &client_id,
+            sanitize_blob_name(&request.name),
+            normalize_mime(&request.mime),
+            data,
+        )
+        .await?;
+    Ok(Json(stored.blob))
 }
 
 async fn chat(State(state): State<AppState>) -> Result<Json<ChatResponse>, DebugError> {

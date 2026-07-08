@@ -9,10 +9,20 @@ use futures_util::{SinkExt, StreamExt};
 use hirsel_proto::{ClientToHost, HostToClient};
 use tokio::sync::broadcast;
 
-use crate::{AppState, lash_runtime::OwnerTurn};
+use crate::{
+    AppState,
+    attachments::{
+        MAX_BLOB_BASE64_BYTES, decode_blob_data_b64, normalize_mime, sanitize_blob_name,
+    },
+    lash_runtime::OwnerTurn,
+};
+
+const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
+        .max_frame_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
@@ -163,12 +173,14 @@ async fn handle_client_frame(
             client_id,
             body,
             r#ref,
+            attachments,
         } => {
             let (message, inserted) = state
                 .storage
-                .append_owner_message(&client_id, body, r#ref)
+                .append_owner_message(&client_id, body, r#ref, &attachments)
                 .await?;
             if inserted {
+                let stored_attachments = state.storage.blobs_for_message(message.id).await?;
                 let _ = state.broadcaster.send(HostToClient::Msg {
                     message: message.clone(),
                 });
@@ -179,11 +191,37 @@ async fn handle_client_frame(
                         client_id,
                         body: message.body.clone(),
                         anchor: message.r#ref,
+                        attachments: stored_attachments,
                     })
                     .await?;
             } else {
                 send_json_sink(sink, &HostToClient::Msg { message }).await?;
             }
+        }
+        ClientToHost::UploadBlob {
+            client_id,
+            name,
+            mime,
+            data_b64,
+        } => {
+            let data = decode_blob_data_b64(&data_b64)?;
+            let stored = state
+                .storage
+                .store_blob(
+                    &client_id,
+                    sanitize_blob_name(&name),
+                    normalize_mime(&mime),
+                    data,
+                )
+                .await?;
+            send_json_sink(
+                sink,
+                &HostToClient::BlobOk {
+                    client_id,
+                    blob: stored.blob,
+                },
+            )
+            .await?;
         }
         ClientToHost::ArchiveItem { item_id } => {
             if let Some(item) = state.storage.archive_inbox_item(item_id).await? {
@@ -221,6 +259,7 @@ mod tests {
     use axum::Router;
     use futures_util::{SinkExt, StreamExt};
     use hirsel_proto::{ChatAuthor, HostToClient};
+    use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
     use tokio::net::TcpListener;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -283,6 +322,186 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn websocket_upload_blob_is_idempotent_and_send_message_replays_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state);
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "upload_blob",
+                "client_id": "upload-1",
+                "name": "../note.txt",
+                "mime": "text/plain",
+                "data_b64": "aGVsbG8="
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let first = read_blob_ok(&mut ws).await;
+        let first_blob = match first {
+            HostToClient::BlobOk { blob, .. } => blob,
+            other => panic!("unexpected blob response: {other:?}"),
+        };
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "upload_blob",
+                "client_id": "upload-1",
+                "name": "different.txt",
+                "mime": "text/plain",
+                "data_b64": "b3RoZXI="
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let duplicate = read_blob_ok(&mut ws).await;
+        let duplicate_blob = match duplicate {
+            HostToClient::BlobOk { blob, .. } => blob,
+            other => panic!("unexpected duplicate blob response: {other:?}"),
+        };
+        assert_eq!(duplicate_blob, first_blob);
+        assert_eq!(first_blob.name, "note.txt");
+        assert_eq!(first_blob.size, 5);
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "send_message",
+                "client_id": "message-1",
+                "body": "see attached",
+                "ref": null,
+                "attachments": [first_blob.id]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let msg = read_owner_msg(&mut ws).await;
+        match msg {
+            HostToClient::Msg { message } => {
+                assert_eq!(message.body, "see attached");
+                assert_eq!(message.attachments, vec![first_blob]);
+            }
+            other => panic!("unexpected message response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_upload_rejects_over_size_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state);
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+        let too_large_b64 = "A".repeat(((15 * 1024 * 1024 + 2) / 3) * 4 + 4);
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "upload_blob",
+                "client_id": "upload-too-large",
+                "name": "too-large.bin",
+                "mime": "application/octet-stream",
+                "data_b64": too_large_b64
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        match read_error(&mut ws).await {
+            HostToClient::Error { detail } => assert!(detail.contains("15 MB")),
+            other => panic!("unexpected error response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_route_requires_token_and_serves_content_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let text = state
+            .storage
+            .store_blob("text-upload", "note.txt", "text/plain", b"hello".to_vec())
+            .await
+            .unwrap();
+        let image = state
+            .storage
+            .store_blob(
+                "image-upload",
+                "tiny.png",
+                "image/png",
+                vec![137, 80, 78, 71],
+            )
+            .await
+            .unwrap();
+        let app = router_from_state(state);
+        let addr = spawn_app(app).await;
+        let client = reqwest::Client::new();
+
+        let unauthorized = client
+            .get(format!("http://{addr}/blob/{}", text.blob.id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let missing = client
+            .get(format!("http://{addr}/blob/missing?token=test-token"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let text_response = client
+            .get(format!(
+                "http://{addr}/blob/{}?token=test-token",
+                text.blob.id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(text_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            text_response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+        assert_eq!(
+            text_response.headers().get(CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"note.txt\""
+        );
+        assert_eq!(text_response.bytes().await.unwrap().as_ref(), b"hello");
+
+        let image_response = client
+            .get(format!("http://{addr}/blob/{}", image.blob.id))
+            .bearer_auth("test-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(image_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            image_response.headers().get(CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            image_response.headers().get(CONTENT_DISPOSITION).unwrap(),
+            "inline; filename=\"tiny.png\""
+        );
+        assert_eq!(
+            image_response.bytes().await.unwrap().as_ref(),
+            &[137, 80, 78, 71]
+        );
+    }
+
     async fn spawn_app(app: Router) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -290,5 +509,97 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         addr
+    }
+
+    fn test_config(data_dir: &std::path::Path) -> Config {
+        Config {
+            token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "claude-opus-4-7".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: true,
+        }
+    }
+
+    async fn send_hello(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) {
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "hello",
+                "token": "test-token",
+                "last_seen_msg_id": null
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn read_hello_ok(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> HostToClient {
+        read_until(ws, |response| {
+            matches!(response, HostToClient::HelloOk { .. })
+        })
+        .await
+    }
+
+    async fn read_blob_ok(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> HostToClient {
+        read_until(ws, |response| {
+            matches!(response, HostToClient::BlobOk { .. })
+        })
+        .await
+    }
+
+    async fn read_owner_msg(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> HostToClient {
+        read_until(ws, |response| match response {
+            HostToClient::Msg { message } => message.author == ChatAuthor::Owner,
+            _ => false,
+        })
+        .await
+    }
+
+    async fn read_error(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> HostToClient {
+        read_until(ws, |response| {
+            matches!(response, HostToClient::Error { .. })
+        })
+        .await
+    }
+
+    async fn read_until(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        predicate: impl Fn(&HostToClient) -> bool,
+    ) -> HostToClient {
+        loop {
+            let frame = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let response: HostToClient = serde_json::from_str(&frame).unwrap();
+            if predicate(&response) {
+                return response;
+            }
+        }
     }
 }

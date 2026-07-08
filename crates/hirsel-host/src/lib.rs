@@ -1,3 +1,5 @@
+pub mod attachments;
+pub mod blob_route;
 pub mod config;
 pub mod debug;
 pub mod lash_runtime;
@@ -80,6 +82,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
 pub fn router_from_state(state: AppState) -> Router {
     let mut app = Router::new()
         .route("/ws", axum::routing::get(ws::ws_handler))
+        .route("/blob/:id", axum::routing::get(blob_route::blob_handler))
         .with_state(state.clone());
     if state.debug_enabled {
         app = app.merge(debug::routes(state.clone()));

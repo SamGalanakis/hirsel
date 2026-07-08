@@ -1,11 +1,12 @@
 use std::{path::PathBuf, sync::Arc};
 
+use anyhow::Context;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{AgentActivityState, HostToClient, QuickReply};
 use lash::{
-    PromptLayerSink, TurnInput,
+    InputItem, PromptLayerSink, TurnInput,
     observe::RemoteSessionObservationStreamItem,
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     process::{
@@ -36,6 +37,7 @@ use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 
 use crate::{
     config::{AgentMode, DriverMode, ProviderMode},
+    storage::StoredBlob,
     tools::ToolSuite,
 };
 
@@ -67,6 +69,7 @@ pub struct OwnerTurn {
     pub client_id: String,
     pub body: String,
     pub anchor: Option<u64>,
+    pub attachments: Vec<StoredBlob>,
 }
 
 enum AgentBackend {
@@ -286,12 +289,9 @@ impl LashAgentRuntime {
                 latest_agent_message_id: None,
             });
         }
-        let body = match turn.anchor {
-            Some(anchor) => format!("Owner replied to Inbox anchor {anchor}.\n\n{}", turn.body),
-            None => turn.body,
-        };
+        let input = owner_turn_input(&turn).await?;
         self.session
-            .enqueue(TurnInput::text(body))
+            .enqueue(input)
             .id(turn.client_id)
             .send()
             .await?;
@@ -530,6 +530,47 @@ fn render_final_value(value: &serde_json::Value) -> String {
             serde_json::to_string_pretty(other).unwrap_or_default()
         ),
     }
+}
+
+async fn owner_turn_input(turn: &OwnerTurn) -> anyhow::Result<TurnInput> {
+    let mut items = vec![InputItem::text(owner_turn_text(turn))];
+    let mut image_blobs = Vec::new();
+
+    for attachment in &turn.attachments {
+        if !attachment.blob.mime.starts_with("image/") {
+            continue;
+        }
+        let id = attachment.blob.id.clone();
+        let bytes = tokio::fs::read(&attachment.path)
+            .await
+            .with_context(|| format!("read image attachment {}", attachment.path.display()))?;
+        items.push(InputItem::image_ref(id.clone()));
+        image_blobs.push((id, bytes));
+    }
+
+    let mut input = TurnInput::items(items);
+    for (id, bytes) in image_blobs {
+        input = input.with_image_blob(id, bytes);
+    }
+    Ok(input)
+}
+
+fn owner_turn_text(turn: &OwnerTurn) -> String {
+    let mut text = match turn.anchor {
+        Some(anchor) => format!("Owner replied to Inbox anchor {anchor}.\n\n{}", turn.body),
+        None => turn.body.clone(),
+    };
+    for attachment in &turn.attachments {
+        text.push('\n');
+        text.push_str(&format!(
+            "[attachment stored at {}: {} ({}, {} bytes)]",
+            attachment.path.display(),
+            attachment.blob.name,
+            attachment.blob.mime,
+            attachment.blob.size
+        ));
+    }
+    text
 }
 
 fn activity_from_observation(event: &RemoteSessionObservationEventPayload) -> Option<HostToClient> {
@@ -1362,7 +1403,8 @@ impl ScriptedAgentWorker {
     }
 
     async fn handle_turn_inner(&self, turn: &OwnerTurn) -> anyhow::Result<()> {
-        let lower = turn.body.to_lowercase();
+        let turn_text = owner_turn_text(turn);
+        let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             return self.handle_fake_delegation(turn).await;
         }
@@ -1377,6 +1419,15 @@ impl ScriptedAgentWorker {
         }
         if lower.contains("pong") {
             self.tools.chat_send("pong", Some(turn.message_id)).await?;
+            return Ok(());
+        }
+        if !turn.attachments.is_empty() {
+            self.tools
+                .chat_send(
+                    format!("Scripted turn input:\n\n{turn_text}"),
+                    Some(turn.message_id),
+                )
+                .await?;
             return Ok(());
         }
         self.tools
@@ -1448,6 +1499,67 @@ fn terminal_content(outcome: &TerminalOutcome) -> String {
         }
         TerminalOutcome::Interrupted => {
             "Sub-agent was interrupted.\n\nHow should I proceed?".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use hirsel_proto::Blob;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn owner_turn_input_notes_all_attachments_and_references_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let text_path = dir.path().join("text-blob");
+        let image_path = dir.path().join("image-blob");
+        tokio::fs::write(&text_path, b"hello").await.unwrap();
+        tokio::fs::write(&image_path, [137, 80, 78, 71])
+            .await
+            .unwrap();
+        let text = stored_blob("text-1", "note.txt", "text/plain", 5, text_path);
+        let image = stored_blob("image-1", "tiny.png", "image/png", 4, image_path);
+        let turn = OwnerTurn {
+            message_id: 1,
+            client_id: "client-1".to_string(),
+            body: "see attached".to_string(),
+            anchor: None,
+            attachments: vec![text.clone(), image.clone()],
+        };
+
+        let rendered = owner_turn_text(&turn);
+        assert!(rendered.contains(&format!(
+            "[attachment stored at {}: note.txt (text/plain, 5 bytes)]",
+            text.path.display()
+        )));
+        assert!(rendered.contains(&format!(
+            "[attachment stored at {}: tiny.png (image/png, 4 bytes)]",
+            image.path.display()
+        )));
+
+        let input = owner_turn_input(&turn).await.unwrap();
+        assert_eq!(input.items.len(), 2);
+        assert!(matches!(input.items[0], InputItem::Text { .. }));
+        assert!(matches!(&input.items[1], InputItem::ImageRef { id } if id == "image-1"));
+        assert_eq!(
+            input.image_blobs.get("image-1").unwrap().as_slice(),
+            &[137, 80, 78, 71]
+        );
+        assert!(!input.image_blobs.contains_key("text-1"));
+    }
+
+    fn stored_blob(id: &str, name: &str, mime: &str, size: u64, path: PathBuf) -> StoredBlob {
+        StoredBlob {
+            blob: Blob {
+                id: id.to_string(),
+                name: name.to_string(),
+                mime: mime.to_string(),
+                size,
+            },
+            path,
+            created_ts: Utc::now(),
         }
     }
 }

@@ -9,6 +9,14 @@ pub enum ChatAuthor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blob {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: u64,
     pub author: ChatAuthor,
@@ -16,6 +24,8 @@ pub struct ChatMessage {
     #[serde(rename = "ref")]
     pub r#ref: Option<u64>,
     pub ts: DateTime<Utc>,
+    #[serde(default)]
+    pub attachments: Vec<Blob>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +65,14 @@ pub enum ClientToHost {
         body: String,
         #[serde(rename = "ref")]
         r#ref: Option<u64>,
+        #[serde(default)]
+        attachments: Vec<String>,
+    },
+    UploadBlob {
+        client_id: String,
+        name: String,
+        mime: String,
+        data_b64: String,
     },
     ArchiveItem {
         item_id: u64,
@@ -86,6 +104,10 @@ pub enum HostToClient {
     },
     InboxUpsert {
         item: InboxItem,
+    },
+    BlobOk {
+        client_id: String,
+        blob: Blob,
     },
     Error {
         detail: String,
@@ -123,7 +145,8 @@ mod tests {
             "type": "send_message",
             "client_id": "client-1",
             "body": "hello",
-            "ref": 42
+            "ref": 42,
+            "attachments": ["blob-1"]
         });
 
         let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
@@ -133,9 +156,57 @@ mod tests {
                 client_id: "client-1".to_string(),
                 body: "hello".to_string(),
                 r#ref: Some(42),
+                attachments: vec!["blob-1".to_string()],
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn send_message_without_attachments_deserializes_as_empty() {
+        let value = json!({
+            "type": "send_message",
+            "client_id": "client-1",
+            "body": "hello",
+            "ref": null
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::SendMessage {
+                client_id: "client-1".to_string(),
+                body: "hello".to_string(),
+                r#ref: None,
+                attachments: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn upload_blob_and_blob_ok_round_trip() {
+        let upload = ClientToHost::UploadBlob {
+            client_id: "upload-1".to_string(),
+            name: "tiny.png".to_string(),
+            mime: "image/png".to_string(),
+            data_b64: "iVBORw0KGgo=".to_string(),
+        };
+        let encoded = serde_json::to_string(&upload).unwrap();
+        let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, upload);
+
+        let response = HostToClient::BlobOk {
+            client_id: "upload-1".to_string(),
+            blob: Blob {
+                id: "blob-1".to_string(),
+                name: "tiny.png".to_string(),
+                mime: "image/png".to_string(),
+                size: 8,
+            },
+        };
+        let encoded = serde_json::to_string(&response).unwrap();
+        let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, response);
     }
 
     #[test]
@@ -147,6 +218,12 @@ mod tests {
             body: "pong".to_string(),
             r#ref: None,
             ts,
+            attachments: vec![Blob {
+                id: "blob-1".to_string(),
+                name: "tiny.png".to_string(),
+                mime: "image/png".to_string(),
+                size: 8,
+            }],
         };
         let item = InboxItem {
             id: 9,
@@ -170,5 +247,19 @@ mod tests {
         let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn chat_message_without_attachments_deserializes_as_empty() {
+        let value = json!({
+            "id": 1,
+            "author": "owner",
+            "body": "old row",
+            "ref": null,
+            "ts": "2026-07-08T12:00:00Z"
+        });
+
+        let parsed: ChatMessage = serde_json::from_value(value).unwrap();
+        assert!(parsed.attachments.is_empty());
     }
 }

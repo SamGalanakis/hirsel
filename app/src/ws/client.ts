@@ -2,7 +2,7 @@
 // exponential backoff, offline outgoing queue flushed on reconnect using
 // stable client_ids so the host can dedupe resends.
 import type { ClientMessage, ServerMessage } from "../protocol";
-import { storeApi } from "../store/store";
+import { dispatch, state } from "../store/store";
 import { backoffDelayMs } from "./backoff";
 
 const TOKEN_KEY = "hirsel.token";
@@ -77,7 +77,7 @@ class HirselWsClient {
   sendMessage(body: string, ref: number | null): number {
     const clientId = makeClientId();
     const localId = makeLocalId();
-    storeApi.getState().dispatch({
+    dispatch({
       type: "send_local",
       localId,
       clientId,
@@ -111,7 +111,7 @@ class HirselWsClient {
   }
 
   private openSocket(): void {
-    storeApi.getState().dispatch({
+    dispatch({
       type: "connection_status",
       status: this.reconnectAttempt === 0 ? "connecting" : "reconnecting",
     });
@@ -135,7 +135,7 @@ class HirselWsClient {
     socket.addEventListener("close", () => {
       this.socket = null;
       if (this.closedByClient) return;
-      storeApi.getState().dispatch({ type: "connection_status", status: "reconnecting" });
+      dispatch({ type: "connection_status", status: "reconnecting" });
       this.scheduleReconnect();
     });
 
@@ -155,8 +155,6 @@ class HirselWsClient {
   }
 
   private handleServerMessage(message: ServerMessage): void {
-    const dispatch = storeApi.getState().dispatch;
-
     switch (message.type) {
       case "hello_ok": {
         dispatch({ type: "hello_ok", payload: message });
@@ -197,7 +195,7 @@ class HirselWsClient {
     // Resend anything still un-acked, oldest first, using its original
     // client_id so the host can dedupe if it actually did receive it before
     // the disconnect.
-    for (const pending of storeApi.getState().pendingSends) {
+    for (const pending of state.pendingSends) {
       this.socket.send(
         JSON.stringify({
           type: "send_message",

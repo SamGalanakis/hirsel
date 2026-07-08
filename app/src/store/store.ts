@@ -1,6 +1,6 @@
-import { create } from "zustand";
+import { createStore, reconcile } from "solid-js/store";
 import { reduce } from "./reducer";
-import { type AppState, initialState, type Action } from "./types";
+import { type Action, type AppState, initialState } from "./types";
 
 export type Tab = "chat" | "inbox";
 
@@ -11,10 +11,10 @@ export interface ComposerDraft {
 }
 
 /** Cross-view navigation/UI state layered on top of the protocol AppState.
- * This is still "one store" (the spec's requirement) - the protocol side is
- * kept in a pure, independently-tested reducer (see reducer.ts) while this
- * thin UI slice (active tab, one-shot scroll/prefill requests) is plain
- * zustand setters, since it has no wire-protocol semantics to unit test. */
+ * This is still "one store": the protocol side is kept in a pure,
+ * independently-tested reducer (see reducer.ts) while this thin UI slice
+ * (active tab, one-shot scroll/prefill requests) is plain setters, since it
+ * has no wire-protocol semantics to unit test. */
 interface UiState {
   activeTab: Tab;
   /** Set when something (a quoted ref, a quick reply) wants Chat to scroll to
@@ -24,33 +24,69 @@ interface UiState {
   composerDraft: ComposerDraft | null;
 }
 
-interface Store extends AppState, UiState {
-  dispatch: (action: Action) => void;
-  goToChat: (opts?: { scrollToMessageId?: number; composerDraft?: ComposerDraft }) => void;
-  setActiveTab: (tab: Tab) => void;
-  clearScrollTarget: () => void;
-  clearComposerDraft: () => void;
+type Store = AppState & UiState;
+
+function initialStore(): Store {
+  return {
+    ...initialState(),
+    activeTab: "chat",
+    scrollToMessageId: null,
+    composerDraft: null,
+  };
 }
 
-export const useStore = create<Store>((set) => ({
-  ...initialState(),
-  activeTab: "chat",
-  scrollToMessageId: null,
-  composerDraft: null,
+const [state, setState] = createStore<Store>(initialStore());
 
-  dispatch: (action) => set((state) => reduce(state, action)),
+/** Snapshot the protocol-facing slice to hand to the pure reducer. */
+function appSnapshot(): AppState {
+  return {
+    messages: state.messages,
+    inbox: state.inbox,
+    agentActivity: state.agentActivity,
+    connection: state.connection,
+    lastSeenMsgId: state.lastSeenMsgId,
+    pendingSends: state.pendingSends,
+  };
+}
 
-  goToChat: (opts) =>
-    set(() => ({
-      activeTab: "chat",
-      scrollToMessageId: opts?.scrollToMessageId ?? null,
-      composerDraft: opts?.composerDraft ?? null,
-    })),
-  setActiveTab: (tab) => set({ activeTab: tab }),
-  clearScrollTarget: () => set({ scrollToMessageId: null }),
-  clearComposerDraft: () => set({ composerDraft: null }),
-}));
+/** Apply the same pure `reduce` used by the tests, then push the result into
+ * the fine-grained store. The two rendered arrays (messages, inbox) go through
+ * `reconcile` keyed by `id` so only the DOM bound to genuinely-changed rows
+ * re-renders; the small scalar/never-rendered fields are set directly. */
+export function dispatch(action: Action): void {
+  const next = reduce(appSnapshot(), action);
+  setState("messages", reconcile(next.messages, { key: "id" }));
+  setState("inbox", reconcile(next.inbox, { key: "id" }));
+  setState("pendingSends", next.pendingSends);
+  setState("agentActivity", next.agentActivity);
+  setState("connection", next.connection);
+  setState("lastSeenMsgId", next.lastSeenMsgId);
+}
 
-/** Non-hook accessor for use inside the WebSocket client module, which is not
- * itself a React component. */
-export const storeApi = useStore;
+export function goToChat(opts?: {
+  scrollToMessageId?: number;
+  composerDraft?: ComposerDraft;
+}): void {
+  setState({
+    activeTab: "chat",
+    scrollToMessageId: opts?.scrollToMessageId ?? null,
+    composerDraft: opts?.composerDraft ?? null,
+  });
+}
+
+export function setActiveTab(tab: Tab): void {
+  setState("activeTab", tab);
+}
+
+export function clearScrollTarget(): void {
+  setState("scrollToMessageId", null);
+}
+
+export function clearComposerDraft(): void {
+  setState("composerDraft", null);
+}
+
+/** The reactive store proxy: components read `state.messages`, `state.connection`,
+ * etc. directly and Solid tracks the exact reads. Also read by the WebSocket
+ * client module (which is not a component) for the `pendingSends` replay. */
+export { state };

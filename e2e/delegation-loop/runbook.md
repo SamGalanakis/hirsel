@@ -17,7 +17,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-scripted
-export HIRSEL_LISTEN=127.0.0.1:8420
+export HIRSEL_LISTEN=127.0.0.1:3089
 cargo run -p hirsel-host
 ```
 
@@ -26,13 +26,13 @@ Run the gates:
 1. Reset:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8420/debug/reset
+curl -sS -X POST http://127.0.0.1:3089/debug/reset
 ```
 
 2. Inject the Owner delegation request:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8420/debug/owner-message \
+curl -sS -X POST http://127.0.0.1:3089/debug/owner-message \
   -H 'content-type: application/json' \
   -d '{"body":"Please delegate a trivial repo fix to a Sub-agent, then ask me before applying the result.","ref":null}'
 ```
@@ -46,7 +46,7 @@ curl -sS -X POST http://127.0.0.1:8420/debug/owner-message \
 6. Send the Quick Reply as an Anchor-refed Owner message:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8420/debug/owner-message \
+curl -sS -X POST http://127.0.0.1:3089/debug/owner-message \
   -H 'content-type: application/json' \
   -d '{"body":"ship it","ref":ANCHOR_ID}'
 ```
@@ -69,15 +69,15 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-codex
-export HIRSEL_LISTEN=127.0.0.1:8420
+export HIRSEL_LISTEN=127.0.0.1:3089
 cargo run -p hirsel-host
 ```
 
 First prove the tool-call smoke:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8420/debug/reset
-curl -sS -X POST http://127.0.0.1:8420/debug/owner-message \
+curl -sS -X POST http://127.0.0.1:3089/debug/reset
+curl -sS -X POST http://127.0.0.1:3089/debug/owner-message \
   -H 'content-type: application/json' \
   -d '{"body":"reply with exactly the word pong using chat.send","ref":null}'
 ```

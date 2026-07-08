@@ -18,6 +18,6 @@ One-time setup (after the first merge to main):
 3. `sudo cp infra/hirsel.service /etc/systemd/system/ && sudo systemctl enable --now hirsel`
 4. Install caddy, put `infra/Caddyfile` (with the real subdomain) at `/etc/caddy/Caddyfile`, `sudo systemctl reload caddy`.
 
-Inputs that are Sam's call: the subdomain (DNS record to this VM) and the provider credentials. Until caddy is up, the host works locally (`HIRSEL_LISTEN=0.0.0.0:8420` + plain `ws://` for LAN testing; service worker/push need the HTTPS origin).
+Inputs that are Sam's call: the subdomain (DNS record to this VM) and the provider credentials. Until caddy is up, the host works locally (`HIRSEL_LISTEN=0.0.0.0:3089` + plain `ws://` for LAN testing; service worker/push need the HTTPS origin).
 
 iroh transport is milestone 2 (ADR-0006) and replaces the caddy/DNS requirement when it lands.

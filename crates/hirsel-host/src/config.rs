@@ -86,7 +86,7 @@ impl Config {
         };
         let fake_fixture = env::var_os("HIRSEL_FAKE_FIXTURE").map(PathBuf::from);
         let mut listen: SocketAddr = env::var("HIRSEL_LISTEN")
-            .unwrap_or_else(|_| "127.0.0.1:8420".to_string())
+            .unwrap_or_else(|_| "127.0.0.1:3089".to_string())
             .parse()
             .context("HIRSEL_LISTEN must be a socket address")?;
         let debug = env::var("HIRSEL_DEBUG").ok().as_deref() == Some("1");

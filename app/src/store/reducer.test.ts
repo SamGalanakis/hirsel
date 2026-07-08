@@ -62,6 +62,114 @@ describe("hello_ok replay merge", () => {
     expect(reconnected.messages.map((m) => m.id)).toEqual([1, 2]);
   });
 
+  it("reconciles a pending send against a replayed owner message (echo lost to disconnect)", () => {
+    // Owner sent while connected; the frame reached the host but the `msg`
+    // echo was lost to the disconnect. The reconnect replay contains the
+    // real message - the pending bubble must clear, not duplicate.
+    const withPending = reduce(initialState(), {
+      type: "send_local",
+      localId: -1,
+      clientId: "c1",
+      body: "made it to the host",
+      ref: null,
+      ts: "2026-07-08T00:00:00Z",
+    });
+
+    const afterReconnect = reduce(withPending, {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 7,
+        messages: [msg(7, "owner", "made it to the host")],
+        inbox: [],
+      },
+    });
+
+    expect(afterReconnect.messages).toHaveLength(1);
+    expect(afterReconnect.messages[0]).toEqual(msg(7, "owner", "made it to the host"));
+    expect(afterReconnect.messages[0].pending).toBeUndefined();
+    expect(afterReconnect.pendingSends).toEqual([]);
+  });
+
+  it("keeps non-matching pending sends through a replay so they are still resent", () => {
+    const s1 = reduce(initialState(), {
+      type: "send_local",
+      localId: -1,
+      clientId: "c1",
+      body: "reached the host",
+      ref: null,
+      ts: "2026-07-08T00:00:00Z",
+    });
+    const s2 = reduce(s1, {
+      type: "send_local",
+      localId: -2,
+      clientId: "c2",
+      body: "never reached the host",
+      ref: null,
+      ts: "2026-07-08T00:00:01Z",
+    });
+
+    const afterReconnect = reduce(s2, {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 7,
+        messages: [msg(7, "owner", "reached the host")],
+        inbox: [],
+      },
+    });
+
+    // c1 reconciled away; c2 survives as pending and stays in pendingSends
+    // for the post-hello_ok resend.
+    expect(afterReconnect.messages).toHaveLength(2);
+    expect(afterReconnect.messages[0]).toEqual(msg(7, "owner", "reached the host"));
+    expect(afterReconnect.messages[1]).toMatchObject({
+      pending: true,
+      clientId: "c2",
+      body: "never reached the host",
+    });
+    expect(afterReconnect.pendingSends).toEqual([
+      { clientId: "c2", body: "never reached the host", ref: null },
+    ]);
+  });
+
+  it("does not re-reconcile an already-known replayed message against new pending sends", () => {
+    // A message already merged in a previous replay must not consume a new
+    // pending entry that happens to share its body.
+    const seeded = reduce(initialState(), {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 1,
+        messages: [msg(1, "owner", "same words")],
+        inbox: [],
+      },
+    });
+    const withPending = reduce(seeded, {
+      type: "send_local",
+      localId: -1,
+      clientId: "c1",
+      body: "same words",
+      ref: null,
+      ts: "2026-07-08T00:00:02Z",
+    });
+
+    const afterReconnect = reduce(withPending, {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 1,
+        messages: [msg(1, "owner", "same words")],
+        inbox: [],
+      },
+    });
+
+    expect(afterReconnect.messages).toHaveLength(2);
+    expect(afterReconnect.pendingSends).toEqual([
+      { clientId: "c1", body: "same words", ref: null },
+    ]);
+  });
+
   it("keeps still-pending optimistic sends after the tail of a replay", () => {
     const withPending = reduce(initialState(), {
       type: "send_local",

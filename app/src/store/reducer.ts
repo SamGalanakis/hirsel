@@ -46,18 +46,38 @@ export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
       const { latest_msg_id, messages, inbox } = action.payload;
-      const pending = state.messages.filter((m) => m.pending);
       const known = new Map<number, DisplayMessage>();
       for (const m of state.messages) {
         if (!m.pending) known.set(m.id, m);
       }
+      const newlyReplayed = messages.filter((m) => !known.has(m.id));
       for (const m of messages) known.set(m.id, m);
       const merged = Array.from(known.values()).sort((a, b) => a.id - b.id);
+
+      // Reconcile optimistic entries against the replay: a send may have
+      // reached the host right before the disconnect, in which case its echo
+      // arrives here as a replayed owner message instead of a live `msg`.
+      // Same rule as reconcileOrAppend - each newly replayed owner message
+      // consumes the oldest still-pending entry with a matching body. Without
+      // this the message would render twice (replayed + stuck pending bubble)
+      // and its client_id would be resent on every future reconnect forever.
+      let pending = state.messages.filter((m) => m.pending);
+      let pendingSends = state.pendingSends;
+      for (const m of newlyReplayed) {
+        if (m.author !== "owner") continue;
+        const idx = pending.findIndex((p) => p.body === m.body);
+        if (idx === -1) continue;
+        const reconciled = pending[idx];
+        pending = pending.filter((_, i) => i !== idx);
+        pendingSends = pendingSends.filter((p) => p.clientId !== reconciled.clientId);
+      }
+
       return {
         ...state,
         messages: [...merged, ...pending],
         inbox,
         lastSeenMsgId: latest_msg_id,
+        pendingSends,
       };
     }
 

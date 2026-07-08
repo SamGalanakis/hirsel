@@ -11,7 +11,7 @@ Living document, updated as design decisions land. v1 = the smallest hirsel that
 - Agent wires its own wakes via lash process/trigger/wake machinery; system prompt carries the conventions. [ADR-0005]
 - Chat + Inbox: single chat thread; inbox items = markdown + Anchor + requires-response + optional Quick Replies; open/archived lifecycle; replies are anchor-refed chat messages. requires-response surfaces as in-app notification/badge only.
 - Memory: none beyond the session itself. The Agent self-compacts via the RLM `continue_as` control op (fresh Agent Frame seeded by the Agent's own summary).
-- PWA: mobile-friendly web first (Vite + React); native/mobile-specific work deferred.
+- PWA: mobile-friendly web first — SolidJS + the lashapp component system (Tailwind 4, Kobalte, lashapp ui primitives/theme); native/mobile-specific work deferred.
 - Transport: transport-agnostic message-stream protocol; v1 over WSS (caddy + bearer token), iroh as milestone two. [ADR-0006] PWA static files served from caddy on the VM (same origin), so no external static hosting until iroh.
 - Client protocol (small and boring): client `hello{last_seen_msg_id}` → host replays missed chat + inbox state → streams chat appends, live agent-turn text (lash Session Observation / Live Replay), inbox upserts. Client sends `send_message{body, ref?}`, `archive_item{id}`.
 - Agent-driven e2e runbooks, figments-style: `e2e/RULES.md` + one `runbook.md` per scenario, executed by a testing agent against a host debug surface (reset, inject owner message, read chat/inbox, gate on async) — no PWA in the loop.
@@ -23,7 +23,7 @@ Living document, updated as design decisions land. v1 = the smallest hirsel that
 
 ## Deferred (explicitly, with reason)
 
-- **UI rendering / MCP-UI / templates** — agent-supplied HTML in sandboxed iframes, template repo, snapshot vs live views, ui:// resources, generic-form. Deferred whole. v1 chat renders markdown + Inbox Quick Replies only.
+- **UI rendering / MCP-UI / templates** — agent-supplied HTML in sandboxed iframes, template repo, snapshot vs live views, ui:// resources, generic-form. Deferred whole. v1 chat renders markdown + Inbox Quick Replies only. When this revives, evaluate the Datastar-style pattern (server-pushed HTML fragments morphed in place by stable ID) carried over our own message stream — the update-in-place semantics we want, without adopting Datastar itself (its fetch/SSE/HTTP machinery conflicts with ADR-0006's transport-agnostic protocol, and its no-optimistic-UI philosophy conflicts with phone-first offline chat).
 - **Voice / audio** — hold-to-talk, streaming to VM, server-side STT. Deferred whole.
 - **Any memory system** — markdown notebook, lash observational-memory plugin, and the grounded-memory-units design are all deferred. Revisit when in-context + `continue_as` demonstrably hurts.
 - **Web Push (VAPID)** — deferred; requires-response items surface only in-app until push earns its keep.

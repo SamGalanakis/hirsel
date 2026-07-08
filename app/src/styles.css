@@ -1,5 +1,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* scroll-fade + shimmer utility families used by the ported shadcn chat
+   components (MessageScroller edge fades, Attachment rows, "Thinking…" marker).
+   Vendored verbatim from the shadcn package — see the file header. It defines
+   @utility/@property/@keyframes, so it must be imported before vega (which
+   consumes `shimmer`/`scroll-fade-*`) but as plain utilities, not in a layer. */
+@import "./styles/shadcn-scroll-shimmer.css";
 /* The vega component classes live in the base layer (matching zaidan's own
    wiring) so plain utility classes at call sites can override them. */
 @import "./styles/vega.css" layer(base);

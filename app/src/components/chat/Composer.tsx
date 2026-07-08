@@ -1,15 +1,36 @@
-import { ArrowUp, X } from "lucide-solid";
-import { createEffect, createSignal, Show } from "solid-js";
+import { ArrowUp, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import type { Blob, SendMode } from "../../protocol";
+import { state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
+import { formatBytes } from "../../lib/format";
+import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentGroup,
+  AttachmentMedia,
+  AttachmentTitle,
+  type AttachmentState,
+} from "../ui/attachment";
+import type { AttachmentsController } from "./useAttachments";
 
 const MAX_HEIGHT_PX = 112;
+const LONG_PRESS_MS = 450;
 
 interface Props {
   replyingTo: DisplayMessage | undefined | null;
   onCancelReply: () => void;
-  onSend: (body: string, ref: number | null) => void;
+  attachments: AttachmentsController;
+  thinking: boolean;
+  onSend: (body: string, ref: number | null, mode: SendMode, blobs: Blob[]) => void;
+  onStop: () => void;
+  getLastOwnerBody: () => string | null;
 }
 
 function snippet(body: string): string {
@@ -17,15 +38,30 @@ function snippet(body: string): string {
   return oneLine.length > 60 ? `${oneLine.slice(0, 60)}…` : oneLine;
 }
 
-/** Composer pinned above the tab bar. Enter inserts a newline (mobile
- * default); Ctrl/Cmd+Enter sends (desktop convenience). */
+/** Composer pinned above the tab bar. CLI-grade keyboard map on fine-pointer
+ * devices (Enter send · Shift+Enter newline · Tab queue next-turn · Esc cancel
+ * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
+ * (long-press = queue). Handles attachment staging (paperclip + paste). */
 export function Composer(props: Props) {
   const [value, setValue] = createSignal("");
+  const [coarse, setCoarse] = createSignal(false);
+  const [sending, setSending] = createSignal(false);
   let textareaRef: HTMLTextAreaElement | undefined;
+  let fileInputRef: HTMLInputElement | undefined;
+  let longPressTimer: ReturnType<typeof setTimeout> | undefined;
+  let longPressed = false;
+
+  onMount(() => {
+    const mq = window.matchMedia("(pointer: coarse)");
+    setCoarse(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setCoarse(e.matches);
+    mq.addEventListener?.("change", onChange);
+    onCleanup(() => mq.removeEventListener?.("change", onChange));
+  });
 
   // Auto-grow the textarea up to a cap whenever the draft changes.
   createEffect(() => {
-    value(); // track
+    value();
     const el = textareaRef;
     if (!el) return;
     el.style.height = "auto";
@@ -37,20 +73,113 @@ export function Composer(props: Props) {
     if (props.replyingTo) textareaRef?.focus();
   });
 
-  function send() {
+  const uploadState = (clientId: string): AttachmentState => {
+    const u = state.uploads.find((x) => x.clientId === clientId);
+    if (!u) return "idle";
+    return u.state; // "uploading" | "done" | "error"
+  };
+
+  async function submit(mode: SendMode) {
     const body = value().trim();
-    if (body.length === 0) return;
-    props.onSend(body, props.replyingTo?.id ?? null);
+    const hasFiles = props.attachments.files().length > 0;
+    if (body.length === 0 && !hasFiles) return;
+
+    let blobs: Blob[] = [];
+    if (hasFiles) {
+      setSending(true);
+      try {
+        blobs = await props.attachments.uploadAll();
+      } catch {
+        setSending(false);
+        toast("Some attachments failed — retry them", { variant: "error" });
+        return;
+      }
+      setSending(false);
+    }
+
+    props.onSend(body, props.replyingTo?.id ?? null, mode, blobs);
+    props.attachments.clear();
     setValue("");
     if (props.replyingTo) props.onCancelReply();
+    textareaRef?.focus();
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    // Esc interrupts the active turn (no-op if idle).
+    if (e.key === "Escape") {
+      if (props.thinking) {
+        e.preventDefault();
+        props.onStop();
+      }
+      return;
+    }
+    // ArrowUp on an empty composer recalls the last owner message.
+    if (e.key === "ArrowUp" && value().length === 0) {
+      const last = props.getLastOwnerBody();
+      if (last !== null) {
+        e.preventDefault();
+        setValue(last);
+        queueMicrotask(() => textareaRef?.setSelectionRange(last.length, last.length));
+      }
+      return;
+    }
+    // Ctrl/Cmd+Enter always sends, on every device.
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      send();
+      void submit("send");
+      return;
+    }
+    if (coarse()) return; // phone: Enter stays a newline; send button submits.
+    // Desktop:
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void submit("send");
+      return;
+    }
+    // Tab with a non-empty composer queues a next-turn message; empty Tab keeps
+    // normal focus movement.
+    if (e.key === "Tab" && !e.shiftKey && value().trim().length > 0) {
+      e.preventDefault();
+      void submit("next_turn");
     }
   }
+
+  function handlePaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of items) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      props.attachments.addFiles(files);
+    }
+  }
+
+  function onSendPointerDown() {
+    longPressed = false;
+    if (!coarse()) return;
+    longPressTimer = setTimeout(() => {
+      longPressed = true;
+      void submit("next_turn");
+    }, LONG_PRESS_MS);
+  }
+  function onSendPointerUp() {
+    if (longPressTimer) clearTimeout(longPressTimer);
+  }
+  function onSendClick() {
+    if (longPressed) {
+      longPressed = false;
+      return; // the long-press already queued it
+    }
+    void submit("send");
+  }
+
+  const canSend = () => value().trim().length > 0 || props.attachments.files().length > 0;
 
   return (
     <div class="flex-shrink-0 border-t border-border bg-card px-3 py-2">
@@ -76,7 +205,77 @@ export function Composer(props: Props) {
           </div>
         )}
       </Show>
+
+      {/* Staged attachment chips. */}
+      <Show when={props.attachments.files().length > 0}>
+        <AttachmentGroup class="mb-2">
+          <For each={props.attachments.files()}>
+            {(pf) => {
+              const st = () => uploadState(pf.clientId);
+              return (
+                <Attachment size="sm" state={st()} class="w-52">
+                  <AttachmentMedia variant={pf.previewUrl ? "image" : "icon"}>
+                    <Show when={pf.previewUrl} fallback={<FileText />}>
+                      <img src={pf.previewUrl} alt={pf.name} />
+                    </Show>
+                  </AttachmentMedia>
+                  <AttachmentContent>
+                    <AttachmentTitle>{pf.name}</AttachmentTitle>
+                    <AttachmentDescription>
+                      <Show when={st() === "error"} fallback={formatBytes(pf.size)}>
+                        Upload failed
+                      </Show>
+                    </AttachmentDescription>
+                  </AttachmentContent>
+                  <AttachmentActions>
+                    <Show when={st() === "uploading"}>
+                      <LoaderCircle class="size-4 animate-spin text-muted-foreground" />
+                    </Show>
+                    <Show when={st() === "error"}>
+                      <AttachmentAction
+                        aria-label="Retry upload"
+                        onClick={() => props.attachments.retry(pf.clientId)}
+                      >
+                        <RotateCcw />
+                      </AttachmentAction>
+                    </Show>
+                    <Show when={st() !== "uploading"}>
+                      <AttachmentAction
+                        aria-label="Remove attachment"
+                        onClick={() => props.attachments.removeFile(pf.clientId)}
+                      >
+                        <X />
+                      </AttachmentAction>
+                    </Show>
+                  </AttachmentActions>
+                </Attachment>
+              );
+            }}
+          </For>
+        </AttachmentGroup>
+      </Show>
+
       <div class="flex items-end gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          class="hidden"
+          onChange={(e) => {
+            if (e.currentTarget.files) props.attachments.addFiles(e.currentTarget.files);
+            e.currentTarget.value = "";
+          }}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          class="shrink-0 rounded-full text-muted-foreground"
+          aria-label="Attach files"
+          onClick={() => fileInputRef?.click()}
+        >
+          <Paperclip class="size-5" />
+        </Button>
         <Textarea
           ref={textareaRef}
           rows={1}
@@ -85,18 +284,46 @@ export function Composer(props: Props) {
           value={value()}
           onInput={(e) => setValue(e.currentTarget.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
         />
+        <Show when={props.thinking}>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            class="shrink-0 rounded-full"
+            aria-label="Stop the agent"
+            onClick={() => props.onStop()}
+          >
+            <Square class="size-4 fill-current" />
+          </Button>
+        </Show>
         <Button
           type="button"
           size="icon"
           class="shrink-0 rounded-full"
-          onClick={send}
-          disabled={value().trim().length === 0}
+          onPointerDown={onSendPointerDown}
+          onPointerUp={onSendPointerUp}
+          onPointerLeave={onSendPointerUp}
+          onClick={onSendClick}
+          disabled={!canSend() || sending()}
           aria-label="Send"
         >
-          <ArrowUp class="size-5" />
+          <Show when={sending()} fallback={<ArrowUp class="size-5" />}>
+            <LoaderCircle class="size-5 animate-spin" />
+          </Show>
         </Button>
       </div>
+
+      {/* Subtle desktop keyboard hint. */}
+      <Show when={!coarse()}>
+        <div class="mt-1 px-1 text-[0.66rem] text-muted-foreground/70">
+          <span class="font-medium">Enter</span> send ·{" "}
+          <span class="font-medium">Shift+Enter</span> newline ·{" "}
+          <span class="font-medium">Tab</span> queue ·{" "}
+          <span class="font-medium">Esc</span> stop
+        </div>
+      </Show>
     </div>
   );
 }

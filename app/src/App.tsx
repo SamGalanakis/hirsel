@@ -3,6 +3,7 @@ import { ChatView } from "./components/chat/ChatView";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { InboxView } from "./components/inbox/InboxView";
 import { TabBar } from "./components/TabBar";
+import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { openRequiresResponseCount } from "./store/selectors";
 import { state } from "./store/store";
@@ -66,6 +67,7 @@ function App() {
         </main>
         <TabBar />
       </div>
+      <Toaster />
     </Show>
   );
 }

@@ -1,19 +1,66 @@
-import { MessagesSquare } from "lucide-solid";
+import { ArrowDown, MessagesSquare, Upload } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import type { Blob, SendMode } from "../../protocol";
 import { clearComposerDraft, clearScrollTarget, state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
-import { AgentActivityIndicator } from "./AgentActivityIndicator";
+import { Marker, MarkerContent } from "../ui/marker";
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerViewport,
+  useMessageScrollerVisibility,
+} from "../ui/message-scroller";
 import { Composer } from "./Composer";
+import { Lightbox } from "./Lightbox";
 import { MessageBubble } from "./MessageBubble";
+import { createComposerAttachments } from "./useAttachments";
 
 const HIGHLIGHT_MS = 1600;
 
+function dayKey(ts: string): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function dayLabel(ts: string): string {
+  const d = new Date(ts);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (dayKey(ts) === dayKey(today.toISOString())) return "Today";
+  if (dayKey(ts) === dayKey(yesterday.toISOString())) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+}
+
+type Row =
+  | { kind: "day"; key: string; label: string }
+  | { kind: "msg"; key: string; message: DisplayMessage };
+
+/** Scroll-to-latest pill with an unseen-below count, rendered inside the
+ * scroller so it can read the visibility hook. */
+function JumpToLatest() {
+  const { unseenCount } = useMessageScrollerVisibility();
+  return (
+    <MessageScrollerButton size="sm" class="gap-1.5 px-3" aria-label="Scroll to latest">
+      <ArrowDown class="size-4" />
+      <Show when={unseenCount() > 0}>
+        <span class="text-xs font-medium">{unseenCount()} new</span>
+      </Show>
+    </MessageScrollerButton>
+  );
+}
+
 export function ChatView() {
-  let scrollRef: HTMLDivElement | undefined;
   const [highlightedId, setHighlightedId] = createSignal<number | null>(null);
-  let prevLength = 0;
+  const [lightbox, setLightbox] = createSignal<{ src: string; alt: string } | null>(null);
+  const [dragging, setDragging] = createSignal(false);
+  let dragDepth = 0;
+
+  const attachments = createComposerAttachments();
 
   const messagesById = createMemo(() => {
     const map = new Map<number, DisplayMessage>();
@@ -21,22 +68,26 @@ export function ChatView() {
     return map;
   });
 
+  // Interleave day-break markers between messages when the calendar day changes.
+  const rows = createMemo<Row[]>(() => {
+    const out: Row[] = [];
+    let lastDay: string | null = null;
+    for (const m of state.messages) {
+      const key = dayKey(m.ts);
+      if (key !== lastDay) {
+        out.push({ kind: "day", key: `day-${key}-${m.id}`, label: dayLabel(m.ts) });
+        lastDay = key;
+      }
+      out.push({ kind: "msg", key: `msg-${m.id}`, message: m });
+    }
+    return out;
+  });
+
   function scrollToId(id: number) {
     document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     setHighlightedId(id);
     setTimeout(() => setHighlightedId((cur) => (cur === id ? null : cur)), HIGHLIGHT_MS);
   }
-
-  // Auto-scroll to the newest message as the thread grows, unless a specific
-  // scroll target was requested (handled by the effect below).
-  createEffect(() => {
-    const len = state.messages.length;
-    const target = state.scrollToMessageId;
-    if (len > prevLength && target === null) {
-      scrollRef?.scrollTo({ top: scrollRef.scrollHeight, behavior: "smooth" });
-    }
-    prevLength = len;
-  });
 
   // Consume a one-shot scroll-to request (from a quoted ref tap or a quick reply).
   createEffect(() => {
@@ -49,15 +100,52 @@ export function ChatView() {
   const replyingTo = () =>
     state.composerDraft ? messagesById().get(state.composerDraft.ref) : null;
 
-  function handleSend(body: string, ref: number | null) {
-    getClient()?.sendMessage(body, ref);
+  const thinking = () => state.agentActivity.state === "thinking";
+
+  function handleSend(body: string, ref: number | null, mode: SendMode, blobs: Blob[]) {
+    getClient()?.sendMessage(body, ref, { mode, attachments: blobs });
+  }
+
+  function lastOwnerBody(): string | null {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      if (state.messages[i].author === "owner") return state.messages[i].body;
+    }
+    return null;
+  }
+
+  // Drag-and-drop anywhere on the chat view. Depth counter avoids flicker as the
+  // dragged item crosses child element boundaries.
+  function onDragEnter(e: DragEvent) {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    dragDepth += 1;
+    setDragging(true);
+  }
+  function onDragLeave() {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setDragging(false);
+  }
+  function onDragOver(e: DragEvent) {
+    if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+  }
+  function onDrop(e: DragEvent) {
+    dragDepth = 0;
+    setDragging(false);
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault();
+    attachments.addFiles(e.dataTransfer.files);
   }
 
   return (
     <div class="flex min-h-0 flex-1 flex-col">
-      <div ref={scrollRef} class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto py-3">
+      <div
+        class="relative flex min-h-0 flex-1 flex-col"
+        onDragEnter={onDragEnter}
+        onDragLeave={onDragLeave}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+      >
         <Show when={state.messages.length === 0}>
-          <Empty class="border-none">
+          <Empty class="flex-1 border-none">
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <MessagesSquare />
@@ -67,19 +155,84 @@ export function ChatView() {
             </EmptyHeader>
           </Empty>
         </Show>
-        <For each={state.messages}>
-          {(m) => (
-            <MessageBubble
-              message={m}
-              refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
-              highlighted={highlightedId() === m.id}
-              onTapQuote={scrollToId}
-            />
-          )}
-        </For>
+
+        <Show when={state.messages.length > 0}>
+          <MessageScroller class="flex-1">
+            <MessageScrollerViewport class="py-3">
+              <MessageScrollerContent class="gap-3">
+                <For each={rows()}>
+                  {(row) => (
+                    <Show
+                      when={row.kind === "msg"}
+                      fallback={
+                        <MessageScrollerItem class="px-3 py-1">
+                          <Marker variant="separator" class="text-[0.7rem] uppercase tracking-wide">
+                            <MarkerContent>{(row as { label: string }).label}</MarkerContent>
+                          </Marker>
+                        </MessageScrollerItem>
+                      }
+                    >
+                      {(() => {
+                        const m = (row as { message: DisplayMessage }).message;
+                        return (
+                          <MessageScrollerItem scrollAnchor={m.author === "owner"}>
+                            <MessageBubble
+                              message={m}
+                              refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
+                              highlighted={highlightedId() === m.id}
+                              queued={m.mode === "next_turn" && thinking()}
+                              onTapQuote={scrollToId}
+                              onOpenImage={(src, alt) => setLightbox({ src, alt })}
+                              onRetry={(cid) => getClient()?.retrySend(cid)}
+                              onCancelQueued={(cid) => getClient()?.cancelQueued(cid)}
+                            />
+                          </MessageScrollerItem>
+                        );
+                      })()}
+                    </Show>
+                  )}
+                </For>
+
+                {/* Live "Thinking…" status via a shimmering Marker (ephemeral). */}
+                <Show when={thinking()}>
+                  <MessageScrollerItem class="px-4 py-1">
+                    <Marker>
+                      <MarkerContent class="shimmer text-sm">
+                        {state.agentActivity.text ?? "Thinking…"}
+                      </MarkerContent>
+                    </Marker>
+                  </MessageScrollerItem>
+                </Show>
+              </MessageScrollerContent>
+            </MessageScrollerViewport>
+            <JumpToLatest />
+          </MessageScroller>
+        </Show>
+
+        {/* Drop overlay. */}
+        <Show when={dragging()}>
+          <div class="pointer-events-none absolute inset-2 z-40 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary bg-background/80 backdrop-blur-sm">
+            <Upload class="size-8 text-primary" />
+            <span class="text-sm font-medium text-foreground">Drop files to attach</span>
+          </div>
+        </Show>
       </div>
-      <AgentActivityIndicator />
-      <Composer replyingTo={replyingTo()} onCancelReply={clearComposerDraft} onSend={handleSend} />
+
+      <Composer
+        replyingTo={replyingTo()}
+        attachments={attachments}
+        thinking={thinking()}
+        onCancelReply={clearComposerDraft}
+        onSend={handleSend}
+        onStop={() => getClient()?.cancelTurn()}
+        getLastOwnerBody={lastOwnerBody}
+      />
+
+      <Lightbox
+        src={lightbox()?.src ?? null}
+        alt={lightbox()?.alt ?? ""}
+        onClose={() => setLightbox(null)}
+      />
     </div>
   );
 }

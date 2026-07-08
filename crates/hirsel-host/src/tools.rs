@@ -1,4 +1,10 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use futures_util::StreamExt;
 use hirsel_drivers::{
@@ -31,6 +37,7 @@ pub struct ToolSuite {
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
     terminal_tx: broadcast::Sender<ProcessTerminal>,
+    visible_sends: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,11 +78,19 @@ impl ToolSuite {
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
             terminal_tx,
+            visible_sends: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn terminal_events(&self) -> broadcast::Receiver<ProcessTerminal> {
         self.terminal_tx.subscribe()
+    }
+
+    /// Count of Owner-visible sends (chat messages + inbox items) since boot.
+    /// The turn pump compares before/after a turn to detect replies the Agent
+    /// produced as bare prose instead of delivering through a tool.
+    pub fn visible_sends(&self) -> u64 {
+        self.visible_sends.load(Ordering::Relaxed)
     }
 
     pub async fn chat_send(
@@ -90,6 +105,7 @@ impl ToolSuite {
         let _ = self.broadcaster.send(HostToClient::Msg {
             message: message.clone(),
         });
+        self.visible_sends.fetch_add(1, Ordering::Relaxed);
         Ok(message)
     }
 
@@ -107,6 +123,7 @@ impl ToolSuite {
         let _ = self
             .broadcaster
             .send(HostToClient::InboxUpsert { item: item.clone() });
+        self.visible_sends.fetch_add(1, Ordering::Relaxed);
         Ok(item)
     }
 

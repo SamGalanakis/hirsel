@@ -326,8 +326,25 @@ impl LashAgentRuntime {
                 runtime.notify.notified().await;
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
+                    let sends_before = runtime.tools.visible_sends();
                     match runtime.session.queued_turn().run().await {
-                        Ok(Some(_output)) => continue,
+                        Ok(Some(output)) => {
+                            // Safety net: a turn that never called chat.send /
+                            // inbox.file left Sam with nothing visible. Deliver
+                            // its terminal prose to Chat rather than swallowing
+                            // the reply (the prompt still teaches chat.send as
+                            // the proper path).
+                            if runtime.tools.visible_sends() == sends_before {
+                                let text = output
+                                    .assistant_message()
+                                    .map(str::to_owned)
+                                    .or_else(|| output.final_value().map(render_final_value));
+                                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                                    runtime.deliver_fallback_chat(text).await;
+                                }
+                            }
+                            continue;
+                        }
                         Ok(None) => break,
                         Err(error) => {
                             runtime.handle_turn_error(error).await;
@@ -337,6 +354,21 @@ impl LashAgentRuntime {
                 }
             }
         });
+    }
+
+    async fn deliver_fallback_chat(&self, text: String) {
+        let anchor = self.current_anchor().await;
+        match self.tools.chat_send(text, anchor).await {
+            Ok(message) => {
+                let mut anchors = self.anchors.lock().await;
+                if let Some(anchors) = anchors.as_mut() {
+                    anchors.latest_agent_message_id = Some(message.id);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to deliver fallback Agent chat message");
+            }
+        }
     }
 
     async fn handle_turn_error(&self, error: lash::EmbedError) {
@@ -489,6 +521,16 @@ async fn enqueue_process_wake(
     ));
     store.enqueue_queued_work(draft).await?;
     Ok(())
+}
+
+fn render_final_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => format!(
+            "```json\n{}\n```",
+            serde_json::to_string_pretty(other).unwrap_or_default()
+        ),
+    }
 }
 
 fn activity_from_observation(event: &RemoteSessionObservationEventPayload) -> Option<HostToClient> {

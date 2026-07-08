@@ -357,8 +357,7 @@ impl LashAgentRuntime {
     }
 
     async fn deliver_fallback_chat(&self, text: String) {
-        let anchor = self.current_anchor().await;
-        match self.tools.chat_send(text, anchor).await {
+        match self.tools.chat_send(text, None).await {
             Ok(message) => {
                 let mut anchors = self.anchors.lock().await;
                 if let Some(anchors) = anchors.as_mut() {
@@ -735,10 +734,13 @@ impl HirselToolExecutor {
 
     async fn chat_send(&self, args: &Value) -> Result<Value, String> {
         let body = required_string_any(args, &["body_md", "body", "message"])?;
-        let anchor = self.current_anchor().await;
+        // Chat messages quote-render their ref in the client, so only an
+        // explicit ref from the Agent belongs here — the implicit turn anchor
+        // is for Inbox Items, not ordinary replies.
+        let explicit_ref = args.get("ref").and_then(Value::as_u64);
         let message = self
             .tools
-            .chat_send(body, anchor)
+            .chat_send(body, explicit_ref)
             .await
             .map_err(|error| error.to_string())?;
         {
@@ -1087,13 +1089,14 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.chat_send",
             "chat_send",
-            "Append an Agent-authored Chat message for the Owner.",
+            "Append an Agent-authored Chat message for the Owner. Optional ref quotes an OLDER chat message by id; never ref the message you are directly answering.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["body_md"],
                 "properties": {
-                    "body_md": { "type": "string" }
+                    "body_md": { "type": "string" },
+                    "ref": { "type": "integer", "minimum": 1 }
                 }
             }),
             json!({ "type": "object" }),

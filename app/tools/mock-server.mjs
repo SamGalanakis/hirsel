@@ -1,126 +1,175 @@
 #!/usr/bin/env node
-// Dev harness: a tiny in-memory WS server implementing PROTOCOL.md, with a
-// scripted "agent" so the PWA can be developed/demoed without the Rust host.
-// Not durable, not multi-session-aware beyond client_id dedupe - restart
-// resets all state. Run via `npm run dev:mock` (mock server + vite together)
-// or `npm run mock-server` alone.
+// Dev harness: a tiny in-memory host implementing PROTOCOL.md (v1 + v1.1
+// attachments + v1.2 CLI send/queue/cancel), with a scripted "agent" so the PWA
+// can be developed/demoed without the Rust host. Not durable — restart resets
+// all state. Serves blob content over HTTP on the same port the WS runs on.
+// Run via `npm run dev:mock` (mock + vite together) or `npm run mock-server`.
+import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8787);
 const TOKEN = process.env.MOCK_TOKEN ?? "dev-token";
 const REPLAY_LIMIT = 200;
 const ARCHIVED_REPLAY_LIMIT = 20;
+const MAX_BLOB_BYTES = 15 * 1024 * 1024;
 
-/** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string}[]} */
+/** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[]}[]} */
 const messages = [];
-/** @type {{id:number, content:string, anchor:number, requires_response:boolean, quick_replies:{value:string,label:string}[], status:'open'|'archived', ts:string}[]} */
 const inbox = [];
 let nextMsgId = 1;
 let nextInboxId = 1;
-/** client_id -> assigned message id, so resends after reconnect dedupe. */
-const seenClientIds = new Map();
+const seenClientIds = new Map(); // client_id -> assigned message id
+const blobs = new Map(); // blob id -> { id, name, mime, size, buffer }
+
+// --- turn model (for v1.2 mode/cancel) --------------------------------------
+let turnActive = false;
+let turnTimers = [];
+/** Messages sent with mode:"next_turn" while a turn was active, awaiting their
+ * own turn. Each: { clientId, messageId }. "Claimed" once dequeued. */
+let queuedNextTurn = [];
 
 const clients = new Set();
 
 function now() {
   return new Date().toISOString();
 }
-
 function log(...args) {
   console.log(`[mock-server]`, ...args);
 }
-
 function broadcast(frame) {
   const json = JSON.stringify(frame);
-  for (const ws of clients) {
-    if (ws.readyState === ws.OPEN) ws.send(json);
-  }
+  for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(json);
 }
 
-function addMessage(author, body, ref) {
-  const message = { id: nextMsgId++, author, body, ref: ref ?? null, ts: now() };
+function addMessage(author, body, ref, attachments = []) {
+  const message = { id: nextMsgId++, author, body, ref: ref ?? null, ts: now(), attachments };
   messages.push(message);
   broadcast({ type: "msg", message });
   return message;
 }
-
 function setActivity(state, text) {
   broadcast({ type: "agent_activity", state, text: text ?? null });
 }
-
 function upsertInbox(item) {
   const idx = inbox.findIndex((i) => i.id === item.id);
   if (idx === -1) inbox.push(item);
   else inbox[idx] = item;
   broadcast({ type: "inbox_upsert", item });
 }
-
 function findOpenInboxByAnchor(anchorId) {
   return inbox.find((i) => i.status === "open" && i.anchor === anchorId);
 }
 
-/** Any reply that refs an open Inbox Item's anchor gets a generic
- * acknowledgement + the item archives - independent of the delegate script,
- * since this is how every quick-reply / anchor-refed reply resolves. */
+function later(fn, ms) {
+  const t = setTimeout(fn, ms);
+  turnTimers.push(t);
+  return t;
+}
+function clearTurnTimers() {
+  for (const t of turnTimers) clearTimeout(t);
+  turnTimers = [];
+}
+
+/** Finish the active turn, then drain the next_turn queue (one turn each). */
+function finishTurn() {
+  setActivity("idle", null);
+  turnActive = false;
+  turnTimers = [];
+  drainQueue();
+}
+
+function drainQueue() {
+  if (turnActive || queuedNextTurn.length === 0) return;
+  const next = queuedNextTurn.shift(); // claim it
+  const message = messages.find((m) => m.id === next.messageId);
+  if (message) startReplyTurn(message);
+}
+
+/** Kick off a scripted agent reply for an owner message. */
+function startReplyTurn(ownerMessage) {
+  turnActive = true;
+  if (ownerMessage.body.trim().toLowerCase() === "delegate") {
+    setActivity("thinking", "Delegating to a sub-agent…");
+    later(() => {
+      const reply = addMessage(
+        "agent",
+        "On it — kicking off a sub-agent for that. I'll update you here when it's done.",
+        ownerMessage.id,
+      );
+      finishTurn();
+      // Independent follow-up (not part of the turn): an inbox item lands later.
+      setTimeout(() => {
+        upsertInbox({
+          id: nextInboxId++,
+          content:
+            "**Sub-agent finished the delegated task.**\n\nDiff is ready — approve to merge, or reject to discard.",
+          anchor: reply.id,
+          requires_response: true,
+          quick_replies: [
+            { value: "approve", label: "Approve" },
+            { value: "reject", label: "Reject" },
+          ],
+          status: "open",
+          ts: now(),
+        });
+      }, 3000);
+    }, 1000);
+  } else {
+    setActivity("thinking", "Thinking…");
+    later(() => {
+      const noun = ownerMessage.attachments.length > 0 ? ` (+${ownerMessage.attachments.length} attachment${ownerMessage.attachments.length > 1 ? "s" : ""})` : "";
+      addMessage("agent", `Echo: ${ownerMessage.body || "(no text)"}${noun}`, ownerMessage.id);
+      finishTurn();
+    }, 1000);
+  }
+}
+
 function acknowledgeInboxResponse(item, ownerMessage) {
+  turnActive = true;
   setActivity("thinking", "Noting your response…");
-  setTimeout(() => {
+  later(() => {
     addMessage("agent", `Got it — noted: "${ownerMessage.body}".`, ownerMessage.id);
-    setActivity("idle", null);
     upsertInbox({ ...item, status: "archived" });
+    finishTurn();
   }, 1000);
 }
 
-function runDelegateScript(ownerMessage) {
-  setActivity("thinking", "Delegating to a sub-agent…");
-  setTimeout(() => {
-    const reply = addMessage(
-      "agent",
-      "On it — kicking off a sub-agent for that. I'll update you here when it's done.",
-      ownerMessage.id,
-    );
-    setActivity("idle", null);
-
-    setTimeout(() => {
-      const item = {
-        id: nextInboxId++,
-        content:
-          "**Sub-agent finished the delegated task.**\n\nDiff is ready — approve to merge, or reject to discard.",
-        anchor: reply.id,
-        requires_response: true,
-        quick_replies: [
-          { value: "approve", label: "Approve" },
-          { value: "reject", label: "Reject" },
-        ],
-        status: "open",
-        ts: now(),
-      };
-      upsertInbox(item);
-    }, 3000);
-  }, 1000);
+function resolveAttachments(ids) {
+  return (ids ?? [])
+    .map((id) => {
+      const b = blobs.get(id);
+      return b ? { id: b.id, name: b.name, mime: b.mime, size: b.size } : null;
+    })
+    .filter(Boolean);
 }
 
-function runEchoScript(ownerMessage) {
-  setActivity("thinking", "Thinking…");
-  setTimeout(() => {
-    addMessage("agent", `Echo: ${ownerMessage.body}`, ownerMessage.id);
-    setActivity("idle", null);
-  }, 1000);
+function handleUploadBlob(ws, frame) {
+  const buffer = Buffer.from(frame.data_b64 ?? "", "base64");
+  if (buffer.length > MAX_BLOB_BYTES) {
+    ws.send(JSON.stringify({ type: "error", detail: "blob exceeds 15 MB", client_id: frame.client_id }));
+    return;
+  }
+  const id = randomUUID();
+  const blob = { id, name: frame.name, mime: frame.mime, size: buffer.length };
+  blobs.set(id, { ...blob, buffer });
+  ws.send(JSON.stringify({ type: "blob_ok", client_id: frame.client_id, blob }));
+  log("stored blob", frame.name, `${buffer.length}B`);
 }
 
 function handleSendMessage(frame) {
   const already = seenClientIds.get(frame.client_id);
   if (already !== undefined) {
-    // Resend after reconnect: host already has this one, just re-affirm it
-    // rather than creating a duplicate or re-running the scripted agent.
     const existing = messages.find((m) => m.id === already);
     if (existing) broadcast({ type: "msg", message: existing });
     return;
   }
 
-  const message = addMessage("owner", frame.body, frame.ref);
+  const attachments = resolveAttachments(frame.attachments);
+  const message = addMessage("owner", frame.body, frame.ref, attachments);
   seenClientIds.set(frame.client_id, message.id);
 
+  // Anchored replies resolve their inbox item regardless of mode.
   if (message.ref !== null) {
     const item = findOpenInboxByAnchor(message.ref);
     if (item) {
@@ -129,11 +178,44 @@ function handleSendMessage(frame) {
     }
   }
 
-  if (message.body.trim().toLowerCase() === "delegate") {
-    runDelegateScript(message);
-  } else {
-    runEchoScript(message);
+  // mode=next_turn while a turn is running: hold for the current turn to finish.
+  // (mode=send during a turn is treated as normal ingress — Early Injection is
+  // indistinguishable from a plain reply in this mock.)
+  if (frame.mode === "next_turn" && turnActive) {
+    queuedNextTurn.push({ clientId: frame.client_id, messageId: message.id });
+    log("queued next_turn message", message.id);
+    return;
   }
+
+  if (turnActive) {
+    // A plain send arriving mid-turn: queue it so replies stay ordered.
+    queuedNextTurn.push({ clientId: frame.client_id, messageId: message.id });
+    return;
+  }
+  startReplyTurn(message);
+}
+
+function handleCancelTurn() {
+  if (!turnActive) return; // no-op if idle
+  clearTurnTimers();
+  addMessage("agent", "_Turn cancelled._", null);
+  finishTurn();
+}
+
+function handleCancelQueued(ws, frame) {
+  const idx = queuedNextTurn.findIndex((q) => q.clientId === frame.client_id);
+  if (idx === -1) {
+    // Not queued (never was, or already claimed/replied).
+    ws.send(JSON.stringify({ type: "error", detail: "already claimed", client_id: frame.client_id }));
+    return;
+  }
+  const [removed] = queuedNextTurn.splice(idx, 1);
+  // Drop it from history — it never reached the Agent.
+  const mi = messages.findIndex((m) => m.id === removed.messageId);
+  if (mi !== -1) messages.splice(mi, 1);
+  seenClientIds.delete(frame.client_id);
+  broadcast({ type: "msg_removed", id: removed.messageId });
+  log("cancelled queued message", removed.messageId);
 }
 
 function handleArchiveItem(frame) {
@@ -142,7 +224,36 @@ function handleArchiveItem(frame) {
   upsertInbox({ ...item, status: "archived" });
 }
 
-const wss = new WebSocketServer({ port: PORT });
+// --- HTTP (blob content) + WS on the same port ------------------------------
+const httpServer = createServer((req, res) => {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  const match = url.pathname.match(/^\/blob\/(.+)$/);
+  if (req.method === "GET" && match) {
+    if (url.searchParams.get("token") !== TOKEN) {
+      res.writeHead(403);
+      res.end("forbidden");
+      return;
+    }
+    const blob = blobs.get(decodeURIComponent(match[1]));
+    if (!blob) {
+      res.writeHead(404);
+      res.end("not found");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": blob.mime || "application/octet-stream",
+      "Content-Length": blob.buffer.length,
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+    });
+    res.end(blob.buffer);
+    return;
+  }
+  res.writeHead(404);
+  res.end("not found");
+});
+
+const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (ws) => {
   let helloed = false;
@@ -175,7 +286,6 @@ wss.on("connection", (ws) => {
         ws.close(1008, "invalid token");
         return;
       }
-
       helloed = true;
       const lastSeen = frame.last_seen_msg_id;
       const replayMessages =
@@ -186,7 +296,6 @@ wss.on("connection", (ws) => {
       const archivedItems = inbox
         .filter((i) => i.status === "archived")
         .slice(-ARCHIVED_REPLAY_LIMIT);
-
       ws.send(
         JSON.stringify({
           type: "hello_ok",
@@ -203,6 +312,15 @@ wss.on("connection", (ws) => {
       case "send_message":
         handleSendMessage(frame);
         break;
+      case "upload_blob":
+        handleUploadBlob(ws, frame);
+        break;
+      case "cancel_turn":
+        handleCancelTurn();
+        break;
+      case "cancel_queued":
+        handleCancelQueued(ws, frame);
+        break;
       case "archive_item":
         handleArchiveItem(frame);
         break;
@@ -215,4 +333,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-log(`listening on ws://localhost:${PORT} (token: ${TOKEN})`);
+httpServer.listen(PORT, () => {
+  log(`listening on ws://localhost:${PORT} + http blobs at /blob/:id (token: ${TOKEN})`);
+});

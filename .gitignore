@@ -1,0 +1,38 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / frontend (app/ has its own .gitignore too)
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Runtime state & data
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Secrets & local config
+.env
+.env.*
+*.local
+!*.example
+
+# Logs & scratch
+*.log
+tmp/
+scratch/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo

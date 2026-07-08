@@ -179,6 +179,16 @@ textarea {
   scrollbar-width: thin;
 }
 
+/* Used by the ported AttachmentGroup's horizontal snap row. */
+@utility no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;

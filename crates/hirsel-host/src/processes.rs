@@ -42,6 +42,17 @@ impl ProcessStore {
         cwd: String,
     ) -> anyhow::Result<String> {
         let id = format!("proc-{}", Uuid::new_v4());
+        self.insert_with_id(id, agent, handle, prompt, cwd)
+    }
+
+    pub fn insert_with_id(
+        &self,
+        id: String,
+        agent: AgentKind,
+        handle: SessionHandle,
+        prompt: String,
+        cwd: String,
+    ) -> anyhow::Result<String> {
         let record = ProcessRecord {
             id: id.clone(),
             agent,
@@ -81,6 +92,10 @@ impl ProcessStore {
         let mut values = self.lock()?.values().cloned().collect::<Vec<_>>();
         values.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(values)
+    }
+
+    pub fn get(&self, process_id: &str) -> anyhow::Result<Option<ProcessRecord>> {
+        Ok(self.lock()?.get(process_id).cloned())
     }
 
     pub fn recent_events(&self, process_id: &str) -> anyhow::Result<Vec<SubagentEvent>> {

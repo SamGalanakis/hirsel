@@ -20,7 +20,7 @@ futures-util = "0.3.31"
 hirsel-drivers = { path = "crates/hirsel-drivers" }
 hirsel-proto = { path = "crates/hirsel-proto" }
 libc = "0.2.177"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tempfile = "3.23.0"

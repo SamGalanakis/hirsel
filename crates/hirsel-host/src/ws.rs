@@ -226,7 +226,7 @@ mod tests {
 
     use crate::{
         build_state,
-        config::{Config, DriverMode},
+        config::{AgentMode, Config, DriverMode, ProviderMode},
         router_from_state,
     };
 
@@ -235,8 +235,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = Config {
             token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
             anthropic_api_key: None,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-4-7".to_string(),
             data_dir: dir.path().to_path_buf(),
             driver: DriverMode::Fake,
             fake_fixture: None,

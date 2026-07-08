@@ -126,6 +126,18 @@ impl ToolSuite {
         prompt: impl Into<String>,
         cwd: PathBuf,
     ) -> anyhow::Result<SpawnedProcess> {
+        let process_id = format!("proc-{}", uuid::Uuid::new_v4());
+        self.subagents_spawn_with_process_id(agent, prompt, cwd, process_id)
+            .await
+    }
+
+    pub async fn subagents_spawn_with_process_id(
+        &self,
+        agent: AgentKind,
+        prompt: impl Into<String>,
+        cwd: PathBuf,
+        process_id: String,
+    ) -> anyhow::Result<SpawnedProcess> {
         let prompt = prompt.into();
         let driver = self.driver_for(agent);
         let handle = driver
@@ -136,7 +148,8 @@ impl ToolSuite {
                 fake_fixture: self.config.fake_fixture.clone(),
             })
             .await?;
-        let process_id = self.processes.insert(
+        let process_id = self.processes.insert_with_id(
+            process_id,
             agent,
             handle.clone(),
             prompt,
@@ -178,9 +191,29 @@ impl ToolSuite {
         Ok(())
     }
 
+    pub async fn subagents_prompt_process(
+        &self,
+        process_id: &str,
+        text: String,
+    ) -> anyhow::Result<()> {
+        let record = self
+            .processes
+            .get(process_id)?
+            .ok_or_else(|| anyhow::anyhow!("Sub-agent process not found: {process_id}"))?;
+        self.subagents_prompt(&record.handle, text).await
+    }
+
     pub async fn subagents_interrupt(&self, handle: &SessionHandle) -> anyhow::Result<()> {
         self.driver_for(handle.agent).interrupt(handle).await?;
         Ok(())
+    }
+
+    pub async fn subagents_interrupt_process(&self, process_id: &str) -> anyhow::Result<()> {
+        let record = self
+            .processes
+            .get(process_id)?
+            .ok_or_else(|| anyhow::anyhow!("Sub-agent process not found: {process_id}"))?;
+        self.subagents_interrupt(&record.handle).await
     }
 
     pub fn subagents_list(&self) -> anyhow::Result<Vec<crate::processes::ProcessRecord>> {

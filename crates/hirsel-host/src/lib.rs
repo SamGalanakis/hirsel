@@ -55,14 +55,17 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     );
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
-            has_anthropic_key: config.anthropic_api_key.is_some(),
+            agent_mode: config.agent,
+            provider_mode: config.provider,
+            anthropic_api_key: config.anthropic_api_key.clone(),
             model: config.model.clone(),
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
         },
         tools,
         broadcaster.clone(),
-    );
+    )
+    .await?;
     Ok(AppState {
         token: Arc::from(config.token),
         storage,

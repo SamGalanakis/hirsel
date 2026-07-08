@@ -1,0 +1,3 @@
+# The Agent runs in RLM mode, not standard tool-calling
+
+The Agent's lash session uses `rlm` execution mode: the model writes lashlang programs executed in the sandboxed VM, rather than native provider tool-calling (`standard` mode). Standard mode was the boring/safe option for a chat-shaped agent, but hirsel is also a lash dogfooding vehicle, and RLM is where lash is differentiated — the Agent can express orchestration directly ("spawn three Sub-agents, park on their Durable Waits, render a combined report") instead of one tool call per turn. Consequence: every tool hirsel exposes must ship a Lashlang Tool Binding, and the system prompt teaches program-writing conventions, which makes a later mode switch expensive.

@@ -1,0 +1,3 @@
+# The Agent manages its own wakes; the host installs no wake policy
+
+The Hirsel Host does not decide what wakes the Agent. The Agent itself wires its wakes using lash primitives — Runtime Processes, Trigger Sources/Subscriptions, Wake Targets, Durable Waits — and the system prompt supplies the conventions (e.g. "subscribe to Sub-agent terminal events, not progress"; "keep an idle heartbeat timer"). The obvious alternative — host code that routes sub-agent completion → wake, progress → no wake — is policy code, which hirsel refuses: wake rules should be editable by editing the prompt (or by the Agent itself), not by recompiling the host. Consequence: a badly prompted Agent can wake itself too often or sleep through events; that is accepted and treated as a prompt bug.

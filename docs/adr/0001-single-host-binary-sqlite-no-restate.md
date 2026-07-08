@@ -1,0 +1,3 @@
+# Single host binary with sqlite persistence, no Restate
+
+Hirsel is one Rust binary (the Hirsel Host) embedding lash-runtime with `lash-sqlite-store` and the `InlineEffectHost`, in one repo that also contains the PWA client and the agent-editable UI templates. We deliberately skip lash's first-party Restate adapter even though hirsel dogfoods lash: for a single-player system on one VM, Restate is an extra service to operate for replay guarantees we mostly don't need — sqlite per-turn commits give restart-survivability, and Sub-agent sessions are cattle re-spawned from task specs anyway. The lash `EffectHost` boundary keeps the door open to Restate later.

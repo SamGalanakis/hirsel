@@ -1,8 +1,8 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
-// WebSocket/zustand concerns so it can be unit tested directly (see
-// reducer.test.ts) and reused verbatim by the zustand store.
+// WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
+// and reused verbatim by the Solid store.
 import type { InboxItem } from "../protocol";
-import type { Action, AppState, DisplayMessage } from "./types";
+import type { Action, AppState, DisplayMessage, PendingSend, Upload } from "./types";
 
 function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
   const idx = inbox.findIndex((existing) => existing.id === item.id);
@@ -12,9 +12,15 @@ function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
   return next;
 }
 
+function setUpload(uploads: Upload[], clientId: string, patch: Partial<Upload>): Upload[] {
+  return uploads.map((u) => (u.clientId === clientId ? { ...u, ...patch } : u));
+}
+
 /** Reconcile an incoming owner-authored `msg` against the oldest still-pending
  * optimistic send whose body matches (protocol.md: "replaces optimistic entry
- * with the first msg whose author=owner and body matches"). */
+ * with the first msg whose author=owner and body matches"). The optimistic
+ * entry's `clientId`/`mode` are preserved onto the reconciled message so a
+ * next_turn bubble stays cancellable (cancel_queued) after the host echo. */
 function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
   if (state.messages.some((m) => !m.pending && m.id === message.id)) {
     // Already known (e.g. re-delivered); nothing to do.
@@ -22,19 +28,21 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
   }
 
   if (message.author === "owner") {
-    const pendingIdx = state.messages.findIndex(
-      (m) => m.pending && m.body === message.body,
-    );
+    const pendingIdx = state.messages.findIndex((m) => m.pending && m.body === message.body);
     if (pendingIdx !== -1) {
       const reconciled = state.messages[pendingIdx];
       const nextMessages = state.messages.slice();
-      nextMessages[pendingIdx] = { ...message };
+      // Preserve clientId/mode only for next_turn sends, which stay cancellable
+      // (cancel_queued) after the echo. Plain sends reconcile to the bare host
+      // message so nothing lingers on them.
+      nextMessages[pendingIdx] =
+        reconciled.mode === "next_turn"
+          ? { ...message, clientId: reconciled.clientId, mode: reconciled.mode }
+          : { ...message };
       return {
         ...state,
         messages: nextMessages,
-        pendingSends: state.pendingSends.filter(
-          (p) => p.clientId !== reconciled.clientId,
-        ),
+        pendingSends: state.pendingSends.filter((p) => p.clientId !== reconciled.clientId),
       };
     }
   }
@@ -45,7 +53,9 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
-      const { latest_msg_id, messages, inbox } = action.payload;
+      const { latest_msg_id, inbox } = action.payload;
+      // Never re-admit a tombstoned (cancelled) id from replay.
+      const messages = action.payload.messages.filter((m) => !state.removedIds.includes(m.id));
       const known = new Map<number, DisplayMessage>();
       for (const m of state.messages) {
         if (!m.pending) known.set(m.id, m);
@@ -57,10 +67,6 @@ export function reduce(state: AppState, action: Action): AppState {
       // Reconcile optimistic entries against the replay: a send may have
       // reached the host right before the disconnect, in which case its echo
       // arrives here as a replayed owner message instead of a live `msg`.
-      // Same rule as reconcileOrAppend - each newly replayed owner message
-      // consumes the oldest still-pending entry with a matching body. Without
-      // this the message would render twice (replayed + stuck pending bubble)
-      // and its client_id would be resent on every future reconnect forever.
       let pending = state.messages.filter((m) => m.pending);
       let pendingSends = state.pendingSends;
       for (const m of newlyReplayed) {
@@ -83,13 +89,32 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "msg": {
       const message = action.payload.message;
+      // A tombstoned id (cancelled queued message) must never re-materialize,
+      // even if its echo arrives after the msg_removed that killed it.
+      if (state.removedIds.includes(message.id)) return state;
       const next = reconcileOrAppend(state, message);
       return {
         ...next,
         lastSeenMsgId:
-          state.lastSeenMsgId === null
-            ? message.id
-            : Math.max(state.lastSeenMsgId, message.id),
+          state.lastSeenMsgId === null ? message.id : Math.max(state.lastSeenMsgId, message.id),
+      };
+    }
+
+    case "msg_removed": {
+      // Tombstone for a cancelled queued message: drop the bubble and any
+      // still-pending optimistic entry / pendingSend that carried it.
+      const removed = state.messages.find((m) => m.id === action.id);
+      const removedClientId = removed?.clientId;
+      const removedIds = state.removedIds.includes(action.id)
+        ? state.removedIds
+        : [...state.removedIds, action.id].slice(-200);
+      return {
+        ...state,
+        messages: state.messages.filter((m) => m.id !== action.id),
+        pendingSends: removedClientId
+          ? state.pendingSends.filter((p) => p.clientId !== removedClientId)
+          : state.pendingSends,
+        removedIds,
       };
     }
 
@@ -109,26 +134,95 @@ export function reduce(state: AppState, action: Action): AppState {
       };
 
     case "send_local": {
-      const { localId, clientId, body, ref, ts } = action;
-      // Negative synthetic ids (assigned by the caller, see ws/client.ts) keep
-      // optimistic entries clearly out of the host's id space; they are never
-      // sorted against real ids, only ever appended at the tail and later
-      // replaced in place once reconciled.
+      const { localId, clientId, body, ref, ts, attachments, mode } = action;
+      const blobs = attachments ?? [];
+      const sendMode = mode ?? "send";
+      // Negative synthetic ids keep optimistic entries clearly out of the
+      // host's id space; they are never sorted against real ids, only appended
+      // and later replaced in place once reconciled.
       const localMessage: DisplayMessage = {
         id: localId,
         author: "owner",
         body,
         ref,
         ts,
+        attachments: blobs,
         pending: true,
         clientId,
+        mode: sendMode,
       };
+      // Keep the bare {clientId, body, ref} shape unless there is something extra
+      // to carry, so the un-adorned case matches the original wire/replay path.
+      const pendingSend: PendingSend = { clientId, body, ref };
+      if (blobs.length > 0) pendingSend.attachments = blobs.map((b) => b.id);
+      if (sendMode !== "send") pendingSend.mode = sendMode;
       return {
         ...state,
         messages: [...state.messages, localMessage],
-        pendingSends: [...state.pendingSends, { clientId, body, ref }],
+        pendingSends: [...state.pendingSends, pendingSend],
       };
     }
+
+    case "send_failed":
+      return {
+        ...state,
+        messages: state.messages.map((m) =>
+          m.pending && m.clientId === action.clientId ? { ...m, failed: true } : m,
+        ),
+      };
+
+    case "send_retry":
+      return {
+        ...state,
+        messages: state.messages.map((m) =>
+          m.pending && m.clientId === action.clientId ? { ...m, failed: false } : m,
+        ),
+      };
+
+    case "upload_start":
+      return {
+        ...state,
+        uploads: [
+          ...state.uploads.filter((u) => u.clientId !== action.clientId),
+          {
+            clientId: action.clientId,
+            name: action.name,
+            size: action.size,
+            mime: action.mime,
+            state: "uploading",
+          },
+        ],
+      };
+
+    case "blob_ok":
+      return {
+        ...state,
+        uploads: setUpload(state.uploads, action.clientId, {
+          state: "done",
+          blobId: action.blob.id,
+        }),
+      };
+
+    case "upload_error":
+      return {
+        ...state,
+        uploads: setUpload(state.uploads, action.clientId, { state: "error" }),
+      };
+
+    case "upload_retry":
+      return {
+        ...state,
+        uploads: setUpload(state.uploads, action.clientId, { state: "uploading" }),
+      };
+
+    case "upload_remove":
+      return {
+        ...state,
+        uploads: state.uploads.filter((u) => u.clientId !== action.clientId),
+      };
+
+    case "uploads_clear":
+      return { ...state, uploads: [] };
 
     case "connection_status":
       return { ...state, connection: action.status };

@@ -33,6 +33,22 @@ const Message = (props: MessageProps) => {
   );
 };
 
+type MessageAvatarProps = ComponentProps<"div">;
+
+const MessageAvatar = (props: MessageAvatarProps) => {
+  const [local, others] = splitProps(props, ["class"]);
+  return (
+    <div
+      data-slot="message-avatar"
+      class={cn(
+        "z-message-avatar flex w-fit shrink-0 items-center justify-center self-end overflow-hidden rounded-full bg-muted",
+        local.class,
+      )}
+      {...others}
+    />
+  );
+};
+
 type MessageContentProps = ComponentProps<"div">;
 
 const MessageContent = (props: MessageContentProps) => {
@@ -75,4 +91,11 @@ const MessageFooter = (props: MessageFooterProps) => {
   );
 };
 
-export { Message, MessageContent, MessageFooter, MessageGroup, MessageHeader };
+export {
+  Message,
+  MessageAvatar,
+  MessageContent,
+  MessageFooter,
+  MessageGroup,
+  MessageHeader,
+};

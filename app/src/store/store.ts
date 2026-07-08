@@ -47,6 +47,7 @@ function appSnapshot(): AppState {
     connection: state.connection,
     lastSeenMsgId: state.lastSeenMsgId,
     pendingSends: state.pendingSends,
+    uploads: state.uploads,
   };
 }
 
@@ -66,6 +67,7 @@ export function dispatch(action: Action): void {
     setState("messages", reconcile(next.messages, { key: "id" }));
     setState("inbox", reconcile(next.inbox, { key: "id" }));
     setState("pendingSends", next.pendingSends);
+    setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);

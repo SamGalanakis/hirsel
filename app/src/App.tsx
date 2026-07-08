@@ -9,7 +9,14 @@ import { TokenGate } from "./components/TokenGate";
 import { ChatView } from "./components/chat/ChatView";
 import { InboxView } from "./components/inbox/InboxView";
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? `ws://${window.location.hostname}:8787`;
+// VITE_WS_URL always wins. Otherwise: in dev, default to the mock server's
+// port; in production the Hirsel Host serves this app from the same origin
+// with its WS endpoint at /ws, so default to same-origin.
+const WS_URL =
+  import.meta.env.VITE_WS_URL ??
+  (import.meta.env.DEV
+    ? `ws://${window.location.hostname}:8787`
+    : `${window.location.protocol === "https:" ? "wss://" : "ws://"}${window.location.host}/ws`);
 
 function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());

@@ -26,8 +26,12 @@ Open the printed local URL, enter `dev-token` at the first-run token prompt
 VITE_WS_URL=wss://your-host/ws npm run dev
 ```
 
-If `VITE_WS_URL` is unset it defaults to `ws://<current-host>:8787`, i.e. the
-mock server's default.
+`VITE_WS_URL` always wins when set. When unset, the default depends on mode:
+
+- dev (`npm run dev`): `ws://<current-host>:8787` — the mock server's port.
+- production build: same-origin `ws(s)://<origin>/ws` — the Hirsel Host
+  serves `dist/` itself and exposes its WS endpoint at `/ws`, so a plain
+  `npm run build` needs no configuration at all.
 
 ## Verification
 

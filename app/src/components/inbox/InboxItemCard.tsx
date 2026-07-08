@@ -1,7 +1,9 @@
+import { Show } from "solid-js";
 import type { InboxItem, QuickReply } from "../../protocol";
 import { Markdown } from "../Markdown";
+import { Button } from "../ui/button";
+import { Card } from "../ui/card";
 import { QuickReplyButtons } from "./QuickReplyButtons";
-import styles from "./InboxItemCard.module.css";
 
 interface Props {
   item: InboxItem;
@@ -23,38 +25,48 @@ function formatTime(ts: string): string {
   }
 }
 
-export function InboxItemCard({ item, onQuickReply, onReply, onArchive }: Props) {
-  const isOpen = item.status === "open";
-
+export function InboxItemCard(props: Props) {
+  const isOpen = () => props.item.status === "open";
   return (
-    <div
-      className={`${styles.card} ${item.requires_response ? styles.requiresResponse : ""}`}
+    <Card
+      size="sm"
+      class="mx-3 gap-2 border-l-2 px-3 py-3"
+      classList={{
+        "border-l-primary": props.item.requires_response,
+        "border-l-transparent": !props.item.requires_response,
+      }}
     >
-      <div className={styles.header}>
-        <span className={styles.timestamp}>{formatTime(item.ts)}</span>
-        {!isOpen && <span className={styles.archivedTag}>Archived</span>}
+      <div class="flex items-center justify-between">
+        <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.item.ts)}</span>
+        <Show when={!isOpen()}>
+          <span class="text-[0.68rem] uppercase tracking-[0.03em] text-muted-foreground">
+            Archived
+          </span>
+        </Show>
       </div>
-      <Markdown>{item.content}</Markdown>
-      {isOpen && (
+      <Markdown>{props.item.content}</Markdown>
+      <Show when={isOpen()}>
         <QuickReplyButtons
-          quickReplies={item.quick_replies}
-          onTap={(reply) => onQuickReply(item, reply)}
+          quickReplies={props.item.quick_replies}
+          onTap={(reply) => props.onQuickReply(props.item, reply)}
         />
-      )}
-      <div className={styles.actions}>
-        <button type="button" className={styles.actionButton} onClick={() => onReply(item)}>
+      </Show>
+      <div class="-ml-2.5 mt-1 flex gap-1">
+        <Button type="button" variant="link" size="sm" onClick={() => props.onReply(props.item)}>
           Reply
-        </button>
-        {isOpen && (
-          <button
+        </Button>
+        <Show when={isOpen()}>
+          <Button
             type="button"
-            className={`${styles.actionButton} ${styles.archive}`}
-            onClick={() => onArchive(item)}
+            variant="ghost"
+            size="sm"
+            class="text-muted-foreground"
+            onClick={() => props.onArchive(props.item)}
           >
             Archive
-          </button>
-        )}
+          </Button>
+        </Show>
       </div>
-    </div>
+    </Card>
   );
 }

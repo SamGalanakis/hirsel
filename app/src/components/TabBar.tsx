@@ -1,38 +1,43 @@
-import { useStore } from "../store/store";
+import { Inbox, MessageCircle } from "lucide-solid";
+import { Show } from "solid-js";
 import { openRequiresResponseCount } from "../store/selectors";
-import styles from "./TabBar.module.css";
+import { setActiveTab, state } from "../store/store";
 
 export function TabBar() {
-  const activeTab = useStore((s) => s.activeTab);
-  const setActiveTab = useStore((s) => s.setActiveTab);
-  const inboxBadgeCount = useStore((s) => openRequiresResponseCount(s.inbox));
+  const badgeCount = () => openRequiresResponseCount(state.inbox);
 
   return (
-    <nav className={styles.bar}>
+    <nav class="flex flex-shrink-0 border-t border-border bg-card pb-[env(safe-area-inset-bottom)]">
       <button
         type="button"
-        className={`${styles.tab} ${activeTab === "chat" ? styles.active : ""}`}
+        class="relative flex flex-1 flex-col items-center gap-0.5 py-2 pb-3 text-xs transition-colors"
+        classList={{
+          "text-primary": state.activeTab === "chat",
+          "text-muted-foreground": state.activeTab !== "chat",
+        }}
         onClick={() => setActiveTab("chat")}
-        aria-current={activeTab === "chat"}
+        aria-current={state.activeTab === "chat"}
       >
-        <span className={styles.icon} aria-hidden>
-          💬
-        </span>
+        <MessageCircle class="size-5" aria-hidden="true" />
         Chat
       </button>
       <button
         type="button"
-        className={`${styles.tab} ${activeTab === "inbox" ? styles.active : ""}`}
+        class="relative flex flex-1 flex-col items-center gap-0.5 py-2 pb-3 text-xs transition-colors"
+        classList={{
+          "text-primary": state.activeTab === "inbox",
+          "text-muted-foreground": state.activeTab !== "inbox",
+        }}
         onClick={() => setActiveTab("inbox")}
-        aria-current={activeTab === "inbox"}
+        aria-current={state.activeTab === "inbox"}
       >
-        <span className={styles.icon} aria-hidden>
-          🗂️
-        </span>
+        <Inbox class="size-5" aria-hidden="true" />
         Inbox
-        {inboxBadgeCount > 0 && (
-          <span className={styles.badge}>{inboxBadgeCount > 99 ? "99+" : inboxBadgeCount}</span>
-        )}
+        <Show when={badgeCount() > 0}>
+          <span class="absolute top-1 right-[calc(50%-1.375rem)] grid h-4 min-w-4 place-items-center rounded-full bg-status-danger px-1 text-[0.65rem] font-bold text-primary-foreground">
+            {badgeCount() > 99 ? "99+" : badgeCount()}
+          </span>
+        </Show>
       </button>
     </nav>
   );

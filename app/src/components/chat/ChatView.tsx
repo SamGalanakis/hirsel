@@ -1,29 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "../../store/store";
+import { MessagesSquare } from "lucide-solid";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { clearComposerDraft, clearScrollTarget, state } from "../../store/store";
+import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
-import { MessageBubble } from "./MessageBubble";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { AgentActivityIndicator } from "./AgentActivityIndicator";
 import { Composer } from "./Composer";
-import styles from "./ChatView.module.css";
+import { MessageBubble } from "./MessageBubble";
 
 const HIGHLIGHT_MS = 1600;
 
 export function ChatView() {
-  const messages = useStore((s) => s.messages);
-  const scrollToMessageId = useStore((s) => s.scrollToMessageId);
-  const clearScrollTarget = useStore((s) => s.clearScrollTarget);
-  const composerDraft = useStore((s) => s.composerDraft);
-  const clearComposerDraft = useStore((s) => s.clearComposerDraft);
+  let scrollRef: HTMLDivElement | undefined;
+  const [highlightedId, setHighlightedId] = createSignal<number | null>(null);
+  let prevLength = 0;
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [highlightedId, setHighlightedId] = useState<number | null>(null);
-  const prevLength = useRef(0);
-
-  const messagesById = useMemo(() => {
-    const map = new Map<number, (typeof messages)[number]>();
-    for (const m of messages) map.set(m.id, m);
+  const messagesById = createMemo(() => {
+    const map = new Map<number, DisplayMessage>();
+    for (const m of state.messages) map.set(m.id, m);
     return map;
-  }, [messages]);
+  });
 
   function scrollToId(id: number) {
     document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -33,44 +29,57 @@ export function ChatView() {
 
   // Auto-scroll to the newest message as the thread grows, unless a specific
   // scroll target was requested (handled by the effect below).
-  useEffect(() => {
-    if (messages.length > prevLength.current && scrollToMessageId === null) {
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  createEffect(() => {
+    const len = state.messages.length;
+    const target = state.scrollToMessageId;
+    if (len > prevLength && target === null) {
+      scrollRef?.scrollTo({ top: scrollRef.scrollHeight, behavior: "smooth" });
     }
-    prevLength.current = messages.length;
-  }, [messages, scrollToMessageId]);
+    prevLength = len;
+  });
 
-  useEffect(() => {
-    if (scrollToMessageId === null) return;
-    scrollToId(scrollToMessageId);
+  // Consume a one-shot scroll-to request (from a quoted ref tap or a quick reply).
+  createEffect(() => {
+    const target = state.scrollToMessageId;
+    if (target === null) return;
+    scrollToId(target);
     clearScrollTarget();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrollToMessageId, clearScrollTarget]);
+  });
 
-  const replyingTo = composerDraft ? messagesById.get(composerDraft.ref) : null;
+  const replyingTo = () =>
+    state.composerDraft ? messagesById().get(state.composerDraft.ref) : null;
 
   function handleSend(body: string, ref: number | null) {
     getClient()?.sendMessage(body, ref);
   }
 
   return (
-    <div className={styles.view}>
-      <div className={styles.scroll} ref={scrollRef}>
-        {messages.length === 0 && (
-          <div className={styles.empty}>No messages yet. Say hello to the Agent.</div>
-        )}
-        {messages.map((m) => (
-          <MessageBubble
-            key={m.clientId ?? m.id}
-            message={m}
-            refTarget={m.ref !== null ? messagesById.get(m.ref) : undefined}
-            highlighted={highlightedId === m.id}
-            onTapQuote={scrollToId}
-          />
-        ))}
+    <div class="flex min-h-0 flex-1 flex-col">
+      <div ref={scrollRef} class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto py-3">
+        <Show when={state.messages.length === 0}>
+          <Empty class="border-none">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <MessagesSquare />
+              </EmptyMedia>
+              <EmptyTitle>No messages yet</EmptyTitle>
+              <EmptyDescription>Say hello to the Agent to get started.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        </Show>
+        <For each={state.messages}>
+          {(m) => (
+            <MessageBubble
+              message={m}
+              refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
+              highlighted={highlightedId() === m.id}
+              onTapQuote={scrollToId}
+            />
+          )}
+        </For>
       </div>
       <AgentActivityIndicator />
-      <Composer replyingTo={replyingTo} onCancelReply={clearComposerDraft} onSend={handleSend} />
+      <Composer replyingTo={replyingTo()} onCancelReply={clearComposerDraft} onSend={handleSend} />
     </div>
   );
 }

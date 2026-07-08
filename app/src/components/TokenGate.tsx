@@ -1,6 +1,6 @@
-import { useState } from "react";
-import type { FormEvent } from "react";
-import styles from "./TokenGate.module.css";
+import { createSignal, onMount } from "solid-js";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 
 interface Props {
   onSubmit: (token: string) => void;
@@ -8,40 +8,42 @@ interface Props {
 
 /** First-run prompt for the bearer token (protocol.md Auth). Persisted to
  * localStorage by the caller once submitted; this component only collects it. */
-export function TokenGate({ onSubmit }: Props) {
-  const [value, setValue] = useState("");
+export function TokenGate(props: Props) {
+  const [value, setValue] = createSignal("");
+  let inputRef: HTMLInputElement | undefined;
 
-  function handleSubmit(e: FormEvent) {
+  onMount(() => inputRef?.focus());
+
+  function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
-    const trimmed = value.trim();
+    const trimmed = value().trim();
     if (trimmed.length === 0) return;
-    onSubmit(trimmed);
+    props.onSubmit(trimmed);
   }
 
   return (
-    <div className={styles.wrap}>
-      <h1 className={styles.title}>hirsel</h1>
-      <p className={styles.subtitle}>
-        Enter the access token for your Hirsel Host. It's stored only on this
-        device.
+    <div class="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+      <h1 class="m-0 text-2xl font-semibold">hirsel</h1>
+      <p class="m-0 max-w-[32ch] text-[0.95rem] text-muted-foreground">
+        Enter the access token for your Hirsel Host. It's stored only on this device.
       </p>
-      <form className={styles.form} onSubmit={handleSubmit}>
-        <input
-          className={styles.input}
+      <form class="flex w-full max-w-[320px] flex-col gap-3" onSubmit={handleSubmit}>
+        <Input
+          ref={inputRef}
           type="password"
           inputMode="text"
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck={false}
           placeholder="access token"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          autoFocus
+          class="h-11 text-center text-base"
+          value={value()}
+          onInput={(e) => setValue(e.currentTarget.value)}
         />
-        <button className={styles.submit} type="submit" disabled={value.trim().length === 0}>
+        <Button type="submit" size="lg" class="h-11 text-base" disabled={value().trim().length === 0}>
           Connect
-        </button>
+        </Button>
       </form>
     </div>
   );

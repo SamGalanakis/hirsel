@@ -1,26 +1,30 @@
+import { For, Show } from "solid-js";
 import type { QuickReply } from "../../protocol";
-import styles from "./QuickReplyButtons.module.css";
+import { Button } from "../ui/button";
 
 interface Props {
   quickReplies: QuickReply[];
   onTap: (reply: QuickReply) => void;
 }
 
-export function QuickReplyButtons({ quickReplies, onTap }: Props) {
-  if (quickReplies.length === 0) return null;
-
+export function QuickReplyButtons(props: Props) {
   return (
-    <div className={styles.row}>
-      {quickReplies.map((qr) => (
-        <button
-          key={qr.value}
-          type="button"
-          className={styles.button}
-          onClick={() => onTap(qr)}
-        >
-          {qr.label}
-        </button>
-      ))}
-    </div>
+    <Show when={props.quickReplies.length > 0}>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <For each={props.quickReplies}>
+          {(qr) => (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              class="rounded-full"
+              onClick={() => props.onTap(qr)}
+            >
+              {qr.label}
+            </Button>
+          )}
+        </For>
+      </div>
+    </Show>
   );
 }

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import { ArrowUp, X } from "lucide-solid";
+import { createEffect, createSignal, Show } from "solid-js";
 import type { DisplayMessage } from "../../store/types";
-import styles from "./Composer.module.css";
+import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
 
 const MAX_HEIGHT_PX = 112;
 
@@ -18,30 +19,33 @@ function snippet(body: string): string {
 
 /** Composer pinned above the tab bar. Enter inserts a newline (mobile
  * default); Ctrl/Cmd+Enter sends (desktop convenience). */
-export function Composer({ replyingTo, onCancelReply, onSend }: Props) {
-  const [value, setValue] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+export function Composer(props: Props) {
+  const [value, setValue] = createSignal("");
+  let textareaRef: HTMLTextAreaElement | undefined;
 
-  useEffect(() => {
-    const el = textareaRef.current;
+  // Auto-grow the textarea up to a cap whenever the draft changes.
+  createEffect(() => {
+    value(); // track
+    const el = textareaRef;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT_PX)}px`;
-  }, [value]);
+  });
 
-  useEffect(() => {
-    if (replyingTo) textareaRef.current?.focus();
-  }, [replyingTo]);
+  // Focus the composer when a reply is pre-quoted into it.
+  createEffect(() => {
+    if (props.replyingTo) textareaRef?.focus();
+  });
 
   function send() {
-    const body = value.trim();
+    const body = value().trim();
     if (body.length === 0) return;
-    onSend(body, replyingTo?.id ?? null);
+    props.onSend(body, props.replyingTo?.id ?? null);
     setValue("");
-    if (replyingTo) onCancelReply();
+    if (props.replyingTo) props.onCancelReply();
   }
 
-  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKeyDown(e: KeyboardEvent) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       send();
@@ -49,46 +53,50 @@ export function Composer({ replyingTo, onCancelReply, onSend }: Props) {
   }
 
   return (
-    <div className={styles.wrap}>
-      {replyingTo && (
-        <div className={styles.replyChip}>
-          <div className={styles.replyChipBody}>
-            <div className={styles.replyChipLabel}>
-              Replying to {replyingTo.author === "owner" ? "you" : "Agent"}
+    <div class="flex-shrink-0 border-t border-border bg-card px-3 py-2">
+      <Show when={props.replyingTo}>
+        {(replyingTo) => (
+          <div class="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-black/15 px-2 py-1">
+            <div class="min-w-0 flex-1">
+              <div class="text-[0.68rem] uppercase tracking-[0.03em] text-primary">
+                Replying to {replyingTo().author === "owner" ? "you" : "Agent"}
+              </div>
+              <div class="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
+                {snippet(replyingTo().body)}
+              </div>
             </div>
-            <div className={styles.replyChipSnippet}>{snippet(replyingTo.body)}</div>
+            <button
+              type="button"
+              class="p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => props.onCancelReply()}
+              aria-label="Cancel reply"
+            >
+              <X class="size-4" />
+            </button>
           </div>
-          <button
-            type="button"
-            className={styles.replyChipCancel}
-            onClick={onCancelReply}
-            aria-label="Cancel reply"
-          >
-            ×
-          </button>
-        </div>
-      )}
-      <div className={styles.row}>
-        <textarea
+        )}
+      </Show>
+      <div class="flex items-end gap-2">
+        <Textarea
           ref={textareaRef}
-          className={styles.textarea}
           rows={1}
+          class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
           placeholder="Message the Agent…"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
+          value={value()}
+          onInput={(e) => setValue(e.currentTarget.value)}
           onKeyDown={handleKeyDown}
         />
-        <button
+        <Button
           type="button"
-          className={styles.send}
+          size="icon"
+          class="shrink-0 rounded-full"
           onClick={send}
-          disabled={value.trim().length === 0}
+          disabled={value().trim().length === 0}
           aria-label="Send"
         >
-          ↑
-        </button>
+          <ArrowUp class="size-5" />
+        </Button>
       </div>
-      <div className={styles.hint}>Enter for newline · ⌘/Ctrl+Enter to send</div>
     </div>
   );
 }

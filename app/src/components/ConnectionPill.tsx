@@ -1,18 +1,26 @@
-import { useStore } from "../store/store";
-import styles from "./ConnectionPill.module.css";
+import type { ConnectionStatus } from "../store/types";
+import { state } from "../store/store";
+import { Badge } from "./ui/badge";
 
-const LABEL: Record<string, string> = {
+const LABEL: Record<ConnectionStatus, string> = {
   connecting: "connecting…",
   connected: "connected",
   reconnecting: "reconnecting…",
 };
 
 export function ConnectionPill() {
-  const connection = useStore((s) => s.connection);
+  const pending = () => state.connection !== "connected";
   return (
-    <span className={`${styles.pill} ${styles[connection]}`}>
-      <span className={styles.dot} aria-hidden />
-      {LABEL[connection]}
-    </span>
+    <Badge variant="outline" class="gap-1.5 text-muted-foreground">
+      <span
+        aria-hidden="true"
+        class="size-1.5 rounded-full"
+        classList={{
+          "bg-status-success": state.connection === "connected",
+          "bg-status-attention animate-pulse": pending(),
+        }}
+      />
+      {LABEL[state.connection]}
+    </Badge>
   );
 }

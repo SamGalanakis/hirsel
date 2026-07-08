@@ -1,24 +1,23 @@
-import { useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { InboxItem, QuickReply } from "../../protocol";
-import { useStore } from "../../store/store";
+import { goToChat, state } from "../../store/store";
 import { getClient } from "../../ws/client";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { InboxItemCard } from "./InboxItemCard";
-import styles from "./InboxView.module.css";
 
 const ARCHIVED_LIMIT = 20;
 
 export function InboxView() {
-  const inbox = useStore((s) => s.inbox);
-  const goToChat = useStore((s) => s.goToChat);
-  const [archivedExpanded, setArchivedExpanded] = useState(false);
+  const [archivedExpanded, setArchivedExpanded] = createSignal(false);
 
-  const { open, archived } = useMemo(() => {
-    const sorted = [...inbox].sort((a, b) => b.id - a.id); // newest first
+  const partitioned = createMemo(() => {
+    const sorted = [...state.inbox].sort((a, b) => b.id - a.id); // newest first
     return {
       open: sorted.filter((i) => i.status === "open"),
       archived: sorted.filter((i) => i.status === "archived").slice(0, ARCHIVED_LIMIT),
     };
-  }, [inbox]);
+  });
 
   function handleQuickReply(item: InboxItem, reply: QuickReply) {
     const localId = getClient()?.sendMessage(reply.value, item.anchor);
@@ -33,52 +32,66 @@ export function InboxView() {
     getClient()?.archiveItem(item.id);
   }
 
-  if (open.length === 0 && archived.length === 0) {
-    return (
-      <div className={styles.view}>
-        <div className={styles.empty}>Nothing in the Inbox yet.</div>
-      </div>
-    );
-  }
-
   return (
-    <div className={styles.view}>
-      <div className={styles.list}>
-        {open.map((item) => (
-          <InboxItemCard
-            key={item.id}
-            item={item}
-            onQuickReply={handleQuickReply}
-            onReply={handleReply}
-            onArchive={handleArchive}
-          />
-        ))}
-      </div>
-
-      {archived.length > 0 && (
-        <div className={styles.archivedSection}>
-          <button
-            type="button"
-            className={styles.archivedToggle}
-            onClick={() => setArchivedExpanded((v) => !v)}
-          >
-            {archivedExpanded ? "▾" : "▸"} Archived ({archived.length})
-          </button>
-          {archivedExpanded && (
-            <div className={styles.list}>
-              {archived.map((item) => (
-                <InboxItemCard
-                  key={item.id}
-                  item={item}
-                  onQuickReply={handleQuickReply}
-                  onReply={handleReply}
-                  onArchive={handleArchive}
-                />
-              ))}
-            </div>
-          )}
+    <Show
+      when={partitioned().open.length > 0 || partitioned().archived.length > 0}
+      fallback={
+        <div class="flex flex-1 flex-col p-3">
+          <Empty class="border-none">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <InboxIcon />
+              </EmptyMedia>
+              <EmptyTitle>Inbox is empty</EmptyTitle>
+              <EmptyDescription>Nothing needs your attention right now.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         </div>
-      )}
-    </div>
+      }
+    >
+      <div class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
+        <div class="flex flex-col gap-3">
+          <For each={partitioned().open}>
+            {(item) => (
+              <InboxItemCard
+                item={item}
+                onQuickReply={handleQuickReply}
+                onReply={handleReply}
+                onArchive={handleArchive}
+              />
+            )}
+          </For>
+        </div>
+
+        <Show when={partitioned().archived.length > 0}>
+          <div class="mt-2">
+            <button
+              type="button"
+              class="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-1 border-t border-border py-3 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setArchivedExpanded((v) => !v)}
+            >
+              <Show when={archivedExpanded()} fallback={<ChevronRight class="size-4" />}>
+                <ChevronDown class="size-4" />
+              </Show>
+              Archived ({partitioned().archived.length})
+            </button>
+            <Show when={archivedExpanded()}>
+              <div class="flex flex-col gap-3">
+                <For each={partitioned().archived}>
+                  {(item) => (
+                    <InboxItemCard
+                      item={item}
+                      onQuickReply={handleQuickReply}
+                      onReply={handleReply}
+                      onArchive={handleArchive}
+                    />
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+        </Show>
+      </div>
+    </Show>
   );
 }

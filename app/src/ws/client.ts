@@ -13,6 +13,9 @@ const LAST_SEEN_KEY = "hirsel.lastSeenMsgId";
  * with a retry affordance (spec: socket stays closed > 30s or send errors). */
 const FAILED_AFTER_MS = 30_000;
 
+/** Give up on an upload_blob whose blob_ok / error never arrives. */
+const UPLOAD_TIMEOUT_MS = 45_000;
+
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -152,7 +155,22 @@ class HirselWsClient {
    * upload_start first (so the chip renders) and reacts to the promise. */
   uploadBlob(clientId: string, name: string, mime: string, dataB64: string): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
-      this.uploads.set(clientId, { resolve, reject });
+      // Guard against a lost blob_ok or a host error frame that omits the
+      // correlating client_id (the canonical error shape has no id): time out so
+      // the chip fails into its retry state instead of the composer hanging.
+      const timer = setTimeout(() => {
+        if (this.uploads.delete(clientId)) reject(new Error("upload timed out"));
+      }, UPLOAD_TIMEOUT_MS);
+      this.uploads.set(clientId, {
+        resolve: (b) => {
+          clearTimeout(timer);
+          resolve(b);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       this.enqueue({
         type: "upload_blob",
         client_id: clientId,

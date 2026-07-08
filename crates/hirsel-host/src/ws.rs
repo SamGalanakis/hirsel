@@ -404,7 +404,7 @@ mod tests {
         let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
         send_hello(&mut ws).await;
         let _ = read_hello_ok(&mut ws).await;
-        let too_large_b64 = "A".repeat(((15 * 1024 * 1024 + 2) / 3) * 4 + 4);
+        let too_large_b64 = "A".repeat((15_usize * 1024 * 1024).div_ceil(3) * 4 + 4);
 
         ws.send(Message::Text(
             serde_json::json!({

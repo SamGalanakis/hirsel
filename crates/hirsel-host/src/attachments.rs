@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 pub const MAX_BLOB_SIZE_BYTES: usize = 15 * 1024 * 1024;
-pub const MAX_BLOB_BASE64_BYTES: usize = ((MAX_BLOB_SIZE_BYTES + 2) / 3) * 4;
+pub const MAX_BLOB_BASE64_BYTES: usize = MAX_BLOB_SIZE_BYTES.div_ceil(3) * 4;
 
 pub fn decode_blob_data_b64(data_b64: &str) -> anyhow::Result<Vec<u8>> {
     if data_b64.len() > MAX_BLOB_BASE64_BYTES {
@@ -17,11 +17,7 @@ pub fn decode_blob_data_b64(data_b64: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 pub fn sanitize_blob_name(name: &str) -> String {
-    let basename = name
-        .rsplit(|ch| ch == '/' || ch == '\\')
-        .next()
-        .unwrap_or("")
-        .trim();
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
     let sanitized = basename
         .chars()
         .map(|ch| if ch.is_control() { '_' } else { ch })

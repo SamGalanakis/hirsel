@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+/// <reference types="vite-plugin-pwa/client" />
 
 interface ImportMetaEnv {
   /** WebSocket URL of the Hirsel Host (or app/tools/mock-server.mjs in dev).

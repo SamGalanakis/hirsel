@@ -1,25 +1,28 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+import tailwindcss from "@tailwindcss/vite";
+import solid from "vite-plugin-solid";
+import { defineConfig } from "vitest/config";
 import { VitePWA } from "vite-plugin-pwa";
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
-    react(),
+    solid(),
+    tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
       // Slice 1 scope: precache the app shell only. No push, no background
       // sync (see docs/SCOPE.md) - keep the service worker boring.
       workbox: {
-        globPatterns: ["**/*.{js,css,html,svg}"],
+        globPatterns: ["**/*.{js,css,html,svg,woff2}"],
       },
       manifest: {
         name: "hirsel",
         short_name: "hirsel",
         description: "Single-player personal agent client",
-        theme_color: "#0b0f14",
-        background_color: "#0b0f14",
+        theme_color: "#141414",
+        background_color: "#141414",
         display: "standalone",
         icons: [
           {
@@ -31,8 +34,20 @@ export default defineConfig({
       },
     }),
   ],
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
+    environment: "jsdom",
+    globals: true,
+    setupFiles: "./vitest.setup.ts",
+    css: true,
+    include: ["src/**/*.test.{ts,tsx}"],
+    // The component tests dynamic-import a fresh module graph per test (for
+    // store isolation); first-load transform of that graph can exceed the 5s
+    // default, so give tests more headroom.
+    testTimeout: 20000,
   },
 });

@@ -4,8 +4,8 @@ use std::{
     pin::Pin,
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -13,13 +13,13 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::broadcast,
-    time::{sleep, timeout, Duration},
+    time::{Duration, sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -179,7 +179,10 @@ fn default_fake_external_id() -> String {
 }
 
 fn default_fake_progress() -> Vec<String> {
-    vec!["fake driver started".to_string(), "fake driver working".to_string()]
+    vec![
+        "fake driver started".to_string(),
+        "fake driver working".to_string(),
+    ]
 }
 
 fn default_fake_terminal() -> TerminalOutcome {
@@ -500,26 +503,25 @@ fn claude_assistant_progress(value: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|content| match content.get("type").and_then(Value::as_str) {
-            Some("text") => content
-                .get("text")
-                .and_then(Value::as_str)
-                .map(short_line),
-            Some("tool_use") => {
-                let name = content
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool");
-                let detail = content
-                    .pointer("/input/command")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| content.get("input").map(Value::to_string))
-                    .unwrap_or_default();
-                Some(short_line(format!("tool {name}: {detail}")))
-            }
-            _ => None,
-        })
+        .filter_map(
+            |content| match content.get("type").and_then(Value::as_str) {
+                Some("text") => content.get("text").and_then(Value::as_str).map(short_line),
+                Some("tool_use") => {
+                    let name = content
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    let detail = content
+                        .pointer("/input/command")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| content.get("input").map(Value::to_string))
+                        .unwrap_or_default();
+                    Some(short_line(format!("tool {name}: {detail}")))
+                }
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -810,7 +812,8 @@ async fn read_codex_stdout(
                         }
                     }
                     if value.get("method").and_then(Value::as_str) == Some("turn/started") {
-                        if let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                        if let Some(turn_id) =
+                            value.pointer("/params/turn/id").and_then(Value::as_str)
                         {
                             if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
                                 *active_turn_id = Some(turn_id.to_string());
@@ -991,5 +994,49 @@ mod tests {
                 outcome: TerminalOutcome::Interrupted
             }
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the real claude CLI and may spend model tokens"]
+    async fn claude_code_driver_real_cli_smoke() {
+        let driver = ClaudeCodeDriver::default();
+        let handle = driver
+            .spawn(SpawnSpec {
+                agent: AgentKind::Claude,
+                prompt: "Reply with exactly: driver-smoke".to_string(),
+                cwd: std::env::current_dir().unwrap(),
+                fake_fixture: None,
+            })
+            .await
+            .unwrap();
+        let mut events = driver.events(&handle).unwrap();
+        while let Some(event) = events.next().await {
+            if matches!(event, SubagentEvent::Terminal { .. }) {
+                return;
+            }
+        }
+        panic!("claude CLI exited without a terminal event");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the real codex CLI and may spend model tokens"]
+    async fn codex_driver_real_cli_smoke() {
+        let driver = CodexDriver::default();
+        let handle = driver
+            .spawn(SpawnSpec {
+                agent: AgentKind::Codex,
+                prompt: "Reply with exactly: driver-smoke".to_string(),
+                cwd: std::env::current_dir().unwrap(),
+                fake_fixture: None,
+            })
+            .await
+            .unwrap();
+        let mut events = driver.events(&handle).unwrap();
+        while let Some(event) = events.next().await {
+            if matches!(event, SubagentEvent::Terminal { .. }) {
+                return;
+            }
+        }
+        panic!("codex CLI exited without a terminal event");
     }
 }

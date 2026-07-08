@@ -134,6 +134,10 @@ pub enum HostToClient {
     },
     Error {
         detail: String,
+        /// Correlates the error to a specific client request (upload_blob,
+        /// cancel_queued) so the client can mark the exact chip/bubble.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 }
 

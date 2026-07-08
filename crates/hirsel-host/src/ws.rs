@@ -36,6 +36,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         &mut socket,
                         &HostToClient::Error {
                             detail: "invalid token".to_string(),
+                            client_id: None,
                         },
                     )
                     .await;
@@ -48,6 +49,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     &mut socket,
                     &HostToClient::Error {
                         detail: "hello must be the first frame".to_string(),
+                        client_id: None,
                     },
                 )
                 .await;
@@ -58,6 +60,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     &mut socket,
                     &HostToClient::Error {
                         detail: format!("invalid hello: {error}"),
+                        client_id: None,
                     },
                 )
                 .await;
@@ -74,6 +77,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 &mut socket,
                 &HostToClient::Error {
                     detail: format!("replay failed: {error}"),
+                    client_id: None,
                 },
             )
             .await;
@@ -87,6 +91,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 &mut socket,
                 &HostToClient::Error {
                     detail: format!("inbox replay failed: {error}"),
+                    client_id: None,
                 },
             )
             .await;
@@ -100,6 +105,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 &mut socket,
                 &HostToClient::Error {
                     detail: format!("latest message lookup failed: {error}"),
+                    client_id: None,
                 },
             )
             .await;
@@ -124,7 +130,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
                         if let Err(error) = handle_client_frame(&state, &mut sink, &text).await {
-                            let response = HostToClient::Error { detail: error.to_string() };
+                            let client_id = serde_json::from_str::<serde_json::Value>(&text)
+                                .ok()
+                                .and_then(|v| v.get("client_id")?.as_str().map(String::from));
+                            let response = HostToClient::Error { detail: error.to_string(), client_id };
                             if send_json_sink(&mut sink, &response).await.is_err() {
                                 break;
                             }
@@ -164,6 +173,7 @@ async fn handle_client_frame(
                 sink,
                 &HostToClient::Error {
                     detail: "hello already completed".to_string(),
+                    client_id: None,
                 },
             )
             .await?;
@@ -416,7 +426,7 @@ mod tests {
         .unwrap();
 
         match read_error(&mut ws).await {
-            HostToClient::Error { detail } => assert!(detail.contains("15 MB")),
+            HostToClient::Error { detail, .. } => assert!(detail.contains("15 MB")),
             other => panic!("unexpected error response: {other:?}"),
         }
     }

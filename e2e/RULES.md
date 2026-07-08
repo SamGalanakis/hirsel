@@ -11,11 +11,13 @@ You are testing Hirsel, not the tester model. A run is void if the asserted beha
 Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0.1`.
 
 - `POST /debug/reset` wipes Chat, Inbox, process debug state, and starts from a clean session.
-- `POST /debug/owner-message { "body": "...", "ref": null | message_id }` injects an Owner Chat message through the same host ingress path as the WebSocket.
+- `POST /debug/upload { "name": "...", "mime": "...", "data_b64": "..." }` stores a blob and returns its Blob JSON.
+- `POST /debug/owner-message { "body": "...", "ref": null | message_id, "attachments": ["blob-id"] }` injects an Owner Chat message through the same host ingress path as the WebSocket; `attachments` is optional and defaults to `[]`.
 - `GET /debug/chat` returns persisted Chat messages.
 - `GET /debug/inbox` returns persisted Inbox Items.
 - `GET /debug/processes` returns Sub-agent process records and normalized events.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
+- `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.
 
 ## Poll, Don't Sleep
 

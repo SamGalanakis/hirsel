@@ -1,8 +1,9 @@
 # hirsel PWA
 
-Mobile-first Vite + React + TypeScript client for hirsel (slice 1 - see
+Mobile-first Vite + SolidJS + TypeScript client for hirsel (slice 1 - see
 `/CONTEXT.md`, `/docs/SCOPE.md`, and `PROTOCOL.md` in this directory for the
-wire protocol this implements verbatim).
+wire protocol this implements verbatim). UI built on Tailwind 4 + Kobalte with
+the shared component primitives and design tokens from the lashapp frontend.
 
 ## Develop against the mock host
 
@@ -36,7 +37,7 @@ VITE_WS_URL=wss://your-host/ws npm run dev
 ## Verification
 
 ```sh
-npm run build   # tsc -b && vite build
-npm test        # vitest run - protocol reducer + reconnect backoff
+npm run build   # tsc --noEmit && vite build
+npm test        # vitest run - protocol reducer + reconnect backoff + component tests
 npm run lint    # oxlint
 ```

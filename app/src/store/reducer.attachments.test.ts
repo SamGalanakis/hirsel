@@ -77,6 +77,31 @@ describe("msg_removed tombstone", () => {
     expect(after.messages).toHaveLength(0);
     expect(after.pendingSends).toHaveLength(0);
   });
+
+  it("tombstones the id so a late echo cannot re-materialize the bubble", () => {
+    // Out-of-order: cancel (msg_removed) is processed while the send is still an
+    // optimistic negative-id entry, then the host echo arrives afterwards.
+    const s1 = reduce(initialState(), sendLocal("cx", "cancel me", { mode: "next_turn" }));
+    const removed = reduce(s1, { type: "msg_removed", id: 9 }); // id not present yet
+    expect(removed.removedIds).toContain(9);
+    // the optimistic entry is still there (id was negative, not 9) — but the echo…
+    const echo = reduce(removed, { type: "msg", payload: { type: "msg", message: ownerMsg(9, "cancel me") } });
+    expect(echo.messages.find((m) => m.id === 9)).toBeUndefined();
+  });
+
+  it("drops a tombstoned id from a hello_ok replay", () => {
+    const tombstoned = reduce(initialState(), { type: "msg_removed", id: 4 });
+    const after = reduce(tombstoned, {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 4,
+        messages: [ownerMsg(4, "should stay gone")],
+        inbox: [],
+      },
+    });
+    expect(after.messages.find((m) => m.id === 4)).toBeUndefined();
+  });
 });
 
 describe("failed-send + retry", () => {

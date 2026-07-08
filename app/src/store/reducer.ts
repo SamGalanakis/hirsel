@@ -53,7 +53,9 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
-      const { latest_msg_id, messages, inbox } = action.payload;
+      const { latest_msg_id, inbox } = action.payload;
+      // Never re-admit a tombstoned (cancelled) id from replay.
+      const messages = action.payload.messages.filter((m) => !state.removedIds.includes(m.id));
       const known = new Map<number, DisplayMessage>();
       for (const m of state.messages) {
         if (!m.pending) known.set(m.id, m);
@@ -87,6 +89,9 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "msg": {
       const message = action.payload.message;
+      // A tombstoned id (cancelled queued message) must never re-materialize,
+      // even if its echo arrives after the msg_removed that killed it.
+      if (state.removedIds.includes(message.id)) return state;
       const next = reconcileOrAppend(state, message);
       return {
         ...next,
@@ -100,12 +105,16 @@ export function reduce(state: AppState, action: Action): AppState {
       // still-pending optimistic entry / pendingSend that carried it.
       const removed = state.messages.find((m) => m.id === action.id);
       const removedClientId = removed?.clientId;
+      const removedIds = state.removedIds.includes(action.id)
+        ? state.removedIds
+        : [...state.removedIds, action.id].slice(-200);
       return {
         ...state,
         messages: state.messages.filter((m) => m.id !== action.id),
         pendingSends: removedClientId
           ? state.pendingSends.filter((p) => p.clientId !== removedClientId)
           : state.pendingSends,
+        removedIds,
       };
     }
 

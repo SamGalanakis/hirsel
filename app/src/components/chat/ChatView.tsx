@@ -102,6 +102,19 @@ export function ChatView() {
 
   const thinking = () => state.agentActivity.state === "thinking";
 
+  // Ids of the trailing run of owner messages with no agent reply after them —
+  // i.e. still-unanswered sends. A next_turn bubble only shows its cancellable
+  // "queued" chip while it is in this run AND a turn is active; once the agent
+  // replies (an agent message lands after it) it drops out and the chip clears.
+  const unansweredOwnerIds = createMemo(() => {
+    const ids = new Set<number>();
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      if (state.messages[i].author === "agent") break;
+      ids.add(state.messages[i].id);
+    }
+    return ids;
+  });
+
   function handleSend(body: string, ref: number | null, mode: SendMode, blobs: Blob[]) {
     getClient()?.sendMessage(body, ref, { mode, attachments: blobs });
   }
@@ -180,7 +193,9 @@ export function ChatView() {
                               message={m}
                               refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
                               highlighted={highlightedId() === m.id}
-                              queued={m.mode === "next_turn" && thinking()}
+                              queued={
+                                m.mode === "next_turn" && thinking() && unansweredOwnerIds().has(m.id)
+                              }
                               onTapQuote={scrollToId}
                               onOpenImage={(src, alt) => setLightbox({ src, alt })}
                               onRetry={(cid) => getClient()?.retrySend(cid)}

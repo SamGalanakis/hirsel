@@ -62,6 +62,10 @@ export interface AppState {
   lastSeenMsgId: number | null;
   pendingSends: PendingSend[];
   uploads: Upload[];
+  /** Host ids tombstoned by msg_removed. A cancelled queued message can have
+   * its removal race its own echo; keeping the id here means a late echo is
+   * dropped instead of re-materializing the bubble. Bounded. */
+  removedIds: number[];
 }
 
 export type Action =
@@ -99,5 +103,6 @@ export function initialState(): AppState {
     lastSeenMsgId: null,
     pendingSends: [],
     uploads: [],
+    removedIds: [],
   };
 }

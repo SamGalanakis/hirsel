@@ -13,6 +13,7 @@ const TOKEN = process.env.MOCK_TOKEN ?? "dev-token";
 const REPLAY_LIMIT = 200;
 const ARCHIVED_REPLAY_LIMIT = 20;
 const MAX_BLOB_BYTES = 15 * 1024 * 1024;
+const REPLY_DELAY_MS = Number(process.env.MOCK_REPLY_MS ?? 1200);
 
 /** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[]}[]} */
 const messages = [];
@@ -82,6 +83,7 @@ function finishTurn() {
 function drainQueue() {
   if (turnActive || queuedNextTurn.length === 0) return;
   const next = queuedNextTurn.shift(); // claim it
+  log("claimed queued message", next.messageId);
   const message = messages.find((m) => m.id === next.messageId);
   if (message) startReplyTurn(message);
 }
@@ -89,6 +91,16 @@ function drainQueue() {
 /** Kick off a scripted agent reply for an owner message. */
 function startReplyTurn(ownerMessage) {
   turnActive = true;
+  log("turn start", ownerMessage.id, JSON.stringify(ownerMessage.body.slice(0, 24)));
+  // Test/demo hook: a long-running turn so queue/cancel windows are comfortable.
+  if (ownerMessage.body.trim().toLowerCase() === "hold") {
+    setActivity("thinking", "Working on a long task…");
+    later(() => {
+      addMessage("agent", "Done holding.", ownerMessage.id);
+      finishTurn();
+    }, 15000);
+    return;
+  }
   if (ownerMessage.body.trim().toLowerCase() === "delegate") {
     setActivity("thinking", "Delegating to a sub-agent…");
     later(() => {
@@ -114,14 +126,14 @@ function startReplyTurn(ownerMessage) {
           ts: now(),
         });
       }, 3000);
-    }, 1000);
+    }, REPLY_DELAY_MS);
   } else {
     setActivity("thinking", "Thinking…");
     later(() => {
       const noun = ownerMessage.attachments.length > 0 ? ` (+${ownerMessage.attachments.length} attachment${ownerMessage.attachments.length > 1 ? "s" : ""})` : "";
       addMessage("agent", `Echo: ${ownerMessage.body || "(no text)"}${noun}`, ownerMessage.id);
       finishTurn();
-    }, 1000);
+    }, REPLY_DELAY_MS);
   }
 }
 
@@ -188,8 +200,9 @@ function handleSendMessage(frame) {
   }
 
   if (turnActive) {
-    // A plain send arriving mid-turn: queue it so replies stay ordered.
-    queuedNextTurn.push({ clientId: frame.client_id, messageId: message.id });
+    // Plain send mid-turn = Early Injection: it joins the running turn (already
+    // echoed to chat above), the mock does not spawn a separate reply.
+    log("early-injected into active turn", message.id);
     return;
   }
   startReplyTurn(message);

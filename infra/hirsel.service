@@ -1,0 +1,14 @@
+[Unit]
+Description=hirsel host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sam
+EnvironmentFile=/etc/hirsel/env
+ExecStart=/usr/local/bin/hirsel-host
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

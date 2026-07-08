@@ -1,0 +1,5 @@
+# Replace hirsel.example.com with the real subdomain (A/AAAA record -> this VM).
+# Caddy handles TLS automatically; WebSocket proxying needs no extra config.
+hirsel.example.com {
+	reverse_proxy 127.0.0.1:8420
+}

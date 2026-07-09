@@ -37,7 +37,7 @@ The one thing the Agent sends the Owner outside the live Chat exchange: a short 
 _Avoid_: inbox item, task (that's nothing in hirsel — see ADR-0004), notification, card, archived, deleted
 
 **Anchor**:
-The Chat message a Ping points back to — the place where the pings tool was called. Responding to an Inbox Item means sending a normal Chat message that refs its Anchor, WhatsApp-quote style, so multiple pending questions coexist unambiguously.
+The Chat message a Ping points back to — the place where the pings tool was called. Responding to a Ping means sending a normal Chat message that refs its Anchor, WhatsApp-quote style, so multiple pending questions coexist unambiguously.
 _Avoid_: ref (as a noun), thread
 
 **Tray**:

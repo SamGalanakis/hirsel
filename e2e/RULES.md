@@ -24,6 +24,25 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.
 
+There is no debug HTTP route for owner-side Inbox archive/delete in this branch. Runbooks that need to prove owner archive semantics must use the canonical WebSocket `archive_item` frame from `app/PROTOCOL.md`, then gate on `/debug/inbox` and `/debug/broadcasts`.
+
+## Scenario Index
+
+- `attachments` - protocol v1.1 upload, replay, blob fetch, and scripted attachment-note plumbing.
+- `attachment-agent-behavior` - real Codex Agent behavior over image/text attachments.
+- `abandoned-recovery` - ADR-0004 abandoned Sub-agent recovery after SIGKILL/reboot.
+- `compaction` - Agent-initiated context compaction via `continue_as` and post-compaction recall.
+- `delegation-loop` - fake-driver delegation, terminal event, Inbox question, Quick Reply, acknowledgement.
+- `inbox-lifecycle` - requires-response reply flow, owner archive via WebSocket, and Agent archive of a moot item.
+- `inbox-read` - Inbox read-state round trip and restart persistence.
+- `monitors` - monitor creation, process visibility, wake, and restart survival.
+- `multi-turn-memory` - real Codex conversation recall before and after host restart.
+- `real-subagent` - real Codex Sub-agent spawn, progress, completion, and interruption.
+- `restart-persistence` - real Agent persistence over repeated host restarts.
+- `send-queue-cancel` - send/next-turn queueing and active-turn cancellation.
+- `timers` - timer trigger source registration and wake.
+- `turn-timeline` - live turn timeline ordering and tool event summaries.
+
 ## Poll, Don't Sleep
 
 Every async gate must be checked by polling debug state. Do not `sleep` and assume progress. Use short polling intervals and a clear timeout; each poll should inspect the current JSON and decide whether the gate has matched, is still pending, or has failed.

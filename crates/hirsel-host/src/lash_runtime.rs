@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -220,7 +220,7 @@ struct LashAgentRuntime {
     broadcast_log: BroadcastLog,
     notify: Arc<Notify>,
     pump_lock: Mutex<()>,
-    anchors: Arc<Mutex<Option<TurnAnchors>>>,
+    anchors: Arc<Mutex<TurnAnchorState>>,
     active_turn_id: Arc<Mutex<Option<String>>>,
     drain_seq: AtomicU64,
     drain_boot_ms: u64,
@@ -229,6 +229,12 @@ struct LashAgentRuntime {
 #[derive(Debug, Clone)]
 struct TurnAnchors {
     owner_message_id: u64,
+}
+
+#[derive(Debug, Default)]
+struct TurnAnchorState {
+    pending_by_source_key: HashMap<String, TurnAnchors>,
+    active: Option<TurnAnchors>,
 }
 
 impl LashAgentRuntime {
@@ -283,7 +289,7 @@ impl LashAgentRuntime {
             hirsel_tool_definitions(),
             HirselToolExecutor {
                 tools: tools.clone(),
-                anchors: Arc::new(Mutex::new(None)),
+                anchors: Arc::new(Mutex::new(TurnAnchorState::default())),
             },
         ));
         let anchors = tool_provider.executor().anchors.clone();
@@ -363,20 +369,43 @@ impl LashAgentRuntime {
     }
 
     async fn enqueue_inner(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+        let source_key = owner_turn_source_key(&turn.client_id);
         {
             let mut anchors = self.anchors.lock().await;
-            *anchors = Some(TurnAnchors {
-                owner_message_id: turn.message_id,
-            });
+            anchors.pending_by_source_key.insert(
+                source_key.clone(),
+                TurnAnchors {
+                    owner_message_id: turn.message_id,
+                },
+            );
         }
         let ingress = self.ingress_for_mode(turn.mode).await;
-        let input = owner_turn_input(&turn).await?;
-        self.session
+        let input = match owner_turn_input(&turn).await {
+            Ok(input) => input,
+            Err(error) => {
+                self.anchors
+                    .lock()
+                    .await
+                    .pending_by_source_key
+                    .remove(&source_key);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .session
             .enqueue(input)
             .id(turn.client_id)
             .ingress(ingress)
             .send()
-            .await?;
+            .await
+        {
+            self.anchors
+                .lock()
+                .await
+                .pending_by_source_key
+                .remove(&source_key);
+            return Err(error.into());
+        }
         self.notify.notify_one();
         Ok(())
     }
@@ -571,6 +600,7 @@ impl LashAgentRuntime {
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
                     let drain_id = runtime.next_drain_id();
+                    runtime.activate_anchor_for_next_drain().await;
                     runtime.set_active_turn_id(Some(drain_id.clone())).await;
                     let result = runtime
                         .session
@@ -579,6 +609,7 @@ impl LashAgentRuntime {
                         .run()
                         .await;
                     runtime.clear_active_turn_id(&drain_id).await;
+                    runtime.clear_active_anchor_and_prune().await;
                     match result {
                         Ok(Some(output)) => {
                             let tool_calls = tool_call_summaries(&output);
@@ -621,6 +652,44 @@ impl LashAgentRuntime {
         }
     }
 
+    async fn activate_anchor_for_next_drain(&self) {
+        let pending = match self.session.pending_turn_inputs().await {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "failed to inspect pending turn inputs for Inbox anchor");
+                self.anchors.lock().await.active = None;
+                return;
+            }
+        };
+        let mut anchors = self.anchors.lock().await;
+        anchors.active = pending
+            .iter()
+            .filter_map(|input| input.source_key.as_ref())
+            .find_map(|source_key| anchors.pending_by_source_key.get(source_key).cloned());
+    }
+
+    async fn clear_active_anchor_and_prune(&self) {
+        let live_source_keys = match self.session.pending_turn_inputs().await {
+            Ok(pending) => Some(
+                pending
+                    .into_iter()
+                    .filter_map(|input| input.source_key)
+                    .collect::<HashSet<_>>(),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "failed to prune pending turn anchors");
+                None
+            }
+        };
+        let mut anchors = self.anchors.lock().await;
+        anchors.active = None;
+        if let Some(live_source_keys) = live_source_keys {
+            anchors
+                .pending_by_source_key
+                .retain(|source_key, _| live_source_keys.contains(source_key));
+        }
+    }
+
     async fn cancel_turn(&self) -> anyhow::Result<()> {
         self.session.cancel_running_turns();
         publish(
@@ -635,7 +704,8 @@ impl LashAgentRuntime {
     }
 
     async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
-        let target = lash::PendingTurnInputCancelTarget::source_key(format!("host:{client_id}"));
+        let target =
+            lash::PendingTurnInputCancelTarget::source_key(owner_turn_source_key(client_id));
         let mut results = self.session.cancel_pending_turn_inputs([target]).await?;
         let outcome = results
             .pop()
@@ -1221,6 +1291,10 @@ async fn owner_turn_input(turn: &OwnerTurn) -> anyhow::Result<TurnInput> {
         input = input.with_image_blob(id, bytes);
     }
     Ok(input)
+}
+
+fn owner_turn_source_key(client_id: &str) -> String {
+    format!("host:{client_id}")
 }
 
 fn owner_turn_text(turn: &OwnerTurn) -> String {
@@ -1985,7 +2059,7 @@ async fn load_codex_tokens() -> Result<CodexTokens, String> {
 #[derive(Clone)]
 struct HirselToolExecutor {
     tools: ToolSuite,
-    anchors: Arc<Mutex<Option<TurnAnchors>>>,
+    anchors: Arc<Mutex<TurnAnchorState>>,
 }
 
 #[async_trait]
@@ -2250,6 +2324,7 @@ impl HirselToolExecutor {
         self.anchors
             .lock()
             .await
+            .active
             .as_ref()
             .map(|anchors| anchors.owner_message_id)
     }
@@ -3415,8 +3490,9 @@ fn terminal_content(outcome: &TerminalOutcome) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::{processes::ProcessStore, storage::Storage, tools::ToolsConfig};
     use chrono::Utc;
-    use hirsel_proto::Blob;
+    use hirsel_proto::{Blob, ChatAuthor};
     use lash_core::{
         ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
         TriggerInputBinding, TriggerSubscriptionRecord,
@@ -3612,6 +3688,62 @@ mod tests {
             &[137, 80, 78, 71]
         );
         assert!(!input.image_blobs.contains_key("text-1"));
+    }
+
+    #[tokio::test]
+    async fn inbox_file_uses_active_turn_anchor_when_later_owner_message_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let owner_a = storage
+            .append_chat(ChatAuthor::Owner, "owner A", None)
+            .await
+            .unwrap();
+        let owner_b = storage
+            .append_chat(ChatAuthor::Owner, "owner B", None)
+            .await
+            .unwrap();
+        let (broadcaster, _) = broadcast::channel(16);
+        let tools = ToolSuite::new(
+            ToolsConfig {
+                driver_mode: DriverMode::Fake,
+                fake_fixture: None,
+            },
+            storage,
+            broadcaster,
+            BroadcastLog::default(),
+            ProcessStore::default(),
+        );
+        let anchors = Arc::new(Mutex::new(TurnAnchorState::default()));
+        {
+            let mut anchors = anchors.lock().await;
+            anchors.pending_by_source_key.insert(
+                owner_turn_source_key("client-a"),
+                TurnAnchors {
+                    owner_message_id: owner_a.id,
+                },
+            );
+            anchors.active = Some(TurnAnchors {
+                owner_message_id: owner_a.id,
+            });
+            anchors.pending_by_source_key.insert(
+                owner_turn_source_key("client-b"),
+                TurnAnchors {
+                    owner_message_id: owner_b.id,
+                },
+            );
+        }
+        let executor = HirselToolExecutor { tools, anchors };
+
+        let item = executor
+            .inbox_file(&serde_json::json!({
+                "content": "A result for the active turn",
+                "requires_response": true
+            }))
+            .await
+            .unwrap();
+        let item: hirsel_proto::InboxItem = serde_json::from_value(item).unwrap();
+
+        assert_eq!(item.anchor, owner_a.id);
     }
 
     fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {

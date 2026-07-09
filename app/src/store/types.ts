@@ -66,6 +66,11 @@ export interface AppState {
    * its removal race its own echo; keeping the id here means a late echo is
    * dropped instead of re-materializing the bubble. Bounded. */
   removedIds: number[];
+  /** v1.3: Inbox item ids the Owner has manually "Marked unread". There is no
+   * wire unread op, so this is a purely client-side override layered on top of
+   * the wire `read` flag: an item is effectively unread if `!read` OR its id is
+   * here. Auto-read/"Mark read" removes the id (and sends read_item). Bounded. */
+  unreadOverrides: number[];
 }
 
 export type Action =
@@ -74,6 +79,8 @@ export type Action =
   | { type: "msg_removed"; id: number }
   | { type: "agent_activity"; payload: { state: AgentActivityState; text: string | null } }
   | { type: "inbox_upsert"; payload: InboxUpsertMsg }
+  | { type: "read_local"; itemId: number }
+  | { type: "mark_unread_local"; itemId: number }
   | {
       type: "send_local";
       localId: number;
@@ -104,5 +111,6 @@ export function initialState(): AppState {
     pendingSends: [],
     uploads: [],
     removedIds: [],
+    unreadOverrides: [],
   };
 }

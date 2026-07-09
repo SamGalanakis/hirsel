@@ -133,6 +133,29 @@ export function reduce(state: AppState, action: Action): AppState {
         inbox: upsertInboxItem(state.inbox, action.payload.item),
       };
 
+    case "read_local": {
+      // Optimistic email-like "seen" flip: set read=true locally (the host's
+      // inbox_upsert reconciles it) and drop any manual unread override, since
+      // reading always wins over a prior "Mark unread".
+      const inbox = state.inbox.map((i) =>
+        i.id === action.itemId ? { ...i, read: true } : i,
+      );
+      return {
+        ...state,
+        inbox,
+        unreadOverrides: state.unreadOverrides.filter((id) => id !== action.itemId),
+      };
+    }
+
+    case "mark_unread_local": {
+      // Client-only override (no wire unread op): record the id so the item is
+      // rendered/counted as unread even though the wire `read` flag stays true.
+      const unreadOverrides = state.unreadOverrides.includes(action.itemId)
+        ? state.unreadOverrides
+        : [...state.unreadOverrides, action.itemId].slice(-200);
+      return { ...state, unreadOverrides };
+    }
+
     case "send_local": {
       const { localId, clientId, body, ref, ts, attachments, mode } = action;
       const blobs = attachments ?? [];

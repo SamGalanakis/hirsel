@@ -4,6 +4,7 @@ import type { InboxItem, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
 import { isItemRead, latestReplyForAnchor } from "../../store/selectors";
 import { createSeenTimer } from "../../lib/auto-read";
+import { snippet } from "../../lib/format";
 import { Markdown } from "../Markdown";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
@@ -44,11 +45,6 @@ function formatTime(ts: string): string {
   } catch {
     return "";
   }
-}
-
-function snippet(body: string): string {
-  const oneLine = body.replace(/\s+/g, " ").trim();
-  return oneLine.length > 80 ? `${oneLine.slice(0, 80)}…` : oneLine;
 }
 
 export function InboxItemCard(props: Props) {

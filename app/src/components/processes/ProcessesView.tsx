@@ -3,14 +3,9 @@ import { createMemo, For, Show } from "solid-js";
 import type { ProcessInfo } from "../../protocol";
 import { partitionProcesses } from "../../store/selectors";
 import { goToChat, state } from "../../store/store";
+import { snippet } from "../../lib/format";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { ProcessRow } from "./ProcessRow";
-
-/** Short prompt/label snippet for the "Ask to stop" composer pre-fill. */
-function snippet(label: string): string {
-  const oneLine = label.replace(/\s+/g, " ").trim();
-  return oneLine.length > 48 ? `${oneLine.slice(0, 48)}…` : oneLine;
-}
 
 export function ProcessesView() {
   const groups = createMemo(() => partitionProcesses(state.processes));
@@ -18,7 +13,7 @@ export function ProcessesView() {
   // "Ask to stop": interrupts route through the Agent by design — switch to
   // Chat with the composer pre-filled so the Owner sends the request.
   function handleAskToStop(process: ProcessInfo) {
-    goToChat({ composerPrefill: `stop process ${process.id} (${snippet(process.label)})` });
+    goToChat({ composerPrefill: `stop process ${process.id} (${snippet(process.label, 48)})` });
   }
 
   return (

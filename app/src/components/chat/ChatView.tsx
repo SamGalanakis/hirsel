@@ -9,6 +9,7 @@ import {
 } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
+import { TrayOverlay, TrayShelf } from "../inbox/Tray";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Marker, MarkerContent } from "../ui/marker";
 import {
@@ -245,7 +246,15 @@ export function ChatView() {
             <span class="text-sm font-medium text-foreground">Drop files to attach</span>
           </div>
         </Show>
+
+        {/* Tray, expanded: an overlay over this message area, never a push —
+            it must live inside this `relative` container so its absolute
+            positioning resolves against the scroller, not the whole view. */}
+        <TrayOverlay />
       </div>
+
+      {/* Tray, collapsed: the shelf, pinned directly above the Composer. */}
+      <TrayShelf />
 
       <Composer
         replyingTo={replyingTo()}

@@ -1,9 +1,8 @@
-import { createEffect, createSignal, Match, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { ChatView } from "./components/chat/ChatView";
 import { ConnectionPill } from "./components/ConnectionPill";
-import { InboxView } from "./components/inbox/InboxView";
-import { ProcessesView } from "./components/processes/ProcessesView";
-import { TabBar } from "./components/TabBar";
+import { ProcessesButton } from "./components/processes/ProcessesButton";
+import { ProcessesSheet } from "./components/processes/ProcessesSheet";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { openUnreadCount } from "./store/selectors";
@@ -59,23 +58,19 @@ function App() {
       <div class="mx-auto flex w-full max-w-[560px] min-h-0 flex-1 flex-col">
         <header class="flex flex-shrink-0 items-center justify-between border-b border-border px-4 py-3">
           <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-          <ConnectionPill />
+          <div class="flex items-center gap-1.5">
+            <ProcessesButton />
+            <ConnectionPill />
+          </div>
         </header>
+        {/* Chat is the whole app now (spec [P1]): the bottom TabBar and the
+            Inbox tab are gone. Inbox lives in ChatView's Tray; Processes is
+            the header icon's full-screen sheet, layered above via Show. */}
         <main class="flex min-h-0 flex-1 flex-col">
-          <Switch fallback={<ChatView />}>
-            <Match when={state.activeTab === "inbox"}>
-              <InboxView />
-            </Match>
-            <Match when={state.activeTab === "processes"}>
-              <ProcessesView />
-            </Match>
-            <Match when={state.activeTab === "chat"}>
-              <ChatView />
-            </Match>
-          </Switch>
+          <ChatView />
         </main>
-        <TabBar />
       </div>
+      <ProcessesSheet />
       <Toaster />
     </Show>
   );

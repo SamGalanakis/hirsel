@@ -42,7 +42,7 @@ function snippet(body: string): string {
   return oneLine.length > 60 ? `${oneLine.slice(0, 60)}…` : oneLine;
 }
 
-/** Composer pinned above the tab bar. CLI-grade keyboard map on fine-pointer
+/** Composer anchored at the bottom of Chat, below the Tray shelf. CLI-grade keyboard map on fine-pointer
  * devices (Enter send · Shift+Enter newline · Tab queue next-turn · Esc cancel
  * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
  * (long-press = queue). Handles attachment staging (paperclip + paste). */

@@ -8,15 +8,23 @@ import { InboxItemCard } from "./InboxItemCard";
 
 const ARCHIVED_LIMIT = 20;
 
+/** Content of the expanded Tray: the open list (this component's sole caller
+ * is now `TrayOverlay`) plus the collapsed Deleted section, unchanged from the
+ * pre-Tray Inbox tab. */
 export function InboxView() {
   const [archivedExpanded, setArchivedExpanded] = createSignal(false);
 
   const partitioned = createMemo(() => {
-    // Chronological, newest first — unread state is visual, not a re-sort, so
-    // triage order stays predictable (spec §Ordering).
     const sorted = [...state.inbox].sort((a, b) => b.id - a.id);
+    const open = sorted.filter((i) => i.status === "open");
+    // Tray (v1.6): requires_response items float to the top of the open list —
+    // a triage affordance a chronological-only feed lacks, per the design
+    // critique's [P1] fix. Each bucket stays newest-first internally so
+    // arrival order is still legible within a bucket.
+    const requiresResponse = open.filter((i) => i.requires_response);
+    const rest = open.filter((i) => !i.requires_response);
     return {
-      open: sorted.filter((i) => i.status === "open"),
+      open: [...requiresResponse, ...rest],
       deleted: sorted.filter((i) => i.status === "archived").slice(0, ARCHIVED_LIMIT),
     };
   });

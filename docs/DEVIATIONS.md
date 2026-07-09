@@ -11,6 +11,7 @@ The previous Lash Runtime and Runtime Processes deviations are resolved in the s
 - `HIRSEL_PROVIDER=anthropic|codex` selects the Lash provider. Missing credentials degrade to an Agent-authored error Chat message while the host stays up.
 - Hirsel tools are registered as a Lash `ToolProvider` with Lashlang bindings for Inbox, Sub-agents, and shell. Chat replies are not a tool; committed Agent turn output is appended as the Agent-authored Chat message.
 - Sub-agent starts create Lash Runtime Processes with `RecoveryDisposition::OwnerBound`; driver terminal events append terminal Process Events and enqueue Lash `ProcessWake` work for the `agent` session. Spawns accept an optional model.
+- Hirsel contributes a host-owned `timer.Schedule` trigger source. Timer registrations live in Lash's SQLite trigger store; the host scheduler emits `timer.Tick` occurrences and relies on trigger target processes to `wake` the `agent` session.
 - Owner turns and queued process wakes are drained by a sequential Lash queued-turn pump.
 - WebSocket `agent_activity` comes from Lash session observation.
 

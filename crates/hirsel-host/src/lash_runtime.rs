@@ -10,13 +10,17 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{AgentActivityState, HostToClient, QuickReply, SendMode};
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
     observe::RemoteSessionObservationStreamItem,
-    plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
+    plugins::{
+        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
+        PluginSessionContext, SessionPlugin,
+    },
     process::{
         ProcessAwaitOutput, ProcessAwaiter, ProcessEventAppendRequest, ProcessEventType,
         ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessTerminalState,
@@ -28,6 +32,7 @@ use lash::{
         observations::{RemoteSessionCursor, RemoteSessionObservationEventPayload},
         usage::RemoteTurnEvent,
     },
+    runtime::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest},
     tools::{
         LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
         ToolDefinitionLashlangExt, ToolResult, ToolScheduling,
@@ -37,8 +42,8 @@ use lash::{
 use lash_core::{
     DurabilityTier, ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
     ProcessEventSemanticsSpec, ProcessOriginator, ProcessTerminalSpec, ProcessValueSelector,
-    SessionPolicy, TurnInputCheckpointBoundary, TurnInputIngress,
-    plugin::ProcessEngineContributionContext,
+    SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputCheckpointBoundary,
+    TurnInputIngress, plugin::ProcessEngineContributionContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -56,6 +61,9 @@ const HIRSEL_SUBAGENT_ENGINE: &str = "hirsel_subagent";
 const SUBAGENT_COMPLETED: &str = "subagent.completed";
 const SUBAGENT_FAILED: &str = "subagent.failed";
 const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
+const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
+const TIMER_EVENT_TYPE: &str = "timer.Tick";
+const TIMER_MIN_RECURRING_SECS: u64 = 60;
 const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 
 #[derive(Debug, Clone)]
@@ -176,6 +184,7 @@ enum LashStartup {
 }
 
 struct LashAgentRuntime {
+    core: lash::LashCore,
     session: lash::LashSession,
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
@@ -225,7 +234,7 @@ impl LashAgentRuntime {
             Arc::new(lash_sqlite_store::Store::open(&lash_dir.join("process-env.db")).await?);
         let trigger_store = Arc::new(
             lash_sqlite_store::SqliteTriggerStore::open(&lash_dir.join("triggers.db")).await?,
-        );
+        ) as Arc<dyn TriggerStore>;
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&lash_dir.join("processes.db")).await?,
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -234,7 +243,9 @@ impl LashAgentRuntime {
                 .map_err(|error| anyhow::anyhow!("invalid HIRSEL_MODEL metadata: {error}"))?;
         let rlm_config = lash_protocol_rlm::RlmProtocolPluginConfig::default()
             .with_lashlang_abilities(
-                lash_protocol_rlm::LashlangAbilities::default().with_triggers(),
+                lash_protocol_rlm::LashlangAbilities::default()
+                    .with_processes()
+                    .with_triggers(),
             );
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
@@ -246,6 +257,10 @@ impl LashAgentRuntime {
             },
         ));
         let anchors = tool_provider.executor().anchors.clone();
+        let notify = Arc::new(Notify::new());
+        let queued_work_driver = QueuedWorkDriver::new(Arc::new(HirselQueuedWorkNotifier {
+            notify: Arc::clone(&notify),
+        }));
         let core = lash::LashCore::rlm_builder(rlm_factory)
             .provider(provider)
             .model(model_spec)
@@ -256,12 +271,12 @@ impl LashAgentRuntime {
             .process_env_store(process_env_store)
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .process_registry(process_registry)
-            .trigger_store(trigger_store)
+            .trigger_store(Arc::clone(&trigger_store))
             .tools(tool_provider)
             .plugin(Arc::new(HirselProcessPluginFactory {
                 tools: tools.clone(),
             }))
-            .disable_queued_work_driver()
+            .queued_work_driver(queued_work_driver)
             .build()?;
         let process_registry = core
             .process_registry()
@@ -276,11 +291,12 @@ impl LashAgentRuntime {
             .await?;
 
         let runtime = Arc::new(Self {
+            core: core.clone(),
             session,
             tools: tools.clone(),
             broadcaster: broadcaster.clone(),
             broadcast_log,
-            notify: Arc::new(Notify::new()),
+            notify,
             pump_lock: Mutex::new(()),
             anchors,
             active_turn_id: Arc::new(Mutex::new(None)),
@@ -289,6 +305,7 @@ impl LashAgentRuntime {
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
         runtime.spawn_process_terminal_bridge(process_registry, store_factory);
+        runtime.spawn_timer_trigger_source(trigger_store);
         runtime.notify_if_work_pending().await;
         tracing::info!(
             model = %config.model,
@@ -567,6 +584,258 @@ impl LashAgentRuntime {
             }
         });
     }
+
+    fn spawn_timer_trigger_source(self: &Arc<Self>, trigger_store: Arc<dyn TriggerStore>) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = runtime.fire_due_timers(Arc::clone(&trigger_store)).await {
+                    tracing::warn!(%error, "timer trigger source poll failed");
+                }
+            }
+        });
+    }
+
+    async fn fire_due_timers(&self, trigger_store: Arc<dyn TriggerStore>) -> anyhow::Result<()> {
+        let mut filter = TriggerSubscriptionFilter::for_session(AGENT_SESSION_ID);
+        filter.source_type = Some(TIMER_SOURCE_TYPE.to_string());
+        filter.enabled = Some(true);
+        let records = trigger_store.list_subscriptions(filter).await?;
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        for record in records {
+            let schedule = match TimerSchedule::from_registration(&record) {
+                Ok(schedule) => schedule,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        handle = %record.handle,
+                        source_key = %record.source_key,
+                        "invalid timer trigger registration"
+                    );
+                    continue;
+                }
+            };
+            let Some(occurrence) = schedule.due_occurrence(&record, now_ms) else {
+                continue;
+            };
+            if let Err(error) = self
+                .emit_timer_occurrence(Arc::clone(&trigger_store), &record, occurrence)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    handle = %record.handle,
+                    source_key = %record.source_key,
+                    "failed to emit timer trigger occurrence"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn emit_timer_occurrence(
+        &self,
+        trigger_store: Arc<dyn TriggerStore>,
+        record: &lash_core::TriggerSubscriptionRecord,
+        occurrence: TimerOccurrence,
+    ) -> anyhow::Result<()> {
+        let fired_at = Utc::now();
+        let payload = json!({
+            "label": occurrence.label,
+            "fired_at": fired_at.to_rfc3339(),
+            "scheduled_at": timestamp_ms_rfc3339(occurrence.scheduled_at_ms),
+            "source_key": record.source_key,
+            "handle": record.handle,
+        });
+        let report = self
+            .core
+            .triggers()
+            .emit(
+                lash::triggers::TriggerOccurrenceRequest::new(
+                    TIMER_SOURCE_TYPE,
+                    record.source_key.clone(),
+                    payload,
+                    occurrence.idempotency_key,
+                )
+                .with_source(record.source.clone()),
+                inline_trigger_scope(format!(
+                    "timer:{}:{}",
+                    record.source_key, occurrence.scheduled_at_ms
+                )),
+            )
+            .await?;
+        if !report.deliveries.is_empty() {
+            self.notify.notify_one();
+        }
+        if occurrence.one_shot {
+            trigger_store
+                .cancel_subscription(&record.registrant_scope_id(), &record.handle)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+struct HirselQueuedWorkNotifier {
+    notify: Arc<Notify>,
+}
+
+#[async_trait]
+impl QueuedWorkRunHandle for HirselQueuedWorkNotifier {
+    async fn run_queued_work(&self, _request: QueuedWorkRunRequest) -> Result<(), PluginError> {
+        self.notify.notify_one();
+        Ok(())
+    }
+}
+
+fn inline_trigger_scope(scope_id: impl Into<String>) -> lash_core::ScopedEffectController<'static> {
+    lash_core::ScopedEffectController::shared(
+        Arc::new(lash_core::InlineRuntimeEffectController),
+        lash_core::ExecutionScope::runtime_operation(scope_id.into()),
+    )
+    .expect("inline timer trigger occurrence execution scope")
+}
+
+#[derive(Debug, Clone)]
+struct TimerSchedule {
+    label: String,
+    at_ms: Option<u64>,
+    in_secs: Option<u64>,
+    every_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct TimerOccurrence {
+    label: String,
+    scheduled_at_ms: u64,
+    idempotency_key: String,
+    one_shot: bool,
+}
+
+impl TimerSchedule {
+    fn from_registration(record: &lash_core::TriggerSubscriptionRecord) -> Result<Self, String> {
+        let descriptor_type = record
+            .source
+            .get("$lash_host_descriptor_type")
+            .and_then(Value::as_str);
+        if descriptor_type != Some(TIMER_SOURCE_TYPE) {
+            return Err(format!(
+                "expected descriptor type `{TIMER_SOURCE_TYPE}`, got `{}`",
+                descriptor_type.unwrap_or("<missing>")
+            ));
+        }
+        let value = record
+            .source
+            .get("$lash_host_descriptor_value")
+            .ok_or_else(|| "missing timer schedule descriptor value".to_string())?;
+        let label = value
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|label| !label.trim().is_empty())
+            .or_else(|| record.name.clone())
+            .ok_or_else(|| "timer.Schedule requires non-empty `label`".to_string())?;
+        let at_ms = value.get("at").map(parse_timer_at_ms).transpose()?;
+        let in_secs = value.get("in_secs").map(parse_timer_secs).transpose()?;
+        let every_secs = value
+            .get("every_secs")
+            .map(parse_timer_secs)
+            .transpose()?
+            .map(|secs| secs.max(TIMER_MIN_RECURRING_SECS));
+        let configured = [at_ms.is_some(), in_secs.is_some(), every_secs.is_some()]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+        if configured != 1 {
+            return Err(
+                "timer.Schedule requires exactly one of `at`, `in_secs`, or `every_secs`"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            label,
+            at_ms,
+            in_secs,
+            every_secs,
+        })
+    }
+
+    fn due_occurrence(
+        &self,
+        record: &lash_core::TriggerSubscriptionRecord,
+        now_ms: u64,
+    ) -> Option<TimerOccurrence> {
+        if let Some(every_secs) = self.every_secs {
+            let interval_ms = every_secs.saturating_mul(1_000);
+            let first_due_ms = record.created_at_ms.saturating_add(interval_ms);
+            if now_ms < first_due_ms {
+                return None;
+            }
+            let period_index = now_ms
+                .saturating_sub(record.created_at_ms)
+                .checked_div(interval_ms)
+                .unwrap_or(0);
+            if period_index == 0 {
+                return None;
+            }
+            let scheduled_at_ms = record
+                .created_at_ms
+                .saturating_add(period_index.saturating_mul(interval_ms));
+            return Some(TimerOccurrence {
+                label: self.label.clone(),
+                scheduled_at_ms,
+                idempotency_key: format!("timer:{}:every:{period_index}", record.source_key),
+                one_shot: false,
+            });
+        }
+
+        let scheduled_at_ms = self
+            .at_ms
+            .or_else(|| {
+                self.in_secs.map(|secs| {
+                    record
+                        .created_at_ms
+                        .saturating_add(secs.saturating_mul(1_000))
+                })
+            })
+            .expect("one-shot schedule was validated");
+        (now_ms >= scheduled_at_ms).then(|| TimerOccurrence {
+            label: self.label.clone(),
+            scheduled_at_ms,
+            idempotency_key: format!("timer:{}:once:{scheduled_at_ms}", record.source_key),
+            one_shot: true,
+        })
+    }
+}
+
+fn parse_timer_secs(value: &Value) -> Result<u64, String> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .filter(|secs| *secs > 0)
+            .ok_or_else(|| "timer seconds must be a positive integer".to_string()),
+        other => Err(format!("timer seconds must be an integer, got {other}")),
+    }
+}
+
+fn parse_timer_at_ms(value: &Value) -> Result<u64, String> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| "`at` must be an RFC3339 timestamp string".to_string())?;
+    let ts = DateTime::parse_from_rfc3339(text)
+        .map_err(|error| format!("invalid `at` timestamp `{text}`: {error}"))?
+        .with_timezone(&Utc)
+        .timestamp_millis();
+    Ok(ts.max(0) as u64)
+}
+
+fn timestamp_ms_rfc3339(timestamp_ms: u64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(timestamp_ms as i64)
+        .map(|ts| ts.to_rfc3339())
+        .unwrap_or_else(|| timestamp_ms.to_string())
 }
 
 async fn enqueue_process_wake(
@@ -1068,6 +1337,19 @@ impl PluginFactory for HirselProcessPluginFactory {
         "hirsel_processes"
     }
 
+    fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
+        match PluginExtensionContribution::new(
+            lash::rlm::LASHLANG_SURFACE_EXTENSION_ID,
+            hirsel_lashlang_surface(),
+        ) {
+            Ok(contribution) => vec![contribution],
+            Err(error) => {
+                tracing::warn!(%error, "failed to encode Hirsel lashlang surface contribution");
+                Vec::new()
+            }
+        }
+    }
+
     fn process_engine_contributions(
         &self,
         _ctx: &ProcessEngineContributionContext<'_>,
@@ -1092,6 +1374,73 @@ impl SessionPlugin for EmptyHirselSessionPlugin {
     fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         Ok(())
     }
+}
+
+fn hirsel_lashlang_surface() -> lash::rlm::LashlangSurfaceContribution {
+    let mut resources = lash::rlm::LashlangHostCatalog::new();
+    resources
+        .add_trigger_source_constructor(
+            ["timer", "Schedule"],
+            lash::rlm::TypeExpr::Object(vec![
+                lash::rlm::TypeField {
+                    name: "label".into(),
+                    ty: lash::rlm::TypeExpr::Str,
+                    optional: false,
+                },
+                lash::rlm::TypeField {
+                    name: "at".into(),
+                    ty: lash::rlm::TypeExpr::Str,
+                    optional: true,
+                },
+                lash::rlm::TypeField {
+                    name: "in_secs".into(),
+                    ty: lash::rlm::TypeExpr::Int,
+                    optional: true,
+                },
+                lash::rlm::TypeField {
+                    name: "every_secs".into(),
+                    ty: lash::rlm::TypeExpr::Int,
+                    optional: true,
+                },
+            ]),
+            lash::rlm::NamedDataType::object(
+                TIMER_EVENT_TYPE,
+                vec![
+                    lash::rlm::TypeField {
+                        name: "label".into(),
+                        ty: lash::rlm::TypeExpr::Str,
+                        optional: false,
+                    },
+                    lash::rlm::TypeField {
+                        name: "fired_at".into(),
+                        ty: lash::rlm::TypeExpr::Str,
+                        optional: false,
+                    },
+                    lash::rlm::TypeField {
+                        name: "scheduled_at".into(),
+                        ty: lash::rlm::TypeExpr::Str,
+                        optional: false,
+                    },
+                    lash::rlm::TypeField {
+                        name: "source_key".into(),
+                        ty: lash::rlm::TypeExpr::Str,
+                        optional: false,
+                    },
+                    lash::rlm::TypeField {
+                        name: "handle".into(),
+                        ty: lash::rlm::TypeExpr::Str,
+                        optional: false,
+                    },
+                ],
+            )
+            .expect("valid timer.Tick type"),
+        )
+        .expect("valid timer.Schedule trigger source");
+    lash::rlm::LashlangSurfaceContribution::new(
+        lash::rlm::LashlangAbilities::default(),
+        lash::rlm::LashlangLanguageFeatures::default(),
+        resources,
+    )
 }
 
 #[derive(Clone)]
@@ -1737,8 +2086,14 @@ fn terminal_content(outcome: &TerminalOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
     use hirsel_proto::Blob;
+    use lash_core::{
+        ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
+        TriggerInputBinding, TriggerSubscriptionRecord,
+    };
 
     use super::*;
 
@@ -1783,6 +2138,59 @@ mod tests {
         assert!(!input.image_blobs.contains_key("text-1"));
     }
 
+    #[test]
+    fn timer_in_secs_becomes_one_shot_due_from_registration_time() {
+        let record = timer_registration(
+            serde_json::json!({
+                "label": "ping",
+                "in_secs": 5
+            }),
+            1_000,
+        );
+        let schedule = TimerSchedule::from_registration(&record).unwrap();
+
+        assert!(schedule.due_occurrence(&record, 5_999).is_none());
+        let occurrence = schedule.due_occurrence(&record, 6_000).unwrap();
+        assert!(occurrence.one_shot);
+        assert_eq!(occurrence.label, "ping");
+        assert_eq!(occurrence.scheduled_at_ms, 6_000);
+        assert_eq!(occurrence.idempotency_key, "timer:source-key:once:6000");
+    }
+
+    #[test]
+    fn timer_every_secs_uses_sixty_second_floor() {
+        let record = timer_registration(
+            serde_json::json!({
+                "label": "heartbeat",
+                "every_secs": 5
+            }),
+            1_000,
+        );
+        let schedule = TimerSchedule::from_registration(&record).unwrap();
+
+        assert_eq!(schedule.every_secs, Some(TIMER_MIN_RECURRING_SECS));
+        assert!(schedule.due_occurrence(&record, 60_999).is_none());
+        let occurrence = schedule.due_occurrence(&record, 61_000).unwrap();
+        assert!(!occurrence.one_shot);
+        assert_eq!(occurrence.scheduled_at_ms, 61_000);
+        assert_eq!(occurrence.idempotency_key, "timer:source-key:every:1");
+    }
+
+    #[test]
+    fn timer_schedule_requires_exactly_one_clock_field() {
+        let record = timer_registration(
+            serde_json::json!({
+                "label": "bad",
+                "in_secs": 5,
+                "every_secs": 60
+            }),
+            1_000,
+        );
+
+        let error = TimerSchedule::from_registration(&record).unwrap_err();
+        assert!(error.contains("exactly one"));
+    }
+
     fn stored_blob(id: &str, name: &str, mime: &str, size: u64, path: PathBuf) -> StoredBlob {
         StoredBlob {
             blob: Blob {
@@ -1793,6 +2201,34 @@ mod tests {
             },
             path,
             created_ts: Utc::now(),
+        }
+    }
+
+    fn timer_registration(value: Value, created_at_ms: u64) -> TriggerSubscriptionRecord {
+        TriggerSubscriptionRecord {
+            subscription_id: "subscription-id".to_string(),
+            registrant: ProcessOriginator::session(SessionScope::new(AGENT_SESSION_ID)),
+            env_ref: ProcessExecutionEnvRef::new("process-env:test"),
+            wake_target: Some(SessionScope::new(AGENT_SESSION_ID)),
+            handle: "handle-id".to_string(),
+            name: None,
+            source_type: TIMER_SOURCE_TYPE.to_string(),
+            source_key: "source-key".to_string(),
+            source: serde_json::json!({
+                "$lash_host_descriptor_type": TIMER_SOURCE_TYPE,
+                "$lash_host_descriptor_value": value,
+            }),
+            payload_schema: LashSchema::new(serde_json::json!({ "type": "object" })),
+            target: ProcessInput::External {
+                metadata: serde_json::json!({}),
+            },
+            target_identity: ProcessIdentity::new("timer-test"),
+            event_types: Vec::new(),
+            input_template: BTreeMap::<String, TriggerInputBinding>::new(),
+            target_label: None,
+            enabled: true,
+            created_at_ms,
+            updated_at_ms: created_at_ms,
         }
     }
 }

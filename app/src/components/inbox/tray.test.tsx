@@ -30,10 +30,10 @@ describe("Tray shelf badge (email-like: open + unread, RR-driven accent)", () =>
     const { queryByLabelText, getByLabelText } = render(() => <TrayShelf />);
 
     // No items yet -> shelf hidden entirely (0-items rule).
-    expect(queryByLabelText("Open inbox")).toBeNull();
+    expect(queryByLabelText("Open Pings")).toBeNull();
 
     const badge = () =>
-      getByLabelText("Open inbox").querySelector(".font-bold") as HTMLElement;
+      getByLabelText("Open Pings").querySelector(".font-bold") as HTMLElement;
 
     // Open, unread, non-RR item: badge 1, muted (no danger accent).
     store.dispatch({
@@ -94,7 +94,7 @@ describe("Tray shelf preview", () => {
       type: "inbox_upsert",
       payload: { type: "inbox_upsert", item: inboxItem({ id: 2, content: "Second item", read: true }) },
     });
-    expect(getByLabelText("Open inbox").textContent).toContain("Second item");
+    expect(getByLabelText("Open Pings").textContent).toContain("Second item");
 
     // An unread (but non-RR, older) item beats "newest open".
     store.dispatch({
@@ -104,7 +104,7 @@ describe("Tray shelf preview", () => {
         item: inboxItem({ id: 1, content: "First item", read: false }),
       },
     });
-    expect(getByLabelText("Open inbox").textContent).toContain("First item");
+    expect(getByLabelText("Open Pings").textContent).toContain("First item");
 
     // A requires_response item beats an unread one, regardless of recency.
     store.dispatch({
@@ -114,38 +114,40 @@ describe("Tray shelf preview", () => {
         item: inboxItem({ id: 3, content: "Needs your call", requires_response: true, read: true }),
       },
     });
-    expect(getByLabelText("Open inbox").textContent).toContain("Needs your call");
+    expect(getByLabelText("Open Pings").textContent).toContain("Needs your call");
   });
 });
 
 describe("Tray shelf visibility", () => {
-  it("hides entirely with no items, and offers only a minimal Deleted handle once archived items exist", async () => {
+  it("hides entirely with no items, and offers only a minimal Done handle once resolved items exist", async () => {
     const store = await import("../../store/store");
     const { TrayShelf } = await import("./Tray");
     const { queryByLabelText, getByLabelText } = render(() => <TrayShelf />);
 
-    // 0 open, 0 archived -> nothing rendered.
-    expect(queryByLabelText("Open inbox")).toBeNull();
-    expect(queryByLabelText("Open deleted items")).toBeNull();
+    // 0 open, 0 done -> nothing rendered.
+    expect(queryByLabelText("Open Pings")).toBeNull();
+    expect(queryByLabelText("Open done items")).toBeNull();
 
-    // 0 open, 1 archived -> a minimal handle, not the full glyph/badge/preview shelf.
+    // 0 open, 1 done -> a minimal handle, not the full glyph/badge/preview shelf.
+    // (`done` is the ADR-0009 status; the legacy `archived` spelling still
+    // renders here too — covered by the synonym in isResolvedStatus.)
     store.dispatch({
       type: "inbox_upsert",
       payload: {
         type: "inbox_upsert",
-        item: inboxItem({ id: 1, status: "archived", read: true }),
+        item: inboxItem({ id: 1, status: "done", read: true }),
       },
     });
-    expect(queryByLabelText("Open inbox")).toBeNull();
-    expect(getByLabelText("Open deleted items").textContent).toBe("Deleted (1)");
+    expect(queryByLabelText("Open Pings")).toBeNull();
+    expect(getByLabelText("Open done items").textContent).toBe("Done (1)");
 
     // An open item arrives -> the full shelf replaces the minimal handle.
     store.dispatch({
       type: "inbox_upsert",
       payload: { type: "inbox_upsert", item: inboxItem({ id: 2, status: "open" }) },
     });
-    expect(queryByLabelText("Open deleted items")).toBeNull();
-    expect(getByLabelText("Open inbox")).toBeTruthy();
+    expect(queryByLabelText("Open done items")).toBeNull();
+    expect(getByLabelText("Open Pings")).toBeTruthy();
   });
 });
 

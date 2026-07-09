@@ -51,19 +51,19 @@ async function openMenu(screen: ReturnType<typeof render>) {
 }
 
 describe("Inbox card ⋯ context menu", () => {
-  it("Delete sends the destructive action (wire archive_item) via onDelete", async () => {
+  it("Mark done sends the resolve action (wire archive_item) via onDelete", async () => {
     const { screen, onDelete } = renderCard({ id: 42 });
     const user = await openMenu(screen);
-    await user.click(await menu().findByRole("menuitem", { name: "Delete" }));
+    await user.click(await menu().findByRole("menuitem", { name: "Mark done" }));
     await waitFor(() => expect(onDelete).toHaveBeenCalledTimes(1));
     expect(onDelete.mock.calls[0][0]).toMatchObject({ id: 42 });
   });
 
-  it("there is no inline Delete/Archive affordance outside the ⋯ menu", () => {
+  it("there is no inline Mark done/Delete affordance outside the ⋯ menu", () => {
     const { screen } = renderCard();
-    expect(screen.queryByRole("button", { name: /archive/i })).toBeNull();
-    // The ⋯ menu is closed by default, so "Delete" is not in the document yet.
-    expect(menu().queryByText("Delete")).toBeNull();
+    expect(screen.queryByRole("button", { name: /archive|delete/i })).toBeNull();
+    // The ⋯ menu is closed by default, so "Mark done" is not in the document yet.
+    expect(menu().queryByText("Mark done")).toBeNull();
   });
 
   it("an unread card offers Mark read (→ onRead)", async () => {

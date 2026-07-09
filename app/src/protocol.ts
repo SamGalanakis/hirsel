@@ -60,7 +60,13 @@ export interface QuickReply {
   label: string;
 }
 
-export type InboxStatus = "open" | "archived";
+/** v2.1 (ADR-0009): an Inbox Item has exactly two lifecycle states — `open`
+ * (needs the Owner's attention) and `done` (dealt with, kept findable). The
+ * Owner replying to the item's Anchor resolves it to `done` automatically,
+ * host-side. `archived` is the pre-ADR-0009 wire value for the same terminal
+ * state; treat it as a synonym of `done` everywhere (see `isResolvedStatus`)
+ * and render both as "Done". No separate hard-delete state exists. */
+export type InboxStatus = "open" | "done" | "archived";
 
 export interface InboxItem {
   id: number;

@@ -18,7 +18,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
  *   4. Neither answer collapses the Tray — it stays expanded throughout.
  *   5. Both replies reach the wire as send_message frames with the correct
  *      body + ref (= each item's anchor).
- *   6. Both optimistic sends reconcile to the host echo (pending → done).
+ *   6. Both optimistic sends reconcile to the host echo (pending → sent).
+ *   7. ADR-0009: each anchored reply resolves its item to `done`, so both
+ *      leave the open list (the Tray stays expanded regardless).
  *
  * Environment plumbing: vitest's jsdom resolves the `ws` package to its browser
  * stub and ships a `localStorage` with no methods, so we load the real Node
@@ -46,9 +48,9 @@ interface ScriptedHost {
 }
 
 /** A minimal in-process host: replays two anchor messages + two open
- * requires_response Inbox Items on hello, records every send_message, and echoes
- * each as an owner `msg` so the optimistic entry reconciles. It deliberately
- * does NOT archive on reply — replying keeps the item in the Inbox (spec §3). */
+ * requires_response Inbox Items on hello, records every send_message, echoes
+ * each as an owner `msg` so the optimistic entry reconciles, and (ADR-0009)
+ * resolves the anchored item to `done` — the mechanical reply-resolves rule. */
 async function startScriptedHost(): Promise<ScriptedHost> {
   const received: WireFrame[] = [];
   let idSeq = 100;
@@ -104,6 +106,12 @@ async function startScriptedHost(): Promise<ScriptedHost> {
           attachments: [],
         };
         ws.send(JSON.stringify({ type: "msg", message }));
+        // ADR-0009: resolve the anchored item to `done`.
+        const target = inbox.find((i) => i.status === "open" && i.anchor === (frame.ref ?? null));
+        if (target) {
+          target.status = "done";
+          ws.send(JSON.stringify({ type: "inbox_upsert", item: { ...target } }));
+        }
       }
     });
   });
@@ -174,7 +182,7 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
 
       // Tap the Tray shelf open (no more Inbox tab; never auto-expanded).
       expect(store.state.trayExpanded).toBe(false);
-      fireEvent.click(screen.getByLabelText("Open inbox"));
+      fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
       await screen.findByText("Deploy to prod?");
 
@@ -208,8 +216,12 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       expect(byBody("approve")).toMatchObject({ ref: 1 });
       expect(byBody("merge it")).toMatchObject({ ref: 2 });
 
-      // Both items stay in the Inbox (replying does not auto-archive).
-      expect(store.state.inbox.every((i) => i.status === "open")).toBe(true);
+      // ADR-0009: both anchored replies resolved their items to `done`, so they
+      // have left the open list (reconciled from the host's inbox_upsert).
+      await waitFor(
+        () => expect(store.state.inbox.every((i) => i.status === "done")).toBe(true),
+        { timeout: 10000 },
+      );
       expect(store.state.pendingSends).toHaveLength(0);
 
       // Grounded checklist for the report.

@@ -11,6 +11,7 @@ import {
   state,
 } from "../../store/store";
 import { sideChatForItem } from "../../store/selectors";
+import { focusMainComposer } from "../../lib/focus";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { TrayOverlay, TrayShelf } from "../inbox/Tray";
@@ -130,7 +131,11 @@ export function ChatView() {
   createEffect(() => {
     const lastConclusion = state.lastConclusion;
     if (!lastConclusion) return;
-    if (state.activeSideChatSc === lastConclusion.sc) setActiveSideChatSc(null);
+    if (state.activeSideChatSc === lastConclusion.sc) {
+      setActiveSideChatSc(null);
+      // The side composer is gone; hand focus back to the main composer.
+      focusMainComposer();
+    }
     scrollToId(lastConclusion.messageId);
     clearLastConclusion();
   });
@@ -187,7 +192,13 @@ export function ChatView() {
   }
 
   return (
-    <div class="flex min-h-0 flex-1 flex-col">
+    // Slack-style split: a column on phone, a row on wide viewports so an open
+    // Side Chat renders as the right rail beside a still-live main Chat (the
+    // rail is `SideChatSheet` itself, responsive — see that component). On
+    // phone the sheet is `fixed`, out of flow, so this row degrades to the
+    // single main column.
+    <div class="flex min-h-0 flex-1 flex-col min-[900px]:flex-row">
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <div
         class="relative flex min-h-0 flex-1 flex-col"
         onDragEnter={onDragEnter}
@@ -305,10 +316,12 @@ export function ChatView() {
         alt={lightbox()?.alt ?? ""}
         onClose={() => setLightbox(null)}
       />
+      </div>
 
-      {/* v2.0 (ADR-0008): the one Side Chat sheet, full-screen over everything
-          above (fixed positioning) when state.activeSideChatSc is set. Never
-          auto-opened — see the pendingSideChatItemId effect above. */}
+      {/* v2.0 (ADR-0008): the one Side Chat surface when state.activeSideChatSc
+          is set. Responsive presentation (fork-ui iteration): a full-screen
+          `fixed` sheet on phone, an in-flow right rail beside main Chat on wide
+          viewports. Never auto-opened — see the pendingSideChatItemId effect. */}
       <SideChatSheet />
     </div>
   );

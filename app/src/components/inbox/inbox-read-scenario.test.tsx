@@ -16,9 +16,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
  *      Tray overlay, where the card shows its accent (unread dot).
  *   2. It scrolls into view → a read_item frame hits the wire; the host echoes
  *      inbox_upsert read=true → the card goes muted (data-read=true), badge = 0.
- *   3. The Owner replies (quick reply) → the card enters its dealt-with state.
- *   4. ⋯ menu → Delete → archive_item on the wire → the item leaves the open
- *      list and appears under the collapsed **Deleted** section, still inside
+ *   3. The Owner replies (quick reply) → ADR-0009: the anchored reply resolves
+ *      the item to `done`, so it leaves the open list and appears under the
+ *      collapsed **Done** section (carrying the you:-reply quote), still inside
  *      the expanded Tray.
  */
 
@@ -42,7 +42,8 @@ interface ScriptedHost {
 
 /** In-process host: replays one open, unread requires-response-free item plus
  * its anchor; on read_item it upserts read=true; on send_message it echoes the
- * owner msg; on archive_item it upserts status=archived. Records every frame. */
+ * owner msg AND (ADR-0009) resolves the item to `done` when the reply is
+ * anchored to it; on archive_item it upserts status=done. Records every frame. */
 async function startScriptedHost(): Promise<ScriptedHost> {
   const received: WireFrame[] = [];
   let idSeq = 100;
@@ -81,7 +82,7 @@ async function startScriptedHost(): Promise<ScriptedHost> {
         return;
       }
       if (frame.type === "archive_item" && frame.item_id === item.id) {
-        item.status = "archived";
+        item.status = "done";
         send({ type: "inbox_upsert", item: { ...item } });
         return;
       }
@@ -97,6 +98,11 @@ async function startScriptedHost(): Promise<ScriptedHost> {
             attachments: [],
           },
         });
+        // ADR-0009: an anchored reply to an open item resolves it to done.
+        if (frame.ref === item.anchor && item.status === "open") {
+          item.status = "done";
+          send({ type: "inbox_upsert", item: { ...item } });
+        }
       }
     });
   });
@@ -154,7 +160,7 @@ function installIntersectionObserver() {
   (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = IOStub;
 }
 
-describe("Headless scenario: email-like read → reply → delete lifecycle", () => {
+describe("Headless scenario: email-like read → reply → resolve lifecycle", () => {
   let realWebSocket: typeof globalThis.WebSocket | undefined;
   let realIO: typeof globalThis.IntersectionObserver | undefined;
 
@@ -178,7 +184,7 @@ describe("Headless scenario: email-like read → reply → delete lifecycle", ()
     localStorage.clear();
   });
 
-  it("marks read on view (badge clears), replies, then deletes into the Deleted section", async () => {
+  it("marks read on view (badge clears), then a reply resolves the item into the Done section", async () => {
     const host = await startScriptedHost();
     let closeClient: () => void = () => {};
     try {
@@ -196,7 +202,7 @@ describe("Headless scenario: email-like read → reply → delete lifecycle", ()
       await waitFor(() => expect(store.state.inbox).toHaveLength(1), { timeout: 10000 });
       // Tap the Tray shelf open (no more Inbox tab) — never auto-expanded.
       expect(store.state.trayExpanded).toBe(false);
-      fireEvent.click(screen.getByLabelText("Open inbox"));
+      fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
 
       // --- 1. Arrives UNREAD: unread dot + badge 1 ---
@@ -219,38 +225,37 @@ describe("Headless scenario: email-like read → reply → delete lifecycle", ()
       expect(openUnreadCount(store.state.inbox, store.state.unreadOverrides)).toBe(0);
       await waitFor(() => expect(document.title).toBe("hirsel"));
 
-      // --- 3. Reply (quick reply) → dealt-with state (you: … ✓) ---
+      // --- 3. Reply (quick reply) → ADR-0009: resolves into the Done section ---
       fireEvent.click(within(card).getByText("All good"));
       await waitFor(
         () => expect(store.state.messages.some((m) => m.body === "all good" && !m.pending)).toBe(true),
         { timeout: 10000 },
       );
-      expect(within(card).getByText("you:")).toBeTruthy();
       expect(host.received.some((f) => f.type === "send_message" && f.body === "all good")).toBe(true);
 
-      // --- 4. ⋯ menu → Delete → archive_item → moves to Deleted section ---
-      const user = userEvent.setup();
-      await user.click(within(card).getByLabelText("More actions"));
-      await user.click(await within(document.body).findByRole("menuitem", { name: "Delete" }));
-
-      await waitFor(
-        () => expect(host.received.some((f) => f.type === "archive_item" && f.item_id === 1)).toBe(true),
-        { timeout: 10000 },
-      );
-      await waitFor(() => expect(store.state.inbox[0].status).toBe("archived"), { timeout: 10000 });
-      // The collapsed Deleted section (inside the still-expanded Tray panel)
-      // now holds the item. The Tray shelf *also* now reads "Deleted (1)" —
-      // it has no open items left, so it fell back to its own minimal handle
-      // label (spec: 0 open items hides the shelf's full form) — so scope the
-      // assertion to the panel to disambiguate the two matches.
+      // The anchored reply resolves the item to `done` — optimistically on send,
+      // reconciled by the host's inbox_upsert — so it leaves the open list and
+      // the Tray falls back to its minimal "Done (1)" handle.
+      await waitFor(() => expect(store.state.inbox[0].status).toBe("done"), { timeout: 10000 });
       const panel = document.querySelector('[data-slot="tray-panel"]') as HTMLElement;
-      await within(panel).findByText(/Deleted \(1\)/);
+      await within(panel).findByText(/Done \(1\)/);
+
+      // Expand the Done section: the resolved card carries the you:-reply quote
+      // as its done detail (ADR-0009).
+      const user = userEvent.setup();
+      await user.click(within(panel).getByText(/Done \(1\)/));
+      const doneCard = (await within(panel).findByText("Deploy finished — anything else?")).closest(
+        '[data-slot="card"]',
+      ) as HTMLElement;
+      expect(doneCard.getAttribute("data-status")).toBe("done");
+      expect(within(doneCard).getByText("you:")).toBeTruthy();
+      expect(within(doneCard).getByText("all good")).toBeTruthy();
 
       // Grounded checklist for the report.
       // eslint-disable-next-line no-console
       console.log(
         "[inbox-read-scenario] PASS — unread→read via view (read_item on wire), badge 1→0, " +
-          `replied (you: all good), deleted via ⋯ menu; frames: ${host.received
+          `reply resolved item to done (you: all good) into the Done section; frames: ${host.received
             .map((f) => f.type)
             .join(",")}`,
       );

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isItemRead,
+  isResolvedStatus,
   latestReplyForAnchor,
   openUnreadCount,
   partitionProcesses,
@@ -177,5 +178,13 @@ describe("partitionProcesses (Running/Finished, newest activity first)", () => {
     ]);
     expect(running.map((p) => p.id)).toEqual(["r-new", "r-old"]);
     expect(finished.map((p) => p.id)).toEqual(["f-new", "f-old"]);
+  });
+});
+
+describe("isResolvedStatus (ADR-0009: done, or legacy archived, are both resolved)", () => {
+  it("treats done and archived as resolved, open as not", () => {
+    expect(isResolvedStatus("open")).toBe(false);
+    expect(isResolvedStatus("done")).toBe(true);
+    expect(isResolvedStatus("archived")).toBe(true);
   });
 });

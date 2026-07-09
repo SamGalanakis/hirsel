@@ -378,3 +378,56 @@ describe("optimistic-send reconciliation", () => {
     expect(state.messages[0].pending).toBeUndefined();
   });
 });
+
+describe("ADR-0009: replying resolves an Inbox Item to done", () => {
+  function withOpenItem() {
+    return reduce(initialState(), {
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 5, status: "open" }) },
+    });
+  }
+
+  it("optimistically flips an open item to done when a send_local anchors to it", () => {
+    const next = reduce(withOpenItem(), {
+      type: "send_local",
+      localId: -1,
+      clientId: "c1",
+      body: "approved",
+      ref: 5,
+      ts: "2026-07-08T00:01:00Z",
+    });
+    expect(next.inbox[0].status).toBe("done");
+  });
+
+  it("leaves the item open when the send anchors elsewhere (or nowhere)", () => {
+    const other = reduce(withOpenItem(), {
+      type: "send_local",
+      localId: -1,
+      clientId: "c1",
+      body: "unrelated",
+      ref: 99,
+      ts: "2026-07-08T00:01:00Z",
+    });
+    expect(other.inbox[0].status).toBe("open");
+    const plain = reduce(withOpenItem(), {
+      type: "send_local",
+      localId: -2,
+      clientId: "c2",
+      body: "hello",
+      ref: null,
+      ts: "2026-07-08T00:01:00Z",
+    });
+    expect(plain.inbox[0].status).toBe("open");
+  });
+
+  it("resolves the item on a Side Chat conclusion confirm (no send_local of its own)", () => {
+    const opened = reduce(withOpenItem(), {
+      type: "side_chat_open",
+      sc: "side:1",
+      itemId: 1,
+      messages: [],
+    });
+    const confirmed = reduce(opened, { type: "side_chat_confirm_sent", sc: "side:1", anchor: 5 });
+    expect(confirmed.inbox[0].status).toBe("done");
+  });
+});

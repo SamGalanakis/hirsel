@@ -1,10 +1,10 @@
 import { Inbox, MessageCircle } from "lucide-solid";
 import { Show } from "solid-js";
-import { openRequiresResponseCount } from "../store/selectors";
+import { openUnreadCount } from "../store/selectors";
 import { setActiveTab, state } from "../store/store";
 
 export function TabBar() {
-  const badgeCount = () => openRequiresResponseCount(state.inbox);
+  const badgeCount = () => openUnreadCount(state.inbox, state.unreadOverrides);
 
   return (
     <nav class="flex flex-shrink-0 border-t border-border bg-card pb-[env(safe-area-inset-bottom)]">

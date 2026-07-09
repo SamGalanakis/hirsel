@@ -49,6 +49,7 @@ function appSnapshot(): AppState {
     pendingSends: state.pendingSends,
     uploads: state.uploads,
     removedIds: state.removedIds,
+    unreadOverrides: state.unreadOverrides,
   };
 }
 
@@ -69,6 +70,7 @@ export function dispatch(action: Action): void {
     setState("inbox", reconcile(next.inbox, { key: "id" }));
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
+    setState("unreadOverrides", next.unreadOverrides);
     setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);

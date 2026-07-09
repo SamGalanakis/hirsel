@@ -193,6 +193,14 @@ class HirselWsClient {
     this.enqueue({ type: "archive_item", item_id: itemId });
   }
 
+  /** Mark an Inbox item read (v1.3). Optimistically flips read=true locally
+   * (reconciled by the host's inbox_upsert) and sends the idempotent read_item
+   * frame. Enqueued so it survives an offline window like archive_item. */
+  readItem(itemId: number): void {
+    dispatch({ type: "read_local", itemId });
+    this.enqueue({ type: "read_item", item_id: itemId });
+  }
+
   private armFailTimer(clientId: string): void {
     const existing = this.failTimers.get(clientId);
     if (existing) clearTimeout(existing);

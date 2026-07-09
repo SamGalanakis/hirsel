@@ -73,7 +73,7 @@ describe("Inbox inline reply", () => {
     const store = await import("../store/store");
     const sendMessage = vi.fn((_body: string, _ref: number | null) => -9);
     vi.doMock("../ws/client", () => ({
-      getClient: () => ({ sendMessage, archiveItem: vi.fn() }),
+      getClient: () => ({ sendMessage, archiveItem: vi.fn(), readItem: vi.fn() }),
     }));
 
     const { InboxView } = await import("./inbox/InboxView");
@@ -97,7 +97,7 @@ describe("Inbox inline reply", () => {
     const store = await import("../store/store");
     const sendMessage = vi.fn((_body: string, _ref: number | null) => -7);
     vi.doMock("../ws/client", () => ({
-      getClient: () => ({ sendMessage, archiveItem: vi.fn() }),
+      getClient: () => ({ sendMessage, archiveItem: vi.fn(), readItem: vi.fn() }),
     }));
 
     const { InboxView } = await import("./inbox/InboxView");
@@ -120,46 +120,46 @@ describe("Inbox inline reply", () => {
   });
 });
 
-describe("Inbox badge", () => {
-  it("reflects the count of open requires_response items", async () => {
+describe("Inbox badge (email-like: open + unread)", () => {
+  it("counts open unread items regardless of requires_response, and clears as they are read/deleted", async () => {
     const store = await import("../store/store");
     const { TabBar } = await import("./TabBar");
     const { queryByText } = render(() => <TabBar />);
 
-    // No open requires-response items yet -> no badge.
+    // No items yet -> no badge.
     expect(queryByText("1")).toBeNull();
 
+    // An open, unread item (read absent = unread) bumps the badge — even though
+    // it does NOT require a response (badge is now email-like, not RR-based).
     store.dispatch({
       type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, requires_response: true }) },
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, requires_response: false }) },
     });
     expect(queryByText("1")).not.toBeNull();
 
-    // An item that does NOT require a response must not bump the count.
+    // A second open, unread item bumps it to 2.
     store.dispatch({
       type: "inbox_upsert",
-      payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 2, requires_response: false }),
-      },
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, requires_response: true }) },
+    });
+    expect(queryByText("2")).not.toBeNull();
+
+    // Reading one (host upsert read=true) drops it back to 1.
+    store.dispatch({
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, read: true }) },
     });
     expect(queryByText("1")).not.toBeNull();
     expect(queryByText("2")).toBeNull();
 
-    // A second requires-response item bumps it to 2.
-    store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 3, requires_response: true }) },
-    });
+    // Marking it unread again (client-only override) bumps it back to 2.
+    store.dispatch({ type: "mark_unread_local", itemId: 2 });
     expect(queryByText("2")).not.toBeNull();
 
-    // Archiving one drops it back to 1.
+    // Deleting an item (status archived) drops it out of the count.
     store.dispatch({
       type: "inbox_upsert",
-      payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 3, requires_response: true, status: "archived" }),
-      },
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, read: true, status: "archived" }) },
     });
     expect(queryByText("1")).not.toBeNull();
     expect(queryByText("2")).toBeNull();

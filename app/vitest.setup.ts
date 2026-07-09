@@ -11,6 +11,9 @@ if (!Element.prototype.scrollIntoView) {
 if (!Element.prototype.scrollTo) {
   Element.prototype.scrollTo = () => {};
 }
+// jsdom throws "Not implemented" for window.scrollTo; Kobalte's menu engages
+// solid-prevent-scroll on open, which restores window scroll on close.
+window.scrollTo = (() => {}) as typeof window.scrollTo;
 
 // jsdom lacks matchMedia; the Composer probes `(pointer: coarse)` on mount.
 if (!window.matchMedia) {

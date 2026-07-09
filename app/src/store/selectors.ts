@@ -1,11 +1,20 @@
 import type { InboxItem } from "../protocol";
 import type { DisplayMessage } from "./types";
 
-/** Count backing both the Inbox tab badge and the document.title badge
- * (spec: "Tab badge = count of open requires_response items; also reflect it
- * in document.title"). Kept in one place so both stay in sync by construction. */
-export function openRequiresResponseCount(inbox: InboxItem[]): number {
-  return inbox.filter((i) => i.status === "open" && i.requires_response).length;
+/** Effective "seen" state for an Inbox item (v1.3). An item is read when the
+ * wire `read` flag is true AND the Owner has not manually "Marked unread" it
+ * (a client-only override). Kept in one place so the badge, the card visual
+ * state, and the auto-read gate all agree by construction. */
+export function isItemRead(item: InboxItem, unreadOverrides: number[]): boolean {
+  return item.read === true && !unreadOverrides.includes(item.id);
+}
+
+/** Count backing both the Inbox tab badge and the document.title badge. v1.3:
+ * email-like "unread" count = open items that are not yet effectively read
+ * (was open + requires_response). requires_response no longer affects the
+ * badge — it only drives the card accent. */
+export function openUnreadCount(inbox: InboxItem[], unreadOverrides: number[]): number {
+  return inbox.filter((i) => i.status === "open" && !isItemRead(i, unreadOverrides)).length;
 }
 
 /** The Owner's reply to an Inbox Item, derived — never persisted — from Chat.

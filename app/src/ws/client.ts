@@ -106,12 +106,13 @@ class HirselWsClient {
   sendMessage(
     body: string,
     ref: number | null,
-    opts?: { mode?: SendMode; attachments?: Blob[] },
+    opts?: { mode?: SendMode; attachments?: Blob[]; mentions?: number[] },
   ): number {
     const clientId = makeClientId();
     const localId = makeLocalId();
     const mode: SendMode = opts?.mode ?? "send";
     const attachments = opts?.attachments ?? [];
+    const mentions = opts?.mentions ?? [];
     dispatch({
       type: "send_local",
       localId,
@@ -121,6 +122,7 @@ class HirselWsClient {
       ts: new Date().toISOString(),
       attachments,
       mode,
+      mentions,
     });
     this.sendFrame({
       type: "send_message",
@@ -129,6 +131,9 @@ class HirselWsClient {
       ref,
       attachments: attachments.map((b) => b.id),
       mode,
+      // v2.1 (ADR-0009): @-mentioned ping ids. Omit when empty so the common
+      // case keeps the pre-v2.1 wire shape (host defaults it to []).
+      ...(mentions.length > 0 ? { mentions } : {}),
     });
     this.armFailTimer(clientId);
     return localId;
@@ -146,6 +151,7 @@ class HirselWsClient {
       ref: pending.ref,
       attachments: pending.attachments ?? [],
       mode: pending.mode ?? "send",
+      ...(pending.mentions && pending.mentions.length > 0 ? { mentions: pending.mentions } : {}),
     });
     this.armFailTimer(clientId);
   }
@@ -189,25 +195,27 @@ class HirselWsClient {
     this.sendFrame({ type: "cancel_queued", client_id: clientId });
   }
 
-  archiveItem(itemId: number): void {
-    this.enqueue({ type: "archive_item", item_id: itemId });
+  /** v2.1: resolve a Ping to Done (⋯ "Mark done"). Enqueued so it survives an
+   * offline window. (Was `archiveItem`.) */
+  resolvePing(pingId: number): void {
+    this.enqueue({ type: "resolve_ping", ping_id: pingId });
   }
 
-  /** Mark an Inbox item read (v1.3). Optimistically flips read=true locally
-   * (reconciled by the host's inbox_upsert) and sends the idempotent read_item
-   * frame. Enqueued so it survives an offline window like archive_item. */
-  readItem(itemId: number): void {
-    dispatch({ type: "read_local", itemId });
-    this.enqueue({ type: "read_item", item_id: itemId });
+  /** Mark a Ping read (v1.3). Optimistically flips read=true locally
+   * (reconciled by the host's ping_upsert) and sends the idempotent read_ping
+   * frame. Enqueued so it survives an offline window like resolve_ping. */
+  readPing(pingId: number): void {
+    dispatch({ type: "read_local", pingId });
+    this.enqueue({ type: "read_ping", ping_id: pingId });
   }
 
   // ---- v2.0 side chats (ADR-0008) ----
 
-  /** "Discuss" (fresh) or "Resume" (in-progress) — idempotent per item on the
+  /** "Discuss" (fresh) or "Resume" (in-progress) — idempotent per Ping on the
    * host, so this is the single entry point for both. Enqueued so a tap right
    * as the socket drops still fires once reconnected. */
-  openSideChat(itemId: number): void {
-    this.enqueue({ type: "open_side_chat", client_id: makeClientId(), item_id: itemId });
+  openSideChat(pingId: number): void {
+    this.enqueue({ type: "open_side_chat", client_id: makeClientId(), ping_id: pingId });
   }
 
   /** Send within a side chat's scope. Mirrors sendMessage's optimistic +
@@ -387,8 +395,8 @@ class HirselWsClient {
         });
         break;
       }
-      case "inbox_upsert": {
-        dispatch({ type: "inbox_upsert", payload: message });
+      case "ping_upsert": {
+        dispatch({ type: "ping_upsert", payload: message });
         break;
       }
       case "process_upsert": {
@@ -412,7 +420,7 @@ class HirselWsClient {
         dispatch({
           type: "side_chat_open",
           sc: message.sc,
-          itemId: message.item_id,
+          pingId: message.ping_id,
           messages: message.messages,
         });
         break;
@@ -466,6 +474,9 @@ class HirselWsClient {
           ref: pending.ref,
           attachments: pending.attachments ?? [],
           mode: pending.mode ?? "send",
+          ...(pending.mentions && pending.mentions.length > 0
+            ? { mentions: pending.mentions }
+            : {}),
         } satisfies ClientMessage),
       );
     }

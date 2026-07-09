@@ -26,7 +26,7 @@ describe("hello_ok seeds processes", () => {
         type: "hello_ok",
         latest_msg_id: 0,
         messages: [],
-        inbox: [],
+        pings: [],
         processes: [proc(), proc({ id: "proc-2", kind: "monitor" })],
       },
     });
@@ -34,7 +34,7 @@ describe("hello_ok seeds processes", () => {
 
     const withoutProcs = reduce(initialState(), {
       type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], inbox: [] },
+      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [] },
     });
     expect(withoutProcs.processes).toEqual([]);
   });
@@ -47,7 +47,7 @@ describe("hello_ok seeds processes", () => {
     expect(seeded.turnEvents).toHaveLength(1);
     const resynced = reduce(seeded, {
       type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], inbox: [] },
+      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [] },
     });
     expect(resynced.turnEvents).toEqual([]);
   });
@@ -81,4 +81,3 @@ describe("process_upsert", () => {
     expect(s3.processes.map((p) => p.id)).toEqual(["proc-1", "proc-2"]);
   });
 });
-

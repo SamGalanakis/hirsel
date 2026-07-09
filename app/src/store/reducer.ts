@@ -1,7 +1,7 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { ChatMessage, InboxItem, ProcessInfo } from "../protocol";
+import type { ChatMessage, Ping, ProcessInfo } from "../protocol";
 import type {
   Action,
   AppState,
@@ -16,25 +16,25 @@ import type {
  * A live chat session has few turns; this only guards a pathological long run. */
 const TURN_DETAILS_LIMIT = 50;
 
-function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
-  const idx = inbox.findIndex((existing) => existing.id === item.id);
-  if (idx === -1) return [...inbox, item];
-  const next = inbox.slice();
-  next[idx] = item;
+function upsertPing(pings: Ping[], ping: Ping): Ping[] {
+  const idx = pings.findIndex((existing) => existing.id === ping.id);
+  if (idx === -1) return [...pings, ping];
+  const next = pings.slice();
+  next[idx] = ping;
   return next;
 }
 
-/** v2.1 (ADR-0009): the Owner replying to an item's Anchor resolves it to
- * `done`. The host does this authoritatively (and broadcasts an inbox_upsert),
+/** v2.1 (ADR-0009): the Owner replying to a Ping's Anchor resolves it to
+ * `done`. The host does this authoritatively (and broadcasts a ping_upsert),
  * but the client flips optimistically the moment the reply is sent — exactly
- * like read-state — so a replied item leaves the open list immediately instead
+ * like read-state — so a replied Ping leaves the open list immediately instead
  * of lingering until the echo. Idempotent and a no-op when `ref` matches no
- * open item; the host upsert reconciles the truth. */
-function resolveOpenItemByAnchor(inbox: InboxItem[], ref: number | null): InboxItem[] {
-  if (ref === null) return inbox;
-  const idx = inbox.findIndex((i) => i.status === "open" && i.anchor === ref);
-  if (idx === -1) return inbox;
-  const next = inbox.slice();
+ * open Ping; the host upsert reconciles the truth. */
+function resolveOpenPingByAnchor(pings: Ping[], ref: number | null): Ping[] {
+  if (ref === null) return pings;
+  const idx = pings.findIndex((p) => p.status === "open" && p.anchor === ref);
+  if (idx === -1) return pings;
+  const next = pings.slice();
   next[idx] = { ...next[idx], status: "done" };
   return next;
 }
@@ -209,10 +209,10 @@ function setSideChat(
 
 /** A fresh SideChatState for a side chat the client has just learned is live
  * (opened, resumed, or seeded from `hello_ok.side_chats`). */
-function freshSideChat(sc: string, itemId: number, messages: ChatMessage[]): SideChatState {
+function freshSideChat(sc: string, pingId: number, messages: ChatMessage[]): SideChatState {
   return {
     sc,
-    itemId,
+    pingId,
     messages,
     agentActivity: { state: "idle", text: null },
     turnEvents: [],
@@ -220,7 +220,7 @@ function freshSideChat(sc: string, itemId: number, messages: ChatMessage[]): Sid
     draft: null,
     confirming: false,
     discarding: false,
-    itemArchived: false,
+    pingResolved: false,
     ended: false,
   };
 }
@@ -228,7 +228,7 @@ function freshSideChat(sc: string, itemId: number, messages: ChatMessage[]): Sid
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
-      const { latest_msg_id, inbox } = action.payload;
+      const { latest_msg_id, pings } = action.payload;
       // Never re-admit a tombstoned (cancelled) id from replay.
       const messages = action.payload.messages.filter((m) => !state.removedIds.includes(m.id));
       const known = new Map<number, DisplayMessage>();
@@ -276,7 +276,7 @@ export function reduce(state: AppState, action: Action): AppState {
       return {
         ...state,
         messages: [...merged, ...pending],
-        inbox,
+        pings,
         lastSeenMsgId: latest_msg_id,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
@@ -381,16 +381,16 @@ export function reduce(state: AppState, action: Action): AppState {
         }),
       };
 
-    case "inbox_upsert": {
-      const item = action.payload.item;
-      // Edge case (critique, binding): the Agent can archive an item while its
+    case "ping_upsert": {
+      const ping = action.payload.ping;
+      // Edge case (critique, binding): the Agent can resolve a Ping while its
       // side chat is still open. Don't kill the sheet — flag a non-blocking
       // banner; Conclude/Discard both remain available. Fully derivable here,
       // so no separate action/dispatch is needed for it.
       let sideChats = state.sideChats;
-      if (item.status !== "open") {
-        const hasArchivable = Object.values(state.sideChats).some(
-          (sc) => sc.itemId === item.id && !sc.itemArchived,
+      if (ping.status !== "open") {
+        const hasResolvable = Object.values(state.sideChats).some(
+          (sc) => sc.pingId === ping.id && !sc.pingResolved,
         );
         // Guarded so the common case (no matching live side chat) leaves
         // `sideChats` as the untouched live reference — cheap, and safe,
@@ -398,12 +398,12 @@ export function reduce(state: AppState, action: Action): AppState {
         // something IS changing, every entry (not just the matching one) is
         // cloned through, not just aliased into the fresh map (see
         // cloneSideChat's note on why a live reference can't ride along).
-        if (hasArchivable) {
+        if (hasResolvable) {
           const next: AppState["sideChats"] = {};
           for (const [sc, sideChat] of Object.entries(state.sideChats)) {
             next[sc] =
-              sideChat.itemId === item.id && !sideChat.itemArchived
-                ? { ...cloneSideChat(sideChat), itemArchived: true }
+              sideChat.pingId === ping.id && !sideChat.pingResolved
+                ? { ...cloneSideChat(sideChat), pingResolved: true }
                 : cloneSideChat(sideChat);
           }
           sideChats = next;
@@ -411,38 +411,39 @@ export function reduce(state: AppState, action: Action): AppState {
       }
       return {
         ...state,
-        inbox: upsertInboxItem(state.inbox, item),
+        pings: upsertPing(state.pings, ping),
         sideChats,
       };
     }
 
     case "read_local": {
       // Optimistic email-like "seen" flip: set read=true locally (the host's
-      // inbox_upsert reconciles it) and drop any manual unread override, since
+      // ping_upsert reconciles it) and drop any manual unread override, since
       // reading always wins over a prior "Mark unread".
-      const inbox = state.inbox.map((i) =>
-        i.id === action.itemId ? { ...i, read: true } : i,
+      const pings = state.pings.map((p) =>
+        p.id === action.pingId ? { ...p, read: true } : p,
       );
       return {
         ...state,
-        inbox,
-        unreadOverrides: state.unreadOverrides.filter((id) => id !== action.itemId),
+        pings,
+        unreadOverrides: state.unreadOverrides.filter((id) => id !== action.pingId),
       };
     }
 
     case "mark_unread_local": {
-      // Client-only override (no wire unread op): record the id so the item is
+      // Client-only override (no wire unread op): record the id so the Ping is
       // rendered/counted as unread even though the wire `read` flag stays true.
-      const unreadOverrides = state.unreadOverrides.includes(action.itemId)
+      const unreadOverrides = state.unreadOverrides.includes(action.pingId)
         ? state.unreadOverrides
-        : [...state.unreadOverrides, action.itemId].slice(-200);
+        : [...state.unreadOverrides, action.pingId].slice(-200);
       return { ...state, unreadOverrides };
     }
 
     case "send_local": {
-      const { localId, clientId, body, ref, ts, attachments, mode } = action;
+      const { localId, clientId, body, ref, ts, attachments, mode, mentions } = action;
       const blobs = attachments ?? [];
       const sendMode = mode ?? "send";
+      const mentionIds = mentions ?? [];
       // Negative synthetic ids keep optimistic entries clearly out of the
       // host's id space; they are never sorted against real ids, only appended
       // and later replaced in place once reconciled.
@@ -462,12 +463,13 @@ export function reduce(state: AppState, action: Action): AppState {
       const pendingSend: PendingSend = { clientId, body, ref };
       if (blobs.length > 0) pendingSend.attachments = blobs.map((b) => b.id);
       if (sendMode !== "send") pendingSend.mode = sendMode;
+      if (mentionIds.length > 0) pendingSend.mentions = mentionIds;
       return {
         ...state,
         messages: [...state.messages, localMessage],
         pendingSends: [...state.pendingSends, pendingSend],
-        // v2.1 (ADR-0009): an anchored reply optimistically resolves its item.
-        inbox: resolveOpenItemByAnchor(state.inbox, ref),
+        // v2.1 (ADR-0009): an anchored reply optimistically resolves its Ping.
+        pings: resolveOpenPingByAnchor(state.pings, ref),
       };
     }
 
@@ -542,16 +544,16 @@ export function reduce(state: AppState, action: Action): AppState {
     // that sc-scoped routing can never leak into (or read from) main state.
 
     case "side_chat_open": {
-      // Idempotent per item (protocol v2.0): resuming a live side chat answers
+      // Idempotent per Ping (protocol v2.0): resuming a live side chat answers
       // with the SAME sc and its transcript so far, so this both creates a
       // fresh scope and refreshes an already-hydrated one.
       const existing = state.sideChats[action.sc];
       const sideChat = existing
         ? { ...cloneSideChat(existing), messages: action.messages, ended: false }
-        : freshSideChat(action.sc, action.itemId, action.messages);
+        : freshSideChat(action.sc, action.pingId, action.messages);
       const sideChatRefs = state.sideChatRefs.some((r) => r.sc === action.sc)
         ? state.sideChatRefs
-        : [...state.sideChatRefs, { sc: action.sc, item_id: action.itemId }];
+        : [...state.sideChatRefs, { sc: action.sc, ping_id: action.pingId }];
       return {
         ...state,
         sideChats: setSideChat(state.sideChats, action.sc, sideChat),
@@ -684,9 +686,9 @@ export function reduce(state: AppState, action: Action): AppState {
         }),
         awaitingConclusions: { ...state.awaitingConclusions, [action.anchor]: action.sc },
         // v2.1 (ADR-0009): a Side Chat Conclusion is an anchored reply too, so
-        // it resolves its item optimistically on confirm (the confirm has no
+        // it resolves its Ping optimistically on confirm (the confirm has no
         // send_local of its own — the owner reply lands later as a `msg`).
-        inbox: resolveOpenItemByAnchor(state.inbox, action.anchor),
+        pings: resolveOpenPingByAnchor(state.pings, action.anchor),
       };
     }
 

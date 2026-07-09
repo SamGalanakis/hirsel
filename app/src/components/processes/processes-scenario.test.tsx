@@ -12,9 +12,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  *   1. hello_ok seeds a RUNNING sub-agent → Processes badge 1, agent+model chips.
  *   2. Expand → "Ask to stop" → switches to Chat with the composer pre-filled
  *      "stop process <id> (<label>)" (interrupt routes through the Agent).
- *   3. A scripted turn: agent_tool_call events render as LIVE tool rows under the
- *      thinking marker, then CLEAR on commit; the committed message shows a
- *      "⚙ 2 tools" chip that expands to the per-tool ok list.
+ *   3. A committed agent message carrying a tool_calls summary (no live timeline
+ *      streamed) shows the fallback "⚙ 2 tools" chip that expands to the per-tool
+ *      ok list. (The live v1.5 timeline path lives in timeline-scenario.test.tsx.)
  *   4. process_upsert done → the sub-agent moves Running → Finished, badge 0.
  */
 
@@ -173,16 +173,10 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       expect(composer.value).toContain("Review the auth refactor");
       checklist.push('"Ask to stop" switched to Chat and pre-filled the composer');
 
-      // --- 3. Scripted turn: live tool rows appear, then clear on commit ---
+      // --- 3. Committed message with a tool_calls summary but no streamed
+      // timeline → the fallback "⚙ N tools" chip (the full v1.5 live-timeline
+      // path is covered by timeline-scenario.test.tsx). ---
       host.push({ type: "agent_activity", state: "thinking", text: "Working through it…" });
-      host.push({ type: "agent_tool_call", name: "read_file", summary: "reducer.ts", seq: 1 });
-      host.push({ type: "agent_tool_call", name: "grep", summary: "process_upsert", seq: 2 });
-      await waitFor(() => expect(store.state.liveToolCalls).toHaveLength(2), { timeout: 10000 });
-      expect(await screen.findByText("read_file")).toBeTruthy();
-      expect(screen.getByText("grep")).toBeTruthy();
-      checklist.push("live tool rows (read_file, grep) rendered under the thinking marker");
-
-      // Commit the turn: an agent message carrying tool_calls + idle.
       host.push({
         type: "msg",
         message: {
@@ -200,13 +194,10 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       });
       host.push({ type: "agent_activity", state: "idle", text: null });
 
-      await waitFor(() => expect(store.state.liveToolCalls).toHaveLength(0), { timeout: 10000 });
       await screen.findByText("Checked the reducer and grepped — both fine.");
-      // Live rows cleared: the tool names are no longer in the DOM (chip collapsed).
-      expect(screen.queryByText("read_file")).toBeNull();
       const chip = await screen.findByRole("button", { name: /2 tool/ });
       expect(chip.textContent).toContain("2 tools");
-      checklist.push('live rows cleared on commit; committed "⚙ 2 tools" chip present');
+      checklist.push('committed "⚙ 2 tools" fallback chip present (no live timeline captured)');
 
       // Expand the committed chip → per-tool ok list.
       fireEvent.click(chip);

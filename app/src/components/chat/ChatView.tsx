@@ -22,7 +22,7 @@ import {
 import { Composer } from "./Composer";
 import { Lightbox } from "./Lightbox";
 import { MessageBubble } from "./MessageBubble";
-import { LiveToolCalls } from "./ToolCalls";
+import { Timeline } from "./Timeline";
 import { createComposerAttachments } from "./useAttachments";
 
 const HIGHLIGHT_MS = 1600;
@@ -198,6 +198,7 @@ export function ChatView() {
                             <MessageBubble
                               message={m}
                               refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
+                              turnDetails={state.turnDetails[m.id]}
                               highlighted={highlightedId() === m.id}
                               queued={
                                 m.mode === "next_turn" && thinking() && unansweredOwnerIds().has(m.id)
@@ -215,8 +216,9 @@ export function ChatView() {
                 </For>
 
                 {/* Live "Thinking…" status via a shimmering Marker (ephemeral),
-                    with the running turn's live tool-call rows beneath it. */}
-                <Show when={thinking() || state.liveToolCalls.length > 0}>
+                    with the running turn's timeline (prose ↔ tools ↔ reasoning,
+                    in seq order) beneath it. */}
+                <Show when={thinking() || state.turnEvents.length > 0}>
                   <MessageScrollerItem class="flex flex-col gap-1.5 px-4 py-1">
                     <Show when={thinking()}>
                       <Marker>
@@ -225,8 +227,8 @@ export function ChatView() {
                         </MarkerContent>
                       </Marker>
                     </Show>
-                    <Show when={state.liveToolCalls.length > 0}>
-                      <LiveToolCalls calls={state.liveToolCalls} />
+                    <Show when={state.turnEvents.length > 0}>
+                      <Timeline events={state.turnEvents} />
                     </Show>
                   </MessageScrollerItem>
                 </Show>

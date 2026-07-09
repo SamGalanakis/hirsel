@@ -80,9 +80,9 @@ function upsertProcess(patch) {
   return proc;
 }
 
-/** Emit an ephemeral tool-call event for the running turn (v1.4). */
-function emitToolCall(name, summary, seq) {
-  broadcast({ type: "agent_tool_call", name, summary: summary ?? null, seq });
+/** Emit one ephemeral timeline event for the running turn (v1.5). */
+function emitTurnEvent(seq, event) {
+  broadcast({ type: "turn_event", seq, event });
 }
 
 /** hello_ok processes slice: all non-terminal + the last 10 terminal. */
@@ -183,25 +183,61 @@ function startReplyTurn(ownerMessage) {
         });
       }, 8000);
     }, REPLY_DELAY_MS);
-  } else if (ownerMessage.body.trim().toLowerCase() === "tools") {
-    // A scripted thinking window that streams live tool calls, then commits a
-    // reply stamped with the matching tool_calls summary.
+  } else if (ownerMessage.body.trim().toLowerCase() === "timeline") {
+    // A scripted thinking window streaming a full v1.5 timeline — prose →
+    // tool_start/done → prose → reasoning → prose — then committing a reply
+    // stamped with the matching tool_calls summary (the turn-details fallback).
     setActivity("thinking", "Working through it…");
-    later(() => emitToolCall("read_file", "src/store/reducer.ts", 1), 300);
-    later(() => emitToolCall("grep", "process_upsert", 2), 900);
+    later(() => emitTurnEvent(1, { kind: "prose", text: "Let me look into that. " }), 300);
+    later(() => emitTurnEvent(2, { kind: "prose", text: "First I'll check the reducer." }), 700);
+    later(
+      () =>
+        emitTurnEvent(3, {
+          kind: "tool_start",
+          id: "t1",
+          name: "read_file",
+          summary: "src/store/reducer.ts",
+        }),
+      1100,
+    );
+    later(
+      () => emitTurnEvent(4, { kind: "tool_done", id: "t1", ok: true, summary: "read 142 lines" }),
+      1900,
+    );
+    later(
+      () =>
+        emitTurnEvent(5, {
+          kind: "prose",
+          text: "The reducer looks right — the handler is wired correctly.",
+        }),
+      2300,
+    );
+    later(
+      () =>
+        emitTurnEvent(6, {
+          kind: "reasoning",
+          text: "seq ordering guarantees the tool row lands between the two prose blocks even if frames arrive out of order.",
+        }),
+      2700,
+    );
+    later(
+      () =>
+        emitTurnEvent(7, {
+          kind: "prose",
+          text: "Everything checks out — no changes needed.",
+        }),
+      3100,
+    );
     later(() => {
       addMessage(
         "agent",
-        "Checked the reducer and grepped for the handler — both look right.",
+        "Checked the reducer — the handler is wired correctly, no changes needed.",
         ownerMessage.id,
         [],
-        [
-          { name: "read_file", ok: true },
-          { name: "grep", ok: true },
-        ],
+        [{ name: "read_file", ok: true }],
       );
       finishTurn();
-    }, REPLY_DELAY_MS + 1200);
+    }, 3600);
   } else if (ownerMessage.body.trim().toLowerCase() === "monitor") {
     // Create a monitor Runtime Process (running), then have it "fire" once.
     const procId = `proc-${nextProcSeq++}`;

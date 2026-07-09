@@ -322,8 +322,8 @@ class HirselWsClient {
         dispatch({ type: "process_upsert", payload: message });
         break;
       }
-      case "agent_tool_call": {
-        dispatch({ type: "agent_tool_call", payload: message });
+      case "turn_event": {
+        dispatch({ type: "turn_event", payload: message });
         break;
       }
       case "blob_ok": {

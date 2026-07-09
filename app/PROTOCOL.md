@@ -175,3 +175,37 @@ ProcessInfo): monitors.create { cmd, every_secs (floor 30), wake_on:
 Persisted across restarts (like timer schedules); each is a lash Runtime Process that runs the probe
 on its interval and appends a wake event ONLY when the condition fires (payload: label + probe output
 tail).
+
+> **Superseded by v1.5:** `agent_tool_call` is removed from the wire and replaced by the richer
+> `turn_event` stream (below). The committed-message `tool_calls` summary is unchanged.
+
+## v1.5 — running-turn timeline (2026-07-09)
+
+Replaces v1.4 `agent_tool_call` with an ordered `turn_event` stream so the client renders the
+running turn as a lash-CLI-style timeline — streaming prose interleaved with tool rows and collapsed
+reasoning, in exact `seq` order — instead of a bare list of tool rows. Intermediate prose (invisible
+in v1.4) is now surfaced.
+
+Server → client:
+```
+{ "type": "turn_event", "seq": u64, "event": TurnEvent }
+
+TurnEvent  (tagged by "kind"):
+  { "kind": "prose",      "text": string }                       // markdown delta → current prose block
+  { "kind": "reasoning",  "text": string }                       // reasoning delta → current reasoning run
+  { "kind": "tool_start", "id": string, "name": string, "summary": string | null }  // opens a tool row
+  { "kind": "tool_done",  "id": string, "ok": bool, "summary": string | null }       // resolves the row by "id"
+```
+
+- `seq` strictly orders events within the turn. Clients render in seq order, tolerate gaps (a missing
+  seq is skipped, never buffered or reordered), and treat a redelivered seq idempotently (replace).
+- Block model: consecutive same-kind deltas accumulate into one block/run; any change of kind
+  (including a `tool_start`) closes the current prose/reasoning block, and later prose opens a new one.
+  `tool_start` inserts a tool row at its seq position; `tool_done` updates the matching-`id` row in
+  place with a spinner→check/cross result and its own condensed `summary` (it is not a separate row).
+  A `tool_done` with no matching `tool_start` is dropped.
+- `summary` fields are clean one-liners produced host-side (no raw JSON); the client renders them as-is.
+- Ephemeral like `agent_activity`: never stored or replayed. The client clears the live timeline on
+  turn commit (an agent `msg`) or `agent_activity` idle. On commit the client MAY retain the finished
+  timeline in session memory keyed to the committed message (a "turn details" affordance); client-only,
+  not persisted, gone after reload.

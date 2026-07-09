@@ -2,7 +2,18 @@
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
 import type { InboxItem, ProcessInfo } from "../protocol";
-import type { Action, AppState, DisplayMessage, LiveToolCall, PendingSend, Upload } from "./types";
+import type {
+  Action,
+  AppState,
+  DisplayMessage,
+  PendingSend,
+  TimelineEvent,
+  Upload,
+} from "./types";
+
+/** Cap on retained finished-turn timelines (session memory for "turn details").
+ * A live chat session has few turns; this only guards a pathological long run. */
+const TURN_DETAILS_LIMIT = 50;
 
 function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
   const idx = inbox.findIndex((existing) => existing.id === item.id);
@@ -22,11 +33,29 @@ function upsertProcess(processes: ProcessInfo[], process: ProcessInfo): ProcessI
   return next;
 }
 
-/** Insert a live tool-call keyed by `seq` (idempotent on redelivery), keeping
- * the list sorted by seq so the newest row is always last. */
-function upsertLiveToolCall(calls: LiveToolCall[], call: LiveToolCall): LiveToolCall[] {
-  const withoutDup = calls.filter((c) => c.seq !== call.seq);
-  return [...withoutDup, call].sort((a, b) => a.seq - b.seq);
+/** Insert a turn timeline event keyed by `seq` (idempotent on redelivery),
+ * keeping the list sorted by seq. Out-of-order arrivals sort into place; gaps
+ * are left as-is (the fold renders what is present, never buffering). */
+function upsertTurnEvent(events: TimelineEvent[], event: TimelineEvent): TimelineEvent[] {
+  const withoutDup = events.filter((e) => e.seq !== event.seq);
+  return [...withoutDup, event].sort((a, b) => a.seq - b.seq);
+}
+
+/** Freeze the just-finished turn's timeline onto the committing message id,
+ * dropping the oldest retained turn once over the session cap. */
+function retainTurnDetails(
+  details: Record<number, TimelineEvent[]>,
+  msgId: number,
+  events: TimelineEvent[],
+): Record<number, TimelineEvent[]> {
+  const next: Record<number, TimelineEvent[]> = { ...details, [msgId]: events };
+  const ids = Object.keys(next).map(Number);
+  if (ids.length > TURN_DETAILS_LIMIT) {
+    for (const id of ids.sort((a, b) => a - b).slice(0, ids.length - TURN_DETAILS_LIMIT)) {
+      delete next[id];
+    }
+  }
+  return next;
 }
 
 function setUpload(uploads: Upload[], clientId: string, patch: Partial<Upload>): Upload[] {
@@ -101,10 +130,11 @@ export function reduce(state: AppState, action: Action): AppState {
         inbox,
         lastSeenMsgId: latest_msg_id,
         pendingSends,
-        // Fresh sync boundary: seed processes; live tool rows (ephemeral, never
-        // replayed) do not survive a resync.
+        // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
+        // never replayed) does not survive a resync. Retained turn details for
+        // already-shown messages are kept (session memory, orthogonal to sync).
         processes: action.payload.processes ?? [],
-        liveToolCalls: [],
+        turnEvents: [],
       };
     }
 
@@ -114,13 +144,19 @@ export function reduce(state: AppState, action: Action): AppState {
       // even if its echo arrives after the msg_removed that killed it.
       if (state.removedIds.includes(message.id)) return state;
       const next = reconcileOrAppend(state, message);
+      // A committed agent message ends the turn: freeze its live timeline into
+      // session memory keyed to this message (the "turn details" affordance),
+      // then clear the ephemeral live buffer. Only stash a non-empty timeline.
+      const commits = message.author === "agent";
+      const stash = commits && state.turnEvents.length > 0;
       return {
         ...next,
         lastSeenMsgId:
           state.lastSeenMsgId === null ? message.id : Math.max(state.lastSeenMsgId, message.id),
-        // A committed agent message ends the turn: clear the ephemeral live tool
-        // rows (the committed message carries its own tool_calls footer chip).
-        liveToolCalls: message.author === "agent" ? [] : next.liveToolCalls,
+        turnEvents: commits ? [] : next.turnEvents,
+        turnDetails: stash
+          ? retainTurnDetails(state.turnDetails, message.id, state.turnEvents)
+          : next.turnDetails,
       };
     }
 
@@ -149,9 +185,9 @@ export function reduce(state: AppState, action: Action): AppState {
           state: action.payload.state,
           text: action.payload.text,
         },
-        // Turn boundary: idle clears the live tool rows (a cancelled turn may go
-        // idle without a committed message).
-        liveToolCalls: action.payload.state === "idle" ? [] : state.liveToolCalls,
+        // Turn boundary: idle clears the live timeline (a cancelled turn may go
+        // idle without a committed message; its partial timeline is dropped).
+        turnEvents: action.payload.state === "idle" ? [] : state.turnEvents,
       };
 
     case "process_upsert":
@@ -160,13 +196,12 @@ export function reduce(state: AppState, action: Action): AppState {
         processes: upsertProcess(state.processes, action.payload.process),
       };
 
-    case "agent_tool_call":
+    case "turn_event":
       return {
         ...state,
-        liveToolCalls: upsertLiveToolCall(state.liveToolCalls, {
-          name: action.payload.name,
-          summary: action.payload.summary,
+        turnEvents: upsertTurnEvent(state.turnEvents, {
           seq: action.payload.seq,
+          event: action.payload.event,
         }),
       };
 

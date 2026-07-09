@@ -120,6 +120,41 @@ function reconcileSideMessages(
   return { messages: [...messages, message], reconciledClientId: null };
 }
 
+/** Shallow-clone a SideChatState, including FRESH references for its two
+ * array fields. `state` (the reducer's input) may be a live reactive store
+ * proxy (see store.ts's `appSnapshot`): spreading it copies key/value pairs
+ * but not nested array *contents*, so a carried-over `messages`/`turnEvents`
+ * stays the exact same tracked array reference. Feeding that same reference
+ * back into a store write — even nested inside an otherwise-fresh wrapper
+ * object — confused Solid's merge on the *next* write to that path (traced
+ * to an empty `messages` after a resume's `side_chat_open`). Spread this
+ * before layering further overrides, everywhere an existing/current
+ * SideChatState is carried into a new one. */
+function cloneSideChat(sideChat: SideChatState): SideChatState {
+  return { ...sideChat, messages: [...sideChat.messages], turnEvents: [...sideChat.turnEvents] };
+}
+
+/** Set (insert or replace) one entry in the sideChats map, cloning every
+ * OTHER entry through too rather than letting it ride along as a live store
+ * reference embedded in the otherwise-fresh returned object — the same
+ * hazard `cloneSideChat` guards against, just at the map level instead of a
+ * single entry. `value` should already be a fresh SideChatState (built via
+ * `cloneSideChat(existing)` plus overrides, or `freshSideChat`). Side chat
+ * counts are small (a handful at most, per the critique's "multiple side
+ * chats" case), so cloning every entry on every update is cheap. */
+function setSideChat(
+  sideChats: AppState["sideChats"],
+  sc: string,
+  value: SideChatState,
+): AppState["sideChats"] {
+  const next: AppState["sideChats"] = {};
+  for (const [key, existing] of Object.entries(sideChats)) {
+    next[key] = key === sc ? value : cloneSideChat(existing);
+  }
+  if (!(sc in next)) next[sc] = value;
+  return next;
+}
+
 /** A fresh SideChatState for a side chat the client has just learned is live
  * (opened, resumed, or seeded from `hello_ok.side_chats`). */
 function freshSideChat(sc: string, itemId: number, messages: ChatMessage[]): SideChatState {
@@ -179,9 +214,9 @@ export function reduce(state: AppState, action: Action): AppState {
       const sideChats: AppState["sideChats"] = {};
       for (const [sc, sideChat] of Object.entries(state.sideChats)) {
         if (liveScs.has(sc)) {
-          sideChats[sc] = sideChat;
+          sideChats[sc] = cloneSideChat(sideChat);
         } else if (!sideChat.confirming && !sideChat.discarding) {
-          sideChats[sc] = { ...sideChat, ended: true };
+          sideChats[sc] = { ...cloneSideChat(sideChat), ended: true };
         }
         // else: resolved while offline as expected — drop.
       }
@@ -297,10 +332,24 @@ export function reduce(state: AppState, action: Action): AppState {
       // so no separate action/dispatch is needed for it.
       let sideChats = state.sideChats;
       if (item.status === "archived") {
-        for (const [sc, sideChat] of Object.entries(state.sideChats)) {
-          if (sideChat.itemId === item.id && !sideChat.itemArchived) {
-            sideChats = { ...sideChats, [sc]: { ...sideChat, itemArchived: true } };
+        const hasArchivable = Object.values(state.sideChats).some(
+          (sc) => sc.itemId === item.id && !sc.itemArchived,
+        );
+        // Guarded so the common case (no matching live side chat) leaves
+        // `sideChats` as the untouched live reference — cheap, and safe,
+        // since nothing rebuilds a fresh wrapper around it in that case. Once
+        // something IS changing, every entry (not just the matching one) is
+        // cloned through, not just aliased into the fresh map (see
+        // cloneSideChat's note on why a live reference can't ride along).
+        if (hasArchivable) {
+          const next: AppState["sideChats"] = {};
+          for (const [sc, sideChat] of Object.entries(state.sideChats)) {
+            next[sc] =
+              sideChat.itemId === item.id && !sideChat.itemArchived
+                ? { ...cloneSideChat(sideChat), itemArchived: true }
+                : cloneSideChat(sideChat);
           }
+          sideChats = next;
         }
       }
       return {
@@ -439,14 +488,14 @@ export function reduce(state: AppState, action: Action): AppState {
       // fresh scope and refreshes an already-hydrated one.
       const existing = state.sideChats[action.sc];
       const sideChat = existing
-        ? { ...existing, messages: action.messages, ended: false }
+        ? { ...cloneSideChat(existing), messages: action.messages, ended: false }
         : freshSideChat(action.sc, action.itemId, action.messages);
       const sideChatRefs = state.sideChatRefs.some((r) => r.sc === action.sc)
         ? state.sideChatRefs
         : [...state.sideChatRefs, { sc: action.sc, item_id: action.itemId }];
       return {
         ...state,
-        sideChats: { ...state.sideChats, [action.sc]: sideChat },
+        sideChats: setSideChat(state.sideChats, action.sc, sideChat),
         sideChatRefs,
       };
     }
@@ -454,17 +503,19 @@ export function reduce(state: AppState, action: Action): AppState {
     case "side_chat_msg": {
       const sideChat = state.sideChats[action.sc];
       if (!sideChat) return state; // unknown/already-closed scope; drop.
+      const cloned = cloneSideChat(sideChat);
       const { messages, reconciledClientId } = reconcileSideMessages(
-        sideChat.messages,
+        cloned.messages,
         action.message,
       );
       const commits = action.message.author === "agent";
       return {
         ...state,
-        sideChats: {
-          ...state.sideChats,
-          [action.sc]: { ...sideChat, messages, turnEvents: commits ? [] : sideChat.turnEvents },
-        },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloned,
+          messages,
+          turnEvents: commits ? [] : cloned.turnEvents,
+        }),
         pendingSideSends: reconciledClientId
           ? state.pendingSideSends.filter((p) => p.clientId !== reconciledClientId)
           : state.pendingSideSends,
@@ -483,12 +534,13 @@ export function reduce(state: AppState, action: Action): AppState {
         pending: true,
         clientId: action.clientId,
       };
+      const cloned = cloneSideChat(sideChat);
       return {
         ...state,
-        sideChats: {
-          ...state.sideChats,
-          [action.sc]: { ...sideChat, messages: [...sideChat.messages, localMessage] },
-        },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloned,
+          messages: [...cloned.messages, localMessage],
+        }),
         pendingSideSends: [
           ...state.pendingSideSends,
           { sc: action.sc, clientId: action.clientId, body: action.body, ref: action.ref },
@@ -499,34 +551,27 @@ export function reduce(state: AppState, action: Action): AppState {
     case "side_chat_agent_activity": {
       const sideChat = state.sideChats[action.sc];
       if (!sideChat) return state;
+      const cloned = cloneSideChat(sideChat);
       return {
         ...state,
-        sideChats: {
-          ...state.sideChats,
-          [action.sc]: {
-            ...sideChat,
-            agentActivity: { state: action.state, text: action.text },
-            turnEvents: action.state === "idle" ? [] : sideChat.turnEvents,
-          },
-        },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloned,
+          agentActivity: { state: action.state, text: action.text },
+          turnEvents: action.state === "idle" ? [] : cloned.turnEvents,
+        }),
       };
     }
 
     case "side_chat_turn_event": {
       const sideChat = state.sideChats[action.sc];
       if (!sideChat) return state;
+      const cloned = cloneSideChat(sideChat);
       return {
         ...state,
-        sideChats: {
-          ...state.sideChats,
-          [action.sc]: {
-            ...sideChat,
-            turnEvents: upsertTurnEvent(sideChat.turnEvents, {
-              seq: action.seq,
-              event: action.event,
-            }),
-          },
-        },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloned,
+          turnEvents: upsertTurnEvent(cloned.turnEvents, { seq: action.seq, event: action.event }),
+        }),
       };
     }
 
@@ -535,7 +580,10 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!sideChat) return state;
       return {
         ...state,
-        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, drafting: true } },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloneSideChat(sideChat),
+          drafting: true,
+        }),
       };
     }
 
@@ -544,10 +592,11 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!sideChat) return state;
       return {
         ...state,
-        sideChats: {
-          ...state.sideChats,
-          [action.sc]: { ...sideChat, drafting: false, draft: action.text },
-        },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloneSideChat(sideChat),
+          drafting: false,
+          draft: action.text,
+        }),
       };
     }
 
@@ -558,7 +607,10 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!sideChat) return state;
       return {
         ...state,
-        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, draft: null } },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloneSideChat(sideChat),
+          draft: null,
+        }),
       };
     }
 
@@ -567,7 +619,10 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!sideChat) return state;
       return {
         ...state,
-        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, confirming: true } },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloneSideChat(sideChat),
+          confirming: true,
+        }),
         awaitingConclusions: { ...state.awaitingConclusions, [action.anchor]: action.sc },
       };
     }
@@ -577,7 +632,10 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!sideChat) return state;
       return {
         ...state,
-        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, discarding: true } },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloneSideChat(sideChat),
+          discarding: true,
+        }),
       };
     }
 
@@ -586,9 +644,13 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!sideChat) return state; // already gone (e.g. duplicate delivery).
       const sideChatRefs = state.sideChatRefs.filter((r) => r.sc !== action.sc);
       if (sideChat.confirming || sideChat.discarding) {
-        // Expected close (conclude/discard) completed — drop the record.
-        const rest = { ...state.sideChats };
-        delete rest[action.sc];
+        // Expected close (conclude/discard) completed — drop the record. Every
+        // remaining entry is cloned through rather than spread-aliased (see
+        // cloneSideChat) since this rebuilds a fresh top-level map.
+        const rest: AppState["sideChats"] = {};
+        for (const [sc, other] of Object.entries(state.sideChats)) {
+          if (sc !== action.sc) rest[sc] = cloneSideChat(other);
+        }
         return { ...state, sideChats: rest, sideChatRefs };
       }
       // Host-initiated close we didn't ask for (TTL reap, or closed
@@ -596,7 +658,10 @@ export function reduce(state: AppState, action: Action): AppState {
       // chat ended" gracefully instead of the surface just vanishing.
       return {
         ...state,
-        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, ended: true } },
+        sideChats: setSideChat(state.sideChats, action.sc, {
+          ...cloneSideChat(sideChat),
+          ended: true,
+        }),
         sideChatRefs,
       };
     }

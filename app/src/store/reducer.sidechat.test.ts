@@ -417,7 +417,7 @@ describe("hello_ok reconciliation of live side chats", () => {
     expect(state.sideChats).toEqual({});
   });
 
-  it("keeps a hydrated side chat still listed as live untouched", () => {
+  it("keeps a hydrated side chat still listed as live, content-equal", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
@@ -434,7 +434,11 @@ describe("hello_ok reconciliation of live side chats", () => {
         side_chats: [{ sc: "side:1", item_id: 5 }],
       },
     });
-    expect(resynced.sideChats["side:1"]).toBe(opened.sideChats["side:1"]);
+    // Content-equal, but NOT the same reference: a fresh clone (rather than
+    // carrying over the exact prior object) is what makes this safe to feed
+    // into a subsequent store write — see cloneSideChat's note in reducer.ts.
+    expect(resynced.sideChats["side:1"]).toEqual(opened.sideChats["side:1"]);
+    expect(resynced.sideChats["side:1"]).not.toBe(opened.sideChats["side:1"]);
   });
 
   it("drops a hydrated side chat that resolved (confirming/discarding) while offline", () => {

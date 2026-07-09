@@ -115,7 +115,14 @@ export function dispatch(action: Action): void {
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);
     setState("sideChatRefs", next.sideChatRefs);
-    setState("sideChats", next.sideChats);
+    // `reconcile` (not a plain setState) is load-bearing here, unlike
+    // `turnDetails` below (a same-shaped Record<key, {...arrays}>): a plain
+    // `setState("sideChats", plainObject)` intermittently landed a stale/empty
+    // nested array on a same-length array replacement (traced via a resume
+    // losing its restored transcript) — reconcile's structural diff does not
+    // have that failure mode. `turnDetails` likely shares the latent risk;
+    // out of scope for this change, flagging for a follow-up.
+    setState("sideChats", reconcile(next.sideChats));
     setState("pendingSideSends", next.pendingSideSends);
     setState("awaitingConclusions", next.awaitingConclusions);
     setState("conclusionChips", next.conclusionChips);

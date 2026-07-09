@@ -166,7 +166,11 @@ impl AgentRuntime {
     pub async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
         match self.backend.as_ref() {
             AgentBackend::Lash(runtime) => runtime.start_monitor_process(record).await,
-            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(()),
+            AgentBackend::Scripted(runtime) => {
+                runtime.spawn_standalone_monitor(record.id.clone());
+                Ok(())
+            }
+            AgentBackend::Degraded(_) => Ok(()),
         }
     }
 
@@ -203,6 +207,10 @@ fn start_scripted_runtime(
     let worker = Arc::clone(&runtime);
     tokio::spawn(async move {
         worker.run().await;
+    });
+    let monitor_worker = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        monitor_worker.spawn_active_standalone_monitors().await;
     });
     runtime
 }
@@ -3260,6 +3268,64 @@ impl ScriptedAgentRuntime {
             },
         );
         Ok(())
+    }
+
+    async fn spawn_active_standalone_monitors(self: Arc<Self>) {
+        match self.tools.active_monitors().await {
+            Ok(monitors) => {
+                for monitor in monitors {
+                    self.spawn_standalone_monitor(monitor.id);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to resume scripted standalone monitors");
+            }
+        }
+    }
+
+    fn spawn_standalone_monitor(self: &Arc<Self>, monitor_id: String) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let record = match runtime.tools.monitor(&monitor_id).await {
+                    Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                    Ok(_) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor lookup failed");
+                        break;
+                    }
+                };
+                tokio::time::sleep(Duration::from_secs(record.every_secs)).await;
+                let record = match runtime.tools.monitor(&monitor_id).await {
+                    Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                    Ok(_) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor lookup failed");
+                        break;
+                    }
+                };
+                let tick = run_monitor_tick(&record).await;
+                match runtime
+                    .tools
+                    .record_monitor_tick(&monitor_id, tick.probe.output.clone(), tick.summary)
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor tick persist failed");
+                        continue;
+                    }
+                }
+                if tick.wake {
+                    if let Some(text) = tick.wake_text {
+                        if let Err(error) = runtime.deliver_monitor_wake(text).await {
+                            tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor wake delivery failed");
+                        }
+                    }
+                }
+            }
+        });
     }
 
     async fn run(self: Arc<Self>) {

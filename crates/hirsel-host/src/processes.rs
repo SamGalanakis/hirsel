@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent, TerminalOutcome};
 use hirsel_proto::{ProcessInfo, ProcessKind, ProcessState};
 use serde::Serialize;
-use uuid::Uuid;
 
 const SUMMARY_BROADCAST_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -53,18 +52,6 @@ pub struct RecordedProcessUpdate {
 }
 
 impl ProcessStore {
-    pub fn insert(
-        &self,
-        agent: AgentKind,
-        model: Option<String>,
-        handle: SessionHandle,
-        prompt: String,
-        cwd: String,
-    ) -> anyhow::Result<String> {
-        let id = format!("proc-{}", Uuid::new_v4());
-        self.insert_with_id(id, agent, model, handle, prompt, cwd)
-    }
-
     pub fn insert_with_id(
         &self,
         id: String,

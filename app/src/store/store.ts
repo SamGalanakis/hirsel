@@ -53,7 +53,8 @@ function appSnapshot(): AppState {
     pendingSends: state.pendingSends,
     uploads: state.uploads,
     processes: state.processes,
-    liveToolCalls: state.liveToolCalls,
+    turnEvents: state.turnEvents,
+    turnDetails: state.turnDetails,
     removedIds: state.removedIds,
     unreadOverrides: state.unreadOverrides,
   };
@@ -79,7 +80,8 @@ export function dispatch(action: Action): void {
     setState("unreadOverrides", next.unreadOverrides);
     setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("processes", reconcile(next.processes, { key: "id" }));
-    setState("liveToolCalls", next.liveToolCalls);
+    setState("turnEvents", next.turnEvents);
+    setState("turnDetails", next.turnDetails);
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);

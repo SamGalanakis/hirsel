@@ -1,6 +1,5 @@
 import type {
   AgentActivityState,
-  AgentToolCallMsg,
   Blob,
   ChatMessage,
   HelloOkMsg,
@@ -10,6 +9,8 @@ import type {
   ProcessInfo,
   ProcessUpsertMsg,
   SendMode,
+  TurnEvent,
+  TurnEventMsg,
 } from "../protocol";
 
 /** A chat message as rendered locally. `pending`/`clientId`/`mode`/`failed`
@@ -57,13 +58,12 @@ export interface Upload {
   blobId?: string; // set once blob_ok correlates
 }
 
-/** An ephemeral tool-call event from the running turn (v1.4). Accumulated in
- * `seq` order while the Agent is thinking, then cleared the moment the turn
- * commits — never stored beyond the running turn. */
-export interface LiveToolCall {
-  name: string;
-  summary: string | null;
+/** A single ordered timeline event from the running turn (v1.5), carrying its
+ * wire `seq` alongside the tagged event body. Accumulated in `seq` order while
+ * the Agent is thinking; folded into a rendered timeline by `buildTimeline`. */
+export interface TimelineEvent {
   seq: number;
+  event: TurnEvent;
 }
 
 export interface AppState {
@@ -77,9 +77,14 @@ export interface AppState {
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
    * hello_ok.processes and kept current by process_upsert. */
   processes: ProcessInfo[];
-  /** v1.4: live tool-call rows for the turn in progress. Ephemeral: cleared on
-   * turn commit (agent msg / agent_activity idle). */
-  liveToolCalls: LiveToolCall[];
+  /** v1.5: ordered events for the turn in progress, kept sorted by `seq`.
+   * Ephemeral: cleared on turn commit (agent msg / agent_activity idle) and
+   * frozen into `turnDetails` on an agent commit. */
+  turnEvents: TimelineEvent[];
+  /** v1.5: finished-turn timelines kept in session memory, keyed by the id of
+   * the agent message that committed the turn (the "turn details" affordance).
+   * Not persisted — gone after reload. Bounded to the most recent turns. */
+  turnDetails: Record<number, TimelineEvent[]>;
   /** Host ids tombstoned by msg_removed. A cancelled queued message can have
    * its removal race its own echo; keeping the id here means a late echo is
    * dropped instead of re-materializing the bubble. Bounded. */
@@ -97,7 +102,7 @@ export type Action =
   | { type: "msg_removed"; id: number }
   | { type: "agent_activity"; payload: { state: AgentActivityState; text: string | null } }
   | { type: "process_upsert"; payload: ProcessUpsertMsg }
-  | { type: "agent_tool_call"; payload: AgentToolCallMsg }
+  | { type: "turn_event"; payload: TurnEventMsg }
   | { type: "inbox_upsert"; payload: InboxUpsertMsg }
   | { type: "read_local"; itemId: number }
   | { type: "mark_unread_local"; itemId: number }
@@ -131,7 +136,8 @@ export function initialState(): AppState {
     pendingSends: [],
     uploads: [],
     processes: [],
-    liveToolCalls: [],
+    turnEvents: [],
+    turnDetails: {},
     removedIds: [],
     unreadOverrides: [],
   };

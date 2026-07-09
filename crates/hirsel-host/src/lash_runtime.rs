@@ -48,19 +48,23 @@ use lash_core::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, broadcast};
+use uuid::Uuid;
 
 use crate::{
     BroadcastLog,
     config::{AgentMode, DriverMode, ProviderMode},
-    storage::StoredBlob,
+    monitors::{output_tail, run_monitor_tick},
+    storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
     tools::ToolSuite,
 };
 
 const AGENT_SESSION_ID: &str = "agent";
 const HIRSEL_SUBAGENT_ENGINE: &str = "hirsel_subagent";
+const HIRSEL_MONITOR_ENGINE: &str = "hirsel_monitor";
 const SUBAGENT_COMPLETED: &str = "subagent.completed";
 const SUBAGENT_FAILED: &str = "subagent.failed";
 const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
+const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;
@@ -153,6 +157,28 @@ impl AgentRuntime {
             AgentBackend::Scripted(runtime) => runtime.cancel_queued(client_id).await,
             AgentBackend::Lash(runtime) => runtime.cancel_queued(client_id).await,
             AgentBackend::Degraded(runtime) => runtime.cancel_queued(client_id).await,
+        }
+    }
+
+    pub async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Lash(runtime) => runtime.start_monitor_process(record).await,
+            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(()),
+        }
+    }
+
+    pub async fn cancel_monitor_process(&self, monitor_id: &str) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Lash(runtime) => runtime.cancel_monitor_process(monitor_id).await,
+            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(()),
+        }
+    }
+
+    pub async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(runtime) => runtime.deliver_monitor_wake(text).await,
+            AgentBackend::Lash(runtime) => runtime.enqueue_monitor_wake(text).await,
+            AgentBackend::Degraded(runtime) => runtime.deliver_monitor_wake(text).await,
         }
     }
 }
@@ -276,6 +302,7 @@ impl LashAgentRuntime {
             .tools(tool_provider)
             .plugin(Arc::new(HirselProcessPluginFactory {
                 tools: tools.clone(),
+                notify: Arc::clone(&notify),
             }))
             .queued_work_driver(queued_work_driver)
             .build()?;
@@ -311,6 +338,7 @@ impl LashAgentRuntime {
         runtime.spawn_turn_pump();
         runtime.spawn_process_terminal_bridge(process_registry, store_factory);
         runtime.spawn_timer_trigger_source(trigger_store);
+        runtime.resume_active_monitors().await;
         runtime.notify_if_work_pending().await;
         tracing::info!(
             model = %config.model,
@@ -373,6 +401,52 @@ impl LashAgentRuntime {
         };
         if pending_inputs || queued_work {
             self.notify.notify_one();
+        }
+    }
+
+    async fn resume_active_monitors(&self) {
+        let monitors = match self.tools.active_monitors().await {
+            Ok(monitors) => monitors,
+            Err(error) => {
+                tracing::warn!(%error, "failed to list active monitors at boot");
+                return;
+            }
+        };
+        for monitor in monitors {
+            let existing = match self.core.processes().get(&monitor.id).await {
+                Ok(existing) => existing,
+                Err(error) => {
+                    tracing::warn!(%error, monitor_id = %monitor.id, "failed to inspect monitor process at boot");
+                    continue;
+                }
+            };
+            if existing.as_ref().is_some_and(|process| !process.terminal) {
+                continue;
+            }
+            let scope = inline_trigger_scope(format!("monitor-resume:{}", monitor.id));
+            if let Err(error) = self
+                .core
+                .processes()
+                .start(monitor_start_request(&monitor, AGENT_SESSION_ID), scope)
+                .await
+            {
+                tracing::warn!(%error, monitor_id = %monitor.id, "failed to resume monitor process");
+            } else {
+                self.tools.broadcast_monitor_upsert(&monitor);
+            }
+        }
+        match self.core.durable_process_worker_config() {
+            Ok(config) => {
+                if let Err(error) = lash_core::DurableProcessWorker::new(config)
+                    .drive_pending_processes()
+                    .await
+                {
+                    tracing::warn!(%error, "failed to drive recovered monitor processes at boot");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to build monitor recovery worker");
+            }
         }
     }
 
@@ -465,8 +539,53 @@ impl LashAgentRuntime {
         }
     }
 
+    async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
+        self.core
+            .processes()
+            .start(
+                monitor_start_request(record, AGENT_SESSION_ID),
+                inline_trigger_scope(format!("monitor-debug-create:{}", record.id)),
+            )
+            .await?;
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    async fn cancel_monitor_process(&self, monitor_id: &str) -> anyhow::Result<()> {
+        match self
+            .core
+            .processes()
+            .cancel(
+                monitor_id,
+                inline_trigger_scope(format!("monitor-debug-cancel:{monitor_id}")),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::debug!(%error, monitor_id = %monitor_id, "monitor process cancel returned an error");
+                Ok(())
+            }
+        }
+    }
+
+    async fn enqueue_monitor_wake(&self, text: String) -> anyhow::Result<()> {
+        self.session
+            .enqueue(TurnInput::text(text))
+            .id(format!("monitor-wake-{}", Uuid::new_v4()))
+            .ingress(TurnInputIngress::next_turn())
+            .send()
+            .await?;
+        self.notify.notify_one();
+        Ok(())
+    }
+
     async fn deliver_turn_chat(&self, text: String, tool_calls: Vec<ToolCallSummary>) {
-        match self.tools.chat_send_with_tool_calls(text, None, tool_calls).await {
+        match self
+            .tools
+            .chat_send_with_tool_calls(text, None, tool_calls)
+            .await
+        {
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(%error, "failed to deliver Agent turn output to Chat");
@@ -1035,13 +1154,27 @@ fn tool_call_from_observation(
 }
 
 fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
-    output
+    let summaries = output
         .result
         .tool_calls
         .iter()
         .map(|call| ToolCallSummary {
             name: call.tool.clone(),
             ok: call.output.is_success(),
+        })
+        .collect::<Vec<_>>();
+    if !summaries.is_empty() {
+        return summaries;
+    }
+    output
+        .activities
+        .iter()
+        .filter_map(|activity| match &activity.event {
+            lash::TurnEvent::ToolCallCompleted { name, output, .. } => Some(ToolCallSummary {
+                name: name.clone(),
+                ok: output.is_success(),
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -1131,6 +1264,11 @@ impl DegradedAgentRuntime {
                 text: None,
             },
         );
+        Ok(())
+    }
+
+    async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
+        self.tools.chat_send(text, None).await?;
         Ok(())
     }
 
@@ -1253,6 +1391,9 @@ impl HirselToolExecutor {
             "subagents_list" => self.subagents_list().await,
             "subagents_progress" => self.subagents_progress(call.args).await,
             "subagents_wait" => self.subagents_wait(call.args, call.context).await,
+            "monitors_create" => self.monitors_create(call.args, call.context).await,
+            "monitors_list" => self.monitors_list().await,
+            "monitors_cancel" => self.monitors_cancel(call.args, call.context).await,
             "shell_run" => self.shell_run(call.args).await,
             other => Err(format!("Unknown tool: {other}")),
         }
@@ -1409,6 +1550,73 @@ impl HirselToolExecutor {
         serde_json::to_value(output).map_err(|error| error.to_string())
     }
 
+    async fn monitors_create(
+        &self,
+        args: &Value,
+        context: &lash::tools::ToolContext<'_>,
+    ) -> Result<Value, String> {
+        let cmd = required_string(args, "cmd")?;
+        let every_secs = args
+            .get("every_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(30)
+            .max(30);
+        let wake_on = parse_monitor_wake_on(required_string(args, "wake_on")?.as_str())?;
+        let pattern = optional_string(args, "pattern")?;
+        if matches!(wake_on, MonitorWakeOn::Regex) && pattern.is_none() {
+            return Err("pattern is required when wake_on is regex".to_string());
+        }
+        let label = required_string(args, "label")?;
+        let record = self
+            .tools
+            .monitors_create(cmd, every_secs, wake_on, pattern, label)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = monitor_start_request(&record, context.session_id());
+        let start = context.processes().start(request).await;
+        if let Err(error) = start {
+            let _ = self.tools.monitors_cancel(&record.id).await;
+            return Err(error.to_string());
+        }
+        serde_json::to_value(json!({
+            "monitor_id": record.id,
+            "process_id": record.id,
+            "monitor": record,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    async fn monitors_list(&self) -> Result<Value, String> {
+        let monitors = self
+            .tools
+            .monitors_list()
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(json!({ "monitors": monitors })).map_err(|error| error.to_string())
+    }
+
+    async fn monitors_cancel(
+        &self,
+        args: &Value,
+        context: &lash::tools::ToolContext<'_>,
+    ) -> Result<Value, String> {
+        let monitor_id = required_string_any(args, &["monitor_id", "process_id", "id"])?;
+        let record = self
+            .tools
+            .monitors_cancel(&monitor_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if record.is_none() {
+            return Err(format!("monitor not found: {monitor_id}"));
+        }
+        let cancel = context.processes().cancel(&monitor_id).await;
+        if let Err(error) = cancel {
+            tracing::debug!(%error, monitor_id = %monitor_id, "monitor process cancel returned an error");
+        }
+        serde_json::to_value(json!({ "ok": true, "monitor_id": monitor_id }))
+            .map_err(|error| error.to_string())
+    }
+
     async fn current_anchor(&self) -> Option<u64> {
         self.anchors
             .lock()
@@ -1421,6 +1629,7 @@ impl HirselToolExecutor {
 #[derive(Clone)]
 struct HirselProcessPluginFactory {
     tools: ToolSuite,
+    notify: Arc<Notify>,
 }
 
 impl PluginFactory for HirselProcessPluginFactory {
@@ -1445,9 +1654,15 @@ impl PluginFactory for HirselProcessPluginFactory {
         &self,
         _ctx: &ProcessEngineContributionContext<'_>,
     ) -> Result<Vec<Arc<dyn ProcessEngine>>, PluginError> {
-        Ok(vec![Arc::new(HirselSubagentEngine {
-            tools: self.tools.clone(),
-        })])
+        Ok(vec![
+            Arc::new(HirselSubagentEngine {
+                tools: self.tools.clone(),
+            }),
+            Arc::new(HirselMonitorEngine {
+                tools: self.tools.clone(),
+                notify: Arc::clone(&self.notify),
+            }),
+        ])
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -1598,6 +1813,124 @@ impl ProcessEngine for HirselSubagentEngine {
     }
 }
 
+#[derive(Clone)]
+struct HirselMonitorEngine {
+    tools: ToolSuite,
+    notify: Arc<Notify>,
+}
+
+#[async_trait]
+impl ProcessEngine for HirselMonitorEngine {
+    fn kind(&self) -> &'static str {
+        HIRSEL_MONITOR_ENGINE
+    }
+
+    async fn validate_start(
+        &self,
+        _context: ProcessEngineValidationContext<'_>,
+        payload: &Value,
+        _env_spec: Option<&lash::process::ProcessExecutionEnvSpec>,
+    ) -> Result<(), PluginError> {
+        MonitorProcessPayload::from_value(payload).map(|_| ())
+    }
+
+    async fn run(
+        &self,
+        context: ProcessEngineRunContext<'_>,
+        payload: Value,
+    ) -> ProcessAwaitOutput {
+        let payload = match MonitorProcessPayload::from_value(&payload) {
+            Ok(payload) => payload,
+            Err(error) => return cancelled_await_output(error.to_string()),
+        };
+        let process_id = context.registration().id.to_string();
+        let cancellation = context.cancellation_token();
+        let registry = context.registry();
+        let store_factory = context.session_store_factory();
+        drop(context);
+        loop {
+            let record = match self.tools.monitor(&payload.monitor_id).await {
+                Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                Ok(Some(_)) => return cancelled_await_output("monitor cancelled".to_string()),
+                Ok(None) => return cancelled_await_output("monitor spec missing".to_string()),
+                Err(error) => {
+                    return cancelled_await_output(format!("monitor lookup failed: {error}"));
+                }
+            };
+            tokio::select! {
+                () = cancellation.cancelled() => {
+                    return cancelled_await_output("monitor cancelled".to_string());
+                }
+                () = tokio::time::sleep(Duration::from_secs(record.every_secs)) => {}
+            }
+            let record = match self.tools.monitor(&payload.monitor_id).await {
+                Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                Ok(Some(_)) => return cancelled_await_output("monitor cancelled".to_string()),
+                Ok(None) => return cancelled_await_output("monitor spec missing".to_string()),
+                Err(error) => {
+                    return cancelled_await_output(format!("monitor lookup failed: {error}"));
+                }
+            };
+            let tick = run_monitor_tick(&record).await;
+            let updated = match self
+                .tools
+                .record_monitor_tick(
+                    &payload.monitor_id,
+                    tick.probe.output.clone(),
+                    tick.summary.clone(),
+                )
+                .await
+            {
+                Ok(Some(updated)) => updated,
+                Ok(None) => return cancelled_await_output("monitor cancelled".to_string()),
+                Err(error) => {
+                    tracing::warn!(%error, monitor_id = %payload.monitor_id, "failed to persist monitor tick");
+                    continue;
+                }
+            };
+            if !tick.wake {
+                continue;
+            }
+            if let Err(error) = append_monitor_wake(
+                registry.as_ref(),
+                store_factory.as_deref(),
+                &process_id,
+                &updated,
+                &tick,
+                &self.notify,
+            )
+            .await
+            {
+                tracing::warn!(%error, monitor_id = %payload.monitor_id, "failed to append monitor wake event");
+            }
+        }
+    }
+
+    fn identity(&self, payload: &Value) -> ProcessIdentity {
+        let label = MonitorProcessPayload::from_value(payload)
+            .ok()
+            .map(|payload| payload.label);
+        ProcessIdentity::new(HIRSEL_MONITOR_ENGINE).with_label(label)
+    }
+
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+}
+
+struct MonitorProcessPayload {
+    monitor_id: String,
+    label: String,
+}
+
+impl MonitorProcessPayload {
+    fn from_value(value: &Value) -> Result<Self, PluginError> {
+        let monitor_id = required_string(value, "monitor_id").map_err(PluginError::Session)?;
+        let label = required_string(value, "label").map_err(PluginError::Session)?;
+        Ok(Self { monitor_id, label })
+    }
+}
+
 struct SubagentProcessPayload {
     agent: AgentKind,
     model: Option<String>,
@@ -1637,6 +1970,83 @@ fn subagent_event_types() -> Vec<ProcessEventType> {
         terminal_event_type(SUBAGENT_FAILED, ProcessTerminalState::Failed),
         terminal_event_type(SUBAGENT_CANCELLED, ProcessTerminalState::Cancelled),
     ]
+}
+
+fn monitor_start_request(record: &MonitorRecord, session_id: &str) -> ProcessStartRequest {
+    ProcessStartRequest::new(
+        record.id.clone(),
+        ProcessInput::Engine {
+            kind: HIRSEL_MONITOR_ENGINE.to_string(),
+            payload: json!({
+                "monitor_id": record.id,
+                "label": record.label,
+            }),
+        },
+        RecoveryDisposition::Rerunnable,
+        ProcessOriginator::session(SessionScope::new(session_id)),
+    )
+    .with_wake_target(Some(SessionScope::new(AGENT_SESSION_ID)))
+    .with_event_types(monitor_event_types())
+}
+
+fn monitor_event_types() -> Vec<ProcessEventType> {
+    vec![ProcessEventType {
+        name: MONITOR_WAKE_EVENT.to_string(),
+        payload_schema: LashSchema::new(json!({
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["text", "label", "output_tail"],
+            "properties": {
+                "text": { "type": "string" },
+                "label": { "type": "string" },
+                "output_tail": { "type": "string" }
+            }
+        })),
+        semantics: ProcessEventSemanticsSpec {
+            terminal: None,
+            wake: Some(ProcessWakeSpec {
+                when: None,
+                input: ProcessValueSelector::Pointer("/text".to_string()),
+                dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+            }),
+        },
+    }]
+}
+
+async fn append_monitor_wake(
+    registry: &dyn lash::process::ProcessRegistry,
+    store_factory: Option<&dyn lash::persistence::SessionStoreFactory>,
+    process_id: &str,
+    record: &MonitorRecord,
+    tick: &crate::monitors::MonitorTick,
+    notify: &Notify,
+) -> anyhow::Result<()> {
+    let text = tick.wake_text.clone().unwrap_or_else(|| {
+        format!(
+            "Monitor `{}` fired.\n\n{}",
+            record.label,
+            output_tail(&tick.probe.output, 4 * 1024)
+        )
+    });
+    let run_key = record
+        .last_run_ts
+        .map(|ts| ts.timestamp_millis().to_string())
+        .unwrap_or_else(|| Utc::now().timestamp_millis().to_string());
+    let request = ProcessEventAppendRequest::new(
+        MONITOR_WAKE_EVENT,
+        json!({
+            "text": text,
+            "label": record.label,
+            "output_tail": output_tail(&tick.probe.output, 4 * 1024),
+        }),
+    )
+    .with_replay_key(format!("hirsel-monitor:{}:{run_key}", record.id));
+    let result = registry.append_event(process_id, request).await?;
+    if let Some(store_factory) = store_factory {
+        enqueue_process_wake(store_factory, result.wake_delivery).await?;
+        notify.notify_one();
+    }
+    Ok(())
 }
 
 fn terminal_event_type(name: &str, state: ProcessTerminalState) -> ProcessEventType {
@@ -1856,6 +2266,61 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
             ToolScheduling::Parallel,
         ),
         tool_definition(
+            "hirsel.monitors_create",
+            "monitors_create",
+            "Create a persisted host monitor that wakes the Agent when its condition fires.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["cmd", "wake_on", "label"],
+                "properties": {
+                    "cmd": { "type": "string" },
+                    "every_secs": { "type": "integer", "minimum": 30 },
+                    "wake_on": {
+                        "type": "string",
+                        "enum": ["changed", "exit_zero", "exit_nonzero", "regex"]
+                    },
+                    "pattern": { "type": "string" },
+                    "label": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object" }),
+            ["monitors"],
+            "create",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.monitors_list",
+            "monitors_list",
+            "List persisted host monitors.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+            }),
+            json!({ "type": "object" }),
+            ["monitors"],
+            "list",
+            ToolScheduling::Parallel,
+        ),
+        tool_definition(
+            "hirsel.monitors_cancel",
+            "monitors_cancel",
+            "Cancel a persisted host monitor.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["monitor_id"],
+                "properties": {
+                    "monitor_id": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object" }),
+            ["monitors"],
+            "cancel",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
             "hirsel.shell_run",
             "shell_run",
             "Run a bounded shell command and return stdout, stderr, status, and timeout state.",
@@ -1946,6 +2411,18 @@ fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
     }
 }
 
+fn parse_monitor_wake_on(value: &str) -> Result<MonitorWakeOn, String> {
+    match value {
+        "changed" => Ok(MonitorWakeOn::Changed),
+        "exit_zero" => Ok(MonitorWakeOn::ExitZero),
+        "exit_nonzero" => Ok(MonitorWakeOn::ExitNonzero),
+        "regex" => Ok(MonitorWakeOn::Regex),
+        other => Err(format!(
+            "wake_on must be changed, exit_zero, exit_nonzero, or regex, got `{other}`"
+        )),
+    }
+}
+
 fn short_label(text: &str) -> String {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_CHARS: usize = 80;
@@ -2017,6 +2494,27 @@ impl ScriptedAgentRuntime {
             return Ok(CancelQueuedResult::Cancelled);
         }
         Ok(CancelQueuedResult::AlreadyClaimed)
+    }
+
+    async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Thinking,
+                text: Some("monitor wake".to_string()),
+            },
+        );
+        self.tools.chat_send(text, None).await?;
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
+        Ok(())
     }
 
     async fn run(self: Arc<Self>) {

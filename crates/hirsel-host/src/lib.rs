@@ -3,6 +3,7 @@ pub mod blob_route;
 pub mod config;
 pub mod debug;
 pub mod lash_runtime;
+pub mod monitors;
 pub mod processes;
 pub mod storage;
 pub mod tools;
@@ -17,15 +18,16 @@ use std::{
 
 use anyhow::Context;
 use axum::Router;
-use hirsel_proto::{AgentActivityState, ChatMessage, HostToClient, SendMode};
+use hirsel_proto::{AgentActivityState, ChatMessage, HostToClient, ProcessInfo, SendMode};
 use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
 use crate::{
-    config::Config,
+    config::{AgentMode, Config},
     lash_runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn},
+    monitors::run_monitor_tick,
     processes::ProcessStore,
-    storage::Storage,
+    storage::{MonitorRecord, MonitorWakeOn, Storage, monitor_process_info},
     tools::{ToolSuite, ToolsConfig},
 };
 
@@ -39,6 +41,7 @@ pub struct AppState {
     pub processes: ProcessStore,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
+    pub standalone_monitors: bool,
 }
 
 #[derive(Clone, Default)]
@@ -147,6 +150,70 @@ impl AppState {
             CancelQueuedResult::AlreadyClaimed => anyhow::bail!("already claimed"),
         }
     }
+
+    pub async fn process_snapshot(&self) -> anyhow::Result<Vec<ProcessInfo>> {
+        let mut all = self.processes.snapshot()?;
+        all.extend(self.storage.monitor_snapshot().await?);
+        let mut running = Vec::new();
+        let mut terminal = Vec::new();
+        for process in all {
+            if matches!(process.state, hirsel_proto::ProcessState::Running) {
+                running.push(process);
+            } else {
+                terminal.push(process);
+            }
+        }
+        running.sort_by(|left, right| {
+            left.started_ts
+                .cmp(&right.started_ts)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        terminal.sort_by(|left, right| {
+            left.last_event_ts
+                .cmp(&right.last_event_ts)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if terminal.len() > 10 {
+            terminal.drain(..terminal.len() - 10);
+        }
+        running.extend(terminal);
+        Ok(running)
+    }
+
+    pub async fn create_monitor(
+        &self,
+        cmd: String,
+        every_secs: u64,
+        wake_on: MonitorWakeOn,
+        pattern: Option<String>,
+        label: String,
+    ) -> anyhow::Result<MonitorRecord> {
+        let record = self
+            .storage
+            .create_monitor(cmd, every_secs, wake_on, pattern, label)
+            .await?;
+        self.broadcast_monitor(&record);
+        self.agent.start_monitor_process(&record).await?;
+        if self.standalone_monitors {
+            spawn_standalone_monitor(self.clone(), record.id.clone());
+        }
+        Ok(record)
+    }
+
+    pub async fn cancel_monitor(&self, monitor_id: &str) -> anyhow::Result<Option<MonitorRecord>> {
+        let record = self.storage.cancel_monitor(monitor_id).await?;
+        if let Some(record) = &record {
+            self.broadcast_monitor(record);
+        }
+        self.agent.cancel_monitor_process(monitor_id).await?;
+        Ok(record)
+    }
+
+    pub fn broadcast_monitor(&self, record: &MonitorRecord) {
+        self.broadcast(HostToClient::ProcessUpsert {
+            process: monitor_process_info(record),
+        });
+    }
 }
 
 pub async fn build_app(config: Config) -> anyhow::Result<Router> {
@@ -155,6 +222,7 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
 }
 
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
+    let standalone_monitors = matches!(config.agent, AgentMode::Scripted);
     let storage = Storage::open(&config.data_dir)
         .await
         .with_context(|| format!("open storage under {}", config.data_dir.display()))?;
@@ -185,7 +253,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcast_log.clone(),
     )
     .await?;
-    Ok(AppState {
+    let state = AppState {
         token: Arc::from(config.token),
         storage,
         broadcaster,
@@ -194,7 +262,12 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         processes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
-    })
+        standalone_monitors,
+    };
+    if state.standalone_monitors {
+        spawn_active_standalone_monitors(state.clone()).await;
+    }
+    Ok(state)
 }
 
 pub fn router_from_state(state: AppState) -> Router {
@@ -216,6 +289,64 @@ pub fn router_from_state(state: AppState) -> Router {
         );
     }
     app
+}
+
+async fn spawn_active_standalone_monitors(state: AppState) {
+    match state.storage.active_monitors().await {
+        Ok(monitors) => {
+            for monitor in monitors {
+                spawn_standalone_monitor(state.clone(), monitor.id);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to resume standalone monitors");
+        }
+    }
+}
+
+fn spawn_standalone_monitor(state: AppState, monitor_id: String) {
+    tokio::spawn(async move {
+        loop {
+            let record = match state.storage.monitor(&monitor_id).await {
+                Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor lookup failed");
+                    break;
+                }
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(record.every_secs)).await;
+            let record = match state.storage.monitor(&monitor_id).await {
+                Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor lookup failed");
+                    break;
+                }
+            };
+            let tick = run_monitor_tick(&record).await;
+            let updated = match state
+                .storage
+                .record_monitor_tick(&monitor_id, tick.probe.output.clone(), tick.summary)
+                .await
+            {
+                Ok(Some(updated)) => updated,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor tick persist failed");
+                    continue;
+                }
+            };
+            state.broadcast_monitor(&updated);
+            if tick.wake {
+                if let Some(text) = tick.wake_text {
+                    if let Err(error) = state.agent.deliver_monitor_wake(text).await {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor wake delivery failed");
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

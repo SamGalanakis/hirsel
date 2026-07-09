@@ -15,6 +15,7 @@ Tools (bound as lashlang modules):
 - `subagents.prompt({ process_id, text })` · `subagents.interrupt({ process_id })` · `subagents.list({})` · `subagents.progress({ process_id })`
 - `shell.run({ cmd, cwd?, timeout_secs? })`
 - `timers` — schedule wakes for yourself (heartbeats, deadlines, "check on X in an hour") via trigger registration.
+- `monitors.create({ cmd, every_secs, wake_on, pattern?, label })` · `monitors.list({})` · `monitors.cancel({ monitor_id })`
 - `control.continue_as({ task })` — compaction, see below.
 
 ## Conventions

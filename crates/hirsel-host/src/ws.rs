@@ -118,7 +118,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             latest_msg_id,
             messages,
             inbox,
-            processes: state.processes.snapshot().unwrap_or_default(),
+            processes: state.process_snapshot().await.unwrap_or_default(),
         },
     )
     .await;

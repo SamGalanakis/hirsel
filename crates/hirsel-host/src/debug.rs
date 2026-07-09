@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
+    storage::{MonitorRecord, MonitorWakeOn},
 };
 
 pub fn routes(state: AppState) -> Router {
@@ -24,6 +25,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/read-item", post(read_item))
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
+        .route("/debug/create-monitor", post(create_monitor))
         .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
         .route("/debug/inbox", get(inbox))
@@ -62,6 +64,17 @@ struct ReadItemRequest {
     item_id: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateMonitorRequest {
+    cmd: String,
+    #[serde(default)]
+    every_secs: Option<u64>,
+    wake_on: MonitorWakeOn,
+    #[serde(default)]
+    pattern: Option<String>,
+    label: String,
+}
+
 #[derive(Debug, Serialize)]
 struct OwnerMessageResponse {
     client_id: String,
@@ -82,6 +95,11 @@ struct ChatResponse {
 #[derive(Debug, Serialize)]
 struct InboxResponse {
     items: Vec<InboxItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateMonitorResponse {
+    monitor: MonitorRecord,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,6 +188,22 @@ async fn read_item(
     Ok(Json(item))
 }
 
+async fn create_monitor(
+    State(state): State<AppState>,
+    Json(request): Json<CreateMonitorRequest>,
+) -> Result<Json<CreateMonitorResponse>, DebugError> {
+    let monitor = state
+        .create_monitor(
+            request.cmd,
+            request.every_secs.unwrap_or(30),
+            request.wake_on,
+            request.pattern,
+            request.label,
+        )
+        .await?;
+    Ok(Json(CreateMonitorResponse { monitor }))
+}
+
 async fn chat(State(state): State<AppState>) -> Result<Json<ChatResponse>, DebugError> {
     Ok(Json(ChatResponse {
         messages: state.storage.all_chat().await?,
@@ -190,7 +224,7 @@ async fn broadcasts(State(state): State<AppState>) -> Json<BroadcastsResponse> {
 
 async fn processes(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
     Ok(Json(serde_json::json!({
-        "processes": state.processes.snapshot()?
+        "processes": state.process_snapshot().await?
     })))
 }
 

@@ -6,9 +6,11 @@ use std::{
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use hirsel_proto::{
-    Blob, ChatAuthor, ChatMessage, InboxItem, InboxStatus, QuickReply, ToolCallSummary,
+    Blob, ChatAuthor, ChatMessage, InboxItem, InboxStatus, ProcessInfo, ProcessKind, ProcessState,
+    QuickReply, ToolCallSummary,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -23,6 +25,36 @@ pub struct StoredBlob {
     pub blob: Blob,
     pub path: PathBuf,
     pub created_ts: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorWakeOn {
+    Changed,
+    ExitZero,
+    ExitNonzero,
+    Regex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonitorRecord {
+    pub id: String,
+    pub cmd: String,
+    pub every_secs: u64,
+    pub wake_on: MonitorWakeOn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    pub label: String,
+    pub created_ts: DateTime<Utc>,
+    pub last_event_ts: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_ts: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_ts: Option<DateTime<Utc>>,
 }
 
 impl Storage {
@@ -85,6 +117,20 @@ impl Storage {
                 status TEXT NOT NULL,
                 read INTEGER NOT NULL DEFAULT 0,
                 ts TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS monitors (
+                id TEXT PRIMARY KEY,
+                cmd TEXT NOT NULL,
+                every_secs INTEGER NOT NULL,
+                wake_on TEXT NOT NULL,
+                pattern TEXT NULL,
+                label TEXT NOT NULL,
+                created_ts TEXT NOT NULL,
+                last_event_ts TEXT NOT NULL,
+                last_run_ts TEXT NULL,
+                last_output TEXT NULL,
+                summary TEXT NULL,
+                cancelled_ts TEXT NULL
             );
             ",
         )?;
@@ -481,6 +527,167 @@ impl Storage {
         get_stored_blob_optional(&conn, id).map_err(Into::into)
     }
 
+    pub async fn create_monitor(
+        &self,
+        cmd: impl Into<String>,
+        every_secs: u64,
+        wake_on: MonitorWakeOn,
+        pattern: Option<String>,
+        label: impl Into<String>,
+    ) -> anyhow::Result<MonitorRecord> {
+        let now = Utc::now();
+        let record = MonitorRecord {
+            id: format!("mon-{}", Uuid::new_v4()),
+            cmd: cmd.into(),
+            every_secs: every_secs.max(30),
+            wake_on,
+            pattern,
+            label: label.into(),
+            created_ts: now,
+            last_event_ts: now,
+            last_run_ts: None,
+            last_output: None,
+            summary: None,
+            cancelled_ts: None,
+        };
+        validate_monitor_record(&record)?;
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "
+            INSERT INTO monitors (
+                id,
+                cmd,
+                every_secs,
+                wake_on,
+                pattern,
+                label,
+                created_ts,
+                last_event_ts,
+                last_run_ts,
+                last_output,
+                summary,
+                cancelled_ts
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL)
+            ",
+            params![
+                record.id,
+                record.cmd,
+                record.every_secs,
+                monitor_wake_on_to_str(record.wake_on),
+                record.pattern,
+                record.label,
+                record.created_ts.to_rfc3339(),
+                record.last_event_ts.to_rfc3339(),
+            ],
+        )?;
+        get_monitor(&conn, &record.id).map_err(Into::into)
+    }
+
+    pub async fn monitor(&self, monitor_id: &str) -> anyhow::Result<Option<MonitorRecord>> {
+        let conn = self.conn.lock().await;
+        get_monitor_optional(&conn, monitor_id).map_err(Into::into)
+    }
+
+    pub async fn active_monitors(&self) -> anyhow::Result<Vec<MonitorRecord>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, cmd, every_secs, wake_on, pattern, label, created_ts, last_event_ts,
+                   last_run_ts, last_output, summary, cancelled_ts
+            FROM monitors
+            WHERE cancelled_ts IS NULL
+            ORDER BY created_ts ASC, id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], monitor_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub async fn monitors_list(&self) -> anyhow::Result<Vec<MonitorRecord>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, cmd, every_secs, wake_on, pattern, label, created_ts, last_event_ts,
+                   last_run_ts, last_output, summary, cancelled_ts
+            FROM monitors
+            ORDER BY created_ts ASC, id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], monitor_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub async fn cancel_monitor(&self, monitor_id: &str) -> anyhow::Result<Option<MonitorRecord>> {
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "
+            UPDATE monitors
+            SET cancelled_ts = COALESCE(cancelled_ts, ?2),
+                last_event_ts = ?2,
+                summary = 'cancelled'
+            WHERE id = ?1
+            ",
+            params![monitor_id, now.to_rfc3339()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        get_monitor_optional(&conn, monitor_id).map_err(Into::into)
+    }
+
+    pub async fn record_monitor_tick(
+        &self,
+        monitor_id: &str,
+        last_output: String,
+        summary: String,
+    ) -> anyhow::Result<Option<MonitorRecord>> {
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "
+            UPDATE monitors
+            SET last_run_ts = ?2,
+                last_event_ts = ?2,
+                last_output = ?3,
+                summary = ?4
+            WHERE id = ?1 AND cancelled_ts IS NULL
+            ",
+            params![monitor_id, now.to_rfc3339(), last_output, summary],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        get_monitor_optional(&conn, monitor_id).map_err(Into::into)
+    }
+
+    pub async fn monitor_snapshot(&self) -> anyhow::Result<Vec<ProcessInfo>> {
+        let mut records = self.monitors_list().await?;
+        let mut active = Vec::new();
+        let mut terminal = Vec::new();
+        for record in records.drain(..) {
+            if record.cancelled_ts.is_some() {
+                terminal.push(record);
+            } else {
+                active.push(record);
+            }
+        }
+        terminal.sort_by(|left, right| {
+            left.last_event_ts
+                .cmp(&right.last_event_ts)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if terminal.len() > 10 {
+            terminal.drain(..terminal.len() - 10);
+        }
+        Ok(active
+            .iter()
+            .chain(terminal.iter())
+            .map(monitor_process_info)
+            .collect())
+    }
+
     pub async fn blobs_for_message(&self, message_id: u64) -> anyhow::Result<Vec<StoredBlob>> {
         let conn = self.conn.lock().await;
         message_attachments(&conn, message_id).map_err(Into::into)
@@ -512,6 +719,7 @@ impl Storage {
                 DELETE FROM blobs;
                 DELETE FROM client_messages;
                 DELETE FROM inbox_items;
+                DELETE FROM monitors;
                 DELETE FROM chat_messages;
                 DELETE FROM sqlite_sequence WHERE name IN ('chat_messages', 'inbox_items');
                 ",
@@ -764,6 +972,120 @@ fn status_from_str(value: &str) -> rusqlite::Result<InboxStatus> {
     }
 }
 
+pub fn monitor_process_info(record: &MonitorRecord) -> ProcessInfo {
+    ProcessInfo {
+        id: record.id.clone(),
+        kind: ProcessKind::Monitor,
+        label: short_monitor_label(&record.label),
+        agent: None,
+        model: None,
+        state: if record.cancelled_ts.is_some() {
+            ProcessState::Cancelled
+        } else {
+            ProcessState::Running
+        },
+        started_ts: record.created_ts,
+        last_event_ts: record.last_event_ts,
+        summary: record.summary.clone(),
+    }
+}
+
+fn validate_monitor_record(record: &MonitorRecord) -> anyhow::Result<()> {
+    if record.cmd.trim().is_empty() {
+        anyhow::bail!("monitor cmd is required");
+    }
+    if record.label.trim().is_empty() {
+        anyhow::bail!("monitor label is required");
+    }
+    if matches!(record.wake_on, MonitorWakeOn::Regex)
+        && record.pattern.as_deref().is_none_or(str::is_empty)
+    {
+        anyhow::bail!("monitor pattern is required for regex wake_on");
+    }
+    Ok(())
+}
+
+fn get_monitor(conn: &Connection, monitor_id: &str) -> rusqlite::Result<MonitorRecord> {
+    get_monitor_optional(conn, monitor_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+fn get_monitor_optional(
+    conn: &Connection,
+    monitor_id: &str,
+) -> rusqlite::Result<Option<MonitorRecord>> {
+    conn.query_row(
+        "
+        SELECT id, cmd, every_secs, wake_on, pattern, label, created_ts, last_event_ts,
+               last_run_ts, last_output, summary, cancelled_ts
+        FROM monitors
+        WHERE id = ?1
+        ",
+        params![monitor_id],
+        monitor_from_row,
+    )
+    .optional()
+}
+
+fn monitor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MonitorRecord> {
+    let wake_on: String = row.get(3)?;
+    let created_ts: String = row.get(6)?;
+    let last_event_ts: String = row.get(7)?;
+    let last_run_ts: Option<String> = row.get(8)?;
+    let cancelled_ts: Option<String> = row.get(11)?;
+    Ok(MonitorRecord {
+        id: row.get(0)?,
+        cmd: row.get(1)?,
+        every_secs: u64_from_row(row, 2)?,
+        wake_on: monitor_wake_on_from_str(&wake_on)?,
+        pattern: row.get(4)?,
+        label: row.get(5)?,
+        created_ts: parse_ts(&created_ts)?,
+        last_event_ts: parse_ts(&last_event_ts)?,
+        last_run_ts: last_run_ts.as_deref().map(parse_ts).transpose()?,
+        last_output: row.get(9)?,
+        summary: row.get(10)?,
+        cancelled_ts: cancelled_ts.as_deref().map(parse_ts).transpose()?,
+    })
+}
+
+fn u64_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(error))
+    })
+}
+
+fn monitor_wake_on_to_str(wake_on: MonitorWakeOn) -> &'static str {
+    match wake_on {
+        MonitorWakeOn::Changed => "changed",
+        MonitorWakeOn::ExitZero => "exit_zero",
+        MonitorWakeOn::ExitNonzero => "exit_nonzero",
+        MonitorWakeOn::Regex => "regex",
+    }
+}
+
+fn monitor_wake_on_from_str(value: &str) -> rusqlite::Result<MonitorWakeOn> {
+    match value {
+        "changed" => Ok(MonitorWakeOn::Changed),
+        "exit_zero" => Ok(MonitorWakeOn::ExitZero),
+        "exit_nonzero" => Ok(MonitorWakeOn::ExitNonzero),
+        "regex" => Ok(MonitorWakeOn::Regex),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn short_monitor_label(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 80;
+    if compact.chars().count() <= MAX_CHARS {
+        compact
+    } else {
+        let mut truncated = compact.chars().take(MAX_CHARS - 3).collect::<String>();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,18 +1126,54 @@ mod tests {
         ];
 
         let message = storage
-            .append_chat_with_tool_calls(
-                ChatAuthor::Agent,
-                "used tools",
-                None,
-                tool_calls.clone(),
-            )
+            .append_chat_with_tool_calls(ChatAuthor::Agent, "used tools", None, tool_calls.clone())
             .await
             .unwrap();
         let replay = storage.replay_messages(None).await.unwrap();
 
         assert_eq!(message.tool_calls, tool_calls);
         assert_eq!(replay[0].tool_calls, tool_calls);
+    }
+
+    #[tokio::test]
+    async fn monitors_are_persisted_and_project_to_process_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+
+        let monitor = storage
+            .create_monitor(
+                "printf ready",
+                5,
+                MonitorWakeOn::Changed,
+                None,
+                "watch ready",
+            )
+            .await
+            .unwrap();
+        assert_eq!(monitor.every_secs, 30);
+        assert_eq!(storage.active_monitors().await.unwrap().len(), 1);
+
+        let updated = storage
+            .record_monitor_tick(
+                &monitor.id,
+                "ready".to_string(),
+                "exit 0: ready".to_string(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.summary.as_deref(), Some("exit 0: ready"));
+
+        let snapshot = storage.monitor_snapshot().await.unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].kind, ProcessKind::Monitor);
+        assert_eq!(snapshot[0].state, ProcessState::Running);
+        assert_eq!(snapshot[0].summary.as_deref(), Some("exit 0: ready"));
+
+        let cancelled = storage.cancel_monitor(&monitor.id).await.unwrap().unwrap();
+        assert!(cancelled.cancelled_ts.is_some());
+        let snapshot = storage.monitor_snapshot().await.unwrap();
+        assert_eq!(snapshot[0].state, ProcessState::Cancelled);
     }
 
     #[tokio::test]

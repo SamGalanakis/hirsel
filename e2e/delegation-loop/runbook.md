@@ -37,9 +37,9 @@ curl -sS -X POST http://127.0.0.1:3089/debug/owner-message \
   -d '{"body":"Please delegate a trivial repo fix to a Sub-agent, then ask me before applying the result.","ref":null}'
 ```
 
-3. Poll `/debug/processes` until at least one process exists. Record `processes[0].id`.
+3. Poll `/debug/processes` until at least one `kind: "subagent"` process exists. Record `processes[0].id`.
 
-4. Poll `/debug/processes` until that process has `status: "done"` and a terminal event.
+4. Poll `/debug/processes` until that process has `state: "done"` and a terminal summary.
 
 5. Poll `/debug/inbox` until there is an open item with `requires_response: true` and at least one `quick_replies` entry. Record the item `anchor` and the first Quick Reply `value`.
 
@@ -86,11 +86,21 @@ Poll `/debug/chat` until an Agent-authored message contains `pong`.
 
 Then run the same delegation gates from Scenario A. If the Agent does not file an Inbox Item or does not choose a Quick Reply for prompt-quality reasons, preserve the `/debug/chat`, `/debug/processes`, and `/debug/inbox` transcript and treat it as prompt tuning work rather than manually forcing success.
 
+After the real delegation turn uses tools, also prove tool-call visibility:
+
+```bash
+curl -sS http://127.0.0.1:3089/debug/chat | jq '.messages[] | select(.author == "agent" and (.tool_calls | length > 0))'
+curl -sS http://127.0.0.1:3089/debug/broadcasts | jq '.events[] | select(.type == "agent_tool_call")'
+```
+
+Both commands must match at least one row/event from the real turn.
+
 ## Success Gates
 
 - `/debug/health` returns `ok: true`.
 - `/debug/processes` shows a Sub-agent process.
-- The process reaches a terminal done event through the fake driver.
+- The process reaches terminal `state: "done"` through the fake driver.
+- Real Lash runs show persisted Agent `tool_calls` and live `agent_tool_call` broadcasts after a tool-using turn.
 - `/debug/inbox` contains a requires-response Inbox Item with a Quick Reply.
 - The Quick Reply is sent as a normal Owner Chat message with `ref` equal to the Inbox Item anchor.
 - `/debug/chat` contains a later Agent acknowledgement.

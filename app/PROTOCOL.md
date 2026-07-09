@@ -137,3 +137,41 @@ UI language: `archived` is presented as **Deleted** (a trash section); the wire 
 Badge = count of **open + unread** items (was open + requires_response). `document.title` mirrors it.
 `requires_response` no longer drives the badge; it keeps its visual accent and remains the only
 (future) push trigger.
+
+## v1.4 — process visibility, tool-call visibility, monitors (2026-07-09)
+
+```
+ProcessInfo {
+  id: string, kind: "subagent" | "monitor", label: string,
+  agent: string | null, model: string | null,          // subagent kind only
+  state: "running" | "done" | "failed" | "cancelled" | "abandoned",
+  started_ts: string, last_event_ts: string, summary: string | null
+}
+hello_ok gains "processes": [ProcessInfo]              // all non-terminal + last 10 terminal
+{ "type": "process_upsert", "process": ProcessInfo }   // broadcast on any state/summary change
+{ "type": "agent_tool_call", "name": string, "summary": string | null, "seq": u64 }
+  // ephemeral, streamed while the Agent's turn runs (like agent_activity); never stored/replayed
+ChatMessage gains "tool_calls": [ { "name": string, "ok": bool } ]   // default []; stamped on
+  // committed agent messages from lash's per-turn RemoteToolCallSummary
+```
+
+Client-side semantics:
+
+- The **Processes tab** badge counts `state=="running"` processes only, independent of the Inbox
+  unread badge; `document.title` keeps Inbox semantics. Rows are grouped Running / Finished (terminal
+  states), newest `last_event_ts` first. Sub-agent rows show agent+model chips and expand to a full
+  view with an **"Ask to stop"** action — this switches to Chat and pre-fills the composer with
+  `stop process <id> (<label snippet>)`. Interrupts route through the Agent by design; there is no
+  direct client-side kill frame.
+- `agent_tool_call` events accumulate as **live tool rows** under the "Thinking…" marker while a turn
+  runs, then are cleared the moment the turn commits (an agent `msg` arrives or `agent_activity` goes
+  idle). They are never stored past the running turn.
+- A committed agent message with a non-empty `tool_calls` renders a collapsed **"⚙ N tools"** chip in
+  its footer, expanding inline to the per-tool name + ok (check/cross) list. No chip when empty.
+
+Monitors are Agent-created host-run probes (new lashlang tools, no client protocol surface beyond
+ProcessInfo): monitors.create { cmd, every_secs (floor 30), wake_on:
+"changed"|"exit_zero"|"exit_nonzero"|"regex", pattern?, label } / monitors.list / monitors.cancel.
+Persisted across restarts (like timer schedules); each is a lash Runtime Process that runs the probe
+on its interval and appends a wake event ONLY when the condition fires (payload: label + probe output
+tail).

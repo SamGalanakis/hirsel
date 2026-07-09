@@ -12,6 +12,21 @@ export function formatBytes(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
+/** Compact relative-time label like "just now", "3m ago", "2h ago", "4d ago"
+ * for process rows. `now` is injectable for deterministic tests. */
+export function formatRelativeTime(ts: string, now: number = Date.now()): string {
+  const then = Date.parse(ts);
+  if (!Number.isFinite(then)) return "";
+  const secs = Math.max(0, Math.round((now - then) / 1000));
+  if (secs < 45) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
 /** Read a File as a bare base64 string (no data: prefix) for upload_blob. */
 export function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

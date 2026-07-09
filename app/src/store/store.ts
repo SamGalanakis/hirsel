@@ -3,7 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { reduce } from "./reducer";
 import { type Action, type AppState, initialState } from "./types";
 
-export type Tab = "chat" | "inbox";
+export type Tab = "chat" | "inbox" | "processes";
 
 export interface ComposerDraft {
   /** The Anchor message id to quote in the composer ("Reply" pre-quotes the
@@ -23,6 +23,9 @@ interface UiState {
   scrollToMessageId: number | null;
   /** Set when "Reply" pre-quotes an Inbox Item's anchor into the composer. */
   composerDraft: ComposerDraft | null;
+  /** Set when something wants Chat's composer pre-filled with body text (v1.4
+   * "Ask to stop"); consumed once by the Composer then cleared. */
+  composerPrefill: string | null;
 }
 
 type Store = AppState & UiState;
@@ -33,6 +36,7 @@ function initialStore(): Store {
     activeTab: "chat",
     scrollToMessageId: null,
     composerDraft: null,
+    composerPrefill: null,
   };
 }
 
@@ -48,6 +52,8 @@ function appSnapshot(): AppState {
     lastSeenMsgId: state.lastSeenMsgId,
     pendingSends: state.pendingSends,
     uploads: state.uploads,
+    processes: state.processes,
+    liveToolCalls: state.liveToolCalls,
     removedIds: state.removedIds,
     unreadOverrides: state.unreadOverrides,
   };
@@ -72,6 +78,8 @@ export function dispatch(action: Action): void {
     setState("removedIds", next.removedIds);
     setState("unreadOverrides", next.unreadOverrides);
     setState("uploads", reconcile(next.uploads, { key: "clientId" }));
+    setState("processes", reconcile(next.processes, { key: "id" }));
+    setState("liveToolCalls", next.liveToolCalls);
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);
@@ -81,11 +89,14 @@ export function dispatch(action: Action): void {
 export function goToChat(opts?: {
   scrollToMessageId?: number;
   composerDraft?: ComposerDraft;
+  /** Pre-fill the composer with this body (v1.4 "Ask to stop"). */
+  composerPrefill?: string;
 }): void {
   setState({
     activeTab: "chat",
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
+    composerPrefill: opts?.composerPrefill ?? null,
   });
 }
 
@@ -99,6 +110,10 @@ export function clearScrollTarget(): void {
 
 export function clearComposerDraft(): void {
   setState("composerDraft", null);
+}
+
+export function clearComposerPrefill(): void {
+  setState("composerPrefill", null);
 }
 
 /** The reactive store proxy: components read `state.messages`, `state.connection`,

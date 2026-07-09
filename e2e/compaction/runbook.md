@@ -17,7 +17,7 @@ The runner uses `HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_DRIVER=fake`.
 
 - The Agent acknowledges the pre-compaction fact.
 - The Owner asks the Agent to compact immediately.
-- A post-compaction question correctly recalls the pre-compaction fact.
 - `/debug/broadcasts` or `/debug/chat` shows a visible `continue_as`/control/compaction tool event.
+- A post-compaction question correctly recalls the pre-compaction fact.
 
-On this branch, `prompts/agent.md` documents `control.continue_as`, but the host tool definition list does not expose a matching tool. If recall works but no control event is visible, this runbook fails mechanically for missing compaction surface.
+If recall works but no control event is visible, this runbook fails mechanically for missing compaction surface. A missing Chat confirmation after `continue_as` is recorded as behavior evidence, but the mechanical compaction gate is the visible control event plus preserved recall.

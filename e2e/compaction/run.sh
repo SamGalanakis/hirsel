@@ -26,16 +26,16 @@ pass_gate "pre-compaction fact turn completed"
 
 before="$(max_chat_id)"
 post_json debug/owner-message "$(jq -nc --arg body 'Compact your context now using control.continue_as. Your seed must preserve GREEN-742. Then confirm exactly COMPACTED.' '{client_id:"compact-now",body:$body,ref:null}')" >/dev/null
-wait_agent_message_after "$before" '(.body | ascii_downcase | contains("compacted"))' 180
-pass_gate "Agent confirmed compaction request"
+wait_jq debug/broadcasts '.events[] | select(.type == "turn_event" and .event.kind == "tool_done" and (.event.name | test("continue_as|continue|control|compact"; "i")) and .event.ok == true)' 180 >/dev/null
+pass_gate "continue_as/control tool_done visible in broadcasts"
 
 before="$(max_chat_id)"
 post_json debug/owner-message "$(jq -nc --arg body 'What was the exact pre-compaction fact? Reply with only the code.' '{client_id:"compact-recall",body:$body,ref:null}')" >/dev/null
 wait_agent_message_after "$before" '(.body | contains("GREEN-742"))' 180
 pass_gate "post-compaction recall returned GREEN-742"
 
-if get_json debug/broadcasts | jq -e '.events[] | select(.type == "turn_event" and .event.kind == "tool_start" and (.event.name | test("continue|control|compact"; "i")))' >/dev/null; then
-  pass_gate "continue/control tool_start visible in broadcasts"
+if get_json debug/broadcasts | jq -e '.events[] | select(.type == "turn_event" and .event.kind == "tool_start" and (.event.name | test("continue_as|continue|control|compact"; "i")))' >/dev/null; then
+  pass_gate "continue_as/control tool_start visible in broadcasts"
 elif get_json debug/chat | jq -e '.messages[] | select(.author == "agent" and any(.tool_calls[]?; (.name | test("continue|control|compact"; "i"))))' >/dev/null; then
   pass_gate "continue/control tool_call visible on committed chat"
 else

@@ -66,6 +66,7 @@ const HIRSEL_MONITOR_ENGINE: &str = "hirsel_monitor";
 const SUBAGENT_COMPLETED: &str = "subagent.completed";
 const SUBAGENT_FAILED: &str = "subagent.failed";
 const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
+const SUBAGENT_ABANDONED: &str = "subagent.abandoned";
 const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
@@ -338,8 +339,17 @@ impl LashAgentRuntime {
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
-        runtime.spawn_process_terminal_bridge(process_registry, store_factory);
+        runtime.spawn_process_terminal_bridge(process_registry.clone(), store_factory.clone());
         runtime.spawn_timer_trigger_source(trigger_store);
+        runtime
+            .restore_subagent_processes_after_restart(
+                process_registry.clone(),
+                store_factory.clone(),
+            )
+            .await;
+        runtime
+            .abandon_recovered_subagent_runtime_processes(process_registry, store_factory)
+            .await;
         runtime.resume_active_monitors().await;
         runtime.notify_if_work_pending().await;
         tracing::info!(
@@ -403,6 +413,106 @@ impl LashAgentRuntime {
         };
         if pending_inputs || queued_work {
             self.notify.notify_one();
+        }
+    }
+
+    async fn restore_subagent_processes_after_restart(
+        &self,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+        store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+    ) {
+        let abandoned = match self.tools.restore_subagent_processes_after_restart().await {
+            Ok(abandoned) => abandoned,
+            Err(error) => {
+                tracing::warn!(%error, "failed to restore Sub-agent process metadata at boot");
+                return;
+            }
+        };
+        for process_id in abandoned {
+            if self
+                .append_subagent_abandoned_event(
+                    process_registry.as_ref(),
+                    store_factory.as_ref(),
+                    &process_id,
+                )
+                .await
+            {
+                self.notify.notify_one();
+            }
+        }
+    }
+
+    async fn abandon_recovered_subagent_runtime_processes(
+        &self,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+        store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+    ) {
+        let records = match process_registry.list_non_terminal().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(%error, "failed to list non-terminal Lash processes at boot");
+                return;
+            }
+        };
+        for record in records {
+            if !is_hirsel_subagent_process_record(&record) {
+                continue;
+            }
+            if self
+                .append_subagent_abandoned_event(
+                    process_registry.as_ref(),
+                    store_factory.as_ref(),
+                    &record.id,
+                )
+                .await
+            {
+                self.notify.notify_one();
+            }
+        }
+    }
+
+    async fn append_subagent_abandoned_event(
+        &self,
+        process_registry: &dyn lash::process::ProcessRegistry,
+        store_factory: &dyn lash::persistence::SessionStoreFactory,
+        process_id: &str,
+    ) -> bool {
+        let request =
+            ProcessEventAppendRequest::new(SUBAGENT_ABANDONED, subagent_abandoned_payload())
+                .with_replay_key(format!("hirsel-subagent:{process_id}:{SUBAGENT_ABANDONED}"));
+        match process_registry.append_event(process_id, request).await {
+            Ok(result) => match enqueue_process_wake(store_factory, result.wake_delivery).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        process_id = %process_id,
+                        "failed to enqueue abandoned Sub-agent process wake"
+                    );
+                    false
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    process_id = %process_id,
+                    "failed to append abandoned Sub-agent process event"
+                );
+                match process_registry
+                    .complete_process(process_id, subagent_abandoned_output())
+                    .await
+                {
+                    Ok(_) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            process_id = %process_id,
+                            "failed to complete recovered Sub-agent process as abandoned"
+                        );
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -1880,19 +1990,16 @@ impl HirselToolExecutor {
             .unwrap_or_else(std::env::current_dir)
             .map_err(|error| format!("failed to resolve cwd: {error}"))?;
         let process_id = format!("proc-{}", uuid::Uuid::new_v4());
-        let request = ProcessStartRequest::new(
+        let request = ProcessStartRequest::external(
             process_id.clone(),
-            ProcessInput::Engine {
-                kind: HIRSEL_SUBAGENT_ENGINE.to_string(),
-                payload: json!({
-                    "agent": agent,
-                    "model": model,
-                    "prompt": prompt,
-                    "cwd": cwd,
-                }),
-            },
-            RecoveryDisposition::OwnerBound,
             ProcessOriginator::session(SessionScope::new(context.session_id())),
+            json!({
+                "kind": HIRSEL_SUBAGENT_ENGINE,
+                "agent": agent,
+                "model": model,
+                "prompt": prompt,
+                "cwd": cwd,
+            }),
         )
         .with_wake_target(Some(SessionScope::new(AGENT_SESSION_ID)))
         .with_event_types(subagent_event_types());
@@ -1901,6 +2008,20 @@ impl HirselToolExecutor {
             .start(request)
             .await
             .map_err(|error| error.to_string())?;
+        if let Err(error) = self
+            .tools
+            .subagents_spawn_with_process_id(agent, model.clone(), prompt, cwd, process_id.clone())
+            .await
+        {
+            let _ = context
+                .processes()
+                .complete_external(
+                    &process_id,
+                    cancelled_await_output(format!("failed to start Sub-agent Driver: {error}")),
+                )
+                .await;
+            return Err(format!("failed to start Sub-agent Driver: {error}"));
+        }
         serde_json::to_value(json!({
             "process_id": handle.process_id,
             "handle": handle,
@@ -2385,6 +2506,17 @@ impl SubagentProcessPayload {
     }
 }
 
+fn is_hirsel_subagent_process_record(record: &lash_core::ProcessRecord) -> bool {
+    match record.input.as_ref() {
+        ProcessInput::Engine { kind, .. } => kind == HIRSEL_SUBAGENT_ENGINE,
+        ProcessInput::External { metadata } => metadata
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == HIRSEL_SUBAGENT_ENGINE),
+        _ => false,
+    }
+}
+
 fn cancelled_await_output(message: String) -> ProcessAwaitOutput {
     ProcessAwaitOutput::Cancelled {
         message,
@@ -2398,6 +2530,7 @@ fn subagent_event_types() -> Vec<ProcessEventType> {
         terminal_event_type(SUBAGENT_COMPLETED, ProcessTerminalState::Completed),
         terminal_event_type(SUBAGENT_FAILED, ProcessTerminalState::Failed),
         terminal_event_type(SUBAGENT_CANCELLED, ProcessTerminalState::Cancelled),
+        terminal_event_type(SUBAGENT_ABANDONED, ProcessTerminalState::Abandoned),
     ]
 }
 
@@ -2539,6 +2672,31 @@ fn terminal_event_payload(outcome: &TerminalOutcome) -> (&'static str, Value) {
                 }
             }),
         ),
+    }
+}
+
+fn subagent_abandoned_payload() -> Value {
+    json!({
+        "text": "Sub-agent was abandoned after host restart.",
+        "await_output": {
+            "type": "abandoned",
+            "evidence": {
+                "writer": "reconciled_request",
+                "owner": null,
+                "epoch_ms": Utc::now().timestamp_millis().max(0) as u64,
+            }
+        }
+    })
+}
+
+fn subagent_abandoned_output() -> ProcessAwaitOutput {
+    ProcessAwaitOutput::Abandoned {
+        evidence: Box::new(lash_core::AbandonEvidence {
+            writer: lash_core::AbandonWriter::OwnerDrain,
+            owner: None,
+            epoch_ms: Utc::now().timestamp_millis().max(0) as u64,
+        }),
+        control: None,
     }
 }
 

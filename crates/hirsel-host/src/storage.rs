@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent};
 use hirsel_proto::{
     Blob, ChatAuthor, ChatMessage, InboxItem, InboxStatus, ProcessInfo, ProcessKind, ProcessState,
     QuickReply, ToolCallSummary,
@@ -13,6 +14,8 @@ use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use crate::processes::{ProcessRecord, ProcessStatus};
 
 #[derive(Clone)]
 pub struct Storage {
@@ -131,6 +134,20 @@ impl Storage {
                 last_output TEXT NULL,
                 summary TEXT NULL,
                 cancelled_ts TEXT NULL
+            );
+            CREATE TABLE IF NOT EXISTS subagent_processes (
+                id TEXT PRIMARY KEY,
+                agent TEXT NOT NULL,
+                model TEXT NULL,
+                handle_id TEXT NOT NULL,
+                handle_agent TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                external_id TEXT NULL,
+                status TEXT NOT NULL,
+                events TEXT NOT NULL,
+                started_ts TEXT NOT NULL,
+                last_event_ts TEXT NOT NULL
             );
             ",
         )?;
@@ -688,6 +705,95 @@ impl Storage {
             .collect())
     }
 
+    pub async fn upsert_subagent_process(&self, record: &ProcessRecord) -> anyhow::Result<()> {
+        let events = serde_json::to_string(&record.events)?;
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "
+            INSERT INTO subagent_processes (
+                id,
+                agent,
+                model,
+                handle_id,
+                handle_agent,
+                prompt,
+                cwd,
+                external_id,
+                status,
+                events,
+                started_ts,
+                last_event_ts
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ON CONFLICT(id) DO UPDATE SET
+                agent = excluded.agent,
+                model = excluded.model,
+                handle_id = excluded.handle_id,
+                handle_agent = excluded.handle_agent,
+                prompt = excluded.prompt,
+                cwd = excluded.cwd,
+                external_id = excluded.external_id,
+                status = excluded.status,
+                events = excluded.events,
+                started_ts = excluded.started_ts,
+                last_event_ts = excluded.last_event_ts
+            ",
+            params![
+                record.id,
+                agent_kind_to_str(record.agent),
+                record.model,
+                record.handle.id,
+                agent_kind_to_str(record.handle.agent),
+                record.prompt,
+                record.cwd,
+                record.external_id,
+                process_status_to_str(record.status),
+                events,
+                record.started_ts.to_rfc3339(),
+                record.last_event_ts.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn restore_subagent_processes_after_restart(
+        &self,
+    ) -> anyhow::Result<SubagentRestore> {
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let mut records = {
+            let mut stmt = conn.prepare(
+                "
+                SELECT id, agent, model, handle_id, handle_agent, prompt, cwd, external_id,
+                       status, events, started_ts, last_event_ts
+                FROM subagent_processes
+                ORDER BY started_ts ASC, id ASC
+                ",
+            )?;
+            let rows = stmt.query_map([], subagent_process_from_row)?;
+            collect_rows(rows)?
+        };
+        let mut abandoned = Vec::new();
+        for record in &mut records {
+            if record.status != ProcessStatus::Running {
+                continue;
+            }
+            record.status = ProcessStatus::Abandoned;
+            record.last_event_ts = now;
+            abandoned.push(record.id.clone());
+            conn.execute(
+                "
+                UPDATE subagent_processes
+                SET status = 'abandoned',
+                    last_event_ts = ?2
+                WHERE id = ?1
+                ",
+                params![record.id, now.to_rfc3339()],
+            )?;
+        }
+        Ok(SubagentRestore { records, abandoned })
+    }
+
     pub async fn blobs_for_message(&self, message_id: u64) -> anyhow::Result<Vec<StoredBlob>> {
         let conn = self.conn.lock().await;
         message_attachments(&conn, message_id).map_err(Into::into)
@@ -720,6 +826,7 @@ impl Storage {
                 DELETE FROM client_messages;
                 DELETE FROM inbox_items;
                 DELETE FROM monitors;
+                DELETE FROM subagent_processes;
                 DELETE FROM chat_messages;
                 DELETE FROM sqlite_sequence WHERE name IN ('chat_messages', 'inbox_items');
                 ",
@@ -733,6 +840,12 @@ impl Storage {
         tokio::fs::create_dir_all(self.blobs_dir.as_ref()).await?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentRestore {
+    pub records: Vec<ProcessRecord>,
+    pub abandoned: Vec<String>,
 }
 
 fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> anyhow::Result<Vec<T>> {
@@ -1079,6 +1192,69 @@ fn monitor_wake_on_from_str(value: &str) -> rusqlite::Result<MonitorWakeOn> {
     }
 }
 
+fn subagent_process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
+    let agent: String = row.get(1)?;
+    let handle_agent: String = row.get(4)?;
+    let status: String = row.get(8)?;
+    let events: String = row.get(9)?;
+    let started_ts: String = row.get(10)?;
+    let last_event_ts: String = row.get(11)?;
+    Ok(ProcessRecord::restored(
+        row.get(0)?,
+        agent_kind_from_str(&agent)?,
+        row.get(2)?,
+        SessionHandle {
+            id: row.get(3)?,
+            agent: agent_kind_from_str(&handle_agent)?,
+        },
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        process_status_from_str(&status)?,
+        serde_json::from_str::<Vec<SubagentEvent>>(&events).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(9, Type::Text, Box::new(error))
+        })?,
+        parse_ts(&started_ts)?,
+        parse_ts(&last_event_ts)?,
+    ))
+}
+
+fn agent_kind_to_str(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+    }
+}
+
+fn agent_kind_from_str(value: &str) -> rusqlite::Result<AgentKind> {
+    match value {
+        "claude" => Ok(AgentKind::Claude),
+        "codex" => Ok(AgentKind::Codex),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn process_status_to_str(status: ProcessStatus) -> &'static str {
+    match status {
+        ProcessStatus::Running => "running",
+        ProcessStatus::Done => "done",
+        ProcessStatus::Failed => "failed",
+        ProcessStatus::Interrupted => "interrupted",
+        ProcessStatus::Abandoned => "abandoned",
+    }
+}
+
+fn process_status_from_str(value: &str) -> rusqlite::Result<ProcessStatus> {
+    match value {
+        "running" => Ok(ProcessStatus::Running),
+        "done" => Ok(ProcessStatus::Done),
+        "failed" => Ok(ProcessStatus::Failed),
+        "interrupted" => Ok(ProcessStatus::Interrupted),
+        "abandoned" => Ok(ProcessStatus::Abandoned),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 fn short_monitor_label(text: &str) -> String {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_CHARS: usize = 80;
@@ -1182,6 +1358,49 @@ mod tests {
         assert!(cancelled.cancelled_ts.is_some());
         let snapshot = storage.monitor_snapshot().await.unwrap();
         assert_eq!(snapshot[0].state, ProcessState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn running_subagent_processes_restore_as_abandoned_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let now = Utc::now();
+        let record = ProcessRecord::restored(
+            "proc-running".to_string(),
+            AgentKind::Codex,
+            Some("gpt-test".to_string()),
+            SessionHandle {
+                id: "handle-1".to_string(),
+                agent: AgentKind::Codex,
+            },
+            "fix it".to_string(),
+            "/tmp".to_string(),
+            Some("external-1".to_string()),
+            ProcessStatus::Running,
+            vec![SubagentEvent::Started {
+                external_id: "external-1".to_string(),
+            }],
+            now,
+            now,
+        );
+        storage.upsert_subagent_process(&record).await.unwrap();
+
+        let restored = storage
+            .restore_subagent_processes_after_restart()
+            .await
+            .unwrap();
+        assert_eq!(restored.abandoned, vec!["proc-running".to_string()]);
+        assert_eq!(restored.records.len(), 1);
+        assert_eq!(restored.records[0].status, ProcessStatus::Abandoned);
+
+        drop(storage);
+        let reopened = Storage::open(dir.path()).await.unwrap();
+        let restored_again = reopened
+            .restore_subagent_processes_after_restart()
+            .await
+            .unwrap();
+        assert!(restored_again.abandoned.is_empty());
+        assert_eq!(restored_again.records[0].status, ProcessStatus::Abandoned);
     }
 
     #[tokio::test]

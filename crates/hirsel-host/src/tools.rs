@@ -86,6 +86,20 @@ impl ToolSuite {
         self.terminal_tx.subscribe()
     }
 
+    pub async fn restore_subagent_processes_after_restart(&self) -> anyhow::Result<Vec<String>> {
+        let restored = self
+            .storage
+            .restore_subagent_processes_after_restart()
+            .await?;
+        for record in restored.records {
+            self.processes.restore(record.clone())?;
+            if matches!(record.status, crate::processes::ProcessStatus::Abandoned) {
+                self.broadcast_process_upsert(crate::processes::process_info(&record));
+            }
+        }
+        Ok(restored.abandoned)
+    }
+
     pub async fn chat_send(
         &self,
         body_md: impl Into<String>,
@@ -182,11 +196,15 @@ impl ToolSuite {
             prompt,
             cwd.to_string_lossy().into_owned(),
         )?;
+        if let Some(record) = self.processes.get(&process_id)? {
+            self.storage.upsert_subagent_process(&record).await?;
+        }
         if let Some(process) = self.processes.info(&process_id)? {
             self.broadcast_process_upsert(process);
         }
         let mut events = driver.events(&handle)?;
         let processes = self.processes.clone();
+        let storage = self.storage.clone();
         let broadcaster = self.broadcaster.clone();
         let broadcast_log = self.broadcast_log.clone();
         let terminal_tx = self.terminal_tx.clone();
@@ -199,8 +217,13 @@ impl ToolSuite {
                     _ => None,
                 };
                 match processes.push_event(&process_id_for_task, event) {
-                    Ok(Some(update)) if update.should_broadcast => {
-                        publish_process_upsert(&broadcast_log, &broadcaster, update.info);
+                    Ok(Some(update)) => {
+                        if let Err(error) = storage.upsert_subagent_process(&update.record).await {
+                            tracing::warn!(%error, "failed to persist Sub-agent process");
+                        }
+                        if update.should_broadcast {
+                            publish_process_upsert(&broadcast_log, &broadcaster, update.info);
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => tracing::warn!(%error, "failed to record Sub-agent event"),

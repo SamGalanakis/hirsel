@@ -42,11 +42,13 @@ pub enum ProcessStatus {
     Done,
     Failed,
     Interrupted,
+    Abandoned,
 }
 
 #[derive(Debug, Clone)]
 pub struct RecordedProcessUpdate {
     pub info: ProcessInfo,
+    pub record: ProcessRecord,
     pub should_broadcast: bool,
 }
 
@@ -90,6 +92,11 @@ impl ProcessStore {
         Ok(id)
     }
 
+    pub fn restore(&self, record: ProcessRecord) -> anyhow::Result<()> {
+        self.lock()?.insert(record.id.clone(), record);
+        Ok(())
+    }
+
     pub fn push_event(
         &self,
         process_id: &str,
@@ -123,8 +130,10 @@ impl ProcessStore {
             if should_broadcast {
                 record.last_upsert_at = Some(now);
             }
+            let record = record.clone();
             return Ok(Some(RecordedProcessUpdate {
-                info: process_info(record),
+                info: process_info(&record),
+                record,
                 should_broadcast,
             }));
         }
@@ -206,7 +215,39 @@ impl ProcessStore {
     }
 }
 
-fn process_info(record: &ProcessRecord) -> ProcessInfo {
+impl ProcessRecord {
+    #[allow(clippy::too_many_arguments)]
+    pub fn restored(
+        id: String,
+        agent: AgentKind,
+        model: Option<String>,
+        handle: SessionHandle,
+        prompt: String,
+        cwd: String,
+        external_id: Option<String>,
+        status: ProcessStatus,
+        events: Vec<SubagentEvent>,
+        started_ts: DateTime<Utc>,
+        last_event_ts: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            agent,
+            model,
+            handle,
+            prompt,
+            cwd,
+            external_id,
+            status,
+            events,
+            started_ts,
+            last_event_ts,
+            last_upsert_at: None,
+        }
+    }
+}
+
+pub(crate) fn process_info(record: &ProcessRecord) -> ProcessInfo {
     ProcessInfo {
         id: record.id.clone(),
         kind: ProcessKind::Subagent,
@@ -216,7 +257,10 @@ fn process_info(record: &ProcessRecord) -> ProcessInfo {
         state: process_state(record.status),
         started_ts: record.started_ts,
         last_event_ts: record.last_event_ts,
-        summary: record.events.last().map(subagent_event_summary),
+        summary: match record.status {
+            ProcessStatus::Abandoned => Some("abandoned after host restart".to_string()),
+            _ => record.events.last().map(subagent_event_summary),
+        },
     }
 }
 
@@ -226,6 +270,7 @@ fn process_state(status: ProcessStatus) -> ProcessState {
         ProcessStatus::Done => ProcessState::Done,
         ProcessStatus::Failed => ProcessState::Failed,
         ProcessStatus::Interrupted => ProcessState::Cancelled,
+        ProcessStatus::Abandoned => ProcessState::Abandoned,
     }
 }
 

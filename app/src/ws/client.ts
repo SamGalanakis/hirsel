@@ -201,6 +201,63 @@ class HirselWsClient {
     this.enqueue({ type: "read_item", item_id: itemId });
   }
 
+  // ---- v2.0 side chats (ADR-0008) ----
+
+  /** "Discuss" (fresh) or "Resume" (in-progress) — idempotent per item on the
+   * host, so this is the single entry point for both. Enqueued so a tap right
+   * as the socket drops still fires once reconnected. */
+  openSideChat(itemId: number): void {
+    this.enqueue({ type: "open_side_chat", client_id: makeClientId(), item_id: itemId });
+  }
+
+  /** Send within a side chat's scope. Mirrors sendMessage's optimistic +
+   * fail-timer-free durability model, but via the flat `pendingSideSends`
+   * queue (see store/types.ts) instead of per-message fail timers — side
+   * sends are text-only and this v1 keeps their offline story to "queued,
+   * resent on reconnect" rather than replicating the full failed/retry chip. */
+  sendSideMessage(sc: string, body: string, ref: number | null): number {
+    const clientId = makeClientId();
+    const localId = makeLocalId();
+    dispatch({
+      type: "side_chat_send_local",
+      sc,
+      localId,
+      clientId,
+      body,
+      ref,
+      ts: new Date().toISOString(),
+    });
+    this.sendFrame({ type: "send_message", client_id: clientId, body, ref, sc });
+    return localId;
+  }
+
+  /** Cooperatively interrupt a side chat's active turn (Esc in the side
+   * composer). Best-effort like the main cancelTurn — no-op if idle. */
+  cancelSideTurn(sc: string): void {
+    this.sendFrame({ type: "cancel_turn", sc });
+  }
+
+  /** "Conclude": have the side agent draft the Owner's reply. */
+  concludeSideChat(sc: string): void {
+    dispatch({ type: "side_chat_conclude_requested", sc });
+    this.enqueue({ type: "conclude_side_chat", sc });
+  }
+
+  /** "Send reply" on the confirmation sheet: the Owner's edited-or-not final
+   * text. `anchor` is the item's Anchor message id, recorded locally so the
+   * plain owner reply this produces in main chat can be recognized (client-
+   * derived provenance — the wire carries no marker) for the footer chip. */
+  confirmConclusion(sc: string, text: string, anchor: number): void {
+    dispatch({ type: "side_chat_confirm_sent", sc, anchor });
+    this.enqueue({ type: "confirm_conclusion", sc, text });
+  }
+
+  /** Discard: end the side chat with no conclusion; the item stays open. */
+  discardSideChat(sc: string): void {
+    dispatch({ type: "side_chat_discard_sent", sc });
+    this.enqueue({ type: "discard_side_chat", sc });
+  }
+
   private armFailTimer(clientId: string): void {
     const existing = this.failTimers.get(clientId);
     if (existing) clearTimeout(existing);
@@ -297,6 +354,13 @@ class HirselWsClient {
         break;
       }
       case "msg": {
+        // v2.0: sc-scoped frames route to their side chat and never touch
+        // main state (structural guarantee — see reducer.ts). Absent `sc` is
+        // byte-identical to pre-v2.0 main-chat handling.
+        if (message.sc) {
+          dispatch({ type: "side_chat_msg", sc: message.sc, message: message.message });
+          break;
+        }
         dispatch({ type: "msg", payload: message });
         setStoredLastSeen(message.message.id);
         this.reconcileFailTimers();
@@ -308,6 +372,15 @@ class HirselWsClient {
         break;
       }
       case "agent_activity": {
+        if (message.sc) {
+          dispatch({
+            type: "side_chat_agent_activity",
+            sc: message.sc,
+            state: message.state,
+            text: message.text,
+          });
+          break;
+        }
         dispatch({
           type: "agent_activity",
           payload: { state: message.state, text: message.text },
@@ -323,7 +396,33 @@ class HirselWsClient {
         break;
       }
       case "turn_event": {
+        if (message.sc) {
+          dispatch({
+            type: "side_chat_turn_event",
+            sc: message.sc,
+            seq: message.seq,
+            event: message.event,
+          });
+          break;
+        }
         dispatch({ type: "turn_event", payload: message });
+        break;
+      }
+      case "side_chat_open": {
+        dispatch({
+          type: "side_chat_open",
+          sc: message.sc,
+          itemId: message.item_id,
+          messages: message.messages,
+        });
+        break;
+      }
+      case "conclusion_draft": {
+        dispatch({ type: "side_chat_conclusion_draft", sc: message.sc, text: message.text });
+        break;
+      }
+      case "side_chat_closed": {
+        dispatch({ type: "side_chat_closed", sc: message.sc });
         break;
       }
       case "blob_ok": {
@@ -367,6 +466,20 @@ class HirselWsClient {
           ref: pending.ref,
           attachments: pending.attachments ?? [],
           mode: pending.mode ?? "send",
+        } satisfies ClientMessage),
+      );
+    }
+
+    // v2.0: side-chat sends queued the same way (see openSideChat comment) —
+    // "sends queued" while reconnecting applies to the side sheet too.
+    for (const pending of state.pendingSideSends) {
+      this.socket.send(
+        JSON.stringify({
+          type: "send_message",
+          client_id: pending.clientId,
+          body: pending.body,
+          ref: pending.ref,
+          sc: pending.sc,
         } satisfies ClientMessage),
       );
     }

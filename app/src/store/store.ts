@@ -34,6 +34,12 @@ interface UiState {
   /** Set when something wants Chat's composer pre-filled with body text (v1.4
    * "Ask to stop"); consumed once by the Composer then cleared. */
   composerPrefill: string | null;
+  /** v2.0 (ADR-0008): the `sc` of the one Side Chat sheet currently on screen,
+   * or null. One sheet at a time (critique, binding); every other in-progress
+   * side chat is "in progress · resume" from its Inbox card. Deliberately
+   * never set by a cold-reconnect reconciliation — resuming is always a
+   * deliberate tap (critique: "do not auto-reopen"). */
+  activeSideChatSc: string | null;
 }
 
 type Store = AppState & UiState;
@@ -46,6 +52,7 @@ function initialStore(): Store {
     scrollToMessageId: null,
     composerDraft: null,
     composerPrefill: null,
+    activeSideChatSc: null,
   };
 }
 
@@ -66,6 +73,12 @@ function appSnapshot(): AppState {
     turnDetails: state.turnDetails,
     removedIds: state.removedIds,
     unreadOverrides: state.unreadOverrides,
+    sideChatRefs: state.sideChatRefs,
+    sideChats: state.sideChats,
+    pendingSideSends: state.pendingSideSends,
+    awaitingConclusions: state.awaitingConclusions,
+    conclusionChips: state.conclusionChips,
+    lastConclusion: state.lastConclusion,
   };
 }
 
@@ -94,6 +107,12 @@ export function dispatch(action: Action): void {
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);
+    setState("sideChatRefs", next.sideChatRefs);
+    setState("sideChats", next.sideChats);
+    setState("pendingSideSends", next.pendingSideSends);
+    setState("awaitingConclusions", next.awaitingConclusions);
+    setState("conclusionChips", next.conclusionChips);
+    setState("lastConclusion", next.lastConclusion);
   });
 }
 
@@ -109,10 +128,23 @@ export function goToChat(opts?: {
   setState({
     processesOpen: false,
     trayExpanded: false,
+    activeSideChatSc: null,
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
     composerPrefill: opts?.composerPrefill ?? null,
   });
+}
+
+/** Open (or leave-alive-close) the one Side Chat sheet on screen. Setting a
+ * `sc` here is the ONLY thing that ever shows the sheet — cold reconnect
+ * reconciliation seeds `sideChatRefs`/`sideChats` but never touches this, so
+ * a live side chat never auto-reopens on launch (critique, binding). */
+export function setActiveSideChatSc(sc: string | null): void {
+  setState("activeSideChatSc", sc);
+}
+
+export function clearLastConclusion(): void {
+  dispatch({ type: "clear_last_conclusion" });
 }
 
 export function setProcessesOpen(open: boolean): void {

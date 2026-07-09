@@ -95,6 +95,9 @@ export interface SendMessageMsg {
   ref: number | null;
   attachments?: string[]; // v1.1 blob ids, default []
   mode?: SendMode; // v1.2, default "send"
+  /** v2.0: side chat scope. Absent = main conversation (byte-identical to
+   * pre-v2.0 wire shape); present = routed to that side session. */
+  sc?: string;
 }
 
 export interface ArchiveItemMsg {
@@ -123,6 +126,8 @@ export interface UploadBlobMsg {
 /** v1.2: cooperatively interrupt the active agent turn (Esc). No-op if idle. */
 export interface CancelTurnMsg {
   type: "cancel_turn";
+  /** v2.0: side chat scope (see SendMessageMsg). */
+  sc?: string;
 }
 
 /** v1.2: cancel a not-yet-claimed queued (next_turn) message. Host maps
@@ -132,6 +137,34 @@ export interface CancelQueuedMsg {
   client_id: string;
 }
 
+/** v2.0 (ADR-0008): open (or resume) the side chat for an Inbox Item.
+ * Idempotent per item — if it already has a live side chat the host answers
+ * with the SAME sc and its transcript so far; otherwise a fresh scope. */
+export interface OpenSideChatMsg {
+  type: "open_side_chat";
+  client_id: string;
+  item_id: number;
+}
+
+/** v2.0: side agent drafts the Owner's reply (a real side turn). */
+export interface ConcludeSideChatMsg {
+  type: "conclude_side_chat";
+  sc: string;
+}
+
+/** v2.0: the Owner's edited-or-not final text, confirming the conclusion. */
+export interface ConfirmConclusionMsg {
+  type: "confirm_conclusion";
+  sc: string;
+  text: string;
+}
+
+/** v2.0: end the side chat with no conclusion; the item stays open. */
+export interface DiscardSideChatMsg {
+  type: "discard_side_chat";
+  sc: string;
+}
+
 export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
@@ -139,9 +172,21 @@ export type ClientMessage =
   | ReadItemMsg
   | UploadBlobMsg
   | CancelTurnMsg
-  | CancelQueuedMsg;
+  | CancelQueuedMsg
+  | OpenSideChatMsg
+  | ConcludeSideChatMsg
+  | ConfirmConclusionMsg
+  | DiscardSideChatMsg;
 
 // ---- Server -> client ----
+
+/** v2.0: a live side chat, as tracked by hello_ok for reconnect + resume. Just
+ * the reference — no transcript; the client fetches that via `open_side_chat`
+ * (idempotent) if/when the Owner resumes it. */
+export interface SideChatRef {
+  sc: string;
+  item_id: number;
+}
 
 export interface HelloOkMsg {
   type: "hello_ok";
@@ -151,11 +196,16 @@ export interface HelloOkMsg {
   /** v1.4: all non-terminal processes + the last 10 terminal ones. Optional on
    * the wire; absent is treated as []. */
   processes?: ProcessInfo[];
+  /** v2.0: live side chats surviving reconnect. Optional on the wire; absent
+   * is treated as []. */
+  side_chats?: SideChatRef[];
 }
 
 export interface MsgMsg {
   type: "msg";
   message: ChatMessage;
+  /** v2.0: side chat scope (see SendMessageMsg). Absent = main conversation. */
+  sc?: string;
 }
 
 export type AgentActivityState = "thinking" | "idle";
@@ -164,6 +214,8 @@ export interface AgentActivityMsg {
   type: "agent_activity";
   state: AgentActivityState;
   text: string | null;
+  /** v2.0: side chat scope (see SendMessageMsg). Absent = main conversation. */
+  sc?: string;
 }
 
 export interface InboxUpsertMsg {
@@ -210,6 +262,8 @@ export interface TurnEventMsg {
   type: "turn_event";
   seq: number;
   event: TurnEvent;
+  /** v2.0: side chat scope (see SendMessageMsg). Absent = main conversation. */
+  sc?: string;
 }
 
 export interface ErrorMsg {
@@ -221,6 +275,32 @@ export interface ErrorMsg {
   client_id?: string;
 }
 
+/** v2.0: answers `open_side_chat`. Idempotent per item: a fresh side chat
+ * carries `messages: []` (the seed lives in the side session's prompt layer,
+ * not as transcript rows); resuming a live one carries its transcript so far. */
+export interface SideChatOpenMsg {
+  type: "side_chat_open";
+  sc: string;
+  item_id: number;
+  messages: ChatMessage[];
+}
+
+/** v2.0: the side agent's drafted reply. NOT appended to the side transcript —
+ * it only ever lives in the confirmation sheet. */
+export interface ConclusionDraftMsg {
+  type: "conclusion_draft";
+  sc: string;
+  text: string;
+}
+
+/** v2.0: the side chat has ended — via confirm_conclusion, discard_side_chat,
+ * or a host-side TTL reap. The client cannot tell which from this frame alone;
+ * it distinguishes by whether IT asked for the close (see the reducer). */
+export interface SideChatClosedMsg {
+  type: "side_chat_closed";
+  sc: string;
+}
+
 export type ServerMessage =
   | HelloOkMsg
   | MsgMsg
@@ -230,4 +310,7 @@ export type ServerMessage =
   | MsgRemovedMsg
   | ProcessUpsertMsg
   | TurnEventMsg
-  | ErrorMsg;
+  | ErrorMsg
+  | SideChatOpenMsg
+  | ConclusionDraftMsg
+  | SideChatClosedMsg;

@@ -1,4 +1,4 @@
-import type { InboxItem, ProcessInfo, ProcessState } from "../protocol";
+import type { InboxItem, ProcessInfo, ProcessState, SideChatRef } from "../protocol";
 import type { DisplayMessage } from "./types";
 
 /** Effective "seen" state for an Inbox item (v1.3). An item is read when the
@@ -83,6 +83,16 @@ export function isProcessRunning(state: ProcessState): boolean {
  * Deliberately independent of the Inbox unread badge and document.title. */
 export function runningProcessCount(processes: ProcessInfo[]): number {
   return processes.filter((p) => isProcessRunning(p.state)).length;
+}
+
+// ---- v2.0 side chats (ADR-0008) ----
+
+/** The live side chat for an Inbox item, if any — drives the "in progress ·
+ * resume" affordance on its card in place of the plain "Discuss" entry.
+ * Derived from `hello_ok.side_chats` + open/closed tracking (`sideChatRefs`),
+ * not from the (possibly never-hydrated) `sideChats` map. */
+export function sideChatForItem(refs: SideChatRef[], itemId: number): SideChatRef | null {
+  return refs.find((r) => r.item_id === itemId) ?? null;
 }
 
 /** Group processes into Running / Finished, each newest-activity-first

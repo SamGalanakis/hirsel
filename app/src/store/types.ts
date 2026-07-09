@@ -9,6 +9,7 @@ import type {
   ProcessInfo,
   ProcessUpsertMsg,
   SendMode,
+  SideChatRef,
   TurnEvent,
   TurnEventMsg,
 } from "../protocol";
@@ -42,6 +43,44 @@ export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
 export interface AgentActivity {
   state: AgentActivityState;
   text: string | null;
+}
+
+/** v2.0 (ADR-0008): the hydrated, scoped state of one live side chat — created
+ * on `side_chat_open` (fresh Discuss or a deliberate Resume) and torn down on
+ * `side_chat_closed`. Deliberately mirrors the shape of the top-level chat
+ * slice (messages/agentActivity/turnEvents) 1:1 so the same Timeline/Bubble
+ * components render both, per the "side chat is just a fancy reply composer"
+ * design (ADR-0008, critique "what's working" #2) — but it's a wholly separate
+ * bucket so sc-scoped routing can never leak into (or read from) main state. */
+export interface SideChatState {
+  sc: string;
+  itemId: number;
+  messages: DisplayMessage[];
+  agentActivity: AgentActivity;
+  turnEvents: TimelineEvent[];
+  /** True from the moment "Conclude" is tapped until the draft arrives (drives
+   * the sc-scoped "Drafting your reply…" shimmer). */
+  drafting: boolean;
+  /** The side agent's drafted reply once `conclusion_draft` arrives; null
+   * before, and cleared again by "Keep editing" (back to the side chat, no
+   * discard) or once `confirm_conclusion` is sent. */
+  draft: string | null;
+  /** True once `confirm_conclusion` is sent, awaiting `side_chat_closed` (and
+   * the resulting owner reply landing in main chat). Distinguishes an
+   * expected close (drop the record) from a host-initiated one (below). */
+  confirming: boolean;
+  /** True once `discard_side_chat` is sent, awaiting `side_chat_closed`. Same
+   * purpose as `confirming` for the other user-initiated close path. */
+  discarding: boolean;
+  /** Non-blocking banner: the Agent archived this item while its side chat was
+   * still open. Conclude/Discard both remain available (critique edge case). */
+  itemArchived: boolean;
+  /** Terminal: `side_chat_closed` arrived without this client having asked for
+   * it (TTL reap, or gone after a reconnect) while the record was still kept
+   * (i.e. the sheet was open on it). The sheet renders "This side chat ended";
+   * a discarded/concluded record is instead deleted outright, never marked
+   * `ended`. */
+  ended: boolean;
 }
 
 /** Per-file upload state driving the composer attachment chips (v1.1). Purely
@@ -94,6 +133,37 @@ export interface AppState {
    * the wire `read` flag: an item is effectively unread if `!read` OR its id is
    * here. Auto-read/"Mark read" removes the id (and sends read_item). Bounded. */
   unreadOverrides: number[];
+  /** v2.0: live side chats, keyed by `sc` — mirrors `hello_ok.side_chats`
+   * (seeded there, kept in sync by side_chat_open/side_chat_closed) so an
+   * Inbox card can derive "in progress · resume" for its item without ever
+   * hydrating the full transcript. Deliberately separate from `sideChats`
+   * below: a background item can be "in progress" all session without its
+   * scoped state ever being created (that only happens when the sheet is
+   * actually opened/resumed). */
+  sideChatRefs: SideChatRef[];
+  /** v2.0: hydrated per-side-chat state, created by `side_chat_open` (Discuss
+   * or Resume) and removed by `side_chat_closed`. See SideChatState. */
+  sideChats: Record<string, SideChatState>;
+  /** v2.0: outgoing side-chat sends not yet echoed, flat (not per-sc) like
+   * `pendingSends` — flushed the same way on reconnect so "sends queued"
+   * during a socket drop applies to side chats too (critique, reconnect
+   * section). Side sends are text-only (no attachments/mode), so this is a
+   * deliberately smaller shape than the main-chat PendingSend. */
+  pendingSideSends: { sc: string; clientId: string; body: string; ref: number | null }[];
+  /** v2.0 provenance (client-derived; the wire has no marker): while a
+   * `confirm_conclusion` is in flight, the anchor message id it targets maps
+   * to the side chat that produced it, so the plain `msg` that lands in main
+   * chat can be recognized as a conclusion when it arrives. Cleared on match. */
+  awaitingConclusions: Record<number, string>;
+  /** v2.0 provenance: main-chat message ids recognized as side-chat
+   * conclusions (renders the "worked out in a side chat" footer chip).
+   * Client-only session memory, like `turnDetails` — not persisted, so
+   * replayed history after a reload shows no chip (documented, accepted). */
+  conclusionChips: number[];
+  /** v2.0: one-shot "a conclusion just landed" signal consumed by ChatView to
+   * close the sheet (if it's the active one) and land-and-highlight the new
+   * owner bubble — the same pattern as `scrollToMessageId` et al. in UiState. */
+  lastConclusion: { sc: string; messageId: number } | null;
 }
 
 export type Action =
@@ -124,7 +194,28 @@ export type Action =
   | { type: "upload_retry"; clientId: string }
   | { type: "upload_remove"; clientId: string }
   | { type: "uploads_clear" }
-  | { type: "connection_status"; status: ConnectionStatus };
+  | { type: "connection_status"; status: ConnectionStatus }
+  // ---- v2.0 side chats (ADR-0008) ----
+  | { type: "side_chat_open"; sc: string; itemId: number; messages: ChatMessage[] }
+  | { type: "side_chat_msg"; sc: string; message: ChatMessage }
+  | {
+      type: "side_chat_send_local";
+      sc: string;
+      localId: number;
+      clientId: string;
+      body: string;
+      ref: number | null;
+      ts: string;
+    }
+  | { type: "side_chat_agent_activity"; sc: string; state: AgentActivityState; text: string | null }
+  | { type: "side_chat_turn_event"; sc: string; seq: number; event: TurnEvent }
+  | { type: "side_chat_conclude_requested"; sc: string }
+  | { type: "side_chat_conclusion_draft"; sc: string; text: string }
+  | { type: "side_chat_keep_editing"; sc: string }
+  | { type: "side_chat_confirm_sent"; sc: string; anchor: number }
+  | { type: "side_chat_discard_sent"; sc: string }
+  | { type: "side_chat_closed"; sc: string }
+  | { type: "clear_last_conclusion" };
 
 export function initialState(): AppState {
   return {
@@ -140,5 +231,11 @@ export function initialState(): AppState {
     turnDetails: {},
     removedIds: [],
     unreadOverrides: [],
+    sideChatRefs: [],
+    sideChats: {},
+    pendingSideSends: [],
+    awaitingConclusions: {},
+    conclusionChips: [],
+    lastConclusion: null,
   };
 }

@@ -1,12 +1,13 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { InboxItem, ProcessInfo } from "../protocol";
+import type { ChatMessage, InboxItem, ProcessInfo } from "../protocol";
 import type {
   Action,
   AppState,
   DisplayMessage,
   PendingSend,
+  SideChatState,
   TimelineEvent,
   Upload,
 } from "./types";
@@ -96,6 +97,47 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
   return { ...state, messages: [...state.messages, message] };
 }
 
+/** Same idea as `reconcileOrAppend`, scoped to one side chat's own message
+ * list. Side sends are text-only (no attachments/mode), so this is a smaller
+ * shape: it just returns the next list plus the reconciled clientId (if any)
+ * so the caller can drop the matching `pendingSideSends` entry. */
+function reconcileSideMessages(
+  messages: DisplayMessage[],
+  message: DisplayMessage,
+): { messages: DisplayMessage[]; reconciledClientId: string | null } {
+  if (messages.some((m) => !m.pending && m.id === message.id)) {
+    return { messages, reconciledClientId: null };
+  }
+  if (message.author === "owner") {
+    const idx = messages.findIndex((m) => m.pending && m.body === message.body);
+    if (idx !== -1) {
+      const reconciled = messages[idx];
+      const next = messages.slice();
+      next[idx] = { ...message };
+      return { messages: next, reconciledClientId: reconciled.clientId ?? null };
+    }
+  }
+  return { messages: [...messages, message], reconciledClientId: null };
+}
+
+/** A fresh SideChatState for a side chat the client has just learned is live
+ * (opened, resumed, or seeded from `hello_ok.side_chats`). */
+function freshSideChat(sc: string, itemId: number, messages: ChatMessage[]): SideChatState {
+  return {
+    sc,
+    itemId,
+    messages,
+    agentActivity: { state: "idle", text: null },
+    turnEvents: [],
+    drafting: false,
+    draft: null,
+    confirming: false,
+    discarding: false,
+    itemArchived: false,
+    ended: false,
+  };
+}
+
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
@@ -124,6 +166,26 @@ export function reduce(state: AppState, action: Action): AppState {
         pendingSends = pendingSends.filter((p) => p.clientId !== reconciled.clientId);
       }
 
+      // v2.0: reconcile live side chats against hello_ok.side_chats. A sc
+      // still listed survives untouched (its hydrated state, if any, is kept
+      // as-is — the resume flow re-fetches the transcript via open_side_chat,
+      // which is idempotent). A sc that was hydrated but has now vanished
+      // either resolved while offline (this client asked for the close, so
+      // the outcome is already known — drop it silently) or was closed
+      // elsewhere/reaped (mark it `ended` so a currently-open sheet shows the
+      // graceful terminal state instead of just disappearing).
+      const sideChatRefs = action.payload.side_chats ?? [];
+      const liveScs = new Set(sideChatRefs.map((r) => r.sc));
+      const sideChats: AppState["sideChats"] = {};
+      for (const [sc, sideChat] of Object.entries(state.sideChats)) {
+        if (liveScs.has(sc)) {
+          sideChats[sc] = sideChat;
+        } else if (!sideChat.confirming && !sideChat.discarding) {
+          sideChats[sc] = { ...sideChat, ended: true };
+        }
+        // else: resolved while offline as expected — drop.
+      }
+
       return {
         ...state,
         messages: [...merged, ...pending],
@@ -135,6 +197,8 @@ export function reduce(state: AppState, action: Action): AppState {
         // already-shown messages are kept (session memory, orthogonal to sync).
         processes: action.payload.processes ?? [],
         turnEvents: [],
+        sideChatRefs,
+        sideChats,
       };
     }
 
@@ -144,6 +208,23 @@ export function reduce(state: AppState, action: Action): AppState {
       // even if its echo arrives after the msg_removed that killed it.
       if (state.removedIds.includes(message.id)) return state;
       const next = reconcileOrAppend(state, message);
+
+      // v2.0 provenance (client-derived; no wire marker): a plain owner reply
+      // whose ref matches an anchor a confirm_conclusion just targeted is the
+      // conclusion landing in main chat. Tag it for the footer chip and fire
+      // the one-shot "land and highlight" signal ChatView consumes.
+      let awaitingConclusions = next.awaitingConclusions;
+      let conclusionChips = next.conclusionChips;
+      let lastConclusion = next.lastConclusion;
+      if (message.author === "owner" && message.ref !== null && awaitingConclusions[message.ref]) {
+        const sc = awaitingConclusions[message.ref];
+        const rest = { ...awaitingConclusions };
+        delete rest[message.ref];
+        awaitingConclusions = rest;
+        conclusionChips = [...conclusionChips, message.id].slice(-500);
+        lastConclusion = { sc, messageId: message.id };
+      }
+
       // A committed agent message ends the turn: freeze its live timeline into
       // session memory keyed to this message (the "turn details" affordance),
       // then clear the ephemeral live buffer. Only stash a non-empty timeline.
@@ -151,6 +232,9 @@ export function reduce(state: AppState, action: Action): AppState {
       const stash = commits && state.turnEvents.length > 0;
       return {
         ...next,
+        awaitingConclusions,
+        conclusionChips,
+        lastConclusion,
         lastSeenMsgId:
           state.lastSeenMsgId === null ? message.id : Math.max(state.lastSeenMsgId, message.id),
         turnEvents: commits ? [] : next.turnEvents,
@@ -205,11 +289,26 @@ export function reduce(state: AppState, action: Action): AppState {
         }),
       };
 
-    case "inbox_upsert":
+    case "inbox_upsert": {
+      const item = action.payload.item;
+      // Edge case (critique, binding): the Agent can archive an item while its
+      // side chat is still open. Don't kill the sheet — flag a non-blocking
+      // banner; Conclude/Discard both remain available. Fully derivable here,
+      // so no separate action/dispatch is needed for it.
+      let sideChats = state.sideChats;
+      if (item.status === "archived") {
+        for (const [sc, sideChat] of Object.entries(state.sideChats)) {
+          if (sideChat.itemId === item.id && !sideChat.itemArchived) {
+            sideChats = { ...sideChats, [sc]: { ...sideChat, itemArchived: true } };
+          }
+        }
+      }
       return {
         ...state,
-        inbox: upsertInboxItem(state.inbox, action.payload.item),
+        inbox: upsertInboxItem(state.inbox, item),
+        sideChats,
       };
+    }
 
     case "read_local": {
       // Optimistic email-like "seen" flip: set read=true locally (the host's
@@ -327,6 +426,183 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "connection_status":
       return { ...state, connection: action.status };
+
+    // ---- v2.0 side chats (ADR-0008) ----
+    // Every case below only ever touches `sideChats[sc]` / `sideChatRefs` /
+    // `pendingSideSends` / `awaitingConclusions` — never `messages`,
+    // `agentActivity`, or `turnEvents` — which is the structural guarantee
+    // that sc-scoped routing can never leak into (or read from) main state.
+
+    case "side_chat_open": {
+      // Idempotent per item (protocol v2.0): resuming a live side chat answers
+      // with the SAME sc and its transcript so far, so this both creates a
+      // fresh scope and refreshes an already-hydrated one.
+      const existing = state.sideChats[action.sc];
+      const sideChat = existing
+        ? { ...existing, messages: action.messages, ended: false }
+        : freshSideChat(action.sc, action.itemId, action.messages);
+      const sideChatRefs = state.sideChatRefs.some((r) => r.sc === action.sc)
+        ? state.sideChatRefs
+        : [...state.sideChatRefs, { sc: action.sc, item_id: action.itemId }];
+      return {
+        ...state,
+        sideChats: { ...state.sideChats, [action.sc]: sideChat },
+        sideChatRefs,
+      };
+    }
+
+    case "side_chat_msg": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state; // unknown/already-closed scope; drop.
+      const { messages, reconciledClientId } = reconcileSideMessages(
+        sideChat.messages,
+        action.message,
+      );
+      const commits = action.message.author === "agent";
+      return {
+        ...state,
+        sideChats: {
+          ...state.sideChats,
+          [action.sc]: { ...sideChat, messages, turnEvents: commits ? [] : sideChat.turnEvents },
+        },
+        pendingSideSends: reconciledClientId
+          ? state.pendingSideSends.filter((p) => p.clientId !== reconciledClientId)
+          : state.pendingSideSends,
+      };
+    }
+
+    case "side_chat_send_local": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      const localMessage: DisplayMessage = {
+        id: action.localId,
+        author: "owner",
+        body: action.body,
+        ref: action.ref,
+        ts: action.ts,
+        pending: true,
+        clientId: action.clientId,
+      };
+      return {
+        ...state,
+        sideChats: {
+          ...state.sideChats,
+          [action.sc]: { ...sideChat, messages: [...sideChat.messages, localMessage] },
+        },
+        pendingSideSends: [
+          ...state.pendingSideSends,
+          { sc: action.sc, clientId: action.clientId, body: action.body, ref: action.ref },
+        ],
+      };
+    }
+
+    case "side_chat_agent_activity": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: {
+          ...state.sideChats,
+          [action.sc]: {
+            ...sideChat,
+            agentActivity: { state: action.state, text: action.text },
+            turnEvents: action.state === "idle" ? [] : sideChat.turnEvents,
+          },
+        },
+      };
+    }
+
+    case "side_chat_turn_event": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: {
+          ...state.sideChats,
+          [action.sc]: {
+            ...sideChat,
+            turnEvents: upsertTurnEvent(sideChat.turnEvents, {
+              seq: action.seq,
+              event: action.event,
+            }),
+          },
+        },
+      };
+    }
+
+    case "side_chat_conclude_requested": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, drafting: true } },
+      };
+    }
+
+    case "side_chat_conclusion_draft": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: {
+          ...state.sideChats,
+          [action.sc]: { ...sideChat, drafting: false, draft: action.text },
+        },
+      };
+    }
+
+    case "side_chat_keep_editing": {
+      // "Keep editing" returns to the side chat, never a discard: just clear
+      // the draft so the confirmation sheet closes and the composer returns.
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, draft: null } },
+      };
+    }
+
+    case "side_chat_confirm_sent": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, confirming: true } },
+        awaitingConclusions: { ...state.awaitingConclusions, [action.anchor]: action.sc },
+      };
+    }
+
+    case "side_chat_discard_sent": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state;
+      return {
+        ...state,
+        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, discarding: true } },
+      };
+    }
+
+    case "side_chat_closed": {
+      const sideChat = state.sideChats[action.sc];
+      if (!sideChat) return state; // already gone (e.g. duplicate delivery).
+      const sideChatRefs = state.sideChatRefs.filter((r) => r.sc !== action.sc);
+      if (sideChat.confirming || sideChat.discarding) {
+        // Expected close (conclude/discard) completed — drop the record.
+        const rest = { ...state.sideChats };
+        delete rest[action.sc];
+        return { ...state, sideChats: rest, sideChatRefs };
+      }
+      // Host-initiated close we didn't ask for (TTL reap, or closed
+      // elsewhere): mark terminal so a currently-open sheet shows "This side
+      // chat ended" gracefully instead of the surface just vanishing.
+      return {
+        ...state,
+        sideChats: { ...state.sideChats, [action.sc]: { ...sideChat, ended: true } },
+        sideChatRefs,
+      };
+    }
+
+    case "clear_last_conclusion":
+      return { ...state, lastConclusion: null };
 
     default:
       return state;

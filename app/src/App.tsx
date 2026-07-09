@@ -5,7 +5,7 @@ import { InboxView } from "./components/inbox/InboxView";
 import { TabBar } from "./components/TabBar";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
-import { openRequiresResponseCount } from "./store/selectors";
+import { openUnreadCount } from "./store/selectors";
 import { state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
@@ -33,11 +33,11 @@ function App() {
     onCleanup(() => client.close());
   });
 
-  // Reflect the Inbox's requires-response badge count in document.title, so
-  // it's visible from a backgrounded tab without push notifications. (Replaces
-  // the React useTitleBadge hook with a plain effect.)
+  // Reflect the Inbox's email-like unread count (open + unread) in
+  // document.title, so it's visible from a backgrounded tab without push
+  // notifications. (Replaces the React useTitleBadge hook with a plain effect.)
   createEffect(() => {
-    const count = openRequiresResponseCount(state.inbox);
+    const count = openUnreadCount(state.inbox, state.unreadOverrides);
     document.title = count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
   });
 

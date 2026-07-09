@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { InboxItem } from "../../protocol";
-import { goToChat, state } from "../../store/store";
+import { dispatch, goToChat, state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { InboxItemCard } from "./InboxItemCard";
@@ -12,10 +12,12 @@ export function InboxView() {
   const [archivedExpanded, setArchivedExpanded] = createSignal(false);
 
   const partitioned = createMemo(() => {
-    const sorted = [...state.inbox].sort((a, b) => b.id - a.id); // newest first
+    // Chronological, newest first — unread state is visual, not a re-sort, so
+    // triage order stays predictable (spec §Ordering).
+    const sorted = [...state.inbox].sort((a, b) => b.id - a.id);
     return {
       open: sorted.filter((i) => i.status === "open"),
-      archived: sorted.filter((i) => i.status === "archived").slice(0, ARCHIVED_LIMIT),
+      deleted: sorted.filter((i) => i.status === "archived").slice(0, ARCHIVED_LIMIT),
     };
   });
 
@@ -31,13 +33,25 @@ export function InboxView() {
     goToChat({ scrollToMessageId: item.anchor });
   }
 
-  function handleArchive(item: InboxItem) {
+  // Delete = the wire `archive_item` (presented as "Deleted"); the only
+  // destructive action, reached from a card's ⋯ menu.
+  function handleDelete(item: InboxItem) {
     getClient()?.archiveItem(item.id);
+  }
+
+  // Auto-read / "Mark read": optimistic read flip + read_item on the wire.
+  function handleRead(item: InboxItem) {
+    getClient()?.readItem(item.id);
+  }
+
+  // "Mark unread": client-only override — there is no wire unread op.
+  function handleMarkUnread(item: InboxItem) {
+    dispatch({ type: "mark_unread_local", itemId: item.id });
   }
 
   return (
     <Show
-      when={partitioned().open.length > 0 || partitioned().archived.length > 0}
+      when={partitioned().open.length > 0 || partitioned().deleted.length > 0}
       fallback={
         <div class="flex flex-1 flex-col p-3">
           <Empty class="border-none">
@@ -60,13 +74,15 @@ export function InboxView() {
                 item={item}
                 onSendReply={handleSendReply}
                 onJumpToChat={handleJumpToChat}
-                onArchive={handleArchive}
+                onDelete={handleDelete}
+                onRead={handleRead}
+                onMarkUnread={handleMarkUnread}
               />
             )}
           </For>
         </div>
 
-        <Show when={partitioned().archived.length > 0}>
+        <Show when={partitioned().deleted.length > 0}>
           <div class="mt-2">
             <button
               type="button"
@@ -76,17 +92,19 @@ export function InboxView() {
               <Show when={archivedExpanded()} fallback={<ChevronRight class="size-4" />}>
                 <ChevronDown class="size-4" />
               </Show>
-              Archived ({partitioned().archived.length})
+              Deleted ({partitioned().deleted.length})
             </button>
             <Show when={archivedExpanded()}>
               <div class="flex flex-col gap-3">
-                <For each={partitioned().archived}>
+                <For each={partitioned().deleted}>
                   {(item) => (
                     <InboxItemCard
                       item={item}
                       onSendReply={handleSendReply}
                       onJumpToChat={handleJumpToChat}
-                      onArchive={handleArchive}
+                      onDelete={handleDelete}
+                      onRead={handleRead}
+                      onMarkUnread={handleMarkUnread}
                     />
                   )}
                 </For>

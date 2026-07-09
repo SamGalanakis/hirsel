@@ -1,11 +1,19 @@
-import { Check, Clock, MessageSquare, RotateCcw } from "lucide-solid";
-import { createMemo, createSignal, Show } from "solid-js";
+import { Check, Clock, MoreHorizontal, RotateCcw } from "lucide-solid";
+import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { InboxItem, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
-import { latestReplyForAnchor } from "../../store/selectors";
+import { isItemRead, latestReplyForAnchor } from "../../store/selectors";
+import { createSeenTimer } from "../../lib/auto-read";
 import { Markdown } from "../Markdown";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import { QuickReplyButtons } from "./QuickReplyButtons";
 import { ReplyInput } from "./ReplyInput";
 
@@ -16,7 +24,13 @@ interface Props {
   onSendReply: (item: InboxItem, body: string) => void;
   /** Secondary affordance: jump to the item's Anchor in Chat. */
   onJumpToChat: (item: InboxItem) => void;
-  onArchive: (item: InboxItem) => void;
+  /** Delete (wire `archive_item`) — the only destructive action, ⋯ menu only. */
+  onDelete: (item: InboxItem) => void;
+  /** Mark read (auto-read on view/interaction, or the ⋯ "Mark read"): sends
+   * read_item + optimistic flip. */
+  onRead: (item: InboxItem) => void;
+  /** Mark unread (⋯ menu): client-only override, no wire op. */
+  onMarkUnread: (item: InboxItem) => void;
 }
 
 function formatTime(ts: string): string {
@@ -39,6 +53,18 @@ function snippet(body: string): string {
 
 export function InboxItemCard(props: Props) {
   const isOpen = () => props.item.status === "open";
+  const isDeleted = () => props.item.status === "archived";
+  // Effective read state (wire `read` minus any local "Mark unread" override).
+  const read = () => isItemRead(props.item, state.unreadOverrides);
+  // Email-like "unread" = an open item not yet seen. Deleted items are never
+  // "unread" (they've left the active list).
+  const unread = () => isOpen() && !read();
+  // Auto-read candidate: open, still unread on the wire, and not being kept
+  // unread by an explicit "Mark unread". (Manual unread suppresses auto-read so
+  // marking unread then leaving the card on screen doesn't instantly re-read.)
+  const autoReadCandidate = () =>
+    isOpen() && props.item.read !== true && !state.unreadOverrides.includes(props.item.id);
+
   // Reveal the inline input on non-requires_response cards via "Reply"; on
   // requires_response cards it is expanded by default.
   const [revealed, setRevealed] = createSignal(false);
@@ -48,37 +74,116 @@ export function InboxItemCard(props: Props) {
   // latest owner message anchored to this item, if any.
   const reply = createMemo(() => latestReplyForAnchor(state.messages, props.item.anchor));
 
+  // --- Auto-read: email-like "seen" once visible ~1.5s or on interaction. ---
+  let cardEl: HTMLElement | undefined;
+  const markSeen = () => {
+    if (autoReadCandidate()) props.onRead(props.item);
+  };
+  const seen = createSeenTimer({ onSeen: markSeen });
+
+  onMount(() => {
+    // jsdom (unit tests) has no IntersectionObserver; the interaction path and
+    // the ⋯ "Mark read" still cover read there. The headless scenario installs
+    // a stub observer to exercise the view→read path.
+    if (typeof IntersectionObserver === "undefined" || !cardEl) return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        seen.setVisible(entry.isIntersecting && autoReadCandidate());
+      }
+    });
+    observer.observe(cardEl);
+    onCleanup(() => observer.disconnect());
+  });
+  onCleanup(() => seen.dispose());
+
+  // Interacting with the card (reveal input, quick reply, inline send) counts
+  // as seen immediately.
+  const reveal = () => {
+    setRevealed(true);
+    seen.interacted();
+  };
+  const sendReply = (body: string) => {
+    seen.interacted();
+    props.onSendReply(props.item, body);
+  };
+
   return (
     <Card
+      ref={(el: HTMLElement) => (cardEl = el)}
       size="sm"
-      class="mx-3 gap-2 border-l-2 px-3 py-3"
+      class="mx-3 gap-2 border-l-2 px-3 py-3 transition-opacity"
       classList={{
         "border-l-primary": props.item.requires_response,
         "border-l-transparent": !props.item.requires_response,
+        "opacity-60": isDeleted(),
       }}
+      data-read={read() ? "true" : "false"}
+      data-status={props.item.status}
     >
       <div class="flex items-center justify-between gap-2">
-        <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.item.ts)}</span>
+        <span class="flex items-center gap-1.5">
+          <Show when={unread()}>
+            <span
+              class="size-2 shrink-0 rounded-full bg-primary"
+              aria-label="Unread"
+              data-slot="unread-dot"
+            />
+          </Show>
+          <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.item.ts)}</span>
+        </span>
         <div class="flex items-center gap-1">
-          <Show when={!isOpen()}>
+          <Show when={isDeleted()}>
             <span class="text-[0.68rem] uppercase tracking-[0.03em] text-muted-foreground">
-              Archived
+              Deleted
             </span>
           </Show>
-          {/* Secondary "jump to chat" affordance (was the default card tap). */}
-          <button
-            type="button"
-            class="-mr-1 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
-            aria-label="Open in chat"
-            title="Open in chat"
-            onClick={() => props.onJumpToChat(props.item)}
-          >
-            <MessageSquare class="size-3.5" />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              class="-mr-1 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
+              aria-label="More actions"
+            >
+              <MoreHorizontal class="size-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <Show when={isOpen()}>
+                <DropdownMenuItem onSelect={reveal}>Reply</DropdownMenuItem>
+                <Show
+                  when={read()}
+                  fallback={
+                    <DropdownMenuItem onSelect={() => props.onRead(props.item)}>
+                      Mark read
+                    </DropdownMenuItem>
+                  }
+                >
+                  <DropdownMenuItem onSelect={() => props.onMarkUnread(props.item)}>
+                    Mark unread
+                  </DropdownMenuItem>
+                </Show>
+              </Show>
+              <DropdownMenuItem onSelect={() => props.onJumpToChat(props.item)}>
+                View in chat
+              </DropdownMenuItem>
+              <Show when={isOpen()}>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onSelect={() => props.onDelete(props.item)}>
+                  Delete
+                </DropdownMenuItem>
+              </Show>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
-      <Markdown>{props.item.content}</Markdown>
+      {/* Content: full-strength when unread (the "bold email" look), dimmed once
+          read/dealt-with, extra-muted when deleted. */}
+      <div
+        classList={{
+          "font-medium text-foreground": unread(),
+          "text-muted-foreground": !unread(),
+        }}
+      >
+        <Markdown>{props.item.content}</Markdown>
+      </div>
 
       {/* Replied state: small right-aligned quote under the content. */}
       <Show when={reply()}>
@@ -111,7 +216,7 @@ export function InboxItemCard(props: Props) {
       <Show when={isOpen()}>
         <QuickReplyButtons
           quickReplies={props.item.quick_replies}
-          onTap={(qr: QuickReply) => props.onSendReply(props.item, qr.value)}
+          onTap={(qr: QuickReply) => sendReply(qr.value)}
         />
       </Show>
 
@@ -119,33 +224,17 @@ export function InboxItemCard(props: Props) {
         <ReplyInput
           autofocus={revealed()}
           placeholder="Reply…"
-          onSend={(body) => props.onSendReply(props.item, body)}
+          onSend={(body) => sendReply(body)}
         />
       </Show>
 
-      <div class="-ml-2.5 mt-1 flex gap-1">
-        <Show when={isOpen() && !showInput()}>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() => setRevealed(true)}
-          >
+      <Show when={isOpen() && !showInput()}>
+        <div class="-ml-2.5 mt-1 flex gap-1">
+          <Button type="button" variant="link" size="sm" onClick={reveal}>
             Reply
           </Button>
-        </Show>
-        <Show when={isOpen()}>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            class="text-muted-foreground"
-            onClick={() => props.onArchive(props.item)}
-          >
-            Archive
-          </Button>
-        </Show>
-      </div>
+        </div>
+      </Show>
     </Card>
   );
 }

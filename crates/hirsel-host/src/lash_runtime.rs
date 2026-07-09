@@ -194,6 +194,7 @@ struct LashAgentRuntime {
     anchors: Arc<Mutex<Option<TurnAnchors>>>,
     active_turn_id: Arc<Mutex<Option<String>>>,
     drain_seq: AtomicU64,
+    drain_boot_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +302,10 @@ impl LashAgentRuntime {
             anchors,
             active_turn_id: Arc::new(Mutex::new(None)),
             drain_seq: AtomicU64::new(0),
+            drain_boot_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
@@ -411,7 +416,10 @@ impl LashAgentRuntime {
 
     fn next_drain_id(&self) -> String {
         let seq = self.drain_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        format!("host-queue-drain:{seq}")
+        // The boot epoch keeps drain replay keys unique across restarts:
+        // a per-boot counter alone collides with drains already committed in
+        // a persistent session store (store_commit_failed on first turn).
+        format!("host-queue-drain:{}:{seq}", self.drain_boot_ms)
     }
 
     async fn set_active_turn_id(&self, id: Option<String>) {
@@ -467,10 +475,11 @@ impl LashAgentRuntime {
 
     async fn handle_turn_error(&self, error: lash::EmbedError) {
         tracing::warn!(%error, "Lash queued turn failed");
-        let anchor = self.current_anchor().await;
+        // No ref: an error right under the Owner's message renders as a noisy
+        // self-quote in the client.
         match self
             .tools
-            .chat_send(format!("Agent turn failed: {error}"), anchor)
+            .chat_send(format!("Agent turn failed: {error}"), None)
             .await
         {
             Ok(_) => {}
@@ -486,14 +495,6 @@ impl LashAgentRuntime {
                 text: None,
             },
         );
-    }
-
-    async fn current_anchor(&self) -> Option<u64> {
-        self.anchors
-            .lock()
-            .await
-            .as_ref()
-            .map(|anchors| anchors.owner_message_id)
     }
 
     fn spawn_observation_bridge(self: &Arc<Self>) {
@@ -1024,7 +1025,7 @@ struct DegradedAgentRuntime {
 }
 
 impl DegradedAgentRuntime {
-    async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+    async fn enqueue(&self, _turn: OwnerTurn) -> anyhow::Result<()> {
         publish(
             &self.broadcast_log,
             &self.broadcaster,
@@ -1034,10 +1035,7 @@ impl DegradedAgentRuntime {
             },
         );
         self.tools
-            .chat_send(
-                format!("Agent turn failed: {}", self.reason),
-                Some(turn.message_id),
-            )
+            .chat_send(format!("Agent turn failed: {}", self.reason), None)
             .await?;
         publish(
             &self.broadcast_log,

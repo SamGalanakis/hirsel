@@ -202,7 +202,7 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       await waitFor(() => expect(store.state.inbox).toHaveLength(1), { timeout: 10000 });
       // Tap the Tray shelf open (no more Inbox tab) — never auto-expanded.
       expect(store.state.trayExpanded).toBe(false);
-      fireEvent.click(screen.getByLabelText("Open inbox"));
+      fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
 
       // --- 1. Arrives UNREAD: unread dot + badge 1 ---

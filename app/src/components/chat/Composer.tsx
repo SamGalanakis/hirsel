@@ -277,6 +277,7 @@ export function Composer(props: Props) {
         <Textarea
           ref={setRef}
           rows={1}
+          data-composer="main"
           class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
           placeholder="Message the Agent…"
           value={value()}

@@ -173,7 +173,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
     expect(store.state.messages).toHaveLength(1);
 
     // --- Discuss ---
-    await fireEvent.click(screen.getByLabelText("Open inbox"));
+    await fireEvent.click(screen.getByLabelText("Open Pings"));
     await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
     expect(fakeClient.openSideChat).toHaveBeenCalledWith(1);
 
@@ -204,7 +204,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
     expect(store.state.turnEvents).toEqual([]);
 
     // --- Conclude -> edit draft -> Send reply ---
-    await fireEvent.click(screen.getByRole("button", { name: "Conclude" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Wrap up" }));
     expect(fakeClient.concludeSideChat).toHaveBeenCalledWith("side:1");
 
     const textarea = (await screen.findByLabelText("Reply text")) as HTMLTextAreaElement;
@@ -241,7 +241,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
 describe("Resume after reconnect", () => {
   it("shows 'in progress · resume' (never auto-opens), and resuming restores the prior transcript", async () => {
     const { store, screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByLabelText("Open inbox"));
+    await fireEvent.click(screen.getByLabelText("Open Pings"));
     await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
@@ -283,11 +283,11 @@ describe("Resume after reconnect", () => {
 describe("Item archived mid-side-chat", () => {
   it("shows a non-blocking banner and Conclude still works", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByLabelText("Open inbox"));
+    await fireEvent.click(screen.getByLabelText("Open Pings"));
     await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
-    expect(screen.queryByText(/The Agent closed this item\./)).toBeNull();
+    expect(screen.queryByText(/The Agent closed this ping\./)).toBeNull();
 
     // The Agent archives the item while the side chat is still open.
     const store = await import("../store/store");
@@ -297,10 +297,10 @@ describe("Item archived mid-side-chat", () => {
       payload: { type: "inbox_upsert", item: { ...item!, status: "archived" } },
     });
 
-    expect(screen.getByText(/The Agent closed this item\./)).toBeTruthy();
+    expect(screen.getByText(/The Agent closed this ping\./)).toBeTruthy();
     // The sheet itself is not killed, and Conclude is still reachable.
     expect(screen.getByText(/Side chat ·/)).toBeTruthy();
-    await fireEvent.click(screen.getByRole("button", { name: "Conclude" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Wrap up" }));
     expect(fakeClient.concludeSideChat).toHaveBeenCalledWith("side:1");
   });
 });

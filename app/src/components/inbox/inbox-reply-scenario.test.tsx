@@ -182,7 +182,7 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
 
       // Tap the Tray shelf open (no more Inbox tab; never auto-expanded).
       expect(store.state.trayExpanded).toBe(false);
-      fireEvent.click(screen.getByLabelText("Open inbox"));
+      fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
       await screen.findByText("Deploy to prod?");
 

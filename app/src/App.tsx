@@ -23,6 +23,9 @@ const BASE_TITLE = "hirsel";
 function App() {
   const [token, setToken] = createSignal<string | null>(getStoredToken());
 
+  // Whether a Side Chat is open — widens the shell for the desktop split.
+  const splitActive = () => state.activeSideChatSc !== null;
+
   // Open (and tear down) the single WebSocket connection whenever the token is
   // set. Components run once in Solid; this effect re-runs only when token()
   // changes (first-run gate submit).
@@ -55,7 +58,20 @@ function App() {
         </div>
       }
     >
-      <div class="mx-auto flex w-full max-w-[560px] min-h-0 flex-1 flex-col">
+      {/* Slack-style split (ADR-0008 fork-ui iteration): the app column is a
+          phone-width single column by default. When a Side Chat is open on a
+          wide viewport (≥900px, where there is genuinely room for two panes),
+          the shell widens so ChatView can lay main Chat + the side panel out
+          side-by-side — main stays live on the left, the side panel is the
+          right rail. Below 900px the shell stays narrow and the side chat is a
+          full-screen sheet (both driven by CSS, one component tree). */}
+      <div
+        class="mx-auto flex w-full min-h-0 flex-1 flex-col transition-[max-width] duration-200 ease-out"
+        classList={{
+          "max-w-[560px]": !splitActive(),
+          "max-w-[560px] min-[900px]:max-w-[980px]": splitActive(),
+        }}
+      >
         <header class="flex flex-shrink-0 items-center justify-between border-b border-border px-4 py-3">
           <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
           <div class="flex items-center gap-1.5">

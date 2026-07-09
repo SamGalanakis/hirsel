@@ -69,7 +69,7 @@ export function TrayShelf() {
         onClick={() => setTrayExpanded(!expanded())}
         aria-expanded={expanded()}
         aria-label={
-          expanded() ? "Collapse inbox" : hasOpen() ? "Open inbox" : "Open done items"
+          expanded() ? "Collapse Pings" : hasOpen() ? "Open Pings" : "Open done items"
         }
       >
         <Show
@@ -93,7 +93,7 @@ export function TrayShelf() {
               </span>
             }
           >
-            <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Inbox</span>
+            <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Pings</span>
           </Show>
           <Show when={expanded() && thinking()}>
             <span class="flex shrink-0 items-center gap-1.5 text-[0.68rem] text-muted-foreground">
@@ -148,7 +148,7 @@ function TrayPanel() {
       data-slot="tray-panel"
       class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg"
       role="region"
-      aria-label="Inbox"
+      aria-label="Pings"
     >
       <InboxView />
     </div>

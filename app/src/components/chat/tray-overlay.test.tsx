@@ -66,7 +66,7 @@ describe("Tray overlay never pushes Chat", () => {
     viewport.scrollTop = 137;
 
     // Expand the Tray.
-    fireEvent.click(getByLabelText("Open inbox"));
+    fireEvent.click(getByLabelText("Open Pings"));
     expect(store.state.trayExpanded).toBe(true);
 
     // The scroller is untouched: same node, same scrollTop — the overlay is a
@@ -83,7 +83,7 @@ describe("Tray overlay never pushes Chat", () => {
     expect(panel.className).toContain("absolute");
 
     // Collapse again (tap the shelf/header a second time).
-    fireEvent.click(getByLabelText("Collapse inbox"));
+    fireEvent.click(getByLabelText("Collapse Pings"));
     expect(store.state.trayExpanded).toBe(false);
     expect(container.querySelector('[data-slot="tray-panel"]')).toBeNull();
     expect(

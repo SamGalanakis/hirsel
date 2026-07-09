@@ -79,7 +79,7 @@ export function InboxView() {
               <EmptyMedia variant="icon">
                 <InboxIcon />
               </EmptyMedia>
-              <EmptyTitle>Inbox is empty</EmptyTitle>
+              <EmptyTitle>No Pings yet</EmptyTitle>
               <EmptyDescription>Nothing needs your attention right now.</EmptyDescription>
             </EmptyHeader>
           </Empty>

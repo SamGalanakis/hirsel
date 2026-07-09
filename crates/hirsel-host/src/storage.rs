@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_tool_calls_are_persisted_with_chat_messages() {
+    async fn chat_tool_summaries_are_persisted_with_chat_messages() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
         let tool_calls = vec![

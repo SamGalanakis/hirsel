@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -13,7 +13,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
-use hirsel_proto::{AgentActivityState, HostToClient, QuickReply, SendMode, ToolCallSummary};
+use hirsel_proto::{
+    AgentActivityState, HostToClient, QuickReply, SendMode, ToolCallSummary, TurnEventKind,
+};
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
     observe::RemoteSessionObservationStreamItem,
@@ -625,7 +627,7 @@ impl LashAgentRuntime {
             let observable = session.observe();
             let current = observable.current_remote_observation();
             let cursor = RemoteSessionCursor::new(current.cursor);
-            let mut tool_call_seq = ToolCallSequence::default();
+            let mut timeline = TurnTimelineBridge::default();
             let mut stream = match observable.subscribe_and_recover_remote(cursor) {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -633,32 +635,31 @@ impl LashAgentRuntime {
                     return;
                 }
             };
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(RemoteSessionObservationStreamItem::Event(event)) => {
-                        if let Some(activity) = activity_from_observation(&event.event) {
-                            publish(&broadcast_log, &broadcaster, activity);
+            loop {
+                if timeline.has_pending() {
+                    let flush_delay = timeline.flush_delay();
+                    tokio::select! {
+                        item = stream.next() => {
+                            if !handle_observation_stream_item(
+                                item,
+                                &broadcast_log,
+                                &broadcaster,
+                                &mut timeline,
+                            ) {
+                                break;
+                            }
                         }
-                        if let Some(tool_call) =
-                            tool_call_from_observation(&event.event, &mut tool_call_seq)
-                        {
-                            publish(&broadcast_log, &broadcaster, tool_call);
+                        () = tokio::time::sleep(flush_delay) => {
+                            timeline.flush_pending(&broadcast_log, &broadcaster);
                         }
                     }
-                    Ok(RemoteSessionObservationStreamItem::Gap { .. }) => {
-                        publish(
-                            &broadcast_log,
-                            &broadcaster,
-                            HostToClient::AgentActivity {
-                                state: AgentActivityState::Idle,
-                                text: None,
-                            },
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "Lash observation stream failed");
-                        break;
-                    }
+                } else if !handle_observation_stream_item(
+                    stream.next().await,
+                    &broadcast_log,
+                    &broadcaster,
+                    &mut timeline,
+                ) {
+                    break;
                 }
             }
         });
@@ -1079,6 +1080,57 @@ async fn sleep_until_done_or_cancelled(
     }
 }
 
+fn handle_observation_stream_item<E>(
+    item: Option<Result<RemoteSessionObservationStreamItem, E>>,
+    broadcast_log: &BroadcastLog,
+    broadcaster: &broadcast::Sender<HostToClient>,
+    timeline: &mut TurnTimelineBridge,
+) -> bool
+where
+    E: std::fmt::Display,
+{
+    match item {
+        Some(Ok(RemoteSessionObservationStreamItem::Event(event))) => {
+            if matches!(
+                &event.event,
+                RemoteSessionObservationEventPayload::Committed
+            ) {
+                timeline.observe(&event.event, broadcast_log, broadcaster);
+                if let Some(activity) = activity_from_observation(&event.event) {
+                    publish(broadcast_log, broadcaster, activity);
+                }
+            } else {
+                if let Some(activity) = activity_from_observation(&event.event) {
+                    publish(broadcast_log, broadcaster, activity);
+                }
+                timeline.observe(&event.event, broadcast_log, broadcaster);
+            }
+            true
+        }
+        Some(Ok(RemoteSessionObservationStreamItem::Gap { .. })) => {
+            timeline.finish_turn(broadcast_log, broadcaster);
+            publish(
+                broadcast_log,
+                broadcaster,
+                HostToClient::AgentActivity {
+                    state: AgentActivityState::Idle,
+                    text: None,
+                },
+            );
+            true
+        }
+        Some(Err(error)) => {
+            timeline.finish_turn(broadcast_log, broadcaster);
+            tracing::warn!(%error, "Lash observation stream failed");
+            false
+        }
+        None => {
+            timeline.finish_turn(broadcast_log, broadcaster);
+            false
+        }
+    }
+}
+
 fn activity_from_observation(event: &RemoteSessionObservationEventPayload) -> Option<HostToClient> {
     match event {
         RemoteSessionObservationEventPayload::TurnActivity { activity } => match &activity.event {
@@ -1112,44 +1164,182 @@ fn activity_from_observation(event: &RemoteSessionObservationEventPayload) -> Op
     }
 }
 
+const TURN_EVENT_BATCH_INTERVAL: Duration = Duration::from_millis(250);
+const TURN_EVENT_BATCH_CHARS: usize = 400;
+const TURN_EVENT_SUMMARY_CHARS: usize = 120;
+
 #[derive(Default)]
-struct ToolCallSequence {
-    correlation_id: Option<String>,
+struct TurnTimelineBridge {
     seq: u64,
+    in_turn: bool,
+    pending: Option<PendingTimelineText>,
 }
 
-impl ToolCallSequence {
-    fn next(&mut self, correlation_id: &str) -> u64 {
-        if self.correlation_id.as_deref() != Some(correlation_id) {
-            self.correlation_id = Some(correlation_id.to_string());
-            self.seq = 0;
-        }
-        self.seq += 1;
-        self.seq
+struct PendingTimelineText {
+    kind: TimelineTextKind,
+    text: String,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineTextKind {
+    Prose,
+    Reasoning,
+}
+
+impl TurnTimelineBridge {
+    fn has_pending(&self) -> bool {
+        self.pending.is_some()
     }
-}
 
-fn tool_call_from_observation(
-    event: &RemoteSessionObservationEventPayload,
-    sequence: &mut ToolCallSequence,
-) -> Option<HostToClient> {
-    let RemoteSessionObservationEventPayload::TurnActivity { activity } = event else {
-        return None;
-    };
-    match &activity.event {
-        RemoteTurnEvent::ToolCallStarted { name, args, .. } => Some(HostToClient::AgentToolCall {
-            name: name.clone(),
-            summary: summarize_json_value(args),
-            seq: sequence.next(&activity.correlation_id),
-        }),
-        RemoteTurnEvent::ToolCallCompleted { name, output, .. } => {
-            Some(HostToClient::AgentToolCall {
-                name: name.clone(),
-                summary: summarize_json_value(output),
-                seq: sequence.next(&activity.correlation_id),
-            })
+    fn flush_delay(&self) -> Duration {
+        self.pending
+            .as_ref()
+            .map(|pending| TURN_EVENT_BATCH_INTERVAL.saturating_sub(pending.started_at.elapsed()))
+            .unwrap_or(TURN_EVENT_BATCH_INTERVAL)
+    }
+
+    fn observe(
+        &mut self,
+        event: &RemoteSessionObservationEventPayload,
+        broadcast_log: &BroadcastLog,
+        broadcaster: &broadcast::Sender<HostToClient>,
+    ) {
+        match event {
+            RemoteSessionObservationEventPayload::TurnActivity { activity } => {
+                match &activity.event {
+                    RemoteTurnEvent::ModelRequestStarted { .. } => {
+                        self.start_turn_if_needed();
+                    }
+                    RemoteTurnEvent::AssistantProseDelta { text } => {
+                        self.push_text(TimelineTextKind::Prose, text, broadcast_log, broadcaster);
+                    }
+                    RemoteTurnEvent::ReasoningDelta { text } => {
+                        self.push_text(
+                            TimelineTextKind::Reasoning,
+                            text,
+                            broadcast_log,
+                            broadcaster,
+                        );
+                    }
+                    RemoteTurnEvent::ToolCallStarted { name, args, .. } => {
+                        self.start_turn_if_needed();
+                        self.flush_pending(broadcast_log, broadcaster);
+                        self.publish_event(
+                            TurnEventKind::ToolStart {
+                                name: name.clone(),
+                                summary: condense_args(name, args),
+                            },
+                            broadcast_log,
+                            broadcaster,
+                        );
+                    }
+                    RemoteTurnEvent::ToolCallCompleted {
+                        name, args, output, ..
+                    } => {
+                        self.start_turn_if_needed();
+                        self.flush_pending(broadcast_log, broadcaster);
+                        self.publish_event(
+                            TurnEventKind::ToolDone {
+                                name: name.clone(),
+                                ok: tool_output_ok(output),
+                                summary: condense_result(name, args, output),
+                            },
+                            broadcast_log,
+                            broadcaster,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            RemoteSessionObservationEventPayload::Committed => {
+                self.finish_turn(broadcast_log, broadcaster);
+            }
+            _ => {}
         }
-        _ => None,
+    }
+
+    fn start_turn_if_needed(&mut self) {
+        if !self.in_turn {
+            self.seq = 0;
+            self.pending = None;
+            self.in_turn = true;
+        }
+    }
+
+    fn finish_turn(
+        &mut self,
+        broadcast_log: &BroadcastLog,
+        broadcaster: &broadcast::Sender<HostToClient>,
+    ) {
+        self.flush_pending(broadcast_log, broadcaster);
+        self.in_turn = false;
+    }
+
+    fn push_text(
+        &mut self,
+        kind: TimelineTextKind,
+        text: &str,
+        broadcast_log: &BroadcastLog,
+        broadcaster: &broadcast::Sender<HostToClient>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        self.start_turn_if_needed();
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.kind != kind)
+        {
+            self.flush_pending(broadcast_log, broadcaster);
+        }
+        let pending = self.pending.get_or_insert_with(|| PendingTimelineText {
+            kind,
+            text: String::new(),
+            started_at: Instant::now(),
+        });
+        pending.text.push_str(text);
+        if pending.text.chars().count() >= TURN_EVENT_BATCH_CHARS
+            || pending.started_at.elapsed() >= TURN_EVENT_BATCH_INTERVAL
+        {
+            self.flush_pending(broadcast_log, broadcaster);
+        }
+    }
+
+    fn flush_pending(
+        &mut self,
+        broadcast_log: &BroadcastLog,
+        broadcaster: &broadcast::Sender<HostToClient>,
+    ) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if pending.text.is_empty() {
+            return;
+        }
+        let event = match pending.kind {
+            TimelineTextKind::Prose => TurnEventKind::Prose { text: pending.text },
+            TimelineTextKind::Reasoning => TurnEventKind::Reasoning { text: pending.text },
+        };
+        self.publish_event(event, broadcast_log, broadcaster);
+    }
+
+    fn publish_event(
+        &mut self,
+        event: TurnEventKind,
+        broadcast_log: &BroadcastLog,
+        broadcaster: &broadcast::Sender<HostToClient>,
+    ) {
+        self.seq += 1;
+        publish(
+            broadcast_log,
+            broadcaster,
+            HostToClient::TurnEvent {
+                seq: self.seq,
+                event,
+            },
+        );
     }
 }
 
@@ -1179,17 +1369,228 @@ fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
         .collect()
 }
 
-fn summarize_json_value(value: &Value) -> Option<String> {
+fn condense_args(name: &str, payload: &Value) -> Option<String> {
+    let summary = match name {
+        "shell_run" => labeled_scalar(payload, "cmd", "cmd"),
+        "inbox_file" => {
+            labeled_first_scalar(payload, &["content_md", "content", "body"], "content")
+        }
+        "inbox_archive" => scalar_any(payload, &["item_id", "id"]).map(|id| format!("item {id}")),
+        "subagents_spawn" => {
+            let agent = scalar_field(payload, "agent").unwrap_or_else(|| "subagent".to_string());
+            scalar_any(payload, &["prompt", "task"]).map(|prompt| format!("{agent}: {prompt}"))
+        }
+        "subagents_prompt" => process_summary(payload).map(|process| {
+            match scalar_any(payload, &["text", "prompt", "message"]) {
+                Some(text) => format!("{process}: {text}"),
+                None => process,
+            }
+        }),
+        "subagents_interrupt" | "subagents_progress" | "subagents_wait" => process_summary(payload),
+        "monitors_create" => labeled_first_scalar(payload, &["label", "cmd"], "monitor"),
+        "monitors_cancel" => scalar_any(payload, &["monitor_id", "process_id", "id"])
+            .map(|id| format!("monitor {}", tail_identifier(&id))),
+        "monitors_list" | "subagents_list" => None,
+        _ => first_string_field(payload).map(|(key, value)| format!("{key}: {value}")),
+    };
+    clean_summary(summary)
+}
+
+fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
+    let ok = tool_output_ok(output);
+    let prefix = if ok { "ok" } else { "err" };
+    let payload = tool_output_payload(output).unwrap_or(output);
+    let detail = match name {
+        "shell_run" => shell_result_summary(payload),
+        "inbox_file" => scalar_field(payload, "id").map(|id| format!("item {id}")),
+        "inbox_archive" => payload
+            .get("item")
+            .and_then(|item| scalar_field(item, "id"))
+            .or_else(|| scalar_any(args, &["item_id", "id"]))
+            .map(|id| format!("item {id}")),
+        "subagents_spawn" => scalar_any(payload, &["process_id"])
+            .or_else(|| {
+                payload
+                    .get("handle")
+                    .and_then(|handle| scalar_field(handle, "process_id"))
+            })
+            .map(|id| format!("process {}", tail_identifier(&id))),
+        "subagents_prompt" => process_summary(args),
+        "subagents_interrupt" => process_summary(args),
+        "subagents_progress" => process_summary(args),
+        "subagents_wait" => scalar_any(payload, &["process_id"])
+            .or_else(|| scalar_any(args, &["process_id"]))
+            .map(|id| format!("process {}", tail_identifier(&id))),
+        "monitors_create" => scalar_any(payload, &["monitor_id", "process_id"])
+            .map(|id| format!("monitor {}", tail_identifier(&id))),
+        "monitors_cancel" => scalar_any(payload, &["monitor_id"])
+            .or_else(|| scalar_any(args, &["monitor_id", "process_id", "id"]))
+            .map(|id| format!("monitor {}", tail_identifier(&id))),
+        "monitors_list" => {
+            scalar_count(payload, "monitors").map(|count| format!("{count} monitors"))
+        }
+        "subagents_list" => {
+            scalar_count(payload, "processes").map(|count| format!("{count} processes"))
+        }
+        _ => first_scalar_field(payload).map(|(_, value)| value),
+    }
+    .or_else(|| failure_message(output));
+
+    clean_summary(Some(match detail {
+        Some(detail) if !detail.trim().is_empty() => format!("{prefix} {detail}"),
+        _ => prefix.to_string(),
+    }))
+}
+
+fn tool_output_ok(output: &Value) -> bool {
+    output
+        .pointer("/outcome/status")
+        .and_then(Value::as_str)
+        .map(|status| status == "success")
+        .or_else(|| {
+            output
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|status| status == "success" || status == "ok")
+        })
+        .or_else(|| output.get("ok").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn tool_output_payload(output: &Value) -> Option<&Value> {
+    output.pointer("/outcome/payload")
+}
+
+fn shell_result_summary(payload: &Value) -> Option<String> {
+    if payload
+        .get("timed_out")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("timed out".to_string());
+    }
+    scalar_field(payload, "status")
+        .map(|status| format!("status {status}"))
+        .or_else(|| {
+            first_non_empty_string(payload, &["stderr", "stdout"])
+                .map(|text| format!("output {text}"))
+        })
+}
+
+fn failure_message(output: &Value) -> Option<String> {
+    output
+        .pointer("/outcome/payload/message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            output
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn scalar_count(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| items.len().to_string())
+}
+
+fn process_summary(value: &Value) -> Option<String> {
+    scalar_any(value, &["process_id", "id"]).map(|id| format!("process {}", tail_identifier(&id)))
+}
+
+fn labeled_scalar(value: &Value, key: &str, label: &str) -> Option<String> {
+    scalar_field(value, key).map(|text| format!("{label}: {text}"))
+}
+
+fn labeled_first_scalar(value: &Value, keys: &[&str], label: &str) -> Option<String> {
+    scalar_any(value, keys).map(|text| format!("{label}: {text}"))
+}
+
+fn scalar_any(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| scalar_field(value, key))
+}
+
+fn scalar_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(scalar_value)
+}
+
+fn scalar_value(value: &Value) -> Option<String> {
     match value {
-        Value::Null => None,
-        Value::String(text) => latest_line(text),
-        Value::Array(items) if items.is_empty() => None,
-        Value::Object(entries) if entries.is_empty() => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
         Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Array(_) | Value::Object(_) => serde_json::to_string(value)
-            .ok()
-            .and_then(|text| latest_line(&text)),
+        _ => None,
+    }
+}
+
+fn first_non_empty_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_str))
+        .find_map(latest_line)
+}
+
+fn first_string_field(value: &Value) -> Option<(String, String)> {
+    value.as_object()?.iter().find_map(|(key, value)| {
+        value
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| (key.clone(), text.to_string()))
+    })
+}
+
+fn first_scalar_field(value: &Value) -> Option<(String, String)> {
+    value.as_object()?.iter().find_map(|(key, value)| {
+        scalar_value(value)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| (key.clone(), text))
+    })
+}
+
+fn tail_identifier(value: &str) -> String {
+    const MAX_ID_CHARS: usize = 24;
+    if value.chars().count() <= MAX_ID_CHARS {
+        return value.to_string();
+    }
+    let tail = value
+        .chars()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("...{tail}")
+}
+
+fn clean_summary(summary: Option<String>) -> Option<String> {
+    let without_braces = summary?
+        .chars()
+        .map(|ch| match ch {
+            '{' | '}' => ' ',
+            _ => ch,
+        })
+        .collect::<String>();
+    let compact = without_braces
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(&compact, TURN_EVENT_SUMMARY_CHARS))
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let mut truncated = text.chars().take(max_chars - 3).collect::<String>();
+        truncated.push_str("...");
+        truncated
     }
 }
 
@@ -2589,6 +2990,7 @@ impl ScriptedAgentRuntime {
         if cancel.is_cancelled() {
             return Ok(());
         }
+        self.emit_scripted_timeline().await;
         let turn_text = owner_turn_text(turn);
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
@@ -2623,6 +3025,54 @@ impl ScriptedAgentRuntime {
             )
             .await?;
         Ok(())
+    }
+
+    async fn emit_scripted_timeline(&self) {
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::TurnEvent {
+                seq: 1,
+                event: TurnEventKind::Prose {
+                    text: "I am checking the scripted path before replying.".to_string(),
+                },
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::TurnEvent {
+                seq: 2,
+                event: TurnEventKind::ToolStart {
+                    name: "scripted_double".to_string(),
+                    summary: Some("deterministic branch".to_string()),
+                },
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::TurnEvent {
+                seq: 3,
+                event: TurnEventKind::ToolDone {
+                    name: "scripted_double".to_string(),
+                    ok: true,
+                    summary: Some("ok fixture selected".to_string()),
+                },
+            },
+        );
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::TurnEvent {
+                seq: 4,
+                event: TurnEventKind::Prose {
+                    text: "The scripted response is ready.".to_string(),
+                },
+            },
+        );
     }
 
     async fn handle_fake_delegation(&self, turn: &OwnerTurn) -> anyhow::Result<()> {
@@ -2703,6 +3153,153 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn timeline_flushes_prose_before_tool_events() {
+        let broadcast_log = BroadcastLog::default();
+        let (broadcaster, _) = broadcast::channel(16);
+        let mut timeline = TurnTimelineBridge::default();
+
+        timeline.observe(
+            &remote_turn_activity(RemoteTurnEvent::ModelRequestStarted {
+                protocol_iteration: 0,
+            }),
+            &broadcast_log,
+            &broadcaster,
+        );
+        timeline.observe(
+            &remote_turn_activity(RemoteTurnEvent::AssistantProseDelta {
+                text: "I will ".to_string(),
+            }),
+            &broadcast_log,
+            &broadcaster,
+        );
+        timeline.observe(
+            &remote_turn_activity(RemoteTurnEvent::AssistantProseDelta {
+                text: "check now.".to_string(),
+            }),
+            &broadcast_log,
+            &broadcaster,
+        );
+        assert!(turn_events(&broadcast_log).is_empty());
+
+        timeline.observe(
+            &remote_turn_activity(RemoteTurnEvent::ToolCallStarted {
+                call_id: Some("call-1".to_string()),
+                name: "shell_run".to_string(),
+                args: serde_json::json!({ "cmd": "true" }),
+                graph_key: None,
+                parent_call_id: None,
+            }),
+            &broadcast_log,
+            &broadcaster,
+        );
+        timeline.observe(
+            &remote_turn_activity(RemoteTurnEvent::ToolCallCompleted {
+                call_id: Some("call-1".to_string()),
+                name: "shell_run".to_string(),
+                args: serde_json::json!({ "cmd": "true" }),
+                output: serde_json::json!({
+                    "outcome": {
+                        "status": "success",
+                        "payload": {
+                            "status": 0,
+                            "stdout": "",
+                            "stderr": "",
+                            "timed_out": false
+                        }
+                    }
+                }),
+                duration_ms: 12,
+                graph_key: None,
+                parent_call_id: None,
+            }),
+            &broadcast_log,
+            &broadcaster,
+        );
+
+        let events = turn_events(&broadcast_log);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].0, 1);
+        assert_eq!(
+            events[0].1,
+            TurnEventKind::Prose {
+                text: "I will check now.".to_string()
+            }
+        );
+        assert_eq!(events[1].0, 2);
+        assert_eq!(
+            events[1].1,
+            TurnEventKind::ToolStart {
+                name: "shell_run".to_string(),
+                summary: Some("cmd: true".to_string())
+            }
+        );
+        assert_eq!(events[2].0, 3);
+        assert_eq!(
+            events[2].1,
+            TurnEventKind::ToolDone {
+                name: "shell_run".to_string(),
+                ok: true,
+                summary: Some("ok status 0".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn tool_arg_summaries_are_condensed_and_not_json() {
+        let summary = condense_args(
+            "shell_run",
+            &serde_json::json!({
+                "cmd": "printf '{\"raw\":true}' && echo done",
+                "timeout_secs": 30
+            }),
+        )
+        .unwrap();
+
+        assert!(summary.starts_with("cmd: printf"));
+        assert!(!summary.contains("{\""));
+        assert!(!summary.contains('{'));
+        assert!(!summary.contains('}'));
+        assert!(summary.chars().count() <= TURN_EVENT_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn tool_result_summaries_include_status_and_error_hint() {
+        let ok = condense_result(
+            "shell_run",
+            &serde_json::json!({ "cmd": "true" }),
+            &serde_json::json!({
+                "outcome": {
+                    "status": "success",
+                    "payload": {
+                        "status": 0,
+                        "stdout": "",
+                        "stderr": "",
+                        "timed_out": false
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(ok, "ok status 0");
+
+        let err = condense_result(
+            "shell_run",
+            &serde_json::json!({ "cmd": "bad" }),
+            &serde_json::json!({
+                "outcome": {
+                    "status": "failure",
+                    "payload": {
+                        "message": "failed with {\"raw\":true}"
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(err, "err failed with \"raw\":true");
+        assert!(!err.contains("{\""));
+    }
+
     #[tokio::test]
     async fn owner_turn_input_notes_all_attachments_and_references_images() {
         let dir = tempfile::tempdir().unwrap();
@@ -2742,6 +3339,29 @@ mod tests {
             &[137, 80, 78, 71]
         );
         assert!(!input.image_blobs.contains_key("text-1"));
+    }
+
+    fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
+        RemoteSessionObservationEventPayload::TurnActivity {
+            activity: Box::new(lash::remote::usage::RemoteTurnActivity {
+                protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
+                sequence: 1,
+                id: "activity-1".to_string(),
+                correlation_id: "turn-1".to_string(),
+                event,
+            }),
+        }
+    }
+
+    fn turn_events(broadcast_log: &BroadcastLog) -> Vec<(u64, TurnEventKind)> {
+        broadcast_log
+            .recent()
+            .into_iter()
+            .filter_map(|event| match event {
+                HostToClient::TurnEvent { seq, event } => Some((seq, event)),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

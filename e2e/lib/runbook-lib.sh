@@ -13,9 +13,11 @@ repo_root() {
 }
 
 build_host() {
-  local bin="${HOST_BIN:-$CARGO_TARGET_DIR/debug/hirsel-host}"
-  if [[ ! -x "$bin" ]]; then
+  if [[ -z "${HOST_BIN:-}" ]]; then
     cargo build -p hirsel-host
+  elif [[ ! -x "$HOST_BIN" ]]; then
+    printf 'HOST_BIN is not executable: %s\n' "$HOST_BIN" >&2
+    return 1
   fi
 }
 
@@ -197,7 +199,7 @@ debug_snapshot() {
   mkdir -p "$(dirname "$prefix")"
   get_json debug/health >"$prefix.health.json" || true
   get_json debug/chat >"$prefix.chat.json" || true
-  get_json debug/inbox >"$prefix.inbox.json" || true
+  get_json debug/pings >"$prefix.pings.json" || true
   get_json debug/processes >"$prefix.processes.json" || true
   get_json debug/broadcasts >"$prefix.broadcasts.json" || true
   cp "$HOST_LOG" "$prefix.host.log" 2>/dev/null || true

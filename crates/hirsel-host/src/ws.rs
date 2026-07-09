@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use hirsel_proto::{ClientToHost, HostToClient, InboxItem};
+use hirsel_proto::{ClientToHost, HostToClient, Ping};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -90,13 +90,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     };
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Snapshotted, &state).await;
-    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.inbox.clone());
+    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
     send_json(
         &mut socket,
         &HostToClient::HelloOk {
             latest_msg_id: snapshot.latest_msg_id,
             messages: snapshot.messages,
-            inbox: snapshot.inbox,
+            pings: snapshot.pings,
             processes: state.process_snapshot().await.unwrap_or_default(),
             side_chats: state.side_chats.summaries().await,
         },
@@ -149,22 +149,22 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
 struct HelloBroadcastDedupe {
     latest_msg_id: u64,
-    inbox: Vec<InboxItem>,
+    pings: Vec<Ping>,
 }
 
 impl HelloBroadcastDedupe {
-    fn new(latest_msg_id: u64, inbox: Vec<InboxItem>) -> Self {
+    fn new(latest_msg_id: u64, pings: Vec<Ping>) -> Self {
         Self {
             latest_msg_id,
-            inbox,
+            pings,
         }
     }
 
     fn should_send(&self, event: &HostToClient) -> bool {
         match event {
             HostToClient::Msg { message, sc } => sc.is_some() || message.id > self.latest_msg_id,
-            HostToClient::InboxUpsert { item } => {
-                !self.inbox.iter().any(|snapshot| snapshot == item)
+            HostToClient::PingUpsert { ping } => {
+                !self.pings.iter().any(|snapshot| snapshot == ping)
             }
             _ => true,
         }
@@ -194,12 +194,13 @@ async fn handle_client_frame(
             attachments,
             mode,
             sc,
+            mentions,
         } => {
             if let Some(sc) = sc {
-                state.side_chats.send(&sc, body).await?;
+                state.side_chats.send(&sc, body, mentions).await?;
             } else {
                 let submission = state
-                    .submit_owner_message(client_id, body, r#ref, attachments, mode)
+                    .submit_owner_message(client_id, body, r#ref, attachments, mentions, mode)
                     .await?;
                 if !submission.inserted {
                     send_json_sink(
@@ -248,27 +249,27 @@ async fn handle_client_frame(
             )
             .await?;
         }
-        ClientToHost::ArchiveItem { item_id } => {
-            if let Some(item) = state.storage.archive_inbox_item(item_id).await? {
-                state.broadcast(HostToClient::InboxUpsert { item });
+        ClientToHost::ResolvePing { ping_id } => {
+            if let Some(ping) = state.storage.resolve_ping(ping_id).await? {
+                state.broadcast(HostToClient::PingUpsert { ping });
             }
         }
-        ClientToHost::ReadItem { item_id } => {
-            let item = state
+        ClientToHost::ReadPing { ping_id } => {
+            let ping = state
                 .storage
-                .mark_read(item_id)
+                .mark_ping_read(ping_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {item_id}"))?;
-            state.broadcast(HostToClient::InboxUpsert { item });
+                .ok_or_else(|| anyhow::anyhow!("unknown ping: {ping_id}"))?;
+            state.broadcast(HostToClient::PingUpsert { ping });
         }
         ClientToHost::OpenSideChat {
             client_id: _,
-            item_id,
+            ping_id,
         } => {
-            let (sc, messages, _) = state.side_chats.open(item_id).await?;
+            let (sc, messages, _) = state.side_chats.open(ping_id).await?;
             state.broadcast(HostToClient::SideChatOpen {
                 sc,
-                item_id,
+                ping_id,
                 messages,
             });
         }
@@ -422,14 +423,14 @@ mod tests {
             HostToClient::HelloOk {
                 latest_msg_id,
                 messages,
-                inbox,
+                pings,
                 processes,
                 side_chats,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].author, ChatAuthor::Agent);
-                assert!(inbox.is_empty());
+                assert!(pings.is_empty());
                 assert!(processes.is_empty());
                 assert!(side_chats.is_empty());
             }
@@ -597,7 +598,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_read_item_marks_read_and_errors_on_unknown_id() {
+    async fn websocket_rejects_unknown_mention_with_correlated_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "send_message",
+                "client_id": "bad-mention",
+                "body": "What about this?",
+                "ref": null,
+                "mentions": [99_999]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        match read_error(&mut ws).await {
+            HostToClient::Error { detail, client_id } => {
+                assert!(detail.contains("unknown mentioned ping: 99999"));
+                assert_eq!(client_id.as_deref(), Some("bad-mention"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(state.storage.all_chat().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn websocket_read_ping_marks_read_and_errors_on_unknown_id() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
         let anchor = state
@@ -606,48 +640,48 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let item = state
+        let ping = state
             .storage
-            .create_inbox_item("question", anchor, true, Vec::new())
+            .create_ping("question", "Question", "question", anchor, true, Vec::new())
             .await
             .unwrap();
-        assert!(!item.read);
+        assert!(!ping.read);
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
 
         let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
         send_hello(&mut ws).await;
         match read_hello_ok(&mut ws).await {
-            HostToClient::HelloOk { inbox, .. } => {
-                assert_eq!(inbox.len(), 1);
-                assert_eq!(inbox[0].id, item.id);
-                assert!(!inbox[0].read);
+            HostToClient::HelloOk { pings, .. } => {
+                assert_eq!(pings.len(), 1);
+                assert_eq!(pings[0].id, ping.id);
+                assert!(!pings[0].read);
             }
             other => panic!("unexpected hello response: {other:?}"),
         }
 
         ws.send(Message::Text(
             serde_json::json!({
-                "type": "read_item",
-                "item_id": item.id
+                "type": "read_ping",
+                "ping_id": ping.id
             })
             .to_string(),
         ))
         .await
         .unwrap();
-        match read_inbox_upsert(&mut ws).await {
-            HostToClient::InboxUpsert { item: read_item } => {
-                assert_eq!(read_item.id, item.id);
-                assert!(read_item.read);
+        match read_ping_upsert(&mut ws).await {
+            HostToClient::PingUpsert { ping: read_ping } => {
+                assert_eq!(read_ping.id, ping.id);
+                assert!(read_ping.read);
             }
             other => panic!("unexpected read response: {other:?}"),
         }
-        assert!(state.storage.all_inbox().await.unwrap()[0].read);
+        assert!(state.storage.all_pings().await.unwrap()[0].read);
 
         ws.send(Message::Text(
             serde_json::json!({
-                "type": "read_item",
-                "item_id": 99_999
+                "type": "read_ping",
+                "ping_id": 99_999
             })
             .to_string(),
         ))
@@ -655,7 +689,7 @@ mod tests {
         .unwrap();
         match read_error(&mut ws).await {
             HostToClient::Error { detail, client_id } => {
-                assert!(detail.contains("unknown inbox item"));
+                assert!(detail.contains("unknown ping"));
                 assert_eq!(client_id, None);
             }
             other => panic!("unexpected error response: {other:?}"),
@@ -843,13 +877,13 @@ mod tests {
         .await
     }
 
-    async fn read_inbox_upsert(
+    async fn read_ping_upsert(
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> HostToClient {
         read_until(ws, |response| {
-            matches!(response, HostToClient::InboxUpsert { .. })
+            matches!(response, HostToClient::PingUpsert { .. })
         })
         .await
     }

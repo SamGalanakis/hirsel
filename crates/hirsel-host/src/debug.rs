@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hirsel_proto::{Blob, ChatMessage, HostToClient, InboxItem, SendMode};
+use hirsel_proto::{Blob, ChatMessage, HostToClient, Ping, SendMode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,13 +27,14 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/conclude", post(conclude))
         .route("/debug/confirm-conclusion", post(confirm_conclusion))
         .route("/debug/side-chats", get(side_chats))
-        .route("/debug/read-item", post(read_item))
+        .route("/debug/read-ping", post(read_ping))
+        .route("/debug/resolve-ping", post(resolve_ping))
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
         .route("/debug/create-monitor", post(create_monitor))
         .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
-        .route("/debug/inbox", get(inbox))
+        .route("/debug/pings", get(pings))
         .route("/debug/processes", get(processes))
         .route("/debug/health", get(health))
         .with_state(state)
@@ -48,6 +49,8 @@ struct OwnerMessageRequest {
     anchor: Option<u64>,
     #[serde(default)]
     attachments: Vec<String>,
+    #[serde(default)]
+    mentions: Vec<u64>,
     #[serde(default)]
     mode: SendMode,
 }
@@ -65,19 +68,21 @@ struct UploadBlobRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReadItemRequest {
-    item_id: u64,
+struct PingRequest {
+    ping_id: u64,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenSideChatRequest {
-    item_id: u64,
+    ping_id: u64,
 }
 
 #[derive(Debug, Deserialize)]
 struct SideMessageRequest {
     sc: String,
     body: String,
+    #[serde(default)]
+    mentions: Vec<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,8 +125,8 @@ struct ChatResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct InboxResponse {
-    items: Vec<InboxItem>,
+struct PingsResponse {
+    pings: Vec<Ping>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,7 +137,7 @@ struct CreateMonitorResponse {
 #[derive(Debug, Serialize)]
 struct OpenSideChatResponse {
     sc: String,
-    item_id: u64,
+    ping_id: u64,
     messages: Vec<ChatMessage>,
     resumed: bool,
 }
@@ -173,15 +178,15 @@ async fn open_side_chat(
     State(state): State<AppState>,
     Json(request): Json<OpenSideChatRequest>,
 ) -> Result<Json<OpenSideChatResponse>, DebugError> {
-    let (sc, messages, resumed) = state.side_chats.open(request.item_id).await?;
+    let (sc, messages, resumed) = state.side_chats.open(request.ping_id).await?;
     state.broadcast(HostToClient::SideChatOpen {
         sc: sc.clone(),
-        item_id: request.item_id,
+        ping_id: request.ping_id,
         messages: messages.clone(),
     });
     Ok(Json(OpenSideChatResponse {
         sc,
-        item_id: request.item_id,
+        ping_id: request.ping_id,
         messages,
         resumed,
     }))
@@ -191,7 +196,10 @@ async fn side_message(
     State(state): State<AppState>,
     Json(request): Json<SideMessageRequest>,
 ) -> Result<Json<serde_json::Value>, DebugError> {
-    state.side_chats.send(&request.sc, request.body).await?;
+    state
+        .side_chats
+        .send(&request.sc, request.body, request.mentions)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -236,6 +244,7 @@ async fn owner_message(
             request.body,
             request.anchor,
             request.attachments,
+            request.mentions,
             request.mode,
         )
         .await?;
@@ -276,17 +285,30 @@ async fn upload_blob(
     Ok(Json(stored.blob))
 }
 
-async fn read_item(
+async fn read_ping(
     State(state): State<AppState>,
-    Json(request): Json<ReadItemRequest>,
-) -> Result<Json<InboxItem>, DebugError> {
-    let item = state
+    Json(request): Json<PingRequest>,
+) -> Result<Json<Ping>, DebugError> {
+    let ping = state
         .storage
-        .mark_read(request.item_id)
+        .mark_ping_read(request.ping_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {}", request.item_id))?;
-    state.broadcast(HostToClient::InboxUpsert { item: item.clone() });
-    Ok(Json(item))
+        .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
+    state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+    Ok(Json(ping))
+}
+
+async fn resolve_ping(
+    State(state): State<AppState>,
+    Json(request): Json<PingRequest>,
+) -> Result<Json<Ping>, DebugError> {
+    let ping = state
+        .storage
+        .resolve_ping(request.ping_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
+    state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+    Ok(Json(ping))
 }
 
 async fn create_monitor(
@@ -311,9 +333,9 @@ async fn chat(State(state): State<AppState>) -> Result<Json<ChatResponse>, Debug
     }))
 }
 
-async fn inbox(State(state): State<AppState>) -> Result<Json<InboxResponse>, DebugError> {
-    Ok(Json(InboxResponse {
-        items: state.storage.all_inbox().await?,
+async fn pings(State(state): State<AppState>) -> Result<Json<PingsResponse>, DebugError> {
+    Ok(Json(PingsResponse {
+        pings: state.storage.all_pings().await?,
     }))
 }
 

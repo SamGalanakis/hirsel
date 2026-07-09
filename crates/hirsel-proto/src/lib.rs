@@ -69,7 +69,7 @@ pub struct ProcessInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SideChatSummary {
     pub sc: String,
-    pub item_id: u64,
+    pub ping_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,19 +80,21 @@ pub struct QuickReply {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum InboxStatus {
+pub enum PingStatus {
     Open,
-    Archived,
+    Done,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InboxItem {
+pub struct Ping {
     pub id: u64,
+    pub name: String,
+    pub description: String,
     pub content: String,
     pub anchor: u64,
     pub requires_response: bool,
     pub quick_replies: Vec<QuickReply>,
-    pub status: InboxStatus,
+    pub status: PingStatus,
     #[serde(default)]
     pub read: bool,
     pub ts: DateTime<Utc>,
@@ -131,6 +133,8 @@ pub enum ClientToHost {
         mode: SendMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<u64>,
     },
     CancelTurn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,15 +149,15 @@ pub enum ClientToHost {
         mime: String,
         data_b64: String,
     },
-    ArchiveItem {
-        item_id: u64,
+    ResolvePing {
+        ping_id: u64,
     },
-    ReadItem {
-        item_id: u64,
+    ReadPing {
+        ping_id: u64,
     },
     OpenSideChat {
         client_id: String,
-        item_id: u64,
+        ping_id: u64,
     },
     ConcludeSideChat {
         sc: String,
@@ -211,7 +215,7 @@ pub enum HostToClient {
     HelloOk {
         latest_msg_id: u64,
         messages: Vec<ChatMessage>,
-        inbox: Vec<InboxItem>,
+        pings: Vec<Ping>,
         processes: Vec<ProcessInfo>,
         #[serde(default)]
         side_chats: Vec<SideChatSummary>,
@@ -239,8 +243,8 @@ pub enum HostToClient {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,
     },
-    InboxUpsert {
-        item: InboxItem,
+    PingUpsert {
+        ping: Ping,
     },
     BlobOk {
         client_id: String,
@@ -255,7 +259,7 @@ pub enum HostToClient {
     },
     SideChatOpen {
         sc: String,
-        item_id: u64,
+        ping_id: u64,
         messages: Vec<ChatMessage>,
     },
     ConclusionDraft {
@@ -312,6 +316,7 @@ mod tests {
                 attachments: vec!["blob-1".to_string()],
                 mode: SendMode::Send,
                 sc: None,
+                mentions: Vec::new(),
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
@@ -336,6 +341,7 @@ mod tests {
                 attachments: Vec::new(),
                 mode: SendMode::Send,
                 sc: None,
+                mentions: Vec::new(),
             }
         );
     }
@@ -361,6 +367,34 @@ mod tests {
                 attachments: Vec::new(),
                 mode: SendMode::NextTurn,
                 sc: None,
+                mentions: Vec::new(),
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn send_message_mentions_round_trip() {
+        let value = json!({
+            "type": "send_message",
+            "client_id": "client-mention",
+            "body": "status?",
+            "ref": null,
+            "attachments": [],
+            "mentions": [3, 7]
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::SendMessage {
+                client_id: "client-mention".to_string(),
+                body: "status?".to_string(),
+                r#ref: None,
+                attachments: Vec::new(),
+                mode: SendMode::Send,
+                sc: None,
+                mentions: vec![3, 7],
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
@@ -409,14 +443,14 @@ mod tests {
     }
 
     #[test]
-    fn read_item_round_trips() {
+    fn read_ping_round_trips() {
         let value = json!({
-            "type": "read_item",
-            "item_id": 9
+            "type": "read_ping",
+            "ping_id": 9
         });
 
         let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(parsed, ClientToHost::ReadItem { item_id: 9 });
+        assert_eq!(parsed, ClientToHost::ReadPing { ping_id: 9 });
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
     }
 
@@ -430,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_ok_round_trips_chat_and_inbox() {
+    fn hello_ok_round_trips_chat_and_pings() {
         let ts = Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap();
         let message = ChatMessage {
             id: 1,
@@ -449,8 +483,10 @@ mod tests {
                 ok: true,
             }],
         };
-        let item = InboxItem {
+        let ping = Ping {
             id: 9,
+            name: "release-ready".to_string(),
+            description: "Release is ready to ship".to_string(),
             content: "Done".to_string(),
             anchor: 1,
             requires_response: true,
@@ -458,7 +494,7 @@ mod tests {
                 value: "ship".to_string(),
                 label: "Ship it".to_string(),
             }],
-            status: InboxStatus::Open,
+            status: PingStatus::Open,
             read: true,
             ts,
         };
@@ -476,7 +512,7 @@ mod tests {
         let response = HostToClient::HelloOk {
             latest_msg_id: 1,
             messages: vec![message],
-            inbox: vec![item],
+            pings: vec![ping],
             processes: vec![process],
             side_chats: Vec::new(),
         };
@@ -601,10 +637,12 @@ mod tests {
     }
 
     #[test]
-    fn inbox_item_without_read_deserializes_as_unread() {
+    fn ping_without_read_deserializes_as_unread() {
         let value = json!({
             "id": 9,
-            "content": "old item",
+            "name": "old-ping",
+            "description": "Old ping",
+            "content": "old ping",
             "anchor": 1,
             "requires_response": true,
             "quick_replies": [],
@@ -612,7 +650,7 @@ mod tests {
             "ts": "2026-07-08T12:00:00Z"
         });
 
-        let parsed: InboxItem = serde_json::from_value(value).unwrap();
+        let parsed: Ping = serde_json::from_value(value).unwrap();
         assert!(!parsed.read);
     }
 
@@ -621,7 +659,7 @@ mod tests {
         let frames = [
             ClientToHost::OpenSideChat {
                 client_id: "open-1".to_string(),
-                item_id: 9,
+                ping_id: 9,
             },
             ClientToHost::ConcludeSideChat {
                 sc: "side:abc".to_string(),
@@ -650,7 +688,7 @@ mod tests {
         let frames = [
             HostToClient::SideChatOpen {
                 sc: "side:abc".to_string(),
-                item_id: 9,
+                ping_id: 9,
                 messages: Vec::new(),
             },
             HostToClient::ConclusionDraft {
@@ -687,17 +725,18 @@ mod tests {
                 attachments: Vec::new(),
                 mode: SendMode::Send,
                 sc: None,
+                mentions: Vec::new(),
             }
         );
     }
 
     #[test]
-    fn v1_hello_ok_defaults_side_chats() {
+    fn hello_ok_defaults_side_chats() {
         let old = json!({
             "type": "hello_ok",
             "latest_msg_id": 0,
             "messages": [],
-            "inbox": [],
+            "pings": [],
             "processes": []
         });
         let parsed: HostToClient = serde_json::from_value(old).unwrap();
@@ -706,7 +745,7 @@ mod tests {
             HostToClient::HelloOk {
                 latest_msg_id: 0,
                 messages: Vec::new(),
-                inbox: Vec::new(),
+                pings: Vec::new(),
                 processes: Vec::new(),
                 side_chats: Vec::new(),
             }

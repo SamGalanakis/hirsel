@@ -39,6 +39,9 @@ export interface InboxItem {
   quick_replies: QuickReply[]; // may be empty
   status: InboxStatus;
   ts: string;
+  /** v1.3: Owner-side "seen" state, set automatically once an item has been
+   * viewed (email-like). Optional on the wire; absent is treated as false. */
+  read?: boolean;
 }
 
 // ---- Client -> server ----
@@ -68,6 +71,14 @@ export interface ArchiveItemMsg {
   item_id: number;
 }
 
+/** v1.3: mark an Inbox item read (email-like "seen"). Idempotent; the host sets
+ * read=true and broadcasts an inbox_upsert. There is no "unread" op — that is a
+ * client-only override (see store). */
+export interface ReadItemMsg {
+  type: "read_item";
+  item_id: number;
+}
+
 /** v1.1: upload a file's bytes (base64) before referencing it from a
  * send_message. Correlated to a blob_ok by `client_id`. */
 export interface UploadBlobMsg {
@@ -94,6 +105,7 @@ export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
   | ArchiveItemMsg
+  | ReadItemMsg
   | UploadBlobMsg
   | CancelTurnMsg
   | CancelQueuedMsg;

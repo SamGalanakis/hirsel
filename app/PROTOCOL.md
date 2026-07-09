@@ -110,3 +110,30 @@ owner message into the composer for editing/resend. Phone: send button; long-pre
 next-turn; a stop control is visible while agent_activity=thinking.
 Queue affordance: bubbles for messages with mode=next_turn show a "queued" chip while a turn is
 active; chip clears when agent_activity returns to idle or the message's turn starts.
+
+## v1.3 — email-like inbox read state (2026-07-09)
+
+```
+InboxItem gains "read": bool   (optional, default false)
+```
+
+Client → server addition:
+```
+{ "type": "read_item", "item_id": u64 }   // idempotent; host sets read=true, broadcasts inbox_upsert
+```
+
+Semantics: `read` is Owner-side "seen" state, set automatically by the client when an item is
+viewed (email-like: visible in the viewport ~1.5s, or on first interaction with the card). It is
+orthogonal to *replied* (derived from anchor-refed owner messages) and to *status* (open|archived).
+The client flips `read=true` optimistically on send and the `inbox_upsert` reconciles it.
+
+There is deliberately NO wire "unread" op: "Mark unread" is a client-only override the PWA keeps
+locally (it does not round-trip). A subsequent auto-read/"Mark read" clears the override and sends
+`read_item`.
+
+UI language: `archived` is presented as **Deleted** (a trash section); the wire and storage keep
+`archived`. **Delete** (the destructive action) lives only in each card's ⋯ context menu.
+
+Badge = count of **open + unread** items (was open + requires_response). `document.title` mirrors it.
+`requires_response` no longer drives the badge; it keeps its visual accent and remains the only
+(future) push trigger.

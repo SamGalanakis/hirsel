@@ -29,6 +29,9 @@ interface Props {
   onCancelReply: () => void;
   attachments: AttachmentsController;
   thinking: boolean;
+  /** One-shot composer pre-fill (v1.4 "Ask to stop"); consumed once then cleared. */
+  prefill?: string | null;
+  onConsumePrefill?: () => void;
   onSend: (body: string, ref: number | null, mode: SendMode, blobs: Blob[]) => void;
   onStop: () => void;
   getLastOwnerBody: () => string | null;
@@ -55,6 +58,17 @@ export function Composer(props: Props) {
   // Focus the composer when a reply is pre-quoted into it.
   createEffect(() => {
     if (props.replyingTo) focus();
+  });
+
+  // Consume a one-shot pre-fill (v1.4 "Ask to stop"): drop the text into the
+  // draft, move the caret to the end, focus, then clear so it fires once.
+  createEffect(() => {
+    const pre = props.prefill;
+    if (!pre) return;
+    setValue(pre);
+    focus();
+    caretToEnd();
+    props.onConsumePrefill?.();
   });
 
   const uploadState = (clientId: string): AttachmentState => {

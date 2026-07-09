@@ -1,7 +1,8 @@
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, Match, onCleanup, Show, Switch } from "solid-js";
 import { ChatView } from "./components/chat/ChatView";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { InboxView } from "./components/inbox/InboxView";
+import { ProcessesView } from "./components/processes/ProcessesView";
 import { TabBar } from "./components/TabBar";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
@@ -61,9 +62,17 @@ function App() {
           <ConnectionPill />
         </header>
         <main class="flex min-h-0 flex-1 flex-col">
-          <Show when={state.activeTab === "chat"} fallback={<InboxView />}>
-            <ChatView />
-          </Show>
+          <Switch fallback={<ChatView />}>
+            <Match when={state.activeTab === "inbox"}>
+              <InboxView />
+            </Match>
+            <Match when={state.activeTab === "processes"}>
+              <ProcessesView />
+            </Match>
+            <Match when={state.activeTab === "chat"}>
+              <ChatView />
+            </Match>
+          </Switch>
         </main>
         <TabBar />
       </div>

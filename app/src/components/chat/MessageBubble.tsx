@@ -7,6 +7,7 @@ import { Bubble, BubbleContent } from "../ui/bubble";
 import { Message, MessageContent, MessageFooter } from "../ui/message";
 import { MessageAttachments } from "./MessageAttachments";
 import { QuotedRef } from "./QuotedRef";
+import { CommittedToolCalls } from "./ToolCalls";
 
 interface Props {
   message: DisplayMessage;
@@ -132,6 +133,13 @@ export function MessageBubble(props: Props) {
             </Show>
           </button>
         </MessageFooter>
+        {/* Committed tool calls (v1.4): collapsed "⚙ N tools" chip that expands
+            inline. Left-aligned under the (agent) bubble; absent when empty. */}
+        <Show when={props.message.tool_calls && props.message.tool_calls.length > 0}>
+          <div class="pt-1">
+            <CommittedToolCalls toolCalls={props.message.tool_calls ?? []} />
+          </div>
+        </Show>
       </MessageContent>
     </Message>
   );

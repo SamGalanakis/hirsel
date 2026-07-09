@@ -201,7 +201,7 @@ function startReplyTurn(ownerMessage) {
       1100,
     );
     later(
-      () => emitTurnEvent(4, { kind: "tool_done", id: "t1", ok: true, summary: "read 142 lines" }),
+      () => emitTurnEvent(4, { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 142 lines" }),
       1900,
     );
     later(

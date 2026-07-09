@@ -60,7 +60,7 @@ describe("turn details retention on commit", () => {
   it("freezes the live timeline onto the committing agent message, then clears it", () => {
     let s = ev(initialState(), 1, { kind: "prose", text: "looking… " });
     s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
-    s = ev(s, 3, { kind: "tool_done", id: "t1", ok: true, summary: "read 10 lines" });
+    s = ev(s, 3, { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 10 lines" });
     s = ev(s, 4, { kind: "prose", text: "done." });
 
     s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsg(7) } });

@@ -33,16 +33,24 @@ describe("buildTimeline (fold)", () => {
     const items = buildTimeline(
       evs(
         { kind: "tool_start", id: "t1", name: "grep", summary: "TODO" },
-        { kind: "tool_done", id: "t1", ok: true, summary: "3 matches" },
+        { kind: "tool_done", id: "t1", name: "grep", ok: true, summary: "3 matches" },
       ),
     );
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "tool", done: true, ok: true, result: "3 matches" });
   });
 
-  it("drops a tool_done with no matching tool_start", () => {
-    const items = buildTimeline(evs({ kind: "tool_done", id: "ghost", ok: false, summary: "?" }));
-    expect(items).toEqual([]);
+  it("renders an orphan tool_done as a completed row using its own name", () => {
+    const items = buildTimeline(evs({ kind: "tool_done", id: "ghost", name: "grep", ok: false, summary: "no match" }));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "tool",
+      name: "grep",
+      done: true,
+      ok: false,
+      result: "no match",
+      summary: null,
+    });
   });
 
   it("keeps reasoning runs separate from prose", () => {
@@ -88,7 +96,7 @@ describe("Timeline component", () => {
       <Timeline
         events={evs(
           { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" },
-          { kind: "tool_done", id: "t1", ok: true, summary: "read 10 lines" },
+          { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 10 lines" },
         )}
       />
     ));

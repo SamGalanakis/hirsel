@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Dev harness: a tiny in-memory host implementing PROTOCOL.md (v1 + v1.1
-// attachments + v1.2 CLI send/queue/cancel), with a scripted "agent" so the PWA
-// can be developed/demoed without the Rust host. Not durable — restart resets
-// all state. Serves blob content over HTTP on the same port the WS runs on.
+// Dev harness: a tiny in-memory host implementing PROTOCOL.md (v1 through
+// v2.0 side chats / ADR-0008), with a scripted "agent" so the PWA can be
+// developed/demoed without the Rust host. Not durable — restart resets all
+// state. Serves blob content over HTTP on the same port the WS runs on.
 // Run via `npm run dev:mock` (mock + vite together) or `npm run mock-server`.
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -14,6 +14,7 @@ const REPLAY_LIMIT = 200;
 const ARCHIVED_REPLAY_LIMIT = 20;
 const MAX_BLOB_BYTES = 15 * 1024 * 1024;
 const REPLY_DELAY_MS = Number(process.env.MOCK_REPLY_MS ?? 1200);
+const SIDECHAT_TTL_MS = Number(process.env.HIRSEL_SIDECHAT_TTL_SECS ?? 86400) * 1000;
 
 /** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[], tool_calls:object[]}[]} */
 const messages = [];
@@ -25,6 +26,12 @@ let nextInboxId = 1;
 let nextProcSeq = 1;
 const seenClientIds = new Map(); // client_id -> assigned message id
 const blobs = new Map(); // blob id -> { id, name, mime, size, buffer }
+
+// --- side chats (v2.0 / ADR-0008) -------------------------------------------
+/** @type {Map<string, {sc:string, itemId:number, messages:object[], nextMsgId:number, turnActive:boolean, turnTimers:NodeJS.Timeout[], ttlTimer:NodeJS.Timeout|null}>} */
+const sideChats = new Map(); // sc -> side chat state
+const sideChatByItem = new Map(); // item_id -> sc (idempotent open/resume, one live side chat per item)
+const sideSeenClientIds = new Map(); // client_id -> { sc, messageId } (per-side-chat send idempotency)
 
 // --- turn model (for v1.2 mode/cancel) --------------------------------------
 let turnActive = false;
@@ -99,6 +106,227 @@ function upsertInbox(item) {
 }
 function findOpenInboxByAnchor(anchorId) {
   return inbox.find((i) => i.status === "open" && i.anchor === anchorId);
+}
+
+/** hello_ok side_chats slice: just the {sc, item_id} refs (v2.0). */
+function sideChatsForHello() {
+  return [...sideChats.values()].map((s) => ({ sc: s.sc, item_id: s.itemId }));
+}
+
+/** (Re)arm the TTL-close timer for a side chat; any activity resets the clock. */
+function armSideTtl(sc) {
+  const sideChat = sideChats.get(sc);
+  if (!sideChat) return;
+  if (sideChat.ttlTimer) clearTimeout(sideChat.ttlTimer);
+  sideChat.ttlTimer = setTimeout(() => closeSideChat(sc, "ttl-reap"), SIDECHAT_TTL_MS);
+}
+
+/** Tear down a side chat and tell the client, regardless of why (confirm,
+ * discard, or a TTL reap) — the client distinguishes "expected" from
+ * "host-initiated" by whether IT asked for the close (see the reducer). */
+function closeSideChat(sc, reason) {
+  const sideChat = sideChats.get(sc);
+  if (!sideChat) return;
+  for (const t of sideChat.turnTimers) clearTimeout(t);
+  if (sideChat.ttlTimer) clearTimeout(sideChat.ttlTimer);
+  sideChats.delete(sc);
+  sideChatByItem.delete(sideChat.itemId);
+  broadcast({ type: "side_chat_closed", sc });
+  log("side chat closed:", sc, `(${reason})`);
+}
+
+function addSideMessage(sideChat, author, body, ref = null) {
+  const message = { id: sideChat.nextMsgId++, author, body, ref, ts: now(), attachments: [], tool_calls: [] };
+  sideChat.messages.push(message);
+  broadcast({ type: "msg", message, sc: sideChat.sc });
+  return message;
+}
+function setSideActivity(sideChat, state, text) {
+  broadcast({ type: "agent_activity", state, text: text ?? null, sc: sideChat.sc });
+}
+function emitSideTurnEvent(sideChat, seq, event) {
+  broadcast({ type: "turn_event", seq, event, sc: sideChat.sc });
+}
+function laterSide(sideChat, fn, ms) {
+  const t = setTimeout(fn, ms);
+  sideChat.turnTimers.push(t);
+  return t;
+}
+function finishSideTurn(sideChat) {
+  setSideActivity(sideChat, "idle", null);
+  sideChat.turnActive = false;
+  sideChat.turnTimers = [];
+}
+
+/** `open_side_chat` is idempotent per item (protocol v2.0): resuming answers
+ * with the SAME sc + transcript so far; a fresh one gets messages: [] — the
+ * seed (item + anchor + recent chat) lives in the side session's prompt
+ * layer, never as fake transcript rows. */
+function handleOpenSideChat(ws, frame) {
+  const existingSc = sideChatByItem.get(frame.item_id);
+  if (existingSc) {
+    const sideChat = sideChats.get(existingSc);
+    ws.send(
+      JSON.stringify({
+        type: "side_chat_open",
+        sc: sideChat.sc,
+        item_id: sideChat.itemId,
+        messages: sideChat.messages,
+      }),
+    );
+    log("side chat resumed", sideChat.sc, "for item", frame.item_id);
+    return;
+  }
+  const sc = `side:${randomUUID()}`;
+  const sideChat = {
+    sc,
+    itemId: frame.item_id,
+    messages: [],
+    nextMsgId: 1,
+    turnActive: false,
+    turnTimers: [],
+    ttlTimer: null,
+  };
+  sideChats.set(sc, sideChat);
+  sideChatByItem.set(frame.item_id, sc);
+  armSideTtl(sc);
+  ws.send(JSON.stringify({ type: "side_chat_open", sc, item_id: frame.item_id, messages: [] }));
+  log("side chat opened", sc, "for item", frame.item_id);
+}
+
+/** Scripted side-agent reply. Mirrors startReplyTurn's demo hooks (scoped to
+ * this side chat) plus a debug-only "ttl-close" body that simulates a
+ * host-side reap immediately, so the reconnect-gone / terminal-state path is
+ * drivable without waiting out the real TTL. */
+function startSideReplyTurn(sideChat, ownerMessage) {
+  sideChat.turnActive = true;
+  armSideTtl(sideChat.sc); // any activity resets the TTL clock
+  const trimmed = ownerMessage.body.trim().toLowerCase();
+
+  if (trimmed === "ttl-close") {
+    sideChat.turnActive = false;
+    closeSideChat(sideChat.sc, "ttl-close command");
+    return;
+  }
+
+  if (trimmed === "timeline") {
+    setSideActivity(sideChat, "thinking", "Working through it…");
+    laterSide(
+      sideChat,
+      () => emitSideTurnEvent(sideChat, 1, { kind: "prose", text: "Let me check the seeded context. " }),
+      300,
+    );
+    laterSide(
+      sideChat,
+      () => emitSideTurnEvent(sideChat, 2, { kind: "tool_start", id: "s1", name: "read_context", summary: null }),
+      700,
+    );
+    laterSide(
+      sideChat,
+      () =>
+        emitSideTurnEvent(sideChat, 3, {
+          kind: "tool_done",
+          id: "s1",
+          name: "read_context",
+          ok: true,
+          summary: "item + anchor + last 20 messages",
+        }),
+      1300,
+    );
+    laterSide(
+      sideChat,
+      () => emitSideTurnEvent(sideChat, 4, { kind: "prose", text: "Here's a reasonable take on it." }),
+      1700,
+    );
+    laterSide(
+      sideChat,
+      () => {
+        addSideMessage(sideChat, "agent", "Here's a reasonable take on it.", ownerMessage.id);
+        finishSideTurn(sideChat);
+      },
+      2000,
+    );
+    return;
+  }
+
+  setSideActivity(sideChat, "thinking", "Thinking…");
+  laterSide(
+    sideChat,
+    () => {
+      addSideMessage(sideChat, "agent", `Echo (side): ${ownerMessage.body || "(no text)"}`, ownerMessage.id);
+      finishSideTurn(sideChat);
+    },
+    REPLY_DELAY_MS,
+  );
+}
+
+function handleSideSendMessage(frame) {
+  const sideChat = sideChats.get(frame.sc);
+  if (!sideChat) return; // unknown/already-closed scope — a real host errors; the mock just drops it.
+  const already = sideSeenClientIds.get(frame.client_id);
+  if (already) {
+    const existing = sideChat.messages.find((m) => m.id === already.messageId);
+    if (existing) broadcast({ type: "msg", message: existing, sc: sideChat.sc });
+    return;
+  }
+  const message = addSideMessage(sideChat, "owner", frame.body, frame.ref ?? null);
+  sideSeenClientIds.set(frame.client_id, { sc: frame.sc, messageId: message.id });
+  if (!sideChat.turnActive) startSideReplyTurn(sideChat, message);
+}
+
+function handleSideCancelTurn(frame) {
+  const sideChat = sideChats.get(frame.sc);
+  if (!sideChat || !sideChat.turnActive) return;
+  for (const t of sideChat.turnTimers) clearTimeout(t);
+  sideChat.turnTimers = [];
+  addSideMessage(sideChat, "agent", "_Turn cancelled._", null);
+  finishSideTurn(sideChat);
+}
+
+/** A plausible-looking scripted draft: leans on the side chat's own last owner
+ * line if there is one, otherwise the item content — never the empty string,
+ * since the confirm sheet must always have something to show/edit. */
+function draftConclusion(sideChat) {
+  const item = inbox.find((i) => i.id === sideChat.itemId);
+  const lastOwnerLine = [...sideChat.messages].reverse().find((m) => m.author === "owner");
+  const base = lastOwnerLine ? lastOwnerLine.body : item ? item.content.replace(/\s+/g, " ") : "Sounds good.";
+  return `Based on our side chat: ${base}`;
+}
+
+function handleConcludeSideChat(frame) {
+  const sideChat = sideChats.get(frame.sc);
+  if (!sideChat) return;
+  setSideActivity(sideChat, "thinking", "Drafting your reply…");
+  laterSide(
+    sideChat,
+    () => {
+      const text = draftConclusion(sideChat);
+      setSideActivity(sideChat, "idle", null);
+      broadcast({ type: "conclusion_draft", sc: sideChat.sc, text });
+    },
+    REPLY_DELAY_MS,
+  );
+}
+
+/** `confirm_conclusion`: post the Owner's (possibly-edited) reply as a normal
+ * anchor-refed MAIN chat message (idempotent client_id keeps a resend from
+ * double-posting), archive the item (idempotent — a no-op if the Agent
+ * already archived it), then discard the side session + transcript. */
+function handleConfirmConclusion(frame) {
+  const sideChat = sideChats.get(frame.sc);
+  if (!sideChat) return;
+  const item = inbox.find((i) => i.id === sideChat.itemId);
+  const clientId = `side-conclude:${frame.sc}`;
+  if (!seenClientIds.has(clientId)) {
+    const message = addMessage("owner", frame.text, item ? item.anchor : null);
+    seenClientIds.set(clientId, message.id);
+    if (item && item.status !== "archived") upsertInbox({ ...item, status: "archived" });
+  }
+  closeSideChat(frame.sc, "concluded");
+}
+
+function handleDiscardSideChat(frame) {
+  closeSideChat(frame.sc, "discarded");
 }
 
 function later(fn, ms) {
@@ -463,6 +691,7 @@ wss.on("connection", (ws) => {
           messages: replayMessages,
           inbox: [...openItems, ...archivedItems],
           processes: processesForHello(),
+          side_chats: sideChatsForHello(),
         }),
       );
       log("hello ok, replayed", replayMessages.length, "messages");
@@ -471,13 +700,17 @@ wss.on("connection", (ws) => {
 
     switch (frame.type) {
       case "send_message":
-        handleSendMessage(frame);
+        // v2.0: sc present routes to that side chat; absent is main (byte-
+        // identical to the pre-v2.0 wire shape).
+        if (frame.sc) handleSideSendMessage(frame);
+        else handleSendMessage(frame);
         break;
       case "upload_blob":
         handleUploadBlob(ws, frame);
         break;
       case "cancel_turn":
-        handleCancelTurn();
+        if (frame.sc) handleSideCancelTurn(frame);
+        else handleCancelTurn();
         break;
       case "cancel_queued":
         handleCancelQueued(ws, frame);
@@ -487,6 +720,18 @@ wss.on("connection", (ws) => {
         break;
       case "read_item":
         handleReadItem(frame);
+        break;
+      case "open_side_chat":
+        handleOpenSideChat(ws, frame);
+        break;
+      case "conclude_side_chat":
+        handleConcludeSideChat(frame);
+        break;
+      case "confirm_conclusion":
+        handleConfirmConclusion(frame);
+        break;
+      case "discard_side_chat":
+        handleDiscardSideChat(frame);
         break;
       case "hello":
         ws.send(JSON.stringify({ type: "error", detail: "hello already sent" }));

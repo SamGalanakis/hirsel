@@ -318,6 +318,14 @@ class HirselWsClient {
         dispatch({ type: "inbox_upsert", payload: message });
         break;
       }
+      case "process_upsert": {
+        dispatch({ type: "process_upsert", payload: message });
+        break;
+      }
+      case "agent_tool_call": {
+        dispatch({ type: "agent_tool_call", payload: message });
+        break;
+      }
       case "blob_ok": {
         const pending = this.uploads.get(message.client_id);
         if (pending) {

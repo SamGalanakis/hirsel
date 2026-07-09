@@ -1,8 +1,8 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { InboxItem } from "../protocol";
-import type { Action, AppState, DisplayMessage, PendingSend, Upload } from "./types";
+import type { InboxItem, ProcessInfo } from "../protocol";
+import type { Action, AppState, DisplayMessage, LiveToolCall, PendingSend, Upload } from "./types";
 
 function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
   const idx = inbox.findIndex((existing) => existing.id === item.id);
@@ -10,6 +10,23 @@ function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
   const next = inbox.slice();
   next[idx] = item;
   return next;
+}
+
+/** Upsert a process by id, preserving list position for a known id (the
+ * newest-activity-first ordering is applied by the selector, not stored). */
+function upsertProcess(processes: ProcessInfo[], process: ProcessInfo): ProcessInfo[] {
+  const idx = processes.findIndex((p) => p.id === process.id);
+  if (idx === -1) return [...processes, process];
+  const next = processes.slice();
+  next[idx] = process;
+  return next;
+}
+
+/** Insert a live tool-call keyed by `seq` (idempotent on redelivery), keeping
+ * the list sorted by seq so the newest row is always last. */
+function upsertLiveToolCall(calls: LiveToolCall[], call: LiveToolCall): LiveToolCall[] {
+  const withoutDup = calls.filter((c) => c.seq !== call.seq);
+  return [...withoutDup, call].sort((a, b) => a.seq - b.seq);
 }
 
 function setUpload(uploads: Upload[], clientId: string, patch: Partial<Upload>): Upload[] {
@@ -84,6 +101,10 @@ export function reduce(state: AppState, action: Action): AppState {
         inbox,
         lastSeenMsgId: latest_msg_id,
         pendingSends,
+        // Fresh sync boundary: seed processes; live tool rows (ephemeral, never
+        // replayed) do not survive a resync.
+        processes: action.payload.processes ?? [],
+        liveToolCalls: [],
       };
     }
 
@@ -97,6 +118,9 @@ export function reduce(state: AppState, action: Action): AppState {
         ...next,
         lastSeenMsgId:
           state.lastSeenMsgId === null ? message.id : Math.max(state.lastSeenMsgId, message.id),
+        // A committed agent message ends the turn: clear the ephemeral live tool
+        // rows (the committed message carries its own tool_calls footer chip).
+        liveToolCalls: message.author === "agent" ? [] : next.liveToolCalls,
       };
     }
 
@@ -125,6 +149,25 @@ export function reduce(state: AppState, action: Action): AppState {
           state: action.payload.state,
           text: action.payload.text,
         },
+        // Turn boundary: idle clears the live tool rows (a cancelled turn may go
+        // idle without a committed message).
+        liveToolCalls: action.payload.state === "idle" ? [] : state.liveToolCalls,
+      };
+
+    case "process_upsert":
+      return {
+        ...state,
+        processes: upsertProcess(state.processes, action.payload.process),
+      };
+
+    case "agent_tool_call":
+      return {
+        ...state,
+        liveToolCalls: upsertLiveToolCall(state.liveToolCalls, {
+          name: action.payload.name,
+          summary: action.payload.summary,
+          seq: action.payload.seq,
+        }),
       };
 
     case "inbox_upsert":

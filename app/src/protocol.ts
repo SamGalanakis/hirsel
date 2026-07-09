@@ -15,6 +15,13 @@ export interface Blob {
   size: number; // u64, decoded byte size
 }
 
+/** A single tool the Agent invoked during the turn that produced a committed
+ * agent message (v1.4). Stamped from lash's per-turn RemoteToolCallSummary. */
+export interface ToolCall {
+  name: string;
+  ok: boolean;
+}
+
 export interface ChatMessage {
   id: number; // u64, monotonic, host-assigned
   author: Author;
@@ -22,6 +29,30 @@ export interface ChatMessage {
   ref: number | null; // id of the chat message this replies to
   ts: string; // RFC3339
   attachments?: Blob[]; // v1.1, default []
+  /** v1.4: tools invoked in the turn that committed this (agent) message.
+   * Optional on the wire; absent/empty renders no footer chip. */
+  tool_calls?: ToolCall[];
+}
+
+/** A host-tracked background process the Agent has running (v1.4): a delegated
+ * sub-agent, or a monitor probe. Surfaced in the Processes tab. */
+export type ProcessKind = "subagent" | "monitor";
+
+/** `running` is the only non-terminal state; the rest are terminal. `failed` /
+ * `abandoned` get a warning tint in the UI. */
+export type ProcessState = "running" | "done" | "failed" | "cancelled" | "abandoned";
+
+export interface ProcessInfo {
+  id: string;
+  kind: ProcessKind;
+  label: string;
+  /** subagent kind only: the acting agent + model, shown as small chips. */
+  agent: string | null;
+  model: string | null;
+  state: ProcessState;
+  started_ts: string; // RFC3339
+  last_event_ts: string; // RFC3339, drives newest-activity-first ordering
+  summary: string | null; // latest progress line, single-line truncated in UI
 }
 
 export interface QuickReply {
@@ -117,6 +148,9 @@ export interface HelloOkMsg {
   latest_msg_id: number;
   messages: ChatMessage[];
   inbox: InboxItem[];
+  /** v1.4: all non-terminal processes + the last 10 terminal ones. Optional on
+   * the wire; absent is treated as []. */
+  processes?: ProcessInfo[];
 }
 
 export interface MsgMsg {
@@ -150,6 +184,21 @@ export interface MsgRemovedMsg {
   id: number;
 }
 
+/** v1.4: full-process upsert broadcast on any state/summary change. */
+export interface ProcessUpsertMsg {
+  type: "process_upsert";
+  process: ProcessInfo;
+}
+
+/** v1.4: ephemeral tool-call event streamed while the Agent's turn runs (like
+ * agent_activity); never stored or replayed. `seq` orders calls within a turn. */
+export interface AgentToolCallMsg {
+  type: "agent_tool_call";
+  name: string;
+  summary: string | null;
+  seq: number;
+}
+
 export interface ErrorMsg {
   type: "error";
   detail: string;
@@ -166,4 +215,6 @@ export type ServerMessage =
   | InboxUpsertMsg
   | BlobOkMsg
   | MsgRemovedMsg
+  | ProcessUpsertMsg
+  | AgentToolCallMsg
   | ErrorMsg;

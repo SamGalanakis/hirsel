@@ -1,11 +1,14 @@
 import type {
   AgentActivityState,
+  AgentToolCallMsg,
   Blob,
   ChatMessage,
   HelloOkMsg,
   InboxItem,
   InboxUpsertMsg,
   MsgMsg,
+  ProcessInfo,
+  ProcessUpsertMsg,
   SendMode,
 } from "../protocol";
 
@@ -54,6 +57,15 @@ export interface Upload {
   blobId?: string; // set once blob_ok correlates
 }
 
+/** An ephemeral tool-call event from the running turn (v1.4). Accumulated in
+ * `seq` order while the Agent is thinking, then cleared the moment the turn
+ * commits — never stored beyond the running turn. */
+export interface LiveToolCall {
+  name: string;
+  summary: string | null;
+  seq: number;
+}
+
 export interface AppState {
   messages: DisplayMessage[];
   inbox: InboxItem[];
@@ -62,6 +74,12 @@ export interface AppState {
   lastSeenMsgId: number | null;
   pendingSends: PendingSend[];
   uploads: Upload[];
+  /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
+   * hello_ok.processes and kept current by process_upsert. */
+  processes: ProcessInfo[];
+  /** v1.4: live tool-call rows for the turn in progress. Ephemeral: cleared on
+   * turn commit (agent msg / agent_activity idle). */
+  liveToolCalls: LiveToolCall[];
   /** Host ids tombstoned by msg_removed. A cancelled queued message can have
    * its removal race its own echo; keeping the id here means a late echo is
    * dropped instead of re-materializing the bubble. Bounded. */
@@ -78,6 +96,8 @@ export type Action =
   | { type: "msg"; payload: MsgMsg }
   | { type: "msg_removed"; id: number }
   | { type: "agent_activity"; payload: { state: AgentActivityState; text: string | null } }
+  | { type: "process_upsert"; payload: ProcessUpsertMsg }
+  | { type: "agent_tool_call"; payload: AgentToolCallMsg }
   | { type: "inbox_upsert"; payload: InboxUpsertMsg }
   | { type: "read_local"; itemId: number }
   | { type: "mark_unread_local"; itemId: number }
@@ -110,6 +130,8 @@ export function initialState(): AppState {
     lastSeenMsgId: null,
     pendingSends: [],
     uploads: [],
+    processes: [],
+    liveToolCalls: [],
     removedIds: [],
     unreadOverrides: [],
   };

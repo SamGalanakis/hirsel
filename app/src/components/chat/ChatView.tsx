@@ -1,7 +1,12 @@
 import { ArrowDown, MessagesSquare, Upload } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
-import { clearComposerDraft, clearScrollTarget, state } from "../../store/store";
+import {
+  clearComposerDraft,
+  clearComposerPrefill,
+  clearScrollTarget,
+  state,
+} from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
@@ -17,6 +22,7 @@ import {
 import { Composer } from "./Composer";
 import { Lightbox } from "./Lightbox";
 import { MessageBubble } from "./MessageBubble";
+import { LiveToolCalls } from "./ToolCalls";
 import { createComposerAttachments } from "./useAttachments";
 
 const HIGHLIGHT_MS = 1600;
@@ -208,14 +214,20 @@ export function ChatView() {
                   )}
                 </For>
 
-                {/* Live "Thinking…" status via a shimmering Marker (ephemeral). */}
-                <Show when={thinking()}>
-                  <MessageScrollerItem class="px-4 py-1">
-                    <Marker>
-                      <MarkerContent class="shimmer text-sm">
-                        {state.agentActivity.text ?? "Thinking…"}
-                      </MarkerContent>
-                    </Marker>
+                {/* Live "Thinking…" status via a shimmering Marker (ephemeral),
+                    with the running turn's live tool-call rows beneath it. */}
+                <Show when={thinking() || state.liveToolCalls.length > 0}>
+                  <MessageScrollerItem class="flex flex-col gap-1.5 px-4 py-1">
+                    <Show when={thinking()}>
+                      <Marker>
+                        <MarkerContent class="shimmer text-sm">
+                          {state.agentActivity.text ?? "Thinking…"}
+                        </MarkerContent>
+                      </Marker>
+                    </Show>
+                    <Show when={state.liveToolCalls.length > 0}>
+                      <LiveToolCalls calls={state.liveToolCalls} />
+                    </Show>
                   </MessageScrollerItem>
                 </Show>
               </MessageScrollerContent>
@@ -237,6 +249,8 @@ export function ChatView() {
         replyingTo={replyingTo()}
         attachments={attachments}
         thinking={thinking()}
+        prefill={state.composerPrefill}
+        onConsumePrefill={clearComposerPrefill}
         onCancelReply={clearComposerDraft}
         onSend={handleSend}
         onStop={() => getClient()?.cancelTurn()}

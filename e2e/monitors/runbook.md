@@ -109,7 +109,7 @@ post_json debug/reset '{}'
 printf 'before\n' > "$WATCH"
 post_json debug/owner-message '{"client_id":"monitor-real-1","body":"Create a monitor named watch test file. It should run `stat -c %Y /tmp/hirsel-monitor-watch.txt` every 30 seconds, wake on changed output, and tell me when it fires. Use monitors.create. After creating it, reply exactly: monitor armed","ref":null}'
 MONITOR_ID="$(wait_jq debug/processes '.processes[] | select(.kind == "monitor" and .label == "watch test file")' 90 | jq -r '.processes[] | select(.kind == "monitor" and .label == "watch test file") | .id' | tail -1)"
-wait_jq debug/broadcasts '.events[] | select(.type == "agent_tool_call" and .name == "monitors_create")' 15 >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "turn_event" and .event.kind == "tool_start" and .event.name == "monitors_create")' 15 >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "process_upsert" and .process.id == "'$MONITOR_ID'")' 15 >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .body == "monitor armed")' 30 >/dev/null
 LATEST="$(curl -sS "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
@@ -134,4 +134,4 @@ wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > ('$LATEST'
 - `/debug/broadcasts` contains `process_upsert` for the monitor.
 - After touching the file, an Agent-authored Chat message appears from the monitor wake.
 - After restarting with the same data dir, the same monitor id is visible and fires again after another file change.
-- Real Lash variant also shows `agent_tool_call` for `monitors_create`.
+- Real Lash variant also shows a `turn_event` `tool_start` for `monitors_create`.

@@ -150,6 +150,33 @@ pub enum AgentActivityState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnEvent {
+    pub seq: u64,
+    pub event: TurnEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEventKind {
+    Prose {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolStart {
+        name: String,
+        summary: Option<String>,
+    },
+    ToolDone {
+        name: String,
+        ok: bool,
+        summary: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum HostToClient {
@@ -165,10 +192,9 @@ pub enum HostToClient {
     ProcessUpsert {
         process: ProcessInfo,
     },
-    AgentToolCall {
-        name: String,
-        summary: Option<String>,
+    TurnEvent {
         seq: u64,
+        event: TurnEventKind,
     },
     MsgRemoved {
         id: u64,
@@ -425,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn process_upsert_and_agent_tool_call_round_trip() {
+    fn process_upsert_round_trips() {
         let ts = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
         let process = ProcessInfo {
             id: "proc-1".to_string(),
@@ -448,19 +474,53 @@ mod tests {
         );
         let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, upsert);
+    }
 
-        let tool_call = HostToClient::AgentToolCall {
-            name: "shell_run".to_string(),
-            summary: Some("ok".to_string()),
-            seq: 2,
+    #[test]
+    fn turn_event_prose_round_trips() {
+        let event = TurnEvent {
+            seq: 1,
+            event: TurnEventKind::Prose {
+                text: "I will check that now.".to_string(),
+            },
         };
-        let encoded = serde_json::to_string(&tool_call).unwrap();
+        let encoded = serde_json::to_string(&HostToClient::TurnEvent {
+            seq: event.seq,
+            event: event.event.clone(),
+        })
+        .unwrap();
         assert_eq!(
             encoded,
-            r#"{"type":"agent_tool_call","name":"shell_run","summary":"ok","seq":2}"#
+            r#"{"type":"turn_event","seq":1,"event":{"kind":"prose","text":"I will check that now."}}"#
         );
         let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, tool_call);
+        assert_eq!(
+            decoded,
+            HostToClient::TurnEvent {
+                seq: 1,
+                event: event.event,
+            }
+        );
+    }
+
+    #[test]
+    fn turn_event_tool_done_round_trips() {
+        let event = HostToClient::TurnEvent {
+            seq: 3,
+            event: TurnEventKind::ToolDone {
+                name: "shell_run".to_string(),
+                ok: true,
+                summary: Some("ok status 0".to_string()),
+            },
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"turn_event","seq":3,"event":{"kind":"tool_done","name":"shell_run","ok":true,"summary":"ok status 0"}}"#
+        );
+        let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
     }
 
     #[test]

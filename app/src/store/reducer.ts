@@ -42,14 +42,51 @@ function upsertTurnEvent(events: TimelineEvent[], event: TimelineEvent): Timelin
   return [...withoutDup, event].sort((a, b) => a.seq - b.seq);
 }
 
+/** Streamed deltas can land the turn's final prose chunk with different
+ * trailing whitespace than the committed body (or vice versa), so a plain
+ * `===` would miss near-duplicates; tolerate either string being a prefix of
+ * the other, on top of an exact trimmed match. */
+function proseMatchesBody(proseText: string, body: string): boolean {
+  const p = proseText.trim();
+  const b = body.trim();
+  return p === b || b.startsWith(p) || p.startsWith(b);
+}
+
+/** Drop the turn timeline's trailing prose block when it just restates the
+ * committed message body — the turn's final prose IS the committed body, so
+ * showing it again as the last row of "turn details" is pure duplication.
+ * Only the trailing block is a candidate: intermediate prose (thinking out
+ * loud along the way) is the whole point of the expander and is left alone. */
+function trimTrailingProse(events: TimelineEvent[], body: string): TimelineEvent[] {
+  const last = events[events.length - 1];
+  if (!last || last.event.kind !== "prose" || !proseMatchesBody(last.event.text, body)) {
+    return events;
+  }
+  return events.slice(0, -1);
+}
+
 /** Freeze the just-finished turn's timeline onto the committing message id,
- * dropping the oldest retained turn once over the session cap. */
+ * dropping the oldest retained turn once over the session cap.
+ *
+ * `turnDetails` has the identical `Record<key, TimelineEvent[]>` shape as
+ * `sideChats` and shares its latent hazard (see cloneSideChat/setSideChat's
+ * notes): `details` may be a live reactive store proxy, so a plain
+ * `{ ...details, [msgId]: events }` copies the *other* entries' array
+ * references verbatim rather than cloning their contents. Feeding one of
+ * those live references back into a store write — even nested inside an
+ * otherwise-fresh wrapper object — is what caused sideChats' same-length
+ * array replacement to intermittently land empty. Every entry (the new one
+ * and every carried-over one) gets a fresh array here for the same reason. */
 function retainTurnDetails(
   details: Record<number, TimelineEvent[]>,
   msgId: number,
   events: TimelineEvent[],
 ): Record<number, TimelineEvent[]> {
-  const next: Record<number, TimelineEvent[]> = { ...details, [msgId]: events };
+  const next: Record<number, TimelineEvent[]> = {};
+  for (const [key, existing] of Object.entries(details)) {
+    next[Number(key)] = [...existing];
+  }
+  next[msgId] = [...events];
   const ids = Object.keys(next).map(Number);
   if (ids.length > TURN_DETAILS_LIMIT) {
     for (const id of ids.sort((a, b) => a - b).slice(0, ids.length - TURN_DETAILS_LIMIT)) {
@@ -262,9 +299,14 @@ export function reduce(state: AppState, action: Action): AppState {
 
       // A committed agent message ends the turn: freeze its live timeline into
       // session memory keyed to this message (the "turn details" affordance),
-      // then clear the ephemeral live buffer. Only stash a non-empty timeline.
+      // then clear the ephemeral live buffer. The timeline's trailing prose
+      // block is dropped first when it just restates the committed body (see
+      // trimTrailingProse) — otherwise the expander's last row would be a
+      // verbatim repeat of the message everyone can already read. Only stash
+      // a non-empty (post-trim) timeline.
       const commits = message.author === "agent";
-      const stash = commits && state.turnEvents.length > 0;
+      const frozenEvents = commits ? trimTrailingProse(state.turnEvents, message.body) : state.turnEvents;
+      const stash = commits && frozenEvents.length > 0;
       return {
         ...next,
         awaitingConclusions,
@@ -274,7 +316,7 @@ export function reduce(state: AppState, action: Action): AppState {
           state.lastSeenMsgId === null ? message.id : Math.max(state.lastSeenMsgId, message.id),
         turnEvents: commits ? [] : next.turnEvents,
         turnDetails: stash
-          ? retainTurnDetails(state.turnDetails, message.id, state.turnEvents)
+          ? retainTurnDetails(state.turnDetails, message.id, frozenEvents)
           : next.turnDetails,
       };
     }

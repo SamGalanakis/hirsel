@@ -110,18 +110,23 @@ export function dispatch(action: Action): void {
     setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("processes", reconcile(next.processes, { key: "id" }));
     setState("turnEvents", next.turnEvents);
-    setState("turnDetails", next.turnDetails);
+    // `reconcile` (not a plain setState) is load-bearing here, same as
+    // `sideChats` below: a plain `setState("turnDetails", plainObject)` has
+    // the same same-shaped-Record-of-arrays failure mode that intermittently
+    // landed a stale/empty nested array for sideChats (traced via a resume
+    // losing its restored transcript) — reconcile's structural diff does not
+    // have that hazard. See reducer.ts's `retainTurnDetails` for the matching
+    // clone-through-every-entry half of this fix.
+    setState("turnDetails", reconcile(next.turnDetails));
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);
     setState("sideChatRefs", next.sideChatRefs);
-    // `reconcile` (not a plain setState) is load-bearing here, unlike
-    // `turnDetails` below (a same-shaped Record<key, {...arrays}>): a plain
+    // `reconcile` (not a plain setState) is load-bearing here too: a plain
     // `setState("sideChats", plainObject)` intermittently landed a stale/empty
     // nested array on a same-length array replacement (traced via a resume
     // losing its restored transcript) — reconcile's structural diff does not
-    // have that failure mode. `turnDetails` likely shares the latent risk;
-    // out of scope for this change, flagging for a follow-up.
+    // have that failure mode.
     setState("sideChats", reconcile(next.sideChats));
     setState("pendingSideSends", next.pendingSideSends);
     setState("awaitingConclusions", next.awaitingConclusions);

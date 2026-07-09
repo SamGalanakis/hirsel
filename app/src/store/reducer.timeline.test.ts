@@ -89,3 +89,128 @@ describe("turn details retention on commit", () => {
     expect(s.turnDetails[7]).toBeTruthy();
   });
 });
+
+describe("turn details: trailing-prose duplication trim", () => {
+  function agentMsgBody(id: number, body: string): ChatMessage {
+    return { id, author: "agent", body, ref: null, ts: `2026-07-10T00:00:0${id}Z`, tool_calls: [] };
+  }
+
+  it("drops the trailing prose block when it exactly matches the committed body", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "looking into it…" });
+    s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 3, { kind: "prose", text: "Here is the answer." });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Here is the answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("trims when the streamed final prose is a prefix of the final body (lost trailing text)", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 2, { kind: "prose", text: "Here is the ans" });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Here is the answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("trims when the committed body is a prefix of the streamed final prose (lost trailing whitespace)", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 2, { kind: "prose", text: "Here is the answer.   " });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Here is the answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("keeps intermediate prose blocks untouched, only trimming the trailing one", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "First I'll check the file." });
+    s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 3, { kind: "prose", text: "Final answer." });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Final answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2]);
+    expect(s.turnDetails[7][0].event).toMatchObject({ kind: "prose", text: "First I'll check the file." });
+  });
+
+  it("still attaches turn details when the trailing block is a tool event, not prose", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "Checking…" });
+    s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 3, { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "10 lines" });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Done reading the file.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("does not attach turn details at all when trimming empties the whole timeline", () => {
+    const s0 = ev(initialState(), 1, { kind: "prose", text: "Final answer." });
+    const s = reduce(s0, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Final answer.") },
+    });
+
+    expect(s.turnDetails).toEqual({});
+    expect(s.turnDetails[7]).toBeUndefined();
+  });
+});
+
+describe("turn details: clone-through hardening (mirrors sideChats' fix)", () => {
+  function agentMsgBody(id: number, body: string): ChatMessage {
+    return { id, author: "agent", body, ref: null, ts: `2026-07-10T00:00:0${id}Z`, tool_calls: [] };
+  }
+
+  it("retains a turn's events as a fresh array, not the same live turnEvents reference", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    const liveTurnEvents = s.turnEvents;
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(7, "done") } });
+
+    expect(s.turnDetails[7]).toEqual(liveTurnEvents);
+    expect(s.turnDetails[7]).not.toBe(liveTurnEvents);
+  });
+
+  it("clones every OTHER retained entry's array on a later commit rather than aliasing it", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(7, "first") } });
+    const firstEntryAfterFirstCommit = s.turnDetails[7];
+
+    s = ev(s, 2, { kind: "tool_start", id: "t2", name: "grep", summary: "foo" });
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(8, "second") } });
+    const firstEntryAfterSecondCommit = s.turnDetails[7];
+
+    // Content-equal (message 7's frozen timeline never changes)...
+    expect(firstEntryAfterSecondCommit).toEqual(firstEntryAfterFirstCommit);
+    // ...but NOT the same reference: a fresh clone (rather than carrying over
+    // the exact prior array) is what makes a subsequent store write safe —
+    // see retainTurnDetails' note in reducer.ts.
+    expect(firstEntryAfterSecondCommit).not.toBe(firstEntryAfterFirstCommit);
+  });
+
+  it("evicts the oldest retained turn once over the session cap, keeping the newest ones fresh", () => {
+    let s = initialState();
+    for (let i = 1; i <= 51; i++) {
+      s = ev(s, i, { kind: "tool_start", id: `t${i}`, name: "read_file", summary: `${i}.ts` });
+      s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(i, `reply ${i}`) } });
+    }
+    const ids = Object.keys(s.turnDetails).map(Number).sort((a, b) => a - b);
+    expect(ids).toHaveLength(50);
+    expect(ids[0]).toBe(2); // id 1 evicted, oldest of the 50 retained is 2.
+    expect(s.turnDetails[51]).toBeTruthy();
+  });
+});

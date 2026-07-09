@@ -49,6 +49,8 @@ pub struct InboxItem {
     pub requires_response: bool,
     pub quick_replies: Vec<QuickReply>,
     pub status: InboxStatus,
+    #[serde(default)]
+    pub read: bool,
     pub ts: DateTime<Utc>,
 }
 
@@ -95,6 +97,9 @@ pub enum ClientToHost {
         data_b64: String,
     },
     ArchiveItem {
+        item_id: u64,
+    },
+    ReadItem {
         item_id: u64,
     },
 }
@@ -280,6 +285,18 @@ mod tests {
     }
 
     #[test]
+    fn read_item_round_trips() {
+        let value = json!({
+            "type": "read_item",
+            "item_id": 9
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed, ClientToHost::ReadItem { item_id: 9 });
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
     fn msg_removed_round_trips() {
         let response = HostToClient::MsgRemoved { id: 42 };
         let encoded = serde_json::to_string(&response).unwrap();
@@ -314,6 +331,7 @@ mod tests {
                 label: "Ship it".to_string(),
             }],
             status: InboxStatus::Open,
+            read: true,
             ts,
         };
         let response = HostToClient::HelloOk {
@@ -340,5 +358,21 @@ mod tests {
 
         let parsed: ChatMessage = serde_json::from_value(value).unwrap();
         assert!(parsed.attachments.is_empty());
+    }
+
+    #[test]
+    fn inbox_item_without_read_deserializes_as_unread() {
+        let value = json!({
+            "id": 9,
+            "content": "old item",
+            "anchor": 1,
+            "requires_response": true,
+            "quick_replies": [],
+            "status": "open",
+            "ts": "2026-07-08T12:00:00Z"
+        });
+
+        let parsed: InboxItem = serde_json::from_value(value).unwrap();
+        assert!(!parsed.read);
     }
 }

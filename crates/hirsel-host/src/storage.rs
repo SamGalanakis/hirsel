@@ -80,10 +80,12 @@ impl Storage {
                 requires_response INTEGER NOT NULL,
                 quick_replies TEXT NOT NULL,
                 status TEXT NOT NULL,
+                read INTEGER NOT NULL DEFAULT 0,
                 ts TEXT NOT NULL
             );
             ",
         )?;
+        ensure_inbox_read_column(&conn)?;
         Ok(())
     }
 
@@ -242,8 +244,16 @@ impl Storage {
         let conn = self.conn.lock().await;
         conn.execute(
             "
-            INSERT INTO inbox_items (content, anchor, requires_response, quick_replies, status, ts)
-            VALUES (?1, ?2, ?3, ?4, 'open', ?5)
+            INSERT INTO inbox_items (
+                content,
+                anchor,
+                requires_response,
+                quick_replies,
+                status,
+                read,
+                ts
+            )
+            VALUES (?1, ?2, ?3, ?4, 'open', 0, ?5)
             ",
             params![
                 content,
@@ -261,6 +271,7 @@ impl Storage {
             requires_response,
             quick_replies,
             status: InboxStatus::Open,
+            read: false,
             ts,
         })
     }
@@ -277,13 +288,22 @@ impl Storage {
         Ok(Some(get_inbox_item(&conn, item_id)?))
     }
 
+    pub async fn mark_read(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE inbox_items SET read = 1 WHERE id = ?1 AND read = 0",
+            params![item_id],
+        )?;
+        get_inbox_item_optional(&conn, item_id).map_err(Into::into)
+    }
+
     pub async fn inbox_snapshot(&self) -> anyhow::Result<Vec<InboxItem>> {
         let conn = self.conn.lock().await;
         let mut items = Vec::new();
         {
             let mut stmt = conn.prepare(
                 "
-                SELECT id, content, anchor, requires_response, quick_replies, status, ts
+                SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
                 FROM inbox_items
                 WHERE status = 'open'
                 ORDER BY id ASC
@@ -295,7 +315,7 @@ impl Storage {
         {
             let mut stmt = conn.prepare(
                 "
-                SELECT id, content, anchor, requires_response, quick_replies, status, ts
+                SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
                 FROM inbox_items
                 WHERE status = 'archived'
                 ORDER BY id DESC
@@ -314,7 +334,7 @@ impl Storage {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "
-            SELECT id, content, anchor, requires_response, quick_replies, status, ts
+            SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
             FROM inbox_items
             ORDER BY id ASC
             ",
@@ -475,6 +495,28 @@ fn validate_blob_ids(conn: &Connection, blob_ids: &[String]) -> anyhow::Result<(
     Ok(())
 }
 
+fn ensure_inbox_read_column(conn: &Connection) -> rusqlite::Result<()> {
+    if inbox_items_has_read_column(conn)? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE inbox_items ADD COLUMN read INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
+fn inbox_items_has_read_column(conn: &Connection) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(inbox_items)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "read" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage> {
     let mut message = conn.query_row(
         "SELECT id, author, body, ref, ts FROM chat_messages WHERE id = ?1",
@@ -489,15 +531,20 @@ fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage>
 }
 
 fn get_inbox_item(conn: &Connection, id: u64) -> rusqlite::Result<InboxItem> {
+    get_inbox_item_optional(conn, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+fn get_inbox_item_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<InboxItem>> {
     conn.query_row(
         "
-        SELECT id, content, anchor, requires_response, quick_replies, status, ts
+        SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
         FROM inbox_items
         WHERE id = ?1
         ",
         params![id],
         inbox_item_from_row,
     )
+    .optional()
 }
 
 fn load_attachments_for_messages(
@@ -589,7 +636,7 @@ fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessag
 fn inbox_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
     let replies: String = row.get(4)?;
     let status: String = row.get(5)?;
-    let ts: String = row.get(6)?;
+    let ts: String = row.get(7)?;
     Ok(InboxItem {
         id: row.get(0)?,
         content: row.get(1)?,
@@ -599,6 +646,7 @@ fn inbox_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
             rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
         })?,
         status: status_from_str(&status)?,
+        read: row.get::<_, i64>(6)? != 0,
         ts: parse_ts(&ts)?,
     })
 }
@@ -678,12 +726,94 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(!item.read);
         let archived = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
         let snapshot = storage.inbox_snapshot().await.unwrap();
 
         assert_eq!(archived.status, InboxStatus::Archived);
+        assert!(!archived.read);
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].status, InboxStatus::Archived);
+    }
+
+    #[tokio::test]
+    async fn mark_read_is_idempotent_and_preserved_by_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap()
+            .id;
+        let item = storage
+            .create_inbox_item("question", anchor, true, Vec::new())
+            .await
+            .unwrap();
+
+        assert!(!item.read);
+        let read = storage.mark_read(item.id).await.unwrap().unwrap();
+        let read_again = storage.mark_read(item.id).await.unwrap().unwrap();
+        let archived = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
+
+        assert!(read.read);
+        assert!(read_again.read);
+        assert!(archived.read);
+        assert_eq!(archived.status, InboxStatus::Archived);
+        assert!(storage.mark_read(99_999).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn open_adds_inbox_read_column_to_existing_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    author TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    ref INTEGER NULL,
+                    ts TEXT NOT NULL
+                );
+                CREATE TABLE inbox_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT NOT NULL,
+                    anchor INTEGER NOT NULL REFERENCES chat_messages(id),
+                    requires_response INTEGER NOT NULL,
+                    quick_replies TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    ts TEXT NOT NULL
+                );
+                INSERT INTO chat_messages (author, body, ref, ts)
+                VALUES ('agent', 'anchor', NULL, '2026-07-08T12:00:00Z');
+                INSERT INTO inbox_items (
+                    content,
+                    anchor,
+                    requires_response,
+                    quick_replies,
+                    status,
+                    ts
+                )
+                VALUES ('legacy question', 1, 1, '[]', 'open', '2026-07-08T12:00:00Z');
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let legacy = storage.all_inbox().await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert!(!legacy[0].read);
+
+        let read = storage.mark_read(legacy[0].id).await.unwrap().unwrap();
+        assert!(read.read);
+        drop(storage);
+
+        let reopened = Storage::open(dir.path()).await.unwrap();
+        let persisted = reopened.all_inbox().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert!(persisted[0].read);
     }
 
     #[tokio::test]

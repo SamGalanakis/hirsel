@@ -21,6 +21,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/reset", post(reset))
         .route("/debug/upload", post(upload_blob))
         .route("/debug/owner-message", post(owner_message))
+        .route("/debug/read-item", post(read_item))
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
         .route("/debug/broadcasts", get(broadcasts))
@@ -54,6 +55,11 @@ struct UploadBlobRequest {
     name: String,
     mime: String,
     data_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadItemRequest {
+    item_id: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +155,19 @@ async fn upload_blob(
         )
         .await?;
     Ok(Json(stored.blob))
+}
+
+async fn read_item(
+    State(state): State<AppState>,
+    Json(request): Json<ReadItemRequest>,
+) -> Result<Json<InboxItem>, DebugError> {
+    let item = state
+        .storage
+        .mark_read(request.item_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {}", request.item_id))?;
+    state.broadcast(HostToClient::InboxUpsert { item: item.clone() });
+    Ok(Json(item))
 }
 
 async fn chat(State(state): State<AppState>) -> Result<Json<ChatResponse>, DebugError> {

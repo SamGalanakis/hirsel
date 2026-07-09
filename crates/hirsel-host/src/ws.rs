@@ -234,6 +234,14 @@ async fn handle_client_frame(
                 state.broadcast(HostToClient::InboxUpsert { item });
             }
         }
+        ClientToHost::ReadItem { item_id } => {
+            let item = state
+                .storage
+                .mark_read(item_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {item_id}"))?;
+            state.broadcast(HostToClient::InboxUpsert { item });
+        }
     }
     Ok(())
 }
@@ -397,6 +405,72 @@ mod tests {
                 assert_eq!(message.attachments, vec![first_blob]);
             }
             other => panic!("unexpected message response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_read_item_marks_read_and_errors_on_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap()
+            .id;
+        let item = state
+            .storage
+            .create_inbox_item("question", anchor, true, Vec::new())
+            .await
+            .unwrap();
+        assert!(!item.read);
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        match read_hello_ok(&mut ws).await {
+            HostToClient::HelloOk { inbox, .. } => {
+                assert_eq!(inbox.len(), 1);
+                assert_eq!(inbox[0].id, item.id);
+                assert!(!inbox[0].read);
+            }
+            other => panic!("unexpected hello response: {other:?}"),
+        }
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "read_item",
+                "item_id": item.id
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        match read_inbox_upsert(&mut ws).await {
+            HostToClient::InboxUpsert { item: read_item } => {
+                assert_eq!(read_item.id, item.id);
+                assert!(read_item.read);
+            }
+            other => panic!("unexpected read response: {other:?}"),
+        }
+        assert!(state.storage.all_inbox().await.unwrap()[0].read);
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "read_item",
+                "item_id": 99_999
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        match read_error(&mut ws).await {
+            HostToClient::Error { detail, client_id } => {
+                assert!(detail.contains("unknown inbox item"));
+                assert_eq!(client_id, None);
+            }
+            other => panic!("unexpected error response: {other:?}"),
         }
     }
 
@@ -567,6 +641,17 @@ mod tests {
     ) -> HostToClient {
         read_until(ws, |response| {
             matches!(response, HostToClient::BlobOk { .. })
+        })
+        .await
+    }
+
+    async fn read_inbox_upsert(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> HostToClient {
+        read_until(ws, |response| {
+            matches!(response, HostToClient::InboxUpsert { .. })
         })
         .await
     }

@@ -149,8 +149,8 @@ ProcessInfo {
 }
 hello_ok gains "processes": [ProcessInfo]              // all non-terminal + last 10 terminal
 { "type": "process_upsert", "process": ProcessInfo }   // broadcast on any state/summary change
-{ "type": "agent_tool_call", "name": string, "summary": string | null, "seq": u64 }
-  // ephemeral, streamed while the Agent's turn runs (like agent_activity); never stored/replayed
+// NOTE: v1.4 also shipped { "type": "agent_tool_call", ... } for live tool rows. It was REMOVED
+// in v1.5 and superseded by the richer `turn_event` stream — see the v1.5 section below.
 ChatMessage gains "tool_calls": [ { "name": string, "ok": bool } ]   // default []; stamped on
   // committed agent messages from lash's per-turn RemoteToolCallSummary
 ```
@@ -163,9 +163,10 @@ Client-side semantics:
   view with an **"Ask to stop"** action — this switches to Chat and pre-fills the composer with
   `stop process <id> (<label snippet>)`. Interrupts route through the Agent by design; there is no
   direct client-side kill frame.
-- `agent_tool_call` events accumulate as **live tool rows** under the "Thinking…" marker while a turn
-  runs, then are cleared the moment the turn commits (an agent `msg` arrives or `agent_activity` goes
-  idle). They are never stored past the running turn.
+- Live tool visibility under the "Thinking…" marker while a turn runs is now driven by the v1.5
+  `turn_event` stream (see below), which replaced v1.4's `agent_tool_call`. The live timeline is
+  cleared the moment the turn commits (an agent `msg` arrives or `agent_activity` goes idle) and is
+  never stored past the running turn.
 - A committed agent message with a non-empty `tool_calls` renders a collapsed **"⚙ N tools"** chip in
   its footer, expanding inline to the per-tool name + ok (check/cross) list. No chip when empty.
 
@@ -193,8 +194,8 @@ Server → client:
 TurnEvent  (tagged by "kind"):
   { "kind": "prose",      "text": string }                       // markdown delta → current prose block
   { "kind": "reasoning",  "text": string }                       // reasoning delta → current reasoning run
-  { "kind": "tool_start", "id": string, "name": string, "summary": string | null }  // opens a tool row
-  { "kind": "tool_done",  "id": string, "ok": bool, "summary": string | null }       // resolves the row by "id"
+  { "kind": "tool_start", "id": string, "name": string, "summary": string | null }             // opens a tool row
+  { "kind": "tool_done",  "id": string, "name": string, "ok": bool, "summary": string | null }  // resolves the row by "id"
 ```
 
 - `seq` strictly orders events within the turn. Clients render in seq order, tolerate gaps (a missing
@@ -203,7 +204,9 @@ TurnEvent  (tagged by "kind"):
   (including a `tool_start`) closes the current prose/reasoning block, and later prose opens a new one.
   `tool_start` inserts a tool row at its seq position; `tool_done` updates the matching-`id` row in
   place with a spinner→check/cross result and its own condensed `summary` (it is not a separate row).
-  A `tool_done` with no matching `tool_start` is dropped.
+  `tool_done` also carries the tool `name`, so a `tool_done` with no matching `tool_start` (e.g. the
+  start was lost across a reconnect mid-turn) is not dropped — it renders as an already-completed row
+  labelled from that `name`.
 - `summary` fields are clean one-liners produced host-side (no raw JSON); the client renders them as-is.
 - Ephemeral like `agent_activity`: never stored or replayed. The client clears the live timeline on
   turn commit (an agent `msg`) or `agent_activity` idle. On commit the client MAY retain the finished

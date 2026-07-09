@@ -9,12 +9,38 @@ export function isItemRead(item: InboxItem, unreadOverrides: number[]): boolean 
   return item.read === true && !unreadOverrides.includes(item.id);
 }
 
-/** Count backing both the Inbox tab badge and the document.title badge. v1.3:
+/** Count backing both the Tray shelf badge and the document.title badge. v1.3:
  * email-like "unread" count = open items that are not yet effectively read
  * (was open + requires_response). requires_response no longer affects the
- * badge — it only drives the card accent. */
+ * badge count — it only drives the card accent and (Tray, v1.6) the shelf
+ * badge's tone. */
 export function openUnreadCount(inbox: InboxItem[], unreadOverrides: number[]): number {
   return inbox.filter((i) => i.status === "open" && !isItemRead(i, unreadOverrides)).length;
+}
+
+/** Tray (v1.6): true when any open item still requires a response — drives the
+ * shelf badge's `status-danger` accent (muted neutral otherwise). Independent
+ * of the unread count so an item can be read but still awaiting a reply. */
+export function hasOpenRequiresResponse(inbox: InboxItem[]): boolean {
+  return inbox.some((i) => i.status === "open" && i.requires_response);
+}
+
+/** Tray (v1.6): the single item the collapsed shelf previews — the most
+ * "actionable" open item, in order: newest open `requires_response`, else
+ * newest unread, else newest open. "Newest" = highest host-assigned id (ids
+ * are monotonic), matching the ordering convention used elsewhere (e.g.
+ * InboxView, partitionProcesses). Null when there are no open items. */
+export function mostActionableItem(
+  inbox: InboxItem[],
+  unreadOverrides: number[],
+): InboxItem | null {
+  const open = inbox.filter((i) => i.status === "open").sort((a, b) => b.id - a.id);
+  if (open.length === 0) return null;
+  return (
+    open.find((i) => i.requires_response) ??
+    open.find((i) => !isItemRead(i, unreadOverrides)) ??
+    open[0]
+  );
 }
 
 /** The Owner's reply to an Inbox Item, derived — never persisted — from Chat.

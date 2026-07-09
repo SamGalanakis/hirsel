@@ -3,8 +3,6 @@ import { createStore, reconcile } from "solid-js/store";
 import { reduce } from "./reducer";
 import { type Action, type AppState, initialState } from "./types";
 
-export type Tab = "chat" | "inbox" | "processes";
-
 export interface ComposerDraft {
   /** The Anchor message id to quote in the composer ("Reply" pre-quotes the
    * anchor - the user still types their own body). */
@@ -14,10 +12,20 @@ export interface ComposerDraft {
 /** Cross-view navigation/UI state layered on top of the protocol AppState.
  * This is still "one store": the protocol side is kept in a pure,
  * independently-tested reducer (see reducer.ts) while this thin UI slice
- * (active tab, one-shot scroll/prefill requests) is plain setters, since it
- * has no wire-protocol semantics to unit test. */
+ * (sheet/overlay visibility, one-shot scroll/prefill requests) is plain
+ * setters, since it has no wire-protocol semantics to unit test.
+ *
+ * v1.6 (Tray): Chat is the whole app now, so there is no more tab-switching
+ * plumbing. Inbox lives in the Tray (an overlay local to ChatView, expanded
+ * state kept here so `goToChat` can centrally collapse it — e.g. "View in
+ * chat" from inside the expanded tray). Processes is a header-launched
+ * full-screen sheet, tracked by `processesOpen`. */
 interface UiState {
-  activeTab: Tab;
+  /** Tray overlay expanded/collapsed. Only ever set true by an explicit tap on
+   * the shelf (or the equivalent test action) — never auto-expanded. */
+  trayExpanded: boolean;
+  /** Processes full-screen sheet open/closed, launched from the header icon. */
+  processesOpen: boolean;
   /** Set when something (a quoted ref, a quick reply) wants Chat to scroll to
    * and highlight a message; consumed once then cleared. */
   scrollToMessageId: number | null;
@@ -33,7 +41,8 @@ type Store = AppState & UiState;
 function initialStore(): Store {
   return {
     ...initialState(),
-    activeTab: "chat",
+    trayExpanded: false,
+    processesOpen: false,
     scrollToMessageId: null,
     composerDraft: null,
     composerPrefill: null,
@@ -88,6 +97,9 @@ export function dispatch(action: Action): void {
   });
 }
 
+/** Land on Chat: closes the Processes sheet and collapses the Tray overlay
+ * (both would otherwise cover the surface being navigated to), then applies
+ * any one-shot scroll/draft/prefill request. */
 export function goToChat(opts?: {
   scrollToMessageId?: number;
   composerDraft?: ComposerDraft;
@@ -95,15 +107,20 @@ export function goToChat(opts?: {
   composerPrefill?: string;
 }): void {
   setState({
-    activeTab: "chat",
+    processesOpen: false,
+    trayExpanded: false,
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
     composerPrefill: opts?.composerPrefill ?? null,
   });
 }
 
-export function setActiveTab(tab: Tab): void {
-  setState("activeTab", tab);
+export function setProcessesOpen(open: boolean): void {
+  setState("processesOpen", open);
+}
+
+export function setTrayExpanded(open: boolean): void {
+  setState("trayExpanded", open);
 }
 
 export function clearScrollTarget(): void {

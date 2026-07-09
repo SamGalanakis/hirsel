@@ -10,7 +10,7 @@ pub mod ws;
 
 use std::{
     collections::VecDeque,
-    path::Path,
+    path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
     time::SystemTime,
 };
@@ -205,8 +205,15 @@ pub fn router_from_state(state: AppState) -> Router {
     if state.debug_enabled {
         app = app.merge(debug::routes(state.clone()));
     }
-    if Path::new("app/dist").exists() {
-        app = app.fallback_service(ServeDir::new("app/dist"));
+    let app_dir =
+        std::env::var_os("HIRSEL_APP_DIR").map_or_else(|| "app/dist".into(), PathBuf::from);
+    if app_dir.exists() {
+        app = app.fallback_service(ServeDir::new(&app_dir));
+    } else {
+        tracing::warn!(
+            app_dir = %app_dir.display(),
+            "app shell directory not found; serving WS/blob/debug only (set HIRSEL_APP_DIR or run from the repo root)"
+        );
     }
     app
 }

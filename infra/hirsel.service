@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 User=sam
 EnvironmentFile=/etc/hirsel/env
+# HIRSEL_APP_DIR in /etc/hirsel/env must point at the built PWA (app/dist)
 ExecStart=/usr/local/bin/hirsel-host
 Restart=always
 RestartSec=2

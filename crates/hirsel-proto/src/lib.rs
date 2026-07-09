@@ -67,6 +67,12 @@ pub struct ProcessInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SideChatSummary {
+    pub sc: String,
+    pub item_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickReply {
     pub value: String,
     pub label: String,
@@ -123,8 +129,13 @@ pub enum ClientToHost {
         attachments: Vec<String>,
         #[serde(default, skip_serializing_if = "SendMode::is_send")]
         mode: SendMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sc: Option<String>,
     },
-    CancelTurn {},
+    CancelTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sc: Option<String>,
+    },
     CancelQueued {
         client_id: String,
     },
@@ -139,6 +150,20 @@ pub enum ClientToHost {
     },
     ReadItem {
         item_id: u64,
+    },
+    OpenSideChat {
+        client_id: String,
+        item_id: u64,
+    },
+    ConcludeSideChat {
+        sc: String,
+    },
+    ConfirmConclusion {
+        sc: String,
+        text: String,
+    },
+    DiscardSideChat {
+        sc: String,
     },
 }
 
@@ -188,9 +213,13 @@ pub enum HostToClient {
         messages: Vec<ChatMessage>,
         inbox: Vec<InboxItem>,
         processes: Vec<ProcessInfo>,
+        #[serde(default)]
+        side_chats: Vec<SideChatSummary>,
     },
     Msg {
         message: ChatMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sc: Option<String>,
     },
     ProcessUpsert {
         process: ProcessInfo,
@@ -198,6 +227,8 @@ pub enum HostToClient {
     TurnEvent {
         seq: u64,
         event: TurnEventKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sc: Option<String>,
     },
     MsgRemoved {
         id: u64,
@@ -205,6 +236,8 @@ pub enum HostToClient {
     AgentActivity {
         state: AgentActivityState,
         text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sc: Option<String>,
     },
     InboxUpsert {
         item: InboxItem,
@@ -219,6 +252,18 @@ pub enum HostToClient {
         /// cancel_queued) so the client can mark the exact chip/bubble.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
+    },
+    SideChatOpen {
+        sc: String,
+        item_id: u64,
+        messages: Vec<ChatMessage>,
+    },
+    ConclusionDraft {
+        sc: String,
+        text: String,
+    },
+    SideChatClosed {
+        sc: String,
     },
 }
 
@@ -266,6 +311,7 @@ mod tests {
                 r#ref: Some(42),
                 attachments: vec!["blob-1".to_string()],
                 mode: SendMode::Send,
+                sc: None,
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
@@ -289,6 +335,7 @@ mod tests {
                 r#ref: None,
                 attachments: Vec::new(),
                 mode: SendMode::Send,
+                sc: None,
             }
         );
     }
@@ -313,6 +360,7 @@ mod tests {
                 r#ref: None,
                 attachments: Vec::new(),
                 mode: SendMode::NextTurn,
+                sc: None,
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
@@ -320,7 +368,7 @@ mod tests {
 
     #[test]
     fn cancel_frames_round_trip() {
-        let cancel_turn = ClientToHost::CancelTurn {};
+        let cancel_turn = ClientToHost::CancelTurn { sc: None };
         let encoded = serde_json::to_string(&cancel_turn).unwrap();
         assert_eq!(encoded, r#"{"type":"cancel_turn"}"#);
         let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
@@ -430,6 +478,7 @@ mod tests {
             messages: vec![message],
             inbox: vec![item],
             processes: vec![process],
+            side_chats: Vec::new(),
         };
 
         let encoded = serde_json::to_string(&response).unwrap();
@@ -490,6 +539,7 @@ mod tests {
         let encoded = serde_json::to_string(&HostToClient::TurnEvent {
             seq: event.seq,
             event: event.event.clone(),
+            sc: None,
         })
         .unwrap();
         assert_eq!(
@@ -502,6 +552,7 @@ mod tests {
             HostToClient::TurnEvent {
                 seq: 1,
                 event: event.event,
+                sc: None,
             }
         );
     }
@@ -515,6 +566,7 @@ mod tests {
                 name: "shell_run".to_string(),
                 summary: Some("cmd: true".to_string()),
             },
+            sc: None,
         };
 
         let encoded = serde_json::to_string(&event).unwrap();
@@ -536,6 +588,7 @@ mod tests {
                 ok: true,
                 summary: Some("ok status 0".to_string()),
             },
+            sc: None,
         };
 
         let encoded = serde_json::to_string(&event).unwrap();
@@ -561,5 +614,176 @@ mod tests {
 
         let parsed: InboxItem = serde_json::from_value(value).unwrap();
         assert!(!parsed.read);
+    }
+
+    #[test]
+    fn side_chat_client_frames_round_trip() {
+        let frames = [
+            ClientToHost::OpenSideChat {
+                client_id: "open-1".to_string(),
+                item_id: 9,
+            },
+            ClientToHost::ConcludeSideChat {
+                sc: "side:abc".to_string(),
+            },
+            ClientToHost::ConfirmConclusion {
+                sc: "side:abc".to_string(),
+                text: "Ship it".to_string(),
+            },
+            ClientToHost::DiscardSideChat {
+                sc: "side:abc".to_string(),
+            },
+            ClientToHost::CancelTurn {
+                sc: Some("side:abc".to_string()),
+            },
+        ];
+
+        for frame in frames {
+            let encoded = serde_json::to_value(&frame).unwrap();
+            let decoded: ClientToHost = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn side_chat_host_frames_round_trip() {
+        let frames = [
+            HostToClient::SideChatOpen {
+                sc: "side:abc".to_string(),
+                item_id: 9,
+                messages: Vec::new(),
+            },
+            HostToClient::ConclusionDraft {
+                sc: "side:abc".to_string(),
+                text: "Ship it".to_string(),
+            },
+            HostToClient::SideChatClosed {
+                sc: "side:abc".to_string(),
+            },
+        ];
+
+        for frame in frames {
+            let encoded = serde_json::to_value(&frame).unwrap();
+            let decoded: HostToClient = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn v1_send_message_defaults_new_fields() {
+        let old = json!({
+            "type": "send_message",
+            "client_id": "c1",
+            "body": "hi",
+            "ref": null
+        });
+        let parsed: ClientToHost = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::SendMessage {
+                client_id: "c1".to_string(),
+                body: "hi".to_string(),
+                r#ref: None,
+                attachments: Vec::new(),
+                mode: SendMode::Send,
+                sc: None,
+            }
+        );
+    }
+
+    #[test]
+    fn v1_hello_ok_defaults_side_chats() {
+        let old = json!({
+            "type": "hello_ok",
+            "latest_msg_id": 0,
+            "messages": [],
+            "inbox": [],
+            "processes": []
+        });
+        let parsed: HostToClient = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            parsed,
+            HostToClient::HelloOk {
+                latest_msg_id: 0,
+                messages: Vec::new(),
+                inbox: Vec::new(),
+                processes: Vec::new(),
+                side_chats: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn scoped_server_frames_round_trip() {
+        let ts = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
+        let frames = [
+            HostToClient::Msg {
+                message: ChatMessage {
+                    id: 1,
+                    author: ChatAuthor::Agent,
+                    body: "hello".to_string(),
+                    r#ref: None,
+                    ts,
+                    attachments: Vec::new(),
+                    tool_calls: Vec::new(),
+                },
+                sc: Some("abc".to_string()),
+            },
+            HostToClient::TurnEvent {
+                seq: 1,
+                event: TurnEventKind::Prose {
+                    text: "hello".to_string(),
+                },
+                sc: Some("abc".to_string()),
+            },
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Thinking,
+                text: Some("thinking".to_string()),
+                sc: Some("abc".to_string()),
+            },
+        ];
+
+        for frame in frames {
+            let encoded = serde_json::to_value(&frame).unwrap();
+            assert_eq!(encoded.get("sc"), Some(&json!("abc")));
+            let decoded: HostToClient = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn main_scope_frames_omit_sc() {
+        let ts = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
+        let frames = [
+            HostToClient::Msg {
+                message: ChatMessage {
+                    id: 1,
+                    author: ChatAuthor::Agent,
+                    body: "hello".to_string(),
+                    r#ref: None,
+                    ts,
+                    attachments: Vec::new(),
+                    tool_calls: Vec::new(),
+                },
+                sc: None,
+            },
+            HostToClient::TurnEvent {
+                seq: 1,
+                event: TurnEventKind::Prose {
+                    text: "hello".to_string(),
+                },
+                sc: None,
+            },
+            HostToClient::AgentActivity {
+                state: AgentActivityState::Idle,
+                text: None,
+                sc: None,
+            },
+        ];
+
+        for frame in frames {
+            let encoded = serde_json::to_value(frame).unwrap();
+            assert!(encoded.get("sc").is_none());
+        }
     }
 }

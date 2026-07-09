@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -71,7 +71,7 @@ const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;
-const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
+pub(crate) const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -111,6 +111,18 @@ enum AgentBackend {
 }
 
 impl AgentRuntime {
+    pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
+            AgentBackend::Lash(runtime) => {
+                crate::side_chat::SideChatBackend::Lash(Arc::new(runtime.core.clone()))
+            }
+            AgentBackend::Degraded(runtime) => {
+                crate::side_chat::SideChatBackend::Degraded(runtime.reason.clone())
+            }
+        }
+    }
+
     pub async fn start(
         config: RuntimeConfig,
         tools: ToolSuite,
@@ -242,6 +254,8 @@ struct LashAgentRuntime {
     active_turn_id: Arc<Mutex<Option<String>>>,
     drain_seq: AtomicU64,
     drain_boot_ms: u64,
+    drain_retry_scheduled: AtomicBool,
+    drain_retry_attempts: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +352,15 @@ impl LashAgentRuntime {
             .ok_or_else(|| anyhow::anyhow!("Lash process registry was not configured"))?;
         let session = core
             .session(AGENT_SESSION_ID)
+            // A liveness-aware lease identity lets a rebooted host reclaim the
+            // session execution lease immediately when the previous holder was
+            // a now-dead process on this same host+boot (e.g. after SIGKILL),
+            // instead of waiting out the lease TTL.
+            .session_execution_owner(lash_core::LeaseOwnerIdentity::local_process(
+                "hirsel-host:agent",
+                Uuid::new_v4().to_string(),
+                local_host_id(),
+            ))
             .prompt_contribution(lash::prompt::PromptContribution::guidance(
                 "Hirsel Agent",
                 AGENT_PROMPT,
@@ -360,6 +383,8 @@ impl LashAgentRuntime {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
+            drain_retry_scheduled: AtomicBool::new(false),
+            drain_retry_attempts: AtomicU64::new(0),
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
@@ -445,23 +470,54 @@ impl LashAgentRuntime {
     }
 
     async fn notify_if_work_pending(&self) {
+        if self.work_pending().await {
+            self.notify.notify_one();
+        }
+    }
+
+    async fn work_pending(&self) -> bool {
         let pending_inputs = match self.session.pending_turn_inputs().await {
             Ok(inputs) => !inputs.is_empty(),
             Err(error) => {
-                tracing::warn!(%error, "failed to inspect pending Lash turn inputs at boot");
+                tracing::warn!(%error, "failed to inspect pending Lash turn inputs");
                 false
             }
         };
         let queued_work = match self.session.queued_work().await {
             Ok(work) => !work.is_empty(),
             Err(error) => {
-                tracing::warn!(%error, "failed to inspect pending Lash queued work at boot");
+                tracing::warn!(%error, "failed to inspect pending Lash queued work");
                 false
             }
         };
-        if pending_inputs || queued_work {
-            self.notify.notify_one();
+        pending_inputs || queued_work
+    }
+
+    /// Schedule a single delayed pump re-notify with exponential backoff
+    /// (2s doubling to a 30s cap). Used when a queued-work drain came back
+    /// empty while work is still pending: the session execution lease is held
+    /// elsewhere, and without a retry the pending work would sit unclaimed
+    /// forever (no other code path re-notifies the pump).
+    fn schedule_drain_retry(self: &Arc<Self>) {
+        if self.drain_retry_scheduled.swap(true, Ordering::AcqRel) {
+            return;
         }
+        let attempt = self.drain_retry_attempts.fetch_add(1, Ordering::AcqRel);
+        let delay = Duration::from_secs((2u64 << attempt.min(4)).min(30));
+        tracing::info!(
+            attempt = attempt + 1,
+            delay_secs = delay.as_secs(),
+            "queued work is pending but the drain claimed nothing (session \
+             execution lease busy); scheduling a delayed drain retry"
+        );
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            runtime
+                .drain_retry_scheduled
+                .store(false, Ordering::Release);
+            runtime.notify.notify_one();
+        });
     }
 
     async fn restore_subagent_processes_after_restart(
@@ -630,6 +686,7 @@ impl LashAgentRuntime {
                     runtime.clear_active_anchor_and_prune().await;
                     match result {
                         Ok(Some(output)) => {
+                            runtime.drain_retry_attempts.store(0, Ordering::Release);
                             let tool_calls = tool_call_summaries(&output);
                             let text = output
                                 .assistant_message()
@@ -640,7 +697,18 @@ impl LashAgentRuntime {
                             }
                             continue;
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            // An empty drain while durable work is still queued
+                            // means another owner's session execution lease is
+                            // blocking the claim (e.g. a stale lease after an
+                            // unclean shutdown). Nothing else re-notifies the
+                            // pump, so schedule a bounded delayed retry until
+                            // the lease expires or is reclaimed.
+                            if runtime.work_pending().await {
+                                runtime.schedule_drain_retry();
+                            }
+                            break;
+                        }
                         Err(error) => {
                             runtime.handle_turn_error(error).await;
                             break;
@@ -716,6 +784,7 @@ impl LashAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -814,6 +883,7 @@ impl LashAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
     }
@@ -1094,6 +1164,18 @@ impl QueuedWorkRunHandle for HirselQueuedWorkNotifier {
         self.notify.notify_one();
         Ok(())
     }
+}
+
+/// A stable per-machine id for lease owner liveness. Lease reclaim only
+/// compares it between processes that already share the same session store
+/// (a local sqlite file), so the hostname is plenty; the boot id and pid
+/// carried alongside it do the real liveness discrimination.
+fn local_host_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "local".to_string())
 }
 
 fn inline_trigger_scope(scope_id: impl Into<String>) -> lash_core::ScopedEffectController<'static> {
@@ -1396,6 +1478,7 @@ where
                 HostToClient::AgentActivity {
                     state: AgentActivityState::Idle,
                     text: None,
+                    sc: None,
                 },
             );
             true
@@ -1647,6 +1730,7 @@ impl TurnTimelineBridge {
             HostToClient::TurnEvent {
                 seq: self.seq,
                 event,
+                sc: None,
             },
         );
     }
@@ -1904,7 +1988,11 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 fn agent_activity(state: AgentActivityState, text: Option<String>) -> HostToClient {
-    HostToClient::AgentActivity { state, text }
+    HostToClient::AgentActivity {
+        state,
+        text,
+        sc: None,
+    }
 }
 
 fn publish(
@@ -1949,6 +2037,7 @@ impl DegradedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Thinking,
                 text: Some("provider unavailable".to_string()),
+                sc: None,
             },
         );
         self.tools
@@ -1960,6 +2049,7 @@ impl DegradedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -1972,6 +2062,7 @@ impl DegradedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -3241,6 +3332,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -3266,6 +3358,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Thinking,
                 text: Some("monitor wake".to_string()),
+                sc: None,
             },
         );
         self.tools.chat_send(text, None).await?;
@@ -3275,6 +3368,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -3383,6 +3477,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Thinking,
                 text: Some("processing owner message".to_string()),
+                sc: None,
             },
         );
         let result = self.handle_turn_inner(&turn, &cancel).await;
@@ -3392,6 +3487,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         result
@@ -3456,6 +3552,7 @@ impl ScriptedAgentRuntime {
                 event: TurnEventKind::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
                 },
+                sc: None,
             },
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -3469,6 +3566,7 @@ impl ScriptedAgentRuntime {
                     name: "scripted_double".to_string(),
                     summary: Some("deterministic branch".to_string()),
                 },
+                sc: None,
             },
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -3483,6 +3581,7 @@ impl ScriptedAgentRuntime {
                     ok: true,
                     summary: Some("ok fixture selected".to_string()),
                 },
+                sc: None,
             },
         );
         publish(
@@ -3493,6 +3592,7 @@ impl ScriptedAgentRuntime {
                 event: TurnEventKind::Prose {
                     text: "The scripted response is ready.".to_string(),
                 },
+                sc: None,
             },
         );
     }
@@ -3839,7 +3939,7 @@ mod tests {
             .recent()
             .into_iter()
             .filter_map(|event| match event {
-                HostToClient::TurnEvent { seq, event } => Some((seq, event)),
+                HostToClient::TurnEvent { seq, event, .. } => Some((seq, event)),
                 _ => None,
             })
             .collect()

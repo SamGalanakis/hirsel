@@ -98,6 +98,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             messages: snapshot.messages,
             inbox: snapshot.inbox,
             processes: state.process_snapshot().await.unwrap_or_default(),
+            side_chats: state.side_chats.summaries().await,
         },
     )
     .await;
@@ -161,7 +162,7 @@ impl HelloBroadcastDedupe {
 
     fn should_send(&self, event: &HostToClient) -> bool {
         match event {
-            HostToClient::Msg { message } => message.id > self.latest_msg_id,
+            HostToClient::Msg { message, sc } => sc.is_some() || message.id > self.latest_msg_id,
             HostToClient::InboxUpsert { item } => {
                 !self.inbox.iter().any(|snapshot| snapshot == item)
             }
@@ -192,22 +193,32 @@ async fn handle_client_frame(
             r#ref,
             attachments,
             mode,
+            sc,
         } => {
-            let submission = state
-                .submit_owner_message(client_id, body, r#ref, attachments, mode)
-                .await?;
-            if !submission.inserted {
-                send_json_sink(
-                    sink,
-                    &HostToClient::Msg {
-                        message: submission.message,
-                    },
-                )
-                .await?;
+            if let Some(sc) = sc {
+                state.side_chats.send(&sc, body).await?;
+            } else {
+                let submission = state
+                    .submit_owner_message(client_id, body, r#ref, attachments, mode)
+                    .await?;
+                if !submission.inserted {
+                    send_json_sink(
+                        sink,
+                        &HostToClient::Msg {
+                            message: submission.message,
+                            sc: None,
+                        },
+                    )
+                    .await?;
+                }
             }
         }
-        ClientToHost::CancelTurn {} => {
-            state.cancel_turn().await?;
+        ClientToHost::CancelTurn { sc } => {
+            if let Some(sc) = sc {
+                state.side_chats.cancel(&sc).await?;
+            } else {
+                state.cancel_turn().await?;
+            }
         }
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
@@ -249,6 +260,26 @@ async fn handle_client_frame(
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {item_id}"))?;
             state.broadcast(HostToClient::InboxUpsert { item });
+        }
+        ClientToHost::OpenSideChat {
+            client_id: _,
+            item_id,
+        } => {
+            let (sc, messages, _) = state.side_chats.open(item_id).await?;
+            state.broadcast(HostToClient::SideChatOpen {
+                sc,
+                item_id,
+                messages,
+            });
+        }
+        ClientToHost::ConcludeSideChat { sc } => {
+            state.side_chats.conclude(&sc).await?;
+        }
+        ClientToHost::ConfirmConclusion { sc, text } => {
+            state.side_chats.confirm(&sc, text, state).await?;
+        }
+        ClientToHost::DiscardSideChat { sc } => {
+            state.side_chats.discard(&sc).await?;
         }
     }
     Ok(())
@@ -327,7 +358,7 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
             .append_chat(ChatAuthor::Agent, hook.body, None)
             .await
             .expect("hello test hook appends chat");
-        state.broadcast(HostToClient::Msg { message });
+        state.broadcast(HostToClient::Msg { message, sc: None });
     }
 }
 
@@ -362,6 +393,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
+            sidechat_ttl_secs: 86_400,
         };
         let state = build_state(config.clone()).await.unwrap();
         state
@@ -392,12 +424,14 @@ mod tests {
                 messages,
                 inbox,
                 processes,
+                side_chats,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].author, ChatAuthor::Agent);
                 assert!(inbox.is_empty());
                 assert!(processes.is_empty());
+                assert!(side_chats.is_empty());
             }
             other => panic!("unexpected hello response: {other:?}"),
         }
@@ -447,7 +481,7 @@ mod tests {
                     assert_eq!(latest_msg_id, 0);
                     assert!(messages.is_empty());
                     match read_agent_msg(&mut ws).await {
-                        HostToClient::Msg { message } => assert_eq!(message.body, body),
+                        HostToClient::Msg { message, .. } => assert_eq!(message.body, body),
                         other => panic!("unexpected message response: {other:?}"),
                     }
                 }
@@ -520,7 +554,7 @@ mod tests {
         .unwrap();
         let msg = read_owner_msg(&mut ws).await;
         match msg {
-            HostToClient::Msg { message } => {
+            HostToClient::Msg { message, .. } => {
                 assert_eq!(message.body, "see attached");
                 assert_eq!(message.attachments, vec![first_blob]);
             }
@@ -757,6 +791,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
+            sidechat_ttl_secs: 86_400,
         }
     }
 
@@ -825,7 +860,7 @@ mod tests {
         >,
     ) -> HostToClient {
         read_until(ws, |response| match response {
-            HostToClient::Msg { message } => message.author == ChatAuthor::Owner,
+            HostToClient::Msg { message, .. } => message.author == ChatAuthor::Owner,
             _ => false,
         })
         .await
@@ -837,7 +872,7 @@ mod tests {
         >,
     ) -> HostToClient {
         read_until(ws, |response| match response {
-            HostToClient::Msg { message } => message.author == ChatAuthor::Agent,
+            HostToClient::Msg { message, .. } => message.author == ChatAuthor::Agent,
             _ => false,
         })
         .await

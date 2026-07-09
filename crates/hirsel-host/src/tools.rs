@@ -120,6 +120,7 @@ impl ToolSuite {
             .await?;
         self.broadcast(HostToClient::Msg {
             message: message.clone(),
+            sc: None,
         });
         Ok(message)
     }

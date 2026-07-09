@@ -36,6 +36,7 @@ pub struct Config {
     pub fake_fixture: Option<PathBuf>,
     pub listen: SocketAddr,
     pub debug: bool,
+    pub sidechat_ttl_secs: u64,
 }
 
 impl Config {
@@ -90,6 +91,10 @@ impl Config {
             .parse()
             .context("HIRSEL_LISTEN must be a socket address")?;
         let debug = env::var("HIRSEL_DEBUG").ok().as_deref() == Some("1");
+        let sidechat_ttl_secs = env::var("HIRSEL_SIDECHAT_TTL_SECS")
+            .unwrap_or_else(|_| "86400".to_string())
+            .parse()
+            .context("HIRSEL_SIDECHAT_TTL_SECS must be an unsigned integer")?;
         if debug && !listen.ip().is_loopback() {
             listen = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen.port());
         }
@@ -104,6 +109,7 @@ impl Config {
             fake_fixture,
             listen,
             debug,
+            sidechat_ttl_secs,
         })
     }
 }

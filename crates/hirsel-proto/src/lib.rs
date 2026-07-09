@@ -374,6 +374,33 @@ mod tests {
     }
 
     #[test]
+    fn send_message_mentions_round_trip() {
+        let value = json!({
+            "type": "send_message",
+            "client_id": "client-mention",
+            "body": "status?",
+            "ref": null,
+            "attachments": [],
+            "mentions": [3, 7]
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::SendMessage {
+                client_id: "client-mention".to_string(),
+                body: "status?".to_string(),
+                r#ref: None,
+                attachments: Vec::new(),
+                mode: SendMode::Send,
+                sc: None,
+                mentions: vec![3, 7],
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
     fn cancel_frames_round_trip() {
         let cancel_turn = ClientToHost::CancelTurn { sc: None };
         let encoded = serde_json::to_string(&cancel_turn).unwrap();

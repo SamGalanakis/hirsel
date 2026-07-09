@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{
-    AgentActivityState, HostToClient, QuickReply, SendMode, ToolCallSummary, TurnEventKind,
+    AgentActivityState, HostToClient, Ping, QuickReply, SendMode, ToolCallSummary, TurnEventKind,
 };
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
@@ -95,6 +95,7 @@ pub struct OwnerTurn {
     pub body: String,
     pub anchor: Option<u64>,
     pub attachments: Vec<StoredBlob>,
+    pub mentioned_pings: Vec<Ping>,
     pub mode: SendMode,
 }
 
@@ -1399,7 +1400,7 @@ fn owner_turn_source_key(client_id: &str) -> String {
 
 fn owner_turn_text(turn: &OwnerTurn) -> String {
     let mut text = match turn.anchor {
-        Some(anchor) => format!("Owner replied to Inbox anchor {anchor}.\n\n{}", turn.body),
+        Some(anchor) => format!("Owner replied to Ping anchor {anchor}.\n\n{}", turn.body),
         None => turn.body.clone(),
     };
     for attachment in &turn.attachments {
@@ -1412,7 +1413,26 @@ fn owner_turn_text(turn: &OwnerTurn) -> String {
             attachment.blob.size
         ));
     }
+    append_mentioned_ping_context(&mut text, &turn.mentioned_pings);
     text
+}
+
+pub(crate) fn append_mentioned_ping_context(text: &mut String, pings: &[Ping]) {
+    for ping in pings {
+        text.push('\n');
+        text.push_str(&format!(
+            "[mentioned ping @{} (ping_id {}, {}, requires_response={}, anchor {}): {}]",
+            ping.name,
+            ping.id,
+            match ping.status {
+                hirsel_proto::PingStatus::Open => "open",
+                hirsel_proto::PingStatus::Done => "done",
+            },
+            ping.requires_response,
+            ping.anchor,
+            ping.description
+        ));
+    }
 }
 
 fn slow_turn_duration(body: &str) -> anyhow::Result<Option<Duration>> {
@@ -4360,6 +4380,7 @@ mod tests {
             body: "see attached".to_string(),
             anchor: None,
             attachments: vec![text.clone(), image.clone()],
+            mentioned_pings: Vec::new(),
             mode: SendMode::Send,
         };
 
@@ -4382,6 +4403,35 @@ mod tests {
             &[137, 80, 78, 71]
         );
         assert!(!input.image_blobs.contains_key("text-1"));
+    }
+
+    #[test]
+    fn owner_turn_text_expands_mentioned_ping_context() {
+        let turn = OwnerTurn {
+            message_id: 2,
+            client_id: "mention-1".to_string(),
+            body: "What changed?".to_string(),
+            anchor: None,
+            attachments: Vec::new(),
+            mentioned_pings: vec![Ping {
+                id: 7,
+                name: "release-choice".to_string(),
+                description: "Choose the release channel".to_string(),
+                content: "Longer details".to_string(),
+                anchor: 3,
+                requires_response: true,
+                quick_replies: Vec::new(),
+                status: PingStatus::Done,
+                read: true,
+                ts: Utc::now(),
+            }],
+            mode: SendMode::Send,
+        };
+
+        assert_eq!(
+            owner_turn_text(&turn),
+            "What changed?\n[mentioned ping @release-choice (ping_id 7, done, requires_response=true, anchor 3): Choose the release channel]"
+        );
     }
 
     #[tokio::test]

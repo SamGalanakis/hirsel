@@ -50,6 +50,8 @@ struct OwnerMessageRequest {
     #[serde(default)]
     attachments: Vec<String>,
     #[serde(default)]
+    mentions: Vec<u64>,
+    #[serde(default)]
     mode: SendMode,
 }
 
@@ -79,6 +81,8 @@ struct OpenSideChatRequest {
 struct SideMessageRequest {
     sc: String,
     body: String,
+    #[serde(default)]
+    mentions: Vec<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,7 +196,10 @@ async fn side_message(
     State(state): State<AppState>,
     Json(request): Json<SideMessageRequest>,
 ) -> Result<Json<serde_json::Value>, DebugError> {
-    state.side_chats.send(&request.sc, request.body).await?;
+    state
+        .side_chats
+        .send(&request.sc, request.body, request.mentions)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -237,6 +244,7 @@ async fn owner_message(
             request.body,
             request.anchor,
             request.attachments,
+            request.mentions,
             request.mode,
         )
         .await?;

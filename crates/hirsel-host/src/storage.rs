@@ -534,6 +534,17 @@ impl Storage {
         get_ping_optional(&conn, ping_id).map_err(Into::into)
     }
 
+    pub async fn mentioned_pings(&self, ping_ids: &[u64]) -> anyhow::Result<Vec<Ping>> {
+        let conn = self.conn.lock().await;
+        ping_ids
+            .iter()
+            .map(|ping_id| {
+                get_ping_optional(&conn, *ping_id)?
+                    .ok_or_else(|| anyhow::anyhow!("unknown mentioned ping: {ping_id}"))
+            })
+            .collect()
+    }
+
     pub async fn all_pings(&self) -> anyhow::Result<Vec<Ping>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(

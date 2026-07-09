@@ -175,11 +175,17 @@ impl SideChatManager {
         Ok((sc, Vec::new(), false))
     }
 
-    pub async fn send(self: &Arc<Self>, sc: &str, body: String) -> anyhow::Result<()> {
+    pub async fn send(
+        self: &Arc<Self>,
+        sc: &str,
+        body: String,
+        mentions: Vec<u64>,
+    ) -> anyhow::Result<()> {
         let session = self.session(sc).await?;
         if session.closed.load(Ordering::Acquire) {
             anyhow::bail!("side chat is closed: {sc}");
         }
+        let mentioned_pings = self.storage.mentioned_pings(&mentions).await?;
         let owner = self
             .storage
             .append_side_chat_message(sc, ChatAuthor::Owner, &body)
@@ -193,12 +199,16 @@ impl SideChatManager {
             message: owner,
             sc: Some(sc.to_string()),
         });
+        let mut agent_input = body.clone();
+        crate::lash_runtime::append_mentioned_ping_context(&mut agent_input, &mentioned_pings);
 
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let result = match manager.backend {
                 SideChatBackend::Lash(_) => {
-                    manager.run_lash_reply(Arc::clone(&session), body).await
+                    manager
+                        .run_lash_reply(Arc::clone(&session), agent_input)
+                        .await
                 }
                 SideChatBackend::Scripted => {
                     manager.run_scripted_reply(Arc::clone(&session), body).await
@@ -262,6 +272,7 @@ impl SideChatManager {
                 format!("side-conclude:{sc}"),
                 text,
                 Some(session.anchor),
+                Vec::new(),
                 Vec::new(),
                 SendMode::Send,
             )
@@ -767,7 +778,7 @@ mod tests {
 
         state
             .side_chats
-            .send(&sc, "Ship after the final check.".to_string())
+            .send(&sc, "Ship after the final check.".to_string(), Vec::new())
             .await
             .unwrap();
         let transcript = wait_for_transcript_len(&state.side_chats, &sc, 2).await;
@@ -866,7 +877,7 @@ mod tests {
         let (sc, _, _) = state.side_chats.open(ping.id).await.unwrap();
         state
             .side_chats
-            .send(&sc, "temporary".to_string())
+            .send(&sc, "temporary".to_string(), Vec::new())
             .await
             .unwrap();
         wait_for_transcript_len(&state.side_chats, &sc, 2).await;
@@ -912,7 +923,7 @@ mod tests {
         let mut broadcasts = state.broadcaster.subscribe();
         state
             .side_chats
-            .send(&sc, "do not answer".to_string())
+            .send(&sc, "do not answer".to_string(), Vec::new())
             .await
             .unwrap();
         loop {

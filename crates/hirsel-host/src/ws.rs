@@ -194,13 +194,13 @@ async fn handle_client_frame(
             attachments,
             mode,
             sc,
-            mentions: _,
+            mentions,
         } => {
             if let Some(sc) = sc {
-                state.side_chats.send(&sc, body).await?;
+                state.side_chats.send(&sc, body, mentions).await?;
             } else {
                 let submission = state
-                    .submit_owner_message(client_id, body, r#ref, attachments, mode)
+                    .submit_owner_message(client_id, body, r#ref, attachments, mentions, mode)
                     .await?;
                 if !submission.inserted {
                     send_json_sink(
@@ -593,6 +593,39 @@ mod tests {
                 assert_eq!(client_id.as_deref(), Some("enqueue-fails"));
             }
             other => panic!("unexpected response before error: {other:?}"),
+        }
+        assert!(state.storage.all_chat().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_unknown_mention_with_correlated_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "send_message",
+                "client_id": "bad-mention",
+                "body": "What about this?",
+                "ref": null,
+                "mentions": [99_999]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        match read_error(&mut ws).await {
+            HostToClient::Error { detail, client_id } => {
+                assert!(detail.contains("unknown mentioned ping: 99999"));
+                assert_eq!(client_id.as_deref(), Some("bad-mention"));
+            }
+            other => panic!("unexpected response: {other:?}"),
         }
         assert!(state.storage.all_chat().await.unwrap().is_empty());
     }

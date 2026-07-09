@@ -1173,6 +1173,7 @@ struct TurnTimelineBridge {
     seq: u64,
     in_turn: bool,
     pending: Option<PendingTimelineText>,
+    tool_id_seq: u64,
 }
 
 struct PendingTimelineText {
@@ -1222,11 +1223,15 @@ impl TurnTimelineBridge {
                             broadcaster,
                         );
                     }
-                    RemoteTurnEvent::ToolCallStarted { name, args, .. } => {
+                    RemoteTurnEvent::ToolCallStarted {
+                        call_id, name, args, ..
+                    } => {
                         self.start_turn_if_needed();
                         self.flush_pending(broadcast_log, broadcaster);
+                        let id = self.tool_event_id(call_id.as_deref(), name);
                         self.publish_event(
                             TurnEventKind::ToolStart {
+                                id,
                                 name: name.clone(),
                                 summary: condense_args(name, args),
                             },
@@ -1235,12 +1240,18 @@ impl TurnTimelineBridge {
                         );
                     }
                     RemoteTurnEvent::ToolCallCompleted {
-                        name, args, output, ..
+                        call_id,
+                        name,
+                        args,
+                        output,
+                        ..
                     } => {
                         self.start_turn_if_needed();
                         self.flush_pending(broadcast_log, broadcaster);
+                        let id = self.tool_event_id(call_id.as_deref(), name);
                         self.publish_event(
                             TurnEventKind::ToolDone {
+                                id,
                                 name: name.clone(),
                                 ok: tool_output_ok(output),
                                 summary: condense_result(name, args, output),
@@ -1264,6 +1275,20 @@ impl TurnTimelineBridge {
             self.seq = 0;
             self.pending = None;
             self.in_turn = true;
+            self.tool_id_seq = 0;
+        }
+    }
+
+    /// lash supplies call_id on native tool events; RLM cell executions may
+    /// omit it, so fall back to a per-turn ordinal. Started/Completed arrive
+    /// serially per call in RLM mode, so name+ordinal pairs stay aligned.
+    fn tool_event_id(&mut self, call_id: Option<&str>, name: &str) -> String {
+        match call_id {
+            Some(id) => id.to_string(),
+            None => {
+                self.tool_id_seq += 1;
+                format!("{name}:{}", self.tool_id_seq.div_ceil(2))
+            }
         }
     }
 
@@ -3045,6 +3070,7 @@ impl ScriptedAgentRuntime {
             HostToClient::TurnEvent {
                 seq: 2,
                 event: TurnEventKind::ToolStart {
+                    id: "scripted-tool-1".to_string(),
                     name: "scripted_double".to_string(),
                     summary: Some("deterministic branch".to_string()),
                 },
@@ -3057,6 +3083,7 @@ impl ScriptedAgentRuntime {
             HostToClient::TurnEvent {
                 seq: 3,
                 event: TurnEventKind::ToolDone {
+                    id: "scripted-tool-1".to_string(),
                     name: "scripted_double".to_string(),
                     ok: true,
                     summary: Some("ok fixture selected".to_string()),

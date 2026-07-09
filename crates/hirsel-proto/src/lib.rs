@@ -166,10 +166,13 @@ pub enum TurnEventKind {
         text: String,
     },
     ToolStart {
+        /// Correlates start/done pairs so clients resolve the right row.
+        id: String,
         name: String,
         summary: Option<String>,
     },
     ToolDone {
+        id: String,
         name: String,
         ok: bool,
         summary: Option<String>,

@@ -14,8 +14,9 @@ import { sideChatForItem } from "../../store/selectors";
 import { focusMainComposer } from "../../lib/focus";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
-import { TrayOverlay, TrayShelf } from "../inbox/Tray";
+import { PingsRail, TrayOverlay, TrayShelf } from "../inbox/Tray";
 import { SideChatSheet } from "../inbox/SideChatSheet";
+import { ProcessesSheet } from "../processes/ProcessesSheet";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Marker, MarkerContent } from "../ui/marker";
 import {
@@ -192,13 +193,19 @@ export function ChatView() {
   }
 
   return (
-    // Slack-style split: a column on phone, a row on wide viewports so an open
-    // Side Chat renders as the right rail beside a still-live main Chat (the
-    // rail is `SideChatSheet` itself, responsive — see that component). On
-    // phone the sheet is `fixed`, out of flow, so this row degrades to the
-    // single main column.
-    <div class="flex min-h-0 flex-1 flex-col min-[900px]:flex-row">
+    // The desktop two-zone row (desktop-shell): a column on phone, a row at
+    // `split`. The left zone is the chat pane (fills, `flex-1`); the right zone
+    // is shared by precedence — a standing Pings rail by default, the Side Chat
+    // panel when one is open, the Processes inspector docked over either. On
+    // phone the side chat / processes are `fixed` out-of-flow sheets, so the row
+    // degrades to the single chat column. `relative` anchors the Processes dock.
+    <div class="relative flex min-h-0 flex-1 flex-col split:flex-row">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Measured inner: at `rail` width the chat pane fills the left zone but
+          its content is capped to a reading measure (~640px), left-anchored, so
+          bubbles never stretch to hostile line lengths. Below `rail` this is a
+          no-op and the phone/split widths are unchanged. */}
+      <div class="flex min-h-0 w-full flex-1 flex-col rail:max-w-[640px]">
       <div
         class="relative flex min-h-0 flex-1 flex-col"
         onDragEnter={onDragEnter}
@@ -317,12 +324,20 @@ export function ChatView() {
         onClose={() => setLightbox(null)}
       />
       </div>
+      </div>
 
-      {/* v2.0 (ADR-0008): the one Side Chat surface when state.activeSideChatSc
-          is set. Responsive presentation (fork-ui iteration): a full-screen
-          `fixed` sheet on phone, an in-flow right rail beside main Chat on wide
-          viewports. Never auto-opened — see the pendingSideChatItemId effect. */}
+      {/* Right region — precedence-ordered, one slot:
+          • Side Chat panel when state.activeSideChatSc is set (fork-ui: a
+            full-screen `fixed` sheet on phone, an in-flow right rail on wide
+            viewports; never auto-opened — see the pendingSideChatItemId effect).
+          • Otherwise the standing Pings rail at `rail` width (PingsRail hides
+            itself while a side chat holds the region). */}
       <SideChatSheet />
+      <PingsRail />
+
+      {/* Processes: a full-screen sheet on phone, a right-docked inspector over
+          the right region on desktop — never covering the chat. */}
+      <ProcessesSheet />
     </div>
   );
 }

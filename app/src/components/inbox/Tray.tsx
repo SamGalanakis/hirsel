@@ -7,7 +7,7 @@ import {
   mostActionableItem,
   openUnreadCount,
 } from "../../store/selectors";
-import { setTrayExpanded, state } from "../../store/store";
+import { setActiveSideChatSc, setTrayExpanded, state } from "../../store/store";
 import { InboxView } from "./InboxView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
@@ -65,7 +65,7 @@ export function TrayShelf() {
       <button
         type="button"
         data-slot="tray-bar"
-        class="flex h-10 w-full shrink-0 items-center gap-2 border-t border-border bg-card px-3 text-left"
+        class="flex h-10 w-full shrink-0 items-center gap-2 border-t border-border bg-card px-3 text-left rail:hidden"
         onClick={() => setTrayExpanded(!expanded())}
         aria-expanded={expanded()}
         aria-label={
@@ -79,6 +79,7 @@ export function TrayShelf() {
           <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <Show when={badgeCount() > 0}>
             <span
+              data-slot="tray-shelf-badge"
               class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
               classList={{ "bg-status-danger": danger(), "bg-muted-foreground": !danger() }}
             >
@@ -115,6 +116,76 @@ export function TrayShelf() {
   );
 }
 
+/** Shared badge chip (shelf + rail + restore button), so the count and the
+ * danger tone are identical across every Pings surface by construction. */
+function PingsBadge(props: { slot?: string }) {
+  return (
+    <Show when={badgeCount() > 0}>
+      <span
+        data-slot={props.slot}
+        class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
+        classList={{ "bg-status-danger": danger(), "bg-muted-foreground": !danger() }}
+      >
+        {badgeLabel()}
+      </span>
+    </Show>
+  );
+}
+
+/** The standing Pings rail (desktop-shell): the Tray promoted from a bottom
+ * shelf to a persistent right column at `rail` width. Same `InboxView` body the
+ * phone overlay uses (one component, two mount points), under a slim header that
+ * mirrors the shelf's count/danger badge. It yields the right region when a Side
+ * Chat is open (precedence) — rendered only while `activeSideChatSc` is null,
+ * and `hidden` below the rail breakpoint so the phone shelf/overlay stay the
+ * sole Pings surface there. */
+export function PingsRail() {
+  return (
+    <Show when={state.activeSideChatSc === null}>
+      <aside
+        data-slot="pings-rail"
+        class="hidden min-h-0 w-[360px] shrink-0 flex-col border-l border-border bg-background rail:flex"
+        aria-label="Pings"
+      >
+        <div class="flex h-10 flex-shrink-0 items-center gap-2 border-b border-border px-3">
+          <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Pings</span>
+          <Show when={thinking()}>
+            <span class="flex shrink-0 items-center gap-1.5 text-[0.68rem] text-muted-foreground">
+              <span class="size-1.5 animate-pulse rounded-full bg-status-active" aria-hidden="true" />
+              working
+            </span>
+          </Show>
+          <PingsBadge slot="pings-rail-badge" />
+        </div>
+        <InboxView />
+      </aside>
+    </Show>
+  );
+}
+
+/** Header affordance (desktop-shell): while a Side Chat holds the right region,
+ * a "Pings (n)" control restores the rail by leaving the side chat alive
+ * (resumable from its card). Rail width only — below it the shelf is always
+ * present, so no restore control is needed. */
+export function PingsRestoreButton() {
+  return (
+    <Show when={state.activeSideChatSc !== null}>
+      <button
+        type="button"
+        data-slot="pings-restore"
+        class="hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground rail:flex"
+        onClick={() => setActiveSideChatSc(null)}
+        aria-label="Show Pings"
+      >
+        <InboxIcon class="size-4 shrink-0" aria-hidden="true" />
+        Pings
+        <PingsBadge />
+      </button>
+    </Show>
+  );
+}
+
 /** Transparent scrim confined to the message-area container (never extends
  * over the Composer, which must stay usable while the tray is up). Tapping it
  * — "tapping outside" — collapses the tray; Esc does too. Its own
@@ -131,7 +202,7 @@ function TrayScrim() {
 
   return (
     <div
-      class="absolute inset-0 z-20"
+      class="absolute inset-0 z-20 rail:hidden"
       aria-hidden="true"
       onClick={() => setTrayExpanded(false)}
     />
@@ -146,7 +217,7 @@ function TrayPanel() {
   return (
     <div
       data-slot="tray-panel"
-      class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg"
+      class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg rail:hidden"
       role="region"
       aria-label="Pings"
     >

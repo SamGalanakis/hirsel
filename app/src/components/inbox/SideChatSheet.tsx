@@ -194,26 +194,26 @@ function SideChatPanel(props: { sc: string }) {
       class="flex flex-col bg-background
         fixed inset-0 z-40 pb-[env(safe-area-inset-bottom)]
         animate-in fade-in slide-in-from-bottom duration-200
-        min-[900px]:relative min-[900px]:inset-auto min-[900px]:z-auto
-        min-[900px]:w-[clamp(340px,38vw,440px)] min-[900px]:shrink-0 min-[900px]:pb-0
-        min-[900px]:border-l min-[900px]:border-border
-        min-[900px]:slide-in-from-bottom-0 min-[900px]:slide-in-from-right-4"
+        split:relative split:inset-auto split:z-auto
+        split:w-[clamp(340px,38vw,440px)] split:shrink-0 split:pb-0
+        split:border-l split:border-border
+        split:slide-in-from-bottom-0 split:slide-in-from-right-4"
     >
       {/* Header: pure orientation now (leave · title · status · ⋯) — Conclude
           has moved to the wrap-up bar above the composer. Single row (density
           cleanup). The leave control is `‹ Chat` on phone (a back gesture) and
           a plain close `✕` on the desktop split (Chat is right there on the
           left, so "back" would be a lie). */}
-      <header class="flex flex-shrink-0 items-center gap-1.5 border-b border-border px-1.5 py-2 pt-[calc(env(safe-area-inset-top)+0.5rem)] min-[900px]:pt-2">
+      <header class="flex flex-shrink-0 items-center gap-1.5 border-b border-border px-1.5 py-2 pt-[calc(env(safe-area-inset-top)+0.5rem)] split:pt-2">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
           onClick={leave}
           aria-label="Leave side chat (stays open — resume any time)"
         >
-          <ChevronRight class="size-5 rotate-180 min-[900px]:hidden" aria-hidden="true" />
-          <X class="hidden size-4 min-[900px]:block" aria-hidden="true" />
-          <span class="min-[900px]:hidden">Chat</span>
+          <ChevronRight class="size-5 rotate-180 split:hidden" aria-hidden="true" />
+          <X class="hidden size-4 split:block" aria-hidden="true" />
+          <span class="split:hidden">Chat</span>
         </button>
         <div class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           Side chat · {titleSnippet(item()?.content)}
@@ -477,50 +477,60 @@ function ConcludeConfirmSheet(props: {
   });
 
   return (
+    // Phone: a full-screen sheet (room to edit with the keyboard up). Desktop
+    // (`split`): a centered, scrimmed, capped modal over the side-panel region —
+    // never a whole-screen blank for a two-line confirmation (P2). The chat
+    // stays visible on the left; only the side panel is scrimmed.
     <div
       class="fixed inset-0 z-50 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
-        min-[900px]:absolute min-[900px]:z-30 min-[900px]:pb-0"
+        split:absolute split:z-30 split:items-center split:justify-center split:bg-black/40 split:p-3 split:pb-3"
       role="dialog"
       aria-modal="true"
       aria-label="Send this reply?"
     >
-      <header class="flex-shrink-0 border-b border-border px-4 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
-        <h2 class="m-0 text-base font-semibold">Send this reply?</h2>
-      </header>
-      <div class="thin-scrollbar flex-1 overflow-y-auto p-4">
-        <Show when={props.item?.requires_response}>
-          <div class="mb-3 rounded-md border-l-2 border-border bg-muted/40 p-2.5">
-            <div class="mb-1 text-[0.68rem] uppercase tracking-wide text-muted-foreground">
-              Original question
+      <div
+        class="flex min-h-0 w-full flex-1 flex-col bg-background
+          split:max-h-full split:max-w-[400px] split:flex-none split:overflow-hidden
+          split:rounded-lg split:border split:border-border split:shadow-lg"
+      >
+        <header class="flex-shrink-0 border-b border-border px-4 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] split:pt-3">
+          <h2 class="m-0 text-base font-semibold">Send this reply?</h2>
+        </header>
+        <div class="thin-scrollbar flex-1 overflow-y-auto p-4">
+          <Show when={props.item?.requires_response}>
+            <div class="mb-3 rounded-md border-l-2 border-border bg-muted/40 p-2.5">
+              <div class="mb-1 text-[0.68rem] uppercase tracking-wide text-muted-foreground">
+                Original question
+              </div>
+              <div class="text-sm text-muted-foreground">
+                <Markdown>{props.item?.content ?? ""}</Markdown>
+              </div>
             </div>
-            <div class="text-sm text-muted-foreground">
-              <Markdown>{props.item?.content ?? ""}</Markdown>
-            </div>
-          </div>
-        </Show>
-        <Textarea
-          class="min-h-40 w-full resize-y rounded-md border border-border bg-background p-3 text-sm leading-relaxed"
-          value={text()}
-          onInput={(e) => setText(e.currentTarget.value)}
-          aria-label="Reply text"
-        />
-      </div>
-      <div class="flex flex-shrink-0 flex-col gap-2 border-t border-border p-3">
-        <div class="flex flex-col gap-1">
-          <Button
-            type="button"
-            disabled={text().trim().length === 0}
-            onClick={() => props.onSend(text())}
-          >
-            Send reply
-          </Button>
-          <span class="text-center text-[0.7rem] text-muted-foreground">
-            Goes to your chat as your reply; this side chat closes.
-          </span>
+          </Show>
+          <Textarea
+            class="min-h-40 w-full resize-y rounded-md border border-border bg-background p-3 text-sm leading-relaxed split:min-h-32"
+            value={text()}
+            onInput={(e) => setText(e.currentTarget.value)}
+            aria-label="Reply text"
+          />
         </div>
-        <Button type="button" variant="secondary" onClick={props.onKeepEditing}>
-          Keep editing
-        </Button>
+        <div class="flex flex-shrink-0 flex-col gap-2 border-t border-border p-3">
+          <div class="flex flex-col gap-1">
+            <Button
+              type="button"
+              disabled={text().trim().length === 0}
+              onClick={() => props.onSend(text())}
+            >
+              Send reply
+            </Button>
+            <span class="text-center text-[0.7rem] text-muted-foreground">
+              Goes to your chat as your reply; this side chat closes.
+            </span>
+          </div>
+          <Button type="button" variant="secondary" onClick={props.onKeepEditing}>
+            Keep editing
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -531,7 +541,7 @@ function ConcludeConfirmSheet(props: {
 function DiscardConfirmDialog(props: { onCancel: () => void; onConfirm: () => void }) {
   return (
     <div
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 min-[900px]:absolute min-[900px]:z-30"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 split:absolute split:z-30"
       onClick={props.onCancel}
     >
       <div

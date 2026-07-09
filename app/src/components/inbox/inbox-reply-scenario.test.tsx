@@ -184,10 +184,15 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       expect(store.state.trayExpanded).toBe(false);
       fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
-      await screen.findByText("Deploy to prod?");
+      // Scope inbox queries to the Tray overlay: the desktop Pings rail is a
+      // second, always-mounted InboxView (hidden by CSS below the rail
+      // breakpoint, but present in the jsdom tree), so an unscoped query for a
+      // card would match twice.
+      const tray = () => within(document.querySelector('[data-slot="tray-panel"]') as HTMLElement);
+      await tray().findByText("Deploy to prod?");
 
       // --- Item 1: answer with a Quick Reply tap, in place ---
-      fireEvent.click(screen.getByText("Approve"));
+      fireEvent.click(tray().getByText("Approve"));
       await waitFor(
         () => expect(store.state.messages.some((m) => m.body === "approve" && !m.pending)).toBe(true),
         { timeout: 10000 },
@@ -195,7 +200,7 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       expect(store.state.trayExpanded).toBe(true); // no collapse from the Quick Reply
 
       // --- Item 2: answer with the inline freeform input, in place ---
-      const card2 = (await screen.findByText("Merge the branch?")).closest(
+      const card2 = (await tray().findByText("Merge the branch?")).closest(
         '[data-slot="card"]',
       ) as HTMLElement;
       const input = within(card2).getByPlaceholderText("Reply…") as HTMLTextAreaElement;

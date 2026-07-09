@@ -204,9 +204,13 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       expect(store.state.trayExpanded).toBe(false);
       fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
+      // Scope inbox queries to the Tray overlay: the desktop Pings rail is a
+      // second, always-mounted InboxView (CSS-hidden below the rail breakpoint
+      // but present in the jsdom tree), so an unscoped card query matches twice.
+      const tray = () => within(document.querySelector('[data-slot="tray-panel"]') as HTMLElement);
 
       // --- 1. Arrives UNREAD: unread dot + badge 1 ---
-      const card = (await screen.findByText("Deploy finished — anything else?")).closest(
+      const card = (await tray().findByText("Deploy finished — anything else?")).closest(
         '[data-slot="card"]',
       ) as HTMLElement;
       expect(card.getAttribute("data-read")).toBe("false");

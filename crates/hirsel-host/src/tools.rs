@@ -6,7 +6,7 @@ use hirsel_drivers::{
     SubagentEvent, TerminalOutcome,
 };
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, HostToClient, InboxItem, ProcessInfo, QuickReply, ToolCallSummary,
+    ChatAuthor, ChatMessage, HostToClient, Ping, ProcessInfo, QuickReply, ToolCallSummary,
 };
 use serde::Serialize;
 use tokio::{sync::broadcast, time::Duration};
@@ -125,27 +125,36 @@ impl ToolSuite {
         Ok(message)
     }
 
-    pub async fn inbox_file(
+    pub async fn pings_send(
         &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
         content_md: impl Into<String>,
         anchor: u64,
         requires_response: bool,
         quick_replies: Vec<QuickReply>,
-    ) -> anyhow::Result<InboxItem> {
-        let item = self
+    ) -> anyhow::Result<Ping> {
+        let ping = self
             .storage
-            .create_inbox_item(content_md.into(), anchor, requires_response, quick_replies)
+            .create_ping(
+                name,
+                description,
+                content_md,
+                anchor,
+                requires_response,
+                quick_replies,
+            )
             .await?;
-        self.broadcast(HostToClient::InboxUpsert { item: item.clone() });
-        Ok(item)
+        self.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+        Ok(ping)
     }
 
-    pub async fn inbox_archive(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
-        let item = self.storage.archive_inbox_item(item_id).await?;
-        if let Some(item) = &item {
-            self.broadcast(HostToClient::InboxUpsert { item: item.clone() });
+    pub async fn pings_resolve(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
+        let ping = self.storage.resolve_ping(ping_id).await?;
+        if let Some(ping) = &ping {
+            self.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
         }
-        Ok(item)
+        Ok(ping)
     }
 
     fn broadcast(&self, event: HostToClient) {

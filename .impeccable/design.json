@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-10T00:00:00Z",
+  "title": "Design System: hirsel",
+  "extensions": {
+    "colorMeta": {
+      "bg-base": { "role": "neutral", "displayName": "Base Canvas", "canonical": "oklch(0.141 0.005 285.823)", "tonalRamp": ["oklch(0.141 0.005 285.8)", "oklch(0.21 0.006 285.9)", "oklch(0.274 0.006 286)", "oklch(0.37 0.006 286)", "oklch(0.52 0.01 286)", "oklch(0.705 0.015 286)", "oklch(0.85 0.008 286)", "oklch(0.985 0 0)"] },
+      "surface-card": { "role": "neutral", "displayName": "Raised Card", "canonical": "oklch(0.21 0.006 285.885)", "tonalRamp": ["oklch(0.16 0.005 286)", "oklch(0.21 0.006 285.9)", "oklch(0.27 0.006 286)", "oklch(0.35 0.006 286)", "oklch(0.5 0.01 286)", "oklch(0.7 0.015 286)", "oklch(0.85 0.008 286)", "oklch(0.98 0 0)"] },
+      "fg-primary": { "role": "neutral", "displayName": "Foreground", "canonical": "oklch(0.985 0 0)", "tonalRamp": ["oklch(0.2 0 0)", "oklch(0.3 0 0)", "oklch(0.42 0 0)", "oklch(0.55 0 0)", "oklch(0.68 0 0)", "oklch(0.8 0 0)", "oklch(0.91 0 0)", "oklch(0.985 0 0)"] },
+      "fg-muted": { "role": "neutral", "displayName": "Muted Foreground", "canonical": "oklch(0.705 0.015 286.067)", "tonalRamp": ["oklch(0.3 0.01 286)", "oklch(0.4 0.012 286)", "oklch(0.5 0.014 286)", "oklch(0.6 0.015 286)", "oklch(0.705 0.015 286)", "oklch(0.8 0.012 286)", "oklch(0.88 0.008 286)", "oklch(0.95 0.004 286)"] },
+      "accent-primary": { "role": "primary", "displayName": "Muted Indigo", "canonical": "oklch(0.55 0.13 264.05)", "tonalRamp": ["oklch(0.18 0.06 264)", "oklch(0.28 0.09 264)", "oklch(0.38 0.11 264)", "oklch(0.47 0.13 264)", "oklch(0.55 0.13 264)", "oklch(0.65 0.12 264)", "oklch(0.78 0.08 264)", "oklch(0.92 0.03 264)"] },
+      "secondary": { "role": "neutral", "displayName": "Quiet Fill", "canonical": "oklch(0.274 0.006 286.033)", "tonalRamp": ["oklch(0.2 0.005 286)", "oklch(0.274 0.006 286)", "oklch(0.34 0.007 286)", "oklch(0.42 0.008 286)", "oklch(0.55 0.01 286)", "oklch(0.7 0.014 286)", "oklch(0.84 0.008 286)", "oklch(0.96 0.003 286)"] },
+      "status-active": { "role": "tertiary", "displayName": "Live Cyan-Blue", "canonical": "oklch(0.72 0.115 221)", "tonalRamp": ["oklch(0.3 0.05 221)", "oklch(0.4 0.07 221)", "oklch(0.5 0.09 221)", "oklch(0.6 0.105 221)", "oklch(0.72 0.115 221)", "oklch(0.82 0.09 221)", "oklch(0.9 0.05 221)", "oklch(0.96 0.02 221)"] },
+      "status-success": { "role": "tertiary", "displayName": "Muted Green", "canonical": "oklch(0.72 0.185 150)", "tonalRamp": ["oklch(0.3 0.08 150)", "oklch(0.4 0.11 150)", "oklch(0.52 0.15 150)", "oklch(0.62 0.17 150)", "oklch(0.72 0.185 150)", "oklch(0.82 0.14 150)", "oklch(0.9 0.08 150)", "oklch(0.96 0.03 150)"] },
+      "status-attention": { "role": "tertiary", "displayName": "Warning Gold", "canonical": "oklch(0.79 0.16 82)", "tonalRamp": ["oklch(0.35 0.06 82)", "oklch(0.45 0.09 82)", "oklch(0.57 0.12 82)", "oklch(0.68 0.14 82)", "oklch(0.79 0.16 82)", "oklch(0.87 0.13 82)", "oklch(0.93 0.08 82)", "oklch(0.97 0.03 82)"] },
+      "status-danger": { "role": "tertiary", "displayName": "Interrupt Red", "canonical": "oklch(0.704 0.191 22.216)", "tonalRamp": ["oklch(0.3 0.09 22)", "oklch(0.4 0.13 22)", "oklch(0.5 0.17 22)", "oklch(0.6 0.19 22)", "oklch(0.704 0.191 22)", "oklch(0.8 0.15 22)", "oklch(0.89 0.09 22)", "oklch(0.96 0.03 22)"] }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "Wordmark, card titles, dialog headings. 16px is the ceiling — no display face above it." },
+      "body": { "displayName": "Body", "purpose": "Message bubbles, Ping content, transcript prose. 14px / leading-relaxed." },
+      "meta": { "displayName": "Meta", "purpose": "Timestamps, footers, secondary chips, keyboard-hint emphasis." },
+      "micro-label": { "displayName": "Micro-label", "purpose": "Uppercase eyebrows, state chips, provenance chips — the densest, quietest tier." },
+      "mono": { "displayName": "Mono", "purpose": "Machine tokens ONLY — tool names, commands, ids, @handles, keyboard keys." }
+    },
+    "shadows": [
+      { "name": "resting", "value": "0 1px 2px 0 rgb(0 0 0 / 0.05)", "purpose": "Almost-subliminal lift on cards, buttons, inputs. The foreground/10 hairline ring does most of the separating." },
+      { "name": "floating", "value": "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)", "purpose": "The floating scroll-to-end pill over the transcript." },
+      { "name": "overlay", "value": "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)", "purpose": "Genuinely-above-the-plane surfaces only: expanded Tray panel, dropdown menus, discard dialog." }
+    ],
+    "rings": [
+      { "name": "card-hairline", "value": "0 0 0 1px oklch(0.985 0 0 / 0.1)", "purpose": "The ring-1 ring-foreground/10 hairline that lifts a resting card off the canvas without a shadow." },
+      { "name": "focus", "value": "0 0 0 3px oklch(0.62 0.14 264.05 / 0.5)", "purpose": "focus-visible ring on every interactive element. Keyboard flows always show focus." }
+    ],
+    "motion": [
+      { "name": "state-transition", "value": "150ms ease", "purpose": "Default color/opacity/shadow transitions on hover and state change." },
+      { "name": "sheet-enter", "value": "200ms ease-out", "purpose": "Side Chat sheet / rail slide-in (fade + slide-from-bottom, or slide-from-right on the desktop split) and the shell max-width widen." },
+      { "name": "pulse", "value": "2s cubic-bezier(0.4,0,0.6,1) infinite", "purpose": "Live status dots (agent working, running Process)." },
+      { "name": "shimmer", "value": "loop over muted-foreground", "purpose": "The 'Thinking…' / 'Drafting…' marker only." },
+      { "name": "reduced-motion", "value": "prefers-reduced-motion: reduce -> scroll-behavior: auto", "purpose": "All motion is restrained and honors the reduced-motion query." }
+    ],
+    "breakpoints": [
+      { "name": "app-column", "value": "560px", "purpose": "Default single-column app width (phone-first)." },
+      { "name": "split", "value": "900px", "purpose": "Side Chat becomes a right rail (was a full-screen sheet); shell can widen." },
+      { "name": "split-max", "value": "980px", "purpose": "Widened shell max-width when a Side Chat split is active." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Agent Message Bubble",
+      "kind": "custom",
+      "refersTo": "bubble-agent",
+      "description": "The agent's turn in Chat: muted secondary fill, left-aligned, no avatar. Speaker is signaled by fill + alignment.",
+      "html": "<div class=\"ds-bubble-agent\"><p>Spun up the monitor. I'll ping you if the deploy stalls past 10 minutes.</p></div>",
+      "css": ".ds-bubble-agent { max-width: 80%; background: oklch(0.274 0.006 286.033); color: oklch(0.985 0 0); border-radius: 14px; padding: 8px 12px; font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; line-height: 1.625; } .ds-bubble-agent p { margin: 0; }"
+    },
+    {
+      "name": "Owner Message Bubble",
+      "kind": "custom",
+      "refersTo": "bubble-owner",
+      "description": "The owner's turn in Chat: filled indigo, right-aligned. The one place the brand accent fills a whole surface.",
+      "html": "<div class=\"ds-bubble-owner\"><p>Ship it. Ping me only if the tests go red.</p></div>",
+      "css": ".ds-bubble-owner { max-width: 80%; margin-left: auto; background: oklch(0.55 0.13 264.05); color: oklch(0.985 0 0); border-radius: 14px; padding: 8px 12px; font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; line-height: 1.625; } .ds-bubble-owner p { margin: 0; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Filled indigo action (send, confirm). Quiet 1px press nudge; hover dims to 80%.",
+      "html": "<button class=\"ds-btn-primary\">Send reply</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px; background: oklch(0.55 0.13 264.05); color: oklch(0.985 0 0); font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; font-weight: 500; cursor: pointer; transition: background 0.15s ease, transform 0.05s ease; } .ds-btn-primary:hover { background: oklch(0.55 0.13 264.05 / 0.8); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: none; border-color: oklch(0.62 0.14 264.05); box-shadow: 0 0 0 3px oklch(0.62 0.14 264.05 / 0.5); }"
+    },
+    {
+      "name": "Ghost Icon Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Round, quiet icon action used across the composer and headers (attach, close, more). Transparent until hover.",
+      "html": "<button class=\"ds-btn-ghost\" aria-label=\"Attach files\"><svg viewBox=\"0 0 24 24\" width=\"20\" height=\"20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48\"/></svg></button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: none; border-radius: 9999px; background: transparent; color: oklch(0.705 0.015 286.067); cursor: pointer; transition: background 0.15s ease, color 0.15s ease; } .ds-btn-ghost:hover { background: oklch(0.274 0.006 286.033 / 0.5); color: oklch(0.985 0 0); } .ds-btn-ghost:focus-visible { outline: none; box-shadow: 0 0 0 3px oklch(0.62 0.14 264.05 / 0.5); }"
+    },
+    {
+      "name": "Ping Card (requires response)",
+      "kind": "card",
+      "refersTo": "ping-card",
+      "description": "A Ping that needs the owner: indigo left stripe, unread dot, bold text, hairline ring. Flat — no drop shadow.",
+      "html": "<div class=\"ds-ping-card\"><div class=\"ds-ping-head\"><span class=\"ds-ping-dot\" aria-label=\"Unread\"></span><span class=\"ds-ping-time\">Jul 10, 09:24</span></div><div class=\"ds-ping-body\">Which staging DB should the migration target — <code class=\"ds-mono\">stg-a</code> or <code class=\"ds-mono\">stg-b</code>?</div></div>",
+      "css": ".ds-ping-card { position: relative; background: oklch(0.21 0.006 285.885); color: oklch(0.985 0 0); border-radius: 14px; border-left: 2px solid oklch(0.55 0.13 264.05); box-shadow: inset 0 0 0 1px oklch(0.985 0 0 / 0.1), 0 1px 2px 0 rgb(0 0 0 / 0.05); padding: 12px; font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; } .ds-ping-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; } .ds-ping-dot { width: 8px; height: 8px; border-radius: 9999px; background: oklch(0.55 0.13 264.05); flex: none; } .ds-ping-time { font-size: 0.7rem; color: oklch(0.705 0.015 286.067); } .ds-ping-body { font-size: 0.875rem; line-height: 1.625; font-weight: 500; color: oklch(0.985 0 0); } .ds-mono { background: oklch(0.274 0.006 286.033); border-radius: 4px; padding: 1px 4px; font-family: \"SFMono-Regular\", \"Cascadia Code\", \"Liberation Mono\", Menlo, monospace; font-size: 0.8em; color: oklch(0.985 0 0 / 0.9); }"
+    },
+    {
+      "name": "Timeline Tool Row",
+      "kind": "custom",
+      "refersTo": "state-chip",
+      "description": "One tool call in the running turn timeline: state glyph, tool name in mono, muted result summary — on a hairline left rail.",
+      "html": "<ul class=\"ds-timeline\"><li class=\"ds-tool-row\"><svg class=\"ds-tool-ok\" viewBox=\"0 0 24 24\" width=\"12\" height=\"12\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 6 9 17l-5-5\"/></svg><span class=\"ds-tool-name\">bash.run</span><span class=\"ds-tool-detail\">exited 0 in 2.1s</span></li></ul>",
+      "css": ".ds-timeline { list-style: none; margin: 0 0 0 4px; padding: 0 0 0 12px; border-left: 1px solid oklch(0.985 0 0 / 0.06); } .ds-tool-row { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: oklch(0.705 0.015 286.067); font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; } .ds-tool-ok { flex: none; color: oklch(0.72 0.185 150); } .ds-tool-name { flex: none; font-family: \"SFMono-Regular\", \"Cascadia Code\", \"Liberation Mono\", Menlo, monospace; font-size: 0.72rem; color: oklch(0.985 0 0 / 0.9); } .ds-tool-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }"
+    },
+    {
+      "name": "Process State Chip",
+      "kind": "chip",
+      "refersTo": "state-chip",
+      "description": "A running/failed/done pill: tinted-fill-plus-colored-text semantic. Running carries a pulsing dot; done stays quiet.",
+      "html": "<span class=\"ds-chip-running\"><span class=\"ds-chip-dot\"></span>running</span>",
+      "css": ".ds-chip-running { display: inline-flex; align-items: center; gap: 4px; border-radius: 9999px; padding: 1px 6px; font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; font-size: 0.62rem; font-weight: 500; letter-spacing: 0.02em; background: oklch(0.72 0.115 221 / 0.15); color: oklch(0.72 0.115 221); } .ds-chip-dot { width: 6px; height: 6px; border-radius: 9999px; background: oklch(0.72 0.115 221); animation: ds-pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; } @keyframes ds-pulse { 50% { opacity: 0.4; } }"
+    },
+    {
+      "name": "Composer Textarea",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "The message composer field: transparent over a white/15 hairline, indigo focus ring, auto-grow capped.",
+      "html": "<textarea class=\"ds-textarea\" rows=\"1\" placeholder=\"Message the Agent…\"></textarea>",
+      "css": ".ds-textarea { width: 100%; min-height: 0; max-height: 112px; resize: none; background: oklch(0.985 0 0 / 0.03); border: 1px solid oklch(0.985 0 0 / 0.15); border-radius: 8px; padding: 8px 10px; color: oklch(0.985 0 0); font-family: \"Inter Variable\", \"Inter\", ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; line-height: 1.375; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); transition: border-color 0.15s ease, box-shadow 0.15s ease; } .ds-textarea::placeholder { color: oklch(0.705 0.015 286.067); } .ds-textarea:focus-visible { outline: none; border-color: oklch(0.62 0.14 264.05); box-shadow: 0 0 0 3px oklch(0.62 0.14 264.05 / 0.5); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Instrument",
+    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default and dark by commitment; the light token theme is carried for parity but never shipped. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width (rails and a Slack-style split). Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
+    "keyCharacteristics": [
+      "Dark-only, near-black base (oklch(0.141)) with hairline white/10 borders doing the structural work.",
+      "One brand accent — a muted indigo (oklch(0.55 0.13 264)) — reserved for interaction and 'attend to this.'",
+      "Inter (with cv-alternate feature settings) for everything human; a monospace stack for machine tokens only.",
+      "Flat by default: separation via hairline borders and a foreground/10 ring, not drop shadows.",
+      "Restraint as respect: muted for everything, escalation is rare and legible without relying on hue alone."
+    ],
+    "rules": [
+      { "name": "The One Escalation Rule", "body": "Exactly one color means 'genuinely blocked on you': danger red, and only on the Tray badge for an open requires-response Ping. Indigo means 'interactive / worth a look,' amber means 'transient hiccup,' but red is the single interrupt. Do not multiply reds.", "section": "colors" },
+      { "name": "The Color-Is-Never-Alone Rule", "body": "No state is conveyed by hue alone. A requires-response Ping also carries a persistent left border, bolder text, and an expanded reply input; a Done Ping dims to 60% and shows a labeled tag; a Process state carries its literal word. Strip the color and the meaning must survive.", "section": "colors" },
+      { "name": "The Monospace-Earns-It Rule", "body": "Monospace is for machine tokens only: tool names, commands, ids, @name handles, keyboard hints. Prose is never monospace, and a label is never monospace just for flavor.", "section": "typography" },
+      { "name": "The No-Display Rule", "body": "There is no display type and no hero. 16px is the top of the scale. Confidence comes from spacing and restraint, never from a big headline.", "section": "typography" },
+      { "name": "The Hairline-First Rule", "body": "Reach for a white/10 border before a shadow. Separation between siblings on the same plane is always a 1px hairline. A shadow means 'this floats above everything,' and most things do not float.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do stay dark. The canvas is near-black oklch(0.141); raised surfaces step up one tone to card/secondary. Ship dark; the light theme exists only for token parity.",
+      "Do separate siblings with a white/10 hairline border first, and a foreground/10 ring on cards — reach for a shadow only when an element genuinely floats.",
+      "Do keep indigo (--primary) rare and meaningful: interaction and 'attend to this,' nothing decorative.",
+      "Do reserve monospace for machine tokens and keep all prose in Inter.",
+      "Do make every state legible without color: a stripe, a dot, a weight change, or a literal label alongside the hue. Hold WCAG AA for body and secondary text.",
+      "Do keep motion to state changes — a pulse, a shimmer, a 200ms sheet slide — and honor prefers-reduced-motion.",
+      "Do keep 16px as the top of the type scale. Earn importance with spacing and weight, not size.",
+      "Do keep touch targets thumb-friendly on phone even at high density, and give every keyboard flow a visible focus ring."
+    ],
+    "donts": [
+      "Don't build corporate SaaS chat (Intercom / Zendesk): no chirpy rounded-friendly bubbles with tails, no marketing tone, no drop-shadowed pastel cards, no 'How can I help you today!' energy.",
+      "Don't build a consumer assistant (Siri / Alexa / ChatGPT mobile): no mascot personality, no over-explaining, no empty enthusiasm, no hand-holding onboarding.",
+      "Don't build a notification slot machine: no badge spam, no scattered red dots, no engagement-bait urgency. One interrupt (danger red on the Tray badge) and silence otherwise.",
+      "Don't introduce a second saturated hue or a gradient. Neutral grays + one indigo + a tiny semantic status set. No neon, no glassmorphism, no purple-gradient dark mode.",
+      "Don't multiply reds. If more than one thing is shouting danger, something is miscoded.",
+      "Don't add a display face, a hero headline, or type above 16px.",
+      "Don't cast a heavy drop shadow on a resting card. If it looks like a 2014 app, the shadow is too dark and the blur is too small — use the hairline ring instead.",
+      "Don't set prose, labels, or decoration in monospace. Monospace with no machine content is costume, not signal."
+    ]
+  }
+}

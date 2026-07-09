@@ -1,8 +1,8 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { ChatView } from "./components/chat/ChatView";
 import { ConnectionPill } from "./components/ConnectionPill";
+import { PingsRestoreButton } from "./components/inbox/Tray";
 import { ProcessesButton } from "./components/processes/ProcessesButton";
-import { ProcessesSheet } from "./components/processes/ProcessesSheet";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { openUnreadCount } from "./store/selectors";
@@ -58,35 +58,40 @@ function App() {
         </div>
       }
     >
-      {/* Slack-style split (ADR-0008 fork-ui iteration): the app column is a
-          phone-width single column by default. When a Side Chat is open on a
-          wide viewport (≥900px, where there is genuinely room for two panes),
-          the shell widens so ChatView can lay main Chat + the side panel out
-          side-by-side — main stays live on the left, the side panel is the
-          right rail. Below 900px the shell stays narrow and the side chat is a
-          full-screen sheet (both driven by CSS, one component tree). */}
+      {/* The desktop shell frame (desktop-shell pass). Mobile-first: a
+          phone-width single column by default. Two width overrides layer on top,
+          both pure CSS so first paint is correct and no width signal threads
+          through the store:
+            • `rail` (≥1100px): the frame fills to a cap (~1360px), centered,
+              so ChatView can stand a Pings rail beside the chat measure — the
+              empty-desktop void is filled to a cap, never stretched to glass.
+            • `split` (≥900px) while a Side Chat is open: the fork-ui two-pane
+              width (~980px), for the 900–1099 band where the rail has no room.
+          Below `split` nothing changes — the phone column is the fallback. */}
       <div
-        class="mx-auto flex w-full min-h-0 flex-1 flex-col transition-[max-width] duration-200 ease-out"
+        class="relative mx-auto flex w-full min-h-0 flex-1 flex-col duration-200 ease-out motion-safe:transition-[max-width]"
         classList={{
-          "max-w-[560px]": !splitActive(),
-          "max-w-[560px] min-[900px]:max-w-[980px]": splitActive(),
+          "max-w-[560px] rail:max-w-[1360px]": !splitActive(),
+          "max-w-[560px] split:max-w-[980px] rail:max-w-[1360px]": splitActive(),
         }}
       >
         <header class="flex flex-shrink-0 items-center justify-between border-b border-border px-4 py-3">
           <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
           <div class="flex items-center gap-1.5">
+            {/* Precedence affordance: while a Side Chat holds the right region,
+                bring the Pings rail back (rail width only). */}
+            <PingsRestoreButton />
             <ProcessesButton />
             <ConnectionPill />
           </div>
         </header>
-        {/* Chat is the whole app now (spec [P1]): the bottom TabBar and the
-            Inbox tab are gone. Inbox lives in ChatView's Tray; Processes is
-            the header icon's full-screen sheet, layered above via Show. */}
+        {/* Chat is the whole app (spec [P1]). ChatView owns the two-zone
+            desktop layout: chat measure on the left, the shared right region
+            (Pings rail / Side Chat / Processes inspector) on the right. */}
         <main class="flex min-h-0 flex-1 flex-col">
           <ChatView />
         </main>
       </div>
-      <ProcessesSheet />
       <Toaster />
     </Show>
   );

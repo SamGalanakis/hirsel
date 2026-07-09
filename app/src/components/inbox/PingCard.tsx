@@ -1,8 +1,8 @@
 import { Check, Clock, GitFork, MoreHorizontal, RotateCcw } from "lucide-solid";
 import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
-import type { InboxItem, QuickReply } from "../../protocol";
+import type { Ping, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
-import { isItemRead, isResolvedStatus, latestReplyForAnchor, sideChatForItem } from "../../store/selectors";
+import { isPingRead, isResolvedStatus, latestReplyForAnchor, sideChatForPing } from "../../store/selectors";
 import { createSeenTimer } from "../../lib/auto-read";
 import { snippet } from "../../lib/format";
 import { Markdown } from "../Markdown";
@@ -19,24 +19,24 @@ import { QuickReplyButtons } from "./QuickReplyButtons";
 import { ReplyInput } from "./ReplyInput";
 
 interface Props {
-  item: InboxItem;
-  /** Send a reply anchored to this item, in place — no navigation. Shared by
+  ping: Ping;
+  /** Send a reply anchored to this Ping, in place — no navigation. Shared by
    * the Quick Reply taps and the inline freeform input. */
-  onSendReply: (item: InboxItem, body: string) => void;
-  /** Secondary affordance: jump to the item's Anchor in Chat. */
-  onJumpToChat: (item: InboxItem) => void;
-  /** Mark done (wire `archive_item`, ADR-0009 terminal state) — ⋯ menu only.
-   * Non-destructive: the item stays findable under Done. */
-  onDelete: (item: InboxItem) => void;
+  onSendReply: (ping: Ping, body: string) => void;
+  /** Secondary affordance: jump to the Ping's Anchor in Chat. */
+  onJumpToChat: (ping: Ping) => void;
+  /** Mark done (wire `resolve_ping`, ADR-0009 terminal state) — ⋯ menu only.
+   * Non-destructive: the Ping stays findable under Done. */
+  onResolve: (ping: Ping) => void;
   /** Mark read (auto-read on view/interaction, or the ⋯ "Mark read"): sends
-   * read_item + optimistic flip. */
-  onRead: (item: InboxItem) => void;
+   * read_ping + optimistic flip. */
+  onRead: (ping: Ping) => void;
   /** Mark unread (⋯ menu): client-only override, no wire op. */
-  onMarkUnread: (item: InboxItem) => void;
+  onMarkUnread: (ping: Ping) => void;
   /** v2.0 (ADR-0008): "Discuss" (fresh) / "in progress · resume" (a live side
-   * chat already exists for this item) — the effort ladder's third rung after
+   * chat already exists for this Ping) — the effort ladder's third rung after
    * Quick Reply and Reply. */
-  onDiscuss: (item: InboxItem) => void;
+  onDiscuss: (ping: Ping) => void;
 }
 
 function formatTime(ts: string): string {
@@ -52,40 +52,40 @@ function formatTime(ts: string): string {
   }
 }
 
-export function InboxItemCard(props: Props) {
-  const isOpen = () => props.item.status === "open";
+export function PingCard(props: Props) {
+  const isOpen = () => props.ping.status === "open";
   // v2.1 (ADR-0009): "done" is the terminal state (legacy "archived" is a
   // synonym); the card dims and shows a non-destructive "Done" tag.
-  const isDone = () => isResolvedStatus(props.item.status);
+  const isDone = () => isResolvedStatus(props.ping.status);
   // Effective read state (wire `read` minus any local "Mark unread" override).
-  const read = () => isItemRead(props.item, state.unreadOverrides);
-  // Email-like "unread" = an open item not yet seen. Deleted items are never
+  const read = () => isPingRead(props.ping, state.unreadOverrides);
+  // Email-like "unread" = an open Ping not yet seen. Done Pings are never
   // "unread" (they've left the active list).
   const unread = () => isOpen() && !read();
   // Auto-read candidate: open, still unread on the wire, and not being kept
   // unread by an explicit "Mark unread". (Manual unread suppresses auto-read so
   // marking unread then leaving the card on screen doesn't instantly re-read.)
   const autoReadCandidate = () =>
-    isOpen() && props.item.read !== true && !state.unreadOverrides.includes(props.item.id);
+    isOpen() && props.ping.read !== true && !state.unreadOverrides.includes(props.ping.id);
 
   // Reveal the inline input on non-requires_response cards via "Reply"; on
   // requires_response cards it is expanded by default.
   const [revealed, setRevealed] = createSignal(false);
-  const showInput = () => isOpen() && (props.item.requires_response || revealed());
+  const showInput = () => isOpen() && (props.ping.requires_response || revealed());
 
-  // v2.0: a live side chat for this item, if any — flips the "Discuss"
+  // v2.0: a live side chat for this Ping, if any — flips the "Discuss"
   // affordance to "in progress · resume" (derived from hello_ok.side_chats +
   // open/closed tracking, never a bespoke flag).
-  const sideChatRef = () => sideChatForItem(state.sideChatRefs, props.item.id);
+  const sideChatRef = () => sideChatForPing(state.sideChatRefs, props.ping.id);
 
-  // Replied state, derived from Chat (no persisted inbox reply state): the
-  // latest owner message anchored to this item, if any.
-  const reply = createMemo(() => latestReplyForAnchor(state.messages, props.item.anchor));
+  // Replied state, derived from Chat (no persisted reply state): the latest
+  // owner message anchored to this Ping, if any.
+  const reply = createMemo(() => latestReplyForAnchor(state.messages, props.ping.anchor));
 
   // --- Auto-read: email-like "seen" once visible ~1.5s or on interaction. ---
   let cardEl: HTMLElement | undefined;
   const markSeen = () => {
-    if (autoReadCandidate()) props.onRead(props.item);
+    if (autoReadCandidate()) props.onRead(props.ping);
   };
   const seen = createSeenTimer({ onSeen: markSeen });
 
@@ -112,7 +112,7 @@ export function InboxItemCard(props: Props) {
   };
   const sendReply = (body: string) => {
     seen.interacted();
-    props.onSendReply(props.item, body);
+    props.onSendReply(props.ping, body);
   };
 
   return (
@@ -121,25 +121,52 @@ export function InboxItemCard(props: Props) {
       size="sm"
       class="mx-3 gap-2 border-l-2 px-3 py-3 transition-opacity"
       classList={{
-        "border-l-primary": props.item.requires_response,
-        "border-l-transparent": !props.item.requires_response,
+        "border-l-primary": props.ping.requires_response,
+        "border-l-transparent": !props.ping.requires_response,
         "opacity-60": isDone(),
       }}
       data-read={read() ? "true" : "false"}
-      data-status={props.item.status}
+      data-status={props.ping.status}
+      data-ping-id={props.ping.id}
+      data-ping-name={props.ping.name}
     >
-      <div class="flex items-center justify-between gap-2">
-        <span class="flex items-center gap-1.5">
+      {/* Header: the Ping is now an addressable, named thing, so its @handle is
+          the primary label (mono — the Monospace-Earns-It rule covers @name
+          handles) with the one-line description as a quiet subtitle beneath.
+          The unread dot leads; timestamp + Done tag + ⋯ cluster to the right. */}
+      <div class="flex items-start justify-between gap-2">
+        <div class="flex min-w-0 items-start gap-1.5">
           <Show when={unread()}>
             <span
-              class="size-2 shrink-0 rounded-full bg-primary"
+              class="mt-1 size-2 shrink-0 rounded-full bg-primary"
               aria-label="Unread"
               data-slot="unread-dot"
             />
           </Show>
-          <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.item.ts)}</span>
-        </span>
-        <div class="flex items-center gap-1">
+          <div class="min-w-0">
+            <span
+              class="block truncate font-mono text-[0.8rem] leading-tight"
+              classList={{
+                "text-foreground": unread(),
+                "text-muted-foreground": !unread(),
+              }}
+              data-slot="ping-name"
+            >
+              @{props.ping.name}
+            </span>
+            <Show when={props.ping.description.trim().length > 0}>
+              <span
+                class="mt-0.5 block truncate text-xs text-muted-foreground"
+                data-slot="ping-description"
+                title={props.ping.description}
+              >
+                {props.ping.description}
+              </span>
+            </Show>
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-1">
+          <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.ping.ts)}</span>
           <Show when={isDone()}>
             <span class="inline-flex items-center gap-1 text-[0.68rem] uppercase tracking-[0.03em] text-muted-foreground">
               <Check class="size-3 text-status-success" aria-hidden="true" />
@@ -159,26 +186,25 @@ export function InboxItemCard(props: Props) {
                 <Show
                   when={read()}
                   fallback={
-                    <DropdownMenuItem onSelect={() => props.onRead(props.item)}>
+                    <DropdownMenuItem onSelect={() => props.onRead(props.ping)}>
                       Mark read
                     </DropdownMenuItem>
                   }
                 >
-                  <DropdownMenuItem onSelect={() => props.onMarkUnread(props.item)}>
+                  <DropdownMenuItem onSelect={() => props.onMarkUnread(props.ping)}>
                     Mark unread
                   </DropdownMenuItem>
                 </Show>
               </Show>
-              <DropdownMenuItem onSelect={() => props.onJumpToChat(props.item)}>
+              <DropdownMenuItem onSelect={() => props.onJumpToChat(props.ping)}>
                 View in chat
               </DropdownMenuItem>
-              {/* v2.1 (ADR-0009): "Mark done" replaces the destructive
-                  "Delete" — resolving an item is non-destructive (it stays
-                  findable under Done), so no destructive styling and no
-                  confirm. */}
+              {/* v2.1 (ADR-0009): "Mark done" (wire resolve_ping) — resolving a
+                  Ping is non-destructive (it stays findable under Done), so no
+                  destructive styling and no confirm. */}
               <Show when={isOpen()}>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => props.onDelete(props.item)}>
+                <DropdownMenuItem onSelect={() => props.onResolve(props.ping)}>
                   Mark done
                 </DropdownMenuItem>
               </Show>
@@ -187,15 +213,15 @@ export function InboxItemCard(props: Props) {
         </div>
       </div>
 
-      {/* Content: full-strength when unread (the "bold email" look), dimmed once
-          read/dealt-with, extra-muted when deleted. */}
+      {/* Content body: full-strength when unread (the "bold email" look),
+          dimmed once read/dealt-with. */}
       <div
         classList={{
           "font-medium text-foreground": unread(),
           "text-muted-foreground": !unread(),
         }}
       >
-        <Markdown>{props.item.content}</Markdown>
+        <Markdown>{props.ping.content}</Markdown>
       </div>
 
       {/* Replied state: small right-aligned quote under the content. */}
@@ -228,7 +254,7 @@ export function InboxItemCard(props: Props) {
 
       <Show when={isOpen()}>
         <QuickReplyButtons
-          quickReplies={props.item.quick_replies}
+          quickReplies={props.ping.quick_replies}
           onTap={(qr: QuickReply) => sendReply(qr.value)}
         />
       </Show>
@@ -243,7 +269,7 @@ export function InboxItemCard(props: Props) {
 
       {/* Effort ladder, rung 2 and 3 (rung 1 is QuickReplyButtons above):
           "Reply" only while the input isn't already showing; "Discuss" (or,
-          for an item with a live side chat, "in progress · resume") stays
+          for a Ping with a live side chat, "in progress · resume") stays
           reachable regardless — even mid-typing an answer, the Owner can
           still bail into a side chat instead. Always labeled, never icon-only
           (critique: icon-only leave/discard-style controls cause mis-taps). */}
@@ -262,7 +288,7 @@ export function InboxItemCard(props: Props) {
                 variant="link"
                 size="sm"
                 class="gap-1"
-                onClick={() => props.onDiscuss(props.item)}
+                onClick={() => props.onDiscuss(props.ping)}
               >
                 <GitFork class="size-3.5" aria-hidden="true" />
                 Discuss
@@ -274,7 +300,7 @@ export function InboxItemCard(props: Props) {
               variant="link"
               size="sm"
               class="gap-1 text-status-active"
-              onClick={() => props.onDiscuss(props.item)}
+              onClick={() => props.onDiscuss(props.ping)}
             >
               <GitFork class="size-3.5" aria-hidden="true" />
               in progress · resume

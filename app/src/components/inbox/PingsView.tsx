@@ -1,72 +1,72 @@
 import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
 import { createMemo, createSignal, For, Show } from "solid-js";
-import type { InboxItem } from "../../protocol";
+import type { Ping } from "../../protocol";
 import { dispatch, goToChat, requestSideChatOpen, state } from "../../store/store";
 import { isResolvedStatus } from "../../store/selectors";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
-import { InboxItemCard } from "./InboxItemCard";
+import { PingCard } from "./PingCard";
 
 const DONE_LIMIT = 20;
 
-/** Content of the expanded Tray: the open list (this component's sole caller
- * is now `TrayOverlay`) plus the collapsed Done section (ADR-0009: was
- * "Deleted"). */
-export function InboxView() {
+/** Content of the expanded Tray: the open Pings (this component's sole caller
+ * is now `TrayOverlay` / `PingsRail`) plus the collapsed Done section (ADR-0009:
+ * was "Deleted"). */
+export function PingsView() {
   const [doneExpanded, setDoneExpanded] = createSignal(false);
 
   const partitioned = createMemo(() => {
-    const sorted = [...state.inbox].sort((a, b) => b.id - a.id);
-    const open = sorted.filter((i) => i.status === "open");
-    // Tray (v1.6): requires_response items float to the top of the open list —
+    const sorted = [...state.pings].sort((a, b) => b.id - a.id);
+    const open = sorted.filter((p) => p.status === "open");
+    // Tray (v1.6): requires_response Pings float to the top of the open list —
     // a triage affordance a chronological-only feed lacks, per the design
     // critique's [P1] fix. Each bucket stays newest-first internally so
     // arrival order is still legible within a bucket.
-    const requiresResponse = open.filter((i) => i.requires_response);
-    const rest = open.filter((i) => !i.requires_response);
+    const requiresResponse = open.filter((p) => p.requires_response);
+    const rest = open.filter((p) => !p.requires_response);
     return {
       open: [...requiresResponse, ...rest],
-      // ADR-0009: resolved items (done, or legacy archived) collect here.
-      done: sorted.filter((i) => isResolvedStatus(i.status)).slice(0, DONE_LIMIT),
+      // ADR-0009: resolved Pings (done, or legacy archived) collect here.
+      done: sorted.filter((p) => isResolvedStatus(p.status)).slice(0, DONE_LIMIT),
     };
   });
 
   // Answer in place: reuse the same send path an owner Composer send uses
   // (client_id, optimistic reconcile, offline queue). No tab switch, no
-  // navigation — the card reconciles the reply inline and stays in the Inbox.
-  function handleSendReply(item: InboxItem, body: string) {
-    getClient()?.sendMessage(body, item.anchor);
+  // navigation — the card reconciles the reply inline and stays in the Tray.
+  function handleSendReply(ping: Ping, body: string) {
+    getClient()?.sendMessage(body, ping.anchor);
   }
 
-  // Secondary affordance: jump to the item's Anchor in Chat.
-  function handleJumpToChat(item: InboxItem) {
-    goToChat({ scrollToMessageId: item.anchor });
+  // Secondary affordance: jump to the Ping's Anchor in Chat.
+  function handleJumpToChat(ping: Ping) {
+    goToChat({ scrollToMessageId: ping.anchor });
   }
 
-  // Mark done = the wire `archive_item` (ADR-0009: the item's terminal state,
+  // Mark done = the wire `resolve_ping` (ADR-0009: the Ping's terminal state,
   // presented as "Done"); non-destructive, reached from a card's ⋯ menu.
-  function handleDelete(item: InboxItem) {
-    getClient()?.archiveItem(item.id);
+  function handleResolve(ping: Ping) {
+    getClient()?.resolvePing(ping.id);
   }
 
-  // Auto-read / "Mark read": optimistic read flip + read_item on the wire.
-  function handleRead(item: InboxItem) {
-    getClient()?.readItem(item.id);
+  // Auto-read / "Mark read": optimistic read flip + read_ping on the wire.
+  function handleRead(ping: Ping) {
+    getClient()?.readPing(ping.id);
   }
 
   // "Mark unread": client-only override — there is no wire unread op.
-  function handleMarkUnread(item: InboxItem) {
-    dispatch({ type: "mark_unread_local", itemId: item.id });
+  function handleMarkUnread(ping: Ping) {
+    dispatch({ type: "mark_unread_local", pingId: ping.id });
   }
 
   // v2.0 (ADR-0008): "Discuss" (fresh) / "resume" (a live one already exists)
-  // — open_side_chat is idempotent per item on the host either way. Recording
-  // the pending item id here is what lets ChatView's effect open the sheet
+  // — open_side_chat is idempotent per Ping on the host either way. Recording
+  // the pending ping id here is what lets ChatView's effect open the sheet
   // the moment its `sc` (fresh) or transcript (resume) is ready, without the
-  // Tray/InboxView needing to know about the sheet at all.
-  function handleDiscuss(item: InboxItem) {
-    getClient()?.openSideChat(item.id);
-    requestSideChatOpen(item.id);
+  // Tray/PingsView needing to know about the sheet at all.
+  function handleDiscuss(ping: Ping) {
+    getClient()?.openSideChat(ping.id);
+    requestSideChatOpen(ping.id);
   }
 
   return (
@@ -89,12 +89,12 @@ export function InboxView() {
       <div class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
         <div class="flex flex-col gap-3">
           <For each={partitioned().open}>
-            {(item) => (
-              <InboxItemCard
-                item={item}
+            {(ping) => (
+              <PingCard
+                ping={ping}
                 onSendReply={handleSendReply}
                 onJumpToChat={handleJumpToChat}
-                onDelete={handleDelete}
+                onResolve={handleResolve}
                 onRead={handleRead}
                 onMarkUnread={handleMarkUnread}
                 onDiscuss={handleDiscuss}
@@ -118,12 +118,12 @@ export function InboxView() {
             <Show when={doneExpanded()}>
               <div class="flex flex-col gap-3">
                 <For each={partitioned().done}>
-                  {(item) => (
-                    <InboxItemCard
-                      item={item}
+                  {(ping) => (
+                    <PingCard
+                      ping={ping}
                       onSendReply={handleSendReply}
                       onJumpToChat={handleJumpToChat}
-                      onDelete={handleDelete}
+                      onResolve={handleResolve}
                       onRead={handleRead}
                       onMarkUnread={handleMarkUnread}
                       onDiscuss={handleDiscuss}

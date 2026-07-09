@@ -10,7 +10,7 @@ import {
   setActiveSideChatSc,
   state,
 } from "../../store/store";
-import { sideChatForItem } from "../../store/selectors";
+import { sideChatForPing } from "../../store/selectors";
 import { focusMainComposer } from "../../lib/focus";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
@@ -111,15 +111,15 @@ export function ChatView() {
     clearScrollTarget();
   });
 
-  // v2.0 (ADR-0008): Discuss/Resume was tapped (see InboxView.handleDiscuss)
+  // v2.0 (ADR-0008): Discuss/Resume was tapped (see PingsView.handleDiscuss)
   // but the sheet couldn't open yet because the sc wasn't known. The moment a
-  // sideChatRefs entry for that item appears — immediately for Resume (it
+  // sideChatRefs entry for that Ping appears — immediately for Resume (it
   // already existed), or once open_side_chat's response lands for a fresh
   // Discuss — open the sheet and consume the request.
   createEffect(() => {
-    const itemId = state.pendingSideChatItemId;
-    if (itemId === null) return;
-    const ref = sideChatForItem(state.sideChatRefs, itemId);
+    const pingId = state.pendingSideChatPingId;
+    if (pingId === null) return;
+    const ref = sideChatForPing(state.sideChatRefs, pingId);
     if (!ref) return;
     setActiveSideChatSc(ref.sc);
     clearPendingSideChatOpen();
@@ -159,8 +159,14 @@ export function ChatView() {
     return ids;
   });
 
-  function handleSend(body: string, ref: number | null, mode: SendMode, blobs: Blob[]) {
-    getClient()?.sendMessage(body, ref, { mode, attachments: blobs });
+  function handleSend(
+    body: string,
+    ref: number | null,
+    mode: SendMode,
+    blobs: Blob[],
+    mentions: number[],
+  ) {
+    getClient()?.sendMessage(body, ref, { mode, attachments: blobs, mentions });
   }
 
   function lastOwnerBody(): string | null {
@@ -329,7 +335,7 @@ export function ChatView() {
       {/* Right region — precedence-ordered, one slot:
           • Side Chat panel when state.activeSideChatSc is set (fork-ui: a
             full-screen `fixed` sheet on phone, an in-flow right rail on wide
-            viewports; never auto-opened — see the pendingSideChatItemId effect).
+            viewports; never auto-opened — see the pendingSideChatPingId effect).
           • Otherwise the standing Pings rail at `rail` width (PingsRail hides
             itself while a side chat holds the region). */}
       <SideChatSheet />

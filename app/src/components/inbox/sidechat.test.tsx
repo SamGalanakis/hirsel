@@ -1,7 +1,7 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InboxItem } from "../../protocol";
+import type { Ping } from "../../protocol";
 
 // Component-level gates for the Side Chat sheet (ADR-0008): Discuss opens the
 // sheet, the conclude flow reaches confirm_conclusion with the Owner's edited
@@ -14,9 +14,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "deploy-approval",
+    description: "Approve the production deployment",
     content: "Approve the deploy to prod?",
     anchor: 5,
     requires_response: true,
@@ -27,16 +29,16 @@ function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
   };
 }
 
-/** Mounts ChatView (which owns both the Tray/InboxView Discuss entry point
+/** Mounts ChatView (which owns both the Tray/PingsView Discuss entry point
  * and the SideChatSheet itself) with a fake ws client that behaves like the
  * mock server's side-chat handling, synchronously. */
-async function setup(itemOverrides: Partial<InboxItem> = {}) {
+async function setup(itemOverrides: Partial<Ping> = {}) {
   const store = await import("../../store/store");
   let scCounter = 0;
   const fakeClient = {
-    openSideChat: vi.fn((itemId: number) => {
+    openSideChat: vi.fn((pingId: number) => {
       const sc = `side:${++scCounter}`;
-      store.dispatch({ type: "side_chat_open", sc, itemId, messages: [] });
+      store.dispatch({ type: "side_chat_open", sc, pingId, messages: [] });
     }),
     sendSideMessage: vi.fn((sc: string, body: string, ref: number | null) => {
       const localId = -1000 - scCounter;
@@ -60,8 +62,8 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
     discardSideChat: vi.fn((sc: string) => {
       store.dispatch({ type: "side_chat_closed", sc });
     }),
-    archiveItem: vi.fn(),
-    readItem: vi.fn(),
+    resolvePing: vi.fn(),
+    readPing: vi.fn(),
     sendMessage: vi.fn(() => -1),
   };
   vi.doMock("../../ws/client", () => ({ getClient: () => fakeClient }));
@@ -71,8 +73,8 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
   // conclude" instead) — these tests aren't exercising that, so start online.
   store.dispatch({ type: "connection_status", status: "connected" });
   store.dispatch({
-    type: "inbox_upsert",
-    payload: { type: "inbox_upsert", item: inboxItem(itemOverrides) },
+    type: "ping_upsert",
+    payload: { type: "ping_upsert", ping: inboxItem(itemOverrides) },
   });
   const screen = render(() => <ChatView />);
 
@@ -83,7 +85,7 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
 }
 
 /** Scope inbox queries to the Tray overlay: the desktop Pings rail is a second,
- * always-mounted InboxView (CSS-hidden below the rail breakpoint but present in
+ * always-mounted PingsView (CSS-hidden below the rail breakpoint but present in
  * the jsdom tree), so an unscoped Discuss/resume query would match twice. */
 function pings() {
   const el = document.querySelector('[data-slot="tray-panel"]');

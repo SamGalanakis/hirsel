@@ -1,6 +1,6 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatMessage, InboxItem } from "../protocol";
+import type { ChatMessage, Ping } from "../protocol";
 
 // Headless full-loop scenario for the Side Chat sheet (ADR-0008 / the opus
 // design critique), driven the same way as the rest of this suite's scenario
@@ -15,9 +15,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "deploy-approval",
+    description: "Approve the production deployment",
     content: "Approve the deploy to prod?",
     anchor: 5,
     requires_response: true,
@@ -50,14 +52,14 @@ function makeFakeHost(store: typeof import("../store/store")) {
   const transcripts = new Map<string, ChatMessage[]>();
 
   return {
-    openSideChat: vi.fn((itemId: number) => {
-      let sc = byItem.get(itemId);
+    openSideChat: vi.fn((pingId: number) => {
+      let sc = byItem.get(pingId);
       if (!sc) {
         sc = `side:${++scCounter}`;
-        byItem.set(itemId, sc);
+        byItem.set(pingId, sc);
         transcripts.set(sc, []);
       }
-      store.dispatch({ type: "side_chat_open", sc, itemId, messages: transcripts.get(sc) ?? [] });
+      store.dispatch({ type: "side_chat_open", sc, pingId, messages: transcripts.get(sc) ?? [] });
     }),
     sendSideMessage: vi.fn((sc: string, body: string, ref: number | null) => {
       const localId = -(1000 + sideMsgId);
@@ -120,27 +122,27 @@ function makeFakeHost(store: typeof import("../store/store")) {
           message: { id: 900, author: "owner", body: text, ref: anchor, ts: "2026-07-08T00:02:00Z" },
         },
       });
-      const itemId = byItem.entries().next().value?.[0];
-      const item = store.state.inbox.find((i) => i.anchor === anchor);
+      const pingId = byItem.entries().next().value?.[0];
+      const item = store.state.pings.find((i) => i.anchor === anchor);
       if (item) {
         store.dispatch({
-          type: "inbox_upsert",
-          payload: { type: "inbox_upsert", item: { ...item, status: "archived" } },
+          type: "ping_upsert",
+          payload: { type: "ping_upsert", ping: { ...item, status: "done" } },
         });
       }
-      void itemId;
+      void pingId;
       store.dispatch({ type: "side_chat_closed", sc });
     }),
     discardSideChat: vi.fn((sc: string) => {
       store.dispatch({ type: "side_chat_closed", sc });
     }),
-    archiveItem: vi.fn(),
-    readItem: vi.fn(),
+    resolvePing: vi.fn(),
+    readPing: vi.fn(),
     sendMessage: vi.fn(() => -1),
   };
 }
 
-async function setup(itemOverrides: Partial<InboxItem> = {}) {
+async function setup(itemOverrides: Partial<Ping> = {}) {
   const store = await import("../store/store");
   const fakeClient = makeFakeHost(store);
   vi.doMock("../ws/client", () => ({ getClient: () => fakeClient }));
@@ -149,8 +151,8 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
   store.dispatch({ type: "connection_status", status: "connected" });
   store.dispatch({ type: "msg", payload: { type: "msg", message: anchorMessage() } });
   store.dispatch({
-    type: "inbox_upsert",
-    payload: { type: "inbox_upsert", item: inboxItem(itemOverrides) },
+    type: "ping_upsert",
+    payload: { type: "ping_upsert", ping: inboxItem(itemOverrides) },
   });
   const screen = render(() => <ChatView />);
   return { store, screen, fakeClient };
@@ -166,7 +168,7 @@ function sideSheet() {
 }
 
 /** Scope inbox queries to the Tray overlay: the desktop Pings rail is a second,
- * always-mounted InboxView (CSS-hidden below the rail breakpoint but present in
+ * always-mounted PingsView (CSS-hidden below the rail breakpoint but present in
  * the jsdom tree), so an unscoped Discuss/resume query would match twice. */
 function pings() {
   const el = document.querySelector('[data-slot="tray-panel"]');
@@ -243,7 +245,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
     const ownerBubbleContent = document.getElementById("msg-900")?.querySelector('[data-slot="bubble-content"]');
     expect(ownerBubbleContent?.className).toContain("ring-2");
 
-    expect(store.state.inbox.find((i) => i.id === 1)?.status).toBe("archived");
+    expect(store.state.pings.find((i) => i.id === 1)?.status).toBe("done");
   });
 });
 
@@ -271,8 +273,8 @@ describe("Resume after reconnect", () => {
         type: "hello_ok",
         latest_msg_id: store.state.lastSeenMsgId ?? 0,
         messages: [],
-        inbox: store.state.inbox,
-        side_chats: [{ sc: "side:1", item_id: 1 }],
+        pings: store.state.pings,
+        side_chats: [{ sc: "side:1", ping_id: 1 }],
       },
     });
     expect(screen.queryByText(/Side chat ·/)).toBeNull(); // still not auto-opened
@@ -296,17 +298,17 @@ describe("Item archived mid-side-chat", () => {
     await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
-    expect(screen.queryByText(/The Agent closed this ping\./)).toBeNull();
+    expect(screen.queryByText(/The Agent closed this Ping\./)).toBeNull();
 
     // The Agent archives the item while the side chat is still open.
     const store = await import("../store/store");
-    const item = store.state.inbox.find((i) => i.id === 1);
+    const item = store.state.pings.find((i) => i.id === 1);
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: { ...item!, status: "archived" } },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: { ...item!, status: "done" } },
     });
 
-    expect(screen.getByText(/The Agent closed this ping\./)).toBeTruthy();
+    expect(screen.getByText(/The Agent closed this Ping\./)).toBeTruthy();
     // The sheet itself is not killed, and Conclude is still reachable.
     expect(screen.getByText(/Side chat ·/)).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "Wrap up" }));

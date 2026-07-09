@@ -1,16 +1,18 @@
 import { render, waitFor, within } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { InboxItem } from "../../protocol";
-import { InboxItemCard } from "./InboxItemCard";
+import type { Ping } from "../../protocol";
+import { PingCard } from "./PingCard";
 
 // Kobalte's dropdown content renders into a Portal on document.body, so it is
 // outside the render container the returned queries are bound to. Query the
 // menu through `within(document.body)`; the trigger lives inside the card.
 
-function item(overrides: Partial<InboxItem> = {}): InboxItem {
+function item(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "deploy-approval",
+    description: "Approve the deployment",
     content: "Approve the deploy?",
     anchor: 5,
     requires_response: false,
@@ -21,25 +23,25 @@ function item(overrides: Partial<InboxItem> = {}): InboxItem {
   };
 }
 
-function renderCard(overrides: Partial<InboxItem> = {}) {
-  const onDelete = vi.fn();
+function renderCard(overrides: Partial<Ping> = {}) {
+  const onResolve = vi.fn();
   const onRead = vi.fn();
   const onMarkUnread = vi.fn();
   const onJumpToChat = vi.fn();
   const onSendReply = vi.fn();
   const onDiscuss = vi.fn();
   const screen = render(() => (
-    <InboxItemCard
-      item={item(overrides)}
+    <PingCard
+      ping={item(overrides)}
       onSendReply={onSendReply}
       onJumpToChat={onJumpToChat}
-      onDelete={onDelete}
+      onResolve={onResolve}
       onRead={onRead}
       onMarkUnread={onMarkUnread}
       onDiscuss={onDiscuss}
     />
   ));
-  return { screen, onDelete, onRead, onMarkUnread, onJumpToChat };
+  return { screen, onResolve, onRead, onMarkUnread, onJumpToChat };
 }
 
 const menu = () => within(document.body);
@@ -51,12 +53,12 @@ async function openMenu(screen: ReturnType<typeof render>) {
 }
 
 describe("Inbox card ⋯ context menu", () => {
-  it("Mark done sends the resolve action (wire archive_item) via onDelete", async () => {
-    const { screen, onDelete } = renderCard({ id: 42 });
+  it("Mark done sends the resolve action (wire resolve_ping) via onResolve", async () => {
+    const { screen, onResolve } = renderCard({ id: 42 });
     const user = await openMenu(screen);
     await user.click(await menu().findByRole("menuitem", { name: "Mark done" }));
-    await waitFor(() => expect(onDelete).toHaveBeenCalledTimes(1));
-    expect(onDelete.mock.calls[0][0]).toMatchObject({ id: 42 });
+    await waitFor(() => expect(onResolve).toHaveBeenCalledTimes(1));
+    expect(onResolve.mock.calls[0][0]).toMatchObject({ id: 42 });
   });
 
   it("there is no inline Mark done/Delete affordance outside the ⋯ menu", () => {

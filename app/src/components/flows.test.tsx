@@ -1,6 +1,6 @@
 import { fireEvent, render } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InboxItem } from "../protocol";
+import type { Ping } from "../protocol";
 
 // Each test runs against a pristine copy of the store singleton: resetModules +
 // dynamic import means the freshly-imported component and the store `dispatch`
@@ -9,9 +9,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "change-approval",
+    description: "Approve the proposed change",
     content: "Approve the change?",
     anchor: 5,
     requires_response: true,
@@ -44,7 +46,7 @@ describe("Composer send", () => {
           });
           return -1;
         },
-        archiveItem: () => {},
+        resolvePing: () => {},
       }),
     }));
 
@@ -73,16 +75,16 @@ describe("Inbox inline reply", () => {
     const store = await import("../store/store");
     const sendMessage = vi.fn((_body: string, _ref: number | null) => -9);
     vi.doMock("../ws/client", () => ({
-      getClient: () => ({ sendMessage, archiveItem: vi.fn(), readItem: vi.fn() }),
+      getClient: () => ({ sendMessage, resolvePing: vi.fn(), readPing: vi.fn() }),
     }));
 
-    const { InboxView } = await import("./inbox/InboxView");
+    const { PingsView } = await import("./inbox/PingsView");
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 5 }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, anchor: 5 }) },
     });
 
-    const { getByText } = render(() => <InboxView />);
+    const { getByText } = render(() => <PingsView />);
     fireEvent.click(getByText("Approve"));
 
     // Anchor-refed send: value = quick reply value, ref = item.anchor.
@@ -96,17 +98,17 @@ describe("Inbox inline reply", () => {
     const store = await import("../store/store");
     const sendMessage = vi.fn((_body: string, _ref: number | null) => -7);
     vi.doMock("../ws/client", () => ({
-      getClient: () => ({ sendMessage, archiveItem: vi.fn(), readItem: vi.fn() }),
+      getClient: () => ({ sendMessage, resolvePing: vi.fn(), readPing: vi.fn() }),
     }));
 
-    const { InboxView } = await import("./inbox/InboxView");
+    const { PingsView } = await import("./inbox/PingsView");
     // requires_response item exposes the inline input expanded by default.
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 9 }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, anchor: 9 }) },
     });
 
-    const { getByPlaceholderText, getByLabelText } = render(() => <InboxView />);
+    const { getByPlaceholderText, getByLabelText } = render(() => <PingsView />);
     const input = getByPlaceholderText("Reply…") as HTMLTextAreaElement;
     fireEvent.input(input, { target: { value: "ship it" } });
     fireEvent.click(getByLabelText("Send reply"));

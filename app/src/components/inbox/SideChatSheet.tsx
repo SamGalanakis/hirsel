@@ -1,6 +1,6 @@
 import { ArrowUp, ChevronDown, ChevronRight, MoreHorizontal, TriangleAlert, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import type { InboxItem } from "../../protocol";
+import type { Ping } from "../../protocol";
 import { focusMainComposer } from "../../lib/focus";
 import { dispatch, setActiveSideChatSc, state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
@@ -85,8 +85,8 @@ export function SideChatSheet() {
 
 function SideChatPanel(props: { sc: string }) {
   const sideChat = () => state.sideChats[props.sc];
-  const item = (): InboxItem | undefined =>
-    state.inbox.find((i) => i.id === sideChat()?.itemId);
+  const ping = (): Ping | undefined =>
+    state.pings.find((p) => p.id === sideChat()?.pingId);
 
   const [highlightedId, setHighlightedId] = createSignal<number | null>(null);
   const [seedExpanded, setSeedExpanded] = createSignal(true);
@@ -216,7 +216,10 @@ function SideChatPanel(props: { sc: string }) {
           <span class="split:hidden">Chat</span>
         </button>
         <div class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-          Side chat · {titleSnippet(item()?.content)}
+          Side chat ·{" "}
+          <Show when={ping()?.name} fallback={titleSnippet(ping()?.content)}>
+            <span class="font-mono text-foreground/90">@{ping()?.name}</span>
+          </Show>
         </div>
         <Show when={offline()}>
           <span class="flex shrink-0 items-center gap-1 px-1 text-[0.68rem] text-status-attention">
@@ -243,13 +246,13 @@ function SideChatPanel(props: { sc: string }) {
         </DropdownMenu>
       </header>
 
-      {/* Non-blocking: the Agent can archive the item mid-side-chat. Conclude
-          and Discard both remain reachable (archive-on-conclude is a no-op if
-          already archived). */}
-      <Show when={sideChat()?.itemArchived}>
+      {/* Non-blocking: the Agent can resolve the Ping mid-side-chat. Conclude
+          and Discard both remain reachable (resolve-on-conclude is a no-op if
+          already done). */}
+      <Show when={sideChat()?.pingResolved}>
         <div class="flex flex-shrink-0 items-center gap-1.5 border-b border-border bg-status-attention/10 px-3 py-1.5 text-xs text-status-attention">
           <TriangleAlert class="size-3.5 shrink-0" aria-hidden="true" />
-          The Agent closed this ping.
+          The Agent closed this Ping.
         </div>
       </Show>
 
@@ -299,7 +302,7 @@ function SideChatPanel(props: { sc: string }) {
                     </button>
                     <Show when={seedExpanded()}>
                       <div class="mt-2 border-l-2 border-border pl-2 text-sm text-muted-foreground">
-                        <Markdown>{item()?.content ?? ""}</Markdown>
+                        <Markdown>{ping()?.content ?? ""}</Markdown>
                       </div>
                     </Show>
                   </div>
@@ -427,10 +430,10 @@ function SideChatPanel(props: { sc: string }) {
         <ConcludeConfirmSheet
           sc={props.sc}
           draft={sideChat()?.draft ?? ""}
-          item={item()}
+          ping={ping()}
           onKeepEditing={() => dispatch({ type: "side_chat_keep_editing", sc: props.sc })}
           onSend={(text) => {
-            const anchor = item()?.anchor;
+            const anchor = ping()?.anchor;
             if (anchor === undefined) return;
             getClient()?.confirmConclusion(props.sc, text, anchor);
           }}
@@ -460,7 +463,7 @@ function SideChatPanel(props: { sc: string }) {
 function ConcludeConfirmSheet(props: {
   sc: string;
   draft: string;
-  item: InboxItem | undefined;
+  ping: Ping | undefined;
   onKeepEditing: () => void;
   onSend: (text: string) => void;
 }) {
@@ -497,13 +500,13 @@ function ConcludeConfirmSheet(props: {
           <h2 class="m-0 text-base font-semibold">Send this reply?</h2>
         </header>
         <div class="thin-scrollbar flex-1 overflow-y-auto p-4">
-          <Show when={props.item?.requires_response}>
+          <Show when={props.ping?.requires_response}>
             <div class="mb-3 rounded-md border-l-2 border-border bg-muted/40 p-2.5">
               <div class="mb-1 text-[0.68rem] uppercase tracking-wide text-muted-foreground">
                 Original question
               </div>
               <div class="text-sm text-muted-foreground">
-                <Markdown>{props.item?.content ?? ""}</Markdown>
+                <Markdown>{props.ping?.content ?? ""}</Markdown>
               </div>
             </div>
           </Show>

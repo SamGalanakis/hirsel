@@ -1,6 +1,6 @@
 import { render } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InboxItem } from "../../protocol";
+import type { Ping } from "../../protocol";
 
 // Tray (spec [P1]): the Inbox tab and TabBar are gone; these are the
 // TabBar-badge-equivalent tests plus the new Tray-specific gates (shelf
@@ -10,9 +10,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "change-approval",
+    description: "Approve the proposed change",
     content: "Approve the change?",
     anchor: 5,
     requires_response: false,
@@ -35,10 +37,10 @@ describe("Tray shelf badge (email-like: open + unread, RR-driven accent)", () =>
     const badge = () =>
       getByLabelText("Open Pings").querySelector(".font-bold") as HTMLElement;
 
-    // Open, unread, non-RR item: badge 1, muted (no danger accent).
+    // Open, unread, non-RR ping: badge 1, muted (no danger accent).
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, requires_response: false }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, requires_response: false }) },
     });
     expect(badge().textContent).toBe("1");
     expect(badge().classList.contains("bg-muted-foreground")).toBe(true);
@@ -46,8 +48,8 @@ describe("Tray shelf badge (email-like: open + unread, RR-driven accent)", () =>
 
     // A second open+unread+RR item bumps the badge to 2 AND flips the accent.
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, requires_response: true }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 2, requires_response: true }) },
     });
     expect(badge().textContent).toBe("2");
     expect(badge().classList.contains("bg-status-danger")).toBe(true);
@@ -56,10 +58,10 @@ describe("Tray shelf badge (email-like: open + unread, RR-driven accent)", () =>
     // persists because it tracks "any open requires_response", not the
     // unread count.
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 2, requires_response: true, read: true }),
+        type: "ping_upsert",
+        ping: inboxItem({ id: 2, requires_response: true, read: true }),
       },
     });
     expect(badge().textContent).toBe("1");
@@ -68,10 +70,10 @@ describe("Tray shelf badge (email-like: open + unread, RR-driven accent)", () =>
     // Deleting the RR item clears the accent; item 1 (open, unread) keeps the
     // badge at 1.
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 2, requires_response: true, read: true, status: "archived" }),
+        type: "ping_upsert",
+        ping: inboxItem({ id: 2, requires_response: true, read: true, status: "done" }),
       },
     });
     expect(badge().textContent).toBe("1");
@@ -80,40 +82,55 @@ describe("Tray shelf badge (email-like: open + unread, RR-driven accent)", () =>
 });
 
 describe("Tray shelf preview", () => {
-  it("previews the most-actionable open item: requires_response > unread > newest open", async () => {
+  it("previews the most-actionable open ping: requires_response > unread > newest open", async () => {
     const store = await import("../../store/store");
     const { TrayShelf } = await import("./Tray");
     const { getByLabelText } = render(() => <TrayShelf />);
 
     // Two read, non-RR items -> falls back to "newest open" (highest id).
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, content: "First item", read: true }) },
+      type: "ping_upsert",
+      payload: {
+        type: "ping_upsert",
+        ping: inboxItem({ id: 1, name: "first", description: "First item", read: true }),
+      },
     });
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, content: "Second item", read: true }) },
+      type: "ping_upsert",
+      payload: {
+        type: "ping_upsert",
+        ping: inboxItem({ id: 2, name: "second", description: "Second item", read: true }),
+      },
     });
+    expect(getByLabelText("Open Pings").textContent).toContain("@second");
     expect(getByLabelText("Open Pings").textContent).toContain("Second item");
 
     // An unread (but non-RR, older) item beats "newest open".
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 1, content: "First item", read: false }),
+        type: "ping_upsert",
+        ping: inboxItem({ id: 1, name: "first", description: "First item", read: false }),
       },
     });
+    expect(getByLabelText("Open Pings").textContent).toContain("@first");
     expect(getByLabelText("Open Pings").textContent).toContain("First item");
 
     // A requires_response item beats an unread one, regardless of recency.
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 3, content: "Needs your call", requires_response: true, read: true }),
+        type: "ping_upsert",
+        ping: inboxItem({
+          id: 3,
+          name: "release-call",
+          description: "Needs your call",
+          requires_response: true,
+          read: true,
+        }),
       },
     });
+    expect(getByLabelText("Open Pings").textContent).toContain("@release-call");
     expect(getByLabelText("Open Pings").textContent).toContain("Needs your call");
   });
 });
@@ -132,10 +149,10 @@ describe("Tray shelf visibility", () => {
     // (`done` is the ADR-0009 status; the legacy `archived` spelling still
     // renders here too — covered by the synonym in isResolvedStatus.)
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 1, status: "done", read: true }),
+        type: "ping_upsert",
+        ping: inboxItem({ id: 1, status: "done", read: true }),
       },
     });
     expect(queryByLabelText("Open Pings")).toBeNull();
@@ -143,8 +160,8 @@ describe("Tray shelf visibility", () => {
 
     // An open item arrives -> the full shelf replaces the minimal handle.
     store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, status: "open" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 2, status: "open" }) },
     });
     expect(queryByLabelText("Open done items")).toBeNull();
     expect(getByLabelText("Open Pings")).toBeTruthy();
@@ -161,10 +178,10 @@ describe("Tray never auto-expands", () => {
     expect(container.querySelector('[data-slot="tray-panel"]')).toBeNull();
 
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: inboxItem({ id: 1, requires_response: true }),
+        type: "ping_upsert",
+        ping: inboxItem({ id: 1, requires_response: true }),
       },
     });
 

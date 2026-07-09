@@ -1,6 +1,6 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InboxItem } from "../../protocol";
+import type { Ping } from "../../protocol";
 
 // Desktop-shell gates (desktop-shell pass). The named breakpoints are pure CSS,
 // so jsdom (which loads no stylesheet) can't compute which surface is visible at
@@ -13,9 +13,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "deploy-approval",
+    description: "Approve the production deployment",
     content: "Approve the deploy to prod?",
     anchor: 5,
     requires_response: true,
@@ -30,17 +32,17 @@ function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
 function makeClient(store: typeof import("../../store/store")) {
   let scCounter = 0;
   return {
-    openSideChat: vi.fn((itemId: number) => {
+    openSideChat: vi.fn((pingId: number) => {
       const sc = `side:${++scCounter}`;
-      store.dispatch({ type: "side_chat_open", sc, itemId, messages: [] });
+      store.dispatch({ type: "side_chat_open", sc, pingId, messages: [] });
     }),
     sendSideMessage: vi.fn(() => -1),
     cancelSideTurn: vi.fn(),
     concludeSideChat: vi.fn(),
     confirmConclusion: vi.fn(),
     discardSideChat: vi.fn(),
-    archiveItem: vi.fn(),
-    readItem: vi.fn(),
+    resolvePing: vi.fn(),
+    readPing: vi.fn(),
     sendMessage: vi.fn(() => -1),
     retrySend: vi.fn(),
     cancelQueued: vi.fn(),
@@ -48,7 +50,7 @@ function makeClient(store: typeof import("../../store/store")) {
   };
 }
 
-async function setup(itemOverrides: Partial<InboxItem> = {}) {
+async function setup(itemOverrides: Partial<Ping> = {}) {
   const store = await import("../../store/store");
   const fakeClient = makeClient(store);
   vi.doMock("../../ws/client", () => ({ getClient: () => fakeClient }));
@@ -56,8 +58,8 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
   const { ChatView } = await import("./ChatView");
   store.dispatch({ type: "connection_status", status: "connected" });
   store.dispatch({
-    type: "inbox_upsert",
-    payload: { type: "inbox_upsert", item: inboxItem(itemOverrides) },
+    type: "ping_upsert",
+    payload: { type: "ping_upsert", ping: inboxItem(itemOverrides) },
   });
   const screen = render(() => <ChatView />);
   return { store, screen, fakeClient };
@@ -65,7 +67,7 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
 
 /** Full-App mount (the header — with its restore-Pings affordance — lives in
  * App, not ChatView). ws/client is fully stubbed so no socket opens. */
-async function setupApp(itemOverrides: Partial<InboxItem> = {}) {
+async function setupApp(itemOverrides: Partial<Ping> = {}) {
   const store = await import("../../store/store");
   const fakeClient = makeClient(store);
   vi.doMock("../../ws/client", () => ({
@@ -78,22 +80,22 @@ async function setupApp(itemOverrides: Partial<InboxItem> = {}) {
   const { default: App } = await import("../../App");
   store.dispatch({ type: "connection_status", status: "connected" });
   store.dispatch({
-    type: "inbox_upsert",
-    payload: { type: "inbox_upsert", item: inboxItem(itemOverrides) },
+    type: "ping_upsert",
+    payload: { type: "ping_upsert", ping: inboxItem(itemOverrides) },
   });
   const screen = render(() => <App />);
   return { store, screen, fakeClient };
 }
 
 describe("Desktop shell: the standing Pings rail", () => {
-  it("stands a rail that reuses InboxView and is CSS-gated to the rail breakpoint", async () => {
+  it("stands a rail that reuses PingsView and is CSS-gated to the rail breakpoint", async () => {
     const { screen } = await setup();
     const rail = screen.getByRole("complementary", { name: "Pings" });
     // CSS-gated: hidden below `rail`, shown as a flex column at/above it — so it
     // renders at ≥1100 and never competes with the phone shelf below.
     expect(rail.className).toContain("hidden");
     expect(rail.className).toContain("rail:flex");
-    // Reuses InboxView verbatim — the seeded item card is in the rail body.
+    // Reuses PingsView verbatim — the seeded item card is in the rail body.
     expect(within(rail).getByText("Approve the deploy to prod?")).toBeTruthy();
   });
 
@@ -128,7 +130,7 @@ describe("Desktop shell: right-region precedence", () => {
     expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeNull();
 
     // Open a side chat from the rail: it takes the right region; the rail
-    // yields (unmounts). Only the rail mounts InboxView here (tray collapsed),
+    // yields (unmounts). Only the rail mounts PingsView here (tray collapsed),
     // so the Discuss control is unambiguous.
     await fireEvent.click(
       within(screen.getByRole("complementary", { name: "Pings" })).getByRole("button", {

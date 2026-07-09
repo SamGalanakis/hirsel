@@ -75,7 +75,7 @@ async function startScriptedHost(): Promise<ScriptedHost> {
           messages: [
             { id: 1, author: "agent", body: "Ready.", ref: null, ts: now(), attachments: [] },
           ],
-          inbox: [],
+          pings: [],
           processes: [{ ...SUBAGENT }],
         });
         return;

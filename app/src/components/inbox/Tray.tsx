@@ -4,11 +4,11 @@ import { snippet } from "../../lib/format";
 import {
   hasOpenRequiresResponse,
   isResolvedStatus,
-  mostActionableItem,
+  mostActionablePing,
   openUnreadCount,
 } from "../../store/selectors";
 import { setActiveSideChatSc, setTrayExpanded, state } from "../../store/store";
-import { InboxView } from "./InboxView";
+import { PingsView } from "./PingsView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
 // is a slim shelf pinned directly above the Composer; expanded, it is an
@@ -21,18 +21,18 @@ import { InboxView } from "./InboxView";
 // (rather than reflows) the scroller, while `TrayShelf` is a normal flex
 // sibling between that container and the Composer.
 
-const PREVIEW_MAX = 60;
+const PREVIEW_MAX = 52;
 
 function openCount(): number {
-  return state.inbox.filter((i) => i.status === "open").length;
+  return state.pings.filter((p) => p.status === "open").length;
 }
 
 function doneCount(): number {
-  return state.inbox.filter((i) => isResolvedStatus(i.status)).length;
+  return state.pings.filter((p) => isResolvedStatus(p.status)).length;
 }
 
 function badgeCount(): number {
-  return openUnreadCount(state.inbox, state.unreadOverrides);
+  return openUnreadCount(state.pings, state.unreadOverrides);
 }
 
 function badgeLabel(): string {
@@ -41,12 +41,12 @@ function badgeLabel(): string {
 }
 
 function danger(): boolean {
-  return hasOpenRequiresResponse(state.inbox);
+  return hasOpenRequiresResponse(state.pings);
 }
 
-function preview(): string | null {
-  const item = mostActionableItem(state.inbox, state.unreadOverrides);
-  return item ? snippet(item.content, PREVIEW_MAX) : null;
+/** The most-actionable open Ping the collapsed shelf previews, or null. */
+function previewPing() {
+  return mostActionablePing(state.pings, state.unreadOverrides);
 }
 
 const thinking = () => state.agentActivity.state === "thinking";
@@ -89,9 +89,21 @@ export function TrayShelf() {
           <Show
             when={expanded()}
             fallback={
-              <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                {preview()}
-              </span>
+              <Show
+                when={previewPing()}
+                fallback={
+                  <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">Pings</span>
+                }
+              >
+                {(p) => (
+                  <span class="flex min-w-0 flex-1 items-baseline gap-1.5 truncate">
+                    <span class="shrink-0 font-mono text-xs text-foreground">@{p().name}</span>
+                    <span class="min-w-0 truncate text-xs text-muted-foreground">
+                      {snippet(p().description || p().content, PREVIEW_MAX)}
+                    </span>
+                  </span>
+                )}
+              </Show>
             }
           >
             <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Pings</span>
@@ -133,7 +145,7 @@ function PingsBadge(props: { slot?: string }) {
 }
 
 /** The standing Pings rail (desktop-shell): the Tray promoted from a bottom
- * shelf to a persistent right column at `rail` width. Same `InboxView` body the
+ * shelf to a persistent right column at `rail` width. Same `PingsView` body the
  * phone overlay uses (one component, two mount points), under a slim header that
  * mirrors the shelf's count/danger badge. It yields the right region when a Side
  * Chat is open (precedence) — rendered only while `activeSideChatSc` is null,
@@ -158,7 +170,7 @@ export function PingsRail() {
           </Show>
           <PingsBadge slot="pings-rail-badge" />
         </div>
-        <InboxView />
+        <PingsView />
       </aside>
     </Show>
   );
@@ -209,7 +221,7 @@ function TrayScrim() {
   );
 }
 
-/** The expanded panel: reuses `InboxView` (Done section included) verbatim
+/** The expanded panel: reuses `PingsView` (Done section included) verbatim
  * inside an absolutely-positioned box, ~58% viewport height, its own internal
  * scroll. `TrayShelf` (a flex sibling just below this container) supplies the
  * visual header/footer cap and the collapse control. */
@@ -221,7 +233,7 @@ function TrayPanel() {
       role="region"
       aria-label="Pings"
     >
-      <InboxView />
+      <PingsView />
     </div>
   );
 }

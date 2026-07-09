@@ -165,6 +165,15 @@ function sideSheet() {
   return within(el as HTMLElement);
 }
 
+/** Scope inbox queries to the Tray overlay: the desktop Pings rail is a second,
+ * always-mounted InboxView (CSS-hidden below the rail breakpoint but present in
+ * the jsdom tree), so an unscoped Discuss/resume query would match twice. */
+function pings() {
+  const el = document.querySelector('[data-slot="tray-panel"]');
+  if (!el) throw new Error("tray is not expanded");
+  return within(el as HTMLElement);
+}
+
 describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send reply -> landed in main", () => {
   it("keeps main chat untouched during the side conversation, then lands the edited conclusion with its provenance chip and archives the item", async () => {
     const { store, screen, fakeClient } = await setup();
@@ -174,7 +183,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
 
     // --- Discuss ---
     await fireEvent.click(screen.getByLabelText("Open Pings"));
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     expect(fakeClient.openSideChat).toHaveBeenCalledWith(1);
 
     // --- Seed card visible ---
@@ -242,7 +251,7 @@ describe("Resume after reconnect", () => {
   it("shows 'in progress · resume' (never auto-opens), and resuming restores the prior transcript", async () => {
     const { store, screen, fakeClient } = await setup();
     await fireEvent.click(screen.getByLabelText("Open Pings"));
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     const composer = sideSheet().getByPlaceholderText("Message the Agent…") as HTMLTextAreaElement;
@@ -267,10 +276,10 @@ describe("Resume after reconnect", () => {
       },
     });
     expect(screen.queryByText(/Side chat ·/)).toBeNull(); // still not auto-opened
-    expect(screen.getByRole("button", { name: /in progress · resume/ })).toBeTruthy();
+    expect(pings().getByRole("button", { name: /in progress · resume/ })).toBeTruthy();
 
     // Resume is a deliberate tap: it re-opens (idempotent) and restores history.
-    await fireEvent.click(screen.getByRole("button", { name: /in progress · resume/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /in progress · resume/ }));
     expect(fakeClient.openSideChat).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
     // Appears twice, legitimately: the owner bubble itself, and the agent
@@ -284,7 +293,7 @@ describe("Item archived mid-side-chat", () => {
   it("shows a non-blocking banner and Conclude still works", async () => {
     const { screen, fakeClient } = await setup();
     await fireEvent.click(screen.getByLabelText("Open Pings"));
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     expect(screen.queryByText(/The Agent closed this ping\./)).toBeNull();

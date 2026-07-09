@@ -82,11 +82,20 @@ async function setup(itemOverrides: Partial<InboxItem> = {}) {
   return { store, screen, fakeClient };
 }
 
+/** Scope inbox queries to the Tray overlay: the desktop Pings rail is a second,
+ * always-mounted InboxView (CSS-hidden below the rail breakpoint but present in
+ * the jsdom tree), so an unscoped Discuss/resume query would match twice. */
+function pings() {
+  const el = document.querySelector('[data-slot="tray-panel"]');
+  if (!el) throw new Error("tray is not expanded");
+  return within(el as HTMLElement);
+}
+
 describe("Discuss opens the Side Chat sheet", () => {
   it("opens the sheet with the seed card, and hides it again on leave", async () => {
     const { screen, fakeClient } = await setup();
 
-    const discussButton = screen.getByRole("button", { name: /Discuss/ });
+    const discussButton = pings().getByRole("button", { name: /Discuss/ });
     await fireEvent.click(discussButton);
 
     expect(fakeClient.openSideChat).toHaveBeenCalledWith(1);
@@ -102,14 +111,14 @@ describe("Discuss opens the Side Chat sheet", () => {
 
   it("flips to 'in progress · resume' once a side chat is live for the item", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
     await fireEvent.click(screen.getByLabelText(/Leave side chat/));
 
-    expect(screen.getByRole("button", { name: /in progress · resume/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /^Discuss$/ })).toBeNull();
+    expect(pings().getByRole("button", { name: /in progress · resume/ })).toBeTruthy();
+    expect(pings().queryByRole("button", { name: /^Discuss$/ })).toBeNull();
 
-    await fireEvent.click(screen.getByRole("button", { name: /in progress · resume/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /in progress · resume/ }));
     // Resuming calls open_side_chat again (idempotent on the host) rather than
     // creating a second side chat.
     expect(fakeClient.openSideChat).toHaveBeenCalledTimes(2);
@@ -120,7 +129,7 @@ describe("Discuss opens the Side Chat sheet", () => {
 describe("Conclude flow reaches confirm_conclusion with the Owner's edited text", () => {
   it("drafts, lets the Owner edit, and sends the edited text on 'Send reply'", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     await fireEvent.click(screen.getByRole("button", { name: "Wrap up" }));
@@ -147,7 +156,7 @@ describe("Conclude flow reaches confirm_conclusion with the Owner's edited text"
 
   it("'Keep editing' returns to the side chat without discarding or sending", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
     await fireEvent.click(screen.getByRole("button", { name: "Wrap up" }));
     await screen.findByLabelText("Reply text");
@@ -173,7 +182,7 @@ describe("Discard requires its confirm", () => {
 
   it("Cancel leaves the side chat untouched", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     const user = userEvent.setup();
@@ -192,7 +201,7 @@ describe("Discard requires its confirm", () => {
 
   it("Discard (confirmed) closes the sheet with no conclusion; the item stays open", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     const user = userEvent.setup();
@@ -203,14 +212,14 @@ describe("Discard requires its confirm", () => {
     expect(fakeClient.discardSideChat).toHaveBeenCalledWith("side:1");
     expect(screen.queryByText(/Side chat ·/)).toBeNull();
     // The item itself stays open — Discuss is offered again, fresh.
-    expect(screen.getByRole("button", { name: /^Discuss$/ })).toBeTruthy();
+    expect(pings().getByRole("button", { name: /^Discuss$/ })).toBeTruthy();
   });
 });
 
 describe("Slack-style split: both conversations stay live (fork-ui iteration)", () => {
   it("a main-chat msg arriving while the side panel is open updates the left side, untouched by the side scope", async () => {
     const { store, screen } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     // Main chat is still LIVE behind/beside the side panel: a msg landing in
@@ -233,7 +242,7 @@ describe("Slack-style split: both conversations stay live (fork-ui iteration)", 
 
   it("presents responsively: a full-screen sheet by default, an in-flow right rail at ≥900px", async () => {
     const { screen } = await setup();
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     const surface = document.querySelector('[data-slot="side-chat-sheet"]') as HTMLElement;
@@ -241,8 +250,8 @@ describe("Slack-style split: both conversations stay live (fork-ui iteration)", 
     expect(surface.className).toContain("fixed");
     expect(surface.className).toContain("inset-0");
     // Desktop split: the same element becomes an in-flow, bordered right rail.
-    expect(surface.className).toContain("min-[900px]:relative");
-    expect(surface.className).toContain("min-[900px]:border-l");
+    expect(surface.className).toContain("split:relative");
+    expect(surface.className).toContain("split:border-l");
   });
 });
 
@@ -250,7 +259,7 @@ describe("Focus handoff between the two composers (fork-ui iteration)", () => {
   it("lands focus in the side composer on open and returns it to the main composer on leave", async () => {
     const { screen } = await setup();
 
-    await fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     const sideComposer = document.querySelector('[data-composer="side"]') as HTMLTextAreaElement;

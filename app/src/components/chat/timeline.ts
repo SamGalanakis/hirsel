@@ -28,7 +28,8 @@ export type TimelineItem =
  *   later prose delta opens a new one.
  * - `tool_start` inserts a tool row at its position; `tool_done` resolves the
  *   matching-`id` row in place (spinner → ok/fail + result). A `tool_done` with
- *   no matching open row is dropped.
+ *   no matching open row (e.g. a reconnect mid-turn dropped the start) is not
+ *   discarded — it inserts an already-completed row labelled from its own `name`.
  *
  * Input is assumed already sorted by `seq` (the reducer keeps it so); this fold
  * never reorders.
@@ -65,7 +66,22 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
       }
       case "tool_done": {
         const idx = toolIndexById.get(event.id);
-        if (idx === undefined) break; // no matching tool_start → drop
+        if (idx === undefined) {
+          // Orphan done (no matching tool_start — e.g. the start was lost across
+          // a reconnect). Render it as an already-completed row from its own name.
+          toolIndexById.set(event.id, items.length);
+          items.push({
+            kind: "tool",
+            key: `tool-${event.id}`,
+            toolId: event.id,
+            name: event.name,
+            summary: null,
+            done: true,
+            ok: event.ok,
+            result: event.summary,
+          });
+          break;
+        }
         const row = items[idx];
         if (row.kind !== "tool") break;
         row.done = true;

@@ -193,12 +193,14 @@ export interface ProcessUpsertMsg {
 /** v1.5: one ordered event in the running turn's timeline. Tagged by `kind`.
  * Prose/reasoning carry markdown deltas that accumulate into the current
  * block/run; tool_start opens a row that tool_done (matched by `id`) resolves.
- * Host `summary` strings are clean one-liners (no raw JSON). */
+ * `tool_done` carries its own `name` too, so an orphan done (no matching start,
+ * e.g. a reconnect mid-turn) still renders a labelled row. Host `summary`
+ * strings are clean one-liners (no raw JSON). */
 export type TurnEvent =
   | { kind: "prose"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool_start"; id: string; name: string; summary: string | null }
-  | { kind: "tool_done"; id: string; ok: boolean; summary: string | null };
+  | { kind: "tool_done"; id: string; name: string; ok: boolean; summary: string | null };
 
 /** v1.5: ephemeral timeline event streamed while the Agent's turn runs (like
  * agent_activity); never stored or replayed. `seq` strictly orders events

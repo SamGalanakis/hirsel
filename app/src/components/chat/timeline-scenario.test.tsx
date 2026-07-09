@@ -171,7 +171,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       host.push({
         type: "turn_event",
         seq: 3,
-        event: { kind: "tool_done", id: "t1", ok: true, summary: "read 142 lines" },
+        event: { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 142 lines" },
       });
       await waitFor(() => expect(timeline()!.querySelector('[aria-label="ok"]')).toBeTruthy());
       const toolRow = timeline()!.querySelector('[data-slot="timeline-tool"]') as HTMLElement;

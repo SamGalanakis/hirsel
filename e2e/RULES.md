@@ -13,6 +13,10 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `POST /debug/reset` wipes Chat, Inbox, process debug state, and starts from a clean session.
 - `POST /debug/upload { "name": "...", "mime": "...", "data_b64": "..." }` stores a blob and returns its Blob JSON.
 - `POST /debug/owner-message { "client_id": "optional-stable-id", "body": "...", "ref": null | message_id, "attachments": ["blob-id"], "mode": "send" | "next_turn" }` injects an Owner Chat message through the same host ingress path as the WebSocket; `client_id`, `attachments`, and `mode` are optional, and `mode` defaults to `send`.
+- `POST /debug/open-side-chat { "item_id": ... }` opens or resumes a live side chat and returns its scope id and transcript.
+- `POST /debug/side-message { "sc": "side:...", "body": "..." }` submits a side-scoped Owner message; poll `/debug/side-chats` for the reply.
+- `POST /debug/conclude { "sc": "side:..." }` drafts the Owner's conclusion without adding the draft to the transcript.
+- `POST /debug/confirm-conclusion { "sc": "side:...", "text": "..." }` posts the anchor-refed Owner conclusion to main Chat, archives the item, and closes the side chat.
 - `POST /debug/read-item { "item_id": ... }` marks an Inbox Item read and broadcasts `inbox_upsert`.
 - `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
 - `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
@@ -21,6 +25,7 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `GET /debug/inbox` returns persisted Inbox Items.
 - `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, `turn_event`, `process_upsert`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
 - `GET /debug/processes` returns v1.4 `ProcessInfo` rows for Sub-agents and monitors: `id`, `kind`, `label`, `agent`, `model`, `state`, timestamps, and `summary`.
+- `GET /debug/side-chats` returns only live side chats with their scoped transcripts.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.
 
@@ -40,6 +45,7 @@ There is no debug HTTP route for owner-side Inbox archive/delete in this branch.
 - `real-subagent` - real Codex Sub-agent spawn, progress, completion, and interruption.
 - `restart-persistence` - real Agent persistence over repeated host restarts.
 - `send-queue-cancel` - send/next-turn queueing and active-turn cancellation.
+- `side-chats` - protocol v2.0 side-chat loop: seeded open, scoped conversation, resume, conclude, confirm, idempotent archive, teardown, and main-Agent reaction (scripted + real variants).
 - `timers` - timer trigger source registration and wake.
 - `turn-timeline` - live turn timeline ordering and tool event summaries.
 

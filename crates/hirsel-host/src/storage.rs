@@ -489,6 +489,32 @@ impl Storage {
         Ok(Some(get_ping(&conn, ping_id)?))
     }
 
+    pub async fn resolve_open_pings_for_anchor(&self, anchor: u64) -> anyhow::Result<Vec<Ping>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let ping_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM pings WHERE anchor = ?1 AND status = 'open' ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![anchor], |row| row.get::<_, u64>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if ping_ids.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        tx.execute(
+            "UPDATE pings SET status = 'done' WHERE anchor = ?1 AND status = 'open'",
+            params![anchor],
+        )?;
+        let pings = ping_ids
+            .into_iter()
+            .map(|ping_id| get_ping(&tx, ping_id))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(pings)
+    }
+
     pub async fn mark_ping_read(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let conn = self.conn.lock().await;
         conn.execute(
@@ -1613,6 +1639,53 @@ mod tests {
         let second = storage.resolve_ping(ping.id).await.unwrap().unwrap();
         assert_eq!(first.status, PingStatus::Done);
         assert_eq!(second.status, PingStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn owner_reply_resolves_every_open_ping_for_its_anchor_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap();
+        let first = storage
+            .create_ping("first", "First", "First", anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+        let second = storage
+            .create_ping("second", "Second", "Second", anchor.id, false, Vec::new())
+            .await
+            .unwrap();
+        let other_anchor = storage
+            .append_chat(ChatAuthor::Agent, "other anchor", None)
+            .await
+            .unwrap();
+        let other = storage
+            .create_ping("other", "Other", "Other", other_anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+
+        let resolved = storage
+            .resolve_open_pings_for_anchor(anchor.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.iter().map(|ping| ping.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert!(resolved.iter().all(|ping| ping.status == PingStatus::Done));
+        assert!(
+            storage
+                .resolve_open_pings_for_anchor(anchor.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage.ping(other.id).await.unwrap().unwrap().status,
+            PingStatus::Open
+        );
     }
 
     #[tokio::test]

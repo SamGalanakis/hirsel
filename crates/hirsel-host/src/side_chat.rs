@@ -266,12 +266,6 @@ impl SideChatManager {
                 SendMode::Send,
             )
             .await?;
-        let ping = self
-            .storage
-            .resolve_ping(session.ping_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", session.ping_id))?;
-        app_state.broadcast(HostToClient::PingUpsert { ping });
         self.close_session(sc).await?;
         self.publish(HostToClient::SideChatClosed { sc: sc.to_string() });
         Ok(())
@@ -834,6 +828,18 @@ mod tests {
             event,
             HostToClient::SideChatClosed { sc: closed } if closed == &sc
         )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HostToClient::PingUpsert { ping: update }
+                        if update.id == ping.id && update.status == PingStatus::Done
+                ))
+                .count(),
+            1,
+            "Side Chat confirmation resolves through the shared Owner-message path"
+        );
     }
 
     #[tokio::test]

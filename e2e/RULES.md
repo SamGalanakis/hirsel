@@ -43,6 +43,14 @@ There is no debug HTTP route for owner-side Inbox archive/delete in this branch.
 - `timers` - timer trigger source registration and wake.
 - `turn-timeline` - live turn timeline ordering and tool event summaries.
 
+## Neutral Working Directories
+
+Never let anything under test touch or inherit from the hirsel checkout:
+
+- Host instances under test run with their working directory in the scenario's `/tmp` workdir (invoke the prebuilt binary by absolute path; the repo is reference material, not a runtime location).
+- Every delegation instruction in an owner message MUST name an explicit throwaway workdir (e.g. "in /tmp/hirsel-e2e-<scenario>-work, which you may create") — an unguided Agent defaults its Sub-agent `cwd` into the host's cwd, and a full-auto CLI running inside the hirsel repo inherits the Owner's personal CLAUDE.md and can write into the checkout.
+- Runbook executors likewise run from a neutral directory and reference the repo read-only by absolute path.
+
 ## Poll, Don't Sleep
 
 Every async gate must be checked by polling debug state. Do not `sleep` and assume progress. Use short polling intervals and a clear timeout; each poll should inspect the current JSON and decide whether the gate has matched, is still pending, or has failed.

@@ -34,7 +34,7 @@ curl -sS -X POST http://127.0.0.1:3089/debug/reset
 ```bash
 curl -sS -X POST http://127.0.0.1:3089/debug/owner-message \
   -H 'content-type: application/json' \
-  -d '{"body":"Please delegate a trivial repo fix to a Sub-agent, then ask me before applying the result.","ref":null}'
+  -d '{"body":"Please delegate a trivial task to a Sub-agent working in /tmp/hirsel-e2e-delegation-work (create the directory if needed), then ask me before applying the result.","ref":null}'
 ```
 
 3. Poll `/debug/processes` until at least one `kind: "subagent"` process exists. Record `processes[0].id`.

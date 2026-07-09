@@ -38,3 +38,4 @@ Thumbs.db
 !.vscode/extensions.json
 *.swp
 *.swo
+.playwright-cli/

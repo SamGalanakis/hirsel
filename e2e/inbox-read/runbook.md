@@ -36,7 +36,7 @@ result in the Inbox:
 ```bash
 curl -sS -X POST http://127.0.0.1:3097/debug/owner-message \
   -H 'content-type: application/json' \
-  -d '{"body":"Please delegate a trivial repo fix to a Sub-agent, then ask me before applying the result.","ref":null}'
+  -d '{"body":"Please delegate a trivial task to a Sub-agent working in /tmp/hirsel-e2e-inbox-read-work (create the directory if needed), then ask me before applying the result.","ref":null}'
 ```
 
 Poll `/debug/inbox` until an open item with `requires_response: true` appears. Record its `id`.

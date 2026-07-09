@@ -19,7 +19,7 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `POST /debug/create-monitor { "cmd": "...", "every_secs": 30, "wake_on": "changed" | "exit_zero" | "exit_nonzero" | "regex", "pattern": "...", "label": "..." }` creates a persisted monitor for deterministic monitor runbooks.
 - `GET /debug/chat` returns persisted Chat messages.
 - `GET /debug/inbox` returns persisted Inbox Items.
-- `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, `agent_tool_call`, `process_upsert`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
+- `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, `turn_event`, `process_upsert`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
 - `GET /debug/processes` returns v1.4 `ProcessInfo` rows for Sub-agents and monitors: `id`, `kind`, `label`, `agent`, `model`, `state`, timestamps, and `summary`.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.
@@ -34,7 +34,7 @@ Before judging wording, prove the state transition happened:
 
 - A delegated run must show a process in `/debug/processes`.
 - A Sub-agent completion must show `kind: "subagent"` and terminal `state: "done"`.
-- A tool-using Agent turn must persist non-empty `tool_calls` on the Agent Chat message and emit `agent_tool_call` broadcasts while running.
+- A tool-using Agent turn must persist non-empty `tool_calls` on the Agent Chat message and emit `turn_event` `tool_start`/`tool_done` broadcasts while running.
 - An Owner question must appear as an Inbox Item with `requires_response: true`.
 - A Quick Reply response must be an Anchor-refed Owner Chat message.
 - The Agent acknowledgement must be a persisted Agent Chat message after the Owner reply.

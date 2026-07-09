@@ -90,7 +90,7 @@ After the real delegation turn uses tools, also prove tool-call visibility:
 
 ```bash
 curl -sS http://127.0.0.1:3089/debug/chat | jq '.messages[] | select(.author == "agent" and (.tool_calls | length > 0))'
-curl -sS http://127.0.0.1:3089/debug/broadcasts | jq '.events[] | select(.type == "agent_tool_call")'
+curl -sS http://127.0.0.1:3089/debug/broadcasts | jq '.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done"))'
 ```
 
 Both commands must match at least one row/event from the real turn.
@@ -100,7 +100,7 @@ Both commands must match at least one row/event from the real turn.
 - `/debug/health` returns `ok: true`.
 - `/debug/processes` shows a Sub-agent process.
 - The process reaches terminal `state: "done"` through the fake driver.
-- Real Lash runs show persisted Agent `tool_calls` and live `agent_tool_call` broadcasts after a tool-using turn.
+- Real Lash runs show persisted Agent `tool_calls` and live `turn_event` tool broadcasts after a tool-using turn.
 - `/debug/inbox` contains a requires-response Inbox Item with a Quick Reply.
 - The Quick Reply is sent as a normal Owner Chat message with `ref` equal to the Inbox Item anchor.
 - `/debug/chat` contains a later Agent acknowledgement.

@@ -29,29 +29,29 @@ The single live conversation thread between the Owner and the Agent. There is ex
 _Avoid_: conversation list, session (that's a lash/Sub-agent word)
 
 **Inbox**:
-The Owner-facing surface that organizes the Agent's async output — completions, digests, FYIs, pending questions — so it doesn't flood the Chat. Inbox items are created by the Agent calling the inbox tool; each item points back to the Chat message where that call happened.
-_Avoid_: notifications, feed, event log
+Retired term — see Ping and Tray.
+_Avoid_: using it at all
 
-**Inbox Item**:
-One piece of async Agent output filed in the Inbox: markdown content, an Anchor, a requires-response flag, and optionally Quick Replies. Lifecycle: open (needs the Owner's attention; unread → read as the seen-state) → done (dealt with, kept findable). The Owner replying to the Anchor resolves the item automatically; the Agent resolves moot items via `inbox.resolve`; the Owner can mark done explicitly. One terminal state — there is no separate deleted/archived. Anything richer than markdown-plus-buttons is a UI template's job, not the Inbox's.
-_Avoid_: notification, card, form, archived, deleted
+**Ping**:
+The one thing the Agent sends the Owner outside the live Chat exchange: a short name (its `@name` handle), a one-line description, markdown content, an Anchor, a requires-response flag, and optionally Quick Replies. Covers blocking asks and soft FYIs alike. Lifecycle: open (unread → read as the seen-state) → done. The Owner replying to the Anchor resolves a Ping automatically; the Agent resolves moot Pings via `pings.resolve`; the Owner can mark done explicitly. One terminal state — no separate deleted/archived. Anything richer than markdown-plus-buttons is a UI template's job.
+_Avoid_: inbox item, task (that's nothing in hirsel — see ADR-0004), notification, card, archived, deleted
 
 **Anchor**:
-The Chat message an Inbox Item points back to — the place where the inbox tool was called. Responding to an Inbox Item means sending a normal Chat message that refs its Anchor, WhatsApp-quote style, so multiple pending questions coexist unambiguously.
+The Chat message a Ping points back to — the place where the pings tool was called. Responding to an Inbox Item means sending a normal Chat message that refs its Anchor, WhatsApp-quote style, so multiple pending questions coexist unambiguously.
 _Avoid_: ref (as a noun), thread
 
 **Tray**:
-The collapsible surface under the Chat where Inbox Items live — the Inbox's home in the client (there is no separate Inbox tab). Badge and Deleted section live on/in it.
-_Avoid_: inbox tab, drawer
+The collapsible surface under the Chat where Pings live. Badge and Done section live on/in it.
+_Avoid_: inbox, inbox tab, drawer
 
 **Side Chat**:
-An ephemeral conversation forked from the main Chat and scoped to one Inbox Item: a fresh session seeded with the item, its Anchor exchange, and a bounded window of recent chat — same Agent persona, transcript never enters the main session. Concluding it discards it.
+An ephemeral conversation forked from the main Chat and scoped to one Ping: a fresh session seeded with the item, its Anchor exchange, and a bounded window of recent chat — same Agent persona, transcript never enters the main session. Concluding it discards it.
 _Avoid_: thread (standing), fork (implies full copy), sub-conversation
 
 **Conclusion**:
-The Owner's answer to an Inbox Item produced by a Side Chat: drafted by the side agent, edited/confirmed by the Owner, delivered into the main Chat as the Owner's Anchor-refed reply (and the item archives).
+The Owner's answer to a Ping produced by a Side Chat: drafted by the side agent, edited/confirmed by the Owner, delivered into the main Chat as the Owner's Anchor-refed reply (and the Ping resolves).
 _Avoid_: summary, verdict, resolution
 
 **Quick Reply**:
-An optional flat list of value/label buttons on an Inbox Item. Tapping one sends its value as an ordinary Anchor-refed Chat message; freeform reply is always available alongside. Not a form engine — no typed fields, no validation.
+An optional flat list of value/label buttons on a Ping. Tapping one sends its value as an ordinary Anchor-refed Chat message; freeform reply is always available alongside. Not a form engine — no typed fields, no validation.
 _Avoid_: response spec, field spec, action button

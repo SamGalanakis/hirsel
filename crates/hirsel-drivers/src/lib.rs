@@ -54,6 +54,8 @@ pub enum AgentKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnSpec {
     pub agent: AgentKind,
+    #[serde(default)]
+    pub model: Option<String>,
     pub prompt: String,
     pub cwd: PathBuf,
     #[serde(default)]
@@ -154,6 +156,7 @@ fn kill_process_group(pgid: i32) {
 #[derive(Default)]
 pub struct FakeDriver {
     sessions: Mutex<HashMap<String, Arc<FakeSession>>>,
+    spawned: Mutex<Vec<SpawnSpec>>,
 }
 
 struct FakeSession {
@@ -205,6 +208,7 @@ impl Default for FakeFixture {
 #[async_trait]
 impl SubagentDriver for FakeDriver {
     async fn spawn(&self, task: SpawnSpec) -> DriverResult<SessionHandle> {
+        lock(&self.spawned)?.push(task.clone());
         let fixture = match task.fake_fixture {
             Some(path) => serde_json::from_str(&tokio::fs::read_to_string(path).await?)?,
             None => FakeFixture::default(),
@@ -294,6 +298,12 @@ impl SubagentDriver for FakeDriver {
     }
 }
 
+impl FakeDriver {
+    pub fn spawned_specs(&self) -> DriverResult<Vec<SpawnSpec>> {
+        Ok(lock(&self.spawned)?.clone())
+    }
+}
+
 #[derive(Default)]
 pub struct ClaudeCodeDriver {
     sessions: Mutex<HashMap<String, Arc<ProcessSession>>>,
@@ -327,6 +337,9 @@ impl SubagentDriver for ClaudeCodeDriver {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(model) = task.model.as_deref() {
+            command.arg("--model").arg(model);
+        }
         start_in_process_group(&mut command);
 
         let mut child = command.spawn()?;
@@ -585,6 +598,9 @@ impl SubagentDriver for CodexDriver {
     async fn spawn(&self, task: SpawnSpec) -> DriverResult<SessionHandle> {
         let mut command = Command::new("codex");
         command.arg("app-server").arg("--stdio");
+        if let Some(model) = task.model.as_deref() {
+            command.arg("-c").arg(format!("model={model}"));
+        }
         for (key, value) in codex_mcp_disable_flags() {
             command.arg("-c").arg(format!("{key}={value}"));
         }
@@ -929,6 +945,7 @@ mod tests {
         let handle = driver
             .spawn(SpawnSpec {
                 agent: AgentKind::Claude,
+                model: None,
                 prompt: "fix it".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,
@@ -957,6 +974,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fake_driver_records_requested_model() {
+        let driver = FakeDriver::default();
+        let _handle = driver
+            .spawn(SpawnSpec {
+                agent: AgentKind::Codex,
+                model: Some("gpt-test-model".to_string()),
+                prompt: "fix it".to_string(),
+                cwd: std::env::current_dir().unwrap(),
+                fake_fixture: None,
+            })
+            .await
+            .unwrap();
+
+        let specs = driver.spawned_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].model.as_deref(), Some("gpt-test-model"));
+    }
+
+    #[tokio::test]
     async fn fake_driver_interrupt_is_terminal() {
         let fixture = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -974,6 +1010,7 @@ mod tests {
         let handle = driver
             .spawn(SpawnSpec {
                 agent: AgentKind::Codex,
+                model: None,
                 prompt: "wait".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: Some(fixture.path().to_path_buf()),
@@ -1003,6 +1040,7 @@ mod tests {
         let handle = driver
             .spawn(SpawnSpec {
                 agent: AgentKind::Claude,
+                model: None,
                 prompt: "Reply with exactly: driver-smoke".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,
@@ -1025,6 +1063,7 @@ mod tests {
         let handle = driver
             .spawn(SpawnSpec {
                 agent: AgentKind::Codex,
+                model: None,
                 prompt: "Reply with exactly: driver-smoke".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,

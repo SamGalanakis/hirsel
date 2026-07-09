@@ -16,6 +16,8 @@ pub struct ProcessStore {
 pub struct ProcessRecord {
     pub id: String,
     pub agent: AgentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub handle: SessionHandle,
     pub prompt: String,
     pub cwd: String,
@@ -37,18 +39,20 @@ impl ProcessStore {
     pub fn insert(
         &self,
         agent: AgentKind,
+        model: Option<String>,
         handle: SessionHandle,
         prompt: String,
         cwd: String,
     ) -> anyhow::Result<String> {
         let id = format!("proc-{}", Uuid::new_v4());
-        self.insert_with_id(id, agent, handle, prompt, cwd)
+        self.insert_with_id(id, agent, model, handle, prompt, cwd)
     }
 
     pub fn insert_with_id(
         &self,
         id: String,
         agent: AgentKind,
+        model: Option<String>,
         handle: SessionHandle,
         prompt: String,
         cwd: String,
@@ -56,6 +60,7 @@ impl ProcessStore {
         let record = ProcessRecord {
             id: id.clone(),
             agent,
+            model,
             handle,
             prompt,
             cwd,

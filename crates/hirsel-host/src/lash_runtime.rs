@@ -961,6 +961,7 @@ impl HirselToolExecutor {
                 .and_then(Value::as_str)
                 .unwrap_or("claude"),
         )?;
+        let model = optional_string(args, "model")?;
         let prompt = required_string_any(args, &["prompt", "task"])?;
         let cwd = optional_path(args, "cwd")?
             .map(Ok)
@@ -973,6 +974,7 @@ impl HirselToolExecutor {
                 kind: HIRSEL_SUBAGENT_ENGINE.to_string(),
                 payload: json!({
                     "agent": agent,
+                    "model": model,
                     "prompt": prompt,
                     "cwd": cwd,
                 }),
@@ -1023,11 +1025,16 @@ impl HirselToolExecutor {
 
     async fn subagents_progress(&self, args: &Value) -> Result<Value, String> {
         let process_id = required_string(args, "process_id")?;
+        let process = self
+            .tools
+            .subagents_process(&process_id)
+            .map_err(|error| error.to_string())?;
         let events = self
             .tools
             .subagents_progress(&process_id)
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({ "events": events })).map_err(|error| error.to_string())
+        serde_json::to_value(json!({ "process": process, "events": events }))
+            .map_err(|error| error.to_string())
     }
 
     async fn shell_run(&self, args: &Value) -> Result<Value, String> {
@@ -1121,6 +1128,7 @@ impl ProcessEngine for HirselSubagentEngine {
             .tools
             .subagents_spawn_with_process_id(
                 payload.agent,
+                payload.model,
                 payload.prompt,
                 payload.cwd,
                 process_id.clone(),
@@ -1152,6 +1160,7 @@ impl ProcessEngine for HirselSubagentEngine {
 
 struct SubagentProcessPayload {
     agent: AgentKind,
+    model: Option<String>,
     prompt: String,
     cwd: PathBuf,
 }
@@ -1160,11 +1169,17 @@ impl SubagentProcessPayload {
     fn from_value(value: &Value) -> Result<Self, PluginError> {
         let agent = parse_agent_kind(value.get("agent").and_then(Value::as_str).unwrap_or(""))
             .map_err(PluginError::Session)?;
+        let model = optional_string(value, "model").map_err(PluginError::Session)?;
         let prompt = required_string(value, "prompt").map_err(PluginError::Session)?;
         let cwd = optional_path(value, "cwd")
             .map_err(PluginError::Session)?
             .ok_or_else(|| PluginError::Session("cwd is required".to_string()))?;
-        Ok(Self { agent, prompt, cwd })
+        Ok(Self {
+            agent,
+            model,
+            prompt,
+            cwd,
+        })
     }
 }
 
@@ -1307,6 +1322,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["agent", "prompt"],
                 "properties": {
                     "agent": { "type": "string", "enum": ["claude", "codex"] },
+                    "model": { "type": "string" },
                     "prompt": { "type": "string" },
                     "cwd": { "type": "string" }
                 }
@@ -1440,6 +1456,18 @@ fn required_u64_any(args: &Value, keys: &[&str]) -> Result<u64, String> {
     keys.iter()
         .find_map(|key| args.get(*key).and_then(Value::as_u64))
         .ok_or_else(|| format!("missing required integer field `{}`", keys.join("` or `")))
+}
+
+fn optional_string(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .map(Some)
+            .ok_or_else(|| format!("field `{key}` must be a non-empty string")),
+    }
 }
 
 fn optional_path(args: &Value, key: &str) -> Result<Option<PathBuf>, String> {
@@ -1656,6 +1684,7 @@ impl ScriptedAgentRuntime {
             .tools
             .subagents_spawn(
                 AgentKind::Claude,
+                None,
                 "Make the trivial repo fix and report back.",
                 cwd,
             )

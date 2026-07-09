@@ -44,6 +44,8 @@ pub struct ProcessTerminal {
 #[derive(Debug, Clone, Serialize)]
 pub struct SpawnedProcess {
     pub process_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub handle: SessionHandle,
 }
 
@@ -127,17 +129,19 @@ impl ToolSuite {
     pub async fn subagents_spawn(
         &self,
         agent: AgentKind,
+        model: Option<String>,
         prompt: impl Into<String>,
         cwd: PathBuf,
     ) -> anyhow::Result<SpawnedProcess> {
         let process_id = format!("proc-{}", uuid::Uuid::new_v4());
-        self.subagents_spawn_with_process_id(agent, prompt, cwd, process_id)
+        self.subagents_spawn_with_process_id(agent, model, prompt, cwd, process_id)
             .await
     }
 
     pub async fn subagents_spawn_with_process_id(
         &self,
         agent: AgentKind,
+        model: Option<String>,
         prompt: impl Into<String>,
         cwd: PathBuf,
         process_id: String,
@@ -147,6 +151,7 @@ impl ToolSuite {
         let handle = driver
             .spawn(SpawnSpec {
                 agent,
+                model: model.clone(),
                 prompt: prompt.clone(),
                 cwd: cwd.clone(),
                 fake_fixture: self.config.fake_fixture.clone(),
@@ -155,6 +160,7 @@ impl ToolSuite {
         let process_id = self.processes.insert_with_id(
             process_id,
             agent,
+            model.clone(),
             handle.clone(),
             prompt,
             cwd.to_string_lossy().into_owned(),
@@ -183,7 +189,11 @@ impl ToolSuite {
                 }
             }
         });
-        Ok(SpawnedProcess { process_id, handle })
+        Ok(SpawnedProcess {
+            process_id,
+            model,
+            handle,
+        })
     }
 
     pub async fn subagents_prompt(
@@ -226,6 +236,13 @@ impl ToolSuite {
 
     pub fn subagents_progress(&self, process_id: &str) -> anyhow::Result<Vec<SubagentEvent>> {
         self.processes.recent_events(process_id)
+    }
+
+    pub fn subagents_process(
+        &self,
+        process_id: &str,
+    ) -> anyhow::Result<Option<crate::processes::ProcessRecord>> {
+        self.processes.get(process_id)
     }
 
     pub async fn shell_run(

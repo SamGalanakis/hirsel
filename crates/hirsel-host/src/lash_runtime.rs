@@ -716,6 +716,7 @@ impl LashAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -814,6 +815,7 @@ impl LashAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
     }
@@ -1396,6 +1398,7 @@ where
                 HostToClient::AgentActivity {
                     state: AgentActivityState::Idle,
                     text: None,
+                    sc: None,
                 },
             );
             true
@@ -1647,6 +1650,7 @@ impl TurnTimelineBridge {
             HostToClient::TurnEvent {
                 seq: self.seq,
                 event,
+                sc: None,
             },
         );
     }
@@ -1904,7 +1908,11 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 fn agent_activity(state: AgentActivityState, text: Option<String>) -> HostToClient {
-    HostToClient::AgentActivity { state, text }
+    HostToClient::AgentActivity {
+        state,
+        text,
+        sc: None,
+    }
 }
 
 fn publish(
@@ -1949,6 +1957,7 @@ impl DegradedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Thinking,
                 text: Some("provider unavailable".to_string()),
+                sc: None,
             },
         );
         self.tools
@@ -1960,6 +1969,7 @@ impl DegradedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -1972,6 +1982,7 @@ impl DegradedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -3241,6 +3252,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -3266,6 +3278,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Thinking,
                 text: Some("monitor wake".to_string()),
+                sc: None,
             },
         );
         self.tools.chat_send(text, None).await?;
@@ -3275,6 +3288,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         Ok(())
@@ -3383,6 +3397,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Thinking,
                 text: Some("processing owner message".to_string()),
+                sc: None,
             },
         );
         let result = self.handle_turn_inner(&turn, &cancel).await;
@@ -3392,6 +3407,7 @@ impl ScriptedAgentRuntime {
             HostToClient::AgentActivity {
                 state: AgentActivityState::Idle,
                 text: None,
+                sc: None,
             },
         );
         result
@@ -3456,6 +3472,7 @@ impl ScriptedAgentRuntime {
                 event: TurnEventKind::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
                 },
+                sc: None,
             },
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -3469,6 +3486,7 @@ impl ScriptedAgentRuntime {
                     name: "scripted_double".to_string(),
                     summary: Some("deterministic branch".to_string()),
                 },
+                sc: None,
             },
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -3483,6 +3501,7 @@ impl ScriptedAgentRuntime {
                     ok: true,
                     summary: Some("ok fixture selected".to_string()),
                 },
+                sc: None,
             },
         );
         publish(
@@ -3493,6 +3512,7 @@ impl ScriptedAgentRuntime {
                 event: TurnEventKind::Prose {
                     text: "The scripted response is ready.".to_string(),
                 },
+                sc: None,
             },
         );
     }
@@ -3839,7 +3859,7 @@ mod tests {
             .recent()
             .into_iter()
             .filter_map(|event| match event {
-                HostToClient::TurnEvent { seq, event } => Some((seq, event)),
+                HostToClient::TurnEvent { seq, event, .. } => Some((seq, event)),
                 _ => None,
             })
             .collect()

@@ -212,3 +212,46 @@ TurnEvent  (tagged by "kind"):
   turn commit (an agent `msg`) or `agent_activity` idle. On commit the client MAY retain the finished
   timeline in session memory keyed to the committed message (a "turn details" affordance); client-only,
   not persisted, gone after reload.
+
+## v2.0 — side chats: session-scoped frames (ADR-0008) (2026-07-09)
+
+Breaks the "exactly one session" assumption. `send_message` and `cancel_turn` MAY carry
+`"sc": string` (side chat id) to target a side session; `msg`, `turn_event`, and `agent_activity`
+carry `"sc"` when side-scoped. When `sc` is absent the frame belongs to the main conversation and
+its wire shape is byte-identical to v1.5 (the key is omitted, never null).
+
+Client → server:
+```
+{ "type": "open_side_chat", "client_id": string, "item_id": u64 }
+  → { "type": "side_chat_open", "sc": string, "item_id": u64, "messages": [ChatMessage] }
+  // idempotent per item: if the item already has a live side chat the host answers with the SAME
+  // sc and the transcript so far; otherwise a fresh scope ("side:<uuid>") with messages: [] —
+  // the seed lives in the side session's prompt layer, not as transcript rows.
+send_message { ..., "sc" } / cancel_turn { "sc" }  → routed to that side session
+{ "type": "conclude_side_chat", "sc" }             // side agent drafts the Owner's reply (a real side turn)
+  → { "type": "conclusion_draft", "sc", "text" }   // NOT appended to the side transcript
+{ "type": "confirm_conclusion", "sc", "text" }     // owner-edited final text
+  → host posts the Owner's anchor-refed reply in MAIN chat (normal msg flow, normal agent enqueue,
+    idempotency client_id "side-conclude:<sc>"), archives the item (IDEMPOTENT — a no-op if the
+    Agent already archived it), discards the side session + transcript
+  → { "type": "side_chat_closed", "sc" }
+{ "type": "discard_side_chat", "sc" } → side_chat_closed (no conclusion, item stays open)
+```
+
+Server → client:
+```
+hello_ok gains "side_chats": [ { "sc": string, "item_id": u64 } ]   // default []; live side chats
+                                                                    // for reconnect + scoped replay
+{ "type": "side_chat_open", "sc", "item_id", "messages": [ChatMessage] }
+{ "type": "conclusion_draft", "sc", "text" }
+{ "type": "side_chat_closed", "sc" }
+```
+
+Side transcripts persist only while the side chat lives (they survive host-side across reconnects;
+message ids are a separate sequence from main chat) and are deleted on close (conclude/discard/TTL);
+they never survive a host restart. Side sessions: one ephemeral lash session per side chat
+(in-memory store, never the durable session store), seeded at open with the agent prompt + a
+host-rendered context block (the Inbox Item, its Anchor message, and the last ~20 main-chat
+messages), full tool access, NO process/timer wakes routed to them (wakes stay main-session only).
+Stale side chats are silently closed (`side_chat_closed`) after `HIRSEL_SIDECHAT_TTL_SECS`
+(default 86400) without activity.

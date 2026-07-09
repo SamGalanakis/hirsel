@@ -98,6 +98,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             messages: snapshot.messages,
             inbox: snapshot.inbox,
             processes: state.process_snapshot().await.unwrap_or_default(),
+            side_chats: Vec::new(),
         },
     )
     .await;
@@ -161,7 +162,7 @@ impl HelloBroadcastDedupe {
 
     fn should_send(&self, event: &HostToClient) -> bool {
         match event {
-            HostToClient::Msg { message } => message.id > self.latest_msg_id,
+            HostToClient::Msg { message, sc } => sc.is_some() || message.id > self.latest_msg_id,
             HostToClient::InboxUpsert { item } => {
                 !self.inbox.iter().any(|snapshot| snapshot == item)
             }
@@ -192,7 +193,11 @@ async fn handle_client_frame(
             r#ref,
             attachments,
             mode,
+            sc,
         } => {
+            if let Some(sc) = sc {
+                anyhow::bail!("side chats are not wired yet: {sc}");
+            }
             let submission = state
                 .submit_owner_message(client_id, body, r#ref, attachments, mode)
                 .await?;
@@ -201,12 +206,16 @@ async fn handle_client_frame(
                     sink,
                     &HostToClient::Msg {
                         message: submission.message,
+                        sc: None,
                     },
                 )
                 .await?;
             }
         }
-        ClientToHost::CancelTurn {} => {
+        ClientToHost::CancelTurn { sc } => {
+            if let Some(sc) = sc {
+                anyhow::bail!("side chats are not wired yet: {sc}");
+            }
             state.cancel_turn().await?;
         }
         ClientToHost::CancelQueued { client_id } => {
@@ -249,6 +258,12 @@ async fn handle_client_frame(
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {item_id}"))?;
             state.broadcast(HostToClient::InboxUpsert { item });
+        }
+        ClientToHost::OpenSideChat { .. }
+        | ClientToHost::ConcludeSideChat { .. }
+        | ClientToHost::ConfirmConclusion { .. }
+        | ClientToHost::DiscardSideChat { .. } => {
+            anyhow::bail!("side chats are not wired yet");
         }
     }
     Ok(())
@@ -327,7 +342,7 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
             .append_chat(ChatAuthor::Agent, hook.body, None)
             .await
             .expect("hello test hook appends chat");
-        state.broadcast(HostToClient::Msg { message });
+        state.broadcast(HostToClient::Msg { message, sc: None });
     }
 }
 
@@ -392,12 +407,14 @@ mod tests {
                 messages,
                 inbox,
                 processes,
+                side_chats,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].author, ChatAuthor::Agent);
                 assert!(inbox.is_empty());
                 assert!(processes.is_empty());
+                assert!(side_chats.is_empty());
             }
             other => panic!("unexpected hello response: {other:?}"),
         }
@@ -447,7 +464,7 @@ mod tests {
                     assert_eq!(latest_msg_id, 0);
                     assert!(messages.is_empty());
                     match read_agent_msg(&mut ws).await {
-                        HostToClient::Msg { message } => assert_eq!(message.body, body),
+                        HostToClient::Msg { message, .. } => assert_eq!(message.body, body),
                         other => panic!("unexpected message response: {other:?}"),
                     }
                 }
@@ -520,7 +537,7 @@ mod tests {
         .unwrap();
         let msg = read_owner_msg(&mut ws).await;
         match msg {
-            HostToClient::Msg { message } => {
+            HostToClient::Msg { message, .. } => {
                 assert_eq!(message.body, "see attached");
                 assert_eq!(message.attachments, vec![first_blob]);
             }
@@ -825,7 +842,7 @@ mod tests {
         >,
     ) -> HostToClient {
         read_until(ws, |response| match response {
-            HostToClient::Msg { message } => message.author == ChatAuthor::Owner,
+            HostToClient::Msg { message, .. } => message.author == ChatAuthor::Owner,
             _ => false,
         })
         .await
@@ -837,7 +854,7 @@ mod tests {
         >,
     ) -> HostToClient {
         read_until(ws, |response| match response {
-            HostToClient::Msg { message } => message.author == ChatAuthor::Agent,
+            HostToClient::Msg { message, .. } => message.author == ChatAuthor::Agent,
             _ => false,
         })
         .await

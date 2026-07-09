@@ -129,6 +129,7 @@ impl AppState {
             }
             self.broadcast(HostToClient::Msg {
                 message: message.clone(),
+                sc: None,
             });
         }
         Ok(OwnerSubmission {
@@ -143,6 +144,7 @@ impl AppState {
         self.broadcast(HostToClient::AgentActivity {
             state: AgentActivityState::Idle,
             text: None,
+            sc: None,
         });
         Ok(())
     }

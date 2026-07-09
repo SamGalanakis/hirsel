@@ -4,18 +4,24 @@ import { resolve as pathResolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
- * Headless scenario (spec v1.4 gate): the Processes tab + tool-call visibility
- * driven through the REAL App over a REAL WebSocket against an in-process
- * scripted host that PUSHES server frames on command.
+ * Headless scenario (spec v1.4 gate; adapted v1.6 for the Tray/header-icon
+ * layout): the Processes header icon + tool-call visibility driven through
+ * the REAL App over a REAL WebSocket against an in-process scripted host that
+ * PUSHES server frames on command. The bottom TabBar and Processes tab are
+ * gone — Processes now opens from a header icon (next to ConnectionPill) as a
+ * full-screen sheet with a back affordance.
  *
  * Proven here:
- *   1. hello_ok seeds a RUNNING sub-agent → Processes badge 1, agent+model chips.
- *   2. Expand → "Ask to stop" → switches to Chat with the composer pre-filled
- *      "stop process <id> (<label>)" (interrupt routes through the Agent).
+ *   1. hello_ok seeds a RUNNING sub-agent → header icon badge 1 (status-active).
+ *   2. Tapping the header icon opens the full-screen Processes sheet, showing
+ *      agent+model chips; expand → "Ask to stop" closes the sheet (back to
+ *      Chat) with the composer pre-filled "stop process <id> (<label>)"
+ *      (interrupt routes through the Agent).
  *   3. A committed agent message carrying a tool_calls summary (no live timeline
  *      streamed) shows the fallback "⚙ 2 tools" chip that expands to the per-tool
  *      ok list. (The live v1.5 timeline path lives in timeline-scenario.test.tsx.)
- *   4. process_upsert done → the sub-agent moves Running → Finished, badge 0.
+ *   4. process_upsert done → the sub-agent moves Running → Finished, header
+ *      icon badge 0.
  */
 
 const now = () => new Date().toISOString();
@@ -151,8 +157,11 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       const screen = render(() => <App />);
       await waitFor(() => expect(store.state.processes).toHaveLength(1), { timeout: 10000 });
 
-      // --- 1. Running sub-agent: badge 1, agent+model chips ---
-      fireEvent.click(screen.getByText("Processes"));
+      // --- 1. Running sub-agent: header icon badge 1, agent+model chips ---
+      const processesButton = screen.getByLabelText("Processes");
+      expect(within(processesButton).getByText("1")).toBeTruthy();
+      fireEvent.click(processesButton);
+      expect(store.state.processesOpen).toBe(true);
       await screen.findByText("Running (1)");
       const row = (await screen.findByText("Review the auth refactor")).closest(
         '[data-slot="process-row"]',
@@ -162,16 +171,16 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       expect(runningProcessCount(store.state.processes)).toBe(1);
       checklist.push("running sub-agent shown with agent+model chips, badge 1");
 
-      // --- 2. Expand → Ask to stop → Chat with pre-filled composer ---
+      // --- 2. Expand → Ask to stop → sheet closes back to Chat, pre-filled composer ---
       fireEvent.click(within(row).getByText("Review the auth refactor").closest("button")!);
       fireEvent.click(await within(row).findByText("Ask to stop"));
-      await waitFor(() => expect(store.state.activeTab).toBe("chat"));
+      await waitFor(() => expect(store.state.processesOpen).toBe(false));
       const composer = (await screen.findByPlaceholderText(
         "Message the Agent…",
       )) as HTMLTextAreaElement;
       await waitFor(() => expect(composer.value).toContain("stop process proc-1"));
       expect(composer.value).toContain("Review the auth refactor");
-      checklist.push('"Ask to stop" switched to Chat and pre-filled the composer');
+      checklist.push('"Ask to stop" closed the Processes sheet back to Chat and pre-filled the composer');
 
       // --- 3. Committed message with a tool_calls summary but no streamed
       // timeline → the fallback "⚙ N tools" chip (the full v1.5 live-timeline
@@ -213,10 +222,11 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       await waitFor(() => expect(runningProcessCount(store.state.processes)).toBe(0), {
         timeout: 10000,
       });
-      fireEvent.click(screen.getByText("Processes"));
+      expect(within(processesButton).queryByText("1")).toBeNull();
+      fireEvent.click(processesButton);
       await screen.findByText("Finished (1)");
       expect(screen.queryByText("Running (1)")).toBeNull();
-      checklist.push("process completed: moved Running → Finished, badge 0");
+      checklist.push("process completed: moved Running → Finished, header icon badge 0");
 
       // eslint-disable-next-line no-console
       console.log(`[processes-scenario] PASS —\n  - ${checklist.join("\n  - ")}`);

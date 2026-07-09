@@ -5,17 +5,21 @@ import { resolve as pathResolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
- * Headless scenario (spec v1.3 gate 2): an email-like read lifecycle driven
- * through the REAL App over a REAL WebSocket against an in-process scripted
- * host — the genuine send/read/delete path, asserting the frames on the wire.
+ * Headless scenario (spec v1.3 gate 2; adapted v1.6 for the Tray): an
+ * email-like read lifecycle driven through the REAL App over a REAL
+ * WebSocket against an in-process scripted host — the genuine
+ * send/read/delete path, asserting the frames on the wire. Inbox now lives in
+ * the Tray (no Inbox tab): the item is triaged by tapping the shelf open.
  *
  * Lifecycle proven here:
- *   1. Item arrives UNREAD  → accent (unread dot) visible, badge = 1.
+ *   1. Item arrives UNREAD → shelf badge = 1; tapping the shelf expands the
+ *      Tray overlay, where the card shows its accent (unread dot).
  *   2. It scrolls into view → a read_item frame hits the wire; the host echoes
  *      inbox_upsert read=true → the card goes muted (data-read=true), badge = 0.
  *   3. The Owner replies (quick reply) → the card enters its dealt-with state.
  *   4. ⋯ menu → Delete → archive_item on the wire → the item leaves the open
- *      list and appears under the collapsed **Deleted** section.
+ *      list and appears under the collapsed **Deleted** section, still inside
+ *      the expanded Tray.
  */
 
 const now = () => new Date().toISOString();
@@ -190,7 +194,10 @@ describe("Headless scenario: email-like read → reply → delete lifecycle", ()
       const screen = render(() => <App />);
 
       await waitFor(() => expect(store.state.inbox).toHaveLength(1), { timeout: 10000 });
-      fireEvent.click(screen.getByText("Inbox"));
+      // Tap the Tray shelf open (no more Inbox tab) — never auto-expanded.
+      expect(store.state.trayExpanded).toBe(false);
+      fireEvent.click(screen.getByLabelText("Open inbox"));
+      expect(store.state.trayExpanded).toBe(true);
 
       // --- 1. Arrives UNREAD: unread dot + badge 1 ---
       const card = (await screen.findByText("Deploy finished — anything else?")).closest(
@@ -231,8 +238,13 @@ describe("Headless scenario: email-like read → reply → delete lifecycle", ()
         { timeout: 10000 },
       );
       await waitFor(() => expect(store.state.inbox[0].status).toBe("archived"), { timeout: 10000 });
-      // The collapsed Deleted section now holds the item.
-      await screen.findByText(/Deleted \(1\)/);
+      // The collapsed Deleted section (inside the still-expanded Tray panel)
+      // now holds the item. The Tray shelf *also* now reads "Deleted (1)" —
+      // it has no open items left, so it fell back to its own minimal handle
+      // label (spec: 0 open items hides the shelf's full form) — so scope the
+      // assertion to the panel to disambiguate the two matches.
+      const panel = document.querySelector('[data-slot="tray-panel"]') as HTMLElement;
+      await within(panel).findByText(/Deleted \(1\)/);
 
       // Grounded checklist for the report.
       // eslint-disable-next-line no-console

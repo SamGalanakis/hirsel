@@ -77,7 +77,6 @@ describe("Inbox inline reply", () => {
     }));
 
     const { InboxView } = await import("./inbox/InboxView");
-    store.setActiveTab("inbox");
     store.dispatch({
       type: "inbox_upsert",
       payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 5 }) },
@@ -88,8 +87,8 @@ describe("Inbox inline reply", () => {
 
     // Anchor-refed send: value = quick reply value, ref = item.anchor.
     expect(sendMessage).toHaveBeenCalledWith("approve", 5);
-    // Answered in place: no tab switch, no one-shot scroll request.
-    expect(store.state.activeTab).toBe("inbox");
+    // Answered in place: no navigation, no one-shot scroll request (the Tray
+    // that hosts this view has no reason to collapse or scroll Chat either).
     expect(store.state.scrollToMessageId).toBeNull();
   });
 
@@ -101,7 +100,6 @@ describe("Inbox inline reply", () => {
     }));
 
     const { InboxView } = await import("./inbox/InboxView");
-    store.setActiveTab("inbox");
     // requires_response item exposes the inline input expanded by default.
     store.dispatch({
       type: "inbox_upsert",
@@ -114,54 +112,7 @@ describe("Inbox inline reply", () => {
     fireEvent.click(getByLabelText("Send reply"));
 
     expect(sendMessage).toHaveBeenCalledWith("ship it", 9);
-    expect(store.state.activeTab).toBe("inbox");
     // The input clears after sending so the card is ready for the next reply.
     expect(input.value).toBe("");
-  });
-});
-
-describe("Inbox badge (email-like: open + unread)", () => {
-  it("counts open unread items regardless of requires_response, and clears as they are read/deleted", async () => {
-    const store = await import("../store/store");
-    const { TabBar } = await import("./TabBar");
-    const { queryByText } = render(() => <TabBar />);
-
-    // No items yet -> no badge.
-    expect(queryByText("1")).toBeNull();
-
-    // An open, unread item (read absent = unread) bumps the badge — even though
-    // it does NOT require a response (badge is now email-like, not RR-based).
-    store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, requires_response: false }) },
-    });
-    expect(queryByText("1")).not.toBeNull();
-
-    // A second open, unread item bumps it to 2.
-    store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, requires_response: true }) },
-    });
-    expect(queryByText("2")).not.toBeNull();
-
-    // Reading one (host upsert read=true) drops it back to 1.
-    store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, read: true }) },
-    });
-    expect(queryByText("1")).not.toBeNull();
-    expect(queryByText("2")).toBeNull();
-
-    // Marking it unread again (client-only override) bumps it back to 2.
-    store.dispatch({ type: "mark_unread_local", itemId: 2 });
-    expect(queryByText("2")).not.toBeNull();
-
-    // Deleting an item (status archived) drops it out of the count.
-    store.dispatch({
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 2, read: true, status: "archived" }) },
-    });
-    expect(queryByText("1")).not.toBeNull();
-    expect(queryByText("2")).toBeNull();
   });
 });

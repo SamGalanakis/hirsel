@@ -5,18 +5,20 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 
 /**
  * Headless scenario (spec: "answer two requires_response items back-to-back
- * entirely inside the Inbox"). Unlike the mocked component tests, this drives
- * the REAL App over a REAL WebSocket against an in-process scripted host, so it
- * exercises the genuine send path — client_id, optimistic reconcile, offline
- * queue — and lets us assert the frames that actually reached the wire.
+ * entirely inside the Inbox"; adapted v1.6 for the Tray). Unlike the mocked
+ * component tests, this drives the REAL App over a REAL WebSocket against an
+ * in-process scripted host, so it exercises the genuine send path —
+ * client_id, optimistic reconcile, offline queue — and lets us assert the
+ * frames that actually reached the wire.
  *
  * Checklist proven here:
  *   1. Inbox is scripted with two open requires_response items.
- *   2. Item 1 is answered by a Quick Reply tap; item 2 by the inline input.
- *   3. Neither answer switches tabs — activeTab stays "inbox" throughout.
- *   4. Both replies reach the wire as send_message frames with the correct
+ *   2. The Owner taps the Tray shelf open (no more Inbox tab).
+ *   3. Item 1 is answered by a Quick Reply tap; item 2 by the inline input.
+ *   4. Neither answer collapses the Tray — it stays expanded throughout.
+ *   5. Both replies reach the wire as send_message frames with the correct
  *      body + ref (= each item's anchor).
- *   5. Both optimistic sends reconcile to the host echo (pending → done).
+ *   6. Both optimistic sends reconcile to the host echo (pending → done).
  *
  * Environment plumbing: vitest's jsdom resolves the `ws` package to its browser
  * stub and ships a `localStorage` with no methods, so we load the real Node
@@ -167,12 +169,13 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
 
       const screen = render(() => <App />);
 
-      // Connected + inbox replayed: both scripted items are on screen.
+      // Connected + inbox replayed: both scripted items are queued in the Tray.
       await waitFor(() => expect(store.state.inbox).toHaveLength(2), { timeout: 10000 });
 
-      // Open the Inbox (user taps the Inbox tab).
-      fireEvent.click(screen.getByText("Inbox"));
-      expect(store.state.activeTab).toBe("inbox");
+      // Tap the Tray shelf open (no more Inbox tab; never auto-expanded).
+      expect(store.state.trayExpanded).toBe(false);
+      fireEvent.click(screen.getByLabelText("Open inbox"));
+      expect(store.state.trayExpanded).toBe(true);
       await screen.findByText("Deploy to prod?");
 
       // --- Item 1: answer with a Quick Reply tap, in place ---
@@ -181,7 +184,7 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
         () => expect(store.state.messages.some((m) => m.body === "approve" && !m.pending)).toBe(true),
         { timeout: 10000 },
       );
-      expect(store.state.activeTab).toBe("inbox"); // no tab switch from the Quick Reply
+      expect(store.state.trayExpanded).toBe(true); // no collapse from the Quick Reply
 
       // --- Item 2: answer with the inline freeform input, in place ---
       const card2 = (await screen.findByText("Merge the branch?")).closest(
@@ -195,8 +198,8 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
         { timeout: 10000 },
       );
 
-      // --- Assertions: no tab switch, both replies on the wire w/ correct refs ---
-      expect(store.state.activeTab).toBe("inbox");
+      // --- Assertions: Tray stays open, both replies on the wire w/ correct refs ---
+      expect(store.state.trayExpanded).toBe(true);
       expect(store.state.scrollToMessageId).toBeNull();
       expect(store.state.composerDraft).toBeNull();
 
@@ -213,7 +216,7 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       // eslint-disable-next-line no-console
       console.log(
         "[inbox-reply-scenario] PASS — 2 items scripted; answered via QuickReply + inline; " +
-          `no tab switch (activeTab=${store.state.activeTab}); ` +
+          `Tray stayed expanded throughout (trayExpanded=${store.state.trayExpanded}); ` +
           `wire frames: ${host.received.map((f) => `${f.body}->ref${f.ref}`).join(", ")}`,
       );
     } finally {

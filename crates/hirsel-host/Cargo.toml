@@ -20,6 +20,7 @@ lash-provider-anthropic = { path = "/workspace/code/lash/crates/lash-provider-an
 lash-provider-openai = { path = "/workspace/code/lash/crates/lash-provider-openai" }
 lash-protocol-rlm = { path = "/workspace/code/lash/crates/lash-protocol-rlm" }
 lash-sqlite-store = { path = "/workspace/code/lash/crates/lash-sqlite-store" }
+libc.workspace = true
 regex = "1.12.2"
 rusqlite.workspace = true
 serde.workspace = true

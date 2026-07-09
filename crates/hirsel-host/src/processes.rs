@@ -109,13 +109,16 @@ impl ProcessStore {
                 SubagentEvent::Started { external_id } => {
                     record.external_id = Some(external_id.clone());
                 }
-                SubagentEvent::Terminal { outcome } => {
+                SubagentEvent::Terminal { outcome }
+                    if !matches!(previous_status, ProcessStatus::Abandoned) =>
+                {
                     record.status = match outcome {
                         TerminalOutcome::Done { .. } => ProcessStatus::Done,
                         TerminalOutcome::Failed { .. } => ProcessStatus::Failed,
                         TerminalOutcome::Interrupted => ProcessStatus::Interrupted,
                     };
                 }
+                SubagentEvent::Terminal { .. } => {}
                 SubagentEvent::Progress { .. } => {}
             }
             record.events.push(event);
@@ -201,6 +204,29 @@ impl ProcessStore {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    pub fn abandon(&self, process_id: &str) -> anyhow::Result<Option<RecordedProcessUpdate>> {
+        let mut inner = self.lock()?;
+        let Some(record) = inner.get_mut(process_id) else {
+            return Ok(None);
+        };
+        if record.status != ProcessStatus::Running {
+            return Ok(Some(RecordedProcessUpdate {
+                info: process_info(record),
+                record: record.clone(),
+                should_broadcast: false,
+            }));
+        }
+        record.status = ProcessStatus::Abandoned;
+        record.last_event_ts = Utc::now();
+        record.last_upsert_at = Some(Instant::now());
+        let record = record.clone();
+        Ok(Some(RecordedProcessUpdate {
+            info: process_info(&record),
+            record,
+            should_broadcast: true,
+        }))
     }
 
     pub fn reset(&self) -> anyhow::Result<()> {

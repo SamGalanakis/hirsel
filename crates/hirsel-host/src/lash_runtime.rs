@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -340,6 +340,7 @@ impl LashAgentRuntime {
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
         runtime.spawn_process_terminal_bridge(process_registry.clone(), store_factory.clone());
+        runtime.spawn_subagent_control_bridge(process_registry.clone());
         runtime.spawn_timer_trigger_source(trigger_store);
         runtime
             .restore_subagent_processes_after_restart(
@@ -818,6 +819,84 @@ impl LashAgentRuntime {
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    fn spawn_subagent_control_bridge(
+        self: &Arc<Self>,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+    ) {
+        let tools = self.tools.clone();
+        tokio::spawn(async move {
+            let mut cancelled = HashSet::new();
+            let mut abandoned = HashSet::new();
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let processes = match tools.subagents_list() {
+                    Ok(processes) => processes,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to list Sub-agent processes for control bridge");
+                        continue;
+                    }
+                };
+                for process in processes {
+                    if !matches!(process.status, crate::processes::ProcessStatus::Running) {
+                        continue;
+                    }
+                    let process_id = process.id.clone();
+                    let Some(record) = process_registry.get_process(&process_id).await else {
+                        continue;
+                    };
+                    if record.abandon_request.is_some() && !abandoned.contains(&process_id) {
+                        match tools.subagents_abandon_process(&process_id).await {
+                            Ok(()) => {
+                                abandoned.insert(process_id.clone());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    process_id = %process_id,
+                                    "failed to abandon Sub-agent after Lash abandon request"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if cancelled.contains(&process_id) {
+                        continue;
+                    }
+                    let events = match process_registry.events_after(&process_id, 0).await {
+                        Ok(events) => events,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                process_id = %process_id,
+                                "failed to read Sub-agent process events for control bridge"
+                            );
+                            continue;
+                        }
+                    };
+                    if events
+                        .iter()
+                        .any(|event| event.event_type == "process.cancel_requested")
+                    {
+                        match tools.subagents_interrupt_process(&process_id).await {
+                            Ok(()) => {
+                                cancelled.insert(process_id.clone());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    process_id = %process_id,
+                                    "failed to interrupt Sub-agent after Lash cancel request"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });

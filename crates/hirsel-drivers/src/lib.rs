@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::broadcast,
     time::{Duration, sleep, timeout},
 };
@@ -89,6 +89,7 @@ pub trait SubagentDriver: Send + Sync {
     async fn spawn(&self, task: SpawnSpec) -> DriverResult<SessionHandle>;
     async fn prompt(&self, handle: &SessionHandle, text: String) -> DriverResult<()>;
     async fn interrupt(&self, handle: &SessionHandle) -> DriverResult<()>;
+    async fn retire(&self, handle: &SessionHandle) -> DriverResult<()>;
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream>;
 }
 
@@ -179,6 +180,17 @@ fn kill_process_group(pgid: i32) {
         // Best-effort cleanup for externally spawned CLIs.
         unsafe {
             libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+async fn drain_stderr(mut stderr: ChildStderr) {
+    let mut buf = [0_u8; 8192];
+    loop {
+        match stderr.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
 }
@@ -319,6 +331,11 @@ impl SubagentDriver for FakeDriver {
         Ok(())
     }
 
+    async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
+        lock(&self.sessions)?.remove(&handle.id);
+        Ok(())
+    }
+
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream> {
         let sessions = lock(&self.sessions)?;
         let session = sessions
@@ -343,6 +360,12 @@ struct ProcessSession {
     events: Arc<EventHub>,
     stdin: tokio::sync::Mutex<ChildStdin>,
     pgid: i32,
+}
+
+impl ProcessSession {
+    fn kill_group(&self) {
+        kill_process_group(self.pgid);
+    }
 }
 
 impl Drop for ProcessSession {
@@ -382,6 +405,10 @@ impl SubagentDriver for ClaudeCodeDriver {
             .stdout
             .take()
             .ok_or(DriverError::MissingPipe("stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(DriverError::MissingPipe("stderr"))?;
         let events = EventHub::new(256);
         let session = Arc::new(ProcessSession {
             events: events.clone(),
@@ -393,6 +420,7 @@ impl SubagentDriver for ClaudeCodeDriver {
             agent: AgentKind::Claude,
         };
         lock(&self.sessions)?.insert(handle.id.clone(), session.clone());
+        tokio::spawn(drain_stderr(stderr));
         tokio::spawn(read_claude_stdout(stdout, child, events));
 
         let mut stdin = session.stdin.lock().await;
@@ -431,6 +459,13 @@ impl SubagentDriver for ClaudeCodeDriver {
             }),
         )
         .await
+    }
+
+    async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
+        if let Some(session) = lock(&self.sessions)?.remove(&handle.id) {
+            session.kill_group();
+        }
+        Ok(())
     }
 
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream> {
@@ -608,9 +643,16 @@ struct CodexSession {
     events: Arc<EventHub>,
     stdin: tokio::sync::Mutex<ChildStdin>,
     thread_id: String,
+    cwd: PathBuf,
     active_turn_id: Mutex<Option<String>>,
     next_request_id: AtomicU64,
     pgid: i32,
+}
+
+impl CodexSession {
+    fn kill_group(&self) {
+        kill_process_group(self.pgid);
+    }
 }
 
 impl Drop for CodexSession {
@@ -647,6 +689,10 @@ impl SubagentDriver for CodexDriver {
             .stdout
             .take()
             .ok_or(DriverError::MissingPipe("stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(DriverError::MissingPipe("stderr"))?;
         let mut lines = BufReader::new(stdout).lines();
         let events = EventHub::new(256);
 
@@ -666,6 +712,7 @@ impl SubagentDriver for CodexDriver {
             events: events.clone(),
             stdin: tokio::sync::Mutex::new(stdin),
             thread_id: thread_id.clone(),
+            cwd: task.cwd.clone(),
             active_turn_id: Mutex::new(None),
             next_request_id: AtomicU64::new(4),
             pgid,
@@ -684,6 +731,7 @@ impl SubagentDriver for CodexDriver {
             )
             .await?;
         }
+        tokio::spawn(drain_stderr(stderr));
         tokio::spawn(read_codex_stdout(lines, child, session.clone()));
         Ok(handle)
     }
@@ -697,11 +745,10 @@ impl SubagentDriver for CodexDriver {
                 .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?
         };
         let request_id = session.next_request_id.fetch_add(1, Ordering::SeqCst);
-        let cwd = std::env::current_dir()?;
         let mut stdin = session.stdin.lock().await;
         write_json_line(
             &mut stdin,
-            &codex_turn_start_request(request_id, &session.thread_id, &text, &cwd),
+            &codex_turn_start_request(request_id, &session.thread_id, &text, &session.cwd),
         )
         .await
     }
@@ -732,6 +779,13 @@ impl SubagentDriver for CodexDriver {
             }),
         )
         .await
+    }
+
+    async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
+        if let Some(session) = lock(&self.sessions)?.remove(&handle.id) {
+            session.kill_group();
+        }
+        Ok(())
     }
 
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream> {
@@ -1109,6 +1163,27 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[tokio::test]
+    async fn drains_spawned_cli_stderr_without_deadlock() {
+        let mut child = Command::new("bash")
+            .arg("-lc")
+            .arg("for _ in $(seq 1 20000); do printf 1234567890 >&2; done")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let drain = tokio::spawn(drain_stderr(stderr));
+
+        let status = timeout(Duration::from_secs(2), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(status.success());
+        drain.await.unwrap();
     }
 
     #[tokio::test]

@@ -9,14 +9,13 @@ use hirsel_proto::{
     ChatAuthor, ChatMessage, HostToClient, InboxItem, ProcessInfo, QuickReply, ToolCallSummary,
 };
 use serde::Serialize;
-use tokio::{
-    process::Command,
-    sync::broadcast,
-    time::{Duration, timeout},
-};
+use tokio::{sync::broadcast, time::Duration};
 
 use crate::storage::{MonitorRecord, MonitorWakeOn, monitor_process_info};
-use crate::{BroadcastLog, config::DriverMode, processes::ProcessStore, storage::Storage};
+use crate::{
+    BroadcastLog, config::DriverMode, process_run::run_bash_command, processes::ProcessStore,
+    storage::Storage,
+};
 
 #[derive(Clone, Debug)]
 pub struct ToolsConfig {
@@ -208,6 +207,7 @@ impl ToolSuite {
         let broadcaster = self.broadcaster.clone();
         let broadcast_log = self.broadcast_log.clone();
         let terminal_tx = self.terminal_tx.clone();
+        let driver_for_task = driver.clone();
         let process_id_for_task = process_id.clone();
         let handle_for_task = handle.clone();
         tokio::spawn(async move {
@@ -229,6 +229,9 @@ impl ToolSuite {
                     Err(error) => tracing::warn!(%error, "failed to record Sub-agent event"),
                 }
                 if let Some(outcome) = terminal {
+                    if let Err(error) = driver_for_task.retire(&handle_for_task).await {
+                        tracing::warn!(%error, "failed to retire Sub-agent driver session");
+                    }
                     let _ = terminal_tx.send(ProcessTerminal {
                         process_id: process_id_for_task.clone(),
                         handle: handle_for_task.clone(),
@@ -277,6 +280,25 @@ impl ToolSuite {
             .get(process_id)?
             .ok_or_else(|| anyhow::anyhow!("Sub-agent process not found: {process_id}"))?;
         self.subagents_interrupt(&record.handle).await
+    }
+
+    pub async fn subagents_abandon_process(&self, process_id: &str) -> anyhow::Result<()> {
+        let record = self
+            .processes
+            .get(process_id)?
+            .ok_or_else(|| anyhow::anyhow!("Sub-agent process not found: {process_id}"))?;
+        let driver = self.driver_for(record.handle.agent);
+        if let Err(error) = driver.interrupt(&record.handle).await {
+            tracing::debug!(%error, process_id, "Sub-agent interrupt during abandon failed");
+        }
+        driver.retire(&record.handle).await?;
+        if let Some(update) = self.processes.abandon(process_id)? {
+            self.storage.upsert_subagent_process(&update.record).await?;
+            if update.should_broadcast {
+                self.broadcast_process_upsert(update.info);
+            }
+        }
+        Ok(())
     }
 
     pub fn subagents_list(&self) -> anyhow::Result<Vec<crate::processes::ProcessRecord>> {
@@ -356,30 +378,18 @@ impl ToolSuite {
         cwd: Option<PathBuf>,
         timeout_secs: Option<u64>,
     ) -> anyhow::Result<ShellRunOutput> {
-        let mut command = Command::new("bash");
-        command.arg("-lc").arg(cmd);
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
         let duration = Duration::from_secs(timeout_secs.unwrap_or(30).min(600));
-        let child = command.output();
-        match timeout(duration, child).await {
-            Ok(output) => {
-                let output = output?;
-                Ok(ShellRunOutput {
-                    status: output.status.code(),
-                    stdout: truncate_output(String::from_utf8_lossy(&output.stdout)),
-                    stderr: truncate_output(String::from_utf8_lossy(&output.stderr)),
-                    timed_out: false,
-                })
-            }
-            Err(_) => Ok(ShellRunOutput {
-                status: None,
-                stdout: String::new(),
-                stderr: "command timed out".to_string(),
-                timed_out: true,
-            }),
-        }
+        let output = run_bash_command(cmd, cwd, duration).await?;
+        Ok(ShellRunOutput {
+            status: output.status,
+            stdout: truncate_output(String::from_utf8_lossy(&output.stdout)),
+            stderr: if output.timed_out {
+                "command timed out".to_string()
+            } else {
+                truncate_output(String::from_utf8_lossy(&output.stderr))
+            },
+            timed_out: output.timed_out,
+        })
     }
 
     fn driver_for(&self, agent: AgentKind) -> Arc<dyn SubagentDriver> {
@@ -414,4 +424,75 @@ fn truncate_output(output: impl AsRef<str>) -> String {
         .collect::<String>();
     truncated.push_str("\n[truncated]");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::processes::ProcessStatus;
+
+    #[tokio::test]
+    async fn subagent_abandon_retires_driver_session_and_stays_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            fixture.path(),
+            serde_json::to_string(&serde_json::json!({
+                "external_id": "fake-running",
+                "progress": ["still running"],
+                "delay_ms": 5_000,
+                "terminal": { "status": "done", "summary": "should not happen" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let (broadcaster, _) = broadcast::channel(128);
+        let tools = ToolSuite::new(
+            ToolsConfig {
+                driver_mode: DriverMode::Fake,
+                fake_fixture: Some(fixture.path().to_path_buf()),
+            },
+            storage.clone(),
+            broadcaster,
+            BroadcastLog::default(),
+            ProcessStore::default(),
+        );
+        let spawned = tools
+            .subagents_spawn(
+                AgentKind::Codex,
+                None,
+                "keep running",
+                dir.path().to_path_buf(),
+            )
+            .await
+            .unwrap();
+
+        tools
+            .subagents_abandon_process(&spawned.process_id)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let record = tools
+            .subagents_process(&spawned.process_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, ProcessStatus::Abandoned);
+        assert!(
+            tools
+                .subagents_prompt_process(&spawned.process_id, "after abandon".to_string())
+                .await
+                .is_err(),
+            "abandoned Sub-agent driver session should be retired"
+        );
+
+        let reopened = Storage::open(dir.path()).await.unwrap();
+        let restored = reopened
+            .restore_subagent_processes_after_restart()
+            .await
+            .unwrap();
+        assert_eq!(restored.records.len(), 1);
+        assert_eq!(restored.records[0].status, ProcessStatus::Abandoned);
+    }
 }

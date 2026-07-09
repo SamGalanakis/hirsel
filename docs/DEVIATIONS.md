@@ -9,7 +9,7 @@ The previous Lash Runtime and Runtime Processes deviations are resolved in the s
 - `hirsel-host` embeds `LashCore::rlm_builder` with the RLM protocol factory, SQLite session/process/trigger stores, file attachments, process env store, and `InlineEffectHost`.
 - The default Agent mode is a real Lash RLM session named `agent`; `prompts/agent.md` is installed as a session prompt contribution.
 - `HIRSEL_PROVIDER=anthropic|codex` selects the Lash provider. Missing credentials degrade to an Agent-authored error Chat message while the host stays up.
-- Hirsel tools are registered as a Lash `ToolProvider` with Lashlang bindings for Chat, Inbox, Sub-agents, and shell.
+- Hirsel tools are registered as a Lash `ToolProvider` with Lashlang bindings for Inbox, Sub-agents, and shell. Chat replies are not a tool; committed Agent turn output is appended as the Agent-authored Chat message.
 - Sub-agent starts create Lash Runtime Processes with `RecoveryDisposition::OwnerBound`; driver terminal events append terminal Process Events and enqueue Lash `ProcessWake` work for the `agent` session.
 - Owner turns and queued process wakes are drained by a sequential Lash queued-turn pump.
 - WebSocket `agent_activity` comes from Lash session observation.

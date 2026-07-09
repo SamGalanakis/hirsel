@@ -190,7 +190,6 @@ struct LashAgentRuntime {
 #[derive(Debug, Clone)]
 struct TurnAnchors {
     owner_message_id: u64,
-    latest_agent_message_id: Option<u64>,
 }
 
 impl LashAgentRuntime {
@@ -305,7 +304,6 @@ impl LashAgentRuntime {
             let mut anchors = self.anchors.lock().await;
             *anchors = Some(TurnAnchors {
                 owner_message_id: turn.message_id,
-                latest_agent_message_id: None,
             });
         }
         let ingress = self.ingress_for_mode(turn.mode).await;
@@ -363,7 +361,6 @@ impl LashAgentRuntime {
                 runtime.notify.notified().await;
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
-                    let sends_before = runtime.tools.visible_sends();
                     let drain_id = runtime.next_drain_id();
                     runtime.set_active_turn_id(Some(drain_id.clone())).await;
                     let result = runtime
@@ -375,19 +372,12 @@ impl LashAgentRuntime {
                     runtime.clear_active_turn_id(&drain_id).await;
                     match result {
                         Ok(Some(output)) => {
-                            // Safety net: a turn that never called chat.send /
-                            // inbox.file left Sam with nothing visible. Deliver
-                            // its terminal prose to Chat rather than swallowing
-                            // the reply (the prompt still teaches chat.send as
-                            // the proper path).
-                            if runtime.tools.visible_sends() == sends_before {
-                                let text = output
-                                    .assistant_message()
-                                    .map(str::to_owned)
-                                    .or_else(|| output.final_value().map(render_final_value));
-                                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                                    runtime.deliver_fallback_chat(text).await;
-                                }
+                            let text = output
+                                .assistant_message()
+                                .map(str::to_owned)
+                                .or_else(|| output.final_value().map(render_final_value));
+                            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                                runtime.deliver_turn_chat(text).await;
                             }
                             continue;
                         }
@@ -449,16 +439,11 @@ impl LashAgentRuntime {
         }
     }
 
-    async fn deliver_fallback_chat(&self, text: String) {
+    async fn deliver_turn_chat(&self, text: String) {
         match self.tools.chat_send(text, None).await {
-            Ok(message) => {
-                let mut anchors = self.anchors.lock().await;
-                if let Some(anchors) = anchors.as_mut() {
-                    anchors.latest_agent_message_id = Some(message.id);
-                }
-            }
+            Ok(_) => {}
             Err(error) => {
-                tracing::warn!(%error, "failed to deliver fallback Agent chat message");
+                tracing::warn!(%error, "failed to deliver Agent turn output to Chat");
             }
         }
     }
@@ -471,12 +456,7 @@ impl LashAgentRuntime {
             .chat_send(format!("Agent turn failed: {error}"), anchor)
             .await
         {
-            Ok(message) => {
-                let mut anchors = self.anchors.lock().await;
-                if let Some(anchors) = anchors.as_mut() {
-                    anchors.latest_agent_message_id = Some(message.id);
-                }
-            }
+            Ok(_) => {}
             Err(chat_error) => {
                 tracing::warn!(%chat_error, "failed to write Agent turn error to Chat");
             }
@@ -492,11 +472,11 @@ impl LashAgentRuntime {
     }
 
     async fn current_anchor(&self) -> Option<u64> {
-        self.anchors.lock().await.as_ref().map(|anchors| {
-            anchors
-                .latest_agent_message_id
-                .unwrap_or(anchors.owner_message_id)
-        })
+        self.anchors
+            .lock()
+            .await
+            .as_ref()
+            .map(|anchors| anchors.owner_message_id)
     }
 
     fn spawn_observation_bridge(self: &Arc<Self>) {
@@ -924,7 +904,6 @@ impl StaticToolExecute for HirselToolExecutor {
 impl HirselToolExecutor {
     async fn execute_inner(&self, call: ToolCall<'_>) -> Result<Value, String> {
         match call.name {
-            "chat_send" => self.chat_send(call.args).await,
             "inbox_file" => self.inbox_file(call.args).await,
             "inbox_archive" => self.inbox_archive(call.args).await,
             "subagents_spawn" => self.subagents_spawn(call.args, call.context).await,
@@ -935,26 +914,6 @@ impl HirselToolExecutor {
             "shell_run" => self.shell_run(call.args).await,
             other => Err(format!("Unknown tool: {other}")),
         }
-    }
-
-    async fn chat_send(&self, args: &Value) -> Result<Value, String> {
-        let body = required_string_any(args, &["body_md", "body", "message"])?;
-        // Chat messages quote-render their ref in the client, so only an
-        // explicit ref from the Agent belongs here — the implicit turn anchor
-        // is for Inbox Items, not ordinary replies.
-        let explicit_ref = args.get("ref").and_then(Value::as_u64);
-        let message = self
-            .tools
-            .chat_send(body, explicit_ref)
-            .await
-            .map_err(|error| error.to_string())?;
-        {
-            let mut anchors = self.anchors.lock().await;
-            if let Some(anchors) = anchors.as_mut() {
-                anchors.latest_agent_message_id = Some(message.id);
-            }
-        }
-        serde_json::to_value(message).map_err(|error| error.to_string())
     }
 
     async fn inbox_file(&self, args: &Value) -> Result<Value, String> {
@@ -1084,11 +1043,11 @@ impl HirselToolExecutor {
     }
 
     async fn current_anchor(&self) -> Option<u64> {
-        self.anchors.lock().await.as_ref().map(|anchors| {
-            anchors
-                .latest_agent_message_id
-                .unwrap_or(anchors.owner_message_id)
-        })
+        self.anchors
+            .lock()
+            .await
+            .as_ref()
+            .map(|anchors| anchors.owner_message_id)
     }
 }
 
@@ -1291,24 +1250,6 @@ fn terminal_event_payload(outcome: &TerminalOutcome) -> (&'static str, Value) {
 
 fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
     vec![
-        tool_definition(
-            "hirsel.chat_send",
-            "chat_send",
-            "Append an Agent-authored Chat message for the Owner. Optional ref quotes an OLDER chat message by id; never ref the message you are directly answering.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["body_md"],
-                "properties": {
-                    "body_md": { "type": "string" },
-                    "ref": { "type": "integer", "minimum": 1 }
-                }
-            }),
-            json!({ "type": "object" }),
-            ["chat"],
-            "send",
-            ToolScheduling::Serial,
-        ),
         tool_definition(
             "hirsel.inbox_file",
             "inbox_file",

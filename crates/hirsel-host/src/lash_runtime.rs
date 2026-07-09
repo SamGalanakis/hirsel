@@ -4162,9 +4162,14 @@ fn terminal_content(outcome: &TerminalOutcome) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::{processes::ProcessStore, storage::Storage, tools::ToolsConfig};
+    use crate::{
+        processes::{ProcessRecord, ProcessStatus, ProcessStore},
+        storage::Storage,
+        tools::{ShellRunOutput, ToolsConfig},
+    };
     use chrono::Utc;
-    use hirsel_proto::{Blob, ChatAuthor};
+    use hirsel_drivers::{SessionHandle, SubagentEvent};
+    use hirsel_proto::{Blob, ChatAuthor, InboxItem, InboxStatus};
     use lash_core::{
         ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
         TriggerInputBinding, TriggerSubscriptionRecord,
@@ -4416,6 +4421,173 @@ mod tests {
 
         assert_eq!(result["anchor"], owner_a.id);
         assert_eq!(result["item_id"], 1);
+    }
+
+    #[test]
+    fn every_executor_result_matches_its_declared_output_schema() {
+        let now = Utc::now();
+        let inbox_item = InboxItem {
+            id: 7,
+            content: "Choose a release".to_string(),
+            anchor: 3,
+            requires_response: true,
+            quick_replies: vec![QuickReply {
+                value: "stable".to_string(),
+                label: "Stable".to_string(),
+            }],
+            status: InboxStatus::Archived,
+            read: true,
+            ts: now,
+        };
+        let events = vec![
+            SubagentEvent::Started {
+                external_id: "driver-session-1".to_string(),
+            },
+            SubagentEvent::Progress {
+                summary: "running tests".to_string(),
+            },
+            SubagentEvent::Terminal {
+                outcome: TerminalOutcome::Done {
+                    summary: "tests passed".to_string(),
+                },
+            },
+        ];
+        let process = ProcessRecord::restored(
+            "proc-1".to_string(),
+            AgentKind::Codex,
+            Some("gpt-test".to_string()),
+            SessionHandle {
+                id: "driver-session-1".to_string(),
+                agent: AgentKind::Codex,
+            },
+            "Run the tests".to_string(),
+            "/tmp/repo".to_string(),
+            Some("external-1".to_string()),
+            ProcessStatus::Done,
+            events.clone(),
+            now,
+            now,
+        );
+        let monitor = MonitorRecord {
+            id: "monitor-1".to_string(),
+            cmd: "test -f done".to_string(),
+            every_secs: 30,
+            wake_on: MonitorWakeOn::Regex,
+            pattern: Some("ready".to_string()),
+            label: "build ready".to_string(),
+            created_ts: now,
+            last_event_ts: now,
+            last_run_ts: Some(now),
+            last_output: Some("ready".to_string()),
+            summary: Some("matched".to_string()),
+            cancelled_ts: Some(now),
+        };
+        let wait_outcomes = [
+            ProcessAwaitOutput::Success {
+                value: json!({ "summary": "done" }),
+                control: None,
+            },
+            ProcessAwaitOutput::Failure {
+                class: lash_core::ToolFailureClass::Execution,
+                code: "subagent_failed".to_string(),
+                message: "failed".to_string(),
+                raw: Some(json!({ "reason": "failed" })),
+                control: None,
+            },
+            ProcessAwaitOutput::Cancelled {
+                message: "interrupted".to_string(),
+                raw: None,
+                control: None,
+            },
+            ProcessAwaitOutput::Abandoned {
+                evidence: Box::new(lash_core::AbandonEvidence {
+                    writer: lash_core::AbandonWriter::ReconciledRequest,
+                    owner: None,
+                    epoch_ms: 42,
+                }),
+                control: None,
+            },
+        ];
+
+        let mut results = BTreeMap::<&str, Vec<Value>>::new();
+        results.insert("inbox_file", vec![inbox_file_result(&inbox_item)]);
+        results.insert(
+            "inbox_archive",
+            vec![
+                inbox_archive_result(Some(&inbox_item)).unwrap(),
+                inbox_archive_result(None).unwrap(),
+            ],
+        );
+        results.insert("subagents_spawn", vec![subagent_spawn_result("proc-1")]);
+        results.insert("subagents_prompt", vec![acknowledgement_result()]);
+        results.insert("subagents_interrupt", vec![acknowledgement_result()]);
+        results.insert(
+            "subagents_list",
+            vec![subagents_list_result(std::slice::from_ref(&process)).unwrap()],
+        );
+        results.insert(
+            "subagents_progress",
+            vec![
+                subagents_progress_result(Some(&process), &events).unwrap(),
+                subagents_progress_result(None, &[]).unwrap(),
+            ],
+        );
+        results.insert(
+            "subagents_wait",
+            wait_outcomes
+                .iter()
+                .map(|outcome| subagents_wait_result("proc-1", outcome).unwrap())
+                .collect(),
+        );
+        results.insert(
+            "monitors_create",
+            vec![monitors_create_result(&monitor).unwrap()],
+        );
+        results.insert(
+            "monitors_list",
+            vec![monitors_list_result(std::slice::from_ref(&monitor)).unwrap()],
+        );
+        results.insert("monitors_cancel", vec![monitors_cancel_result("monitor-1")]);
+        results.insert(
+            "shell_run",
+            vec![
+                shell_run_result(&ShellRunOutput {
+                    status: Some(0),
+                    stdout: "done\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                })
+                .unwrap(),
+                shell_run_result(&ShellRunOutput {
+                    status: None,
+                    stdout: String::new(),
+                    stderr: "timed out".to_string(),
+                    timed_out: true,
+                })
+                .unwrap(),
+            ],
+        );
+
+        let definitions = hirsel_tool_definitions();
+        assert_eq!(results.len(), definitions.len());
+        for definition in definitions {
+            let examples = results
+                .get(definition.name())
+                .unwrap_or_else(|| panic!("missing result examples for {}", definition.name()));
+            let schema = definition.contract.output_schema.canonical();
+            let validator = jsonschema::JSONSchema::compile(schema).unwrap_or_else(|error| {
+                panic!("invalid schema for {}: {error}", definition.name())
+            });
+            for example in examples {
+                if let Err(errors) = validator.validate(example) {
+                    let errors = errors.map(|error| error.to_string()).collect::<Vec<_>>();
+                    panic!(
+                        "result for {} did not match its schema: {errors:?}\nresult: {example}",
+                        definition.name()
+                    );
+                }
+            }
+        }
     }
 
     fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {

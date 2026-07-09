@@ -24,10 +24,9 @@ use lash::{
         PluginSessionContext, SessionPlugin,
     },
     process::{
-        ProcessAwaitOutput, ProcessAwaiter, ProcessEventAppendRequest, ProcessEventType,
-        ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessTerminalState,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition,
-        SessionScope,
+        ProcessAwaitOutput, ProcessAwaiter, ProcessCompletionAuthority, ProcessEventAppendRequest,
+        ProcessEventType, ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessTerminalState,
+        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
     },
     provider::{ProviderHandle, ProviderOptions},
     remote::{
@@ -604,7 +603,11 @@ impl LashAgentRuntime {
                     "failed to append abandoned Sub-agent process event"
                 );
                 match process_registry
-                    .complete_process(process_id, subagent_abandoned_output())
+                    .complete_process(
+                        process_id,
+                        subagent_abandoned_output(),
+                        ProcessCompletionAuthority::ReconciledAbandon,
+                    )
                     .await
                 {
                     Ok(_) => true,

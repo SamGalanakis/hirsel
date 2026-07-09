@@ -208,6 +208,16 @@ fn start_scripted_runtime(
     tokio::spawn(async move {
         worker.run().await;
     });
+    let restore_worker = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        if let Err(error) = restore_worker
+            .tools
+            .restore_subagent_processes_after_restart()
+            .await
+        {
+            tracing::warn!(%error, "failed to restore scripted Sub-agent processes after restart");
+        }
+    });
     let monitor_worker = Arc::clone(&runtime);
     tokio::spawn(async move {
         monitor_worker.spawn_active_standalone_monitors().await;

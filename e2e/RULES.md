@@ -10,26 +10,30 @@ You are testing Hirsel, not the tester model. A run is void if the asserted beha
 
 Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0.1`.
 
-- `POST /debug/reset` wipes Chat, Inbox, process debug state, and starts from a clean session.
+- `POST /debug/reset` wipes Chat, Pings, process debug state, and starts from a clean session.
 - `POST /debug/upload { "name": "...", "mime": "...", "data_b64": "..." }` stores a blob and returns its Blob JSON.
-- `POST /debug/owner-message { "client_id": "optional-stable-id", "body": "...", "ref": null | message_id, "attachments": ["blob-id"], "mode": "send" | "next_turn" }` injects an Owner Chat message through the same host ingress path as the WebSocket; `client_id`, `attachments`, and `mode` are optional, and `mode` defaults to `send`.
-- `POST /debug/open-side-chat { "item_id": ... }` opens or resumes a live side chat and returns its scope id and transcript.
-- `POST /debug/side-message { "sc": "side:...", "body": "..." }` submits a side-scoped Owner message; poll `/debug/side-chats` for the reply.
+- `POST /debug/owner-message { "client_id": "optional-stable-id", "body": "...", "ref": null | message_id, "attachments": ["blob-id"], "mentions": [ping_id], "mode": "send" | "next_turn" }` injects an Owner Chat message through the same host ingress path as the WebSocket; optional `mentions` add Ping context without changing lifecycle, while only `ref` to a Ping Anchor auto-resolves it.
+- `POST /debug/open-side-chat { "ping_id": ... }` opens or resumes a live side chat and returns its scope id and transcript.
+- `POST /debug/side-message { "sc": "side:...", "body": "...", "mentions": [ping_id] }` submits a side-scoped Owner message; poll `/debug/side-chats` for the reply.
 - `POST /debug/conclude { "sc": "side:..." }` drafts the Owner's conclusion without adding the draft to the transcript.
-- `POST /debug/confirm-conclusion { "sc": "side:...", "text": "..." }` posts the anchor-refed Owner conclusion to main Chat, archives the item, and closes the side chat.
-- `POST /debug/read-item { "item_id": ... }` marks an Inbox Item read and broadcasts `inbox_upsert`.
+- `POST /debug/confirm-conclusion { "sc": "side:...", "text": "..." }` posts the anchor-refed Owner conclusion to main Chat, auto-resolves the Ping, and closes the side chat.
+- `POST /debug/read-ping { "ping_id": ... }` marks a Ping read and broadcasts `ping_upsert`.
+- `POST /debug/resolve-ping { "ping_id": ... }` explicitly moves a Ping to done and broadcasts `ping_upsert`.
 - `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
 - `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
 - `POST /debug/create-monitor { "cmd": "...", "every_secs": 30, "wake_on": "changed" | "exit_zero" | "exit_nonzero" | "regex", "pattern": "...", "label": "..." }` creates a persisted monitor for deterministic monitor runbooks.
 - `GET /debug/chat` returns persisted Chat messages.
-- `GET /debug/inbox` returns persisted Inbox Items.
+- `GET /debug/pings` returns persisted Pings, including required `name` and `description` fields.
 - `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, `turn_event`, `process_upsert`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
 - `GET /debug/processes` returns v1.4 `ProcessInfo` rows for Sub-agents and monitors: `id`, `kind`, `label`, `agent`, `model`, `state`, timestamps, and `summary`.
 - `GET /debug/side-chats` returns only live side chats with their scoped transcripts.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.
 
-There is no debug HTTP route for owner-side Inbox archive/delete in this branch. Runbooks that need to prove owner archive semantics must use the canonical WebSocket `archive_item` frame from `app/PROTOCOL.md`, then gate on `/debug/inbox` and `/debug/broadcasts`.
+Agent Ping tools are `pings.send { name, description, content_md, requires_response, quick_replies? }`
+and `pings.resolve { ping_id }`. Tool summaries use the internal names `pings_send` and
+`pings_resolve`. A scripted or real Agent must supply a non-empty name (at most 32 characters) and
+description; runbooks must never synthesize these fields outside the Agent tool path.
 
 ## Scenario Index
 
@@ -37,15 +41,15 @@ There is no debug HTTP route for owner-side Inbox archive/delete in this branch.
 - `attachment-agent-behavior` - real Codex Agent behavior over image/text attachments.
 - `abandoned-recovery` - ADR-0004 abandoned Sub-agent recovery after SIGKILL/reboot.
 - `compaction` - Agent-initiated context compaction via `continue_as` and post-compaction recall.
-- `delegation-loop` - fake-driver delegation, terminal event, Inbox question, Quick Reply, acknowledgement.
-- `inbox-lifecycle` - requires-response reply flow, owner archive via WebSocket, and Agent archive of a moot item.
-- `inbox-read` - Inbox read-state round trip and restart persistence.
+- `delegation-loop` - fake-driver delegation, terminal event, Ping question, Quick Reply, auto-resolution, and acknowledgement.
+- `pings-lifecycle` - named/described Pings, reply auto-resolution, neutral mentions, and explicit Owner/Agent resolution.
+- `ping-read` - Ping read-state round trip and restart persistence.
 - `monitors` - monitor creation, process visibility, wake, and restart survival.
 - `multi-turn-memory` - real Codex conversation recall before and after host restart.
 - `real-subagent` - real Codex Sub-agent spawn, progress, completion, and interruption.
 - `restart-persistence` - real Agent persistence over repeated host restarts.
 - `send-queue-cancel` - send/next-turn queueing and active-turn cancellation.
-- `side-chats` - protocol v2.0 side-chat loop: seeded open, scoped conversation, resume, conclude, confirm, idempotent archive, teardown, and main-Agent reaction (scripted + real variants).
+- `side-chats` - side-chat loop: seeded open, scoped conversation, resume, conclude, confirm, reply-driven Ping resolution, teardown, and main-Agent reaction.
 - `timers` - timer trigger source registration and wake.
 - `turn-timeline` - live turn timeline ordering and tool event summaries.
 
@@ -68,7 +72,7 @@ Before judging wording, prove the state transition happened:
 - A delegated run must show a process in `/debug/processes`.
 - A Sub-agent completion must show `kind: "subagent"` and terminal `state: "done"`.
 - A tool-using Agent turn must persist non-empty `tool_calls` on the Agent Chat message and emit `turn_event` `tool_start`/`tool_done` broadcasts while running.
-- An Owner question must appear as an Inbox Item with `requires_response: true`.
+- An Owner question must appear as a Ping with non-empty `name` and `description` and `requires_response: true`.
 - A Quick Reply response must be an Anchor-refed Owner Chat message.
 - The Agent acknowledgement must be a persisted Agent Chat message after the Owner reply.
 

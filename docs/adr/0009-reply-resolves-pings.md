@@ -1,0 +1,5 @@
+# Replying resolves a Ping; one terminal state, named Done
+
+A Ping has exactly two states: open (needs the Owner's attention) and done (dealt with, kept findable). The Owner replying to its Anchor — Quick Reply, inline reply, or Side Chat Conclusion — transitions it to done automatically, host-side, the moment the Anchor-refed reply lands. This is deliberately mechanical and does not violate ADR-0005's no-policy-code stance: like read-state, it encodes a fact (replied ⇒ handled), not a judgment. Judgments such as whether a Ping is moot remain Agent cognition via `pings.resolve`. The Agent must never resolve a Ping the Owner already replied to nor narrate resolutions in Chat. The UI section is Done, and there is no separate hard-delete state.
+
+Addendum (same day): a Ping has a required short name (its `@name` Chat handle, at most 32 characters) and one-line description. Tools: `pings.send` / `pings.resolve`. Chat @-mentions are a separate structured field on messages and are lifecycle-neutral — only Anchor-refed replies auto-resolve, so "what's the status of @x?" never marks @x done.

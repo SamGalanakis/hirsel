@@ -39,7 +39,7 @@ post_json debug/reset '{}' >/dev/null
 pass_gate "debug reset"
 
 BODY="$(cat <<EOF
-Delegate this repo fix to a Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5.5", and cwd "$FIX_REPO". The Sub-agent task is: run python3 -m unittest -v, fix the implementation, and leave the tests passing. After spawning, wait for the Sub-agent to finish, then report the outcome in Chat or Inbox according to your conventions.
+Delegate this repo fix to a Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5.5", and cwd "$FIX_REPO". The Sub-agent task is: run python3 -m unittest -v, fix the implementation, and leave the tests passing. After spawning, wait for the Sub-agent to finish, then report the outcome in Chat or a Ping according to your conventions.
 EOF
 )"
 REQ="$(jq -nc --arg body "$BODY" '{client_id:"real-subagent-fix",body:$body,ref:null}')"
@@ -54,7 +54,7 @@ wait_jq debug/broadcasts '[.events[] | select(.type == "process_upsert" and .pro
 pass_gate "process_upsert progress accumulated for $PROC_ID"
 
 BEFORE_TERMINAL_CHAT="$(max_chat_id)"
-BEFORE_TERMINAL_INBOX_COUNT="$(get_json debug/inbox | jq '.items | length')"
+BEFORE_TERMINAL_PING_COUNT="$(get_json debug/pings | jq '.pings | length')"
 wait_jq debug/processes '.processes[] | select(.id == "'"$PROC_ID"'" and .state == "done")' 900 >/dev/null
 pass_gate "real codex process reached done: $PROC_ID"
 
@@ -62,8 +62,8 @@ deadline=$((SECONDS + 180))
 REPORTED=0
 while (( SECONDS < deadline )); do
   CHAT_MATCH="$(get_json debug/chat | jq -e '.messages[] | select(.author == "agent" and .id > ('"$BEFORE_TERMINAL_CHAT"'))' 2>/dev/null || true)"
-  INBOX_COUNT="$(get_json debug/inbox | jq '.items | length')"
-  if [[ -n "$CHAT_MATCH" ]] || (( INBOX_COUNT > BEFORE_TERMINAL_INBOX_COUNT )); then
+  PING_COUNT="$(get_json debug/pings | jq '.pings | length')"
+  if [[ -n "$CHAT_MATCH" ]] || (( PING_COUNT > BEFORE_TERMINAL_PING_COUNT )); then
     REPORTED=1
     break
   fi

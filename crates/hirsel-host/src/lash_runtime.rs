@@ -743,7 +743,7 @@ impl LashAgentRuntime {
         let pending = match self.session.pending_turn_inputs().await {
             Ok(pending) => pending,
             Err(error) => {
-                tracing::warn!(%error, "failed to inspect pending turn inputs for Inbox anchor");
+                tracing::warn!(%error, "failed to inspect pending turn inputs for Ping anchor");
                 self.anchors.lock().await.active = None;
                 return;
             }
@@ -4046,7 +4046,7 @@ impl ScriptedAgentRuntime {
         if turn.anchor.is_some() {
             self.tools
                 .chat_send(
-                    "Acknowledged. I will continue from that Inbox reply.",
+                    "Acknowledged. I will continue from that Ping reply.",
                     Some(turn.message_id),
                 )
                 .await?;

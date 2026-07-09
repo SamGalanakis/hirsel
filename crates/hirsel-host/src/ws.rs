@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use hirsel_proto::{ClientToHost, HostToClient};
+use hirsel_proto::{ClientToHost, HostToClient, InboxItem};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -70,13 +70,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         _ => return,
     };
 
-    let messages = match state.storage.replay_messages(hello).await {
-        Ok(messages) => messages,
+    let mut broadcasts = state.broadcaster.subscribe();
+    #[cfg(test)]
+    run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
+
+    let snapshot = match state.storage.hello_snapshot(hello).await {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             send_json(
                 &mut socket,
                 &HostToClient::Error {
-                    detail: format!("replay failed: {error}"),
+                    detail: format!("hello snapshot failed: {error}"),
                     client_id: None,
                 },
             )
@@ -84,47 +88,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             return;
         }
     };
-    let inbox = match state.storage.inbox_snapshot().await {
-        Ok(inbox) => inbox,
-        Err(error) => {
-            send_json(
-                &mut socket,
-                &HostToClient::Error {
-                    detail: format!("inbox replay failed: {error}"),
-                    client_id: None,
-                },
-            )
-            .await;
-            return;
-        }
-    };
-    let latest_msg_id = match state.storage.latest_msg_id().await {
-        Ok(id) => id,
-        Err(error) => {
-            send_json(
-                &mut socket,
-                &HostToClient::Error {
-                    detail: format!("latest message lookup failed: {error}"),
-                    client_id: None,
-                },
-            )
-            .await;
-            return;
-        }
-    };
+    #[cfg(test)]
+    run_hello_test_hook(HelloTestHookPoint::Snapshotted, &state).await;
+    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.inbox.clone());
     send_json(
         &mut socket,
         &HostToClient::HelloOk {
-            latest_msg_id,
-            messages,
-            inbox,
+            latest_msg_id: snapshot.latest_msg_id,
+            messages: snapshot.messages,
+            inbox: snapshot.inbox,
             processes: state.process_snapshot().await.unwrap_or_default(),
         },
     )
     .await;
+    #[cfg(test)]
+    run_hello_test_hook(HelloTestHookPoint::HelloOkSent, &state).await;
 
     let (mut sink, mut stream) = socket.split();
-    let mut broadcasts = state.broadcaster.subscribe();
     loop {
         tokio::select! {
             frame = stream.next() => {
@@ -151,6 +131,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             event = broadcasts.recv() => {
                 match event {
                     Ok(event) => {
+                        if !dedupe.should_send(&event) {
+                            continue;
+                        }
                         if send_json_sink(&mut sink, &event).await.is_err() {
                             break;
                         }
@@ -159,6 +142,30 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+        }
+    }
+}
+
+struct HelloBroadcastDedupe {
+    latest_msg_id: u64,
+    inbox: Vec<InboxItem>,
+}
+
+impl HelloBroadcastDedupe {
+    fn new(latest_msg_id: u64, inbox: Vec<InboxItem>) -> Self {
+        Self {
+            latest_msg_id,
+            inbox,
+        }
+    }
+
+    fn should_send(&self, event: &HostToClient) -> bool {
+        match event {
+            HostToClient::Msg { message } => message.id > self.latest_msg_id,
+            HostToClient::InboxUpsert { item } => {
+                !self.inbox.iter().any(|snapshot| snapshot == item)
+            }
+            _ => true,
         }
     }
 }
@@ -268,8 +275,65 @@ async fn send_json_sink(
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloTestHookPoint {
+    Subscribed,
+    Snapshotted,
+    HelloOkSent,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct HelloTestHook {
+    token: String,
+    point: HelloTestHookPoint,
+    body: String,
+}
+
+#[cfg(test)]
+fn hello_test_hooks() -> &'static std::sync::Mutex<std::collections::VecDeque<HelloTestHook>> {
+    static HOOKS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<HelloTestHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+#[cfg(test)]
+fn queue_hello_test_hook(token: String, point: HelloTestHookPoint, body: String) {
+    hello_test_hooks()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push_back(HelloTestHook { token, point, body });
+}
+
+#[cfg(test)]
+async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
+    use hirsel_proto::ChatAuthor;
+
+    let hook = {
+        let mut hooks = hello_test_hooks()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(position) = hooks
+            .iter()
+            .position(|hook| hook.point == point && hook.token == state.token.as_ref())
+        else {
+            return;
+        };
+        hooks.remove(position)
+    };
+    if let Some(hook) = hook {
+        let message = state
+            .storage
+            .append_chat(ChatAuthor::Agent, hook.body, None)
+            .await
+            .expect("hello test hook appends chat");
+        state.broadcast(HostToClient::Msg { message });
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, time::Duration};
 
     use axum::Router;
     use futures_util::{SinkExt, StreamExt};
@@ -336,6 +400,59 @@ mod tests {
                 assert!(processes.is_empty());
             }
             other => panic!("unexpected hello response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_hello_subscribe_first_covers_reconnect_races() {
+        let cases = [
+            (super::HelloTestHookPoint::Subscribed, true),
+            (super::HelloTestHookPoint::Snapshotted, false),
+            (super::HelloTestHookPoint::HelloOkSent, false),
+        ];
+        for (index, (point, should_be_in_snapshot)) in cases.into_iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let token = format!("race-token-{index}");
+            let body = format!("race-message-{index}");
+            let mut config = test_config(dir.path());
+            config.token = token.clone();
+            let state = build_state(config).await.unwrap();
+            super::queue_hello_test_hook(token.clone(), point, body.clone());
+            let app = router_from_state(state);
+            let addr = spawn_app(app).await;
+
+            let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+            send_hello_token(&mut ws, &token).await;
+            match read_hello_ok(&mut ws).await {
+                HostToClient::HelloOk {
+                    latest_msg_id,
+                    messages,
+                    ..
+                } if should_be_in_snapshot => {
+                    assert_eq!(latest_msg_id, 1);
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(messages[0].body, body);
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(100), ws.next())
+                            .await
+                            .is_err(),
+                        "snapshot message should not be delivered again from the buffered broadcast"
+                    );
+                }
+                HostToClient::HelloOk {
+                    latest_msg_id,
+                    messages,
+                    ..
+                } => {
+                    assert_eq!(latest_msg_id, 0);
+                    assert!(messages.is_empty());
+                    match read_agent_msg(&mut ws).await {
+                        HostToClient::Msg { message } => assert_eq!(message.body, body),
+                        other => panic!("unexpected message response: {other:?}"),
+                    }
+                }
+                other => panic!("unexpected hello response: {other:?}"),
+            }
         }
     }
 
@@ -409,6 +526,40 @@ mod tests {
             }
             other => panic!("unexpected message response: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_send_message_enqueue_failure_returns_error_without_msg() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "send_message",
+                "client_id": "enqueue-fails",
+                "body": "__hirsel_test_enqueue_error__",
+                "ref": null
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let frame = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        match serde_json::from_str::<HostToClient>(&frame).unwrap() {
+            HostToClient::Error { detail, client_id } => {
+                assert!(detail.contains("scripted enqueue failed"));
+                assert_eq!(client_id.as_deref(), Some("enqueue-fails"));
+            }
+            other => panic!("unexpected response before error: {other:?}"),
+        }
+        assert!(state.storage.all_chat().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -614,10 +765,19 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) {
+        send_hello_token(ws, "test-token").await;
+    }
+
+    async fn send_hello_token(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        token: &str,
+    ) {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "hello",
-                "token": "test-token",
+                "token": token,
                 "last_seen_msg_id": null
             })
             .to_string(),
@@ -666,6 +826,18 @@ mod tests {
     ) -> HostToClient {
         read_until(ws, |response| match response {
             HostToClient::Msg { message } => message.author == ChatAuthor::Owner,
+            _ => false,
+        })
+        .await
+    }
+
+    async fn read_agent_msg(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> HostToClient {
+        read_until(ws, |response| match response {
+            HostToClient::Msg { message } => message.author == ChatAuthor::Agent,
             _ => false,
         })
         .await

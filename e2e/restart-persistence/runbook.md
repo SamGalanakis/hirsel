@@ -19,13 +19,15 @@ HIRSEL_TOKEN=dev-token HIRSEL_DATA_DIR="$DATA" HIRSEL_LISTEN=127.0.0.1:<same-por
 
 ## Scenario
 
-1. Boot 1: send owner message "reply with exactly the word one". Gate: agent chat reply containing `one`; NO agent message containing `Agent turn failed`.
+1. Boot 1: send owner message "delegate a tiny fake-driver task, then wait". Gate: `/debug/processes` contains exactly one `subagent` process id. Record it as `SUBAGENT_ID`.
 2. Kill the host with SIGTERM. Wait for exit.
 3. Boot 2 on the SAME data dir. Gate: `/debug/health` ok.
-4. Gate: `/debug/chat` still contains the full boot-1 history (owner message + reply).
-5. Send owner message "reply with exactly the word two". Gate: agent chat reply containing `two`, and NO message containing `Agent turn failed` anywhere in the transcript.
-6. Repeat steps 2-5 once more (boot 3) — two restarts, since the first restart is the historical failure case and the second catches monotonic-state bugs.
+4. Gate: `/debug/processes` contains `SUBAGENT_ID` with `state: "abandoned"`.
+5. Gate: `/debug/processes` contains no additional `subagent` process id that was not present before restart.
+6. Gate: `/debug/chat` still contains the full boot-1 history (owner message + reply).
+7. Send owner message "reply with exactly the word two". Gate: agent chat reply containing `two`, and NO message containing `Agent turn failed` anywhere in the transcript.
+8. Repeat steps 2-7 once more (boot 3) — two restarts, since the first restart is the historical failure case and the second catches monotonic-state bugs.
 
 ## Success
 
-All gates green across three boots of one data dir. Any `Agent turn failed` chat message or non-2xx debug response is a mechanical product failure.
+All gates green across three boots of one data dir. Previously running sub-agent processes must remain visible as `abandoned` after restart, and restart must not create a replacement sub-agent process automatically. Any `Agent turn failed` chat message or non-2xx debug response is a mechanical product failure.

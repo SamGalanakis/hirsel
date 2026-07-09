@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -66,6 +66,7 @@ const HIRSEL_MONITOR_ENGINE: &str = "hirsel_monitor";
 const SUBAGENT_COMPLETED: &str = "subagent.completed";
 const SUBAGENT_FAILED: &str = "subagent.failed";
 const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
+const SUBAGENT_ABANDONED: &str = "subagent.abandoned";
 const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
@@ -165,7 +166,11 @@ impl AgentRuntime {
     pub async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
         match self.backend.as_ref() {
             AgentBackend::Lash(runtime) => runtime.start_monitor_process(record).await,
-            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(()),
+            AgentBackend::Scripted(runtime) => {
+                runtime.spawn_standalone_monitor(record.id.clone());
+                Ok(())
+            }
+            AgentBackend::Degraded(_) => Ok(()),
         }
     }
 
@@ -203,6 +208,20 @@ fn start_scripted_runtime(
     tokio::spawn(async move {
         worker.run().await;
     });
+    let restore_worker = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        if let Err(error) = restore_worker
+            .tools
+            .restore_subagent_processes_after_restart()
+            .await
+        {
+            tracing::warn!(%error, "failed to restore scripted Sub-agent processes after restart");
+        }
+    });
+    let monitor_worker = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        monitor_worker.spawn_active_standalone_monitors().await;
+    });
     runtime
 }
 
@@ -219,7 +238,7 @@ struct LashAgentRuntime {
     broadcast_log: BroadcastLog,
     notify: Arc<Notify>,
     pump_lock: Mutex<()>,
-    anchors: Arc<Mutex<Option<TurnAnchors>>>,
+    anchors: Arc<Mutex<TurnAnchorState>>,
     active_turn_id: Arc<Mutex<Option<String>>>,
     drain_seq: AtomicU64,
     drain_boot_ms: u64,
@@ -228,6 +247,12 @@ struct LashAgentRuntime {
 #[derive(Debug, Clone)]
 struct TurnAnchors {
     owner_message_id: u64,
+}
+
+#[derive(Debug, Default)]
+struct TurnAnchorState {
+    pending_by_source_key: HashMap<String, TurnAnchors>,
+    active: Option<TurnAnchors>,
 }
 
 impl LashAgentRuntime {
@@ -282,7 +307,7 @@ impl LashAgentRuntime {
             hirsel_tool_definitions(),
             HirselToolExecutor {
                 tools: tools.clone(),
-                anchors: Arc::new(Mutex::new(None)),
+                anchors: Arc::new(Mutex::new(TurnAnchorState::default())),
             },
         ));
         let anchors = tool_provider.executor().anchors.clone();
@@ -338,8 +363,18 @@ impl LashAgentRuntime {
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
-        runtime.spawn_process_terminal_bridge(process_registry, store_factory);
+        runtime.spawn_process_terminal_bridge(process_registry.clone(), store_factory.clone());
+        runtime.spawn_subagent_control_bridge(process_registry.clone());
         runtime.spawn_timer_trigger_source(trigger_store);
+        runtime
+            .restore_subagent_processes_after_restart(
+                process_registry.clone(),
+                store_factory.clone(),
+            )
+            .await;
+        runtime
+            .abandon_recovered_subagent_runtime_processes(process_registry, store_factory)
+            .await;
         runtime.resume_active_monitors().await;
         runtime.notify_if_work_pending().await;
         tracing::info!(
@@ -352,20 +387,43 @@ impl LashAgentRuntime {
     }
 
     async fn enqueue_inner(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+        let source_key = owner_turn_source_key(&turn.client_id);
         {
             let mut anchors = self.anchors.lock().await;
-            *anchors = Some(TurnAnchors {
-                owner_message_id: turn.message_id,
-            });
+            anchors.pending_by_source_key.insert(
+                source_key.clone(),
+                TurnAnchors {
+                    owner_message_id: turn.message_id,
+                },
+            );
         }
         let ingress = self.ingress_for_mode(turn.mode).await;
-        let input = owner_turn_input(&turn).await?;
-        self.session
+        let input = match owner_turn_input(&turn).await {
+            Ok(input) => input,
+            Err(error) => {
+                self.anchors
+                    .lock()
+                    .await
+                    .pending_by_source_key
+                    .remove(&source_key);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .session
             .enqueue(input)
             .id(turn.client_id)
             .ingress(ingress)
             .send()
-            .await?;
+            .await
+        {
+            self.anchors
+                .lock()
+                .await
+                .pending_by_source_key
+                .remove(&source_key);
+            return Err(error.into());
+        }
         self.notify.notify_one();
         Ok(())
     }
@@ -403,6 +461,106 @@ impl LashAgentRuntime {
         };
         if pending_inputs || queued_work {
             self.notify.notify_one();
+        }
+    }
+
+    async fn restore_subagent_processes_after_restart(
+        &self,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+        store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+    ) {
+        let abandoned = match self.tools.restore_subagent_processes_after_restart().await {
+            Ok(abandoned) => abandoned,
+            Err(error) => {
+                tracing::warn!(%error, "failed to restore Sub-agent process metadata at boot");
+                return;
+            }
+        };
+        for process_id in abandoned {
+            if self
+                .append_subagent_abandoned_event(
+                    process_registry.as_ref(),
+                    store_factory.as_ref(),
+                    &process_id,
+                )
+                .await
+            {
+                self.notify.notify_one();
+            }
+        }
+    }
+
+    async fn abandon_recovered_subagent_runtime_processes(
+        &self,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+        store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+    ) {
+        let records = match process_registry.list_non_terminal().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(%error, "failed to list non-terminal Lash processes at boot");
+                return;
+            }
+        };
+        for record in records {
+            if !is_hirsel_subagent_process_record(&record) {
+                continue;
+            }
+            if self
+                .append_subagent_abandoned_event(
+                    process_registry.as_ref(),
+                    store_factory.as_ref(),
+                    &record.id,
+                )
+                .await
+            {
+                self.notify.notify_one();
+            }
+        }
+    }
+
+    async fn append_subagent_abandoned_event(
+        &self,
+        process_registry: &dyn lash::process::ProcessRegistry,
+        store_factory: &dyn lash::persistence::SessionStoreFactory,
+        process_id: &str,
+    ) -> bool {
+        let request =
+            ProcessEventAppendRequest::new(SUBAGENT_ABANDONED, subagent_abandoned_payload())
+                .with_replay_key(format!("hirsel-subagent:{process_id}:{SUBAGENT_ABANDONED}"));
+        match process_registry.append_event(process_id, request).await {
+            Ok(result) => match enqueue_process_wake(store_factory, result.wake_delivery).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        process_id = %process_id,
+                        "failed to enqueue abandoned Sub-agent process wake"
+                    );
+                    false
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    process_id = %process_id,
+                    "failed to append abandoned Sub-agent process event"
+                );
+                match process_registry
+                    .complete_process(process_id, subagent_abandoned_output())
+                    .await
+                {
+                    Ok(_) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            process_id = %process_id,
+                            "failed to complete recovered Sub-agent process as abandoned"
+                        );
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -460,6 +618,7 @@ impl LashAgentRuntime {
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
                     let drain_id = runtime.next_drain_id();
+                    runtime.activate_anchor_for_next_drain().await;
                     runtime.set_active_turn_id(Some(drain_id.clone())).await;
                     let result = runtime
                         .session
@@ -468,6 +627,7 @@ impl LashAgentRuntime {
                         .run()
                         .await;
                     runtime.clear_active_turn_id(&drain_id).await;
+                    runtime.clear_active_anchor_and_prune().await;
                     match result {
                         Ok(Some(output)) => {
                             let tool_calls = tool_call_summaries(&output);
@@ -510,6 +670,44 @@ impl LashAgentRuntime {
         }
     }
 
+    async fn activate_anchor_for_next_drain(&self) {
+        let pending = match self.session.pending_turn_inputs().await {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "failed to inspect pending turn inputs for Inbox anchor");
+                self.anchors.lock().await.active = None;
+                return;
+            }
+        };
+        let mut anchors = self.anchors.lock().await;
+        anchors.active = pending
+            .iter()
+            .filter_map(|input| input.source_key.as_ref())
+            .find_map(|source_key| anchors.pending_by_source_key.get(source_key).cloned());
+    }
+
+    async fn clear_active_anchor_and_prune(&self) {
+        let live_source_keys = match self.session.pending_turn_inputs().await {
+            Ok(pending) => Some(
+                pending
+                    .into_iter()
+                    .filter_map(|input| input.source_key)
+                    .collect::<HashSet<_>>(),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "failed to prune pending turn anchors");
+                None
+            }
+        };
+        let mut anchors = self.anchors.lock().await;
+        anchors.active = None;
+        if let Some(live_source_keys) = live_source_keys {
+            anchors
+                .pending_by_source_key
+                .retain(|source_key, _| live_source_keys.contains(source_key));
+        }
+    }
+
     async fn cancel_turn(&self) -> anyhow::Result<()> {
         self.session.cancel_running_turns();
         publish(
@@ -524,7 +722,8 @@ impl LashAgentRuntime {
     }
 
     async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
-        let target = lash::PendingTurnInputCancelTarget::source_key(format!("host:{client_id}"));
+        let target =
+            lash::PendingTurnInputCancelTarget::source_key(owner_turn_source_key(client_id));
         let mut results = self.session.cancel_pending_turn_inputs([target]).await?;
         let outcome = results
             .pop()
@@ -708,6 +907,84 @@ impl LashAgentRuntime {
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    fn spawn_subagent_control_bridge(
+        self: &Arc<Self>,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+    ) {
+        let tools = self.tools.clone();
+        tokio::spawn(async move {
+            let mut cancelled = HashSet::new();
+            let mut abandoned = HashSet::new();
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let processes = match tools.subagents_list() {
+                    Ok(processes) => processes,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to list Sub-agent processes for control bridge");
+                        continue;
+                    }
+                };
+                for process in processes {
+                    if !matches!(process.status, crate::processes::ProcessStatus::Running) {
+                        continue;
+                    }
+                    let process_id = process.id.clone();
+                    let Some(record) = process_registry.get_process(&process_id).await else {
+                        continue;
+                    };
+                    if record.abandon_request.is_some() && !abandoned.contains(&process_id) {
+                        match tools.subagents_abandon_process(&process_id).await {
+                            Ok(()) => {
+                                abandoned.insert(process_id.clone());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    process_id = %process_id,
+                                    "failed to abandon Sub-agent after Lash abandon request"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if cancelled.contains(&process_id) {
+                        continue;
+                    }
+                    let events = match process_registry.events_after(&process_id, 0).await {
+                        Ok(events) => events,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                process_id = %process_id,
+                                "failed to read Sub-agent process events for control bridge"
+                            );
+                            continue;
+                        }
+                    };
+                    if events
+                        .iter()
+                        .any(|event| event.event_type == "process.cancel_requested")
+                    {
+                        match tools.subagents_interrupt_process(&process_id).await {
+                            Ok(()) => {
+                                cancelled.insert(process_id.clone());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    process_id = %process_id,
+                                    "failed to interrupt Sub-agent after Lash cancel request"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -1032,6 +1309,10 @@ async fn owner_turn_input(turn: &OwnerTurn) -> anyhow::Result<TurnInput> {
         input = input.with_image_blob(id, bytes);
     }
     Ok(input)
+}
+
+fn owner_turn_source_key(client_id: &str) -> String {
+    format!("host:{client_id}")
 }
 
 fn owner_turn_text(turn: &OwnerTurn) -> String {
@@ -1796,7 +2077,7 @@ async fn load_codex_tokens() -> Result<CodexTokens, String> {
 #[derive(Clone)]
 struct HirselToolExecutor {
     tools: ToolSuite,
-    anchors: Arc<Mutex<Option<TurnAnchors>>>,
+    anchors: Arc<Mutex<TurnAnchorState>>,
 }
 
 #[async_trait]
@@ -1880,19 +2161,16 @@ impl HirselToolExecutor {
             .unwrap_or_else(std::env::current_dir)
             .map_err(|error| format!("failed to resolve cwd: {error}"))?;
         let process_id = format!("proc-{}", uuid::Uuid::new_v4());
-        let request = ProcessStartRequest::new(
+        let request = ProcessStartRequest::external(
             process_id.clone(),
-            ProcessInput::Engine {
-                kind: HIRSEL_SUBAGENT_ENGINE.to_string(),
-                payload: json!({
-                    "agent": agent,
-                    "model": model,
-                    "prompt": prompt,
-                    "cwd": cwd,
-                }),
-            },
-            RecoveryDisposition::OwnerBound,
             ProcessOriginator::session(SessionScope::new(context.session_id())),
+            json!({
+                "kind": HIRSEL_SUBAGENT_ENGINE,
+                "agent": agent,
+                "model": model,
+                "prompt": prompt,
+                "cwd": cwd,
+            }),
         )
         .with_wake_target(Some(SessionScope::new(AGENT_SESSION_ID)))
         .with_event_types(subagent_event_types());
@@ -1901,6 +2179,20 @@ impl HirselToolExecutor {
             .start(request)
             .await
             .map_err(|error| error.to_string())?;
+        if let Err(error) = self
+            .tools
+            .subagents_spawn_with_process_id(agent, model.clone(), prompt, cwd, process_id.clone())
+            .await
+        {
+            let _ = context
+                .processes()
+                .complete_external(
+                    &process_id,
+                    cancelled_await_output(format!("failed to start Sub-agent Driver: {error}")),
+                )
+                .await;
+            return Err(format!("failed to start Sub-agent Driver: {error}"));
+        }
         serde_json::to_value(json!({
             "process_id": handle.process_id,
             "handle": handle,
@@ -2050,6 +2342,7 @@ impl HirselToolExecutor {
         self.anchors
             .lock()
             .await
+            .active
             .as_ref()
             .map(|anchors| anchors.owner_message_id)
     }
@@ -2385,6 +2678,17 @@ impl SubagentProcessPayload {
     }
 }
 
+fn is_hirsel_subagent_process_record(record: &lash_core::ProcessRecord) -> bool {
+    match record.input.as_ref() {
+        ProcessInput::Engine { kind, .. } => kind == HIRSEL_SUBAGENT_ENGINE,
+        ProcessInput::External { metadata } => metadata
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == HIRSEL_SUBAGENT_ENGINE),
+        _ => false,
+    }
+}
+
 fn cancelled_await_output(message: String) -> ProcessAwaitOutput {
     ProcessAwaitOutput::Cancelled {
         message,
@@ -2398,6 +2702,7 @@ fn subagent_event_types() -> Vec<ProcessEventType> {
         terminal_event_type(SUBAGENT_COMPLETED, ProcessTerminalState::Completed),
         terminal_event_type(SUBAGENT_FAILED, ProcessTerminalState::Failed),
         terminal_event_type(SUBAGENT_CANCELLED, ProcessTerminalState::Cancelled),
+        terminal_event_type(SUBAGENT_ABANDONED, ProcessTerminalState::Abandoned),
     ]
 }
 
@@ -2539,6 +2844,31 @@ fn terminal_event_payload(outcome: &TerminalOutcome) -> (&'static str, Value) {
                 }
             }),
         ),
+    }
+}
+
+fn subagent_abandoned_payload() -> Value {
+    json!({
+        "text": "Sub-agent was abandoned after host restart.",
+        "await_output": {
+            "type": "abandoned",
+            "evidence": {
+                "writer": "reconciled_request",
+                "owner": null,
+                "epoch_ms": Utc::now().timestamp_millis().max(0) as u64,
+            }
+        }
+    })
+}
+
+fn subagent_abandoned_output() -> ProcessAwaitOutput {
+    ProcessAwaitOutput::Abandoned {
+        evidence: Box::new(lash_core::AbandonEvidence {
+            writer: lash_core::AbandonWriter::OwnerDrain,
+            owner: None,
+            epoch_ms: Utc::now().timestamp_millis().max(0) as u64,
+        }),
+        control: None,
     }
 }
 
@@ -2885,6 +3215,10 @@ struct ScriptedActiveTurn {
 
 impl ScriptedAgentRuntime {
     async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if turn.body == "__hirsel_test_enqueue_error__" {
+            anyhow::bail!("scripted enqueue failed for test");
+        }
         self.state.lock().await.queue.push_back(turn);
         self.notify.notify_one();
         Ok(())
@@ -2944,6 +3278,64 @@ impl ScriptedAgentRuntime {
             },
         );
         Ok(())
+    }
+
+    async fn spawn_active_standalone_monitors(self: Arc<Self>) {
+        match self.tools.active_monitors().await {
+            Ok(monitors) => {
+                for monitor in monitors {
+                    self.spawn_standalone_monitor(monitor.id);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to resume scripted standalone monitors");
+            }
+        }
+    }
+
+    fn spawn_standalone_monitor(self: &Arc<Self>, monitor_id: String) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let record = match runtime.tools.monitor(&monitor_id).await {
+                    Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                    Ok(_) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor lookup failed");
+                        break;
+                    }
+                };
+                tokio::time::sleep(Duration::from_secs(record.every_secs)).await;
+                let record = match runtime.tools.monitor(&monitor_id).await {
+                    Ok(Some(record)) if record.cancelled_ts.is_none() => record,
+                    Ok(_) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor lookup failed");
+                        break;
+                    }
+                };
+                let tick = run_monitor_tick(&record).await;
+                match runtime
+                    .tools
+                    .record_monitor_tick(&monitor_id, tick.probe.output.clone(), tick.summary)
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor tick persist failed");
+                        continue;
+                    }
+                }
+                if tick.wake {
+                    if let Some(text) = tick.wake_text {
+                        if let Err(error) = runtime.deliver_monitor_wake(text).await {
+                            tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor wake delivery failed");
+                        }
+                    }
+                }
+            }
+        });
     }
 
     async fn run(self: Arc<Self>) {
@@ -3174,8 +3566,9 @@ fn terminal_content(outcome: &TerminalOutcome) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::{processes::ProcessStore, storage::Storage, tools::ToolsConfig};
     use chrono::Utc;
-    use hirsel_proto::Blob;
+    use hirsel_proto::{Blob, ChatAuthor};
     use lash_core::{
         ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
         TriggerInputBinding, TriggerSubscriptionRecord,
@@ -3371,6 +3764,62 @@ mod tests {
             &[137, 80, 78, 71]
         );
         assert!(!input.image_blobs.contains_key("text-1"));
+    }
+
+    #[tokio::test]
+    async fn inbox_file_uses_active_turn_anchor_when_later_owner_message_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let owner_a = storage
+            .append_chat(ChatAuthor::Owner, "owner A", None)
+            .await
+            .unwrap();
+        let owner_b = storage
+            .append_chat(ChatAuthor::Owner, "owner B", None)
+            .await
+            .unwrap();
+        let (broadcaster, _) = broadcast::channel(16);
+        let tools = ToolSuite::new(
+            ToolsConfig {
+                driver_mode: DriverMode::Fake,
+                fake_fixture: None,
+            },
+            storage,
+            broadcaster,
+            BroadcastLog::default(),
+            ProcessStore::default(),
+        );
+        let anchors = Arc::new(Mutex::new(TurnAnchorState::default()));
+        {
+            let mut anchors = anchors.lock().await;
+            anchors.pending_by_source_key.insert(
+                owner_turn_source_key("client-a"),
+                TurnAnchors {
+                    owner_message_id: owner_a.id,
+                },
+            );
+            anchors.active = Some(TurnAnchors {
+                owner_message_id: owner_a.id,
+            });
+            anchors.pending_by_source_key.insert(
+                owner_turn_source_key("client-b"),
+                TurnAnchors {
+                    owner_message_id: owner_b.id,
+                },
+            );
+        }
+        let executor = HirselToolExecutor { tools, anchors };
+
+        let item = executor
+            .inbox_file(&serde_json::json!({
+                "content": "A result for the active turn",
+                "requires_response": true
+            }))
+            .await
+            .unwrap();
+        let item: hirsel_proto::InboxItem = serde_json::from_value(item).unwrap();
+
+        assert_eq!(item.anchor, owner_a.id);
     }
 
     fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {

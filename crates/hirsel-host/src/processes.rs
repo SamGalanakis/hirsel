@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent, TerminalOutcome};
 use hirsel_proto::{ProcessInfo, ProcessKind, ProcessState};
 use serde::Serialize;
-use uuid::Uuid;
 
 const SUMMARY_BROADCAST_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -42,27 +41,17 @@ pub enum ProcessStatus {
     Done,
     Failed,
     Interrupted,
+    Abandoned,
 }
 
 #[derive(Debug, Clone)]
 pub struct RecordedProcessUpdate {
     pub info: ProcessInfo,
+    pub record: ProcessRecord,
     pub should_broadcast: bool,
 }
 
 impl ProcessStore {
-    pub fn insert(
-        &self,
-        agent: AgentKind,
-        model: Option<String>,
-        handle: SessionHandle,
-        prompt: String,
-        cwd: String,
-    ) -> anyhow::Result<String> {
-        let id = format!("proc-{}", Uuid::new_v4());
-        self.insert_with_id(id, agent, model, handle, prompt, cwd)
-    }
-
     pub fn insert_with_id(
         &self,
         id: String,
@@ -90,6 +79,11 @@ impl ProcessStore {
         Ok(id)
     }
 
+    pub fn restore(&self, record: ProcessRecord) -> anyhow::Result<()> {
+        self.lock()?.insert(record.id.clone(), record);
+        Ok(())
+    }
+
     pub fn push_event(
         &self,
         process_id: &str,
@@ -102,13 +96,16 @@ impl ProcessStore {
                 SubagentEvent::Started { external_id } => {
                     record.external_id = Some(external_id.clone());
                 }
-                SubagentEvent::Terminal { outcome } => {
+                SubagentEvent::Terminal { outcome }
+                    if !matches!(previous_status, ProcessStatus::Abandoned) =>
+                {
                     record.status = match outcome {
                         TerminalOutcome::Done { .. } => ProcessStatus::Done,
                         TerminalOutcome::Failed { .. } => ProcessStatus::Failed,
                         TerminalOutcome::Interrupted => ProcessStatus::Interrupted,
                     };
                 }
+                SubagentEvent::Terminal { .. } => {}
                 SubagentEvent::Progress { .. } => {}
             }
             record.events.push(event);
@@ -123,8 +120,10 @@ impl ProcessStore {
             if should_broadcast {
                 record.last_upsert_at = Some(now);
             }
+            let record = record.clone();
             return Ok(Some(RecordedProcessUpdate {
-                info: process_info(record),
+                info: process_info(&record),
+                record,
                 should_broadcast,
             }));
         }
@@ -194,6 +193,29 @@ impl ProcessStore {
             .unwrap_or_default())
     }
 
+    pub fn abandon(&self, process_id: &str) -> anyhow::Result<Option<RecordedProcessUpdate>> {
+        let mut inner = self.lock()?;
+        let Some(record) = inner.get_mut(process_id) else {
+            return Ok(None);
+        };
+        if record.status != ProcessStatus::Running {
+            return Ok(Some(RecordedProcessUpdate {
+                info: process_info(record),
+                record: record.clone(),
+                should_broadcast: false,
+            }));
+        }
+        record.status = ProcessStatus::Abandoned;
+        record.last_event_ts = Utc::now();
+        record.last_upsert_at = Some(Instant::now());
+        let record = record.clone();
+        Ok(Some(RecordedProcessUpdate {
+            info: process_info(&record),
+            record,
+            should_broadcast: true,
+        }))
+    }
+
     pub fn reset(&self) -> anyhow::Result<()> {
         self.lock()?.clear();
         Ok(())
@@ -206,7 +228,39 @@ impl ProcessStore {
     }
 }
 
-fn process_info(record: &ProcessRecord) -> ProcessInfo {
+impl ProcessRecord {
+    #[allow(clippy::too_many_arguments)]
+    pub fn restored(
+        id: String,
+        agent: AgentKind,
+        model: Option<String>,
+        handle: SessionHandle,
+        prompt: String,
+        cwd: String,
+        external_id: Option<String>,
+        status: ProcessStatus,
+        events: Vec<SubagentEvent>,
+        started_ts: DateTime<Utc>,
+        last_event_ts: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            agent,
+            model,
+            handle,
+            prompt,
+            cwd,
+            external_id,
+            status,
+            events,
+            started_ts,
+            last_event_ts,
+            last_upsert_at: None,
+        }
+    }
+}
+
+pub(crate) fn process_info(record: &ProcessRecord) -> ProcessInfo {
     ProcessInfo {
         id: record.id.clone(),
         kind: ProcessKind::Subagent,
@@ -216,7 +270,10 @@ fn process_info(record: &ProcessRecord) -> ProcessInfo {
         state: process_state(record.status),
         started_ts: record.started_ts,
         last_event_ts: record.last_event_ts,
-        summary: record.events.last().map(subagent_event_summary),
+        summary: match record.status {
+            ProcessStatus::Abandoned => Some("abandoned after host restart".to_string()),
+            _ => record.events.last().map(subagent_event_summary),
+        },
     }
 }
 
@@ -226,6 +283,7 @@ fn process_state(status: ProcessStatus) -> ProcessState {
         ProcessStatus::Done => ProcessState::Done,
         ProcessStatus::Failed => ProcessState::Failed,
         ProcessStatus::Interrupted => ProcessState::Cancelled,
+        ProcessStatus::Abandoned => ProcessState::Abandoned,
     }
 }
 

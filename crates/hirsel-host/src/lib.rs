@@ -4,6 +4,7 @@ pub mod config;
 pub mod debug;
 pub mod lash_runtime;
 pub mod monitors;
+pub mod process_run;
 pub mod processes;
 pub mod storage;
 pub mod tools;
@@ -23,9 +24,8 @@ use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
 use crate::{
-    config::{AgentMode, Config},
+    config::Config,
     lash_runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn},
-    monitors::run_monitor_tick,
     processes::ProcessStore,
     storage::{MonitorRecord, MonitorWakeOn, Storage, monitor_process_info},
     tools::{ToolSuite, ToolsConfig},
@@ -41,7 +41,6 @@ pub struct AppState {
     pub processes: ProcessStore,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
-    pub standalone_monitors: bool,
 }
 
 #[derive(Clone, Default)]
@@ -107,10 +106,8 @@ impl AppState {
             .await?;
         if inserted {
             let stored_attachments = self.storage.blobs_for_message(message.id).await?;
-            self.broadcast(HostToClient::Msg {
-                message: message.clone(),
-            });
-            self.agent
+            if let Err(error) = self
+                .agent
                 .enqueue(OwnerTurn {
                     message_id: message.id,
                     client_id: client_id.clone(),
@@ -119,7 +116,20 @@ impl AppState {
                     attachments: stored_attachments,
                     mode,
                 })
-                .await?;
+                .await
+            {
+                if let Err(delete_error) = self.storage.delete_chat_message(message.id).await {
+                    tracing::warn!(
+                        %delete_error,
+                        message_id = message.id,
+                        "failed to delete owner message after Agent enqueue failed"
+                    );
+                }
+                return Err(error);
+            }
+            self.broadcast(HostToClient::Msg {
+                message: message.clone(),
+            });
         }
         Ok(OwnerSubmission {
             client_id,
@@ -194,9 +204,6 @@ impl AppState {
             .await?;
         self.broadcast_monitor(&record);
         self.agent.start_monitor_process(&record).await?;
-        if self.standalone_monitors {
-            spawn_standalone_monitor(self.clone(), record.id.clone());
-        }
         Ok(record)
     }
 
@@ -222,7 +229,6 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
 }
 
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
-    let standalone_monitors = matches!(config.agent, AgentMode::Scripted);
     let storage = Storage::open(&config.data_dir)
         .await
         .with_context(|| format!("open storage under {}", config.data_dir.display()))?;
@@ -262,11 +268,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         processes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
-        standalone_monitors,
     };
-    if state.standalone_monitors {
-        spawn_active_standalone_monitors(state.clone()).await;
-    }
     Ok(state)
 }
 
@@ -289,64 +291,6 @@ pub fn router_from_state(state: AppState) -> Router {
         );
     }
     app
-}
-
-async fn spawn_active_standalone_monitors(state: AppState) {
-    match state.storage.active_monitors().await {
-        Ok(monitors) => {
-            for monitor in monitors {
-                spawn_standalone_monitor(state.clone(), monitor.id);
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to resume standalone monitors");
-        }
-    }
-}
-
-fn spawn_standalone_monitor(state: AppState, monitor_id: String) {
-    tokio::spawn(async move {
-        loop {
-            let record = match state.storage.monitor(&monitor_id).await {
-                Ok(Some(record)) if record.cancelled_ts.is_none() => record,
-                Ok(_) => break,
-                Err(error) => {
-                    tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor lookup failed");
-                    break;
-                }
-            };
-            tokio::time::sleep(std::time::Duration::from_secs(record.every_secs)).await;
-            let record = match state.storage.monitor(&monitor_id).await {
-                Ok(Some(record)) if record.cancelled_ts.is_none() => record,
-                Ok(_) => break,
-                Err(error) => {
-                    tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor lookup failed");
-                    break;
-                }
-            };
-            let tick = run_monitor_tick(&record).await;
-            let updated = match state
-                .storage
-                .record_monitor_tick(&monitor_id, tick.probe.output.clone(), tick.summary)
-                .await
-            {
-                Ok(Some(updated)) => updated,
-                Ok(None) => break,
-                Err(error) => {
-                    tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor tick persist failed");
-                    continue;
-                }
-            };
-            state.broadcast_monitor(&updated);
-            if tick.wake {
-                if let Some(text) = tick.wake_text {
-                    if let Err(error) = state.agent.deliver_monitor_wake(text).await {
-                        tracing::warn!(%error, monitor_id = %monitor_id, "standalone monitor wake delivery failed");
-                    }
-                }
-            }
-        }
-    });
 }
 
 #[cfg(test)]
@@ -454,6 +398,33 @@ mod tests {
                 .iter()
                 .all(|message| message.author == ChatAuthor::Owner),
             "cancelled slow turn should not produce an Agent reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_message_enqueue_failure_deletes_message_without_broadcast() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let mut broadcasts = state.broadcaster.subscribe();
+
+        let error = state
+            .submit_owner_message(
+                "enqueue-fails".to_string(),
+                "__hirsel_test_enqueue_error__".to_string(),
+                None,
+                Vec::new(),
+                SendMode::Send,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("scripted enqueue failed"));
+        assert!(state.storage.all_chat().await.unwrap().is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), broadcasts.recv())
+                .await
+                .is_err(),
+            "failed enqueue must not publish a sent message"
         );
     }
 

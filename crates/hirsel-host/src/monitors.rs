@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde::Serialize;
-use tokio::{process::Command, time::timeout};
 
+use crate::process_run::run_bash_command;
 use crate::storage::{MonitorRecord, MonitorWakeOn};
 
 const MONITOR_TIMEOUT_SECS: u64 = 60;
@@ -45,10 +45,14 @@ pub async fn run_monitor_tick(record: &MonitorRecord) -> MonitorTick {
 }
 
 async fn run_probe(cmd: &str) -> MonitorProbeOutput {
-    let mut command = Command::new("bash");
-    command.arg("-lc").arg(cmd);
-    match timeout(Duration::from_secs(MONITOR_TIMEOUT_SECS), command.output()).await {
-        Ok(Ok(output)) => {
+    match run_bash_command(
+        cmd.to_string(),
+        None,
+        Duration::from_secs(MONITOR_TIMEOUT_SECS),
+    )
+    .await
+    {
+        Ok(output) => {
             let mut text = String::new();
             text.push_str(&String::from_utf8_lossy(&output.stdout));
             if !output.stderr.is_empty() {
@@ -58,20 +62,15 @@ async fn run_probe(cmd: &str) -> MonitorProbeOutput {
                 text.push_str(&String::from_utf8_lossy(&output.stderr));
             }
             MonitorProbeOutput {
-                status: output.status.code(),
+                status: output.status,
                 output: output_tail(&text, MONITOR_OUTPUT_CAP),
-                timed_out: false,
+                timed_out: output.timed_out,
             }
         }
-        Ok(Err(error)) => MonitorProbeOutput {
+        Err(error) => MonitorProbeOutput {
             status: None,
             output: output_tail(&error.to_string(), MONITOR_OUTPUT_CAP),
             timed_out: false,
-        },
-        Err(_) => MonitorProbeOutput {
-            status: None,
-            output: "command timed out".to_string(),
-            timed_out: true,
         },
     }
 }

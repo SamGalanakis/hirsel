@@ -13,7 +13,7 @@ Living document, updated as design decisions land. v1 = the smallest hirsel that
 - Memory: none beyond the session itself. The Agent self-compacts via the RLM `continue_as` control op (fresh Agent Frame seeded by the Agent's own summary).
 - PWA: mobile-friendly web first — SolidJS + the lashapp component system (Tailwind 4, Kobalte, lashapp ui primitives/theme); native/mobile-specific work deferred.
 - Transport: transport-agnostic message-stream protocol; v1 over WSS (caddy + bearer token), iroh as milestone two. [ADR-0006] PWA static files served from caddy on the VM (same origin), so no external static hosting until iroh.
-- Client protocol (small and boring): client `hello{last_seen_msg_id}` → host replays missed chat + inbox state → streams chat appends, live agent-turn text (lash Session Observation / Live Replay), inbox upserts. Client sends `send_message{body, ref?}`, `archive_item{id}`.
+- Client protocol (small and boring): client `hello{last_seen_msg_id}` → atomic `hello_ok{latest_msg_id, messages, inbox, processes}` → streams `msg`, `msg_removed`, `turn_event`, `agent_activity`, `inbox_upsert`, `process_upsert`, `blob_ok`, and correlated `error`. Client sends `send_message{client_id, body, ref?, attachments?, mode?}`, `upload_blob`, `cancel_turn`, `cancel_queued`, `read_item`, and `archive_item`.
 - Agent-driven e2e runbooks, figments-style: `e2e/RULES.md` + one `runbook.md` per scenario, executed by a testing agent against a host debug surface (reset, inject owner message, read chat/inbox, gate on async) — no PWA in the loop.
 
 ## Slices

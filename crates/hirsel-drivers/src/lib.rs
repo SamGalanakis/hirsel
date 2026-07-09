@@ -96,16 +96,46 @@ fn lock<'a, T>(mutex: &'a Mutex<T>) -> DriverResult<MutexGuard<'a, T>> {
     mutex.lock().map_err(|_| DriverError::StatePoisoned)
 }
 
-fn receiver_stream(mut rx: broadcast::Receiver<SubagentEvent>) -> EventStream {
-    Box::pin(stream! {
-        loop {
-            match rx.recv().await {
-                Ok(event) => yield event,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+struct EventHub {
+    tx: broadcast::Sender<SubagentEvent>,
+    events: Mutex<Vec<SubagentEvent>>,
+}
+
+impl EventHub {
+    fn new(capacity: usize) -> Arc<Self> {
+        let (tx, _) = broadcast::channel(capacity);
+        Arc::new(Self {
+            tx,
+            events: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn emit(&self, event: SubagentEvent) -> DriverResult<()> {
+        lock(&self.events)?.push(event.clone());
+        let _ = self.tx.send(event);
+        Ok(())
+    }
+
+    fn stream(self: &Arc<Self>) -> DriverResult<EventStream> {
+        let (backlog, rx) = {
+            let events = lock(&self.events)?;
+            let rx = self.tx.subscribe();
+            (events.clone(), rx)
+        };
+        Ok(Box::pin(stream! {
+            for event in backlog {
+                yield event;
             }
-        }
-    })
+            let mut rx = rx;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => yield event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
+    }
 }
 
 fn short_line(text: impl AsRef<str>) -> String {
@@ -160,7 +190,7 @@ pub struct FakeDriver {
 }
 
 struct FakeSession {
-    tx: broadcast::Sender<SubagentEvent>,
+    events: Arc<EventHub>,
     interrupted: AtomicBool,
     terminal_sent: AtomicBool,
 }
@@ -217,16 +247,16 @@ impl SubagentDriver for FakeDriver {
             id: Uuid::new_v4().to_string(),
             agent: task.agent,
         };
-        let (tx, _) = broadcast::channel(128);
+        let events = EventHub::new(128);
         let session = Arc::new(FakeSession {
-            tx: tx.clone(),
+            events: events.clone(),
             interrupted: AtomicBool::new(false),
             terminal_sent: AtomicBool::new(false),
         });
         lock(&self.sessions)?.insert(handle.id.clone(), session.clone());
 
         tokio::spawn(async move {
-            let _ = tx.send(SubagentEvent::Started {
+            let _ = events.emit(SubagentEvent::Started {
                 external_id: fixture.external_id,
             });
             for progress in fixture.progress {
@@ -235,13 +265,13 @@ impl SubagentDriver for FakeDriver {
                 }
                 if session.interrupted.load(Ordering::SeqCst) {
                     if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-                        let _ = tx.send(SubagentEvent::Terminal {
+                        let _ = events.emit(SubagentEvent::Terminal {
                             outcome: TerminalOutcome::Interrupted,
                         });
                     }
                     return;
                 }
-                let _ = tx.send(SubagentEvent::Progress {
+                let _ = events.emit(SubagentEvent::Progress {
                     summary: short_line(progress),
                 });
             }
@@ -250,12 +280,12 @@ impl SubagentDriver for FakeDriver {
             }
             if session.interrupted.load(Ordering::SeqCst) {
                 if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-                    let _ = tx.send(SubagentEvent::Terminal {
+                    let _ = events.emit(SubagentEvent::Terminal {
                         outcome: TerminalOutcome::Interrupted,
                     });
                 }
             } else if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-                let _ = tx.send(SubagentEvent::Terminal {
+                let _ = events.emit(SubagentEvent::Terminal {
                     outcome: fixture.terminal,
                 });
             }
@@ -269,7 +299,7 @@ impl SubagentDriver for FakeDriver {
         let session = sessions
             .get(&handle.id)
             .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
-        let _ = session.tx.send(SubagentEvent::Progress {
+        let _ = session.events.emit(SubagentEvent::Progress {
             summary: short_line(format!("prompt: {text}")),
         });
         Ok(())
@@ -282,7 +312,7 @@ impl SubagentDriver for FakeDriver {
             .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
         session.interrupted.store(true, Ordering::SeqCst);
         if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-            let _ = session.tx.send(SubagentEvent::Terminal {
+            let _ = session.events.emit(SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Interrupted,
             });
         }
@@ -294,7 +324,7 @@ impl SubagentDriver for FakeDriver {
         let session = sessions
             .get(&handle.id)
             .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
-        Ok(receiver_stream(session.tx.subscribe()))
+        session.events.stream()
     }
 }
 
@@ -310,7 +340,7 @@ pub struct ClaudeCodeDriver {
 }
 
 struct ProcessSession {
-    tx: broadcast::Sender<SubagentEvent>,
+    events: Arc<EventHub>,
     stdin: tokio::sync::Mutex<ChildStdin>,
     pgid: i32,
 }
@@ -352,9 +382,9 @@ impl SubagentDriver for ClaudeCodeDriver {
             .stdout
             .take()
             .ok_or(DriverError::MissingPipe("stdout"))?;
-        let (tx, _) = broadcast::channel(256);
+        let events = EventHub::new(256);
         let session = Arc::new(ProcessSession {
-            tx: tx.clone(),
+            events: events.clone(),
             stdin: tokio::sync::Mutex::new(stdin),
             pgid,
         });
@@ -363,7 +393,7 @@ impl SubagentDriver for ClaudeCodeDriver {
             agent: AgentKind::Claude,
         };
         lock(&self.sessions)?.insert(handle.id.clone(), session.clone());
-        tokio::spawn(read_claude_stdout(stdout, child, tx));
+        tokio::spawn(read_claude_stdout(stdout, child, events));
 
         let mut stdin = session.stdin.lock().await;
         write_json_line(&mut stdin, &claude_user_message(&task.prompt)).await?;
@@ -408,7 +438,7 @@ impl SubagentDriver for ClaudeCodeDriver {
         let session = sessions
             .get(&handle.id)
             .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
-        Ok(receiver_stream(session.tx.subscribe()))
+        session.events.stream()
     }
 }
 
@@ -422,11 +452,7 @@ fn claude_user_message(text: &str) -> Value {
     })
 }
 
-async fn read_claude_stdout(
-    stdout: ChildStdout,
-    mut child: Child,
-    tx: broadcast::Sender<SubagentEvent>,
-) {
+async fn read_claude_stdout(stdout: ChildStdout, mut child: Child, events: Arc<EventHub>) {
     let mut terminal_sent = false;
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -435,11 +461,11 @@ async fn read_claude_stdout(
                 Ok(value) => {
                     for event in claude_events(&value) {
                         terminal_sent |= matches!(event, SubagentEvent::Terminal { .. });
-                        let _ = tx.send(event);
+                        let _ = events.emit(event);
                     }
                 }
                 Err(error) => {
-                    let _ = tx.send(SubagentEvent::Progress {
+                    let _ = events.emit(SubagentEvent::Progress {
                         summary: short_line(format!("unparsed claude output: {error}")),
                     });
                 }
@@ -447,7 +473,7 @@ async fn read_claude_stdout(
             Ok(None) => break,
             Err(error) => {
                 if !terminal_sent {
-                    let _ = tx.send(SubagentEvent::Terminal {
+                    let _ = events.emit(SubagentEvent::Terminal {
                         outcome: TerminalOutcome::Failed {
                             reason: format!("claude stdout error: {error}"),
                         },
@@ -462,14 +488,14 @@ async fn read_claude_stdout(
     match child.wait().await {
         Ok(status) if terminal_sent || status.success() => {}
         Ok(status) => {
-            let _ = tx.send(SubagentEvent::Terminal {
+            let _ = events.emit(SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Failed {
                     reason: format!("claude exited without terminal result: {status}"),
                 },
             });
         }
         Err(error) if !terminal_sent => {
-            let _ = tx.send(SubagentEvent::Terminal {
+            let _ = events.emit(SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Failed {
                     reason: format!("claude wait failed: {error}"),
                 },
@@ -579,7 +605,7 @@ pub struct CodexDriver {
 }
 
 struct CodexSession {
-    tx: broadcast::Sender<SubagentEvent>,
+    events: Arc<EventHub>,
     stdin: tokio::sync::Mutex<ChildStdin>,
     thread_id: String,
     active_turn_id: Mutex<Option<String>>,
@@ -622,22 +648,22 @@ impl SubagentDriver for CodexDriver {
             .take()
             .ok_or(DriverError::MissingPipe("stdout"))?;
         let mut lines = BufReader::new(stdout).lines();
-        let (tx, _) = broadcast::channel(256);
+        let events = EventHub::new(256);
 
         write_json_line(&mut stdin, &codex_initialize_request(1)).await?;
         write_json_line(&mut stdin, &codex_thread_start_request(2, &task.cwd)).await?;
         let thread_id = timeout(
             Duration::from_secs(30),
-            read_codex_thread_id(&mut lines, tx.clone()),
+            read_codex_thread_id(&mut lines, events.clone()),
         )
         .await
         .map_err(|_| DriverError::MissingExternalId)??;
-        let _ = tx.send(SubagentEvent::Started {
+        let _ = events.emit(SubagentEvent::Started {
             external_id: thread_id.clone(),
         });
 
         let session = Arc::new(CodexSession {
-            tx: tx.clone(),
+            events: events.clone(),
             stdin: tokio::sync::Mutex::new(stdin),
             thread_id: thread_id.clone(),
             active_turn_id: Mutex::new(None),
@@ -713,7 +739,7 @@ impl SubagentDriver for CodexDriver {
         let session = sessions
             .get(&handle.id)
             .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
-        Ok(receiver_stream(session.tx.subscribe()))
+        session.events.stream()
     }
 }
 
@@ -790,12 +816,12 @@ fn codex_turn_start_request(
 
 async fn read_codex_thread_id(
     lines: &mut Lines<BufReader<ChildStdout>>,
-    tx: broadcast::Sender<SubagentEvent>,
+    events: Arc<EventHub>,
 ) -> DriverResult<String> {
     while let Some(line) = lines.next_line().await? {
         let value: Value = serde_json::from_str(&line)?;
         if let Some(summary) = codex_progress(&value) {
-            let _ = tx.send(SubagentEvent::Progress { summary });
+            let _ = events.emit(SubagentEvent::Progress { summary });
         }
         if value.get("id").and_then(Value::as_u64) == Some(2) {
             if let Some(thread_id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
@@ -837,18 +863,18 @@ async fn read_codex_stdout(
                         }
                     }
                     if let Some(summary) = codex_progress(&value) {
-                        let _ = session.tx.send(SubagentEvent::Progress { summary });
+                        let _ = session.events.emit(SubagentEvent::Progress { summary });
                     }
                     if let Some(outcome) = codex_terminal_outcome(&value) {
                         terminal_sent = true;
                         if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
                             *active_turn_id = None;
                         }
-                        let _ = session.tx.send(SubagentEvent::Terminal { outcome });
+                        let _ = session.events.emit(SubagentEvent::Terminal { outcome });
                     }
                 }
                 Err(error) => {
-                    let _ = session.tx.send(SubagentEvent::Progress {
+                    let _ = session.events.emit(SubagentEvent::Progress {
                         summary: short_line(format!("unparsed codex output: {error}")),
                     });
                 }
@@ -856,7 +882,7 @@ async fn read_codex_stdout(
             Ok(None) => break,
             Err(error) => {
                 if !terminal_sent {
-                    let _ = session.tx.send(SubagentEvent::Terminal {
+                    let _ = session.events.emit(SubagentEvent::Terminal {
                         outcome: TerminalOutcome::Failed {
                             reason: format!("codex stdout error: {error}"),
                         },
@@ -870,14 +896,14 @@ async fn read_codex_stdout(
     match child.wait().await {
         Ok(status) if terminal_sent || status.success() => {}
         Ok(status) => {
-            let _ = session.tx.send(SubagentEvent::Terminal {
+            let _ = session.events.emit(SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Failed {
                     reason: format!("codex exited without terminal notification: {status}"),
                 },
             });
         }
         Err(error) if !terminal_sent => {
-            let _ = session.tx.send(SubagentEvent::Terminal {
+            let _ = session.events.emit(SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Failed {
                     reason: format!("codex wait failed: {error}"),
                 },
@@ -1029,6 +1055,58 @@ mod tests {
             event,
             SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Interrupted
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_driver_replays_instant_terminal_to_late_subscriber() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            fixture.path(),
+            serde_json::to_string(&json!({
+                "external_id": "instant",
+                "progress": [],
+                "delay_ms": 0,
+                "terminal": { "status": "done", "summary": "instant done" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let driver = FakeDriver::default();
+        let handle = driver
+            .spawn(SpawnSpec {
+                agent: AgentKind::Claude,
+                model: None,
+                prompt: "instant".to_string(),
+                cwd: std::env::current_dir().unwrap(),
+                fake_fixture: Some(fixture.path().to_path_buf()),
+            })
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(50)).await;
+        let mut events = driver.events(&handle).unwrap();
+
+        let first = timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            SubagentEvent::Started {
+                external_id: "instant".to_string()
+            }
+        );
+        let terminal = timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            terminal,
+            SubagentEvent::Terminal {
+                outcome: TerminalOutcome::Done {
+                    summary: "instant done".to_string()
+                }
             }
         );
     }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { latestReplyForAnchor, openRequiresResponseCount } from "./selectors";
+import { isItemRead, latestReplyForAnchor, openUnreadCount } from "./selectors";
+import type { InboxItem } from "../protocol";
 import type { DisplayMessage } from "./types";
 
 function ownerMsg(overrides: Partial<DisplayMessage> = {}): DisplayMessage {
@@ -13,15 +14,53 @@ function ownerMsg(overrides: Partial<DisplayMessage> = {}): DisplayMessage {
   };
 }
 
-describe("openRequiresResponseCount", () => {
-  it("counts only open requires_response items", () => {
+function item(overrides: Partial<InboxItem> = {}): InboxItem {
+  return {
+    id: 1,
+    content: "",
+    anchor: 1,
+    requires_response: false,
+    quick_replies: [],
+    status: "open",
+    ts: "",
+    ...overrides,
+  };
+}
+
+describe("isItemRead (effective read = wire read minus local unread override)", () => {
+  it("is false when the wire read flag is absent/false", () => {
+    expect(isItemRead(item({ read: false }), [])).toBe(false);
+    expect(isItemRead(item({ read: undefined }), [])).toBe(false);
+  });
+
+  it("is true when read=true and no override", () => {
+    expect(isItemRead(item({ id: 7, read: true }), [])).toBe(true);
+  });
+
+  it("is false when read=true but the id is in the unread override set", () => {
+    expect(isItemRead(item({ id: 7, read: true }), [7])).toBe(false);
+  });
+});
+
+describe("openUnreadCount (email-like badge)", () => {
+  it("counts open items that are not effectively read, regardless of requires_response", () => {
     expect(
-      openRequiresResponseCount([
-        { id: 1, content: "", anchor: 1, requires_response: true, quick_replies: [], status: "open", ts: "" },
-        { id: 2, content: "", anchor: 2, requires_response: false, quick_replies: [], status: "open", ts: "" },
-        { id: 3, content: "", anchor: 3, requires_response: true, quick_replies: [], status: "archived", ts: "" },
-      ]),
-    ).toBe(1);
+      openUnreadCount(
+        [
+          item({ id: 1, requires_response: true, status: "open", read: false }),
+          item({ id: 2, requires_response: false, status: "open", read: false }),
+          item({ id: 3, requires_response: true, status: "open", read: true }), // read → excluded
+          item({ id: 4, requires_response: true, status: "archived", read: false }), // deleted → excluded
+        ],
+        [],
+      ),
+    ).toBe(2);
+  });
+
+  it("counts a read item as unread again when it has a local unread override", () => {
+    const inbox = [item({ id: 1, status: "open", read: true })];
+    expect(openUnreadCount(inbox, [])).toBe(0);
+    expect(openUnreadCount(inbox, [1])).toBe(1);
   });
 });
 

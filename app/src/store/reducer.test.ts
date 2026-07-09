@@ -253,6 +253,54 @@ describe("inbox upsert transitions", () => {
   });
 });
 
+describe("v1.3 read state", () => {
+  it("inbox_upsert carries the wire read flag through", () => {
+    const state = reduce(initialState(), {
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: true }) },
+    });
+    expect(state.inbox[0].read).toBe(true);
+  });
+
+  it("read_local optimistically flips read=true on the item", () => {
+    const seeded = reduce(initialState(), {
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: false }) },
+    });
+    const read = reduce(seeded, { type: "read_local", itemId: 1 });
+    expect(read.inbox[0].read).toBe(true);
+  });
+
+  it("read_local clears a prior manual unread override (reading wins)", () => {
+    const seeded = reduce(initialState(), {
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: true }) },
+    });
+    const unread = reduce(seeded, { type: "mark_unread_local", itemId: 1 });
+    expect(unread.unreadOverrides).toEqual([1]);
+    const reread = reduce(unread, { type: "read_local", itemId: 1 });
+    expect(reread.unreadOverrides).toEqual([]);
+    expect(reread.inbox[0].read).toBe(true);
+  });
+
+  it("mark_unread_local records a client-only override without touching the wire read flag", () => {
+    const seeded = reduce(initialState(), {
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: true }) },
+    });
+    const unread = reduce(seeded, { type: "mark_unread_local", itemId: 1 });
+    // Wire flag is untouched (there is no unread op); only the override records it.
+    expect(unread.inbox[0].read).toBe(true);
+    expect(unread.unreadOverrides).toEqual([1]);
+  });
+
+  it("mark_unread_local is idempotent (no duplicate ids)", () => {
+    const s1 = reduce(initialState(), { type: "mark_unread_local", itemId: 5 });
+    const s2 = reduce(s1, { type: "mark_unread_local", itemId: 5 });
+    expect(s2.unreadOverrides).toEqual([5]);
+  });
+});
+
 describe("optimistic-send reconciliation", () => {
   it("renders a send_local optimistically as a pending owner message", () => {
     const state = reduce(initialState(), {

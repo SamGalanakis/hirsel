@@ -237,6 +237,12 @@ function handleArchiveItem(frame) {
   upsertInbox({ ...item, status: "archived" });
 }
 
+function handleReadItem(frame) {
+  const item = inbox.find((i) => i.id === frame.item_id);
+  if (!item || item.read === true) return; // idempotent
+  upsertInbox({ ...item, read: true });
+}
+
 // --- HTTP (blob content) + WS on the same port ------------------------------
 const httpServer = createServer((req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -336,6 +342,9 @@ wss.on("connection", (ws) => {
         break;
       case "archive_item":
         handleArchiveItem(frame);
+        break;
+      case "read_item":
+        handleReadItem(frame);
         break;
       case "hello":
         ws.send(JSON.stringify({ type: "error", detail: "hello already sent" }));

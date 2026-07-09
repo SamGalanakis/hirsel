@@ -69,6 +69,7 @@ function App() {
               width (~980px), for the 900–1099 band where the rail has no room.
           Below `split` nothing changes — the phone column is the fallback. */}
       <div
+        data-slot="app-frame"
         class="relative mx-auto flex w-full min-h-0 flex-1 flex-col duration-200 ease-out motion-safe:transition-[max-width]"
         classList={{
           "max-w-[560px] rail:max-w-[1360px]": !splitActive(),

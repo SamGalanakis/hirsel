@@ -79,6 +79,7 @@ export function TrayShelf() {
           <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <Show when={badgeCount() > 0}>
             <span
+              data-slot="tray-shelf-badge"
               class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
               classList={{ "bg-status-danger": danger(), "bg-muted-foreground": !danger() }}
             >

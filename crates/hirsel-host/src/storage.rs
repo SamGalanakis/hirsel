@@ -30,6 +30,13 @@ pub struct StoredBlob {
     pub created_ts: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelloSnapshot {
+    pub latest_msg_id: u64,
+    pub messages: Vec<ChatMessage>,
+    pub inbox: Vec<InboxItem>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorWakeOn {
@@ -302,35 +309,27 @@ impl Storage {
         last_seen_msg_id: Option<u64>,
     ) -> anyhow::Result<Vec<ChatMessage>> {
         let conn = self.conn.lock().await;
-        let mut messages = if let Some(last_seen_msg_id) = last_seen_msg_id {
-            let mut stmt = conn.prepare(
-                "
-                SELECT id, author, body, ref, ts, tool_calls
-                FROM chat_messages
-                WHERE id > ?1
-                ORDER BY id ASC
-                ",
-            )?;
-            let rows = stmt.query_map(params![last_seen_msg_id], chat_message_from_row)?;
-            collect_rows(rows)?
-        } else {
-            let mut stmt = conn.prepare(
-                "
-                SELECT id, author, body, ref, ts, tool_calls
-                FROM (
-                    SELECT id, author, body, ref, ts, tool_calls
-                    FROM chat_messages
-                    ORDER BY id DESC
-                    LIMIT 200
-                )
-                ORDER BY id ASC
-                ",
-            )?;
-            let rows = stmt.query_map([], chat_message_from_row)?;
-            collect_rows(rows)?
-        };
-        load_attachments_for_messages(&conn, &mut messages)?;
-        Ok(messages)
+        replay_messages_from_conn(&conn, last_seen_msg_id)
+    }
+
+    pub async fn hello_snapshot(
+        &self,
+        last_seen_msg_id: Option<u64>,
+    ) -> anyhow::Result<HelloSnapshot> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let messages = replay_messages_from_conn(&tx, last_seen_msg_id)?;
+        let inbox = inbox_snapshot_from_conn(&tx)?;
+        let latest_msg_id = messages
+            .last()
+            .map(|message| message.id)
+            .unwrap_or_else(|| last_seen_msg_id.unwrap_or(0));
+        tx.commit()?;
+        Ok(HelloSnapshot {
+            latest_msg_id,
+            messages,
+            inbox,
+        })
     }
 
     pub async fn all_chat(&self) -> anyhow::Result<Vec<ChatMessage>> {
@@ -416,35 +415,7 @@ impl Storage {
 
     pub async fn inbox_snapshot(&self) -> anyhow::Result<Vec<InboxItem>> {
         let conn = self.conn.lock().await;
-        let mut items = Vec::new();
-        {
-            let mut stmt = conn.prepare(
-                "
-                SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
-                FROM inbox_items
-                WHERE status = 'open'
-                ORDER BY id ASC
-                ",
-            )?;
-            let rows = stmt.query_map([], inbox_item_from_row)?;
-            items.extend(collect_rows(rows)?);
-        }
-        {
-            let mut stmt = conn.prepare(
-                "
-                SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
-                FROM inbox_items
-                WHERE status = 'archived'
-                ORDER BY id DESC
-                LIMIT 20
-                ",
-            )?;
-            let rows = stmt.query_map([], inbox_item_from_row)?;
-            let mut archived = collect_rows(rows)?;
-            archived.reverse();
-            items.extend(archived);
-        }
-        Ok(items)
+        inbox_snapshot_from_conn(&conn)
     }
 
     pub async fn all_inbox(&self) -> anyhow::Result<Vec<InboxItem>> {
@@ -851,6 +822,73 @@ pub struct SubagentRestore {
 fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> anyhow::Result<Vec<T>> {
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+fn replay_messages_from_conn(
+    conn: &Connection,
+    last_seen_msg_id: Option<u64>,
+) -> anyhow::Result<Vec<ChatMessage>> {
+    let mut messages = if let Some(last_seen_msg_id) = last_seen_msg_id {
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, author, body, ref, ts, tool_calls
+            FROM chat_messages
+            WHERE id > ?1
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = stmt.query_map(params![last_seen_msg_id], chat_message_from_row)?;
+        collect_rows(rows)?
+    } else {
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, author, body, ref, ts, tool_calls
+            FROM (
+                SELECT id, author, body, ref, ts, tool_calls
+                FROM chat_messages
+                ORDER BY id DESC
+                LIMIT 200
+            )
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], chat_message_from_row)?;
+        collect_rows(rows)?
+    };
+    load_attachments_for_messages(conn, &mut messages)?;
+    Ok(messages)
+}
+
+fn inbox_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<InboxItem>> {
+    let mut items = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
+            FROM inbox_items
+            WHERE status = 'open'
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], inbox_item_from_row)?;
+        items.extend(collect_rows(rows)?);
+    }
+    {
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
+            FROM inbox_items
+            WHERE status = 'archived'
+            ORDER BY id DESC
+            LIMIT 20
+            ",
+        )?;
+        let rows = stmt.query_map([], inbox_item_from_row)?;
+        let mut archived = collect_rows(rows)?;
+        archived.reverse();
+        items.extend(archived);
+    }
+    Ok(items)
 }
 
 fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
@@ -1314,6 +1352,29 @@ mod tests {
 
         assert_eq!(message.tool_calls, tool_calls);
         assert_eq!(replay[0].tool_calls, tool_calls);
+    }
+
+    #[tokio::test]
+    async fn hello_snapshot_derives_latest_id_from_replayed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .append_chat(ChatAuthor::Agent, "one", None)
+            .await
+            .unwrap();
+        storage
+            .append_chat(ChatAuthor::Agent, "two", None)
+            .await
+            .unwrap();
+
+        let snapshot = storage.hello_snapshot(Some(1)).await.unwrap();
+        assert_eq!(snapshot.latest_msg_id, 2);
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages[0].body, "two");
+
+        let empty = storage.hello_snapshot(Some(2)).await.unwrap();
+        assert_eq!(empty.latest_msg_id, 2);
+        assert!(empty.messages.is_empty());
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `POST /debug/reset` wipes Chat, Inbox, process debug state, and starts from a clean session.
 - `POST /debug/upload { "name": "...", "mime": "...", "data_b64": "..." }` stores a blob and returns its Blob JSON.
 - `POST /debug/owner-message { "client_id": "optional-stable-id", "body": "...", "ref": null | message_id, "attachments": ["blob-id"], "mode": "send" | "next_turn" }` injects an Owner Chat message through the same host ingress path as the WebSocket; `client_id`, `attachments`, and `mode` are optional, and `mode` defaults to `send`.
+- `POST /debug/read-item { "item_id": ... }` marks an Inbox Item read and broadcasts `inbox_upsert`.
 - `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
 - `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
 - `GET /debug/chat` returns persisted Chat messages.

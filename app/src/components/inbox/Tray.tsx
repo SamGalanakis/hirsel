@@ -1,7 +1,12 @@
 import { ChevronDown, Inbox as InboxIcon } from "lucide-solid";
 import { onCleanup, onMount, Show } from "solid-js";
 import { snippet } from "../../lib/format";
-import { hasOpenRequiresResponse, mostActionableItem, openUnreadCount } from "../../store/selectors";
+import {
+  hasOpenRequiresResponse,
+  isResolvedStatus,
+  mostActionableItem,
+  openUnreadCount,
+} from "../../store/selectors";
 import { setTrayExpanded, state } from "../../store/store";
 import { InboxView } from "./InboxView";
 
@@ -22,8 +27,8 @@ function openCount(): number {
   return state.inbox.filter((i) => i.status === "open").length;
 }
 
-function archivedCount(): number {
-  return state.inbox.filter((i) => i.status === "archived").length;
+function doneCount(): number {
+  return state.inbox.filter((i) => isResolvedStatus(i.status)).length;
 }
 
 function badgeCount(): number {
@@ -52,11 +57,11 @@ const thinking = () => state.agentActivity.state === "thinking";
  * empty-inbox chrome). Tap toggles expand/collapse — never auto-expanded. */
 export function TrayShelf() {
   const hasOpen = () => openCount() > 0;
-  const hasArchived = () => archivedCount() > 0;
+  const hasDone = () => doneCount() > 0;
   const expanded = () => state.trayExpanded;
 
   return (
-    <Show when={hasOpen() || hasArchived()}>
+    <Show when={hasOpen() || hasDone()}>
       <button
         type="button"
         data-slot="tray-bar"
@@ -64,14 +69,12 @@ export function TrayShelf() {
         onClick={() => setTrayExpanded(!expanded())}
         aria-expanded={expanded()}
         aria-label={
-          expanded() ? "Collapse inbox" : hasOpen() ? "Open inbox" : "Open deleted items"
+          expanded() ? "Collapse inbox" : hasOpen() ? "Open inbox" : "Open done items"
         }
       >
         <Show
           when={hasOpen()}
-          fallback={
-            <span class="text-xs text-muted-foreground">Deleted ({archivedCount()})</span>
-          }
+          fallback={<span class="text-xs text-muted-foreground">Done ({doneCount()})</span>}
         >
           <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <Show when={badgeCount() > 0}>
@@ -135,7 +138,7 @@ function TrayScrim() {
   );
 }
 
-/** The expanded panel: reuses `InboxView` (Deleted section included) verbatim
+/** The expanded panel: reuses `InboxView` (Done section included) verbatim
  * inside an absolutely-positioned box, ~58% viewport height, its own internal
  * scroll. `TrayShelf` (a flex sibling just below this container) supplies the
  * visual header/footer cap and the collapse control. */

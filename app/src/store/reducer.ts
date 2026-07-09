@@ -24,6 +24,21 @@ function upsertInboxItem(inbox: InboxItem[], item: InboxItem): InboxItem[] {
   return next;
 }
 
+/** v2.1 (ADR-0009): the Owner replying to an item's Anchor resolves it to
+ * `done`. The host does this authoritatively (and broadcasts an inbox_upsert),
+ * but the client flips optimistically the moment the reply is sent — exactly
+ * like read-state — so a replied item leaves the open list immediately instead
+ * of lingering until the echo. Idempotent and a no-op when `ref` matches no
+ * open item; the host upsert reconciles the truth. */
+function resolveOpenItemByAnchor(inbox: InboxItem[], ref: number | null): InboxItem[] {
+  if (ref === null) return inbox;
+  const idx = inbox.findIndex((i) => i.status === "open" && i.anchor === ref);
+  if (idx === -1) return inbox;
+  const next = inbox.slice();
+  next[idx] = { ...next[idx], status: "done" };
+  return next;
+}
+
 /** Upsert a process by id, preserving list position for a known id (the
  * newest-activity-first ordering is applied by the selector, not stored). */
 function upsertProcess(processes: ProcessInfo[], process: ProcessInfo): ProcessInfo[] {
@@ -373,7 +388,7 @@ export function reduce(state: AppState, action: Action): AppState {
       // banner; Conclude/Discard both remain available. Fully derivable here,
       // so no separate action/dispatch is needed for it.
       let sideChats = state.sideChats;
-      if (item.status === "archived") {
+      if (item.status !== "open") {
         const hasArchivable = Object.values(state.sideChats).some(
           (sc) => sc.itemId === item.id && !sc.itemArchived,
         );
@@ -451,6 +466,8 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         messages: [...state.messages, localMessage],
         pendingSends: [...state.pendingSends, pendingSend],
+        // v2.1 (ADR-0009): an anchored reply optimistically resolves its item.
+        inbox: resolveOpenItemByAnchor(state.inbox, ref),
       };
     }
 
@@ -666,6 +683,10 @@ export function reduce(state: AppState, action: Action): AppState {
           confirming: true,
         }),
         awaitingConclusions: { ...state.awaitingConclusions, [action.anchor]: action.sc },
+        // v2.1 (ADR-0009): a Side Chat Conclusion is an anchored reply too, so
+        // it resolves its item optimistically on confirm (the confirm has no
+        // send_local of its own — the owner reply lands later as a `msg`).
+        inbox: resolveOpenItemByAnchor(state.inbox, action.anchor),
       };
     }
 

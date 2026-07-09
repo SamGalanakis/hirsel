@@ -1,5 +1,13 @@
-import type { InboxItem, ProcessInfo, ProcessState, SideChatRef } from "../protocol";
+import type { InboxItem, InboxStatus, ProcessInfo, ProcessState, SideChatRef } from "../protocol";
 import type { DisplayMessage } from "./types";
+
+/** v2.1 (ADR-0009): an item is "resolved" (rendered under Done) when its status
+ * is anything other than open. Both the new `done` value and the legacy
+ * `archived` value count — one terminal state, two wire spellings. Kept in one
+ * place so the Tray shelf, the Done section, and the card visuals all agree. */
+export function isResolvedStatus(status: InboxStatus): boolean {
+  return status !== "open";
+}
 
 /** Effective "seen" state for an Inbox item (v1.3). An item is read when the
  * wire `read` flag is true AND the Owner has not manually "Marked unread" it

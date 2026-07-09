@@ -2,17 +2,18 @@ import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { InboxItem } from "../../protocol";
 import { dispatch, goToChat, requestSideChatOpen, state } from "../../store/store";
+import { isResolvedStatus } from "../../store/selectors";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { InboxItemCard } from "./InboxItemCard";
 
-const ARCHIVED_LIMIT = 20;
+const DONE_LIMIT = 20;
 
 /** Content of the expanded Tray: the open list (this component's sole caller
- * is now `TrayOverlay`) plus the collapsed Deleted section, unchanged from the
- * pre-Tray Inbox tab. */
+ * is now `TrayOverlay`) plus the collapsed Done section (ADR-0009: was
+ * "Deleted"). */
 export function InboxView() {
-  const [archivedExpanded, setArchivedExpanded] = createSignal(false);
+  const [doneExpanded, setDoneExpanded] = createSignal(false);
 
   const partitioned = createMemo(() => {
     const sorted = [...state.inbox].sort((a, b) => b.id - a.id);
@@ -25,7 +26,8 @@ export function InboxView() {
     const rest = open.filter((i) => !i.requires_response);
     return {
       open: [...requiresResponse, ...rest],
-      deleted: sorted.filter((i) => i.status === "archived").slice(0, ARCHIVED_LIMIT),
+      // ADR-0009: resolved items (done, or legacy archived) collect here.
+      done: sorted.filter((i) => isResolvedStatus(i.status)).slice(0, DONE_LIMIT),
     };
   });
 
@@ -41,8 +43,8 @@ export function InboxView() {
     goToChat({ scrollToMessageId: item.anchor });
   }
 
-  // Delete = the wire `archive_item` (presented as "Deleted"); the only
-  // destructive action, reached from a card's ⋯ menu.
+  // Mark done = the wire `archive_item` (ADR-0009: the item's terminal state,
+  // presented as "Done"); non-destructive, reached from a card's ⋯ menu.
   function handleDelete(item: InboxItem) {
     getClient()?.archiveItem(item.id);
   }
@@ -69,7 +71,7 @@ export function InboxView() {
 
   return (
     <Show
-      when={partitioned().open.length > 0 || partitioned().deleted.length > 0}
+      when={partitioned().open.length > 0 || partitioned().done.length > 0}
       fallback={
         <div class="flex flex-1 flex-col p-3">
           <Empty class="border-none">
@@ -101,21 +103,21 @@ export function InboxView() {
           </For>
         </div>
 
-        <Show when={partitioned().deleted.length > 0}>
+        <Show when={partitioned().done.length > 0}>
           <div class="mt-2">
             <button
               type="button"
               class="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-1 border-t border-border py-3 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
-              onClick={() => setArchivedExpanded((v) => !v)}
+              onClick={() => setDoneExpanded((v) => !v)}
             >
-              <Show when={archivedExpanded()} fallback={<ChevronRight class="size-4" />}>
+              <Show when={doneExpanded()} fallback={<ChevronRight class="size-4" />}>
                 <ChevronDown class="size-4" />
               </Show>
-              Deleted ({partitioned().deleted.length})
+              Done ({partitioned().done.length})
             </button>
-            <Show when={archivedExpanded()}>
+            <Show when={doneExpanded()}>
               <div class="flex flex-col gap-3">
-                <For each={partitioned().deleted}>
+                <For each={partitioned().done}>
                   {(item) => (
                     <InboxItemCard
                       item={item}

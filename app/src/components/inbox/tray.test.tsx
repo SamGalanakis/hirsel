@@ -119,32 +119,34 @@ describe("Tray shelf preview", () => {
 });
 
 describe("Tray shelf visibility", () => {
-  it("hides entirely with no items, and offers only a minimal Deleted handle once archived items exist", async () => {
+  it("hides entirely with no items, and offers only a minimal Done handle once resolved items exist", async () => {
     const store = await import("../../store/store");
     const { TrayShelf } = await import("./Tray");
     const { queryByLabelText, getByLabelText } = render(() => <TrayShelf />);
 
-    // 0 open, 0 archived -> nothing rendered.
+    // 0 open, 0 done -> nothing rendered.
     expect(queryByLabelText("Open inbox")).toBeNull();
-    expect(queryByLabelText("Open deleted items")).toBeNull();
+    expect(queryByLabelText("Open done items")).toBeNull();
 
-    // 0 open, 1 archived -> a minimal handle, not the full glyph/badge/preview shelf.
+    // 0 open, 1 done -> a minimal handle, not the full glyph/badge/preview shelf.
+    // (`done` is the ADR-0009 status; the legacy `archived` spelling still
+    // renders here too — covered by the synonym in isResolvedStatus.)
     store.dispatch({
       type: "inbox_upsert",
       payload: {
         type: "inbox_upsert",
-        item: inboxItem({ id: 1, status: "archived", read: true }),
+        item: inboxItem({ id: 1, status: "done", read: true }),
       },
     });
     expect(queryByLabelText("Open inbox")).toBeNull();
-    expect(getByLabelText("Open deleted items").textContent).toBe("Deleted (1)");
+    expect(getByLabelText("Open done items").textContent).toBe("Done (1)");
 
     // An open item arrives -> the full shelf replaces the minimal handle.
     store.dispatch({
       type: "inbox_upsert",
       payload: { type: "inbox_upsert", item: inboxItem({ id: 2, status: "open" }) },
     });
-    expect(queryByLabelText("Open deleted items")).toBeNull();
+    expect(queryByLabelText("Open done items")).toBeNull();
     expect(getByLabelText("Open inbox")).toBeTruthy();
   });
 });

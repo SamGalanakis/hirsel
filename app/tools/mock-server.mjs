@@ -320,7 +320,7 @@ function handleConfirmConclusion(frame) {
   if (!seenClientIds.has(clientId)) {
     const message = addMessage("owner", frame.text, item ? item.anchor : null);
     seenClientIds.set(clientId, message.id);
-    if (item && item.status !== "archived") upsertInbox({ ...item, status: "archived" });
+    if (item && item.status === "open") upsertInbox({ ...item, status: "done" });
   }
   closeSideChat(frame.sc, "concluded");
 }
@@ -507,11 +507,15 @@ function startReplyTurn(ownerMessage) {
 }
 
 function acknowledgeInboxResponse(item, ownerMessage) {
+  // ADR-0009: the Owner replying to an item's Anchor resolves it to `done`
+  // automatically, host-side, the moment the reply lands — before (and
+  // independent of) the Agent's acknowledgment turn. This is the mechanical
+  // reply-resolves rule the client mirrors optimistically.
+  if (item.status === "open") upsertInbox({ ...item, status: "done" });
   turnActive = true;
   setActivity("thinking", "Noting your response…");
   later(() => {
     addMessage("agent", `Got it — noted: "${ownerMessage.body}".`, ownerMessage.id);
-    upsertInbox({ ...item, status: "archived" });
     finishTurn();
   }, 1000);
 }
@@ -601,9 +605,11 @@ function handleCancelQueued(ws, frame) {
 }
 
 function handleArchiveItem(frame) {
+  // ADR-0009: "Mark done" — the item's terminal `done` state (the wire op keeps
+  // its `archive_item` name; the status value is `done`).
   const item = inbox.find((i) => i.id === frame.item_id);
-  if (!item || item.status === "archived") return;
-  upsertInbox({ ...item, status: "archived" });
+  if (!item || item.status !== "open") return;
+  upsertInbox({ ...item, status: "done" });
 }
 
 function handleReadItem(frame) {
@@ -681,15 +687,15 @@ wss.on("connection", (ws) => {
           ? messages.slice(-REPLAY_LIMIT)
           : messages.filter((m) => m.id > lastSeen);
       const openItems = inbox.filter((i) => i.status === "open");
-      const archivedItems = inbox
-        .filter((i) => i.status === "archived")
+      const doneItems = inbox
+        .filter((i) => i.status !== "open")
         .slice(-ARCHIVED_REPLAY_LIMIT);
       ws.send(
         JSON.stringify({
           type: "hello_ok",
           latest_msg_id: nextMsgId - 1,
           messages: replayMessages,
-          inbox: [...openItems, ...archivedItems],
+          inbox: [...openItems, ...doneItems],
           processes: processesForHello(),
           side_chats: sideChatsForHello(),
         }),
@@ -771,6 +777,44 @@ function seedProcesses() {
 }
 
 seedProcesses();
+
+/** Seed a short chat + two open Inbox Items so the Tray, Side Chats, and the
+ * Done section have content on first load (dev/demo only). */
+function seedInbox() {
+  const ago = (mins) => new Date(Date.now() - mins * 60_000).toISOString();
+  const push = (author, body, ref = null, ts = now()) => {
+    const m = { id: nextMsgId++, author, body, ref, ts, attachments: [], tool_calls: [] };
+    messages.push(m);
+    return m;
+  };
+  push("owner", "morning — anything need me?", null, ago(30));
+  const a1 = push("agent", "Deploy of build 4821 is staged and green. Ship it to prod now?", messages.at(-1).id, ago(29));
+  const a2 = push("agent", "The auth refactor branch is ready to merge — want me to open the PR?", a1.id, ago(20));
+  inbox.push({
+    id: nextInboxId++,
+    content: "**Deploy build 4821 to prod?**\n\nTests are green and the staging smoke passed.",
+    anchor: a1.id,
+    requires_response: true,
+    quick_replies: [
+      { value: "ship it", label: "Ship it" },
+      { value: "hold off", label: "Hold off" },
+    ],
+    status: "open",
+    ts: ago(29),
+  });
+  inbox.push({
+    id: nextInboxId++,
+    content: "Auth refactor branch is ready — I can open the PR whenever you like.",
+    anchor: a2.id,
+    requires_response: false,
+    quick_replies: [],
+    status: "open",
+    read: true,
+    ts: ago(20),
+  });
+}
+
+seedInbox();
 
 httpServer.listen(PORT, () => {
   log(`listening on ws://localhost:${PORT} + http blobs at /blob/:id (token: ${TOKEN})`);

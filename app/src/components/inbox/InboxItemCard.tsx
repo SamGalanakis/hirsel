@@ -2,7 +2,7 @@ import { Check, Clock, GitFork, MoreHorizontal, RotateCcw } from "lucide-solid";
 import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { InboxItem, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
-import { isItemRead, latestReplyForAnchor, sideChatForItem } from "../../store/selectors";
+import { isItemRead, isResolvedStatus, latestReplyForAnchor, sideChatForItem } from "../../store/selectors";
 import { createSeenTimer } from "../../lib/auto-read";
 import { snippet } from "../../lib/format";
 import { Markdown } from "../Markdown";
@@ -25,7 +25,8 @@ interface Props {
   onSendReply: (item: InboxItem, body: string) => void;
   /** Secondary affordance: jump to the item's Anchor in Chat. */
   onJumpToChat: (item: InboxItem) => void;
-  /** Delete (wire `archive_item`) — the only destructive action, ⋯ menu only. */
+  /** Mark done (wire `archive_item`, ADR-0009 terminal state) — ⋯ menu only.
+   * Non-destructive: the item stays findable under Done. */
   onDelete: (item: InboxItem) => void;
   /** Mark read (auto-read on view/interaction, or the ⋯ "Mark read"): sends
    * read_item + optimistic flip. */
@@ -53,7 +54,9 @@ function formatTime(ts: string): string {
 
 export function InboxItemCard(props: Props) {
   const isOpen = () => props.item.status === "open";
-  const isDeleted = () => props.item.status === "archived";
+  // v2.1 (ADR-0009): "done" is the terminal state (legacy "archived" is a
+  // synonym); the card dims and shows a non-destructive "Done" tag.
+  const isDone = () => isResolvedStatus(props.item.status);
   // Effective read state (wire `read` minus any local "Mark unread" override).
   const read = () => isItemRead(props.item, state.unreadOverrides);
   // Email-like "unread" = an open item not yet seen. Deleted items are never
@@ -120,7 +123,7 @@ export function InboxItemCard(props: Props) {
       classList={{
         "border-l-primary": props.item.requires_response,
         "border-l-transparent": !props.item.requires_response,
-        "opacity-60": isDeleted(),
+        "opacity-60": isDone(),
       }}
       data-read={read() ? "true" : "false"}
       data-status={props.item.status}
@@ -137,9 +140,10 @@ export function InboxItemCard(props: Props) {
           <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.item.ts)}</span>
         </span>
         <div class="flex items-center gap-1">
-          <Show when={isDeleted()}>
-            <span class="text-[0.68rem] uppercase tracking-[0.03em] text-muted-foreground">
-              Deleted
+          <Show when={isDone()}>
+            <span class="inline-flex items-center gap-1 text-[0.68rem] uppercase tracking-[0.03em] text-muted-foreground">
+              <Check class="size-3 text-status-success" aria-hidden="true" />
+              Done
             </span>
           </Show>
           <DropdownMenu>
@@ -168,10 +172,14 @@ export function InboxItemCard(props: Props) {
               <DropdownMenuItem onSelect={() => props.onJumpToChat(props.item)}>
                 View in chat
               </DropdownMenuItem>
+              {/* v2.1 (ADR-0009): "Mark done" replaces the destructive
+                  "Delete" — resolving an item is non-destructive (it stays
+                  findable under Done), so no destructive styling and no
+                  confirm. */}
               <Show when={isOpen()}>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onSelect={() => props.onDelete(props.item)}>
-                  Delete
+                <DropdownMenuItem onSelect={() => props.onDelete(props.item)}>
+                  Mark done
                 </DropdownMenuItem>
               </Show>
             </DropdownMenuContent>

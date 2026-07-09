@@ -1290,7 +1290,6 @@ dependencies = [
  "hmac",
  "lash-sansio",
  "lash-trace",
- "regex",
  "schemars",
  "serde",
  "serde_json",

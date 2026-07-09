@@ -89,3 +89,84 @@ describe("turn details retention on commit", () => {
     expect(s.turnDetails[7]).toBeTruthy();
   });
 });
+
+describe("turn details: trailing-prose duplication trim", () => {
+  function agentMsgBody(id: number, body: string): ChatMessage {
+    return { id, author: "agent", body, ref: null, ts: `2026-07-10T00:00:0${id}Z`, tool_calls: [] };
+  }
+
+  it("drops the trailing prose block when it exactly matches the committed body", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "looking into it…" });
+    s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 3, { kind: "prose", text: "Here is the answer." });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Here is the answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("trims when the streamed final prose is a prefix of the final body (lost trailing text)", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 2, { kind: "prose", text: "Here is the ans" });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Here is the answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("trims when the committed body is a prefix of the streamed final prose (lost trailing whitespace)", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 2, { kind: "prose", text: "Here is the answer.   " });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Here is the answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("keeps intermediate prose blocks untouched, only trimming the trailing one", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "First I'll check the file." });
+    s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 3, { kind: "prose", text: "Final answer." });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Final answer.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2]);
+    expect(s.turnDetails[7][0].event).toMatchObject({ kind: "prose", text: "First I'll check the file." });
+  });
+
+  it("still attaches turn details when the trailing block is a tool event, not prose", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "Checking…" });
+    s = ev(s, 2, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 3, { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "10 lines" });
+
+    s = reduce(s, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Done reading the file.") },
+    });
+
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("does not attach turn details at all when trimming empties the whole timeline", () => {
+    const s0 = ev(initialState(), 1, { kind: "prose", text: "Final answer." });
+    const s = reduce(s0, {
+      type: "msg",
+      payload: { type: "msg", message: agentMsgBody(7, "Final answer.") },
+    });
+
+    expect(s.turnDetails).toEqual({});
+    expect(s.turnDetails[7]).toBeUndefined();
+  });
+});

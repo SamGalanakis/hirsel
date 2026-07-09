@@ -13,8 +13,8 @@ describe("Tray overlay never pushes Chat", () => {
     vi.doMock("../../ws/client", () => ({
       getClient: () => ({
         sendMessage: vi.fn(),
-        archiveItem: vi.fn(),
-        readItem: vi.fn(),
+        resolvePing: vi.fn(),
+        readPing: vi.fn(),
         cancelTurn: vi.fn(),
         retrySend: vi.fn(),
         cancelQueued: vi.fn(),
@@ -40,11 +40,13 @@ describe("Tray overlay never pushes Chat", () => {
       });
     }
     store.dispatch({
-      type: "inbox_upsert",
+      type: "ping_upsert",
       payload: {
-        type: "inbox_upsert",
-        item: {
+        type: "ping_upsert",
+        ping: {
           id: 1,
+          name: "deploy-approval",
+          description: "Approve the deployment",
           content: "Approve the deploy?",
           anchor: 1,
           requires_response: true,

@@ -60,23 +60,29 @@ export interface QuickReply {
   label: string;
 }
 
-/** v2.1 (ADR-0009): an Inbox Item has exactly two lifecycle states — `open`
- * (needs the Owner's attention) and `done` (dealt with, kept findable). The
- * Owner replying to the item's Anchor resolves it to `done` automatically,
- * host-side. `archived` is the pre-ADR-0009 wire value for the same terminal
- * state; treat it as a synonym of `done` everywhere (see `isResolvedStatus`)
- * and render both as "Done". No separate hard-delete state exists. */
-export type InboxStatus = "open" | "done" | "archived";
+/** A Ping has exactly two lifecycle states — `open` (needs the Owner's
+ * attention) and `done` (dealt with, kept findable). The Owner replying to the
+ * Ping's Anchor resolves it to `done` automatically, host-side. `archived` is
+ * the pre-ADR-0009 persisted value for the same terminal state; the live wire
+ * is open|done, but `isResolvedStatus` tolerates the legacy spelling for any
+ * old persisted rows. No separate hard-delete state exists. */
+export type PingStatus = "open" | "done";
 
-export interface InboxItem {
+/** v2.1 (ADR-0009 addendum): a Ping is a named, addressable async work item.
+ * `name` is its short `@` handle (≤32 chars, mono in the UI) and `description`
+ * is a one-line subtitle; both are required on the wire. `content` is the
+ * markdown body. The Owner replying to `anchor` moves it open→done. */
+export interface Ping {
   id: number;
+  name: string; // short @-handle, <= 32 chars
+  description: string; // one line
   content: string; // markdown
-  anchor: number; // ChatMessage.id where the inbox tool was called
+  anchor: number; // ChatMessage.id where pings.send was called
   requires_response: boolean;
   quick_replies: QuickReply[]; // may be empty
-  status: InboxStatus;
+  status: PingStatus;
   ts: string;
-  /** v1.3: Owner-side "seen" state, set automatically once an item has been
+  /** v1.3: Owner-side "seen" state, set automatically once a Ping has been
    * viewed (email-like). Optional on the wire; absent is treated as false. */
   read?: boolean;
 }
@@ -104,19 +110,25 @@ export interface SendMessageMsg {
   /** v2.0: side chat scope. Absent = main conversation (byte-identical to
    * pre-v2.0 wire shape); present = routed to that side session. */
   sc?: string;
+  /** v2.1 (ADR-0009 addendum): ping ids @-mentioned in the body. The host
+   * validates every id and appends each Ping's context to the Agent turn.
+   * Lifecycle-neutral — mentioning a Ping never resolves it. Default []/omitted. */
+  mentions?: number[];
 }
 
-export interface ArchiveItemMsg {
-  type: "archive_item";
-  item_id: number;
+/** v2.1: resolve a Ping to `done` (⋯ "Mark done"). Idempotent; the host sets
+ * status=done and broadcasts a ping_upsert. (Was `archive_item`.) */
+export interface ResolvePingMsg {
+  type: "resolve_ping";
+  ping_id: number;
 }
 
-/** v1.3: mark an Inbox item read (email-like "seen"). Idempotent; the host sets
- * read=true and broadcasts an inbox_upsert. There is no "unread" op — that is a
- * client-only override (see store). */
-export interface ReadItemMsg {
-  type: "read_item";
-  item_id: number;
+/** v1.3: mark a Ping read (email-like "seen"). Idempotent; the host sets
+ * read=true and broadcasts a ping_upsert. There is no "unread" op — that is a
+ * client-only override (see store). (Was `read_item`.) */
+export interface ReadPingMsg {
+  type: "read_ping";
+  ping_id: number;
 }
 
 /** v1.1: upload a file's bytes (base64) before referencing it from a
@@ -143,13 +155,13 @@ export interface CancelQueuedMsg {
   client_id: string;
 }
 
-/** v2.0 (ADR-0008): open (or resume) the side chat for an Inbox Item.
- * Idempotent per item — if it already has a live side chat the host answers
- * with the SAME sc and its transcript so far; otherwise a fresh scope. */
+/** v2.0 (ADR-0008): open (or resume) the side chat for a Ping. Idempotent per
+ * Ping — if it already has a live side chat the host answers with the SAME sc
+ * and its transcript so far; otherwise a fresh scope. */
 export interface OpenSideChatMsg {
   type: "open_side_chat";
   client_id: string;
-  item_id: number;
+  ping_id: number;
 }
 
 /** v2.0: side agent drafts the Owner's reply (a real side turn). */
@@ -174,8 +186,8 @@ export interface DiscardSideChatMsg {
 export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
-  | ArchiveItemMsg
-  | ReadItemMsg
+  | ResolvePingMsg
+  | ReadPingMsg
   | UploadBlobMsg
   | CancelTurnMsg
   | CancelQueuedMsg
@@ -191,14 +203,14 @@ export type ClientMessage =
  * (idempotent) if/when the Owner resumes it. */
 export interface SideChatRef {
   sc: string;
-  item_id: number;
+  ping_id: number;
 }
 
 export interface HelloOkMsg {
   type: "hello_ok";
   latest_msg_id: number;
   messages: ChatMessage[];
-  inbox: InboxItem[];
+  pings: Ping[];
   /** v1.4: all non-terminal processes + the last 10 terminal ones. Optional on
    * the wire; absent is treated as []. */
   processes?: ProcessInfo[];
@@ -224,9 +236,9 @@ export interface AgentActivityMsg {
   sc?: string;
 }
 
-export interface InboxUpsertMsg {
-  type: "inbox_upsert";
-  item: InboxItem;
+export interface PingUpsertMsg {
+  type: "ping_upsert";
+  ping: Ping;
 }
 
 /** v1.1: ack for an upload_blob, correlated by `client_id`. */
@@ -281,13 +293,13 @@ export interface ErrorMsg {
   client_id?: string;
 }
 
-/** v2.0: answers `open_side_chat`. Idempotent per item: a fresh side chat
+/** v2.0: answers `open_side_chat`. Idempotent per Ping: a fresh side chat
  * carries `messages: []` (the seed lives in the side session's prompt layer,
  * not as transcript rows); resuming a live one carries its transcript so far. */
 export interface SideChatOpenMsg {
   type: "side_chat_open";
   sc: string;
-  item_id: number;
+  ping_id: number;
   messages: ChatMessage[];
 }
 
@@ -311,7 +323,7 @@ export type ServerMessage =
   | HelloOkMsg
   | MsgMsg
   | AgentActivityMsg
-  | InboxUpsertMsg
+  | PingUpsertMsg
   | BlobOkMsg
   | MsgRemovedMsg
   | ProcessUpsertMsg

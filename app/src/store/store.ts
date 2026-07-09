@@ -40,12 +40,12 @@ interface UiState {
    * never set by a cold-reconnect reconciliation — resuming is always a
    * deliberate tap (critique: "do not auto-reopen"). */
   activeSideChatSc: string | null;
-  /** v2.0: the Inbox item id whose Discuss/Resume tap is awaiting a
-   * `sideChatRefs` entry before the sheet can open (its `sc` isn't known yet
-   * on a fresh Discuss). Consumed once ChatView's effect sees the matching
-   * ref appear, which then sets `activeSideChatSc`. Resume already has a
-   * live ref, so it resolves on the very next tick. */
-  pendingSideChatItemId: number | null;
+  /** v2.0: the Ping id whose Discuss/Resume tap is awaiting a `sideChatRefs`
+   * entry before the sheet can open (its `sc` isn't known yet on a fresh
+   * Discuss). Consumed once ChatView's effect sees the matching ref appear,
+   * which then sets `activeSideChatSc`. Resume already has a live ref, so it
+   * resolves on the very next tick. */
+  pendingSideChatPingId: number | null;
 }
 
 type Store = AppState & UiState;
@@ -59,7 +59,7 @@ function initialStore(): Store {
     composerDraft: null,
     composerPrefill: null,
     activeSideChatSc: null,
-    pendingSideChatItemId: null,
+    pendingSideChatPingId: null,
   };
 }
 
@@ -69,7 +69,7 @@ const [state, setState] = createStore<Store>(initialStore());
 function appSnapshot(): AppState {
   return {
     messages: state.messages,
-    inbox: state.inbox,
+    pings: state.pings,
     agentActivity: state.agentActivity,
     connection: state.connection,
     lastSeenMsgId: state.lastSeenMsgId,
@@ -92,7 +92,7 @@ function appSnapshot(): AppState {
 /** Apply the same pure `reduce` used by the tests, then push the result into
  * the fine-grained store. The two rendered arrays (messages, inbox) go through
  * `reconcile` keyed by `id` so only the DOM bound to genuinely-changed rows
- * re-renders; the small scalar/never-rendered fields are set directly.
+ * re-renders (messages + pings); the small scalar/never-rendered fields are set directly.
  *
  * The whole body is `untrack`ed: dispatch is an imperative command, and it is
  * sometimes invoked synchronously from inside a reactive scope (e.g. the App
@@ -103,7 +103,7 @@ export function dispatch(action: Action): void {
   untrack(() => {
     const next = reduce(appSnapshot(), action);
     setState("messages", reconcile(next.messages, { key: "id" }));
-    setState("inbox", reconcile(next.inbox, { key: "id" }));
+    setState("pings", reconcile(next.pings, { key: "id" }));
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
     setState("unreadOverrides", next.unreadOverrides);
@@ -162,15 +162,15 @@ export function setActiveSideChatSc(sc: string | null): void {
   setState("activeSideChatSc", sc);
 }
 
-/** Discuss/Resume tapped on an Inbox card: fires `open_side_chat` (the caller
- * does that) and records which item's sheet to open the moment its ref
- * appears (see `pendingSideChatItemId`). */
-export function requestSideChatOpen(itemId: number): void {
-  setState("pendingSideChatItemId", itemId);
+/** Discuss/Resume tapped on a Ping card: fires `open_side_chat` (the caller
+ * does that) and records which Ping's sheet to open the moment its ref appears
+ * (see `pendingSideChatPingId`). */
+export function requestSideChatOpen(pingId: number): void {
+  setState("pendingSideChatPingId", pingId);
 }
 
 export function clearPendingSideChatOpen(): void {
-  setState("pendingSideChatItemId", null);
+  setState("pendingSideChatPingId", null);
 }
 
 export function clearLastConclusion(): void {

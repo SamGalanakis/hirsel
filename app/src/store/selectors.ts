@@ -1,76 +1,76 @@
-import type { InboxItem, InboxStatus, ProcessInfo, ProcessState, SideChatRef } from "../protocol";
+import type { Ping, ProcessInfo, ProcessState, SideChatRef } from "../protocol";
 import type { DisplayMessage } from "./types";
 
-/** v2.1 (ADR-0009): an item is "resolved" (rendered under Done) when its status
+/** v2.1 (ADR-0009): a Ping is "resolved" (rendered under Done) when its status
  * is anything other than open. Both the new `done` value and the legacy
- * `archived` value count — one terminal state, two wire spellings. Kept in one
- * place so the Tray shelf, the Done section, and the card visuals all agree. */
-export function isResolvedStatus(status: InboxStatus): boolean {
+ * `archived` spelling count — one terminal state, two wire spellings. Typed
+ * loosely so the legacy value tolerates through. Kept in one place so the Tray
+ * shelf, the Done section, and the card visuals all agree. */
+export function isResolvedStatus(status: string): boolean {
   return status !== "open";
 }
 
-/** Effective "seen" state for an Inbox item (v1.3). An item is read when the
- * wire `read` flag is true AND the Owner has not manually "Marked unread" it
- * (a client-only override). Kept in one place so the badge, the card visual
+/** Effective "seen" state for a Ping (v1.3). A Ping is read when the wire
+ * `read` flag is true AND the Owner has not manually "Marked unread" it (a
+ * client-only override). Kept in one place so the badge, the card visual
  * state, and the auto-read gate all agree by construction. */
-export function isItemRead(item: InboxItem, unreadOverrides: number[]): boolean {
-  return item.read === true && !unreadOverrides.includes(item.id);
+export function isPingRead(ping: Ping, unreadOverrides: number[]): boolean {
+  return ping.read === true && !unreadOverrides.includes(ping.id);
 }
 
 /** Count backing both the Tray shelf badge and the document.title badge. v1.3:
- * email-like "unread" count = open items that are not yet effectively read
+ * email-like "unread" count = open Pings that are not yet effectively read
  * (was open + requires_response). requires_response no longer affects the
  * badge count — it only drives the card accent and (Tray, v1.6) the shelf
  * badge's tone. */
-export function openUnreadCount(inbox: InboxItem[], unreadOverrides: number[]): number {
-  return inbox.filter((i) => i.status === "open" && !isItemRead(i, unreadOverrides)).length;
+export function openUnreadCount(pings: Ping[], unreadOverrides: number[]): number {
+  return pings.filter((p) => p.status === "open" && !isPingRead(p, unreadOverrides)).length;
 }
 
-/** Tray (v1.6): true when any open item still requires a response — drives the
+/** Tray (v1.6): true when any open Ping still requires a response — drives the
  * shelf badge's `status-danger` accent (muted neutral otherwise). Independent
- * of the unread count so an item can be read but still awaiting a reply. */
-export function hasOpenRequiresResponse(inbox: InboxItem[]): boolean {
-  return inbox.some((i) => i.status === "open" && i.requires_response);
+ * of the unread count so a Ping can be read but still awaiting a reply. */
+export function hasOpenRequiresResponse(pings: Ping[]): boolean {
+  return pings.some((p) => p.status === "open" && p.requires_response);
 }
 
-/** Tray (v1.6): the single item the collapsed shelf previews — the most
- * "actionable" open item, in order: newest open `requires_response`, else
+/** Tray (v1.6): the single Ping the collapsed shelf previews — the most
+ * "actionable" open Ping, in order: newest open `requires_response`, else
  * newest unread, else newest open. "Newest" = highest host-assigned id (ids
  * are monotonic), matching the ordering convention used elsewhere (e.g.
- * InboxView, partitionProcesses). Null when there are no open items. */
-export function mostActionableItem(
-  inbox: InboxItem[],
+ * PingsView, partitionProcesses). Null when there are no open Pings. */
+export function mostActionablePing(
+  pings: Ping[],
   unreadOverrides: number[],
-): InboxItem | null {
-  const open = inbox.filter((i) => i.status === "open").sort((a, b) => b.id - a.id);
+): Ping | null {
+  const open = pings.filter((p) => p.status === "open").sort((a, b) => b.id - a.id);
   if (open.length === 0) return null;
   return (
-    open.find((i) => i.requires_response) ??
-    open.find((i) => !isItemRead(i, unreadOverrides)) ??
+    open.find((p) => p.requires_response) ??
+    open.find((p) => !isPingRead(p, unreadOverrides)) ??
     open[0]
   );
 }
 
-/** The Owner's reply to an Inbox Item, derived — never persisted — from Chat.
- * A reply is just an anchor-refed owner Chat message (`ref === item.anchor`),
- * so its lifecycle (optimistic `pending` → echoed `✓`, or `failed`) is exactly
- * the send it already is. */
-export interface ItemReply {
+/** The Owner's reply to a Ping, derived — never persisted — from Chat. A reply
+ * is just an anchor-refed owner Chat message (`ref === ping.anchor`), so its
+ * lifecycle (optimistic `pending` → echoed `✓`, or `failed`) is exactly the
+ * send it already is. */
+export interface PingReply {
   body: string;
   pending: boolean;
   failed: boolean;
 }
 
-/** Latest Owner reply anchored to `anchor`, or null if none yet. Drives an
- * Inbox card's inline "you: … ✓" replied state. Derived from Chat messages so
- * there is no new inbox reply state to persist or reconcile; when the send
- * reconciles from optimistic to host echo, `pending` flips to false by itself.
- * Newest-first scan: if the Owner answers the same item twice, the most recent
- * reply wins. */
+/** Latest Owner reply anchored to `anchor`, or null if none yet. Drives a Ping
+ * card's inline "you: … ✓" replied state. Derived from Chat messages so there
+ * is no new Ping reply state to persist or reconcile; when the send reconciles
+ * from optimistic to host echo, `pending` flips to false by itself. Newest-first
+ * scan: if the Owner answers the same Ping twice, the most recent reply wins. */
 export function latestReplyForAnchor(
   messages: DisplayMessage[],
   anchor: number,
-): ItemReply | null {
+): PingReply | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.author === "owner" && m.ref === anchor) {
@@ -95,12 +95,12 @@ export function runningProcessCount(processes: ProcessInfo[]): number {
 
 // ---- v2.0 side chats (ADR-0008) ----
 
-/** The live side chat for an Inbox item, if any — drives the "in progress ·
- * resume" affordance on its card in place of the plain "Discuss" entry.
- * Derived from `hello_ok.side_chats` + open/closed tracking (`sideChatRefs`),
- * not from the (possibly never-hydrated) `sideChats` map. */
-export function sideChatForItem(refs: SideChatRef[], itemId: number): SideChatRef | null {
-  return refs.find((r) => r.item_id === itemId) ?? null;
+/** The live side chat for a Ping, if any — drives the "in progress · resume"
+ * affordance on its card in place of the plain "Discuss" entry. Derived from
+ * `hello_ok.side_chats` + open/closed tracking (`sideChatRefs`), not from the
+ * (possibly never-hydrated) `sideChats` map. */
+export function sideChatForPing(refs: SideChatRef[], pingId: number): SideChatRef | null {
+  return refs.find((r) => r.ping_id === pingId) ?? null;
 }
 
 /** Group processes into Running / Finished, each newest-activity-first

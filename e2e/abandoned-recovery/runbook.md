@@ -19,6 +19,6 @@ The runner uses `HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_DRIVER=fake` wit
 - The host is killed while the process is still running.
 - After reboot, no new running Sub-agent process is mechanically spawned.
 - `/debug/processes` surfaces the orphan as `state: "abandoned"`.
-- The Agent is woken and emits Chat or Inbox output that references the orphaned/abandoned work.
+- The Agent is woken and emits Chat or Ping output that references the orphaned/abandoned work.
 
 If no respawn occurs but no abandoned row is visible, the no-respawn gate passes and abandoned visibility fails mechanically.

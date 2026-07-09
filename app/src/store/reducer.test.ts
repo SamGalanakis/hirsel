@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { reduce } from "./reducer";
 import { initialState } from "./types";
-import type { ChatMessage, InboxItem } from "../protocol";
+import type { ChatMessage, Ping } from "../protocol";
 
 function msg(id: number, author: "owner" | "agent", body: string, ref: number | null = null): ChatMessage {
   return { id, author, body, ref, ts: `2026-07-08T00:00:0${id}Z` };
 }
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "test-ping",
+    description: "Test Ping",
     content: "hello",
     anchor: 1,
     requires_response: true,
@@ -28,13 +30,13 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 2,
         messages: [msg(1, "owner", "hi"), msg(2, "agent", "hello back")],
-        inbox: [inboxItem()],
+        pings: [inboxItem()],
       },
     });
 
     expect(state.messages).toHaveLength(2);
     expect(state.messages.map((m) => m.id)).toEqual([1, 2]);
-    expect(state.inbox).toHaveLength(1);
+    expect(state.pings).toHaveLength(1);
     expect(state.lastSeenMsgId).toBe(2);
   });
 
@@ -45,7 +47,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 1,
         messages: [msg(1, "owner", "hi")],
-        inbox: [],
+        pings: [],
       },
     });
 
@@ -55,7 +57,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 2,
         messages: [msg(2, "agent", "second")],
-        inbox: [],
+        pings: [],
       },
     });
 
@@ -81,7 +83,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 7,
         messages: [msg(7, "owner", "made it to the host")],
-        inbox: [],
+        pings: [],
       },
     });
 
@@ -115,7 +117,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 7,
         messages: [msg(7, "owner", "reached the host")],
-        inbox: [],
+        pings: [],
       },
     });
 
@@ -142,7 +144,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 1,
         messages: [msg(1, "owner", "same words")],
-        inbox: [],
+        pings: [],
       },
     });
     const withPending = reduce(seeded, {
@@ -160,7 +162,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 1,
         messages: [msg(1, "owner", "same words")],
-        inbox: [],
+        pings: [],
       },
     });
 
@@ -186,7 +188,7 @@ describe("hello_ok replay merge", () => {
         type: "hello_ok",
         latest_msg_id: 0,
         messages: [],
-        inbox: [],
+        pings: [],
       },
     });
 
@@ -233,70 +235,70 @@ describe("msg append", () => {
 describe("inbox upsert transitions", () => {
   it("inserts a new item", () => {
     const state = reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1 }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1 }) },
     });
-    expect(state.inbox).toHaveLength(1);
+    expect(state.pings).toHaveLength(1);
   });
 
   it("replaces an existing item by id rather than duplicating it", () => {
     const opened = reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, status: "open" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, status: "open" }) },
     });
     const archived = reduce(opened, {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, status: "archived" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, status: "done" }) },
     });
-    expect(archived.inbox).toHaveLength(1);
-    expect(archived.inbox[0].status).toBe("archived");
+    expect(archived.pings).toHaveLength(1);
+    expect(archived.pings[0].status).toBe("done");
   });
 });
 
 describe("v1.3 read state", () => {
-  it("inbox_upsert carries the wire read flag through", () => {
+  it("ping_upsert carries the wire read flag through", () => {
     const state = reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: true }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, read: true }) },
     });
-    expect(state.inbox[0].read).toBe(true);
+    expect(state.pings[0].read).toBe(true);
   });
 
   it("read_local optimistically flips read=true on the item", () => {
     const seeded = reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: false }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, read: false }) },
     });
-    const read = reduce(seeded, { type: "read_local", itemId: 1 });
-    expect(read.inbox[0].read).toBe(true);
+    const read = reduce(seeded, { type: "read_local", pingId: 1 });
+    expect(read.pings[0].read).toBe(true);
   });
 
   it("read_local clears a prior manual unread override (reading wins)", () => {
     const seeded = reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: true }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, read: true }) },
     });
-    const unread = reduce(seeded, { type: "mark_unread_local", itemId: 1 });
+    const unread = reduce(seeded, { type: "mark_unread_local", pingId: 1 });
     expect(unread.unreadOverrides).toEqual([1]);
-    const reread = reduce(unread, { type: "read_local", itemId: 1 });
+    const reread = reduce(unread, { type: "read_local", pingId: 1 });
     expect(reread.unreadOverrides).toEqual([]);
-    expect(reread.inbox[0].read).toBe(true);
+    expect(reread.pings[0].read).toBe(true);
   });
 
   it("mark_unread_local records a client-only override without touching the wire read flag", () => {
     const seeded = reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, read: true }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, read: true }) },
     });
-    const unread = reduce(seeded, { type: "mark_unread_local", itemId: 1 });
+    const unread = reduce(seeded, { type: "mark_unread_local", pingId: 1 });
     // Wire flag is untouched (there is no unread op); only the override records it.
-    expect(unread.inbox[0].read).toBe(true);
+    expect(unread.pings[0].read).toBe(true);
     expect(unread.unreadOverrides).toEqual([1]);
   });
 
   it("mark_unread_local is idempotent (no duplicate ids)", () => {
-    const s1 = reduce(initialState(), { type: "mark_unread_local", itemId: 5 });
-    const s2 = reduce(s1, { type: "mark_unread_local", itemId: 5 });
+    const s1 = reduce(initialState(), { type: "mark_unread_local", pingId: 5 });
+    const s2 = reduce(s1, { type: "mark_unread_local", pingId: 5 });
     expect(s2.unreadOverrides).toEqual([5]);
   });
 });
@@ -382,8 +384,8 @@ describe("optimistic-send reconciliation", () => {
 describe("ADR-0009: replying resolves an Inbox Item to done", () => {
   function withOpenItem() {
     return reduce(initialState(), {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 5, status: "open" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 1, anchor: 5, status: "open" }) },
     });
   }
 
@@ -396,7 +398,7 @@ describe("ADR-0009: replying resolves an Inbox Item to done", () => {
       ref: 5,
       ts: "2026-07-08T00:01:00Z",
     });
-    expect(next.inbox[0].status).toBe("done");
+    expect(next.pings[0].status).toBe("done");
   });
 
   it("leaves the item open when the send anchors elsewhere (or nowhere)", () => {
@@ -408,7 +410,7 @@ describe("ADR-0009: replying resolves an Inbox Item to done", () => {
       ref: 99,
       ts: "2026-07-08T00:01:00Z",
     });
-    expect(other.inbox[0].status).toBe("open");
+    expect(other.pings[0].status).toBe("open");
     const plain = reduce(withOpenItem(), {
       type: "send_local",
       localId: -2,
@@ -417,17 +419,17 @@ describe("ADR-0009: replying resolves an Inbox Item to done", () => {
       ref: null,
       ts: "2026-07-08T00:01:00Z",
     });
-    expect(plain.inbox[0].status).toBe("open");
+    expect(plain.pings[0].status).toBe("open");
   });
 
   it("resolves the item on a Side Chat conclusion confirm (no send_local of its own)", () => {
     const opened = reduce(withOpenItem(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 1,
+      pingId: 1,
       messages: [],
     });
     const confirmed = reduce(opened, { type: "side_chat_confirm_sent", sc: "side:1", anchor: 5 });
-    expect(confirmed.inbox[0].status).toBe("done");
+    expect(confirmed.pings[0].status).toBe("done");
   });
 });

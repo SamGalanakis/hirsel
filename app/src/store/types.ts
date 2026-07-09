@@ -3,9 +3,9 @@ import type {
   Blob,
   ChatMessage,
   HelloOkMsg,
-  InboxItem,
-  InboxUpsertMsg,
   MsgMsg,
+  Ping,
+  PingUpsertMsg,
   ProcessInfo,
   ProcessUpsertMsg,
   SendMode,
@@ -36,6 +36,9 @@ export interface PendingSend {
   // original {clientId, body, ref} shape the store snapshots and tests encode.
   attachments?: string[];
   mode?: SendMode;
+  /** v2.1 (ADR-0009): @-mentioned ping ids, so a reconnect resend carries them
+   * too. Omitted when empty (keeps the common-case shape). */
+  mentions?: number[];
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
@@ -54,7 +57,7 @@ export interface AgentActivity {
  * bucket so sc-scoped routing can never leak into (or read from) main state. */
 export interface SideChatState {
   sc: string;
-  itemId: number;
+  pingId: number;
   messages: DisplayMessage[];
   agentActivity: AgentActivity;
   turnEvents: TimelineEvent[];
@@ -72,9 +75,9 @@ export interface SideChatState {
   /** True once `discard_side_chat` is sent, awaiting `side_chat_closed`. Same
    * purpose as `confirming` for the other user-initiated close path. */
   discarding: boolean;
-  /** Non-blocking banner: the Agent archived this item while its side chat was
+  /** Non-blocking banner: the Agent resolved this Ping while its side chat was
    * still open. Conclude/Discard both remain available (critique edge case). */
-  itemArchived: boolean;
+  pingResolved: boolean;
   /** Terminal: `side_chat_closed` arrived without this client having asked for
    * it (TTL reap, or gone after a reconnect) while the record was still kept
    * (i.e. the sheet was open on it). The sheet renders "This side chat ended";
@@ -107,7 +110,7 @@ export interface TimelineEvent {
 
 export interface AppState {
   messages: DisplayMessage[];
-  inbox: InboxItem[];
+  pings: Ping[];
   agentActivity: AgentActivity;
   connection: ConnectionStatus;
   lastSeenMsgId: number | null;
@@ -128,18 +131,18 @@ export interface AppState {
    * its removal race its own echo; keeping the id here means a late echo is
    * dropped instead of re-materializing the bubble. Bounded. */
   removedIds: number[];
-  /** v1.3: Inbox item ids the Owner has manually "Marked unread". There is no
-   * wire unread op, so this is a purely client-side override layered on top of
-   * the wire `read` flag: an item is effectively unread if `!read` OR its id is
-   * here. Auto-read/"Mark read" removes the id (and sends read_item). Bounded. */
+  /** v1.3: Ping ids the Owner has manually "Marked unread". There is no wire
+   * unread op, so this is a purely client-side override layered on top of the
+   * wire `read` flag: a Ping is effectively unread if `!read` OR its id is
+   * here. Auto-read/"Mark read" removes the id (and sends read_ping). Bounded. */
   unreadOverrides: number[];
   /** v2.0: live side chats, keyed by `sc` — mirrors `hello_ok.side_chats`
-   * (seeded there, kept in sync by side_chat_open/side_chat_closed) so an
-   * Inbox card can derive "in progress · resume" for its item without ever
-   * hydrating the full transcript. Deliberately separate from `sideChats`
-   * below: a background item can be "in progress" all session without its
-   * scoped state ever being created (that only happens when the sheet is
-   * actually opened/resumed). */
+   * (seeded there, kept in sync by side_chat_open/side_chat_closed) so a Ping
+   * card can derive "in progress · resume" for its Ping without ever hydrating
+   * the full transcript. Deliberately separate from `sideChats` below: a
+   * background Ping can be "in progress" all session without its scoped state
+   * ever being created (that only happens when the sheet is actually
+   * opened/resumed). */
   sideChatRefs: SideChatRef[];
   /** v2.0: hydrated per-side-chat state, created by `side_chat_open` (Discuss
    * or Resume) and removed by `side_chat_closed`. See SideChatState. */
@@ -173,9 +176,9 @@ export type Action =
   | { type: "agent_activity"; payload: { state: AgentActivityState; text: string | null } }
   | { type: "process_upsert"; payload: ProcessUpsertMsg }
   | { type: "turn_event"; payload: TurnEventMsg }
-  | { type: "inbox_upsert"; payload: InboxUpsertMsg }
-  | { type: "read_local"; itemId: number }
-  | { type: "mark_unread_local"; itemId: number }
+  | { type: "ping_upsert"; payload: PingUpsertMsg }
+  | { type: "read_local"; pingId: number }
+  | { type: "mark_unread_local"; pingId: number }
   | {
       type: "send_local";
       localId: number;
@@ -185,6 +188,7 @@ export type Action =
       ts: string;
       attachments?: Blob[];
       mode?: SendMode;
+      mentions?: number[];
     }
   | { type: "send_failed"; clientId: string }
   | { type: "send_retry"; clientId: string }
@@ -196,7 +200,7 @@ export type Action =
   | { type: "uploads_clear" }
   | { type: "connection_status"; status: ConnectionStatus }
   // ---- v2.0 side chats (ADR-0008) ----
-  | { type: "side_chat_open"; sc: string; itemId: number; messages: ChatMessage[] }
+  | { type: "side_chat_open"; sc: string; pingId: number; messages: ChatMessage[] }
   | { type: "side_chat_msg"; sc: string; message: ChatMessage }
   | {
       type: "side_chat_send_local";
@@ -220,7 +224,7 @@ export type Action =
 export function initialState(): AppState {
   return {
     messages: [],
-    inbox: [],
+    pings: [],
     agentActivity: { state: "idle", text: null },
     connection: "connecting",
     lastSeenMsgId: null,

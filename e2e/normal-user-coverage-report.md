@@ -1,6 +1,6 @@
 # Normal User E2E Coverage Report
 
-Date: 2026-07-09
+Date: 2026-07-10
 
 ## Coverage Audit
 
@@ -11,15 +11,15 @@ Date: 2026-07-09
 | Abandoned process recovery | None. | ADR-0004 promise was untested. | Added `e2e/abandoned-recovery`; no respawn passed, abandoned visibility failed. |
 | Multi-turn conversation memory | `e2e/restart-persistence` only asked one-off exact replies across restarts. | No ordinary multi-turn recall before and after restart. | Added `e2e/multi-turn-memory`; recall passed before and after restart. |
 | Compaction | None. | `prompts/agent.md` documents `control.continue_as`, but no runbook checked it. | Added `e2e/compaction`; `continue_as` was visible, but post-compaction recall failed. |
-| Inbox read state | `e2e/inbox-read` | Read/unread only; no reply/archive lifecycle. | Added `e2e/inbox-lifecycle`; reply, owner archive, and Agent archive passed. |
+| Ping read state | `e2e/ping-read` | Read/unread only; no reply/resolution lifecycle. | Added `e2e/pings-lifecycle`; reply, Owner resolution, and Agent resolution are covered. |
 | Delegation loop | `e2e/delegation-loop` | Covered fake-driver terminal and Quick Reply flow. | Still covered; real-driver gap moved to `real-subagent`. |
 | Send/queue/cancel | `e2e/send-queue-cancel` | Covered send injection, next-turn queueing, queued cancel, active-turn cancel. | No new gap found in this pass. |
 | Monitors | `e2e/monitors` | Covered debug-created and Agent-created monitors, wake, restart. | No new gap found in this pass. |
 | Timers | `e2e/timers` | Covered one-shot timer wake. | No new gap found in this pass. |
-| Turn timeline and tool visibility | `e2e/turn-timeline` | Covered ordered `turn_event` and tool summaries. | New scenarios also exercised `continue_as`, `shell_run`, `subagents_*`, and `inbox_archive` tool visibility. |
-| Debug archive surface | WebSocket protocol only. | Spec mentioned a debug archive endpoint, but `crates/hirsel-host/src/debug.rs` has none. | Documented in `e2e/RULES.md`; owner archive runbook uses canonical WebSocket `archive_item`. |
+| Turn timeline and tool visibility | `e2e/turn-timeline` | Covered ordered `turn_event` and tool summaries. | New scenarios also exercise `continue_as`, `shell_run`, `subagents_*`, and `pings_resolve` visibility. |
+| Debug resolution surface | `POST /debug/resolve-ping` | Explicit Owner resolution needed a debug gate. | The canonical debug route now exercises it and emits `ping_upsert`. |
 
-Residual lower-priority gaps: worktree hygiene/no redundant sibling enforcement is still only indirectly observed through Agent tool choices, not asserted as a dedicated scenario. Channel-discipline edge cases such as delayed completion choosing Inbox vs Chat are partially exercised but not exhaustively scored.
+Residual lower-priority gaps: worktree hygiene/no redundant sibling enforcement is still only indirectly observed through Agent tool choices, not asserted as a dedicated scenario. Channel-discipline edge cases such as delayed completion choosing Ping vs Chat are partially exercised but not exhaustively scored.
 
 ## Execution Results
 
@@ -45,13 +45,15 @@ Residual lower-priority gaps: worktree hygiene/no redundant sibling enforcement 
 | `attachment-agent-behavior` | Text attachment second line | pass | Agent chat id 2 included `SECOND-LINE-TOKEN-8842`. |
 | `attachment-agent-behavior` | Image word | pass | Agent chat id 2 included `IMAGE_WORD=LIME`. |
 | `attachment-agent-behavior` | Tool use on stored path | pass | Agent chat id 2 had `tool_calls=[{"name":"shell_run","ok":true}]`. |
-| `inbox-lifecycle` | Scripted requires-response item | pass | Item 1, anchor 2, `requires_response=true`, Quick Reply present. |
-| `inbox-lifecycle` | Anchor-refed Owner reply | pass | Owner reply id ref matched anchor 2. |
-| `inbox-lifecycle` | Agent acknowledgement | pass | Agent acknowledged the Inbox reply. |
-| `inbox-lifecycle` | Owner archive via WebSocket | pass | Item 2 reached `status=archived`; `inbox_upsert` broadcast observed. |
-| `inbox-lifecycle` | Real Agent files moot item | pass | Real item 1 content `Moot question: continue?`, `requires_response=true`. |
-| `inbox-lifecycle` | Real Agent archives moot item | pass | Item 1 reached `status=archived`; Agent chat id 3 `MOOT_ARCHIVED`. |
-| `inbox-lifecycle` | Archive tool summary | pass | Agent chat id 3 had `tool_calls=[{"name":"inbox_archive","ok":true}]`. |
+| `pings-lifecycle` | Named requires-response Ping | pass | Scripted Ping 1 was `@delegated-fix-ready`, with description and Quick Reply. |
+| `pings-lifecycle` | Anchor-refed Owner reply | pass | Owner `ref=2` moved Ping 1 to done with `ping_upsert`. |
+| `pings-lifecycle` | Lifecycle-neutral mention | pass | Owner message 7 mentioned Ping 2; Ping 2 remained open. |
+| `pings-lifecycle` | Explicit Owner resolution | pass | `/debug/resolve-ping` moved Ping 2 to done. |
+| `pings-lifecycle` | Real Agent sends/resolves moot Ping | pass | Real `@moot-question` had a description; `pings_resolve` was committed. |
+| `ping-read` | Read persistence | pass | Ping 1 changed to `read=true`, emitted `ping_upsert`, and remained read after restart. |
+| `delegation-loop` | Scripted loop | pass | Process reached done; named Ping 1 auto-resolved from Quick Reply 3; Agent acknowledged. |
+| `side-chats` | Scripted loop | pass | Scoped resume/draft gates passed; Conclusion auto-resolved Ping 1; already-done Ping 2 remained idempotent. |
+| Provider smoke | Named Ping and reply | pass | Ping 1 was `@smoke-test`, description `Smoke test`; Agent reply named `@smoke-test`. |
 
 Run logs are in `/tmp/hirsel-e2e-*.run.log`; final debug snapshots are in `/tmp/hirsel-e2e-*-final.*.json` where the run reached final snapshot.
 
@@ -59,7 +61,7 @@ Run logs are in `/tmp/hirsel-e2e-*.run.log`; final debug snapshots are in `/tmp/
 
 1. `abandoned-recovery`: after SIGKILL and reboot, orphaned subagent work is not surfaced through `/debug/processes` as `abandoned`; the debug process list is empty. The no-respawn safety gate passed.
 2. `compaction`: `continue_as` is observable and succeeds, but the compacted frame did not preserve/use the seed fact on the next question. It returned an internal-looking `md...` id instead.
-3. `debug.rs` has no debug archive endpoint despite the spec naming one. The runbook used the WebSocket `archive_item` frame and `RULES.md` now documents this.
+3. Explicit Owner Ping resolution is available at `/debug/resolve-ping`; reply-driven resolution remains the normal path.
 4. `HIRSEL_MODEL=gpt-5` failed with the current Codex ChatGPT account: "The 'gpt-5' model is not supported when using Codex with a ChatGPT account." The runbooks use the branch default `gpt-5.5`.
 
 ## Commits

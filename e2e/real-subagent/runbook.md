@@ -22,7 +22,7 @@ Scenario A:
 - The Agent uses `subagents.spawn`; `/debug/processes` shows `kind: "subagent"`, `agent: "codex"`, and `model: "gpt-5.5"`.
 - `/debug/broadcasts` accumulates multiple `process_upsert` events for the same process.
 - The process reaches `state: "done"`.
-- After terminal state, the Agent reports the outcome in Chat or Inbox.
+- After terminal state, the Agent reports the outcome in Chat or a Ping.
 - The repo test passes after the Sub-agent finishes.
 
 Scenario B:

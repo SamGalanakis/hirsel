@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{
-    AgentActivityState, HostToClient, QuickReply, SendMode, ToolCallSummary, TurnEventKind,
+    AgentActivityState, HostToClient, Ping, QuickReply, SendMode, ToolCallSummary, TurnEventKind,
 };
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
@@ -24,10 +24,9 @@ use lash::{
         PluginSessionContext, SessionPlugin,
     },
     process::{
-        ProcessAwaitOutput, ProcessAwaiter, ProcessEventAppendRequest, ProcessEventType,
-        ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessTerminalState,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition,
-        SessionScope,
+        ProcessAwaitOutput, ProcessAwaiter, ProcessCompletionAuthority, ProcessEventAppendRequest,
+        ProcessEventType, ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessTerminalState,
+        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
     },
     provider::{ProviderHandle, ProviderOptions},
     remote::{
@@ -95,6 +94,7 @@ pub struct OwnerTurn {
     pub body: String,
     pub anchor: Option<u64>,
     pub attachments: Vec<StoredBlob>,
+    pub mentioned_pings: Vec<Ping>,
     pub mode: SendMode,
 }
 
@@ -603,7 +603,11 @@ impl LashAgentRuntime {
                     "failed to append abandoned Sub-agent process event"
                 );
                 match process_registry
-                    .complete_process(process_id, subagent_abandoned_output())
+                    .complete_process(
+                        process_id,
+                        subagent_abandoned_output(),
+                        ProcessCompletionAuthority::ReconciledAbandon,
+                    )
                     .await
                 {
                     Ok(_) => true,
@@ -742,7 +746,7 @@ impl LashAgentRuntime {
         let pending = match self.session.pending_turn_inputs().await {
             Ok(pending) => pending,
             Err(error) => {
-                tracing::warn!(%error, "failed to inspect pending turn inputs for Inbox anchor");
+                tracing::warn!(%error, "failed to inspect pending turn inputs for Ping anchor");
                 self.anchors.lock().await.active = None;
                 return;
             }
@@ -1399,7 +1403,7 @@ fn owner_turn_source_key(client_id: &str) -> String {
 
 fn owner_turn_text(turn: &OwnerTurn) -> String {
     let mut text = match turn.anchor {
-        Some(anchor) => format!("Owner replied to Inbox anchor {anchor}.\n\n{}", turn.body),
+        Some(anchor) => format!("Owner replied to Ping anchor {anchor}.\n\n{}", turn.body),
         None => turn.body.clone(),
     };
     for attachment in &turn.attachments {
@@ -1412,7 +1416,26 @@ fn owner_turn_text(turn: &OwnerTurn) -> String {
             attachment.blob.size
         ));
     }
+    append_mentioned_ping_context(&mut text, &turn.mentioned_pings);
     text
+}
+
+pub(crate) fn append_mentioned_ping_context(text: &mut String, pings: &[Ping]) {
+    for ping in pings {
+        text.push('\n');
+        text.push_str(&format!(
+            "[mentioned ping @{} (ping_id {}, {}, requires_response={}, anchor {}): {}]",
+            ping.name,
+            ping.id,
+            match ping.status {
+                hirsel_proto::PingStatus::Open => "open",
+                hirsel_proto::PingStatus::Done => "done",
+            },
+            ping.requires_response,
+            ping.anchor,
+            ping.description
+        ));
+    }
 }
 
 fn slow_turn_duration(body: &str) -> anyhow::Result<Option<Duration>> {
@@ -1765,10 +1788,10 @@ fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
 fn condense_args(name: &str, payload: &Value) -> Option<String> {
     let summary = match name {
         "shell_run" => labeled_scalar(payload, "cmd", "cmd"),
-        "inbox_file" => {
+        "pings_send" => {
             labeled_first_scalar(payload, &["content_md", "content", "body"], "content")
         }
-        "inbox_archive" => scalar_any(payload, &["item_id", "id"]).map(|id| format!("item {id}")),
+        "pings_resolve" => scalar_any(payload, &["ping_id", "id"]).map(|id| format!("ping {id}")),
         "subagents_spawn" => {
             let agent = scalar_field(payload, "agent").unwrap_or_else(|| "subagent".to_string());
             scalar_any(payload, &["prompt", "task"]).map(|prompt| format!("{agent}: {prompt}"))
@@ -1795,12 +1818,12 @@ fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
     let payload = tool_output_payload(output).unwrap_or(output);
     let detail = match name {
         "shell_run" => shell_result_summary(payload),
-        "inbox_file" => scalar_field(payload, "id").map(|id| format!("item {id}")),
-        "inbox_archive" => payload
-            .get("item")
-            .and_then(|item| scalar_field(item, "id"))
-            .or_else(|| scalar_any(args, &["item_id", "id"]))
-            .map(|id| format!("item {id}")),
+        "pings_send" => scalar_field(payload, "ping_id").map(|id| format!("ping {id}")),
+        "pings_resolve" => payload
+            .get("ping")
+            .and_then(|ping| scalar_field(ping, "ping_id"))
+            .or_else(|| scalar_any(args, &["ping_id", "id"]))
+            .map(|id| format!("ping {id}")),
         "subagents_spawn" => scalar_any(payload, &["process_id"])
             .or_else(|| {
                 payload
@@ -2184,8 +2207,8 @@ impl StaticToolExecute for HirselToolExecutor {
 impl HirselToolExecutor {
     async fn execute_inner(&self, call: ToolCall<'_>) -> Result<Value, String> {
         match call.name {
-            "inbox_file" => self.inbox_file(call.args).await,
-            "inbox_archive" => self.inbox_archive(call.args).await,
+            "pings_send" => self.pings_send(call.args).await,
+            "pings_resolve" => self.pings_resolve(call.args).await,
             "subagents_spawn" => self.subagents_spawn(call.args, call.context).await,
             "subagents_prompt" => self.subagents_prompt(call.args).await,
             "subagents_interrupt" => self.subagents_interrupt(call.args).await,
@@ -2200,7 +2223,9 @@ impl HirselToolExecutor {
         }
     }
 
-    async fn inbox_file(&self, args: &Value) -> Result<Value, String> {
+    async fn pings_send(&self, args: &Value) -> Result<Value, String> {
+        let name = required_string_any(args, &["name"])?;
+        let description = required_string_any(args, &["description"])?;
         let content = required_string_any(args, &["content_md", "content", "body"])?;
         let requires_response = args
             .get("requires_response")
@@ -2216,23 +2241,30 @@ impl HirselToolExecutor {
         let anchor = self
             .current_anchor()
             .await
-            .ok_or_else(|| "inbox.file requires an active Owner turn anchor".to_string())?;
-        let item = self
+            .ok_or_else(|| "pings.send requires an active Owner turn anchor".to_string())?;
+        let ping = self
             .tools
-            .inbox_file(content, anchor, requires_response, quick_replies)
+            .pings_send(
+                name,
+                description,
+                content,
+                anchor,
+                requires_response,
+                quick_replies,
+            )
             .await
             .map_err(|error| error.to_string())?;
-        Ok(inbox_file_result(&item))
+        Ok(pings_send_result(&ping))
     }
 
-    async fn inbox_archive(&self, args: &Value) -> Result<Value, String> {
-        let item_id = required_u64_any(args, &["item_id", "id"])?;
-        let item = self
+    async fn pings_resolve(&self, args: &Value) -> Result<Value, String> {
+        let ping_id = required_u64_any(args, &["ping_id", "id"])?;
+        let ping = self
             .tools
-            .inbox_archive(item_id)
+            .pings_resolve(ping_id)
             .await
             .map_err(|error| error.to_string())?;
-        inbox_archive_result(item.as_ref())
+        pings_resolve_result(ping.as_ref())
     }
 
     async fn subagents_spawn(
@@ -2424,22 +2456,22 @@ impl HirselToolExecutor {
     }
 }
 
-fn inbox_file_result(item: &hirsel_proto::InboxItem) -> Value {
+fn pings_send_result(ping: &hirsel_proto::Ping) -> Value {
     json!({
-        "item_id": item.id,
-        "anchor": item.anchor,
-        "requires_response": item.requires_response,
+        "ping_id": ping.id,
+        "anchor": ping.anchor,
+        "requires_response": ping.requires_response,
     })
 }
 
-fn inbox_archive_result(item: Option<&hirsel_proto::InboxItem>) -> Result<Value, String> {
-    let item = item.map(inbox_item_result).transpose()?;
-    Ok(json!({ "item": item }))
+fn pings_resolve_result(ping: Option<&hirsel_proto::Ping>) -> Result<Value, String> {
+    let ping = ping.map(ping_result).transpose()?;
+    Ok(json!({ "ping": ping }))
 }
 
-fn inbox_item_result(item: &hirsel_proto::InboxItem) -> Result<Value, String> {
-    let mut value = serde_json::to_value(item).map_err(|error| error.to_string())?;
-    rename_result_id(&mut value, "item_id")?;
+fn ping_result(ping: &hirsel_proto::Ping) -> Result<Value, String> {
+    let mut value = serde_json::to_value(ping).map_err(|error| error.to_string())?;
+    rename_result_id(&mut value, "ping_id")?;
     Ok(value)
 }
 
@@ -3051,14 +3083,16 @@ fn subagent_abandoned_output() -> ProcessAwaitOutput {
 fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         tool_definition(
-            "hirsel.inbox_file",
-            "inbox_file",
-            "File an Inbox Item anchored to the current Agent turn.",
+            "hirsel.pings_send",
+            "pings_send",
+            "Send a Ping anchored to the current Agent turn.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["content_md"],
+                "required": ["name", "description", "content_md"],
                 "properties": {
+                    "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+                    "description": { "type": "string", "minLength": 1 },
                     "content_md": { "type": "string" },
                     "requires_response": { "type": "boolean", "default": true },
                     "quick_replies": {
@@ -3075,26 +3109,26 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 }
             }),
-            inbox_file_output_schema(),
-            ["inbox"],
-            "file",
+            pings_send_output_schema(),
+            ["pings"],
+            "send",
             ToolScheduling::Serial,
         ),
         tool_definition(
-            "hirsel.inbox_archive",
-            "inbox_archive",
-            "Archive an Inbox Item.",
+            "hirsel.pings_resolve",
+            "pings_resolve",
+            "Resolve a Ping that was overtaken by events.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["item_id"],
+                "required": ["ping_id"],
                 "properties": {
-                    "item_id": { "type": "integer", "minimum": 1 }
+                    "ping_id": { "type": "integer", "minimum": 1 }
                 }
             }),
-            inbox_archive_output_schema(),
-            ["inbox"],
-            "archive",
+            pings_resolve_output_schema(),
+            ["pings"],
+            "resolve",
             ToolScheduling::Serial,
         ),
         tool_definition(
@@ -3277,28 +3311,28 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-fn inbox_file_output_schema() -> Value {
+fn pings_send_output_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["item_id", "anchor", "requires_response"],
+        "required": ["ping_id", "anchor", "requires_response"],
         "properties": {
-            "item_id": { "type": "integer", "minimum": 1 },
+            "ping_id": { "type": "integer", "minimum": 1 },
             "anchor": { "type": "integer", "minimum": 1 },
             "requires_response": { "type": "boolean" }
         }
     })
 }
 
-fn inbox_archive_output_schema() -> Value {
+fn pings_resolve_output_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["item"],
+        "required": ["ping"],
         "properties": {
-            "item": {
+            "ping": {
                 "oneOf": [
-                    inbox_item_output_schema(),
+                    ping_output_schema(),
                     { "type": "null" }
                 ]
             }
@@ -3306,12 +3340,14 @@ fn inbox_archive_output_schema() -> Value {
     })
 }
 
-fn inbox_item_output_schema() -> Value {
+fn ping_output_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
         "required": [
-            "item_id",
+            "ping_id",
+            "name",
+            "description",
             "content",
             "anchor",
             "requires_response",
@@ -3321,7 +3357,9 @@ fn inbox_item_output_schema() -> Value {
             "ts"
         ],
         "properties": {
-            "item_id": { "type": "integer", "minimum": 1 },
+            "ping_id": { "type": "integer", "minimum": 1 },
+            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+            "description": { "type": "string", "minLength": 1 },
             "content": { "type": "string" },
             "anchor": { "type": "integer", "minimum": 1 },
             "requires_response": { "type": "boolean" },
@@ -3329,7 +3367,7 @@ fn inbox_item_output_schema() -> Value {
                 "type": "array",
                 "items": quick_reply_output_schema()
             },
-            "status": { "type": "string", "enum": ["open", "archived"] },
+            "status": { "type": "string", "enum": ["open", "done"] },
             "read": { "type": "boolean" },
             "ts": timestamp_output_schema()
         }
@@ -4011,7 +4049,7 @@ impl ScriptedAgentRuntime {
         if turn.anchor.is_some() {
             self.tools
                 .chat_send(
-                    "Acknowledged. I will continue from that Inbox reply.",
+                    "Acknowledged. I will continue from that Ping reply.",
                     Some(turn.message_id),
                 )
                 .await?;
@@ -4097,7 +4135,7 @@ impl ScriptedAgentRuntime {
         let anchor = self
             .tools
             .chat_send(
-                "I delegated the repo fix to a Sub-agent and will file the result in the Inbox.",
+                "I delegated the repo fix to a Sub-agent and will send the result as a Ping.",
                 Some(turn.message_id),
             )
             .await?;
@@ -4119,7 +4157,9 @@ impl ScriptedAgentRuntime {
                     Ok(event) if event.process_id == process.process_id => {
                         let content = terminal_content(&event.outcome);
                         if let Err(error) = tools
-                            .inbox_file(
+                            .pings_send(
+                                "delegated-fix-ready",
+                                "The delegated fix is ready for review",
                                 content,
                                 anchor.id,
                                 true,
@@ -4130,7 +4170,7 @@ impl ScriptedAgentRuntime {
                             )
                             .await
                         {
-                            tracing::warn!(%error, "failed to file Sub-agent terminal Inbox Item");
+                            tracing::warn!(%error, "failed to send Sub-agent terminal Ping");
                         }
                         break;
                     }
@@ -4169,7 +4209,7 @@ mod tests {
     };
     use chrono::Utc;
     use hirsel_drivers::{SessionHandle, SubagentEvent};
-    use hirsel_proto::{Blob, ChatAuthor, InboxItem, InboxStatus};
+    use hirsel_proto::{Blob, ChatAuthor, Ping, PingStatus};
     use lash_core::{
         ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
         TriggerInputBinding, TriggerSubscriptionRecord,
@@ -4343,6 +4383,7 @@ mod tests {
             body: "see attached".to_string(),
             anchor: None,
             attachments: vec![text.clone(), image.clone()],
+            mentioned_pings: Vec::new(),
             mode: SendMode::Send,
         };
 
@@ -4367,8 +4408,37 @@ mod tests {
         assert!(!input.image_blobs.contains_key("text-1"));
     }
 
+    #[test]
+    fn owner_turn_text_expands_mentioned_ping_context() {
+        let turn = OwnerTurn {
+            message_id: 2,
+            client_id: "mention-1".to_string(),
+            body: "What changed?".to_string(),
+            anchor: None,
+            attachments: Vec::new(),
+            mentioned_pings: vec![Ping {
+                id: 7,
+                name: "release-choice".to_string(),
+                description: "Choose the release channel".to_string(),
+                content: "Longer details".to_string(),
+                anchor: 3,
+                requires_response: true,
+                quick_replies: Vec::new(),
+                status: PingStatus::Done,
+                read: true,
+                ts: Utc::now(),
+            }],
+            mode: SendMode::Send,
+        };
+
+        assert_eq!(
+            owner_turn_text(&turn),
+            "What changed?\n[mentioned ping @release-choice (ping_id 7, done, requires_response=true, anchor 3): Choose the release channel]"
+        );
+    }
+
     #[tokio::test]
-    async fn inbox_file_uses_active_turn_anchor_when_later_owner_message_is_pending() {
+    async fn pings_send_uses_active_turn_anchor_when_later_owner_message_is_pending() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
         let owner_a = storage
@@ -4412,7 +4482,9 @@ mod tests {
         let executor = HirselToolExecutor { tools, anchors };
 
         let result = executor
-            .inbox_file(&serde_json::json!({
+            .pings_send(&serde_json::json!({
+                "name": "active-turn-result",
+                "description": "Result for the active turn",
                 "content": "A result for the active turn",
                 "requires_response": true
             }))
@@ -4420,14 +4492,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["anchor"], owner_a.id);
-        assert_eq!(result["item_id"], 1);
+        assert_eq!(result["ping_id"], 1);
     }
 
     #[test]
     fn every_executor_result_matches_its_declared_output_schema() {
         let now = Utc::now();
-        let inbox_item = InboxItem {
+        let ping = Ping {
             id: 7,
+            name: "choose-release".to_string(),
+            description: "Choose a release channel".to_string(),
             content: "Choose a release".to_string(),
             anchor: 3,
             requires_response: true,
@@ -4435,7 +4509,7 @@ mod tests {
                 value: "stable".to_string(),
                 label: "Stable".to_string(),
             }],
-            status: InboxStatus::Archived,
+            status: PingStatus::Done,
             read: true,
             ts: now,
         };
@@ -4510,12 +4584,12 @@ mod tests {
         ];
 
         let mut results = BTreeMap::<&str, Vec<Value>>::new();
-        results.insert("inbox_file", vec![inbox_file_result(&inbox_item)]);
+        results.insert("pings_send", vec![pings_send_result(&ping)]);
         results.insert(
-            "inbox_archive",
+            "pings_resolve",
             vec![
-                inbox_archive_result(Some(&inbox_item)).unwrap(),
-                inbox_archive_result(None).unwrap(),
+                pings_resolve_result(Some(&ping)).unwrap(),
+                pings_resolve_result(None).unwrap(),
             ],
         );
         results.insert("subagents_spawn", vec![subagent_spawn_result("proc-1")]);

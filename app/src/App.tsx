@@ -40,7 +40,7 @@ function App() {
   // document.title, so it's visible from a backgrounded tab without push
   // notifications. (Replaces the React useTitleBadge hook with a plain effect.)
   createEffect(() => {
-    const count = openUnreadCount(state.inbox, state.unreadOverrides);
+    const count = openUnreadCount(state.pings, state.unreadOverrides);
     document.title = count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
   });
 

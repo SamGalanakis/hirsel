@@ -82,7 +82,7 @@ describe("turn details retention on commit", () => {
     expect(s.turnDetails[7]).toBeTruthy();
     s = reduce(s, {
       type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 7, messages: [], inbox: [] },
+      payload: { type: "hello_ok", latest_msg_id: 7, messages: [], pings: [] },
     });
     // Live events cleared by the resync, but the retained turn detail survives.
     expect(s.turnEvents).toEqual([]);

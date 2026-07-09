@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { reduce } from "./reducer";
 import { initialState } from "./types";
-import type { ChatMessage, InboxItem } from "../protocol";
+import type { ChatMessage, Ping } from "../protocol";
 
 // v2.0 side chats (ADR-0008). Covers: sc-scoped routing never leaking into (or
 // reading from) main state, side transcript accumulation/reconciliation, the
@@ -14,9 +14,11 @@ function msg(id: number, author: "owner" | "agent", body: string, ref: number | 
   return { id, author, body, ref, ts: `2026-07-08T00:00:0${id}Z` };
 }
 
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+function inboxItem(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "test-ping",
+    description: "Test Ping",
     content: "hello",
     anchor: 1,
     requires_response: true,
@@ -32,28 +34,28 @@ describe("side_chat_open", () => {
     const state = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     expect(state.sideChats["side:1"]).toMatchObject({
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
       drafting: false,
       draft: null,
       confirming: false,
       discarding: false,
-      itemArchived: false,
+      pingResolved: false,
       ended: false,
     });
-    expect(state.sideChatRefs).toEqual([{ sc: "side:1", item_id: 5 }]);
+    expect(state.sideChatRefs).toEqual([{ sc: "side:1", ping_id: 5 }]);
   });
 
   it("is idempotent: resuming the same sc refreshes its transcript instead of creating a second entry", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     const withHistory = reduce(opened, {
@@ -64,12 +66,12 @@ describe("side_chat_open", () => {
     const resumed = reduce(withHistory, {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [msg(1, "owner", "hi"), msg(2, "agent", "welcome back")],
     });
     expect(Object.keys(resumed.sideChats)).toEqual(["side:1"]);
     expect(resumed.sideChats["side:1"].messages.map((m) => m.id)).toEqual([1, 2]);
-    expect(resumed.sideChatRefs).toEqual([{ sc: "side:1", item_id: 5 }]);
+    expect(resumed.sideChatRefs).toEqual([{ sc: "side:1", ping_id: 5 }]);
   });
 });
 
@@ -78,7 +80,7 @@ describe("sc-scoped routing never leaks into (or reads from) main state", () => 
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     const withMain = reduce(opened, {
@@ -101,7 +103,7 @@ describe("sc-scoped routing never leaks into (or reads from) main state", () => 
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     const withSideActivity = reduce(opened, {
@@ -143,7 +145,7 @@ describe("side transcript accumulation and reconciliation", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     const withLocal = reduce(opened, {
@@ -182,7 +184,7 @@ describe("side transcript accumulation and reconciliation", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     const thinking = reduce(opened, {
@@ -206,7 +208,7 @@ describe("side chat lifecycle states", () => {
     return reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
   }
@@ -287,22 +289,22 @@ describe("side chat lifecycle states", () => {
 });
 
 describe("item archived mid-side-chat (critique edge case)", () => {
-  it("flags itemArchived on any live side chat for that item without touching others", () => {
+  it("flags pingResolved on any live side chat for that item without touching others", () => {
     const withTwo = [
-      { sc: "side:1", itemId: 5 },
-      { sc: "side:2", itemId: 9 },
+      { sc: "side:1", pingId: 5 },
+      { sc: "side:2", pingId: 9 },
     ].reduce(
-      (s, { sc, itemId }) => reduce(s, { type: "side_chat_open", sc, itemId, messages: [] }),
+      (s, { sc, pingId }) => reduce(s, { type: "side_chat_open", sc, pingId, messages: [] }),
       initialState(),
     );
 
     const archived = reduce(withTwo, {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 5, status: "archived" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 5, status: "done" }) },
     });
 
-    expect(archived.sideChats["side:1"].itemArchived).toBe(true);
-    expect(archived.sideChats["side:2"].itemArchived).toBe(false);
+    expect(archived.sideChats["side:1"].pingResolved).toBe(true);
+    expect(archived.sideChats["side:2"].pingResolved).toBe(false);
     // Conclude/Discard must remain reachable — nothing else about the record changes.
     expect(archived.sideChats["side:1"]).toMatchObject({ ended: false, confirming: false });
   });
@@ -311,16 +313,16 @@ describe("item archived mid-side-chat (critique edge case)", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [],
     });
     const once = reduce(opened, {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 5, status: "archived" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 5, status: "done" }) },
     });
     const twice = reduce(once, {
-      type: "inbox_upsert",
-      payload: { type: "inbox_upsert", item: inboxItem({ id: 5, status: "archived" }) },
+      type: "ping_upsert",
+      payload: { type: "ping_upsert", ping: inboxItem({ id: 5, status: "done" }) },
     });
     expect(twice.sideChats["side:1"]).toBe(once.sideChats["side:1"]);
   });
@@ -330,7 +332,7 @@ describe("conclusion chip memory (client-derived provenance)", () => {
   it("tags the owner reply landing in main chat with the matching anchor, and fires the one-shot land signal", () => {
     const drafted = reduce(
       reduce(
-        reduce(initialState(), { type: "side_chat_open", sc: "side:1", itemId: 5, messages: [] }),
+        reduce(initialState(), { type: "side_chat_open", sc: "side:1", pingId: 5, messages: [] }),
         { type: "side_chat_conclude_requested", sc: "side:1" },
       ),
       { type: "side_chat_conclusion_draft", sc: "side:1", text: "Approving this." },
@@ -354,7 +356,7 @@ describe("conclusion chip memory (client-derived provenance)", () => {
 
   it("does not tag an unrelated owner reply to the same anchor once already matched", () => {
     const confirmed = reduce(
-      reduce(initialState(), { type: "side_chat_open", sc: "side:1", itemId: 5, messages: [] }),
+      reduce(initialState(), { type: "side_chat_open", sc: "side:1", pingId: 5, messages: [] }),
       { type: "side_chat_confirm_sent", sc: "side:1", anchor: 5 },
     );
     const landed = reduce(confirmed, {
@@ -380,7 +382,7 @@ describe("conclusion chip memory (client-derived provenance)", () => {
 
   it("clear_last_conclusion consumes the one-shot signal", () => {
     const confirmed = reduce(
-      reduce(initialState(), { type: "side_chat_open", sc: "side:1", itemId: 5, messages: [] }),
+      reduce(initialState(), { type: "side_chat_open", sc: "side:1", pingId: 5, messages: [] }),
       { type: "side_chat_confirm_sent", sc: "side:1", anchor: 5 },
     );
     const landed = reduce(confirmed, {
@@ -401,17 +403,17 @@ describe("hello_ok reconciliation of live side chats", () => {
         type: "hello_ok",
         latest_msg_id: 0,
         messages: [],
-        inbox: [],
-        side_chats: [{ sc: "side:1", item_id: 5 }],
+        pings: [],
+        side_chats: [{ sc: "side:1", ping_id: 5 }],
       },
     });
-    expect(state.sideChatRefs).toEqual([{ sc: "side:1", item_id: 5 }]);
+    expect(state.sideChatRefs).toEqual([{ sc: "side:1", ping_id: 5 }]);
   });
 
   it("defaults to [] when hello_ok omits side_chats (pre-v2.0 host / nothing live)", () => {
     const state = reduce(initialState(), {
       type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], inbox: [] },
+      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [] },
     });
     expect(state.sideChatRefs).toEqual([]);
     expect(state.sideChats).toEqual({});
@@ -421,7 +423,7 @@ describe("hello_ok reconciliation of live side chats", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [msg(1, "owner", "hi")],
     });
     const resynced = reduce(opened, {
@@ -430,8 +432,8 @@ describe("hello_ok reconciliation of live side chats", () => {
         type: "hello_ok",
         latest_msg_id: 1,
         messages: [],
-        inbox: [],
-        side_chats: [{ sc: "side:1", item_id: 5 }],
+        pings: [],
+        side_chats: [{ sc: "side:1", ping_id: 5 }],
       },
     });
     // Content-equal, but NOT the same reference: a fresh clone (rather than
@@ -443,12 +445,12 @@ describe("hello_ok reconciliation of live side chats", () => {
 
   it("drops a hydrated side chat that resolved (confirming/discarding) while offline", () => {
     const confirming = reduce(
-      reduce(initialState(), { type: "side_chat_open", sc: "side:1", itemId: 5, messages: [] }),
+      reduce(initialState(), { type: "side_chat_open", sc: "side:1", pingId: 5, messages: [] }),
       { type: "side_chat_confirm_sent", sc: "side:1", anchor: 5 },
     );
     const resynced = reduce(confirming, {
       type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 1, messages: [], inbox: [] },
+      payload: { type: "hello_ok", latest_msg_id: 1, messages: [], pings: [] },
     });
     expect(resynced.sideChats["side:1"]).toBeUndefined();
   });
@@ -457,12 +459,12 @@ describe("hello_ok reconciliation of live side chats", () => {
     const opened = reduce(initialState(), {
       type: "side_chat_open",
       sc: "side:1",
-      itemId: 5,
+      pingId: 5,
       messages: [msg(1, "owner", "hi")],
     });
     const resynced = reduce(opened, {
       type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 1, messages: [], inbox: [] },
+      payload: { type: "hello_ok", latest_msg_id: 1, messages: [], pings: [] },
     });
     expect(resynced.sideChats["side:1"]).toMatchObject({ ended: true });
     // Its transcript is preserved so the terminal sheet can still show it.

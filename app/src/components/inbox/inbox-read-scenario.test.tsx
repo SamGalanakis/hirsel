@@ -14,8 +14,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
  * Lifecycle proven here:
  *   1. Item arrives UNREAD → shelf badge = 1; tapping the shelf expands the
  *      Tray overlay, where the card shows its accent (unread dot).
- *   2. It scrolls into view → a read_item frame hits the wire; the host echoes
- *      inbox_upsert read=true → the card goes muted (data-read=true), badge = 0.
+ *   2. It scrolls into view → a read_ping frame hits the wire; the host echoes
+ *      ping_upsert read=true → the card goes muted (data-read=true), badge = 0.
  *   3. The Owner replies (quick reply) → ADR-0009: the anchored reply resolves
  *      the item to `done`, so it leaves the open list and appears under the
  *      collapsed **Done** section (carrying the you:-reply quote), still inside
@@ -41,9 +41,9 @@ interface ScriptedHost {
 }
 
 /** In-process host: replays one open, unread requires-response-free item plus
- * its anchor; on read_item it upserts read=true; on send_message it echoes the
+ * its anchor; on read_ping it upserts read=true; on send_message it echoes the
  * owner msg AND (ADR-0009) resolves the item to `done` when the reply is
- * anchored to it; on archive_item it upserts status=done. Records every frame. */
+ * anchored to it; on resolve_ping it upserts status=done. Records every frame. */
 async function startScriptedHost(): Promise<ScriptedHost> {
   const received: WireFrame[] = [];
   let idSeq = 100;
@@ -52,6 +52,8 @@ async function startScriptedHost(): Promise<ScriptedHost> {
   ];
   const item = {
     id: 1,
+    name: "deploy-follow-up",
+    description: "Review the completed deployment",
     content: "Deploy finished — anything else?",
     anchor: 1,
     requires_response: false,
@@ -73,17 +75,17 @@ async function startScriptedHost(): Promise<ScriptedHost> {
       const frame = JSON.parse(String(raw));
       received.push(frame);
       if (frame.type === "hello") {
-        send({ type: "hello_ok", latest_msg_id: 1, messages: anchors, inbox: [item] });
+        send({ type: "hello_ok", latest_msg_id: 1, messages: anchors, pings: [item] });
         return;
       }
-      if (frame.type === "read_item" && frame.item_id === item.id) {
+      if (frame.type === "read_ping" && frame.ping_id === item.id) {
         item.read = true;
-        send({ type: "inbox_upsert", item: { ...item } });
+        send({ type: "ping_upsert", ping: { ...item } });
         return;
       }
-      if (frame.type === "archive_item" && frame.item_id === item.id) {
+      if (frame.type === "resolve_ping" && frame.ping_id === item.id) {
         item.status = "done";
-        send({ type: "inbox_upsert", item: { ...item } });
+        send({ type: "ping_upsert", ping: { ...item } });
         return;
       }
       if (frame.type === "send_message") {
@@ -101,7 +103,7 @@ async function startScriptedHost(): Promise<ScriptedHost> {
         // ADR-0009: an anchored reply to an open item resolves it to done.
         if (frame.ref === item.anchor && item.status === "open") {
           item.status = "done";
-          send({ type: "inbox_upsert", item: { ...item } });
+          send({ type: "ping_upsert", ping: { ...item } });
         }
       }
     });
@@ -199,13 +201,13 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
 
       const screen = render(() => <App />);
 
-      await waitFor(() => expect(store.state.inbox).toHaveLength(1), { timeout: 10000 });
+      await waitFor(() => expect(store.state.pings).toHaveLength(1), { timeout: 10000 });
       // Tap the Tray shelf open (no more Inbox tab) — never auto-expanded.
       expect(store.state.trayExpanded).toBe(false);
       fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
       // Scope inbox queries to the Tray overlay: the desktop Pings rail is a
-      // second, always-mounted InboxView (CSS-hidden below the rail breakpoint
+      // second, always-mounted PingsView (CSS-hidden below the rail breakpoint
       // but present in the jsdom tree), so an unscoped card query matches twice.
       const tray = () => within(document.querySelector('[data-slot="tray-panel"]') as HTMLElement);
 
@@ -215,18 +217,18 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       ) as HTMLElement;
       expect(card.getAttribute("data-read")).toBe("false");
       expect(within(card).getByLabelText("Unread")).toBeTruthy();
-      expect(openUnreadCount(store.state.inbox, store.state.unreadOverrides)).toBe(1);
+      expect(openUnreadCount(store.state.pings, store.state.unreadOverrides)).toBe(1);
       expect(document.title).toContain("(1)");
 
-      // --- 2. Scrolled into view → read_item on the wire → muted + badge 0 ---
+      // --- 2. Scrolled into view → read_ping on the wire → muted + badge 0 ---
       await waitFor(
-        () => expect(host.received.some((f) => f.type === "read_item" && f.item_id === 1)).toBe(true),
+        () => expect(host.received.some((f) => f.type === "read_ping" && f.ping_id === 1)).toBe(true),
         { timeout: 10000 },
       );
-      await waitFor(() => expect(store.state.inbox[0].read).toBe(true), { timeout: 10000 });
+      await waitFor(() => expect(store.state.pings[0].read).toBe(true), { timeout: 10000 });
       expect(card.getAttribute("data-read")).toBe("true");
       expect(within(card).queryByLabelText("Unread")).toBeNull();
-      expect(openUnreadCount(store.state.inbox, store.state.unreadOverrides)).toBe(0);
+      expect(openUnreadCount(store.state.pings, store.state.unreadOverrides)).toBe(0);
       await waitFor(() => expect(document.title).toBe("hirsel"));
 
       // --- 3. Reply (quick reply) → ADR-0009: resolves into the Done section ---
@@ -238,9 +240,9 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       expect(host.received.some((f) => f.type === "send_message" && f.body === "all good")).toBe(true);
 
       // The anchored reply resolves the item to `done` — optimistically on send,
-      // reconciled by the host's inbox_upsert — so it leaves the open list and
+      // reconciled by the host's ping_upsert — so it leaves the open list and
       // the Tray falls back to its minimal "Done (1)" handle.
-      await waitFor(() => expect(store.state.inbox[0].status).toBe("done"), { timeout: 10000 });
+      await waitFor(() => expect(store.state.pings[0].status).toBe("done"), { timeout: 10000 });
       const panel = document.querySelector('[data-slot="tray-panel"]') as HTMLElement;
       await within(panel).findByText(/Done \(1\)/);
 
@@ -258,7 +260,7 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       // Grounded checklist for the report.
       // eslint-disable-next-line no-console
       console.log(
-        "[inbox-read-scenario] PASS — unread→read via view (read_item on wire), badge 1→0, " +
+        "[inbox-read-scenario] PASS — unread→read via view (read_ping on wire), badge 1→0, " +
           `reply resolved item to done (you: all good) into the Done section; frames: ${host.received
             .map((f) => f.type)
             .join(",")}`,

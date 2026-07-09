@@ -59,9 +59,11 @@ async function startScriptedHost(): Promise<ScriptedHost> {
     { id: 1, author: "agent", body: "Ready to deploy to prod?", ref: null, ts: now(), attachments: [] },
     { id: 2, author: "agent", body: "Branch is ready to merge.", ref: null, ts: now(), attachments: [] },
   ];
-  const inbox = [
+  const pings = [
     {
       id: 1,
+      name: "deploy-prod",
+      description: "Choose whether to deploy to production",
       content: "Deploy to prod?",
       anchor: 1,
       requires_response: true,
@@ -74,6 +76,8 @@ async function startScriptedHost(): Promise<ScriptedHost> {
     },
     {
       id: 2,
+      name: "merge-branch",
+      description: "Choose whether to merge the branch",
       content: "Merge the branch?",
       anchor: 2,
       requires_response: true,
@@ -92,7 +96,7 @@ async function startScriptedHost(): Promise<ScriptedHost> {
     ws.on("message", (raw: unknown) => {
       const frame = JSON.parse(String(raw));
       if (frame.type === "hello") {
-        ws.send(JSON.stringify({ type: "hello_ok", latest_msg_id: 2, messages: anchors, inbox }));
+        ws.send(JSON.stringify({ type: "hello_ok", latest_msg_id: 2, messages: anchors, pings }));
         return;
       }
       if (frame.type === "send_message") {
@@ -107,10 +111,10 @@ async function startScriptedHost(): Promise<ScriptedHost> {
         };
         ws.send(JSON.stringify({ type: "msg", message }));
         // ADR-0009: resolve the anchored item to `done`.
-        const target = inbox.find((i) => i.status === "open" && i.anchor === (frame.ref ?? null));
+        const target = pings.find((ping) => ping.status === "open" && ping.anchor === (frame.ref ?? null));
         if (target) {
           target.status = "done";
-          ws.send(JSON.stringify({ type: "inbox_upsert", item: { ...target } }));
+          ws.send(JSON.stringify({ type: "ping_upsert", ping: { ...target } }));
         }
       }
     });
@@ -178,14 +182,14 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       const screen = render(() => <App />);
 
       // Connected + inbox replayed: both scripted items are queued in the Tray.
-      await waitFor(() => expect(store.state.inbox).toHaveLength(2), { timeout: 10000 });
+      await waitFor(() => expect(store.state.pings).toHaveLength(2), { timeout: 10000 });
 
       // Tap the Tray shelf open (no more Inbox tab; never auto-expanded).
       expect(store.state.trayExpanded).toBe(false);
       fireEvent.click(screen.getByLabelText("Open Pings"));
       expect(store.state.trayExpanded).toBe(true);
       // Scope inbox queries to the Tray overlay: the desktop Pings rail is a
-      // second, always-mounted InboxView (hidden by CSS below the rail
+      // second, always-mounted PingsView (hidden by CSS below the rail
       // breakpoint, but present in the jsdom tree), so an unscoped query for a
       // card would match twice.
       const tray = () => within(document.querySelector('[data-slot="tray-panel"]') as HTMLElement);
@@ -222,9 +226,9 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       expect(byBody("merge it")).toMatchObject({ ref: 2 });
 
       // ADR-0009: both anchored replies resolved their items to `done`, so they
-      // have left the open list (reconciled from the host's inbox_upsert).
+      // have left the open list (reconciled from the host's ping_upsert).
       await waitFor(
-        () => expect(store.state.inbox.every((i) => i.status === "done")).toBe(true),
+        () => expect(store.state.pings.every((i) => i.status === "done")).toBe(true),
         { timeout: 10000 },
       );
       expect(store.state.pendingSends).toHaveLength(0);

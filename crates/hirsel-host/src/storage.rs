@@ -7,7 +7,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent};
 use hirsel_proto::{
-    Blob, ChatAuthor, ChatMessage, InboxItem, InboxStatus, ProcessInfo, ProcessKind, ProcessState,
+    Blob, ChatAuthor, ChatMessage, Ping, PingStatus, ProcessInfo, ProcessKind, ProcessState,
     QuickReply, ToolCallSummary,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
@@ -34,7 +34,7 @@ pub struct StoredBlob {
 pub struct HelloSnapshot {
     pub latest_msg_id: u64,
     pub messages: Vec<ChatMessage>,
-    pub inbox: Vec<InboxItem>,
+    pub pings: Vec<Ping>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,16 +126,6 @@ impl Storage {
                 position INTEGER NOT NULL,
                 PRIMARY KEY (message_id, position)
             );
-            CREATE TABLE IF NOT EXISTS inbox_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                anchor INTEGER NOT NULL REFERENCES chat_messages(id),
-                requires_response INTEGER NOT NULL,
-                quick_replies TEXT NOT NULL,
-                status TEXT NOT NULL,
-                read INTEGER NOT NULL DEFAULT 0,
-                ts TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS monitors (
                 id TEXT PRIMARY KEY,
                 cmd TEXT NOT NULL,
@@ -169,7 +159,7 @@ impl Storage {
         // Side-chat sessions are process-local and deliberately do not survive
         // a host restart, so any rows left by an unclean shutdown are orphaned.
         conn.execute("DELETE FROM side_chat_messages", [])?;
-        ensure_inbox_read_column(&conn)?;
+        migrate_pings_schema(&conn)?;
         ensure_chat_tool_calls_column(&conn)?;
         Ok(())
     }
@@ -374,7 +364,7 @@ impl Storage {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
         let messages = replay_messages_from_conn(&tx, last_seen_msg_id)?;
-        let inbox = inbox_snapshot_from_conn(&tx)?;
+        let pings = ping_snapshot_from_conn(&tx)?;
         let latest_msg_id = messages
             .last()
             .map(|message| message.id)
@@ -383,7 +373,7 @@ impl Storage {
         Ok(HelloSnapshot {
             latest_msg_id,
             messages,
-            inbox,
+            pings,
         })
     }
 
@@ -431,20 +421,27 @@ impl Storage {
         }
     }
 
-    pub async fn create_inbox_item(
+    pub async fn create_ping(
         &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
         content: impl Into<String>,
         anchor: u64,
         requires_response: bool,
         quick_replies: Vec<QuickReply>,
-    ) -> anyhow::Result<InboxItem> {
+    ) -> anyhow::Result<Ping> {
+        let name = name.into();
+        let description = description.into();
         let content = content.into();
+        validate_ping_fields(&name, &description)?;
         let ts = Utc::now();
         let encoded_replies = serde_json::to_string(&quick_replies)?;
         let conn = self.conn.lock().await;
         conn.execute(
             "
-            INSERT INTO inbox_items (
+            INSERT INTO pings (
+                name,
+                description,
                 content,
                 anchor,
                 requires_response,
@@ -453,9 +450,11 @@ impl Storage {
                 read,
                 ts
             )
-            VALUES (?1, ?2, ?3, ?4, 'open', 0, ?5)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', 0, ?7)
             ",
             params![
+                name,
+                description,
                 content,
                 anchor,
                 requires_response,
@@ -464,59 +463,99 @@ impl Storage {
             ],
         )?;
         let id = conn.last_insert_rowid() as u64;
-        Ok(InboxItem {
+        Ok(Ping {
             id,
+            name,
+            description,
             content,
             anchor,
             requires_response,
             quick_replies,
-            status: InboxStatus::Open,
+            status: PingStatus::Open,
             read: false,
             ts,
         })
     }
 
-    pub async fn archive_inbox_item(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
+    pub async fn resolve_ping(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let conn = self.conn.lock().await;
         let changed = conn.execute(
-            "UPDATE inbox_items SET status = 'archived' WHERE id = ?1",
-            params![item_id],
+            "UPDATE pings SET status = 'done' WHERE id = ?1",
+            params![ping_id],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        Ok(Some(get_inbox_item(&conn, item_id)?))
+        Ok(Some(get_ping(&conn, ping_id)?))
     }
 
-    pub async fn mark_read(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
+    pub async fn resolve_open_pings_for_anchor(&self, anchor: u64) -> anyhow::Result<Vec<Ping>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let ping_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM pings WHERE anchor = ?1 AND status = 'open' ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![anchor], |row| row.get::<_, u64>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if ping_ids.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        tx.execute(
+            "UPDATE pings SET status = 'done' WHERE anchor = ?1 AND status = 'open'",
+            params![anchor],
+        )?;
+        let pings = ping_ids
+            .into_iter()
+            .map(|ping_id| get_ping(&tx, ping_id))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(pings)
+    }
+
+    pub async fn mark_ping_read(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "UPDATE inbox_items SET read = 1 WHERE id = ?1 AND read = 0",
-            params![item_id],
+            "UPDATE pings SET read = 1 WHERE id = ?1 AND read = 0",
+            params![ping_id],
         )?;
-        get_inbox_item_optional(&conn, item_id).map_err(Into::into)
+        get_ping_optional(&conn, ping_id).map_err(Into::into)
     }
 
-    pub async fn inbox_snapshot(&self) -> anyhow::Result<Vec<InboxItem>> {
+    pub async fn ping_snapshot(&self) -> anyhow::Result<Vec<Ping>> {
         let conn = self.conn.lock().await;
-        inbox_snapshot_from_conn(&conn)
+        ping_snapshot_from_conn(&conn)
     }
 
-    pub async fn inbox_item(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
+    pub async fn ping(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let conn = self.conn.lock().await;
-        get_inbox_item_optional(&conn, item_id).map_err(Into::into)
+        get_ping_optional(&conn, ping_id).map_err(Into::into)
     }
 
-    pub async fn all_inbox(&self) -> anyhow::Result<Vec<InboxItem>> {
+    pub async fn mentioned_pings(&self, ping_ids: &[u64]) -> anyhow::Result<Vec<Ping>> {
+        let conn = self.conn.lock().await;
+        ping_ids
+            .iter()
+            .map(|ping_id| {
+                get_ping_optional(&conn, *ping_id)?
+                    .ok_or_else(|| anyhow::anyhow!("unknown mentioned ping: {ping_id}"))
+            })
+            .collect()
+    }
+
+    pub async fn all_pings(&self) -> anyhow::Result<Vec<Ping>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "
-            SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
-            FROM inbox_items
+            SELECT id, name, description, content, anchor, requires_response,
+                   quick_replies, status, read, ts
+            FROM pings
             ORDER BY id ASC
             ",
         )?;
-        let rows = stmt.query_map([], inbox_item_from_row)?;
+        let rows = stmt.query_map([], ping_from_row)?;
         collect_rows(rows)
     }
 
@@ -884,13 +923,13 @@ impl Storage {
                 DELETE FROM client_blobs;
                 DELETE FROM blobs;
                 DELETE FROM client_messages;
-                DELETE FROM inbox_items;
+                DELETE FROM pings;
                 DELETE FROM side_chat_messages;
                 DELETE FROM monitors;
                 DELETE FROM subagent_processes;
                 DELETE FROM chat_messages;
                 DELETE FROM sqlite_sequence
-                WHERE name IN ('chat_messages', 'inbox_items', 'side_chat_messages');
+                WHERE name IN ('chat_messages', 'pings', 'side_chat_messages');
                 ",
             )?;
         }
@@ -950,36 +989,38 @@ fn replay_messages_from_conn(
     Ok(messages)
 }
 
-fn inbox_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<InboxItem>> {
-    let mut items = Vec::new();
+fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
+    let mut pings = Vec::new();
     {
         let mut stmt = conn.prepare(
             "
-            SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
-            FROM inbox_items
+            SELECT id, name, description, content, anchor, requires_response,
+                   quick_replies, status, read, ts
+            FROM pings
             WHERE status = 'open'
             ORDER BY id ASC
             ",
         )?;
-        let rows = stmt.query_map([], inbox_item_from_row)?;
-        items.extend(collect_rows(rows)?);
+        let rows = stmt.query_map([], ping_from_row)?;
+        pings.extend(collect_rows(rows)?);
     }
     {
         let mut stmt = conn.prepare(
             "
-            SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
-            FROM inbox_items
-            WHERE status = 'archived'
+            SELECT id, name, description, content, anchor, requires_response,
+                   quick_replies, status, read, ts
+            FROM pings
+            WHERE status = 'done'
             ORDER BY id DESC
             LIMIT 20
             ",
         )?;
-        let rows = stmt.query_map([], inbox_item_from_row)?;
-        let mut archived = collect_rows(rows)?;
-        archived.reverse();
-        items.extend(archived);
+        let rows = stmt.query_map([], ping_from_row)?;
+        let mut done = collect_rows(rows)?;
+        done.reverse();
+        pings.extend(done);
     }
-    Ok(items)
+    Ok(pings)
 }
 
 fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
@@ -999,26 +1040,142 @@ fn validate_blob_ids(conn: &Connection, blob_ids: &[String]) -> anyhow::Result<(
     Ok(())
 }
 
-fn ensure_inbox_read_column(conn: &Connection) -> rusqlite::Result<()> {
-    if inbox_items_has_read_column(conn)? {
-        return Ok(());
-    }
-    conn.execute(
-        "ALTER TABLE inbox_items ADD COLUMN read INTEGER NOT NULL DEFAULT 0",
-        [],
-    )?;
-    Ok(())
+fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get(0),
+    )
 }
 
-fn inbox_items_has_read_column(conn: &Connection) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare("PRAGMA table_info(inbox_items)")?;
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for column in columns {
-        if column? == "read" {
+    for candidate in columns {
+        if candidate? == column {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
+    if table_exists(conn, "inbox_items")? && !table_exists(conn, "pings")? {
+        conn.execute("ALTER TABLE inbox_items RENAME TO pings", [])?;
+    }
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS pings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            content TEXT NOT NULL,
+            anchor INTEGER NOT NULL REFERENCES chat_messages(id),
+            requires_response INTEGER NOT NULL,
+            quick_replies TEXT NOT NULL,
+            status TEXT NOT NULL,
+            read INTEGER NOT NULL DEFAULT 0,
+            ts TEXT NOT NULL
+        );
+        ",
+    )?;
+    if !table_has_column(conn, "pings", "read")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN read INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "pings", "name")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "pings", "description")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "UPDATE pings SET status = 'done' WHERE status = 'archived'",
+        [],
+    )?;
+
+    let legacy = {
+        let mut stmt =
+            conn.prepare("SELECT id, content FROM pings WHERE name = '' OR description = ''")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, content) in legacy {
+        let name = derive_ping_name(&content);
+        let description = derive_ping_description(&content);
+        conn.execute(
+            "
+            UPDATE pings
+            SET name = CASE WHEN name = '' THEN ?2 ELSE name END,
+                description = CASE WHEN description = '' THEN ?3 ELSE description END
+            WHERE id = ?1
+            ",
+            params![id, name, description],
+        )?;
+    }
+    Ok(())
+}
+
+fn derive_ping_name(content: &str) -> String {
+    let name = content
+        .split_whitespace()
+        .take(4)
+        .flat_map(|word| word.chars().chain(std::iter::once('-')))
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let compact = name
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let fallback = if compact.is_empty() {
+        "legacy-ping"
+    } else {
+        &compact
+    };
+    fallback.chars().take(32).collect()
+}
+
+fn derive_ping_description(content: &str) -> String {
+    content
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or("Legacy ping")
+        .to_string()
+}
+
+fn validate_ping_fields(name: &str, description: &str) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("ping name is required");
+    }
+    if name.chars().count() > 32 {
+        anyhow::bail!("ping name must be at most 32 characters");
+    }
+    if description.trim().is_empty() {
+        anyhow::bail!("ping description is required");
+    }
+    if description.lines().count() != 1 {
+        anyhow::bail!("ping description must be one line");
+    }
+    Ok(())
 }
 
 fn ensure_chat_tool_calls_column(conn: &Connection) -> rusqlite::Result<()> {
@@ -1060,19 +1217,20 @@ fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage>
     Ok(message)
 }
 
-fn get_inbox_item(conn: &Connection, id: u64) -> rusqlite::Result<InboxItem> {
-    get_inbox_item_optional(conn, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+fn get_ping(conn: &Connection, id: u64) -> rusqlite::Result<Ping> {
+    get_ping_optional(conn, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
-fn get_inbox_item_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<InboxItem>> {
+fn get_ping_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<Ping>> {
     conn.query_row(
         "
-        SELECT id, content, anchor, requires_response, quick_replies, status, read, ts
-        FROM inbox_items
+        SELECT id, name, description, content, anchor, requires_response,
+               quick_replies, status, read, ts
+        FROM pings
         WHERE id = ?1
         ",
         params![id],
-        inbox_item_from_row,
+        ping_from_row,
     )
     .optional()
 }
@@ -1181,20 +1339,22 @@ fn side_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatM
     })
 }
 
-fn inbox_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
-    let replies: String = row.get(4)?;
-    let status: String = row.get(5)?;
-    let ts: String = row.get(7)?;
-    Ok(InboxItem {
+fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
+    let replies: String = row.get(6)?;
+    let status: String = row.get(7)?;
+    let ts: String = row.get(9)?;
+    Ok(Ping {
         id: row.get(0)?,
-        content: row.get(1)?,
-        anchor: row.get(2)?,
-        requires_response: row.get::<_, i64>(3)? != 0,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        content: row.get(3)?,
+        anchor: row.get(4)?,
+        requires_response: row.get::<_, i64>(5)? != 0,
         quick_replies: serde_json::from_str(&replies).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+            rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
         })?,
         status: status_from_str(&status)?,
-        read: row.get::<_, i64>(6)? != 0,
+        read: row.get::<_, i64>(8)? != 0,
         ts: parse_ts(&ts)?,
     })
 }
@@ -1220,10 +1380,10 @@ fn author_from_str(value: &str) -> rusqlite::Result<ChatAuthor> {
     }
 }
 
-fn status_from_str(value: &str) -> rusqlite::Result<InboxStatus> {
+fn status_from_str(value: &str) -> rusqlite::Result<PingStatus> {
     match value {
-        "open" => Ok(InboxStatus::Open),
-        "archived" => Ok(InboxStatus::Archived),
+        "open" => Ok(PingStatus::Open),
+        "done" => Ok(PingStatus::Done),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -1467,22 +1627,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archiving_an_inbox_item_twice_is_idempotent() {
+    async fn resolving_a_ping_twice_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
         let anchor = storage
             .append_chat(ChatAuthor::Agent, "anchor", None)
             .await
             .unwrap();
-        let item = storage
-            .create_inbox_item("Needs reply", anchor.id, true, Vec::new())
+        let ping = storage
+            .create_ping(
+                "needs-reply",
+                "Needs reply",
+                "Needs reply",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
             .await
             .unwrap();
 
-        let first = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
-        let second = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
-        assert_eq!(first.status, InboxStatus::Archived);
-        assert_eq!(second.status, InboxStatus::Archived);
+        let first = storage.resolve_ping(ping.id).await.unwrap().unwrap();
+        let second = storage.resolve_ping(ping.id).await.unwrap().unwrap();
+        assert_eq!(first.status, PingStatus::Done);
+        assert_eq!(second.status, PingStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn owner_reply_resolves_every_open_ping_for_its_anchor_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap();
+        let first = storage
+            .create_ping("first", "First", "First", anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+        let second = storage
+            .create_ping("second", "Second", "Second", anchor.id, false, Vec::new())
+            .await
+            .unwrap();
+        let other_anchor = storage
+            .append_chat(ChatAuthor::Agent, "other anchor", None)
+            .await
+            .unwrap();
+        let other = storage
+            .create_ping("other", "Other", "Other", other_anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+
+        let resolved = storage
+            .resolve_open_pings_for_anchor(anchor.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.iter().map(|ping| ping.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert!(resolved.iter().all(|ping| ping.status == PingStatus::Done));
+        assert!(
+            storage
+                .resolve_open_pings_for_anchor(anchor.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage.ping(other.id).await.unwrap().unwrap().status,
+            PingStatus::Open
+        );
     }
 
     #[tokio::test]
@@ -1621,7 +1835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbox_snapshot_includes_archived_items() {
+    async fn ping_snapshot_includes_done_pings() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
         let anchor = storage
@@ -1629,8 +1843,10 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let item = storage
-            .create_inbox_item(
+        let ping = storage
+            .create_ping(
+                "release-decision",
+                "Choose whether to release",
                 "question",
                 anchor,
                 true,
@@ -1642,18 +1858,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!item.read);
-        let archived = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
-        let snapshot = storage.inbox_snapshot().await.unwrap();
+        assert!(!ping.read);
+        let done = storage.resolve_ping(ping.id).await.unwrap().unwrap();
+        let snapshot = storage.ping_snapshot().await.unwrap();
 
-        assert_eq!(archived.status, InboxStatus::Archived);
-        assert!(!archived.read);
+        assert_eq!(done.status, PingStatus::Done);
+        assert!(!done.read);
         assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].status, InboxStatus::Archived);
+        assert_eq!(snapshot[0].status, PingStatus::Done);
     }
 
     #[tokio::test]
-    async fn mark_read_is_idempotent_and_preserved_by_archive() {
+    async fn mark_ping_read_is_idempotent_and_preserved_when_done() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
         let anchor = storage
@@ -1661,25 +1877,25 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let item = storage
-            .create_inbox_item("question", anchor, true, Vec::new())
+        let ping = storage
+            .create_ping("question", "Question", "question", anchor, true, Vec::new())
             .await
             .unwrap();
 
-        assert!(!item.read);
-        let read = storage.mark_read(item.id).await.unwrap().unwrap();
-        let read_again = storage.mark_read(item.id).await.unwrap().unwrap();
-        let archived = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
+        assert!(!ping.read);
+        let read = storage.mark_ping_read(ping.id).await.unwrap().unwrap();
+        let read_again = storage.mark_ping_read(ping.id).await.unwrap().unwrap();
+        let done = storage.resolve_ping(ping.id).await.unwrap().unwrap();
 
         assert!(read.read);
         assert!(read_again.read);
-        assert!(archived.read);
-        assert_eq!(archived.status, InboxStatus::Archived);
-        assert!(storage.mark_read(99_999).await.unwrap().is_none());
+        assert!(done.read);
+        assert_eq!(done.status, PingStatus::Done);
+        assert!(storage.mark_ping_read(99_999).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn open_adds_inbox_read_column_to_existing_databases() {
+    async fn open_migrates_legacy_ping_rows() {
         let dir = tempfile::tempdir().unwrap();
         {
             let conn = Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
@@ -1722,16 +1938,18 @@ mod tests {
         assert_eq!(legacy_chat.len(), 1);
         assert!(legacy_chat[0].tool_calls.is_empty());
 
-        let legacy = storage.all_inbox().await.unwrap();
+        let legacy = storage.all_pings().await.unwrap();
         assert_eq!(legacy.len(), 1);
         assert!(!legacy[0].read);
+        assert_eq!(legacy[0].name, "legacy-question");
+        assert_eq!(legacy[0].description, "legacy question");
 
-        let read = storage.mark_read(legacy[0].id).await.unwrap().unwrap();
+        let read = storage.mark_ping_read(legacy[0].id).await.unwrap().unwrap();
         assert!(read.read);
         drop(storage);
 
         let reopened = Storage::open(dir.path()).await.unwrap();
-        let persisted = reopened.all_inbox().await.unwrap();
+        let persisted = reopened.all_pings().await.unwrap();
         assert_eq!(persisted.len(), 1);
         assert!(persisted[0].read);
     }

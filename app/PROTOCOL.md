@@ -13,13 +13,15 @@ ChatMessage {
   ts: string               // RFC3339
 }
 
-InboxItem {
+Ping {
   id: u64,
+  name: string,            // short @-handle, <= 32 chars
+  description: string,     // one line
   content: string,         // markdown
-  anchor: u64,             // ChatMessage.id where the inbox tool was called
+  anchor: u64,             // ChatMessage.id where pings.send was called
   requires_response: bool,
   quick_replies: [ { value: string, label: string } ],   // may be empty
-  status: "open" | "archived",
+  status: "open" | "done",
   ts: string
 }
 ```
@@ -28,28 +30,28 @@ InboxItem {
 
 ```
 { "type": "hello", "token": string, "last_seen_msg_id": u64 | null }
-{ "type": "send_message", "client_id": string, "body": string, "ref": u64 | null }
-{ "type": "archive_item", "item_id": u64 }
+{ "type": "send_message", "client_id": string, "body": string, "ref": u64 | null, "mentions": [ping_id] }
+{ "type": "resolve_ping", "ping_id": u64 }
 ```
 
 - `hello` must be the first frame; anything else before it → close.
 - `client_id` is a client-generated idempotency key (uuid); host dedupes resends after reconnect.
-- Quick-reply tap = `send_message { body: value, ref: item.anchor }`. No separate message kind.
+- Quick-reply tap = `send_message { body: value, ref: ping.anchor }`. No separate message kind.
 
 ## Server → client
 
 ```
-{ "type": "hello_ok", "latest_msg_id": u64, "messages": [ChatMessage], "inbox": [InboxItem] }
+{ "type": "hello_ok", "latest_msg_id": u64, "messages": [ChatMessage], "pings": [Ping] }
 { "type": "msg", "message": ChatMessage }
 { "type": "agent_activity", "state": "thinking" | "idle", "text": string | null }
-{ "type": "inbox_upsert", "item": InboxItem }
+{ "type": "ping_upsert", "ping": Ping }
 { "type": "error", "detail": string }
 ```
 
-- `hello_ok.messages` = replay of everything after `last_seen_msg_id` (or last 200 if null). `inbox` = all open items + last 20 archived.
+- `hello_ok.messages` = replay of everything after `last_seen_msg_id` (or last 200 if null). `pings` = all open Pings + last 20 done Pings.
 - `msg` includes the owner's own messages echoed back with host-assigned id (client reconciles via `client_id`? No — v1 keeps it simple: client renders optimistically, replaces optimistic entry with the first `msg` whose author=owner and body matches; good enough single-player).
 - `agent_activity` is ephemeral (live turn preview from lash session observation); never stored, never replayed.
-- `inbox_upsert` is full-item upsert; archiving arrives as an upsert with status=archived.
+- `ping_upsert` is a full-Ping upsert; resolution arrives with `status: "done"`.
 
 ## Auth
 
@@ -111,30 +113,29 @@ next-turn; a stop control is visible while agent_activity=thinking.
 Queue affordance: bubbles for messages with mode=next_turn show a "queued" chip while a turn is
 active; chip clears when agent_activity returns to idle or the message's turn starts.
 
-## v1.3 — email-like inbox read state (2026-07-09)
+## v1.3 — Ping read state (2026-07-09)
 
 ```
-InboxItem gains "read": bool   (optional, default false)
+Ping gains "read": bool   (optional, default false)
 ```
 
 Client → server addition:
 ```
-{ "type": "read_item", "item_id": u64 }   // idempotent; host sets read=true, broadcasts inbox_upsert
+{ "type": "read_ping", "ping_id": u64 }   // idempotent; host sets read=true, broadcasts ping_upsert
 ```
 
-Semantics: `read` is Owner-side "seen" state, set automatically by the client when an item is
-viewed (email-like: visible in the viewport ~1.5s, or on first interaction with the card). It is
-orthogonal to *replied* (derived from anchor-refed owner messages) and to *status* (open|archived).
-The client flips `read=true` optimistically on send and the `inbox_upsert` reconciles it.
+Semantics: `read` is Owner-side "seen" state, set automatically by the client when a Ping is
+viewed (visible in the viewport ~1.5s, or on first interaction). It is orthogonal to *replied*
+(derived from Anchor-refed Owner messages) and to *status* (open|done).
+The client flips `read=true` optimistically on send and `ping_upsert` reconciles it.
 
 There is deliberately NO wire "unread" op: "Mark unread" is a client-only override the PWA keeps
 locally (it does not round-trip). A subsequent auto-read/"Mark read" clears the override and sends
-`read_item`.
+`read_ping`.
 
-UI language: `archived` is presented as **Deleted** (a trash section); the wire and storage keep
-`archived`. **Delete** (the destructive action) lives only in each card's ⋯ context menu.
+UI language: the terminal section is **Done**. There is one terminal state and no separate delete.
 
-Badge = count of **open + unread** items (was open + requires_response). `document.title` mirrors it.
+Badge = count of **open + unread** Pings (was open + requires_response). `document.title` mirrors it.
 `requires_response` no longer drives the badge; it keeps its visual accent and remains the only
 (future) push trigger.
 
@@ -157,8 +158,8 @@ ChatMessage gains "tool_calls": [ { "name": string, "ok": bool } ]   // default 
 
 Client-side semantics:
 
-- The **Processes tab** badge counts `state=="running"` processes only, independent of the Inbox
-  unread badge; `document.title` keeps Inbox semantics. Rows are grouped Running / Finished (terminal
+- The **Processes tab** badge counts `state=="running"` processes only, independent of the Ping
+  unread badge; `document.title` keeps Ping semantics. Rows are grouped Running / Finished (terminal
   states), newest `last_event_ts` first. Sub-agent rows show agent+model chips and expand to a full
   view with an **"Ask to stop"** action — this switches to Chat and pre-fills the composer with
   `stop process <id> (<label snippet>)`. Interrupts route through the Agent by design; there is no
@@ -222,9 +223,9 @@ its wire shape is byte-identical to v1.5 (the key is omitted, never null).
 
 Client → server:
 ```
-{ "type": "open_side_chat", "client_id": string, "item_id": u64 }
-  → { "type": "side_chat_open", "sc": string, "item_id": u64, "messages": [ChatMessage] }
-  // idempotent per item: if the item already has a live side chat the host answers with the SAME
+{ "type": "open_side_chat", "client_id": string, "ping_id": u64 }
+  → { "type": "side_chat_open", "sc": string, "ping_id": u64, "messages": [ChatMessage] }
+  // idempotent per Ping: if the Ping already has a live side chat the host answers with the SAME
   // sc and the transcript so far; otherwise a fresh scope ("side:<uuid>") with messages: [] —
   // the seed lives in the side session's prompt layer, not as transcript rows.
 send_message { ..., "sc" } / cancel_turn { "sc" }  → routed to that side session
@@ -232,17 +233,17 @@ send_message { ..., "sc" } / cancel_turn { "sc" }  → routed to that side sessi
   → { "type": "conclusion_draft", "sc", "text" }   // NOT appended to the side transcript
 { "type": "confirm_conclusion", "sc", "text" }     // owner-edited final text
   → host posts the Owner's anchor-refed reply in MAIN chat (normal msg flow, normal agent enqueue,
-    idempotency client_id "side-conclude:<sc>"), archives the item (IDEMPOTENT — a no-op if the
-    Agent already archived it), discards the side session + transcript
+    idempotency client_id "side-conclude:<sc>"), auto-resolves the Ping through the shared reply
+    path (IDEMPOTENT — a no-op if already done), and discards the side session + transcript
   → { "type": "side_chat_closed", "sc" }
-{ "type": "discard_side_chat", "sc" } → side_chat_closed (no conclusion, item stays open)
+{ "type": "discard_side_chat", "sc" } → side_chat_closed (no conclusion, Ping stays open)
 ```
 
 Server → client:
 ```
-hello_ok gains "side_chats": [ { "sc": string, "item_id": u64 } ]   // default []; live side chats
+hello_ok gains "side_chats": [ { "sc": string, "ping_id": u64 } ]   // default []; live side chats
                                                                     // for reconnect + scoped replay
-{ "type": "side_chat_open", "sc", "item_id", "messages": [ChatMessage] }
+{ "type": "side_chat_open", "sc", "ping_id", "messages": [ChatMessage] }
 { "type": "conclusion_draft", "sc", "text" }
 { "type": "side_chat_closed", "sc" }
 ```
@@ -251,7 +252,16 @@ Side transcripts persist only while the side chat lives (they survive host-side 
 message ids are a separate sequence from main chat) and are deleted on close (conclude/discard/TTL);
 they never survive a host restart. Side sessions: one ephemeral lash session per side chat
 (in-memory store, never the durable session store), seeded at open with the agent prompt + a
-host-rendered context block (the Inbox Item, its Anchor message, and the last ~20 main-chat
+host-rendered context block (the Ping, its Anchor message, and the last ~20 main-chat
 messages), full tool access, NO process/timer wakes routed to them (wakes stay main-session only).
 Stale side chats are silently closed (`side_chat_closed`) after `HIRSEL_SIDECHAT_TTL_SECS`
 (default 86400) without activity.
+
+## v2.1 — Pings: names, descriptions, and mentions (ADR-0009 addendum) (2026-07-10)
+
+`Ping.name` and `Ping.description` are required on the wire. `name` is the short `@` handle and is
+limited to 32 characters; `description` is one line. `send_message` accepts optional
+`mentions: [ping_id]`. The host validates every id and appends each Ping's name, description,
+status, response requirement, and Anchor to the Agent turn context. Mentions are lifecycle-neutral:
+only an Owner message whose `ref` equals an open Ping's Anchor moves it to done and emits
+`ping_upsert`.

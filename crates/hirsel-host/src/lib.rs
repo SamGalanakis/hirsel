@@ -100,8 +100,10 @@ impl AppState {
         body: String,
         anchor: Option<u64>,
         attachments: Vec<String>,
+        mentions: Vec<u64>,
         mode: SendMode,
     ) -> anyhow::Result<OwnerSubmission> {
+        let mentioned_pings = self.storage.mentioned_pings(&mentions).await?;
         let (message, inserted) = self
             .storage
             .append_owner_message(&client_id, body, anchor, &attachments)
@@ -116,6 +118,7 @@ impl AppState {
                     body: message.body.clone(),
                     anchor: message.r#ref,
                     attachments: stored_attachments,
+                    mentioned_pings,
                     mode,
                 })
                 .await
@@ -133,6 +136,11 @@ impl AppState {
                 message: message.clone(),
                 sc: None,
             });
+            if let Some(anchor) = message.r#ref {
+                for ping in self.storage.resolve_open_pings_for_anchor(anchor).await? {
+                    self.broadcast(HostToClient::PingUpsert { ping });
+                }
+            }
         }
         Ok(OwnerSubmission {
             client_id,
@@ -309,7 +317,7 @@ pub fn router_from_state(state: AppState) -> Router {
 mod tests {
     use std::time::Duration;
 
-    use hirsel_proto::{ChatAuthor, SendMode};
+    use hirsel_proto::{ChatAuthor, PingStatus, SendMode};
 
     use super::*;
     use crate::config::{AgentMode, Config, DriverMode, ProviderMode};
@@ -326,6 +334,7 @@ mod tests {
                 "slow:0.4".to_string(),
                 None,
                 Vec::new(),
+                Vec::new(),
                 SendMode::Send,
             )
             .await
@@ -337,6 +346,7 @@ mod tests {
                 "queued".to_string(),
                 "pong".to_string(),
                 None,
+                Vec::new(),
                 Vec::new(),
                 SendMode::NextTurn,
             )
@@ -391,6 +401,7 @@ mod tests {
                 "slow:5".to_string(),
                 None,
                 Vec::new(),
+                Vec::new(),
                 SendMode::Send,
             )
             .await
@@ -425,6 +436,7 @@ mod tests {
                 "__hirsel_test_enqueue_error__".to_string(),
                 None,
                 Vec::new(),
+                Vec::new(),
                 SendMode::Send,
             )
             .await
@@ -438,6 +450,95 @@ mod tests {
                 .is_err(),
             "failed enqueue must not publish a sent message"
         );
+    }
+
+    #[tokio::test]
+    async fn owner_reply_resolves_ping_and_broadcasts_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Choose", None)
+            .await
+            .unwrap();
+        let ping = state
+            .storage
+            .create_ping(
+                "choose-release",
+                "Choose whether to release",
+                "Choose",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        state
+            .submit_owner_message(
+                "reply-1".to_string(),
+                "Ship it".to_string(),
+                Some(anchor.id),
+                Vec::new(),
+                Vec::new(),
+                SendMode::Send,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.storage.ping(ping.id).await.unwrap().unwrap().status,
+            PingStatus::Done
+        );
+        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+            event,
+            HostToClient::PingUpsert { ping: update }
+                if update.id == ping.id && update.status == PingStatus::Done
+        )));
+    }
+
+    #[tokio::test]
+    async fn mentioning_a_ping_never_resolves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Status", None)
+            .await
+            .unwrap();
+        let ping = state
+            .storage
+            .create_ping(
+                "status-check",
+                "Check the current status",
+                "Status",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        state
+            .submit_owner_message(
+                "mention-1".to_string(),
+                "What is happening?".to_string(),
+                None,
+                Vec::new(),
+                vec![ping.id],
+                SendMode::Send,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.storage.ping(ping.id).await.unwrap().unwrap().status,
+            PingStatus::Open
+        );
+        assert!(state.broadcast_log.recent().iter().all(|event| !matches!(
+            event,
+            HostToClient::PingUpsert { ping: update } if update.id == ping.id
+        )));
     }
 
     async fn read_until_agent_activity(

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  isItemRead,
+  isPingRead,
   isResolvedStatus,
   latestReplyForAnchor,
   openUnreadCount,
   partitionProcesses,
   runningProcessCount,
 } from "./selectors";
-import type { InboxItem, ProcessInfo } from "../protocol";
+import type { Ping, ProcessInfo } from "../protocol";
 import type { DisplayMessage } from "./types";
 
 function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
@@ -36,9 +36,11 @@ function ownerMsg(overrides: Partial<DisplayMessage> = {}): DisplayMessage {
   };
 }
 
-function item(overrides: Partial<InboxItem> = {}): InboxItem {
+function item(overrides: Partial<Ping> = {}): Ping {
   return {
     id: 1,
+    name: "test-ping",
+    description: "Test Ping",
     content: "",
     anchor: 1,
     requires_response: false,
@@ -49,18 +51,18 @@ function item(overrides: Partial<InboxItem> = {}): InboxItem {
   };
 }
 
-describe("isItemRead (effective read = wire read minus local unread override)", () => {
+describe("isPingRead (effective read = wire read minus local unread override)", () => {
   it("is false when the wire read flag is absent/false", () => {
-    expect(isItemRead(item({ read: false }), [])).toBe(false);
-    expect(isItemRead(item({ read: undefined }), [])).toBe(false);
+    expect(isPingRead(item({ read: false }), [])).toBe(false);
+    expect(isPingRead(item({ read: undefined }), [])).toBe(false);
   });
 
   it("is true when read=true and no override", () => {
-    expect(isItemRead(item({ id: 7, read: true }), [])).toBe(true);
+    expect(isPingRead(item({ id: 7, read: true }), [])).toBe(true);
   });
 
   it("is false when read=true but the id is in the unread override set", () => {
-    expect(isItemRead(item({ id: 7, read: true }), [7])).toBe(false);
+    expect(isPingRead(item({ id: 7, read: true }), [7])).toBe(false);
   });
 });
 
@@ -72,7 +74,7 @@ describe("openUnreadCount (email-like badge)", () => {
           item({ id: 1, requires_response: true, status: "open", read: false }),
           item({ id: 2, requires_response: false, status: "open", read: false }),
           item({ id: 3, requires_response: true, status: "open", read: true }), // read → excluded
-          item({ id: 4, requires_response: true, status: "archived", read: false }), // deleted → excluded
+          item({ id: 4, requires_response: true, status: "done", read: false }), // deleted → excluded
         ],
         [],
       ),

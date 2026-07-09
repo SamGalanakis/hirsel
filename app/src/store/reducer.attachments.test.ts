@@ -97,7 +97,7 @@ describe("msg_removed tombstone", () => {
         type: "hello_ok",
         latest_msg_id: 4,
         messages: [ownerMsg(4, "should stay gone")],
-        inbox: [],
+        pings: [],
       },
     });
     expect(after.messages.find((m) => m.id === 4)).toBeUndefined();

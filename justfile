@@ -68,13 +68,19 @@ emu:
     fi
 
     if ! pgrep -f 'emulator.*-avd hirsel-emu.*-port 5554' >/dev/null; then
-        if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-            echo "error: /dev/kvm is not accessible; re-login after joining kvm, or run: sg kvm -c 'just emu'" >&2
+        emulator_command="emulator -avd hirsel-emu -port 5554 -no-window -no-audio -gpu swiftshader_indirect -no-boot-anim -no-metrics"
+        if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+            nohup setsid $emulator_command >"$log" 2>&1 </dev/null &
+        elif id -nG "$USER" | tr ' ' '\n' | rg -qx kvm; then
+            # The account was added to kvm after this login began. Launch in a
+            # detached kvm-group session; future logins take the direct branch.
+            sg kvm -c "setsid -f $emulator_command >'$log' 2>&1 </dev/null"
+        else
+            echo "error: /dev/kvm is not accessible and $USER is not in the kvm group" >&2
             exit 1
         fi
-        nohup emulator -avd hirsel-emu -port 5554 -no-window -no-audio \
-            -gpu swiftshader_indirect -no-boot-anim -no-metrics >"$log" 2>&1 &
-        echo $! >"$runtime_dir/emulator.pid"
+        sleep 1
+        pgrep -n -f 'emulator.*-avd hirsel-emu.*-port 5554' >"$runtime_dir/emulator.pid" || true
     fi
 
     deadline=$((SECONDS + 180))
@@ -109,10 +115,10 @@ emu-stop:
         exit 0
     fi
 
-    deadline=$((SECONDS + 30))
+    deadline=$((SECONDS + 60))
     while pgrep -f 'emulator.*-avd hirsel-emu.*-port 5554' >/dev/null; do
         if (( SECONDS >= deadline )); then
-            echo "error: emulator did not stop within 30s" >&2
+            echo "error: emulator did not stop within 60s" >&2
             exit 1
         fi
         sleep 1
@@ -167,6 +173,8 @@ emu-launch package:
     timeout 30 adb -s emulator-5554 shell am start -W -n "$component"
 
 emu-tap x y:
+    #!/usr/bin/env bash
+    set -euo pipefail
     source /workspace/android/env.sh
     timeout 10 adb -s emulator-5554 shell input tap "$1" "$2"
 
@@ -179,10 +187,14 @@ emu-text text:
     timeout 10 adb -s emulator-5554 shell input text "$text"
 
 emu-key keyevent:
+    #!/usr/bin/env bash
+    set -euo pipefail
     source /workspace/android/env.sh
     timeout 10 adb -s emulator-5554 shell input keyevent "$1"
 
 emu-swipe x1 y1 x2 y2:
+    #!/usr/bin/env bash
+    set -euo pipefail
     source /workspace/android/env.sh
     timeout 10 adb -s emulator-5554 shell input swipe "$1" "$2" "$3" "$4" 300
 

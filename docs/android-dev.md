@@ -63,7 +63,7 @@ seconds and has a hard 180-second timeout. If the device is already ready, the
 recipe reuses it and returns immediately. Emulator logs and the PID live under
 `/tmp/hirsel-emu/`.
 
-`just emu-stop` asks the emulator to shut down, waits up to 30 seconds, and
+`just emu-stop` asks the emulator to shut down, waits up to 60 seconds, and
 prints `stopped`. Calling it when the AVD is already down is safe.
 
 ## Recipe reference
@@ -272,9 +272,10 @@ Reference sources: [AGP releases](https://developer.android.com/build/releases/g
 ## Failure modes and recovery
 
 - **`/dev/kvm is not accessible`**: `sam` belongs to the `kvm` group, but an
-  already-open login may not have refreshed supplementary groups. Re-login, or
-  run `sg kvm -c 'just emu'` for the current session. Confirm with
-  `source /workspace/android/env.sh && emulator -accel-check`.
+  already-open login may not have refreshed supplementary groups. `just emu`
+  detects that case and launches through a detached `sg kvm` session; future
+  logins use KVM directly. Confirm the temporary path with
+  `sg kvm -c '. /workspace/android/env.sh && emulator -accel-check'`.
 - **Boot timeout after 180 seconds**: inspect
   `/tmp/hirsel-emu/emulator.log`, run `just emu-stop`, then retry. Messages about
   unsupported nested virtualization or permission-denied KVM indicate a VM host
@@ -294,3 +295,8 @@ Reference sources: [AGP releases](https://developer.android.com/build/releases/g
   `just emu-key MENU` if Android has slept.
 - **Maestro cannot find a device**: verify `adb devices` contains exactly
   `emulator-5554 device`, then pass `--device emulator-5554` explicitly.
+- **SDK XML version warning**: command-line tools 20 can print a non-fatal
+  warning that it understands SDK XML through version 3 while the current
+  repository contains version 4 metadata. The pinned packages still install
+  and list correctly; revisit this only when Google publishes a newer stable
+  command-line tools archive or an SDK operation actually fails.

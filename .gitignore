@@ -39,3 +39,13 @@ Thumbs.db
 *.swp
 *.swo
 .playwright-cli/
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+captures/
+.cxx/
+**/.externalNativeBuild/

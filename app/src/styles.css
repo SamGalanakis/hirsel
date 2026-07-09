@@ -91,6 +91,18 @@
   color-scheme: dark;
 }
 
+/* Named layout breakpoints (desktop-shell). Two thresholds, mobile-first, so
+   the codebase has one breakpoint vocabulary instead of scattered `min-[Npx]:`
+   literals:
+     `split` — two-pane capable: the side-chat split may appear;
+     `rail`  — room for the chat measure + a standing Pings rail.
+   Layout keys off width only (these); pointer/keyboard behaviour stays on the
+   single `(pointer: coarse)` probe in useTextInput. */
+@theme {
+  --breakpoint-split: 900px;
+  --breakpoint-rail: 1100px;
+}
+
 @theme inline {
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);

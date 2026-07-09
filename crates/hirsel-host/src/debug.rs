@@ -22,6 +22,11 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/reset", post(reset))
         .route("/debug/upload", post(upload_blob))
         .route("/debug/owner-message", post(owner_message))
+        .route("/debug/open-side-chat", post(open_side_chat))
+        .route("/debug/side-message", post(side_message))
+        .route("/debug/conclude", post(conclude))
+        .route("/debug/confirm-conclusion", post(confirm_conclusion))
+        .route("/debug/side-chats", get(side_chats))
         .route("/debug/read-item", post(read_item))
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
@@ -65,6 +70,28 @@ struct ReadItemRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct OpenSideChatRequest {
+    item_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SideMessageRequest {
+    sc: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConcludeRequest {
+    sc: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfirmConclusionRequest {
+    sc: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateMonitorRequest {
     cmd: String,
     #[serde(default)]
@@ -103,6 +130,25 @@ struct CreateMonitorResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct OpenSideChatResponse {
+    sc: String,
+    item_id: u64,
+    messages: Vec<ChatMessage>,
+    resumed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConclusionResponse {
+    sc: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SideChatsResponse {
+    side_chats: Vec<crate::side_chat::SideChatView>,
+}
+
+#[derive(Debug, Serialize)]
 struct BroadcastsResponse {
     events: Vec<HostToClient>,
 }
@@ -116,10 +162,65 @@ struct HealthResponse {
 }
 
 async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
+    state.side_chats.discard_all().await;
     state.storage.reset().await?;
     state.processes.reset()?;
     state.broadcast_log.clear();
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn open_side_chat(
+    State(state): State<AppState>,
+    Json(request): Json<OpenSideChatRequest>,
+) -> Result<Json<OpenSideChatResponse>, DebugError> {
+    let (sc, messages, resumed) = state.side_chats.open(request.item_id).await?;
+    state.broadcast(HostToClient::SideChatOpen {
+        sc: sc.clone(),
+        item_id: request.item_id,
+        messages: messages.clone(),
+    });
+    Ok(Json(OpenSideChatResponse {
+        sc,
+        item_id: request.item_id,
+        messages,
+        resumed,
+    }))
+}
+
+async fn side_message(
+    State(state): State<AppState>,
+    Json(request): Json<SideMessageRequest>,
+) -> Result<Json<serde_json::Value>, DebugError> {
+    state.side_chats.send(&request.sc, request.body).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn conclude(
+    State(state): State<AppState>,
+    Json(request): Json<ConcludeRequest>,
+) -> Result<Json<ConclusionResponse>, DebugError> {
+    let text = state.side_chats.conclude(&request.sc).await?;
+    Ok(Json(ConclusionResponse {
+        sc: request.sc,
+        text,
+    }))
+}
+
+async fn confirm_conclusion(
+    State(state): State<AppState>,
+    Json(request): Json<ConfirmConclusionRequest>,
+) -> Result<Json<serde_json::Value>, DebugError> {
+    state
+        .side_chats
+        .confirm(&request.sc, request.text, &state)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn side_chats(State(state): State<AppState>) -> Result<Json<SideChatsResponse>, DebugError> {
+    Ok(Json(SideChatsResponse {
+        side_chats: state.side_chats.views().await?,
+    }))
 }
 
 async fn owner_message(

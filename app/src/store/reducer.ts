@@ -66,13 +66,27 @@ function trimTrailingProse(events: TimelineEvent[], body: string): TimelineEvent
 }
 
 /** Freeze the just-finished turn's timeline onto the committing message id,
- * dropping the oldest retained turn once over the session cap. */
+ * dropping the oldest retained turn once over the session cap.
+ *
+ * `turnDetails` has the identical `Record<key, TimelineEvent[]>` shape as
+ * `sideChats` and shares its latent hazard (see cloneSideChat/setSideChat's
+ * notes): `details` may be a live reactive store proxy, so a plain
+ * `{ ...details, [msgId]: events }` copies the *other* entries' array
+ * references verbatim rather than cloning their contents. Feeding one of
+ * those live references back into a store write — even nested inside an
+ * otherwise-fresh wrapper object — is what caused sideChats' same-length
+ * array replacement to intermittently land empty. Every entry (the new one
+ * and every carried-over one) gets a fresh array here for the same reason. */
 function retainTurnDetails(
   details: Record<number, TimelineEvent[]>,
   msgId: number,
   events: TimelineEvent[],
 ): Record<number, TimelineEvent[]> {
-  const next: Record<number, TimelineEvent[]> = { ...details, [msgId]: events };
+  const next: Record<number, TimelineEvent[]> = {};
+  for (const [key, existing] of Object.entries(details)) {
+    next[Number(key)] = [...existing];
+  }
+  next[msgId] = [...events];
   const ids = Object.keys(next).map(Number);
   if (ids.length > TURN_DETAILS_LIMIT) {
     for (const id of ids.sort((a, b) => a - b).slice(0, ids.length - TURN_DETAILS_LIMIT)) {

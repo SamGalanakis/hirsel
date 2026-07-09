@@ -170,3 +170,47 @@ describe("turn details: trailing-prose duplication trim", () => {
     expect(s.turnDetails[7]).toBeUndefined();
   });
 });
+
+describe("turn details: clone-through hardening (mirrors sideChats' fix)", () => {
+  function agentMsgBody(id: number, body: string): ChatMessage {
+    return { id, author: "agent", body, ref: null, ts: `2026-07-10T00:00:0${id}Z`, tool_calls: [] };
+  }
+
+  it("retains a turn's events as a fresh array, not the same live turnEvents reference", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    const liveTurnEvents = s.turnEvents;
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(7, "done") } });
+
+    expect(s.turnDetails[7]).toEqual(liveTurnEvents);
+    expect(s.turnDetails[7]).not.toBe(liveTurnEvents);
+  });
+
+  it("clones every OTHER retained entry's array on a later commit rather than aliasing it", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(7, "first") } });
+    const firstEntryAfterFirstCommit = s.turnDetails[7];
+
+    s = ev(s, 2, { kind: "tool_start", id: "t2", name: "grep", summary: "foo" });
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(8, "second") } });
+    const firstEntryAfterSecondCommit = s.turnDetails[7];
+
+    // Content-equal (message 7's frozen timeline never changes)...
+    expect(firstEntryAfterSecondCommit).toEqual(firstEntryAfterFirstCommit);
+    // ...but NOT the same reference: a fresh clone (rather than carrying over
+    // the exact prior array) is what makes a subsequent store write safe —
+    // see retainTurnDetails' note in reducer.ts.
+    expect(firstEntryAfterSecondCommit).not.toBe(firstEntryAfterFirstCommit);
+  });
+
+  it("evicts the oldest retained turn once over the session cap, keeping the newest ones fresh", () => {
+    let s = initialState();
+    for (let i = 1; i <= 51; i++) {
+      s = ev(s, i, { kind: "tool_start", id: `t${i}`, name: "read_file", summary: `${i}.ts` });
+      s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(i, `reply ${i}`) } });
+    }
+    const ids = Object.keys(s.turnDetails).map(Number).sort((a, b) => a - b);
+    expect(ids).toHaveLength(50);
+    expect(ids[0]).toBe(2); // id 1 evicted, oldest of the 50 retained is 2.
+    expect(s.turnDetails[51]).toBeTruthy();
+  });
+});

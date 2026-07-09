@@ -1,4 +1,4 @@
-import { ChevronLeft } from "lucide-solid";
+import { ChevronLeft, X } from "lucide-solid";
 import { onCleanup, onMount, Show } from "solid-js";
 import { setProcessesOpen, state } from "../../store/store";
 import { ProcessesView } from "./ProcessesView";
@@ -13,32 +13,43 @@ function ProcessesPanel() {
   });
 
   return (
-    <div class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]">
-      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
+    // Phone: a full-screen `fixed` sheet with a back affordance (unchanged).
+    // Desktop (`rail`): a right-docked inspector `absolute` inside ChatView's
+    // `relative` row — it overlays the right region (Pings rail / Side Chat)
+    // only, never the chat measure on the left, and its bounded width keeps the
+    // ProcessRow status pill next to its label instead of flung across the void.
+    <div
+      data-slot="processes-panel"
+      class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
+        rail:absolute rail:left-auto rail:z-30 rail:w-[420px] rail:border-l rail:border-border rail:pb-0"
+    >
+      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:pt-3">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
           onClick={() => setProcessesOpen(false)}
-          aria-label="Back to Chat"
+          aria-label="Close Processes"
         >
-          <ChevronLeft class="size-5" aria-hidden="true" />
-          Chat
+          <ChevronLeft class="size-5 rail:hidden" aria-hidden="true" />
+          <X class="hidden size-4 rail:block" aria-hidden="true" />
+          <span class="rail:hidden">Chat</span>
         </button>
-        <h1 class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em]">
+        <h1 class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em] rail:text-left">
           Processes
         </h1>
-        {/* Balances the back button so the title stays visually centered. */}
-        <span class="w-[3.25rem]" aria-hidden="true" />
+        {/* Balances the back button so the phone title stays visually centered;
+            harmless at rail width where the title left-aligns. */}
+        <span class="w-[3.25rem] rail:hidden" aria-hidden="true" />
       </header>
       <ProcessesView />
     </div>
   );
 }
 
-/** Full-screen panel replacing the old Processes tab (spec [P1]: "full-screen
- * panel/sheet with a back affordance — keep it simple"). Covers the whole app
- * (header included) rather than sharing it, since there is no longer a tab
- * strip to hold a persistent title — the panel supplies its own. */
+/** Processes surface (spec [P1] / desktop-shell): a full-screen sheet with a
+ * back affordance on phone; a right-docked inspector over the right region on
+ * desktop. Mounted inside ChatView's row so the desktop dock resolves against
+ * the frame, not the viewport (ultrawide margins stay clear of it). */
 export function ProcessesSheet() {
   return (
     <Show when={state.processesOpen}>

@@ -38,5 +38,5 @@ export function useTextInput(maxHeightPx: number) {
     queueMicrotask(() => node.setSelectionRange(node.value.length, node.value.length));
   };
 
-  return { value, setValue, coarse, setRef, focus, caretToEnd, el: () => el };
+  return { value, setValue, coarse, setRef, focus, caretToEnd };
 }

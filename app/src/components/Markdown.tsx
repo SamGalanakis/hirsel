@@ -71,7 +71,6 @@ function renderInline(text: string): JSX.Element[] {
       if (part) nodes.push(part);
     });
   };
-  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec loop
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > last) pushText(text.slice(last, match.index));
     const token = match[0];

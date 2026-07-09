@@ -28,7 +28,6 @@ export interface AttachmentsController {
   /** Upload everything staged; resolves with blobs in order, throws if any
    * fail (leaving the failed chips in an error state for retry). */
   uploadAll: () => Promise<Blob[]>;
-  hasUploading: () => boolean;
 }
 
 /** Owns the composer's staged attachments and the upload orchestration. Created
@@ -109,10 +108,6 @@ export function createComposerAttachments(): AttachmentsController {
     return blobs;
   }
 
-  function hasUploading(): boolean {
-    return files().some((pf) => state.uploads.find((u) => u.clientId === pf.clientId)?.state === "uploading");
-  }
-
   function clear(): void {
     for (const x of files()) if (x.previewUrl) URL.revokeObjectURL(x.previewUrl);
     setFiles([]);
@@ -123,5 +118,5 @@ export function createComposerAttachments(): AttachmentsController {
     for (const x of files()) if (x.previewUrl) URL.revokeObjectURL(x.previewUrl);
   });
 
-  return { files, addFiles, removeFile, retry, clear, uploadAll, hasUploading };
+  return { files, addFiles, removeFile, retry, clear, uploadAll };
 }

@@ -1,5 +1,5 @@
 import { ArrowUp, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
@@ -7,6 +7,7 @@ import { formatBytes } from "../../lib/format";
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
+import { useTextInput } from "./useTextInput";
 import {
   Attachment,
   AttachmentAction,
@@ -43,34 +44,17 @@ function snippet(body: string): string {
  * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
  * (long-press = queue). Handles attachment staging (paperclip + paste). */
 export function Composer(props: Props) {
-  const [value, setValue] = createSignal("");
-  const [coarse, setCoarse] = createSignal(false);
+  // Shared input mechanics (value signal, coarse-pointer detection, auto-grow)
+  // with the Inbox inline ReplyInput.
+  const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX);
   const [sending, setSending] = createSignal(false);
-  let textareaRef: HTMLTextAreaElement | undefined;
   let fileInputRef: HTMLInputElement | undefined;
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressed = false;
 
-  onMount(() => {
-    const mq = window.matchMedia("(pointer: coarse)");
-    setCoarse(mq.matches);
-    const onChange = (e: MediaQueryListEvent) => setCoarse(e.matches);
-    mq.addEventListener?.("change", onChange);
-    onCleanup(() => mq.removeEventListener?.("change", onChange));
-  });
-
-  // Auto-grow the textarea up to a cap whenever the draft changes.
-  createEffect(() => {
-    value();
-    const el = textareaRef;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT_PX)}px`;
-  });
-
   // Focus the composer when a reply is pre-quoted into it.
   createEffect(() => {
-    if (props.replyingTo) textareaRef?.focus();
+    if (props.replyingTo) focus();
   });
 
   const uploadState = (clientId: string): AttachmentState => {
@@ -101,7 +85,7 @@ export function Composer(props: Props) {
     props.attachments.clear();
     setValue("");
     if (props.replyingTo) props.onCancelReply();
-    textareaRef?.focus();
+    focus();
   }
 
   function handleKeyDown(e: KeyboardEvent) {
@@ -119,7 +103,7 @@ export function Composer(props: Props) {
       if (last !== null) {
         e.preventDefault();
         setValue(last);
-        queueMicrotask(() => textareaRef?.setSelectionRange(last.length, last.length));
+        caretToEnd();
       }
       return;
     }
@@ -277,7 +261,7 @@ export function Composer(props: Props) {
           <Paperclip class="size-5" />
         </Button>
         <Textarea
-          ref={textareaRef}
+          ref={setRef}
           rows={1}
           class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
           placeholder="Message the Agent…"

@@ -1,4 +1,4 @@
-import { ArrowUp, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
+import { ArrowUp, AtSign, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
@@ -7,6 +7,8 @@ import { formatBytes } from "../../lib/format";
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
+import { resolveMentionIds } from "./mentions";
+import { useMentionPicker } from "./useMentionPicker";
 import { useTextInput } from "./useTextInput";
 import {
   Attachment,
@@ -32,7 +34,13 @@ interface Props {
   /** One-shot composer pre-fill (v1.4 "Ask to stop"); consumed once then cleared. */
   prefill?: string | null;
   onConsumePrefill?: () => void;
-  onSend: (body: string, ref: number | null, mode: SendMode, blobs: Blob[]) => void;
+  onSend: (
+    body: string,
+    ref: number | null,
+    mode: SendMode,
+    blobs: Blob[],
+    mentions: number[],
+  ) => void;
   onStop: () => void;
   getLastOwnerBody: () => string | null;
 }
@@ -52,8 +60,18 @@ export function Composer(props: Props) {
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX);
   const [sending, setSending] = createSignal(false);
   let fileInputRef: HTMLInputElement | undefined;
+  let textareaRef: HTMLTextAreaElement | undefined;
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressed = false;
+
+  // @-mention picker (v2.1): typing `@` opens a quick-select of open Pings that
+  // inserts an `@handle` token; the outgoing `mentions` are re-parsed from the
+  // body on send (resolveMentionIds), so text and mentions stay in sync.
+  const mentions = useMentionPicker({
+    getEl: () => textareaRef,
+    value,
+    setValue,
+  });
 
   // Focus the composer when a reply is pre-quoted into it.
   createEffect(() => {
@@ -95,14 +113,21 @@ export function Composer(props: Props) {
       setSending(false);
     }
 
-    props.onSend(body, props.replyingTo?.id ?? null, mode, blobs);
+    // Re-parse the composed text into open-Ping ids for send_message.mentions.
+    const mentionIds = resolveMentionIds(body, state.pings);
+    props.onSend(body, props.replyingTo?.id ?? null, mode, blobs, mentionIds);
     props.attachments.clear();
     setValue("");
+    mentions.close();
     if (props.replyingTo) props.onCancelReply();
     focus();
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    // The mention picker owns Up/Down/Enter/Tab/Esc ONLY while it is open, so
+    // the composer keymap below (Enter=send, Tab=queue, Esc=cancel) is intact
+    // whenever the picker is closed.
+    if (mentions.handleKeyDown(e)) return;
     // Esc interrupts the active turn (no-op if idle).
     if (e.key === "Escape") {
       if (props.thinking) {
@@ -253,7 +278,87 @@ export function Composer(props: Props) {
         </AttachmentGroup>
       </Show>
 
-      <div class="flex items-end gap-2">
+      <div class="relative flex items-end gap-2">
+        {/* @-mention picker. Desktop: a keyboard-first popup above the composer
+            (Up/Down move · Enter/Tab accept · Esc dismiss). Phone: a
+            thumb-friendly horizontal chip row of open Pings. Both surface each
+            Ping's @handle (mono) with its one-line description, and both float
+            just above the input so they never push the composer. */}
+        <Show when={mentions.open() && mentions.candidates().length > 0}>
+          <Show
+            when={!coarse()}
+            fallback={
+              <div
+                data-slot="mention-chips"
+                class="absolute inset-x-0 bottom-full mb-2 flex gap-1.5 overflow-x-auto pb-1"
+                role="listbox"
+                aria-label="Mention a Ping"
+              >
+                <For each={mentions.candidates()}>
+                  {(ping) => (
+                    <button
+                      type="button"
+                      role="option"
+                      data-slot="mention-chip"
+                      class="flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-left"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => mentions.accept(ping)}
+                    >
+                      <AtSign class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <span class="font-mono text-xs text-foreground">{ping.name}</span>
+                      <Show when={ping.description.trim().length > 0}>
+                        <span class="max-w-[9rem] truncate text-[0.7rem] text-muted-foreground">
+                          {ping.description}
+                        </span>
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            }
+          >
+            <div
+              data-slot="mention-popup"
+              class="absolute inset-x-0 bottom-full z-30 mb-2 max-h-64 overflow-y-auto rounded-md border border-border bg-card p-1 shadow-lg ring-1 ring-foreground/10"
+              role="listbox"
+              aria-label="Mention a Ping"
+            >
+              <For each={mentions.candidates()}>
+                {(ping, i) => (
+                  <button
+                    type="button"
+                    role="option"
+                    data-slot="mention-option"
+                    aria-selected={i() === mentions.activeIndex()}
+                    class="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left transition-colors"
+                    classList={{
+                      "bg-muted": i() === mentions.activeIndex(),
+                      "hover:bg-muted/60": i() !== mentions.activeIndex(),
+                    }}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => mentions.setActiveIndex(i())}
+                    onClick={() => mentions.accept(ping)}
+                  >
+                    <span class="shrink-0 font-mono text-[0.8rem] text-foreground">
+                      @{ping.name}
+                    </span>
+                    <Show when={ping.description.trim().length > 0}>
+                      <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {ping.description}
+                      </span>
+                    </Show>
+                    <Show when={ping.requires_response}>
+                      <span class="shrink-0 text-[0.62rem] uppercase tracking-[0.03em] text-primary">
+                        needs you
+                      </span>
+                    </Show>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+        </Show>
+
         <input
           ref={fileInputRef}
           type="file"
@@ -275,13 +380,33 @@ export function Composer(props: Props) {
           <Paperclip class="size-5" />
         </Button>
         <Textarea
-          ref={setRef}
+          ref={(node: HTMLTextAreaElement) => {
+            setRef(node);
+            textareaRef = node;
+          }}
           rows={1}
           data-composer="main"
           class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
           placeholder="Message the Agent…"
           value={value()}
-          onInput={(e) => setValue(e.currentTarget.value)}
+          onInput={(e) => {
+            setValue(e.currentTarget.value);
+            mentions.sync();
+          }}
+          onKeyUp={(e) => {
+            // Caret moves (arrows/Home/End) can move INTO a mention while the
+            // picker is closed — re-evaluate then. While it is open the picker
+            // already owns the arrows (and keeps its own active-row state), so
+            // don't re-sync and clobber it.
+            if (
+              !mentions.open() &&
+              (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End")
+            ) {
+              mentions.sync();
+            }
+          }}
+          onClick={() => mentions.sync()}
+          onBlur={() => mentions.close()}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
         />
@@ -320,7 +445,8 @@ export function Composer(props: Props) {
           <span class="font-medium">Enter</span> send ·{" "}
           <span class="font-medium">Shift+Enter</span> newline ·{" "}
           <span class="font-medium">Tab</span> queue ·{" "}
-          <span class="font-medium">Esc</span> stop
+          <span class="font-medium">Esc</span> stop ·{" "}
+          <span class="font-medium">@</span> mention
         </div>
       </Show>
     </div>

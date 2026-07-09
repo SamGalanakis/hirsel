@@ -1224,7 +1224,10 @@ impl TurnTimelineBridge {
                         );
                     }
                     RemoteTurnEvent::ToolCallStarted {
-                        call_id, name, args, ..
+                        call_id,
+                        name,
+                        args,
+                        ..
                     } => {
                         self.start_turn_if_needed();
                         self.flush_pending(broadcast_log, broadcaster);
@@ -3257,6 +3260,7 @@ mod tests {
         assert_eq!(
             events[1].1,
             TurnEventKind::ToolStart {
+                id: "call-1".to_string(),
                 name: "shell_run".to_string(),
                 summary: Some("cmd: true".to_string())
             }
@@ -3265,6 +3269,7 @@ mod tests {
         assert_eq!(
             events[2].1,
             TurnEventKind::ToolDone {
+                id: "call-1".to_string(),
                 name: "shell_run".to_string(),
                 ok: true,
                 summary: Some("ok status 0".to_string())

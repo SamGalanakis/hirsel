@@ -507,10 +507,31 @@ mod tests {
     }
 
     #[test]
+    fn turn_event_tool_start_round_trips() {
+        let event = HostToClient::TurnEvent {
+            seq: 2,
+            event: TurnEventKind::ToolStart {
+                id: "call-1".to_string(),
+                name: "shell_run".to_string(),
+                summary: Some("cmd: true".to_string()),
+            },
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"turn_event","seq":2,"event":{"kind":"tool_start","id":"call-1","name":"shell_run","summary":"cmd: true"}}"#
+        );
+        let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
     fn turn_event_tool_done_round_trips() {
         let event = HostToClient::TurnEvent {
             seq: 3,
             event: TurnEventKind::ToolDone {
+                id: "call-1".to_string(),
                 name: "shell_run".to_string(),
                 ok: true,
                 summary: Some("ok status 0".to_string()),
@@ -520,7 +541,7 @@ mod tests {
         let encoded = serde_json::to_string(&event).unwrap();
         assert_eq!(
             encoded,
-            r#"{"type":"turn_event","seq":3,"event":{"kind":"tool_done","name":"shell_run","ok":true,"summary":"ok status 0"}}"#
+            r#"{"type":"turn_event","seq":3,"event":{"kind":"tool_done","id":"call-1","name":"shell_run","ok":true,"summary":"ok status 0"}}"#
         );
         let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, event);

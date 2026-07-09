@@ -61,6 +61,7 @@ Gates:
 wait_jq debug/broadcasts '[.events[] | select(.type == "turn_event")] as $e | [$e[].seq] == ([$e[].seq] | sort)' 5 >/dev/null
 wait_jq debug/broadcasts '[.events[] | select(.type == "turn_event")] as $e | any(range(0; $e|length) as $i | $e[$i].event.kind == "prose" and any(range($i + 1; $e|length) as $j | $e[$j].event.kind == "tool_start"))' 5 >/dev/null
 wait_jq debug/broadcasts 'all(.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done")); ((.event.summary // "") | contains("{\"") | not))' 5 >/dev/null
+wait_jq debug/broadcasts 'all(.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done")); ((.event.id // "") | length > 0))' 5 >/dev/null
 ```
 
 ## Scenario B: Real Lash Agent
@@ -95,6 +96,7 @@ Gates:
 wait_jq debug/broadcasts '[.events[] | select(.type == "turn_event")] as $e | [$e[].seq] == ([$e[].seq] | sort)' 5 >/dev/null
 wait_jq debug/broadcasts '[.events[] | select(.type == "turn_event")] as $e | any(range(0; $e|length) as $i | $e[$i].event.kind == "prose" and any(range($i + 1; $e|length) as $j | $e[$j].event.kind == "tool_start"))' 5 >/dev/null
 wait_jq debug/broadcasts 'all(.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done")); ((.event.summary // "") | contains("{\"") | not))' 5 >/dev/null
+wait_jq debug/broadcasts 'all(.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done")); ((.event.id // "") | length > 0))' 5 >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | contains("done")))' 30 >/dev/null
 ```
 
@@ -103,4 +105,5 @@ wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | contain
 - `/debug/broadcasts` contains `turn_event` entries with ascending `seq` values.
 - In a talk-then-act turn, a `prose` event appears before a later `tool_start`.
 - Tool summaries for `tool_start` and `tool_done` do not contain raw `{"` JSON dumps.
+- Tool events for `tool_start` and `tool_done` carry a non-empty `id`.
 - The real variant reaches a `shell_run` `tool_done` and commits an Agent chat reply.

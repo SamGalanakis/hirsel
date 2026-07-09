@@ -27,6 +27,7 @@ function renderCard(overrides: Partial<InboxItem> = {}) {
   const onMarkUnread = vi.fn();
   const onJumpToChat = vi.fn();
   const onSendReply = vi.fn();
+  const onDiscuss = vi.fn();
   const screen = render(() => (
     <InboxItemCard
       item={item(overrides)}
@@ -35,6 +36,7 @@ function renderCard(overrides: Partial<InboxItem> = {}) {
       onDelete={onDelete}
       onRead={onRead}
       onMarkUnread={onMarkUnread}
+      onDiscuss={onDiscuss}
     />
   ));
   return { screen, onDelete, onRead, onMarkUnread, onJumpToChat };

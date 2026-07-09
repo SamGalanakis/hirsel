@@ -4,12 +4,17 @@ import type { Blob, SendMode } from "../../protocol";
 import {
   clearComposerDraft,
   clearComposerPrefill,
+  clearLastConclusion,
+  clearPendingSideChatOpen,
   clearScrollTarget,
+  setActiveSideChatSc,
   state,
 } from "../../store/store";
+import { sideChatForItem } from "../../store/selectors";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { TrayOverlay, TrayShelf } from "../inbox/Tray";
+import { SideChatSheet } from "../inbox/SideChatSheet";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Marker, MarkerContent } from "../ui/marker";
 import {
@@ -102,6 +107,32 @@ export function ChatView() {
     if (target === null) return;
     scrollToId(target);
     clearScrollTarget();
+  });
+
+  // v2.0 (ADR-0008): Discuss/Resume was tapped (see InboxView.handleDiscuss)
+  // but the sheet couldn't open yet because the sc wasn't known. The moment a
+  // sideChatRefs entry for that item appears — immediately for Resume (it
+  // already existed), or once open_side_chat's response lands for a fresh
+  // Discuss — open the sheet and consume the request.
+  createEffect(() => {
+    const itemId = state.pendingSideChatItemId;
+    if (itemId === null) return;
+    const ref = sideChatForItem(state.sideChatRefs, itemId);
+    if (!ref) return;
+    setActiveSideChatSc(ref.sc);
+    clearPendingSideChatOpen();
+  });
+
+  // v2.0: a Side Chat conclusion just landed in main chat — close its sheet
+  // (if that's the one on screen) and land-and-highlight the new owner bubble
+  // with the same scroll+highlight machinery a quoted-ref tap uses (critique
+  // P2, "peak-end positive": the work resolves into the main thread).
+  createEffect(() => {
+    const lastConclusion = state.lastConclusion;
+    if (!lastConclusion) return;
+    if (state.activeSideChatSc === lastConclusion.sc) setActiveSideChatSc(null);
+    scrollToId(lastConclusion.messageId);
+    clearLastConclusion();
   });
 
   const replyingTo = () =>
@@ -200,6 +231,7 @@ export function ChatView() {
                               message={m}
                               refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
                               turnDetails={state.turnDetails[m.id]}
+                              isConclusion={state.conclusionChips.includes(m.id)}
                               highlighted={highlightedId() === m.id}
                               queued={
                                 m.mode === "next_turn" && thinking() && unansweredOwnerIds().has(m.id)
@@ -273,6 +305,11 @@ export function ChatView() {
         alt={lightbox()?.alt ?? ""}
         onClose={() => setLightbox(null)}
       />
+
+      {/* v2.0 (ADR-0008): the one Side Chat sheet, full-screen over everything
+          above (fixed positioning) when state.activeSideChatSc is set. Never
+          auto-opened — see the pendingSideChatItemId effect above. */}
+      <SideChatSheet />
     </div>
   );
 }

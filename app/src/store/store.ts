@@ -40,6 +40,12 @@ interface UiState {
    * never set by a cold-reconnect reconciliation — resuming is always a
    * deliberate tap (critique: "do not auto-reopen"). */
   activeSideChatSc: string | null;
+  /** v2.0: the Inbox item id whose Discuss/Resume tap is awaiting a
+   * `sideChatRefs` entry before the sheet can open (its `sc` isn't known yet
+   * on a fresh Discuss). Consumed once ChatView's effect sees the matching
+   * ref appear, which then sets `activeSideChatSc`. Resume already has a
+   * live ref, so it resolves on the very next tick. */
+  pendingSideChatItemId: number | null;
 }
 
 type Store = AppState & UiState;
@@ -53,6 +59,7 @@ function initialStore(): Store {
     composerDraft: null,
     composerPrefill: null,
     activeSideChatSc: null,
+    pendingSideChatItemId: null,
   };
 }
 
@@ -141,6 +148,17 @@ export function goToChat(opts?: {
  * a live side chat never auto-reopens on launch (critique, binding). */
 export function setActiveSideChatSc(sc: string | null): void {
   setState("activeSideChatSc", sc);
+}
+
+/** Discuss/Resume tapped on an Inbox card: fires `open_side_chat` (the caller
+ * does that) and records which item's sheet to open the moment its ref
+ * appears (see `pendingSideChatItemId`). */
+export function requestSideChatOpen(itemId: number): void {
+  setState("pendingSideChatItemId", itemId);
+}
+
+export function clearPendingSideChatOpen(): void {
+  setState("pendingSideChatItemId", null);
 }
 
 export function clearLastConclusion(): void {

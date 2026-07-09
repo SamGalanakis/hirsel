@@ -1,8 +1,8 @@
-import { Check, Clock, MoreHorizontal, RotateCcw } from "lucide-solid";
+import { Check, Clock, GitFork, MoreHorizontal, RotateCcw } from "lucide-solid";
 import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { InboxItem, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
-import { isItemRead, latestReplyForAnchor } from "../../store/selectors";
+import { isItemRead, latestReplyForAnchor, sideChatForItem } from "../../store/selectors";
 import { createSeenTimer } from "../../lib/auto-read";
 import { snippet } from "../../lib/format";
 import { Markdown } from "../Markdown";
@@ -32,6 +32,10 @@ interface Props {
   onRead: (item: InboxItem) => void;
   /** Mark unread (⋯ menu): client-only override, no wire op. */
   onMarkUnread: (item: InboxItem) => void;
+  /** v2.0 (ADR-0008): "Discuss" (fresh) / "in progress · resume" (a live side
+   * chat already exists for this item) — the effort ladder's third rung after
+   * Quick Reply and Reply. */
+  onDiscuss: (item: InboxItem) => void;
 }
 
 function formatTime(ts: string): string {
@@ -65,6 +69,11 @@ export function InboxItemCard(props: Props) {
   // requires_response cards it is expanded by default.
   const [revealed, setRevealed] = createSignal(false);
   const showInput = () => isOpen() && (props.item.requires_response || revealed());
+
+  // v2.0: a live side chat for this item, if any — flips the "Discuss"
+  // affordance to "in progress · resume" (derived from hello_ok.side_chats +
+  // open/closed tracking, never a bespoke flag).
+  const sideChatRef = () => sideChatForItem(state.sideChatRefs, props.item.id);
 
   // Replied state, derived from Chat (no persisted inbox reply state): the
   // latest owner message anchored to this item, if any.
@@ -224,11 +233,45 @@ export function InboxItemCard(props: Props) {
         />
       </Show>
 
-      <Show when={isOpen() && !showInput()}>
-        <div class="-ml-2.5 mt-1 flex gap-1">
-          <Button type="button" variant="link" size="sm" onClick={reveal}>
-            Reply
-          </Button>
+      {/* Effort ladder, rung 2 and 3 (rung 1 is QuickReplyButtons above):
+          "Reply" only while the input isn't already showing; "Discuss" (or,
+          for an item with a live side chat, "in progress · resume") stays
+          reachable regardless — even mid-typing an answer, the Owner can
+          still bail into a side chat instead. Always labeled, never icon-only
+          (critique: icon-only leave/discard-style controls cause mis-taps). */}
+      <Show when={isOpen()}>
+        <div class="-ml-2.5 mt-1 flex flex-wrap items-center gap-1">
+          <Show when={!showInput()}>
+            <Button type="button" variant="link" size="sm" onClick={reveal}>
+              Reply
+            </Button>
+          </Show>
+          <Show
+            when={sideChatRef()}
+            fallback={
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                class="gap-1"
+                onClick={() => props.onDiscuss(props.item)}
+              >
+                <GitFork class="size-3.5" aria-hidden="true" />
+                Discuss
+              </Button>
+            }
+          >
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              class="gap-1 text-status-active"
+              onClick={() => props.onDiscuss(props.item)}
+            >
+              <GitFork class="size-3.5" aria-hidden="true" />
+              in progress · resume
+            </Button>
+          </Show>
         </div>
       </Show>
     </Card>

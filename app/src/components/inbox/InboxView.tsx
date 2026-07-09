@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { InboxItem } from "../../protocol";
-import { dispatch, goToChat, state } from "../../store/store";
+import { dispatch, goToChat, requestSideChatOpen, state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { InboxItemCard } from "./InboxItemCard";
@@ -57,6 +57,16 @@ export function InboxView() {
     dispatch({ type: "mark_unread_local", itemId: item.id });
   }
 
+  // v2.0 (ADR-0008): "Discuss" (fresh) / "resume" (a live one already exists)
+  // — open_side_chat is idempotent per item on the host either way. Recording
+  // the pending item id here is what lets ChatView's effect open the sheet
+  // the moment its `sc` (fresh) or transcript (resume) is ready, without the
+  // Tray/InboxView needing to know about the sheet at all.
+  function handleDiscuss(item: InboxItem) {
+    getClient()?.openSideChat(item.id);
+    requestSideChatOpen(item.id);
+  }
+
   return (
     <Show
       when={partitioned().open.length > 0 || partitioned().deleted.length > 0}
@@ -85,6 +95,7 @@ export function InboxView() {
                 onDelete={handleDelete}
                 onRead={handleRead}
                 onMarkUnread={handleMarkUnread}
+                onDiscuss={handleDiscuss}
               />
             )}
           </For>
@@ -113,6 +124,7 @@ export function InboxView() {
                       onDelete={handleDelete}
                       onRead={handleRead}
                       onMarkUnread={handleMarkUnread}
+                      onDiscuss={handleDiscuss}
                     />
                   )}
                 </For>

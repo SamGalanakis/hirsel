@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, RotateCcw, X } from "lucide-solid";
+import { Check, Clock, Copy, GitFork, RotateCcw, X } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
 import type { DisplayMessage, TimelineEvent } from "../../store/types";
 import { toast } from "../../lib/toast";
@@ -16,6 +16,12 @@ interface Props {
   /** v1.5: the finished turn's timeline, retained in session memory for this
    * committed agent message. When present it supersedes the tool_calls chip. */
   turnDetails?: TimelineEvent[];
+  /** v2.0 (ADR-0008): this owner message is a Side Chat conclusion landing in
+   * main — client-derived (the wire carries no marker; see reducer.ts). Renders
+   * a small non-interactive provenance chip so it never reads as amnesia later.
+   * Never a link — the side transcript is discarded on conclude, so there is
+   * nothing to view (critique P2). */
+  isConclusion?: boolean;
   highlighted: boolean;
   queued: boolean;
   onTapQuote: (id: number) => void;
@@ -123,6 +129,15 @@ export function MessageBubble(props: Props) {
           {/* Plain in-flight send. */}
           <Show when={props.message.pending && !props.message.failed && !props.queued}>
             <span class="italic">sending…</span>
+          </Show>
+          {/* v2.0 provenance: non-interactive, same visual language as the
+              "turn details"/tool-call chips so it reads as system-provenance,
+              never as a link or as content of its own (critique P2). */}
+          <Show when={props.isConclusion}>
+            <span class="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-px text-muted-foreground">
+              <GitFork class="size-3" aria-hidden="true" />
+              worked out in a side chat
+            </span>
           </Show>
           <span>{formatTime(props.message.ts)}</span>
           {/* Copy action: subtle, revealed on hover (desktop); long-press on touch. */}

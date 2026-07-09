@@ -2222,7 +2222,7 @@ impl HirselToolExecutor {
             .inbox_file(content, anchor, requires_response, quick_replies)
             .await
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(item).map_err(|error| error.to_string())
+        Ok(inbox_file_result(&item))
     }
 
     async fn inbox_archive(&self, args: &Value) -> Result<Value, String> {
@@ -2232,7 +2232,7 @@ impl HirselToolExecutor {
             .inbox_archive(item_id)
             .await
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({ "item": item })).map_err(|error| error.to_string())
+        inbox_archive_result(item.as_ref())
     }
 
     async fn subagents_spawn(
@@ -2284,11 +2284,7 @@ impl HirselToolExecutor {
                 .await;
             return Err(format!("failed to start Sub-agent Driver: {error}"));
         }
-        serde_json::to_value(json!({
-            "process_id": handle.process_id,
-            "handle": handle,
-        }))
-        .map_err(|error| error.to_string())
+        Ok(subagent_spawn_result(&handle.process_id))
     }
 
     async fn subagents_prompt(&self, args: &Value) -> Result<Value, String> {
@@ -2298,7 +2294,7 @@ impl HirselToolExecutor {
             .subagents_prompt_process(&process_id, text)
             .await
             .map_err(|error| error.to_string())?;
-        Ok(json!({ "ok": true }))
+        Ok(acknowledgement_result())
     }
 
     async fn subagents_interrupt(&self, args: &Value) -> Result<Value, String> {
@@ -2307,7 +2303,7 @@ impl HirselToolExecutor {
             .subagents_interrupt_process(&process_id)
             .await
             .map_err(|error| error.to_string())?;
-        Ok(json!({ "ok": true }))
+        Ok(acknowledgement_result())
     }
 
     async fn subagents_list(&self) -> Result<Value, String> {
@@ -2315,7 +2311,7 @@ impl HirselToolExecutor {
             .tools
             .subagents_list()
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({ "processes": processes })).map_err(|error| error.to_string())
+        subagents_list_result(&processes)
     }
 
     async fn subagents_progress(&self, args: &Value) -> Result<Value, String> {
@@ -2328,8 +2324,7 @@ impl HirselToolExecutor {
             .tools
             .subagents_progress(&process_id)
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({ "process": process, "events": events }))
-            .map_err(|error| error.to_string())
+        subagents_progress_result(process.as_ref(), &events)
     }
 
     async fn subagents_wait(
@@ -2343,11 +2338,7 @@ impl HirselToolExecutor {
             .await_process(&process_id)
             .await
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({
-            "process_id": process_id,
-            "outcome": outcome,
-        }))
-        .map_err(|error| error.to_string())
+        subagents_wait_result(&process_id, &outcome)
     }
 
     async fn shell_run(&self, args: &Value) -> Result<Value, String> {
@@ -2359,7 +2350,7 @@ impl HirselToolExecutor {
             .shell_run(cmd, cwd, timeout_secs)
             .await
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(output).map_err(|error| error.to_string())
+        shell_run_result(&output)
     }
 
     async fn monitors_create(
@@ -2390,12 +2381,7 @@ impl HirselToolExecutor {
             let _ = self.tools.monitors_cancel(&record.id).await;
             return Err(error.to_string());
         }
-        serde_json::to_value(json!({
-            "monitor_id": record.id,
-            "process_id": record.id,
-            "monitor": record,
-        }))
-        .map_err(|error| error.to_string())
+        monitors_create_result(&record)
     }
 
     async fn monitors_list(&self) -> Result<Value, String> {
@@ -2404,7 +2390,7 @@ impl HirselToolExecutor {
             .monitors_list()
             .await
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({ "monitors": monitors })).map_err(|error| error.to_string())
+        monitors_list_result(&monitors)
     }
 
     async fn monitors_cancel(
@@ -2425,8 +2411,7 @@ impl HirselToolExecutor {
         if let Err(error) = cancel {
             tracing::debug!(%error, monitor_id = %monitor_id, "monitor process cancel returned an error");
         }
-        serde_json::to_value(json!({ "ok": true, "monitor_id": monitor_id }))
-            .map_err(|error| error.to_string())
+        Ok(monitors_cancel_result(&monitor_id))
     }
 
     async fn current_anchor(&self) -> Option<u64> {
@@ -2437,6 +2422,106 @@ impl HirselToolExecutor {
             .as_ref()
             .map(|anchors| anchors.owner_message_id)
     }
+}
+
+fn inbox_file_result(item: &hirsel_proto::InboxItem) -> Value {
+    json!({
+        "item_id": item.id,
+        "anchor": item.anchor,
+        "requires_response": item.requires_response,
+    })
+}
+
+fn inbox_archive_result(item: Option<&hirsel_proto::InboxItem>) -> Result<Value, String> {
+    let item = item.map(inbox_item_result).transpose()?;
+    Ok(json!({ "item": item }))
+}
+
+fn inbox_item_result(item: &hirsel_proto::InboxItem) -> Result<Value, String> {
+    let mut value = serde_json::to_value(item).map_err(|error| error.to_string())?;
+    rename_result_id(&mut value, "item_id")?;
+    Ok(value)
+}
+
+fn subagent_spawn_result(process_id: &str) -> Value {
+    json!({ "process_id": process_id })
+}
+
+fn acknowledgement_result() -> Value {
+    json!({ "ok": true })
+}
+
+fn subagents_list_result(processes: &[crate::processes::ProcessRecord]) -> Result<Value, String> {
+    let processes = processes
+        .iter()
+        .map(subagent_process_result)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({ "processes": processes }))
+}
+
+fn subagents_progress_result(
+    process: Option<&crate::processes::ProcessRecord>,
+    events: &[hirsel_drivers::SubagentEvent],
+) -> Result<Value, String> {
+    let process = process.map(subagent_process_result).transpose()?;
+    Ok(json!({
+        "process": process,
+        "events": events,
+    }))
+}
+
+fn subagent_process_result(process: &crate::processes::ProcessRecord) -> Result<Value, String> {
+    let mut value = serde_json::to_value(process).map_err(|error| error.to_string())?;
+    rename_result_id(&mut value, "process_id")?;
+    Ok(value)
+}
+
+fn subagents_wait_result(process_id: &str, outcome: &ProcessAwaitOutput) -> Result<Value, String> {
+    serde_json::to_value(json!({
+        "process_id": process_id,
+        "outcome": outcome,
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn shell_run_result(output: &crate::tools::ShellRunOutput) -> Result<Value, String> {
+    serde_json::to_value(output).map_err(|error| error.to_string())
+}
+
+fn monitors_create_result(record: &MonitorRecord) -> Result<Value, String> {
+    Ok(json!({
+        "monitor_id": record.id,
+        "monitor": monitor_result(record)?,
+    }))
+}
+
+fn monitors_list_result(monitors: &[MonitorRecord]) -> Result<Value, String> {
+    let monitors = monitors
+        .iter()
+        .map(monitor_result)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({ "monitors": monitors }))
+}
+
+fn monitor_result(record: &MonitorRecord) -> Result<Value, String> {
+    let mut value = serde_json::to_value(record).map_err(|error| error.to_string())?;
+    rename_result_id(&mut value, "monitor_id")?;
+    Ok(value)
+}
+
+fn monitors_cancel_result(monitor_id: &str) -> Value {
+    json!({ "ok": true, "monitor_id": monitor_id })
+}
+
+fn rename_result_id(value: &mut Value, result_name: &str) -> Result<(), String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "tool result record must serialize as an object".to_string())?;
+    let id = object
+        .remove("id")
+        .ok_or_else(|| "tool result record is missing its id".to_string())?;
+    object.insert(result_name.to_string(), id);
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -2990,7 +3075,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 }
             }),
-            json!({ "type": "object" }),
+            inbox_file_output_schema(),
             ["inbox"],
             "file",
             ToolScheduling::Serial,
@@ -3007,7 +3092,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "item_id": { "type": "integer", "minimum": 1 }
                 }
             }),
-            json!({ "type": "object" }),
+            inbox_archive_output_schema(),
             ["inbox"],
             "archive",
             ToolScheduling::Serial,
@@ -3027,7 +3112,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "cwd": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            subagents_spawn_output_schema(),
             ["subagents"],
             "spawn",
             ToolScheduling::Serial,
@@ -3045,7 +3130,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "text": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            acknowledgement_output_schema(),
             ["subagents"],
             "prompt",
             ToolScheduling::Serial,
@@ -3062,7 +3147,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "process_id": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            acknowledgement_output_schema(),
             ["subagents"],
             "interrupt",
             ToolScheduling::Serial,
@@ -3076,7 +3161,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false,
                 "properties": {}
             }),
-            json!({ "type": "object" }),
+            subagents_list_output_schema(),
             ["subagents"],
             "list",
             ToolScheduling::Parallel,
@@ -3093,7 +3178,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "process_id": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            subagents_progress_output_schema(),
             ["subagents"],
             "progress",
             ToolScheduling::Parallel,
@@ -3110,7 +3195,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "process_id": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            subagents_wait_output_schema(),
             ["subagents"],
             "wait",
             ToolScheduling::Parallel,
@@ -3134,7 +3219,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "label": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            monitors_create_output_schema(),
             ["monitors"],
             "create",
             ToolScheduling::Serial,
@@ -3148,7 +3233,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false,
                 "properties": {}
             }),
-            json!({ "type": "object" }),
+            monitors_list_output_schema(),
             ["monitors"],
             "list",
             ToolScheduling::Parallel,
@@ -3165,7 +3250,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "monitor_id": { "type": "string" }
                 }
             }),
-            json!({ "type": "object" }),
+            monitors_cancel_output_schema(),
             ["monitors"],
             "cancel",
             ToolScheduling::Serial,
@@ -3184,12 +3269,423 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600 }
                 }
             }),
-            json!({ "type": "object" }),
+            shell_run_output_schema(),
             ["shell"],
             "run",
             ToolScheduling::Serial,
         ),
     ]
+}
+
+fn inbox_file_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item_id", "anchor", "requires_response"],
+        "properties": {
+            "item_id": { "type": "integer", "minimum": 1 },
+            "anchor": { "type": "integer", "minimum": 1 },
+            "requires_response": { "type": "boolean" }
+        }
+    })
+}
+
+fn inbox_archive_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item"],
+        "properties": {
+            "item": {
+                "oneOf": [
+                    inbox_item_output_schema(),
+                    { "type": "null" }
+                ]
+            }
+        }
+    })
+}
+
+fn inbox_item_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "item_id",
+            "content",
+            "anchor",
+            "requires_response",
+            "quick_replies",
+            "status",
+            "read",
+            "ts"
+        ],
+        "properties": {
+            "item_id": { "type": "integer", "minimum": 1 },
+            "content": { "type": "string" },
+            "anchor": { "type": "integer", "minimum": 1 },
+            "requires_response": { "type": "boolean" },
+            "quick_replies": {
+                "type": "array",
+                "items": quick_reply_output_schema()
+            },
+            "status": { "type": "string", "enum": ["open", "archived"] },
+            "read": { "type": "boolean" },
+            "ts": timestamp_output_schema()
+        }
+    })
+}
+
+fn quick_reply_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value", "label"],
+        "properties": {
+            "value": { "type": "string" },
+            "label": { "type": "string" }
+        }
+    })
+}
+
+fn subagents_spawn_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["process_id"],
+        "properties": {
+            "process_id": { "type": "string", "minLength": 1 }
+        }
+    })
+}
+
+fn acknowledgement_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ok"],
+        "properties": {
+            "ok": { "const": true }
+        }
+    })
+}
+
+fn subagents_list_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["processes"],
+        "properties": {
+            "processes": {
+                "type": "array",
+                "items": subagent_process_output_schema()
+            }
+        }
+    })
+}
+
+fn subagents_progress_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["process", "events"],
+        "properties": {
+            "process": {
+                "oneOf": [
+                    subagent_process_output_schema(),
+                    { "type": "null" }
+                ]
+            },
+            "events": {
+                "type": "array",
+                "items": subagent_event_output_schema()
+            }
+        }
+    })
+}
+
+fn subagent_process_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "process_id",
+            "agent",
+            "handle",
+            "prompt",
+            "cwd",
+            "external_id",
+            "status",
+            "events",
+            "started_ts",
+            "last_event_ts"
+        ],
+        "properties": {
+            "process_id": { "type": "string", "minLength": 1 },
+            "agent": { "type": "string", "enum": ["claude", "codex"] },
+            "model": { "type": "string" },
+            "handle": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "agent"],
+                "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "agent": { "type": "string", "enum": ["claude", "codex"] }
+                }
+            },
+            "prompt": { "type": "string" },
+            "cwd": { "type": "string" },
+            "external_id": { "type": ["string", "null"] },
+            "status": {
+                "type": "string",
+                "enum": ["running", "done", "failed", "interrupted", "abandoned"]
+            },
+            "events": {
+                "type": "array",
+                "items": subagent_event_output_schema()
+            },
+            "started_ts": timestamp_output_schema(),
+            "last_event_ts": timestamp_output_schema()
+        }
+    })
+}
+
+fn subagent_event_output_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "external_id"],
+                "properties": {
+                    "type": { "const": "started" },
+                    "external_id": { "type": "string" }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "summary"],
+                "properties": {
+                    "type": { "const": "progress" },
+                    "summary": { "type": "string" }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "outcome"],
+                "properties": {
+                    "type": { "const": "terminal" },
+                    "outcome": terminal_outcome_output_schema()
+                }
+            }
+        ]
+    })
+}
+
+fn terminal_outcome_output_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status", "summary"],
+                "properties": {
+                    "status": { "const": "done" },
+                    "summary": { "type": "string" }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status", "reason"],
+                "properties": {
+                    "status": { "const": "failed" },
+                    "reason": { "type": "string" }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status"],
+                "properties": {
+                    "status": { "const": "interrupted" }
+                }
+            }
+        ]
+    })
+}
+
+fn subagents_wait_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["process_id", "outcome"],
+        "properties": {
+            "process_id": { "type": "string", "minLength": 1 },
+            "outcome": process_await_output_schema()
+        }
+    })
+}
+
+fn process_await_output_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "value"],
+                "properties": {
+                    "type": { "const": "success" },
+                    "value": true
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "class", "code", "message"],
+                "properties": {
+                    "type": { "const": "failure" },
+                    "class": {
+                        "type": "string",
+                        "enum": [
+                            "invalid_request",
+                            "unavailable",
+                            "permission_denied",
+                            "timeout",
+                            "execution",
+                            "external",
+                            "resource_limit",
+                            "internal"
+                        ]
+                    },
+                    "code": { "type": "string" },
+                    "message": { "type": "string" },
+                    "raw": true
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "message"],
+                "properties": {
+                    "type": { "const": "cancelled" },
+                    "message": { "type": "string" },
+                    "raw": true
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "evidence"],
+                "properties": {
+                    "type": { "const": "abandoned" },
+                    "evidence": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["writer", "epoch_ms"],
+                        "properties": {
+                            "writer": {
+                                "type": "string",
+                                "enum": ["owner_drain", "sweep", "reconciled_request"]
+                            },
+                            "epoch_ms": { "type": "integer", "minimum": 0 }
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn monitors_create_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["monitor_id", "monitor"],
+        "properties": {
+            "monitor_id": { "type": "string", "minLength": 1 },
+            "monitor": monitor_output_schema()
+        }
+    })
+}
+
+fn monitors_list_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["monitors"],
+        "properties": {
+            "monitors": {
+                "type": "array",
+                "items": monitor_output_schema()
+            }
+        }
+    })
+}
+
+fn monitor_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "monitor_id",
+            "cmd",
+            "every_secs",
+            "wake_on",
+            "label",
+            "created_ts",
+            "last_event_ts"
+        ],
+        "properties": {
+            "monitor_id": { "type": "string", "minLength": 1 },
+            "cmd": { "type": "string" },
+            "every_secs": { "type": "integer", "minimum": 30 },
+            "wake_on": {
+                "type": "string",
+                "enum": ["changed", "exit_zero", "exit_nonzero", "regex"]
+            },
+            "pattern": { "type": "string" },
+            "label": { "type": "string" },
+            "created_ts": timestamp_output_schema(),
+            "last_event_ts": timestamp_output_schema(),
+            "last_run_ts": timestamp_output_schema(),
+            "last_output": { "type": "string" },
+            "summary": { "type": "string" },
+            "cancelled_ts": timestamp_output_schema()
+        }
+    })
+}
+
+fn monitors_cancel_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ok", "monitor_id"],
+        "properties": {
+            "ok": { "const": true },
+            "monitor_id": { "type": "string", "minLength": 1 }
+        }
+    })
+}
+
+fn shell_run_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "stdout", "stderr", "timed_out"],
+        "properties": {
+            "status": { "type": ["integer", "null"] },
+            "stdout": { "type": "string" },
+            "stderr": { "type": "string" },
+            "timed_out": { "type": "boolean" }
+        }
+    })
+}
+
+fn timestamp_output_schema() -> Value {
+    json!({ "type": "string", "format": "date-time" })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3666,9 +4162,14 @@ fn terminal_content(outcome: &TerminalOutcome) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::{processes::ProcessStore, storage::Storage, tools::ToolsConfig};
+    use crate::{
+        processes::{ProcessRecord, ProcessStatus, ProcessStore},
+        storage::Storage,
+        tools::{ShellRunOutput, ToolsConfig},
+    };
     use chrono::Utc;
-    use hirsel_proto::{Blob, ChatAuthor};
+    use hirsel_drivers::{SessionHandle, SubagentEvent};
+    use hirsel_proto::{Blob, ChatAuthor, InboxItem, InboxStatus};
     use lash_core::{
         ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
         TriggerInputBinding, TriggerSubscriptionRecord,
@@ -3910,16 +4411,183 @@ mod tests {
         }
         let executor = HirselToolExecutor { tools, anchors };
 
-        let item = executor
+        let result = executor
             .inbox_file(&serde_json::json!({
                 "content": "A result for the active turn",
                 "requires_response": true
             }))
             .await
             .unwrap();
-        let item: hirsel_proto::InboxItem = serde_json::from_value(item).unwrap();
 
-        assert_eq!(item.anchor, owner_a.id);
+        assert_eq!(result["anchor"], owner_a.id);
+        assert_eq!(result["item_id"], 1);
+    }
+
+    #[test]
+    fn every_executor_result_matches_its_declared_output_schema() {
+        let now = Utc::now();
+        let inbox_item = InboxItem {
+            id: 7,
+            content: "Choose a release".to_string(),
+            anchor: 3,
+            requires_response: true,
+            quick_replies: vec![QuickReply {
+                value: "stable".to_string(),
+                label: "Stable".to_string(),
+            }],
+            status: InboxStatus::Archived,
+            read: true,
+            ts: now,
+        };
+        let events = vec![
+            SubagentEvent::Started {
+                external_id: "driver-session-1".to_string(),
+            },
+            SubagentEvent::Progress {
+                summary: "running tests".to_string(),
+            },
+            SubagentEvent::Terminal {
+                outcome: TerminalOutcome::Done {
+                    summary: "tests passed".to_string(),
+                },
+            },
+        ];
+        let process = ProcessRecord::restored(
+            "proc-1".to_string(),
+            AgentKind::Codex,
+            Some("gpt-test".to_string()),
+            SessionHandle {
+                id: "driver-session-1".to_string(),
+                agent: AgentKind::Codex,
+            },
+            "Run the tests".to_string(),
+            "/tmp/repo".to_string(),
+            Some("external-1".to_string()),
+            ProcessStatus::Done,
+            events.clone(),
+            now,
+            now,
+        );
+        let monitor = MonitorRecord {
+            id: "monitor-1".to_string(),
+            cmd: "test -f done".to_string(),
+            every_secs: 30,
+            wake_on: MonitorWakeOn::Regex,
+            pattern: Some("ready".to_string()),
+            label: "build ready".to_string(),
+            created_ts: now,
+            last_event_ts: now,
+            last_run_ts: Some(now),
+            last_output: Some("ready".to_string()),
+            summary: Some("matched".to_string()),
+            cancelled_ts: Some(now),
+        };
+        let wait_outcomes = [
+            ProcessAwaitOutput::Success {
+                value: json!({ "summary": "done" }),
+                control: None,
+            },
+            ProcessAwaitOutput::Failure {
+                class: lash_core::ToolFailureClass::Execution,
+                code: "subagent_failed".to_string(),
+                message: "failed".to_string(),
+                raw: Some(json!({ "reason": "failed" })),
+                control: None,
+            },
+            ProcessAwaitOutput::Cancelled {
+                message: "interrupted".to_string(),
+                raw: None,
+                control: None,
+            },
+            ProcessAwaitOutput::Abandoned {
+                evidence: Box::new(lash_core::AbandonEvidence {
+                    writer: lash_core::AbandonWriter::ReconciledRequest,
+                    owner: None,
+                    epoch_ms: 42,
+                }),
+                control: None,
+            },
+        ];
+
+        let mut results = BTreeMap::<&str, Vec<Value>>::new();
+        results.insert("inbox_file", vec![inbox_file_result(&inbox_item)]);
+        results.insert(
+            "inbox_archive",
+            vec![
+                inbox_archive_result(Some(&inbox_item)).unwrap(),
+                inbox_archive_result(None).unwrap(),
+            ],
+        );
+        results.insert("subagents_spawn", vec![subagent_spawn_result("proc-1")]);
+        results.insert("subagents_prompt", vec![acknowledgement_result()]);
+        results.insert("subagents_interrupt", vec![acknowledgement_result()]);
+        results.insert(
+            "subagents_list",
+            vec![subagents_list_result(std::slice::from_ref(&process)).unwrap()],
+        );
+        results.insert(
+            "subagents_progress",
+            vec![
+                subagents_progress_result(Some(&process), &events).unwrap(),
+                subagents_progress_result(None, &[]).unwrap(),
+            ],
+        );
+        results.insert(
+            "subagents_wait",
+            wait_outcomes
+                .iter()
+                .map(|outcome| subagents_wait_result("proc-1", outcome).unwrap())
+                .collect(),
+        );
+        results.insert(
+            "monitors_create",
+            vec![monitors_create_result(&monitor).unwrap()],
+        );
+        results.insert(
+            "monitors_list",
+            vec![monitors_list_result(std::slice::from_ref(&monitor)).unwrap()],
+        );
+        results.insert("monitors_cancel", vec![monitors_cancel_result("monitor-1")]);
+        results.insert(
+            "shell_run",
+            vec![
+                shell_run_result(&ShellRunOutput {
+                    status: Some(0),
+                    stdout: "done\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                })
+                .unwrap(),
+                shell_run_result(&ShellRunOutput {
+                    status: None,
+                    stdout: String::new(),
+                    stderr: "timed out".to_string(),
+                    timed_out: true,
+                })
+                .unwrap(),
+            ],
+        );
+
+        let definitions = hirsel_tool_definitions();
+        assert_eq!(results.len(), definitions.len());
+        for definition in definitions {
+            let examples = results
+                .get(definition.name())
+                .unwrap_or_else(|| panic!("missing result examples for {}", definition.name()));
+            let schema = definition.contract.output_schema.canonical();
+            let validator = jsonschema::JSONSchema::compile(schema).unwrap_or_else(|error| {
+                panic!("invalid schema for {}: {error}", definition.name())
+            });
+            for example in examples {
+                if let Err(errors) = validator.validate(example) {
+                    let errors = errors.map(|error| error.to_string()).collect::<Vec<_>>();
+                    panic!(
+                        "result for {} did not match its schema: {errors:?}\nresult: {example}",
+                        definition.name()
+                    );
+                }
+            }
+        }
     }
 
     fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {

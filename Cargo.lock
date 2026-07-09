@@ -859,6 +859,7 @@ dependencies = [
  "futures-util",
  "hirsel-drivers",
  "hirsel-proto",
+ "jsonschema",
  "lash-core",
  "lash-protocol-rlm",
  "lash-provider-anthropic",

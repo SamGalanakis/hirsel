@@ -11,7 +11,7 @@ Use this deterministic mode when no LLM credentials are available. It exercises 
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-scaffold
+export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
@@ -62,7 +62,7 @@ Use this mode to prove a real Lash RLM turn, real provider call, Lashlang-bound 
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-scaffold
+export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
@@ -79,7 +79,7 @@ First prove the tool-call smoke:
 curl -sS -X POST http://127.0.0.1:3089/debug/reset
 curl -sS -X POST http://127.0.0.1:3089/debug/owner-message \
   -H 'content-type: application/json' \
-  -d '{"body":"reply with exactly the word pong using chat.send","ref":null}'
+  -d '{"body":"reply with exactly the word pong","ref":null}'
 ```
 
 Poll `/debug/chat` until an Agent-authored message contains `pong`.

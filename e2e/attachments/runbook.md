@@ -7,7 +7,7 @@ Prove protocol v1.1 attachments through the debug surface: upload a text blob an
 ## Start Host
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-niceties-host
+export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1

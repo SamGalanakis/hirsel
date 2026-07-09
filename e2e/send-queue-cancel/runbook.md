@@ -54,7 +54,7 @@ assert_no_jq_for() {
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-niceties-host
+export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
@@ -143,7 +143,7 @@ Use this mode to prove the real lash facade integration. It requires valid Codex
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-niceties-host
+export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
@@ -165,7 +165,7 @@ post_json debug/reset '{}'
 Start a turn that creates a checkpoint via `shell_run`, then inject a same-turn marker:
 
 ```bash
-post_json debug/owner-message '{"client_id":"lash-inject-active","body":"Use shell_run to run exactly `sleep 25`, then use chat_send to reply. If you receive any same-turn owner input containing INJECTED_MARKER, include that exact marker in your reply.","ref":null}' >/dev/null
+post_json debug/owner-message '{"client_id":"lash-inject-active","body":"Use shell_run to run exactly `sleep 25`, then reply in chat. If you receive any same-turn owner input containing INJECTED_MARKER, include that exact marker in your reply.","ref":null}' >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "thinking")' 15 >/dev/null
 post_json debug/owner-message '{"client_id":"lash-inject-marker","body":"INJECTED_MARKER=same-turn-42","ref":null,"mode":"send"}' >/dev/null
 ```
@@ -181,9 +181,9 @@ wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | contain
 Start a slow real turn, then queue a next-turn message:
 
 ```bash
-post_json debug/owner-message '{"client_id":"lash-next-active","body":"Use shell_run to run exactly `sleep 25`, then use chat_send to reply exactly `initial done`.","ref":null}' >/dev/null
+post_json debug/owner-message '{"client_id":"lash-next-active","body":"Use shell_run to run exactly `sleep 25`, then reply exactly `initial done`.","ref":null}' >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "thinking")' 15 >/dev/null
-post_json debug/owner-message '{"client_id":"lash-next-queued","body":"Use chat_send to reply exactly `NEXT_TURN_DONE`.","ref":null,"mode":"next_turn"}' >/dev/null
+post_json debug/owner-message '{"client_id":"lash-next-queued","body":"Reply exactly `NEXT_TURN_DONE`.","ref":null,"mode":"next_turn"}' >/dev/null
 ```
 
 Gate before the first turn finishes:
@@ -204,7 +204,7 @@ wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | contain
 Start a slow real turn and interrupt it:
 
 ```bash
-CANCEL_REAL_JSON="$(post_json debug/owner-message '{"client_id":"lash-cancel-active","body":"Use shell_run to run exactly `sleep 25`, then use chat_send to reply exactly `SHOULD_NOT_APPEAR`.","ref":null}')"
+CANCEL_REAL_JSON="$(post_json debug/owner-message '{"client_id":"lash-cancel-active","body":"Use shell_run to run exactly `sleep 25`, then reply exactly `SHOULD_NOT_APPEAR`.","ref":null}')"
 CANCEL_REAL_ID="$(printf '%s' "$CANCEL_REAL_JSON" | jq -r '.message.id')"
 wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "thinking")' 15 >/dev/null
 post_json debug/cancel-turn '{}'

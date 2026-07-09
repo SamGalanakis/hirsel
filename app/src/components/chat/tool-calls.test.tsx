@@ -1,7 +1,6 @@
 import { fireEvent, render } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
-import type { LiveToolCall } from "../../store/types";
-import { CommittedToolCalls, LiveToolCalls } from "./ToolCalls";
+import { CommittedToolCalls } from "./ToolCalls";
 
 describe("CommittedToolCalls (footer chip expansion)", () => {
   it("renders nothing when there are no tool calls", () => {
@@ -44,20 +43,5 @@ describe("CommittedToolCalls (footer chip expansion)", () => {
       <CommittedToolCalls toolCalls={[{ name: "read_file", ok: true }]} />
     ));
     expect(getByRole("button").textContent).toContain("1 tool");
-  });
-});
-
-describe("LiveToolCalls (ephemeral rows under the thinking marker)", () => {
-  it("renders a row per live call and shimmers only the newest (last)", () => {
-    const calls: LiveToolCall[] = [
-      { name: "read_file", summary: "a.ts", seq: 1 },
-      { name: "grep", summary: "TODO", seq: 2 },
-    ];
-    const { getAllByRole } = render(() => <LiveToolCalls calls={calls} />);
-    const rows = getAllByRole("listitem");
-    expect(rows).toHaveLength(2);
-    // The newest row's name shimmers; the earlier one does not.
-    expect(rows[1].querySelector(".shimmer")).toBeTruthy();
-    expect(rows[0].querySelector(".shimmer")).toBeNull();
   });
 });

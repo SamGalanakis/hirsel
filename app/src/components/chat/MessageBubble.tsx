@@ -1,17 +1,21 @@
 import { Check, Clock, Copy, RotateCcw, X } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
-import type { DisplayMessage } from "../../store/types";
+import type { DisplayMessage, TimelineEvent } from "../../store/types";
 import { toast } from "../../lib/toast";
 import { Markdown } from "../Markdown";
 import { Bubble, BubbleContent } from "../ui/bubble";
 import { Message, MessageContent, MessageFooter } from "../ui/message";
 import { MessageAttachments } from "./MessageAttachments";
 import { QuotedRef } from "./QuotedRef";
+import { TurnDetails } from "./Timeline";
 import { CommittedToolCalls } from "./ToolCalls";
 
 interface Props {
   message: DisplayMessage;
   refTarget: DisplayMessage | undefined;
+  /** v1.5: the finished turn's timeline, retained in session memory for this
+   * committed agent message. When present it supersedes the tool_calls chip. */
+  turnDetails?: TimelineEvent[];
   highlighted: boolean;
   queued: boolean;
   onTapQuote: (id: number) => void;
@@ -133,11 +137,21 @@ export function MessageBubble(props: Props) {
             </Show>
           </button>
         </MessageFooter>
-        {/* Committed tool calls (v1.4): collapsed "⚙ N tools" chip that expands
-            inline. Left-aligned under the (agent) bubble; absent when empty. */}
-        <Show when={props.message.tool_calls && props.message.tool_calls.length > 0}>
+        {/* Finished-turn affordance under the (agent) bubble. A captured v1.5
+            timeline wins (full "turn details" panel); otherwise the v1.4
+            "⚙ N tools" chip is the fallback for replayed messages. */}
+        <Show
+          when={props.turnDetails && props.turnDetails.length > 0}
+          fallback={
+            <Show when={props.message.tool_calls && props.message.tool_calls.length > 0}>
+              <div class="pt-1">
+                <CommittedToolCalls toolCalls={props.message.tool_calls ?? []} />
+              </div>
+            </Show>
+          }
+        >
           <div class="pt-1">
-            <CommittedToolCalls toolCalls={props.message.tool_calls ?? []} />
+            <TurnDetails events={props.turnDetails ?? []} />
           </div>
         </Show>
       </MessageContent>

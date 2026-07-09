@@ -65,7 +65,7 @@ export function TrayShelf() {
       <button
         type="button"
         data-slot="tray-bar"
-        class="flex h-10 w-full shrink-0 items-center gap-2 border-t border-border bg-card px-3 text-left"
+        class="flex h-10 w-full shrink-0 items-center gap-2 border-t border-border bg-card px-3 text-left rail:hidden"
         onClick={() => setTrayExpanded(!expanded())}
         aria-expanded={expanded()}
         aria-label={
@@ -202,7 +202,7 @@ function TrayScrim() {
 
   return (
     <div
-      class="absolute inset-0 z-20"
+      class="absolute inset-0 z-20 rail:hidden"
       aria-hidden="true"
       onClick={() => setTrayExpanded(false)}
     />
@@ -217,7 +217,7 @@ function TrayPanel() {
   return (
     <div
       data-slot="tray-panel"
-      class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg"
+      class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg rail:hidden"
       role="region"
       aria-label="Pings"
     >

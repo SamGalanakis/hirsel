@@ -19,7 +19,7 @@ Scenario A:
 
 - `/debug/health` reports `ok: true`.
 - A throwaway `/tmp` git repo starts with a failing `python3 -m unittest -v`.
-- The Agent uses `subagents.spawn`; `/debug/processes` shows `kind: "subagent"`, `agent: "codex"`, and `model: "gpt-5"`.
+- The Agent uses `subagents.spawn`; `/debug/processes` shows `kind: "subagent"`, `agent: "codex"`, and `model: "gpt-5.5"`.
 - `/debug/broadcasts` accumulates multiple `process_upsert` events for the same process.
 - The process reaches `state: "done"`.
 - After terminal state, the Agent reports the outcome in Chat or Inbox.
@@ -27,7 +27,7 @@ Scenario A:
 
 Scenario B:
 
-- The Agent starts a long-running Codex Sub-agent with `model: "gpt-5"`.
+- The Agent starts a long-running Codex Sub-agent with `model: "gpt-5.5"`.
 - The Owner asks to stop that process by id.
 - The process reaches terminal `state: "cancelled"` or `state: "failed"` and not `done`.
 

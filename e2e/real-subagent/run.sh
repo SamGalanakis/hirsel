@@ -12,7 +12,7 @@ HOST_LOG="/tmp/hirsel-e2e-real-subagent-host.log"
 HIRSEL_AGENT=lash
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=real
-HIRSEL_MODEL=gpt-5
+HIRSEL_MODEL=gpt-5.5
 trap 'stop_hirsel_host TERM' EXIT
 
 FIX_REPO="/tmp/hirsel-e2e-real-subagent-fix-repo"
@@ -39,15 +39,15 @@ post_json debug/reset '{}' >/dev/null
 pass_gate "debug reset"
 
 BODY="$(cat <<EOF
-Delegate this repo fix to a Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5", and cwd "$FIX_REPO". The Sub-agent task is: run python3 -m unittest -v, fix the implementation, and leave the tests passing. After spawning, wait for the Sub-agent to finish, then report the outcome in Chat or Inbox according to your conventions.
+Delegate this repo fix to a Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5.5", and cwd "$FIX_REPO". The Sub-agent task is: run python3 -m unittest -v, fix the implementation, and leave the tests passing. After spawning, wait for the Sub-agent to finish, then report the outcome in Chat or Inbox according to your conventions.
 EOF
 )"
 REQ="$(jq -nc --arg body "$BODY" '{client_id:"real-subagent-fix",body:$body,ref:null}')"
 OWNER_JSON="$(post_json debug/owner-message "$REQ")"
 OWNER_ID="$(printf '%s' "$OWNER_JSON" | jq -r '.message.id')"
 
-PROC_JSON="$(wait_jq debug/processes '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5")' 240)"
-PROC_ID="$(printf '%s' "$PROC_JSON" | jq -r '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5") | .id' | tail -1)"
+PROC_JSON="$(wait_jq debug/processes '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5.5")' 240)"
+PROC_ID="$(printf '%s' "$PROC_JSON" | jq -r '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5.5") | .id' | tail -1)"
 pass_gate "real codex process visible with explicit model: $PROC_ID"
 
 wait_jq debug/broadcasts '[.events[] | select(.type == "process_upsert" and .process.id == "'"$PROC_ID"'")] | length >= 2' 360 >/dev/null
@@ -93,14 +93,14 @@ mkdir -p "$LONG_REPO"
 )
 
 BODY="$(cat <<EOF
-Start a long-running Codex Sub-agent now and do not wait for it. Use subagents.spawn with agent "codex", explicit model "gpt-5", and cwd "$LONG_REPO". The Sub-agent task is: run python3 -c 'import time; time.sleep(180)' and do not finish until that command returns. Reply in Chat after spawning with the process id.
+Start a long-running Codex Sub-agent now and do not wait for it. Use subagents.spawn with agent "codex", explicit model "gpt-5.5", and cwd "$LONG_REPO". The Sub-agent task is: run python3 -c 'import time; time.sleep(180)' and do not finish until that command returns. Reply in Chat after spawning with the process id.
 EOF
 )"
 REQ="$(jq -nc --arg body "$BODY" '{client_id:"real-subagent-long",body:$body,ref:null}')"
 post_json debug/owner-message "$REQ" >/dev/null
 
-LONG_JSON="$(wait_jq debug/processes '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5" and .state == "running" and .id != "'"$PROC_ID"'")' 240)"
-LONG_PROC_ID="$(printf '%s' "$LONG_JSON" | jq -r '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5" and .state == "running" and .id != "'"$PROC_ID"'") | .id' | tail -1)"
+LONG_JSON="$(wait_jq debug/processes '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5.5" and .state == "running" and .id != "'"$PROC_ID"'")' 240)"
+LONG_PROC_ID="$(printf '%s' "$LONG_JSON" | jq -r '.processes[] | select(.kind == "subagent" and .agent == "codex" and .model == "gpt-5.5" and .state == "running" and .id != "'"$PROC_ID"'") | .id' | tail -1)"
 pass_gate "long-running real codex process visible: $LONG_PROC_ID"
 
 STOP_BODY="Stop process $LONG_PROC_ID now. Use subagents.interrupt on exactly this process id, then reply after the interrupt request."

@@ -12,7 +12,7 @@ HOST_LOG="/tmp/hirsel-e2e-attachment-agent-host.log"
 HIRSEL_AGENT=lash
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=fake
-HIRSEL_MODEL=gpt-5
+HIRSEL_MODEL=gpt-5.5
 trap 'stop_hirsel_host TERM' EXIT
 
 ART_DIR="/tmp/hirsel-e2e-attachment-agent-artifacts"

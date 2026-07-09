@@ -12,7 +12,7 @@ HOST_LOG="/tmp/hirsel-e2e-inbox-lifecycle-scripted-host.log"
 HIRSEL_AGENT=scripted
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=fake
-HIRSEL_MODEL=gpt-5
+HIRSEL_MODEL=gpt-5.5
 trap 'stop_hirsel_host TERM' EXIT
 
 start_hirsel_host fresh
@@ -49,7 +49,7 @@ HOST_LOG="/tmp/hirsel-e2e-inbox-lifecycle-real-host.log"
 HIRSEL_AGENT=lash
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=fake
-HIRSEL_MODEL=gpt-5
+HIRSEL_MODEL=gpt-5.5
 start_hirsel_host fresh
 post_json debug/reset '{}' >/dev/null
 pass_gate "real Agent debug reset"

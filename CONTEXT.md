@@ -40,6 +40,18 @@ _Avoid_: notification, card, form
 The Chat message an Inbox Item points back to — the place where the inbox tool was called. Responding to an Inbox Item means sending a normal Chat message that refs its Anchor, WhatsApp-quote style, so multiple pending questions coexist unambiguously.
 _Avoid_: ref (as a noun), thread
 
+**Tray**:
+The collapsible surface under the Chat where Inbox Items live — the Inbox's home in the client (there is no separate Inbox tab). Badge and Deleted section live on/in it.
+_Avoid_: inbox tab, drawer
+
+**Side Chat**:
+An ephemeral conversation forked from the main Chat and scoped to one Inbox Item: a fresh session seeded with the item, its Anchor exchange, and a bounded window of recent chat — same Agent persona, transcript never enters the main session. Concluding it discards it.
+_Avoid_: thread (standing), fork (implies full copy), sub-conversation
+
+**Conclusion**:
+The Owner's answer to an Inbox Item produced by a Side Chat: drafted by the side agent, edited/confirmed by the Owner, delivered into the main Chat as the Owner's Anchor-refed reply (and the item archives).
+_Avoid_: summary, verdict, resolution
+
 **Quick Reply**:
 An optional flat list of value/label buttons on an Inbox Item. Tapping one sends its value as an ordinary Anchor-refed Chat message; freeform reply is always available alongside. Not a form engine — no typed fields, no validation.
 _Avoid_: response spec, field spec, action button

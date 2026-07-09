@@ -25,6 +25,8 @@ data/
 *.log
 tmp/
 scratch/
+__pycache__/
+*.py[cod]
 
 # OS
 .DS_Store

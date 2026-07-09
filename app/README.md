@@ -13,6 +13,19 @@ a small "delegate" scenario (send the message `delegate` to see it: agent
 activity → chat reply → an Inbox Item with Quick Replies ~3s later → tapping a
 Quick Reply gets acknowledged and archives the item).
 
+Scripted words for the v1.4 surfaces (Processes tab + tool-call visibility):
+
+- `delegate` — spawns a **sub-agent** process (agent+model chips) that runs with
+  progress-summary updates then completes; watch it in the **Processes** tab move
+  Running → Finished, and use **Ask to stop** while it runs.
+- `tools` — a thinking turn that streams live tool-call rows under "Thinking…",
+  then commits a reply carrying a **⚙ 2 tools** chip you can expand.
+- `monitor` — creates a **monitor** process (code-style probe cmd) that "fires" a
+  few seconds later, updating its summary.
+
+Two processes (a running monitor and a finished sub-agent) are seeded at startup
+so the tab is populated immediately.
+
 ```sh
 npm install
 npm run dev:mock   # mock WS server (port 8787) + vite dev server together

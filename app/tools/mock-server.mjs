@@ -15,11 +15,14 @@ const ARCHIVED_REPLAY_LIMIT = 20;
 const MAX_BLOB_BYTES = 15 * 1024 * 1024;
 const REPLY_DELAY_MS = Number(process.env.MOCK_REPLY_MS ?? 1200);
 
-/** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[]}[]} */
+/** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[], tool_calls:object[]}[]} */
 const messages = [];
 const inbox = [];
+/** @type {{id:string, kind:'subagent'|'monitor', label:string, agent:string|null, model:string|null, state:string, started_ts:string, last_event_ts:string, summary:string|null}[]} */
+const processes = [];
 let nextMsgId = 1;
 let nextInboxId = 1;
+let nextProcSeq = 1;
 const seenClientIds = new Map(); // client_id -> assigned message id
 const blobs = new Map(); // blob id -> { id, name, mime, size, buffer }
 
@@ -43,14 +46,50 @@ function broadcast(frame) {
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(json);
 }
 
-function addMessage(author, body, ref, attachments = []) {
-  const message = { id: nextMsgId++, author, body, ref: ref ?? null, ts: now(), attachments };
+function addMessage(author, body, ref, attachments = [], toolCalls = []) {
+  const message = {
+    id: nextMsgId++,
+    author,
+    body,
+    ref: ref ?? null,
+    ts: now(),
+    attachments,
+    tool_calls: toolCalls,
+  };
   messages.push(message);
   broadcast({ type: "msg", message });
   return message;
 }
 function setActivity(state, text) {
   broadcast({ type: "agent_activity", state, text: text ?? null });
+}
+
+const TERMINAL_STATES = new Set(["done", "failed", "cancelled", "abandoned"]);
+
+/** Upsert a process by id and broadcast the change (v1.4). */
+function upsertProcess(patch) {
+  const idx = processes.findIndex((p) => p.id === patch.id);
+  const base =
+    idx === -1
+      ? { agent: null, model: null, summary: null, started_ts: now(), last_event_ts: now() }
+      : processes[idx];
+  const proc = { ...base, ...patch, last_event_ts: patch.last_event_ts ?? now() };
+  if (idx === -1) processes.push(proc);
+  else processes[idx] = proc;
+  broadcast({ type: "process_upsert", process: proc });
+  return proc;
+}
+
+/** Emit an ephemeral tool-call event for the running turn (v1.4). */
+function emitToolCall(name, summary, seq) {
+  broadcast({ type: "agent_tool_call", name, summary: summary ?? null, seq });
+}
+
+/** hello_ok processes slice: all non-terminal + the last 10 terminal. */
+function processesForHello() {
+  const nonTerminal = processes.filter((p) => !TERMINAL_STATES.has(p.state));
+  const terminal = processes.filter((p) => TERMINAL_STATES.has(p.state)).slice(-10);
+  return [...nonTerminal, ...terminal];
 }
 function upsertInbox(item) {
   const idx = inbox.findIndex((i) => i.id === item.id);
@@ -102,6 +141,19 @@ function startReplyTurn(ownerMessage) {
     return;
   }
   if (ownerMessage.body.trim().toLowerCase() === "delegate") {
+    // Spawn a sub-agent Runtime Process that runs alongside the turn: it goes
+    // running (with progress-summary updates) → done, broadcasting each step.
+    const procId = `proc-${nextProcSeq++}`;
+    const label = "Review the auth refactor and open a PR";
+    upsertProcess({
+      id: procId,
+      kind: "subagent",
+      label,
+      agent: "code-reviewer",
+      model: "gpt-5.5",
+      state: "running",
+      summary: "starting up…",
+    });
     setActivity("thinking", "Delegating to a sub-agent…");
     later(() => {
       const reply = addMessage(
@@ -110,8 +162,12 @@ function startReplyTurn(ownerMessage) {
         ownerMessage.id,
       );
       finishTurn();
-      // Independent follow-up (not part of the turn): an inbox item lands later.
+      // The sub-agent keeps working after the turn commits.
+      setTimeout(() => upsertProcess({ id: procId, summary: "reading changed files (3)…" }), 2000);
+      setTimeout(() => upsertProcess({ id: procId, summary: "writing review notes…" }), 5000);
       setTimeout(() => {
+        upsertProcess({ id: procId, state: "done", summary: "done — 3 files reviewed, PR opened" });
+        // Independent follow-up: an inbox item lands when it finishes.
         upsertInbox({
           id: nextInboxId++,
           content:
@@ -125,7 +181,56 @@ function startReplyTurn(ownerMessage) {
           status: "open",
           ts: now(),
         });
-      }, 3000);
+      }, 8000);
+    }, REPLY_DELAY_MS);
+  } else if (ownerMessage.body.trim().toLowerCase() === "tools") {
+    // A scripted thinking window that streams live tool calls, then commits a
+    // reply stamped with the matching tool_calls summary.
+    setActivity("thinking", "Working through it…");
+    later(() => emitToolCall("read_file", "src/store/reducer.ts", 1), 300);
+    later(() => emitToolCall("grep", "process_upsert", 2), 900);
+    later(() => {
+      addMessage(
+        "agent",
+        "Checked the reducer and grepped for the handler — both look right.",
+        ownerMessage.id,
+        [],
+        [
+          { name: "read_file", ok: true },
+          { name: "grep", ok: true },
+        ],
+      );
+      finishTurn();
+    }, REPLY_DELAY_MS + 1200);
+  } else if (ownerMessage.body.trim().toLowerCase() === "monitor") {
+    // Create a monitor Runtime Process (running), then have it "fire" once.
+    const procId = `proc-${nextProcSeq++}`;
+    upsertProcess({
+      id: procId,
+      kind: "monitor",
+      label: "curl -sf https://api.example.com/health",
+      agent: null,
+      model: null,
+      state: "running",
+      summary: "every 60s — no wakes yet",
+    });
+    setActivity("thinking", "Setting up a monitor…");
+    later(() => {
+      addMessage(
+        "agent",
+        "Monitor is live — I'll ping you here if the health check starts failing.",
+        ownerMessage.id,
+      );
+      finishTurn();
+      // It fires a few seconds later (condition met).
+      setTimeout(
+        () =>
+          upsertProcess({
+            id: procId,
+            summary: "every 60s — fired: exit 22, tail: 'HTTP 503 Service Unavailable'",
+          }),
+        4000,
+      );
     }, REPLY_DELAY_MS);
   } else {
     setActivity("thinking", "Thinking…");
@@ -321,6 +426,7 @@ wss.on("connection", (ws) => {
           latest_msg_id: nextMsgId - 1,
           messages: replayMessages,
           inbox: [...openItems, ...archivedItems],
+          processes: processesForHello(),
         }),
       );
       log("hello ok, replayed", replayMessages.length, "messages");
@@ -354,6 +460,36 @@ wss.on("connection", (ws) => {
     }
   });
 });
+
+/** Seed a couple of processes so the Processes tab is populated on first load.
+ * Backdated timestamps exercise the "started X ago" / newest-first ordering. */
+function seedProcesses() {
+  const ago = (mins) => new Date(Date.now() - mins * 60_000).toISOString();
+  processes.push({
+    id: `proc-${nextProcSeq++}`,
+    kind: "monitor",
+    label: "tail -n0 -F /var/log/deploy.log",
+    agent: null,
+    model: null,
+    state: "running",
+    started_ts: ago(42),
+    last_event_ts: ago(3),
+    summary: "every 30s — fired: 'deploy complete: build 4821'",
+  });
+  processes.push({
+    id: `proc-${nextProcSeq++}`,
+    kind: "subagent",
+    label: "Draft release notes for v1.4",
+    agent: "writer",
+    model: "fable-5",
+    state: "done",
+    started_ts: ago(20),
+    last_event_ts: ago(11),
+    summary: "done — release notes drafted (2 revisions)",
+  });
+}
+
+seedProcesses();
 
 httpServer.listen(PORT, () => {
   log(`listening on ws://localhost:${PORT} + http blobs at /blob/:id (token: ${TOKEN})`);

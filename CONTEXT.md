@@ -33,8 +33,8 @@ The Owner-facing surface that organizes the Agent's async output — completions
 _Avoid_: notifications, feed, event log
 
 **Inbox Item**:
-One piece of async Agent output filed in the Inbox: markdown content, an Anchor, a requires-response flag, and optionally Quick Replies. Email-like states: unread → read (Owner has seen it; replied items are visibly dealt with), and open → archived (presented as "Deleted" in the UI); either party may archive. Anything richer than markdown-plus-buttons is a UI template's job, not the Inbox's.
-_Avoid_: notification, card, form
+One piece of async Agent output filed in the Inbox: markdown content, an Anchor, a requires-response flag, and optionally Quick Replies. Lifecycle: open (needs the Owner's attention; unread → read as the seen-state) → done (dealt with, kept findable). The Owner replying to the Anchor resolves the item automatically; the Agent resolves moot items via `inbox.resolve`; the Owner can mark done explicitly. One terminal state — there is no separate deleted/archived. Anything richer than markdown-plus-buttons is a UI template's job, not the Inbox's.
+_Avoid_: notification, card, form, archived, deleted
 
 **Anchor**:
 The Chat message an Inbox Item points back to — the place where the inbox tool was called. Responding to an Inbox Item means sending a normal Chat message that refs its Anchor, WhatsApp-quote style, so multiple pending questions coexist unambiguously.

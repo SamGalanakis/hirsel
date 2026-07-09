@@ -1180,6 +1180,7 @@ impl HirselToolExecutor {
             "subagents_interrupt" => self.subagents_interrupt(call.args).await,
             "subagents_list" => self.subagents_list().await,
             "subagents_progress" => self.subagents_progress(call.args).await,
+            "subagents_wait" => self.subagents_wait(call.args, call.context).await,
             "shell_run" => self.shell_run(call.args).await,
             other => Err(format!("Unknown tool: {other}")),
         }
@@ -1304,6 +1305,24 @@ impl HirselToolExecutor {
             .map_err(|error| error.to_string())?;
         serde_json::to_value(json!({ "process": process, "events": events }))
             .map_err(|error| error.to_string())
+    }
+
+    async fn subagents_wait(
+        &self,
+        args: &Value,
+        context: &lash::tools::ToolContext<'_>,
+    ) -> Result<Value, String> {
+        let process_id = required_string(args, "process_id")?;
+        let outcome = context
+            .processes()
+            .await_process(&process_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(json!({
+            "process_id": process_id,
+            "outcome": outcome,
+        }))
+        .map_err(|error| error.to_string())
     }
 
     async fn shell_run(&self, args: &Value) -> Result<Value, String> {
@@ -1745,6 +1764,23 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
             json!({ "type": "object" }),
             ["subagents"],
             "progress",
+            ToolScheduling::Parallel,
+        ),
+        tool_definition(
+            "hirsel.subagents_wait",
+            "subagents_wait",
+            "Wait for a Sub-agent process to reach a terminal outcome.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["process_id"],
+                "properties": {
+                    "process_id": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object" }),
+            ["subagents"],
+            "wait",
             ToolScheduling::Parallel,
         ),
         tool_definition(

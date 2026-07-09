@@ -31,3 +31,4 @@ Living document, updated as design decisions land. v1 = the smallest hirsel that
 - **Restate-backed durability** — sqlite is enough for single-player; EffectHost boundary keeps the door open. [ADR-0001]
 - **Multi-device / additional node keys** — single phone + laptop browser is fine to start.
 - **iOS app** — after the Android app proves the Rust client-core + skin shape. [ADR-0010]
+- **Slack bot entrypoint** — deferred bridge surface; see ADR-0010 addendum for the mapping and why not primary.

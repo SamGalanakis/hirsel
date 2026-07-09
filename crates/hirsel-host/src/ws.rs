@@ -529,6 +529,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_send_message_enqueue_failure_returns_error_without_msg() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "send_message",
+                "client_id": "enqueue-fails",
+                "body": "__hirsel_test_enqueue_error__",
+                "ref": null
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let frame = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        match serde_json::from_str::<HostToClient>(&frame).unwrap() {
+            HostToClient::Error { detail, client_id } => {
+                assert!(detail.contains("scripted enqueue failed"));
+                assert_eq!(client_id.as_deref(), Some("enqueue-fails"));
+            }
+            other => panic!("unexpected response before error: {other:?}"),
+        }
+        assert!(state.storage.all_chat().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn websocket_read_item_marks_read_and_errors_on_unknown_id() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();

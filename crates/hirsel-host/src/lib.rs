@@ -107,10 +107,8 @@ impl AppState {
             .await?;
         if inserted {
             let stored_attachments = self.storage.blobs_for_message(message.id).await?;
-            self.broadcast(HostToClient::Msg {
-                message: message.clone(),
-            });
-            self.agent
+            if let Err(error) = self
+                .agent
                 .enqueue(OwnerTurn {
                     message_id: message.id,
                     client_id: client_id.clone(),
@@ -119,7 +117,20 @@ impl AppState {
                     attachments: stored_attachments,
                     mode,
                 })
-                .await?;
+                .await
+            {
+                if let Err(delete_error) = self.storage.delete_chat_message(message.id).await {
+                    tracing::warn!(
+                        %delete_error,
+                        message_id = message.id,
+                        "failed to delete owner message after Agent enqueue failed"
+                    );
+                }
+                return Err(error);
+            }
+            self.broadcast(HostToClient::Msg {
+                message: message.clone(),
+            });
         }
         Ok(OwnerSubmission {
             client_id,
@@ -454,6 +465,33 @@ mod tests {
                 .iter()
                 .all(|message| message.author == ChatAuthor::Owner),
             "cancelled slow turn should not produce an Agent reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_message_enqueue_failure_deletes_message_without_broadcast() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let mut broadcasts = state.broadcaster.subscribe();
+
+        let error = state
+            .submit_owner_message(
+                "enqueue-fails".to_string(),
+                "__hirsel_test_enqueue_error__".to_string(),
+                None,
+                Vec::new(),
+                SendMode::Send,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("scripted enqueue failed"));
+        assert!(state.storage.all_chat().await.unwrap().is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), broadcasts.recv())
+                .await
+                .is_err(),
+            "failed enqueue must not publish a sent message"
         );
     }
 

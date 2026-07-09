@@ -3043,6 +3043,10 @@ struct ScriptedActiveTurn {
 
 impl ScriptedAgentRuntime {
     async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if turn.body == "__hirsel_test_enqueue_error__" {
+            anyhow::bail!("scripted enqueue failed for test");
+        }
         self.state.lock().await.queue.push_back(turn);
         self.notify.notify_one();
         Ok(())

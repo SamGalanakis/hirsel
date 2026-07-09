@@ -190,13 +190,24 @@ export interface ProcessUpsertMsg {
   process: ProcessInfo;
 }
 
-/** v1.4: ephemeral tool-call event streamed while the Agent's turn runs (like
- * agent_activity); never stored or replayed. `seq` orders calls within a turn. */
-export interface AgentToolCallMsg {
-  type: "agent_tool_call";
-  name: string;
-  summary: string | null;
+/** v1.5: one ordered event in the running turn's timeline. Tagged by `kind`.
+ * Prose/reasoning carry markdown deltas that accumulate into the current
+ * block/run; tool_start opens a row that tool_done (matched by `id`) resolves.
+ * Host `summary` strings are clean one-liners (no raw JSON). */
+export type TurnEvent =
+  | { kind: "prose"; text: string }
+  | { kind: "reasoning"; text: string }
+  | { kind: "tool_start"; id: string; name: string; summary: string | null }
+  | { kind: "tool_done"; id: string; ok: boolean; summary: string | null };
+
+/** v1.5: ephemeral timeline event streamed while the Agent's turn runs (like
+ * agent_activity); never stored or replayed. `seq` strictly orders events
+ * within a turn (gaps tolerated, redelivery idempotent). Replaces v1.4's
+ * `agent_tool_call`. */
+export interface TurnEventMsg {
+  type: "turn_event";
   seq: number;
+  event: TurnEvent;
 }
 
 export interface ErrorMsg {
@@ -216,5 +227,5 @@ export type ServerMessage =
   | BlobOkMsg
   | MsgRemovedMsg
   | ProcessUpsertMsg
-  | AgentToolCallMsg
+  | TurnEventMsg
   | ErrorMsg;

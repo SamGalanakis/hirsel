@@ -986,7 +986,12 @@ pub fn monitor_process_info(record: &MonitorRecord) -> ProcessInfo {
         },
         started_ts: record.created_ts,
         last_event_ts: record.last_event_ts,
-        summary: record.summary.clone(),
+        // The client's monitor rows have no dedicated cmd/interval fields;
+        // the summary carries them (see app/PROTOCOL.md v1.4 notes).
+        summary: Some(match &record.summary {
+            Some(summary) => format!("{} · every {}s — {summary}", record.cmd, record.every_secs),
+            None => format!("{} · every {}s", record.cmd, record.every_secs),
+        }),
     }
 }
 
@@ -1168,7 +1173,10 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].kind, ProcessKind::Monitor);
         assert_eq!(snapshot[0].state, ProcessState::Running);
-        assert_eq!(snapshot[0].summary.as_deref(), Some("exit 0: ready"));
+        assert_eq!(
+            snapshot[0].summary.as_deref(),
+            Some("printf ready · every 30s — exit 0: ready")
+        );
 
         let cancelled = storage.cancel_monitor(&monitor.id).await.unwrap().unwrap();
         assert!(cancelled.cancelled_ts.is_some());

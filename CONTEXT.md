@@ -33,7 +33,7 @@ The Owner-facing surface that organizes the Agent's async output — completions
 _Avoid_: notifications, feed, event log
 
 **Inbox Item**:
-One piece of async Agent output filed in the Inbox: markdown content, an Anchor, a requires-response flag, and optionally Quick Replies. Lifecycle is open → archived, and either party may archive. Anything richer than markdown-plus-buttons is a UI template's job, not the Inbox's.
+One piece of async Agent output filed in the Inbox: markdown content, an Anchor, a requires-response flag, and optionally Quick Replies. Email-like states: unread → read (Owner has seen it; replied items are visibly dealt with), and open → archived (presented as "Deleted" in the UI); either party may archive. Anything richer than markdown-plus-buttons is a UI template's job, not the Inbox's.
 _Avoid_: notification, card, form
 
 **Anchor**:

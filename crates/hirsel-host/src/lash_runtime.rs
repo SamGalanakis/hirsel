@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
-use hirsel_proto::{AgentActivityState, HostToClient, QuickReply, SendMode};
+use hirsel_proto::{AgentActivityState, HostToClient, QuickReply, SendMode, ToolCallSummary};
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
     observe::RemoteSessionObservationStreamItem,
@@ -394,12 +394,13 @@ impl LashAgentRuntime {
                     runtime.clear_active_turn_id(&drain_id).await;
                     match result {
                         Ok(Some(output)) => {
+                            let tool_calls = tool_call_summaries(&output);
                             let text = output
                                 .assistant_message()
                                 .map(str::to_owned)
                                 .or_else(|| output.final_value().map(render_final_value));
                             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                                runtime.deliver_turn_chat(text).await;
+                                runtime.deliver_turn_chat(text, tool_calls).await;
                             }
                             continue;
                         }
@@ -464,8 +465,8 @@ impl LashAgentRuntime {
         }
     }
 
-    async fn deliver_turn_chat(&self, text: String) {
-        match self.tools.chat_send(text, None).await {
+    async fn deliver_turn_chat(&self, text: String, tool_calls: Vec<ToolCallSummary>) {
+        match self.tools.chat_send_with_tool_calls(text, None, tool_calls).await {
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(%error, "failed to deliver Agent turn output to Chat");
@@ -505,6 +506,7 @@ impl LashAgentRuntime {
             let observable = session.observe();
             let current = observable.current_remote_observation();
             let cursor = RemoteSessionCursor::new(current.cursor);
+            let mut tool_call_seq = ToolCallSequence::default();
             let mut stream = match observable.subscribe_and_recover_remote(cursor) {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -517,6 +519,11 @@ impl LashAgentRuntime {
                     Ok(RemoteSessionObservationStreamItem::Event(event)) => {
                         if let Some(activity) = activity_from_observation(&event.event) {
                             publish(&broadcast_log, &broadcaster, activity);
+                        }
+                        if let Some(tool_call) =
+                            tool_call_from_observation(&event.event, &mut tool_call_seq)
+                        {
+                            publish(&broadcast_log, &broadcaster, tool_call);
                         }
                     }
                     Ok(RemoteSessionObservationStreamItem::Gap { .. }) => {
@@ -983,6 +990,73 @@ fn activity_from_observation(event: &RemoteSessionObservationEventPayload) -> Op
             Some(agent_activity(AgentActivityState::Idle, None))
         }
         _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ToolCallSequence {
+    correlation_id: Option<String>,
+    seq: u64,
+}
+
+impl ToolCallSequence {
+    fn next(&mut self, correlation_id: &str) -> u64 {
+        if self.correlation_id.as_deref() != Some(correlation_id) {
+            self.correlation_id = Some(correlation_id.to_string());
+            self.seq = 0;
+        }
+        self.seq += 1;
+        self.seq
+    }
+}
+
+fn tool_call_from_observation(
+    event: &RemoteSessionObservationEventPayload,
+    sequence: &mut ToolCallSequence,
+) -> Option<HostToClient> {
+    let RemoteSessionObservationEventPayload::TurnActivity { activity } = event else {
+        return None;
+    };
+    match &activity.event {
+        RemoteTurnEvent::ToolCallStarted { name, args, .. } => Some(HostToClient::AgentToolCall {
+            name: name.clone(),
+            summary: summarize_json_value(args),
+            seq: sequence.next(&activity.correlation_id),
+        }),
+        RemoteTurnEvent::ToolCallCompleted { name, output, .. } => {
+            Some(HostToClient::AgentToolCall {
+                name: name.clone(),
+                summary: summarize_json_value(output),
+                seq: sequence.next(&activity.correlation_id),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
+    output
+        .result
+        .tool_calls
+        .iter()
+        .map(|call| ToolCallSummary {
+            name: call.tool.clone(),
+            ok: call.output.is_success(),
+        })
+        .collect()
+}
+
+fn summarize_json_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => latest_line(text),
+        Value::Array(items) if items.is_empty() => None,
+        Value::Object(entries) if entries.is_empty() => None,
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value)
+            .ok()
+            .and_then(|text| latest_line(&text)),
     }
 }
 

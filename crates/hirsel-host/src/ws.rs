@@ -118,6 +118,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             latest_msg_id,
             messages,
             inbox,
+            processes: state.processes.snapshot().unwrap_or_default(),
         },
     )
     .await;
@@ -326,11 +327,13 @@ mod tests {
                 latest_msg_id,
                 messages,
                 inbox,
+                processes,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].author, ChatAuthor::Agent);
                 assert!(inbox.is_empty());
+                assert!(processes.is_empty());
             }
             other => panic!("unexpected hello response: {other:?}"),
         }

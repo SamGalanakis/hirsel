@@ -5,7 +5,9 @@ use hirsel_drivers::{
     AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SessionHandle, SpawnSpec, SubagentDriver,
     SubagentEvent, TerminalOutcome,
 };
-use hirsel_proto::{ChatAuthor, ChatMessage, HostToClient, InboxItem, QuickReply};
+use hirsel_proto::{
+    ChatAuthor, ChatMessage, HostToClient, InboxItem, ProcessInfo, QuickReply, ToolCallSummary,
+};
 use serde::Serialize;
 use tokio::{
     process::Command,
@@ -88,9 +90,19 @@ impl ToolSuite {
         body_md: impl Into<String>,
         anchor: Option<u64>,
     ) -> anyhow::Result<ChatMessage> {
+        self.chat_send_with_tool_calls(body_md, anchor, Vec::new())
+            .await
+    }
+
+    pub async fn chat_send_with_tool_calls(
+        &self,
+        body_md: impl Into<String>,
+        anchor: Option<u64>,
+        tool_calls: Vec<ToolCallSummary>,
+    ) -> anyhow::Result<ChatMessage> {
         let message = self
             .storage
-            .append_chat(ChatAuthor::Agent, body_md.into(), anchor)
+            .append_chat_with_tool_calls(ChatAuthor::Agent, body_md.into(), anchor, tool_calls)
             .await?;
         self.broadcast(HostToClient::Msg {
             message: message.clone(),
@@ -124,6 +136,10 @@ impl ToolSuite {
     fn broadcast(&self, event: HostToClient) {
         self.broadcast_log.record(event.clone());
         let _ = self.broadcaster.send(event);
+    }
+
+    fn broadcast_process_upsert(&self, process: ProcessInfo) {
+        publish_process_upsert(&self.broadcast_log, &self.broadcaster, process);
     }
 
     pub async fn subagents_spawn(
@@ -165,8 +181,13 @@ impl ToolSuite {
             prompt,
             cwd.to_string_lossy().into_owned(),
         )?;
+        if let Some(process) = self.processes.info(&process_id)? {
+            self.broadcast_process_upsert(process);
+        }
         let mut events = driver.events(&handle)?;
         let processes = self.processes.clone();
+        let broadcaster = self.broadcaster.clone();
+        let broadcast_log = self.broadcast_log.clone();
         let terminal_tx = self.terminal_tx.clone();
         let process_id_for_task = process_id.clone();
         let handle_for_task = handle.clone();
@@ -176,8 +197,12 @@ impl ToolSuite {
                     SubagentEvent::Terminal { outcome } => Some(outcome.clone()),
                     _ => None,
                 };
-                if let Err(error) = processes.push_event(&process_id_for_task, event) {
-                    tracing::warn!(%error, "failed to record Sub-agent event");
+                match processes.push_event(&process_id_for_task, event) {
+                    Ok(Some(update)) if update.should_broadcast => {
+                        publish_process_upsert(&broadcast_log, &broadcaster, update.info);
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "failed to record Sub-agent event"),
                 }
                 if let Some(outcome) = terminal {
                     let _ = terminal_tx.send(ProcessTerminal {
@@ -284,6 +309,16 @@ impl ToolSuite {
             (DriverMode::Real, AgentKind::Codex) => self.codex.clone(),
         }
     }
+}
+
+fn publish_process_upsert(
+    broadcast_log: &BroadcastLog,
+    broadcaster: &broadcast::Sender<HostToClient>,
+    process: ProcessInfo,
+) {
+    let event = HostToClient::ProcessUpsert { process };
+    broadcast_log.record(event.clone());
+    let _ = broadcaster.send(event);
 }
 
 fn truncate_output(output: impl AsRef<str>) -> String {

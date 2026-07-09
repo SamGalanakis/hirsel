@@ -190,7 +190,7 @@ async fn broadcasts(State(state): State<AppState>) -> Json<BroadcastsResponse> {
 
 async fn processes(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
     Ok(Json(serde_json::json!({
-        "processes": state.processes.list()?
+        "processes": state.processes.snapshot()?
     })))
 }
 

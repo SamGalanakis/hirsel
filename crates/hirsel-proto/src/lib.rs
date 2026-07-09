@@ -26,6 +26,44 @@ pub struct ChatMessage {
     pub ts: DateTime<Utc>,
     #[serde(default)]
     pub attachments: Vec<Blob>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallSummary {
+    pub name: String,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessKind {
+    Subagent,
+    Monitor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessState {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub id: String,
+    pub kind: ProcessKind,
+    pub label: String,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub state: ProcessState,
+    pub started_ts: DateTime<Utc>,
+    pub last_event_ts: DateTime<Utc>,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,9 +157,18 @@ pub enum HostToClient {
         latest_msg_id: u64,
         messages: Vec<ChatMessage>,
         inbox: Vec<InboxItem>,
+        processes: Vec<ProcessInfo>,
     },
     Msg {
         message: ChatMessage,
+    },
+    ProcessUpsert {
+        process: ProcessInfo,
+    },
+    AgentToolCall {
+        name: String,
+        summary: Option<String>,
+        seq: u64,
     },
     MsgRemoved {
         id: u64,
@@ -320,6 +367,10 @@ mod tests {
                 mime: "image/png".to_string(),
                 size: 8,
             }],
+            tool_calls: vec![ToolCallSummary {
+                name: "shell_run".to_string(),
+                ok: true,
+            }],
         };
         let item = InboxItem {
             id: 9,
@@ -334,10 +385,22 @@ mod tests {
             read: true,
             ts,
         };
+        let process = ProcessInfo {
+            id: "proc-1".to_string(),
+            kind: ProcessKind::Subagent,
+            label: "fix bug".to_string(),
+            agent: Some("claude".to_string()),
+            model: None,
+            state: ProcessState::Running,
+            started_ts: ts,
+            last_event_ts: ts,
+            summary: Some("working".to_string()),
+        };
         let response = HostToClient::HelloOk {
             latest_msg_id: 1,
             messages: vec![message],
             inbox: vec![item],
+            processes: vec![process],
         };
 
         let encoded = serde_json::to_string(&response).unwrap();
@@ -358,6 +421,46 @@ mod tests {
 
         let parsed: ChatMessage = serde_json::from_value(value).unwrap();
         assert!(parsed.attachments.is_empty());
+        assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn process_upsert_and_agent_tool_call_round_trip() {
+        let ts = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
+        let process = ProcessInfo {
+            id: "proc-1".to_string(),
+            kind: ProcessKind::Monitor,
+            label: "watch file".to_string(),
+            agent: None,
+            model: None,
+            state: ProcessState::Done,
+            started_ts: ts,
+            last_event_ts: ts,
+            summary: None,
+        };
+        let upsert = HostToClient::ProcessUpsert {
+            process: process.clone(),
+        };
+        let encoded = serde_json::to_string(&upsert).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"process_upsert","process":{"id":"proc-1","kind":"monitor","label":"watch file","agent":null,"model":null,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","summary":null}}"#
+        );
+        let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, upsert);
+
+        let tool_call = HostToClient::AgentToolCall {
+            name: "shell_run".to_string(),
+            summary: Some("ok".to_string()),
+            seq: 2,
+        };
+        let encoded = serde_json::to_string(&tool_call).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"agent_tool_call","name":"shell_run","summary":"ok","seq":2}"#
+        );
+        let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, tool_call);
     }
 
     #[test]

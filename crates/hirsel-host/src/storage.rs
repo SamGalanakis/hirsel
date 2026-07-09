@@ -5,7 +5,9 @@ use std::{
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use hirsel_proto::{Blob, ChatAuthor, ChatMessage, InboxItem, InboxStatus, QuickReply};
+use hirsel_proto::{
+    Blob, ChatAuthor, ChatMessage, InboxItem, InboxStatus, QuickReply, ToolCallSummary,
+};
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -49,7 +51,8 @@ impl Storage {
                 author TEXT NOT NULL,
                 body TEXT NOT NULL,
                 ref INTEGER NULL,
-                ts TEXT NOT NULL
+                ts TEXT NOT NULL,
+                tool_calls TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS client_messages (
                 client_id TEXT PRIMARY KEY,
@@ -86,6 +89,7 @@ impl Storage {
             ",
         )?;
         ensure_inbox_read_column(&conn)?;
+        ensure_chat_tool_calls_column(&conn)?;
         Ok(())
     }
 
@@ -110,6 +114,43 @@ impl Storage {
             r#ref: anchor,
             ts,
             attachments: Vec::new(),
+            tool_calls: Vec::new(),
+        })
+    }
+
+    pub async fn append_chat_with_tool_calls(
+        &self,
+        author: ChatAuthor,
+        body: impl Into<String>,
+        anchor: Option<u64>,
+        tool_calls: Vec<ToolCallSummary>,
+    ) -> anyhow::Result<ChatMessage> {
+        let body = body.into();
+        let ts = Utc::now();
+        let encoded_tool_calls = serde_json::to_string(&tool_calls)?;
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "
+            INSERT INTO chat_messages (author, body, ref, ts, tool_calls)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
+            params![
+                author_to_str(author),
+                body,
+                anchor,
+                ts.to_rfc3339(),
+                encoded_tool_calls
+            ],
+        )?;
+        let id = conn.last_insert_rowid() as u64;
+        Ok(ChatMessage {
+            id,
+            author,
+            body,
+            r#ref: anchor,
+            ts,
+            attachments: Vec::new(),
+            tool_calls,
         })
     }
 
@@ -200,16 +241,24 @@ impl Storage {
         let conn = self.conn.lock().await;
         let mut messages = if let Some(last_seen_msg_id) = last_seen_msg_id {
             let mut stmt = conn.prepare(
-                "SELECT id, author, body, ref, ts FROM chat_messages WHERE id > ?1 ORDER BY id ASC",
+                "
+                SELECT id, author, body, ref, ts, tool_calls
+                FROM chat_messages
+                WHERE id > ?1
+                ORDER BY id ASC
+                ",
             )?;
             let rows = stmt.query_map(params![last_seen_msg_id], chat_message_from_row)?;
             collect_rows(rows)?
         } else {
             let mut stmt = conn.prepare(
                 "
-                SELECT id, author, body, ref, ts
+                SELECT id, author, body, ref, ts, tool_calls
                 FROM (
-                    SELECT id, author, body, ref, ts FROM chat_messages ORDER BY id DESC LIMIT 200
+                    SELECT id, author, body, ref, ts, tool_calls
+                    FROM chat_messages
+                    ORDER BY id DESC
+                    LIMIT 200
                 )
                 ORDER BY id ASC
                 ",
@@ -223,8 +272,13 @@ impl Storage {
 
     pub async fn all_chat(&self) -> anyhow::Result<Vec<ChatMessage>> {
         let conn = self.conn.lock().await;
-        let mut stmt =
-            conn.prepare("SELECT id, author, body, ref, ts FROM chat_messages ORDER BY id ASC")?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, author, body, ref, ts, tool_calls
+            FROM chat_messages
+            ORDER BY id ASC
+            ",
+        )?;
         let rows = stmt.query_map([], chat_message_from_row)?;
         let mut messages = collect_rows(rows)?;
         load_attachments_for_messages(&conn, &mut messages)?;
@@ -517,9 +571,35 @@ fn inbox_items_has_read_column(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(false)
 }
 
+fn ensure_chat_tool_calls_column(conn: &Connection) -> rusqlite::Result<()> {
+    if chat_messages_has_tool_calls_column(conn)? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE chat_messages ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )?;
+    Ok(())
+}
+
+fn chat_messages_has_tool_calls_column(conn: &Connection) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(chat_messages)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "tool_calls" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage> {
     let mut message = conn.query_row(
-        "SELECT id, author, body, ref, ts FROM chat_messages WHERE id = ?1",
+        "
+        SELECT id, author, body, ref, ts, tool_calls
+        FROM chat_messages
+        WHERE id = ?1
+        ",
         params![id],
         chat_message_from_row,
     )?;
@@ -623,6 +703,7 @@ fn blob_size_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result
 fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     let author: String = row.get(1)?;
     let ts: String = row.get(4)?;
+    let tool_calls: String = row.get(5)?;
     Ok(ChatMessage {
         id: row.get(0)?,
         author: author_from_str(&author)?,
@@ -630,6 +711,9 @@ fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessag
         r#ref: row.get(3)?,
         ts: parse_ts(&ts)?,
         attachments: Vec::new(),
+        tool_calls: serde_json::from_str(&tool_calls).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+        })?,
     })
 }
 
@@ -702,6 +786,36 @@ mod tests {
         assert!(!duplicate_inserted);
         assert_eq!(first, second);
         assert_eq!(storage.all_chat().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_tool_calls_are_persisted_with_chat_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let tool_calls = vec![
+            ToolCallSummary {
+                name: "shell_run".to_string(),
+                ok: true,
+            },
+            ToolCallSummary {
+                name: "subagents_spawn".to_string(),
+                ok: false,
+            },
+        ];
+
+        let message = storage
+            .append_chat_with_tool_calls(
+                ChatAuthor::Agent,
+                "used tools",
+                None,
+                tool_calls.clone(),
+            )
+            .await
+            .unwrap();
+        let replay = storage.replay_messages(None).await.unwrap();
+
+        assert_eq!(message.tool_calls, tool_calls);
+        assert_eq!(replay[0].tool_calls, tool_calls);
     }
 
     #[tokio::test]
@@ -802,6 +916,10 @@ mod tests {
         }
 
         let storage = Storage::open(dir.path()).await.unwrap();
+        let legacy_chat = storage.all_chat().await.unwrap();
+        assert_eq!(legacy_chat.len(), 1);
+        assert!(legacy_chat[0].tool_calls.is_empty());
+
         let legacy = storage.all_inbox().await.unwrap();
         assert_eq!(legacy.len(), 1);
         assert!(!legacy[0].read);

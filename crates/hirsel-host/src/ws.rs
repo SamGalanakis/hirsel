@@ -72,7 +72,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let mut broadcasts = state.broadcaster.subscribe();
     #[cfg(test)]
-    run_hello_test_hook(HelloTestHookPoint::AfterSubscribe, &state).await;
+    run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
 
     let snapshot = match state.storage.hello_snapshot(hello).await {
         Ok(snapshot) => snapshot,
@@ -89,7 +89,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     };
     #[cfg(test)]
-    run_hello_test_hook(HelloTestHookPoint::AfterSnapshot, &state).await;
+    run_hello_test_hook(HelloTestHookPoint::Snapshotted, &state).await;
     let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.inbox.clone());
     send_json(
         &mut socket,
@@ -102,7 +102,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     )
     .await;
     #[cfg(test)]
-    run_hello_test_hook(HelloTestHookPoint::AfterHelloOk, &state).await;
+    run_hello_test_hook(HelloTestHookPoint::HelloOkSent, &state).await;
 
     let (mut sink, mut stream) = socket.split();
     loop {
@@ -277,9 +277,9 @@ async fn send_json_sink(
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelloTestHookPoint {
-    AfterSubscribe,
-    AfterSnapshot,
-    AfterHelloOk,
+    Subscribed,
+    Snapshotted,
+    HelloOkSent,
 }
 
 #[cfg(test)]
@@ -406,9 +406,9 @@ mod tests {
     #[tokio::test]
     async fn websocket_hello_subscribe_first_covers_reconnect_races() {
         let cases = [
-            (super::HelloTestHookPoint::AfterSubscribe, true),
-            (super::HelloTestHookPoint::AfterSnapshot, false),
-            (super::HelloTestHookPoint::AfterHelloOk, false),
+            (super::HelloTestHookPoint::Subscribed, true),
+            (super::HelloTestHookPoint::Snapshotted, false),
+            (super::HelloTestHookPoint::HelloOkSent, false),
         ];
         for (index, (point, should_be_in_snapshot)) in cases.into_iter().enumerate() {
             let dir = tempfile::tempdir().unwrap();

@@ -96,6 +96,14 @@ impl Storage {
                 ts TEXT NOT NULL,
                 tool_calls TEXT NOT NULL DEFAULT '[]'
             );
+            CREATE TABLE IF NOT EXISTS side_chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sc TEXT NOT NULL,
+                author TEXT NOT NULL,
+                body TEXT NOT NULL,
+                ts TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS side_chat_messages_sc_idx ON side_chat_messages(sc);
             CREATE TABLE IF NOT EXISTS client_messages (
                 client_id TEXT PRIMARY KEY,
                 msg_id INTEGER NOT NULL REFERENCES chat_messages(id)
@@ -158,6 +166,9 @@ impl Storage {
             );
             ",
         )?;
+        // Side-chat sessions are process-local and deliberately do not survive
+        // a host restart, so any rows left by an unclean shutdown are orphaned.
+        conn.execute("DELETE FROM side_chat_messages", [])?;
         ensure_inbox_read_column(&conn)?;
         ensure_chat_tool_calls_column(&conn)?;
         Ok(())
@@ -222,6 +233,50 @@ impl Storage {
             attachments: Vec::new(),
             tool_calls,
         })
+    }
+
+    pub async fn append_side_chat_message(
+        &self,
+        sc: &str,
+        author: ChatAuthor,
+        body: &str,
+    ) -> anyhow::Result<ChatMessage> {
+        let ts = Utc::now();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO side_chat_messages (sc, author, body, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![sc, author_to_str(author), body, ts.to_rfc3339()],
+        )?;
+        let id = conn.last_insert_rowid() as u64;
+        Ok(ChatMessage {
+            id,
+            author,
+            body: body.to_string(),
+            r#ref: None,
+            ts,
+            attachments: Vec::new(),
+            tool_calls: Vec::new(),
+        })
+    }
+
+    pub async fn side_chat_transcript(&self, sc: &str) -> anyhow::Result<Vec<ChatMessage>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, author, body, ts
+            FROM side_chat_messages
+            WHERE sc = ?1
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = stmt.query_map(params![sc], side_chat_message_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub async fn delete_side_chat_transcript(&self, sc: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute("DELETE FROM side_chat_messages WHERE sc = ?1", params![sc])?;
+        Ok(())
     }
 
     pub async fn append_owner_message(
@@ -347,6 +402,35 @@ impl Storage {
         Ok(messages)
     }
 
+    pub async fn recent_chat(&self, limit: u64) -> anyhow::Result<Vec<ChatMessage>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, author, body, ref, ts, tool_calls
+            FROM (
+                SELECT id, author, body, ref, ts, tool_calls
+                FROM chat_messages
+                ORDER BY id DESC
+                LIMIT ?1
+            )
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = stmt.query_map(params![limit], chat_message_from_row)?;
+        let mut messages = collect_rows(rows)?;
+        load_attachments_for_messages(&conn, &mut messages)?;
+        Ok(messages)
+    }
+
+    pub async fn chat_message(&self, id: u64) -> anyhow::Result<Option<ChatMessage>> {
+        let conn = self.conn.lock().await;
+        match get_chat_message(&conn, id) {
+            Ok(message) => Ok(Some(message)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub async fn create_inbox_item(
         &self,
         content: impl Into<String>,
@@ -416,6 +500,11 @@ impl Storage {
     pub async fn inbox_snapshot(&self) -> anyhow::Result<Vec<InboxItem>> {
         let conn = self.conn.lock().await;
         inbox_snapshot_from_conn(&conn)
+    }
+
+    pub async fn inbox_item(&self, item_id: u64) -> anyhow::Result<Option<InboxItem>> {
+        let conn = self.conn.lock().await;
+        get_inbox_item_optional(&conn, item_id).map_err(Into::into)
     }
 
     pub async fn all_inbox(&self) -> anyhow::Result<Vec<InboxItem>> {
@@ -796,10 +885,12 @@ impl Storage {
                 DELETE FROM blobs;
                 DELETE FROM client_messages;
                 DELETE FROM inbox_items;
+                DELETE FROM side_chat_messages;
                 DELETE FROM monitors;
                 DELETE FROM subagent_processes;
                 DELETE FROM chat_messages;
-                DELETE FROM sqlite_sequence WHERE name IN ('chat_messages', 'inbox_items');
+                DELETE FROM sqlite_sequence
+                WHERE name IN ('chat_messages', 'inbox_items', 'side_chat_messages');
                 ",
             )?;
         }
@@ -1076,6 +1167,20 @@ fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessag
     })
 }
 
+fn side_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    let author: String = row.get(1)?;
+    let ts: String = row.get(3)?;
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        author: author_from_str(&author)?,
+        body: row.get(2)?,
+        r#ref: None,
+        ts: parse_ts(&ts)?,
+        attachments: Vec::new(),
+        tool_calls: Vec::new(),
+    })
+}
+
 fn inbox_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
     let replies: String = row.get(4)?;
     let status: String = row.get(5)?;
@@ -1327,6 +1432,57 @@ mod tests {
         assert!(!duplicate_inserted);
         assert_eq!(first, second);
         assert_eq!(storage.all_chat().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn side_chat_transcripts_use_a_separate_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+
+        let owner = storage
+            .append_side_chat_message("side:test", ChatAuthor::Owner, "question")
+            .await
+            .unwrap();
+        let agent = storage
+            .append_side_chat_message("side:test", ChatAuthor::Agent, "answer")
+            .await
+            .unwrap();
+        assert_eq!(owner.id + 1, agent.id);
+        assert!(storage.all_chat().await.unwrap().is_empty());
+
+        let transcript = storage.side_chat_transcript("side:test").await.unwrap();
+        assert_eq!(transcript, vec![owner, agent]);
+
+        storage
+            .delete_side_chat_transcript("side:test")
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .side_chat_transcript("side:test")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_an_inbox_item_twice_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap();
+        let item = storage
+            .create_inbox_item("Needs reply", anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+
+        let first = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
+        let second = storage.archive_inbox_item(item.id).await.unwrap().unwrap();
+        assert_eq!(first.status, InboxStatus::Archived);
+        assert_eq!(second.status, InboxStatus::Archived);
     }
 
     #[tokio::test]

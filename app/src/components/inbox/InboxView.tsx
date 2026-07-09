@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
 import { createMemo, createSignal, For, Show } from "solid-js";
-import type { InboxItem, QuickReply } from "../../protocol";
+import type { InboxItem } from "../../protocol";
 import { goToChat, state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
@@ -19,13 +19,16 @@ export function InboxView() {
     };
   });
 
-  function handleQuickReply(item: InboxItem, reply: QuickReply) {
-    const localId = getClient()?.sendMessage(reply.value, item.anchor);
-    goToChat({ scrollToMessageId: localId });
+  // Answer in place: reuse the same send path an owner Composer send uses
+  // (client_id, optimistic reconcile, offline queue). No tab switch, no
+  // navigation — the card reconciles the reply inline and stays in the Inbox.
+  function handleSendReply(item: InboxItem, body: string) {
+    getClient()?.sendMessage(body, item.anchor);
   }
 
-  function handleReply(item: InboxItem) {
-    goToChat({ composerDraft: { ref: item.anchor } });
+  // Secondary affordance: jump to the item's Anchor in Chat.
+  function handleJumpToChat(item: InboxItem) {
+    goToChat({ scrollToMessageId: item.anchor });
   }
 
   function handleArchive(item: InboxItem) {
@@ -55,8 +58,8 @@ export function InboxView() {
             {(item) => (
               <InboxItemCard
                 item={item}
-                onQuickReply={handleQuickReply}
-                onReply={handleReply}
+                onSendReply={handleSendReply}
+                onJumpToChat={handleJumpToChat}
                 onArchive={handleArchive}
               />
             )}
@@ -81,8 +84,8 @@ export function InboxView() {
                   {(item) => (
                     <InboxItemCard
                       item={item}
-                      onQuickReply={handleQuickReply}
-                      onReply={handleReply}
+                      onSendReply={handleSendReply}
+                      onJumpToChat={handleJumpToChat}
                       onArchive={handleArchive}
                     />
                   )}

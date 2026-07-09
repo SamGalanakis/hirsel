@@ -68,8 +68,8 @@ describe("Composer send", () => {
   });
 });
 
-describe("Inbox quick reply", () => {
-  it("sends the tapped reply value anchored to the item and jumps to chat", async () => {
+describe("Inbox inline reply", () => {
+  it("quick reply sends the tapped value anchored to the item without navigating", async () => {
     const store = await import("../store/store");
     const sendMessage = vi.fn((_body: string, _ref: number | null) => -9);
     vi.doMock("../ws/client", () => ({
@@ -77,6 +77,7 @@ describe("Inbox quick reply", () => {
     }));
 
     const { InboxView } = await import("./inbox/InboxView");
+    store.setActiveTab("inbox");
     store.dispatch({
       type: "inbox_upsert",
       payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 5 }) },
@@ -87,9 +88,35 @@ describe("Inbox quick reply", () => {
 
     // Anchor-refed send: value = quick reply value, ref = item.anchor.
     expect(sendMessage).toHaveBeenCalledWith("approve", 5);
-    // And the view navigated to Chat, requesting a scroll to the new local id.
-    expect(store.state.activeTab).toBe("chat");
-    expect(store.state.scrollToMessageId).toBe(-9);
+    // Answered in place: no tab switch, no one-shot scroll request.
+    expect(store.state.activeTab).toBe("inbox");
+    expect(store.state.scrollToMessageId).toBeNull();
+  });
+
+  it("inline freeform input sends the typed body anchored to the item, in place", async () => {
+    const store = await import("../store/store");
+    const sendMessage = vi.fn((_body: string, _ref: number | null) => -7);
+    vi.doMock("../ws/client", () => ({
+      getClient: () => ({ sendMessage, archiveItem: vi.fn() }),
+    }));
+
+    const { InboxView } = await import("./inbox/InboxView");
+    store.setActiveTab("inbox");
+    // requires_response item exposes the inline input expanded by default.
+    store.dispatch({
+      type: "inbox_upsert",
+      payload: { type: "inbox_upsert", item: inboxItem({ id: 1, anchor: 9 }) },
+    });
+
+    const { getByPlaceholderText, getByLabelText } = render(() => <InboxView />);
+    const input = getByPlaceholderText("Reply…") as HTMLTextAreaElement;
+    fireEvent.input(input, { target: { value: "ship it" } });
+    fireEvent.click(getByLabelText("Send reply"));
+
+    expect(sendMessage).toHaveBeenCalledWith("ship it", 9);
+    expect(store.state.activeTab).toBe("inbox");
+    // The input clears after sending so the card is ready for the next reply.
+    expect(input.value).toBe("");
   });
 });
 

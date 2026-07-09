@@ -98,7 +98,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             messages: snapshot.messages,
             inbox: snapshot.inbox,
             processes: state.process_snapshot().await.unwrap_or_default(),
-            side_chats: Vec::new(),
+            side_chats: state.side_chats.summaries().await,
         },
     )
     .await;
@@ -196,27 +196,29 @@ async fn handle_client_frame(
             sc,
         } => {
             if let Some(sc) = sc {
-                anyhow::bail!("side chats are not wired yet: {sc}");
-            }
-            let submission = state
-                .submit_owner_message(client_id, body, r#ref, attachments, mode)
-                .await?;
-            if !submission.inserted {
-                send_json_sink(
-                    sink,
-                    &HostToClient::Msg {
-                        message: submission.message,
-                        sc: None,
-                    },
-                )
-                .await?;
+                state.side_chats.send(&sc, body).await?;
+            } else {
+                let submission = state
+                    .submit_owner_message(client_id, body, r#ref, attachments, mode)
+                    .await?;
+                if !submission.inserted {
+                    send_json_sink(
+                        sink,
+                        &HostToClient::Msg {
+                            message: submission.message,
+                            sc: None,
+                        },
+                    )
+                    .await?;
+                }
             }
         }
         ClientToHost::CancelTurn { sc } => {
             if let Some(sc) = sc {
-                anyhow::bail!("side chats are not wired yet: {sc}");
+                state.side_chats.cancel(&sc).await?;
+            } else {
+                state.cancel_turn().await?;
             }
-            state.cancel_turn().await?;
         }
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
@@ -259,11 +261,25 @@ async fn handle_client_frame(
                 .ok_or_else(|| anyhow::anyhow!("unknown inbox item: {item_id}"))?;
             state.broadcast(HostToClient::InboxUpsert { item });
         }
-        ClientToHost::OpenSideChat { .. }
-        | ClientToHost::ConcludeSideChat { .. }
-        | ClientToHost::ConfirmConclusion { .. }
-        | ClientToHost::DiscardSideChat { .. } => {
-            anyhow::bail!("side chats are not wired yet");
+        ClientToHost::OpenSideChat {
+            client_id: _,
+            item_id,
+        } => {
+            let (sc, messages, _) = state.side_chats.open(item_id).await?;
+            state.broadcast(HostToClient::SideChatOpen {
+                sc,
+                item_id,
+                messages,
+            });
+        }
+        ClientToHost::ConcludeSideChat { sc } => {
+            state.side_chats.conclude(&sc).await?;
+        }
+        ClientToHost::ConfirmConclusion { sc, text } => {
+            state.side_chats.confirm(&sc, text, state).await?;
+        }
+        ClientToHost::DiscardSideChat { sc } => {
+            state.side_chats.discard(&sc).await?;
         }
     }
     Ok(())
@@ -377,6 +393,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
+            sidechat_ttl_secs: 86_400,
         };
         let state = build_state(config.clone()).await.unwrap();
         state
@@ -774,6 +791,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
+            sidechat_ttl_secs: 86_400,
         }
     }
 

@@ -71,7 +71,7 @@ const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;
-const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
+pub(crate) const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -111,6 +111,18 @@ enum AgentBackend {
 }
 
 impl AgentRuntime {
+    pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
+            AgentBackend::Lash(runtime) => {
+                crate::side_chat::SideChatBackend::Lash(Arc::new(runtime.core.clone()))
+            }
+            AgentBackend::Degraded(runtime) => {
+                crate::side_chat::SideChatBackend::Degraded(runtime.reason.clone())
+            }
+        }
+    }
+
     pub async fn start(
         config: RuntimeConfig,
         tools: ToolSuite,

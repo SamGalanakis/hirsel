@@ -6,6 +6,7 @@ pub mod lash_runtime;
 pub mod monitors;
 pub mod process_run;
 pub mod processes;
+pub mod side_chat;
 pub mod storage;
 pub mod tools;
 pub mod ws;
@@ -14,7 +15,7 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub broadcaster: broadcast::Sender<HostToClient>,
     pub broadcast_log: BroadcastLog,
     pub agent: AgentRuntime,
+    pub side_chats: Arc<side_chat::SideChatManager>,
     pub processes: ProcessStore,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
@@ -261,12 +263,20 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcast_log.clone(),
     )
     .await?;
+    let side_chats = Arc::new(side_chat::SideChatManager::new(
+        agent.side_chat_backend(),
+        broadcaster.clone(),
+        broadcast_log.clone(),
+        storage.clone(),
+    ));
+    side_chats.spawn_reaper(Duration::from_secs(config.sidechat_ttl_secs));
     let state = AppState {
         token: Arc::from(config.token),
         storage,
         broadcaster,
         broadcast_log,
         agent,
+        side_chats,
         processes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
@@ -468,6 +478,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
+            sidechat_ttl_secs: 86_400,
         }
     }
 }

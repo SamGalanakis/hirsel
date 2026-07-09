@@ -21,7 +21,7 @@ dev port="3089":
     echo ""
     # Rust auto-restart: entr snapshots the file list at start; run `just dev`
     # again after adding new .rs files.
-    ( find crates -name '*.rs' -o -name 'Cargo.toml' | entr -rn cargo run -p hirsel-host ) &
+    ( find crates prompts -name '*.rs' -o -name 'Cargo.toml' -o -name 'agent.md' | entr -rn cargo run -p hirsel-host ) &
     ( cd app && VITE_WS_URL="ws://127.0.0.1:{{port}}/ws" npm run dev -- --port 5173 --strictPort )
 
 # Run the real thing, no watchers: builds the PWA, host serves it. Usage: just run [port]

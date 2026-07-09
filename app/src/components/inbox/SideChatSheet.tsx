@@ -155,7 +155,10 @@ function SideChatPanel(props: { sc: string }) {
   }
 
   return (
-    <div class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]">
+    <div
+      data-slot="side-chat-sheet"
+      class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]"
+    >
       <header class="flex flex-shrink-0 flex-col border-b border-border pt-[env(safe-area-inset-top)]">
         <div class="flex items-center gap-1 px-1 py-2">
           <button
@@ -189,7 +192,7 @@ function SideChatPanel(props: { sc: string }) {
           <DropdownMenu>
             <DropdownMenuTrigger
               class="rounded p-1.5 text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-              aria-label="More actions"
+              aria-label="Side chat actions"
               disabled={!sideChat() || busy() || sideChat()?.ended}
             >
               <MoreHorizontal class="size-4" />

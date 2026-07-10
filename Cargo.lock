@@ -832,6 +832,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hirsel-client-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "hirsel-proto",
+ "rand 0.8.6",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "uuid",
+]
+
+[[package]]
 name = "hirsel-drivers"
 version = "0.1.0"
 dependencies = [

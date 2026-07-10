@@ -39,6 +39,16 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+  // Same-origin dev proxy: the browser talks to vite (5173) and vite forwards
+  // the WS + blob traffic to the Hirsel Host on 3089. This means only the vite
+  // port needs forwarding over an SSH tunnel — no separate 3089 forward — and
+  // the app can use a same-origin `/ws` URL (set VITE_WS_URL="same-origin").
+  server: {
+    proxy: {
+      "/ws": { target: "ws://127.0.0.1:3089", ws: true, changeOrigin: true },
+      "/blob": { target: "http://127.0.0.1:3089", changeOrigin: true },
+    },
+  },
   test: {
     environment: "jsdom",
     globals: true,

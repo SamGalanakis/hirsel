@@ -23,7 +23,10 @@ dev port="3089":
     # Rust auto-restart: entr snapshots the file list at start; run `just dev`
     # again after adding new .rs files.
     ( find crates prompts -name '*.rs' -o -name 'Cargo.toml' -o -name 'agent.md' | entr -rn cargo run -p hirsel-host ) &
-    ( cd app && VITE_WS_URL="ws://127.0.0.1:{{ port }}/ws" npm run dev -- --port 5173 --strictPort )
+    # "same-origin" → the app connects back through vite (5173), which proxies
+    # /ws and /blob to the host (see vite.config.ts). Only 5173 needs to be
+    # reachable/forwarded; no separate host-port tunnel required.
+    ( cd app && VITE_WS_URL="same-origin" npm run dev -- --port 5173 --strictPort )
 
 # Run the real thing, no watchers: builds the PWA, host serves it. Usage: just run [port]
 run port="3089":

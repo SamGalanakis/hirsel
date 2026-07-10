@@ -9,14 +9,22 @@ import { openUnreadCount } from "./store/selectors";
 import { state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
-// VITE_WS_URL always wins. Otherwise: in dev, default to the mock server's
-// port; in production the Hirsel Host serves this app from the same origin
-// with its WS endpoint at /ws, so default to same-origin.
+// The WS endpoint, resolved in this order:
+//  - VITE_WS_URL="same-origin" (or "/ws") → build ws(s)://<this-host>/ws, i.e.
+//    connect back through whatever origin served the app. In dev this is the
+//    vite server, which proxies /ws → the Host (see vite.config.ts), so only
+//    the vite port needs forwarding over a tunnel.
+//  - any other VITE_WS_URL → used verbatim.
+//  - unset: in dev default to the mock server's port; in production the Host
+//    serves this app from the same origin with its WS at /ws.
+const sameOriginWs = () =>
+  `${window.location.protocol === "https:" ? "wss://" : "ws://"}${window.location.host}/ws`;
+const rawWsUrl = import.meta.env.VITE_WS_URL;
 const WS_URL =
-  import.meta.env.VITE_WS_URL ??
-  (import.meta.env.DEV
-    ? `ws://${window.location.hostname}:8787`
-    : `${window.location.protocol === "https:" ? "wss://" : "ws://"}${window.location.host}/ws`);
+  rawWsUrl === "same-origin" || rawWsUrl === "/ws"
+    ? sameOriginWs()
+    : (rawWsUrl ??
+      (import.meta.env.DEV ? `ws://${window.location.hostname}:8787` : sameOriginWs()));
 
 const BASE_TITLE = "hirsel";
 

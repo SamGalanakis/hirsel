@@ -2,7 +2,6 @@ use std::{
     fs::{self, OpenOptions},
     io::{ErrorKind, Write},
     path::Path,
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -23,12 +22,12 @@ use crate::{
 pub const SECRET_KEY_FILE: &str = "iroh-secret-key";
 
 const IROH_FRAME_ENVELOPE_BYTES: usize = 64 * 1024;
-const ONLINE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct IrohServer {
     endpoint: Endpoint,
     ticket: String,
     accept_task: Option<JoinHandle<()>>,
+    relay_task: Option<JoinHandle<()>>,
 }
 
 impl IrohServer {
@@ -42,23 +41,22 @@ impl IrohServer {
             .await
             .context("bind host iroh endpoint")?;
 
-        tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
-            .await
-            .context("host iroh endpoint did not become relay-online within 30 seconds")?;
         let endpoint_id = endpoint.id();
         let ticket = EndpointTicket::new(endpoint.addr()).to_string();
+        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state));
         tracing::info!(
             node_id = %endpoint_id,
             %ticket,
             key_path = %key_path.display(),
-            "Hirsel iroh endpoint online"
+            "Hirsel iroh endpoint bound"
         );
 
-        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state));
+        let relay_task = tokio::spawn(log_relay_online(endpoint.clone(), key_path));
         Ok(Self {
             endpoint,
             ticket,
             accept_task: Some(accept_task),
+            relay_task: Some(relay_task),
         })
     }
 
@@ -75,6 +73,9 @@ impl IrohServer {
         if let Some(task) = self.accept_task.take() {
             let _ = task.await;
         }
+        if let Some(task) = self.relay_task.take() {
+            let _ = task.await;
+        }
     }
 }
 
@@ -83,7 +84,26 @@ impl Drop for IrohServer {
         if let Some(task) = self.accept_task.take() {
             task.abort();
         }
+        if let Some(task) = self.relay_task.take() {
+            task.abort();
+        }
     }
+}
+
+async fn log_relay_online(endpoint: Endpoint, key_path: impl AsRef<Path>) {
+    let closed = endpoint.closed();
+    if closed.run_until(endpoint.online()).await.is_none() {
+        return;
+    }
+
+    let endpoint_id = endpoint.id();
+    let ticket = EndpointTicket::new(endpoint.addr()).to_string();
+    tracing::info!(
+        node_id = %endpoint_id,
+        %ticket,
+        key_path = %key_path.as_ref().display(),
+        "Hirsel iroh endpoint relay-online"
+    );
 }
 
 async fn accept_loop(endpoint: Endpoint, state: AppState) {

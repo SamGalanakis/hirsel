@@ -1,10 +1,15 @@
 # Rust
-target/
+/target/
+**/target/
 **/*.rs.bk
 
-# Node / frontend (app/ has its own .gitignore too)
+# Node / web (app/ has its own .gitignore too)
 node_modules/
+app/node_modules/
 dist/
+app/dist/
+.vite/
+dev-dist/
 *.tsbuildinfo
 
 # Runtime state & data
@@ -43,12 +48,22 @@ Thumbs.db
 # Android / Gradle
 .gradle/
 **/build/
-local.properties
-*.apk
-*.aab
-captures/
+android/local.properties
 .cxx/
 **/.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Signing material — never commit
+*.keystore
+*.jks
+*.p12
+*.pem
+keystore.properties
+signing.properties
 
 # Firebase secrets — never commit
 **/google-services.json

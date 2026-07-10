@@ -24,8 +24,12 @@ interface UiState {
   /** Tray overlay expanded/collapsed. Only ever set true by an explicit tap on
    * the shelf (or the equivalent test action) — never auto-expanded. */
   trayExpanded: boolean;
-  /** Processes full-screen sheet open/closed, launched from the header icon. */
+  /** Processes full-screen sheet open/closed, launched from the header icon
+   * (phone) or the desktop NavRail's Processes item. */
   processesOpen: boolean;
+  /** Settings inspector open/closed, launched from the desktop NavRail's gear.
+   * Placeholder surface for a later pass; only reachable on desktop. */
+  settingsOpen: boolean;
   /** Set when something (a quoted ref, a quick reply) wants Chat to scroll to
    * and highlight a message; consumed once then cleared. */
   scrollToMessageId: number | null;
@@ -55,6 +59,7 @@ function initialStore(): Store {
     ...initialState(),
     trayExpanded: false,
     processesOpen: false,
+    settingsOpen: false,
     scrollToMessageId: null,
     composerDraft: null,
     composerPrefill: null,
@@ -146,6 +151,7 @@ export function goToChat(opts?: {
 }): void {
   setState({
     processesOpen: false,
+    settingsOpen: false,
     trayExpanded: false,
     activeSideChatSc: null,
     scrollToMessageId: opts?.scrollToMessageId ?? null,
@@ -179,6 +185,10 @@ export function clearLastConclusion(): void {
 
 export function setProcessesOpen(open: boolean): void {
   setState("processesOpen", open);
+}
+
+export function setSettingsOpen(open: boolean): void {
+  setState("settingsOpen", open);
 }
 
 export function setTrayExpanded(open: boolean): void {

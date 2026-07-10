@@ -17,6 +17,7 @@ import { getClient } from "../../ws/client";
 import { PingsRail, TrayOverlay, TrayShelf } from "../inbox/Tray";
 import { SideChatSheet } from "../inbox/SideChatSheet";
 import { ProcessesSheet } from "../processes/ProcessesSheet";
+import { SettingsSheet } from "../settings/SettingsSheet";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Marker, MarkerContent } from "../ui/marker";
 import {
@@ -223,13 +224,14 @@ export function ChatView() {
     // degrades to the single chat column. `relative` anchors the Processes dock.
     <div class="relative flex min-h-0 flex-1 flex-col split:flex-row">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-      {/* Measured inner: at `rail` width the chat pane fills the left zone but
-          its content is capped to a reading measure (~640px) and centred in the
-          zone (`rail:mx-auto`), so bubbles never stretch to hostile line lengths
-          and the leftover width breathes evenly on both sides instead of pooling
-          into one dead gutter beside the rail. Below `rail` this is a no-op and
-          the phone/split widths are unchanged. */}
-      <div class="flex min-h-0 w-full flex-1 flex-col rail:mx-auto rail:max-w-[640px]">
+      {/* Measured inner: at `rail` width the chat pane fills the center of the
+          3-pane shell but its content is capped to a reading measure (~680px)
+          and centred in the pane (`rail:mx-auto`), so bubbles never stretch to
+          hostile line lengths. The gutters here are now real structure — the pane
+          sits between the nav rail and the context pane — not a lonely centered
+          column beside a void. Below `rail` this is a no-op and the phone/split
+          widths are unchanged. */}
+      <div class="flex min-h-0 w-full flex-1 flex-col rail:mx-auto rail:max-w-[680px]">
       <div
         class="relative flex min-h-0 flex-1 flex-col"
         onDragEnter={onDragEnter}
@@ -360,9 +362,11 @@ export function ChatView() {
       <SideChatSheet />
       <PingsRail />
 
-      {/* Processes: a full-screen sheet on phone, a right-docked inspector over
-          the right region on desktop — never covering the chat. */}
+      {/* Processes / Settings: full-screen sheets on phone, right-docked
+          inspectors over the right region on desktop — never covering the chat.
+          Settings is a placeholder surface reachable only from the NavRail. */}
       <ProcessesSheet />
+      <SettingsSheet />
     </div>
   );
 }

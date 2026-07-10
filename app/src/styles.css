@@ -95,7 +95,8 @@
    the codebase has one breakpoint vocabulary instead of scattered `min-[Npx]:`
    literals:
      `split` — two-pane capable: the side-chat split may appear;
-     `rail`  — room for the chat measure + a standing Pings rail.
+     `rail`  — desktop: the persistent 3-pane shell (nav rail ∣ chat ∣ context)
+               engages.
    Layout keys off width only (these); pointer/keyboard behaviour stays on the
    single `(pointer: coarse)` probe in useTextInput. */
 @theme {

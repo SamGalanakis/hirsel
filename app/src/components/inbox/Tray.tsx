@@ -7,7 +7,7 @@ import {
   mostActionablePing,
   openUnreadCount,
 } from "../../store/selectors";
-import { setActiveSideChatSc, setTrayExpanded, state } from "../../store/store";
+import { setTrayExpanded, state } from "../../store/store";
 import { PingsView } from "./PingsView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
@@ -128,8 +128,9 @@ export function TrayShelf() {
   );
 }
 
-/** Shared badge chip (shelf + rail + restore button), so the count and the
- * danger tone are identical across every Pings surface by construction. */
+/** Shared badge chip (shelf + rail), so the count and the danger tone are
+ * identical across every Pings surface by construction. The desktop NavRail's
+ * Inbox badge reuses the same selectors, so it stays in parity too. */
 function PingsBadge(props: { slot?: string }) {
   return (
     <Show when={badgeCount() > 0}>
@@ -172,28 +173,6 @@ export function PingsRail() {
         </div>
         <PingsView />
       </aside>
-    </Show>
-  );
-}
-
-/** Header affordance (desktop-shell): while a Side Chat holds the right region,
- * a "Pings (n)" control restores the rail by leaving the side chat alive
- * (resumable from its card). Rail width only — below it the shelf is always
- * present, so no restore control is needed. */
-export function PingsRestoreButton() {
-  return (
-    <Show when={state.activeSideChatSc !== null}>
-      <button
-        type="button"
-        data-slot="pings-restore"
-        class="hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground rail:flex"
-        onClick={() => setActiveSideChatSc(null)}
-        aria-label="Show Pings"
-      >
-        <InboxIcon class="size-4 shrink-0" aria-hidden="true" />
-        Pings
-        <PingsBadge />
-      </button>
     </Show>
   );
 }

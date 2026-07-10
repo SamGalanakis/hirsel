@@ -128,10 +128,7 @@ impl Client {
     pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
         config.validate()?;
         let auth = config.auth.clone();
-        let iroh_secret_key = config
-            .iroh_ticket
-            .as_ref()
-            .map(|_| iroh::SecretKey::generate());
+        let iroh_secret_key = config.parsed_iroh_secret_key()?;
         Ok(Self {
             inner: Arc::new(ClientInner {
                 config,

@@ -275,6 +275,12 @@ struct ObserverAdapter {
     observer: Box<dyn ClientObserver>,
 }
 
+/// Generates a new persistent iroh identity for pairing and later reconnects.
+#[uniffi::export]
+pub fn generate_iroh_identity() -> String {
+    core::generate_iroh_identity()
+}
+
 impl core::ClientObserver for ObserverAdapter {
     fn on_state_changed(&self, snapshot: core::ClientSnapshot) {
         self.observer.on_state_changed(snapshot.into());
@@ -307,9 +313,13 @@ impl Client {
     pub fn new_iroh(
         ticket: String,
         device_token: String,
+        iroh_secret_key: String,
         observer: Box<dyn ClientObserver>,
     ) -> Result<Arc<Self>, ClientError> {
-        Self::from_config(core::ClientConfig::new_iroh(ticket, device_token), observer)
+        Self::from_config(
+            core::ClientConfig::new_iroh(ticket, device_token, iroh_secret_key),
+            observer,
+        )
     }
 
     /// Creates an iroh client that redeems a one-time pairing code.
@@ -318,10 +328,11 @@ impl Client {
         ticket: String,
         code: String,
         device_label: String,
+        iroh_secret_key: String,
         observer: Box<dyn ClientObserver>,
     ) -> Result<Arc<Self>, ClientError> {
         Self::from_config(
-            core::ClientConfig::new_iroh_pairing(ticket, code, device_label),
+            core::ClientConfig::new_iroh_pairing(ticket, code, device_label, iroh_secret_key),
             observer,
         )
     }

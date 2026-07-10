@@ -19,9 +19,11 @@ Two facts force the design. First, the host binds `127.0.0.1` — a phone on mob
    master token.
 3. The phone scans, iroh-connects, and sends `pair_request { code, device_label, node_id }`.
 4. The host validates the code (unexpired, unused), issues a random **per-device token** stored in a `device_tokens` table (token, device_label, node_id, created_ts, last_seen_ts, revoked), and returns it.
-5. The phone persists the token and authenticates future connects with it (the device token is the first frame on reconnect, replacing the static-token check on the iroh path).
+5. The phone persists the token **and its own iroh `SecretKey`** (same secure store) and authenticates future connects with the token (the device token is the first frame on reconnect, replacing the static-token check on the iroh path).
 
 Device tokens are **revocable** via a host list/revoke surface (debug/admin now, desktop-shell panel later). The device's iroh `NodeId` is **pinned** to its token (a token presented from a different node is rejected) as defense-in-depth — the token alone is not bearer-portable. The QR carries a one-time code, never the master secret.
+
+**Client identity must persist.** Because the device token is NodeId-pinned, the client's iroh `SecretKey` (which determines its `NodeId`) MUST be generated once at pairing and persisted, so the same device presents the same `NodeId` on every relaunch. A client that mints a fresh identity per process would be rejected by its own pinned token on reconnect. The `SecretKey` lives in the device's secure storage (Keystore-backed on Android) alongside the token; compromising it requires the same full-device compromise as stealing the token, and revocation still cuts the device off server-side.
 
 **Relays.** Use iroh's default public relays for NAT traversal in v1 (personal scale, one user); self-hosting a relay is deferred. Direct hole-punched connections are used when available, relay-fallback otherwise — transparent to the protocol.
 

@@ -1,6 +1,8 @@
 use hirsel_proto::HelloAuth;
 use thiserror::Error;
 
+use crate::identity::parse_iroh_identity;
+
 /// Reconnect timing expressed as primitive values for a future UniFFI record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconnectPolicy {
@@ -58,6 +60,8 @@ pub struct ClientConfig {
     pub host: String,
     /// Canonical iroh endpoint ticket. When present, the client uses iroh instead of WebSocket.
     pub iroh_ticket: Option<String>,
+    /// Persisted iroh secret key. Required whenever `iroh_ticket` is present.
+    pub iroh_secret_key: Option<String>,
     pub auth: HelloAuth,
     pub reconnect: ReconnectPolicy,
 }
@@ -67,24 +71,32 @@ impl ClientConfig {
         Self {
             host,
             iroh_ticket: None,
+            iroh_secret_key: None,
             auth: HelloAuth::StaticToken(token),
             reconnect: ReconnectPolicy::default(),
         }
     }
 
-    pub fn new_iroh(ticket: String, device_token: String) -> Self {
+    pub fn new_iroh(ticket: String, device_token: String, iroh_secret_key: String) -> Self {
         Self {
             host: String::new(),
             iroh_ticket: Some(ticket),
+            iroh_secret_key: Some(iroh_secret_key),
             auth: HelloAuth::DeviceToken(device_token),
             reconnect: ReconnectPolicy::default(),
         }
     }
 
-    pub fn new_iroh_pairing(ticket: String, code: String, device_label: String) -> Self {
+    pub fn new_iroh_pairing(
+        ticket: String,
+        code: String,
+        device_label: String,
+        iroh_secret_key: String,
+    ) -> Self {
         Self {
             host: String::new(),
             iroh_ticket: Some(ticket),
+            iroh_secret_key: Some(iroh_secret_key),
             auth: HelloAuth::PairingCode { code, device_label },
             reconnect: ReconnectPolicy::default(),
         }
@@ -93,7 +105,13 @@ impl ClientConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.iroh_ticket.as_deref() {
             Some(ticket) if ticket.trim().is_empty() => return Err(ConfigError::EmptyIrohTicket),
-            Some(_) => {}
+            Some(_) => {
+                let secret_key = self
+                    .iroh_secret_key
+                    .as_deref()
+                    .ok_or(ConfigError::MissingIrohSecretKey)?;
+                parse_iroh_identity(secret_key)?;
+            }
             None if self.host.trim().is_empty() => return Err(ConfigError::EmptyHost),
             None => {}
         }
@@ -124,6 +142,13 @@ impl ClientConfig {
             |ticket| TransportTarget::Iroh(ticket.trim().to_owned()),
         )
     }
+
+    pub(crate) fn parsed_iroh_secret_key(&self) -> Result<Option<iroh::SecretKey>, ConfigError> {
+        self.iroh_secret_key
+            .as_deref()
+            .map(parse_iroh_identity)
+            .transpose()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +163,10 @@ pub enum ConfigError {
     EmptyHost,
     #[error("iroh ticket must not be empty")]
     EmptyIrohTicket,
+    #[error("iroh secret key is required for iroh transport")]
+    MissingIrohSecretKey,
+    #[error("iroh secret key is invalid")]
+    InvalidIrohSecretKey,
     #[error("initial reconnect delay must be greater than zero")]
     ZeroInitialDelay,
     #[error("maximum reconnect delay must be at least the initial delay")]
@@ -172,13 +201,16 @@ mod tests {
 
     #[test]
     fn iroh_ticket_selects_iroh_transport_without_a_websocket_host() {
-        let config = ClientConfig::new_iroh("endpointticket".into(), "token".into());
+        let identity = crate::generate_iroh_identity();
+        let config =
+            ClientConfig::new_iroh("endpointticket".into(), "token".into(), identity.clone());
         assert_eq!(
             config.transport_target(),
             TransportTarget::Iroh("endpointticket".into())
         );
         assert_eq!(config.validate(), Ok(()));
         assert_eq!(config.auth, HelloAuth::DeviceToken("token".into()));
+        assert_eq!(config.iroh_secret_key, Some(identity));
     }
 
     #[test]
@@ -187,6 +219,7 @@ mod tests {
             "endpointticket".into(),
             "pairing-code".into(),
             "Owner phone".into(),
+            crate::generate_iroh_identity(),
         );
         assert_eq!(
             config.auth,
@@ -196,6 +229,19 @@ mod tests {
             }
         );
         assert_eq!(config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn iroh_transport_requires_a_valid_secret_key() {
+        let mut config = ClientConfig::new_iroh(
+            "endpointticket".into(),
+            "token".into(),
+            "not-a-secret-key".into(),
+        );
+        assert_eq!(config.validate(), Err(ConfigError::InvalidIrohSecretKey));
+
+        config.iroh_secret_key = None;
+        assert_eq!(config.validate(), Err(ConfigError::MissingIrohSecretKey));
     }
 
     #[test]

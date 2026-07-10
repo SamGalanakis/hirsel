@@ -129,6 +129,7 @@ struct CreateMonitorRequest {
 
 #[derive(Debug, Deserialize)]
 struct PairRequest {
+    #[serde(alias = "label")]
     device_label: String,
 }
 
@@ -138,6 +139,8 @@ struct RevokeDeviceRequest {
     token: Option<String>,
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    token_or_label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -477,10 +480,13 @@ async fn revoke_device(
     State(state): State<AppState>,
     Json(request): Json<RevokeDeviceRequest>,
 ) -> Result<Json<serde_json::Value>, DebugError> {
-    let token_or_label = match (request.token, request.label) {
-        (Some(token), None) => token,
-        (None, Some(label)) => label,
-        _ => return Err(anyhow::anyhow!("provide exactly one of token or label").into()),
+    let token_or_label = match (request.token, request.label, request.token_or_label) {
+        (Some(token), None, None) => token,
+        (None, Some(label), None) => label,
+        (None, None, Some(token_or_label)) => token_or_label,
+        _ => {
+            return Err(anyhow::anyhow!("provide exactly one device token or label").into());
+        }
     };
     let revoked = state.storage.revoke_device(&token_or_label).await?;
     Ok(Json(serde_json::json!({ "revoked": revoked })))

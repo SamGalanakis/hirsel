@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -23,10 +23,17 @@ use crate::processes::{ProcessRecord, ProcessStatus};
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
     blobs_dir: Arc<PathBuf>,
-    pairing_codes: Arc<Mutex<HashMap<String, PairingCode>>>,
+    pairing_codes: Arc<Mutex<PairingCodes>>,
 }
 
 const MAX_PAIRING_CODES: usize = 1_024;
+const MAX_PAIRING_REDEMPTIONS_PER_MINUTE: usize = 256;
+
+#[derive(Default)]
+struct PairingCodes {
+    codes: HashMap<String, PairingCode>,
+    recent_redemptions: VecDeque<Instant>,
+}
 
 struct PairingCode {
     expires_at: Instant,
@@ -105,7 +112,7 @@ impl Storage {
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             blobs_dir: Arc::new(blobs_dir),
-            pairing_codes: Arc::new(Mutex::new(HashMap::new())),
+            pairing_codes: Arc::new(Mutex::new(PairingCodes::default())),
         };
         storage.init().await?;
         Ok(storage)
@@ -746,13 +753,16 @@ impl Storage {
             .checked_add(ttl)
             .ok_or_else(|| anyhow::anyhow!("pairing-code TTL is too large"))?;
         let mut pairing_codes = self.pairing_codes.lock().await;
-        pairing_codes.retain(|_, entry| entry.expires_at > now);
-        if pairing_codes.len() >= MAX_PAIRING_CODES {
+        pairing_codes
+            .codes
+            .retain(|_, entry| entry.expires_at > now);
+        if pairing_codes.codes.len() >= MAX_PAIRING_CODES {
             anyhow::bail!("too many outstanding pairing codes");
         }
         for _ in 0..4 {
             let code = random_secret();
             if pairing_codes
+                .codes
                 .insert(
                     code.clone(),
                     PairingCode {
@@ -769,7 +779,22 @@ impl Storage {
     }
 
     pub async fn redeem_pairing_code(&self, code: &str) -> anyhow::Result<String> {
-        let entry = self.pairing_codes.lock().await.remove(code);
+        let now = Instant::now();
+        let mut pairing_codes = self.pairing_codes.lock().await;
+        let window_start = now - Duration::from_secs(60);
+        while pairing_codes
+            .recent_redemptions
+            .front()
+            .is_some_and(|attempt| *attempt <= window_start)
+        {
+            pairing_codes.recent_redemptions.pop_front();
+        }
+        if pairing_codes.recent_redemptions.len() >= MAX_PAIRING_REDEMPTIONS_PER_MINUTE {
+            anyhow::bail!("too many pairing-code redemption attempts");
+        }
+        pairing_codes.recent_redemptions.push_back(now);
+        let entry = pairing_codes.codes.remove(code);
+        drop(pairing_codes);
         let Some(entry) = entry else {
             anyhow::bail!("unknown pairing code");
         };
@@ -2331,6 +2356,30 @@ mod tests {
             .await
             .unwrap();
         assert!(storage.redeem_pairing_code(&expired).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pairing_code_redemption_attempts_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let code = storage
+            .mint_pairing_code("Rate limited phone", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        for attempt in 0..MAX_PAIRING_REDEMPTIONS_PER_MINUTE {
+            assert!(
+                storage
+                    .redeem_pairing_code(&format!("unknown-{attempt}"))
+                    .await
+                    .is_err()
+            );
+        }
+        let error = storage.redeem_pairing_code(&code).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "too many pairing-code redemption attempts"
+        );
     }
 
     #[tokio::test]

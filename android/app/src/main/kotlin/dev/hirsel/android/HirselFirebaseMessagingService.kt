@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import dev.hirsel.android.settings.SettingsStore
 
 const val FCM_LOG_TAG = "HirselFcm"
 
@@ -29,6 +30,15 @@ class HirselFirebaseMessagingService : FirebaseMessagingService() {
             FCM_LOG_TAG,
             "FCM message received: name=$name ping_id=$pingId title=$title body=$body data=${message.data}",
         )
+        // Honor the user's push preference locally: a token may still be registered
+        // with the host after the user turns push off, so suppress at delivery too.
+        // Notify-scope is intent only here — the host currently pushes exclusively
+        // for requires-response pings, so every delivered push already qualifies
+        // under both "needs a reply" and "all pings".
+        if (!SettingsStore(this).pushEnabled) {
+            Log.i(FCM_LOG_TAG, "push disabled in settings; suppressing notification for ping $pingId")
+            return
+        }
         postPingNotification(title, body, name, pingId)
     }
 

@@ -294,11 +294,9 @@ function SideChatPanel(props: { sc: string }) {
                         classList={{ "-rotate-90": !seedExpanded() }}
                         aria-hidden="true"
                       />
-                      <Marker variant="separator" class="min-w-0 flex-1">
-                        <MarkerContent class="text-[0.68rem] uppercase tracking-wide">
-                          Forked from your chat — seeded with this ping and recent context
-                        </MarkerContent>
-                      </Marker>
+                      <span class="min-w-0 flex-1 text-[0.68rem] uppercase leading-snug tracking-wide text-muted-foreground">
+                        Forked from your chat — seeded with this Ping and recent context
+                      </span>
                     </button>
                     <Show when={seedExpanded()}>
                       <div class="mt-2 border-l-2 border-border pl-2 text-sm text-muted-foreground">

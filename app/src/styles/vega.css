@@ -141,7 +141,7 @@
 }
 
 .z-empty-title {
-  @apply text-lg font-medium tracking-tight;
+  @apply text-base font-medium tracking-tight;
 }
 
 .z-empty-description {

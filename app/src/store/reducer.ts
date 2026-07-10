@@ -276,7 +276,9 @@ export function reduce(state: AppState, action: Action): AppState {
       return {
         ...state,
         messages: [...merged, ...pending],
-        pings,
+        // Defensive, matching processes/side_chats below: a malformed frame
+        // that omits `pings` must not white-screen the whole app.
+        pings: pings ?? [],
         lastSeenMsgId: latest_msg_id,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,

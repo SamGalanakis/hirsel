@@ -102,15 +102,15 @@ function upsertInbox(item) {
   const idx = inbox.findIndex((i) => i.id === item.id);
   if (idx === -1) inbox.push(item);
   else inbox[idx] = item;
-  broadcast({ type: "inbox_upsert", item });
+  broadcast({ type: "ping_upsert", ping: item });
 }
 function findOpenInboxByAnchor(anchorId) {
   return inbox.find((i) => i.status === "open" && i.anchor === anchorId);
 }
 
-/** hello_ok side_chats slice: just the {sc, item_id} refs (v2.0). */
+/** hello_ok side_chats slice: just the {sc, ping_id} refs (v2.0). */
 function sideChatsForHello() {
-  return [...sideChats.values()].map((s) => ({ sc: s.sc, item_id: s.itemId }));
+  return [...sideChats.values()].map((s) => ({ sc: s.sc, ping_id: s.itemId }));
 }
 
 /** (Re)arm the TTL-close timer for a side chat; any activity resets the clock. */
@@ -163,24 +163,25 @@ function finishSideTurn(sideChat) {
  * seed (item + anchor + recent chat) lives in the side session's prompt
  * layer, never as fake transcript rows. */
 function handleOpenSideChat(ws, frame) {
-  const existingSc = sideChatByItem.get(frame.item_id);
+  const pingId = frame.ping_id;
+  const existingSc = sideChatByItem.get(pingId);
   if (existingSc) {
     const sideChat = sideChats.get(existingSc);
     ws.send(
       JSON.stringify({
         type: "side_chat_open",
         sc: sideChat.sc,
-        item_id: sideChat.itemId,
+        ping_id: sideChat.itemId,
         messages: sideChat.messages,
       }),
     );
-    log("side chat resumed", sideChat.sc, "for item", frame.item_id);
+    log("side chat resumed", sideChat.sc, "for ping", pingId);
     return;
   }
   const sc = `side:${randomUUID()}`;
   const sideChat = {
     sc,
-    itemId: frame.item_id,
+    itemId: pingId,
     messages: [],
     nextMsgId: 1,
     turnActive: false,
@@ -188,10 +189,10 @@ function handleOpenSideChat(ws, frame) {
     ttlTimer: null,
   };
   sideChats.set(sc, sideChat);
-  sideChatByItem.set(frame.item_id, sc);
+  sideChatByItem.set(pingId, sc);
   armSideTtl(sc);
-  ws.send(JSON.stringify({ type: "side_chat_open", sc, item_id: frame.item_id, messages: [] }));
-  log("side chat opened", sc, "for item", frame.item_id);
+  ws.send(JSON.stringify({ type: "side_chat_open", sc, ping_id: pingId, messages: [] }));
+  log("side chat opened", sc, "for ping", pingId);
 }
 
 /** Scripted side-agent reply. Mirrors startReplyTurn's demo hooks (scoped to
@@ -398,6 +399,8 @@ function startReplyTurn(ownerMessage) {
         // Independent follow-up: an inbox item lands when it finishes.
         upsertInbox({
           id: nextInboxId++,
+          name: "review-diff",
+          description: "Sub-agent finished — approve or reject the diff",
           content:
             "**Sub-agent finished the delegated task.**\n\nDiff is ready — approve to merge, or reject to discard.",
           anchor: reply.id,
@@ -604,16 +607,15 @@ function handleCancelQueued(ws, frame) {
   log("cancelled queued message", removed.messageId);
 }
 
-function handleArchiveItem(frame) {
-  // ADR-0009: "Mark done" — the item's terminal `done` state (the wire op keeps
-  // its `archive_item` name; the status value is `done`).
-  const item = inbox.find((i) => i.id === frame.item_id);
+function handleResolvePing(frame) {
+  // ADR-0009: "Mark done" — the Ping's terminal `done` state.
+  const item = inbox.find((i) => i.id === frame.ping_id);
   if (!item || item.status !== "open") return;
   upsertInbox({ ...item, status: "done" });
 }
 
-function handleReadItem(frame) {
-  const item = inbox.find((i) => i.id === frame.item_id);
+function handleReadPing(frame) {
+  const item = inbox.find((i) => i.id === frame.ping_id);
   if (!item || item.read === true) return; // idempotent
   upsertInbox({ ...item, read: true });
 }
@@ -695,7 +697,7 @@ wss.on("connection", (ws) => {
           type: "hello_ok",
           latest_msg_id: nextMsgId - 1,
           messages: replayMessages,
-          inbox: [...openItems, ...doneItems],
+          pings: [...openItems, ...doneItems],
           processes: processesForHello(),
           side_chats: sideChatsForHello(),
         }),
@@ -721,11 +723,11 @@ wss.on("connection", (ws) => {
       case "cancel_queued":
         handleCancelQueued(ws, frame);
         break;
-      case "archive_item":
-        handleArchiveItem(frame);
+      case "resolve_ping":
+        handleResolvePing(frame);
         break;
-      case "read_item":
-        handleReadItem(frame);
+      case "read_ping":
+        handleReadPing(frame);
         break;
       case "open_side_chat":
         handleOpenSideChat(ws, frame);
@@ -792,6 +794,8 @@ function seedInbox() {
   const a2 = push("agent", "The auth refactor branch is ready to merge — want me to open the PR?", a1.id, ago(20));
   inbox.push({
     id: nextInboxId++,
+    name: "deploy-4821",
+    description: "Ship the staged prod build?",
     content: "**Deploy build 4821 to prod?**\n\nTests are green and the staging smoke passed.",
     anchor: a1.id,
     requires_response: true,
@@ -804,6 +808,8 @@ function seedInbox() {
   });
   inbox.push({
     id: nextInboxId++,
+    name: "auth-pr",
+    description: "Open the PR for the auth refactor branch",
     content: "Auth refactor branch is ready — I can open the PR whenever you like.",
     anchor: a2.id,
     requires_response: false,
@@ -811,6 +817,18 @@ function seedInbox() {
     status: "open",
     read: true,
     ts: ago(20),
+  });
+  inbox.push({
+    id: nextInboxId++,
+    name: "nightly-backup",
+    description: "Nightly backup verified — 0 errors",
+    content: "Nightly backup completed and verified. Nothing needed from you.",
+    anchor: a2.id,
+    requires_response: false,
+    quick_replies: [],
+    status: "done",
+    read: true,
+    ts: ago(40),
   });
 }
 

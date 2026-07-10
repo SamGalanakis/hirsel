@@ -189,7 +189,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
     expect(fakeClient.openSideChat).toHaveBeenCalledWith(1);
 
     // --- Seed card visible ---
-    await waitFor(() => expect(screen.getByText(/Forked from your chat/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Forked from chat/)).toBeTruthy());
     expect(screen.getByText(/Side chat ·/)).toBeTruthy();
     // the seeded item content, rendered in both the title band and the seed
     // card body (plus behind, in the still-expanded Tray card — hence scoping

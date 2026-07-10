@@ -1,3 +1,4 @@
+import { CornerUpLeft } from "lucide-solid";
 import { Show } from "solid-js";
 import type { DisplayMessage } from "../../store/types";
 
@@ -11,30 +12,32 @@ function snippet(body: string): string {
   return oneLine.length > 80 ? `${oneLine.slice(0, 80)}…` : oneLine;
 }
 
-/** Compact quoted preview of a referenced ChatMessage, WhatsApp-quote style.
+/** A quiet one-line citation of the referenced message — drawn only when the
+ * reply is non-contiguous (see ChatView), so it reads as a light "in reply to"
+ * marker rather than a nested card that competes with the message itself.
  * Tapping it scrolls to (and briefly highlights) the original. */
 export function QuotedRef(props: Props) {
   return (
     <Show
       when={props.message}
       fallback={
-        <div class="mb-1 rounded-md border-l-2 border-current/40 bg-black/10 px-2 py-1">
-          <span class="text-xs italic opacity-70">original message unavailable</span>
+        <div class="mb-1 flex items-center gap-1 border-l-2 border-current/30 pl-1.5 text-[0.7rem] italic opacity-55">
+          <CornerUpLeft class="size-3 shrink-0" aria-hidden="true" />
+          <span>original message unavailable</span>
         </div>
       }
     >
       {(message) => (
         <button
           type="button"
-          class="mb-1 block w-full rounded-md border-l-2 border-current/50 bg-black/15 px-2 py-1 text-left transition-colors hover:bg-black/25"
+          class="mb-1 flex w-full items-center gap-1 border-l-2 border-current/30 pl-1.5 text-left text-[0.7rem] opacity-65 transition-opacity hover:opacity-90"
           onClick={props.onTap}
         >
-          <div class="text-[0.7rem] font-semibold uppercase tracking-[0.03em] opacity-80">
+          <CornerUpLeft class="size-3 shrink-0" aria-hidden="true" />
+          <span class="shrink-0 font-medium">
             {message().author === "owner" ? "You" : "Agent"}
-          </div>
-          <div class="overflow-hidden text-ellipsis whitespace-nowrap text-xs opacity-80">
-            {snippet(message().body)}
-          </div>
+          </span>
+          <span class="min-w-0 truncate opacity-85">{snippet(message().body)}</span>
         </button>
       )}
     </Show>

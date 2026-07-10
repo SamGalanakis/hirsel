@@ -23,7 +23,10 @@ function ProcessesPanel() {
       class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
         rail:absolute rail:left-auto rail:z-30 rail:w-[420px] rail:border-l rail:border-border rail:pb-0"
     >
-      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:pt-3">
+      {/* h-12 on desktop (rail:) so the inspector header shares the top-bar
+          datum with the center chat header + Pings rail; phone keeps its
+          safe-area padding. */}
+      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:h-12 rail:py-0">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"

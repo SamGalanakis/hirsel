@@ -778,7 +778,7 @@ function seedProcesses() {
   });
 }
 
-seedProcesses();
+if (process.env.MOCK_SEED !== "none") seedProcesses();
 
 /** Seed a short chat + two open Inbox Items so the Tray, Side Chats, and the
  * Done section have content on first load (dev/demo only). */
@@ -832,7 +832,7 @@ function seedInbox() {
   });
 }
 
-seedInbox();
+if (process.env.MOCK_SEED !== "none") seedInbox();
 
 httpServer.listen(PORT, () => {
   log(`listening on ws://localhost:${PORT} + http blobs at /blob/:id (token: ${TOKEN})`);

@@ -204,7 +204,7 @@ function SideChatPanel(props: { sc: string }) {
           cleanup). The leave control is `‹ Chat` on phone (a back gesture) and
           a plain close `✕` on the desktop split (Chat is right there on the
           left, so "back" would be a lie). */}
-      <header class="flex flex-shrink-0 items-center gap-1.5 border-b border-border px-1.5 py-2 pt-[calc(env(safe-area-inset-top)+0.5rem)] split:pt-2">
+      <header class="flex flex-shrink-0 items-center gap-1.5 border-b border-border px-1.5 py-2 pt-[calc(env(safe-area-inset-top)+0.5rem)] split:pt-2 rail:h-12 rail:py-0">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
@@ -295,7 +295,7 @@ function SideChatPanel(props: { sc: string }) {
                         aria-hidden="true"
                       />
                       <span class="min-w-0 flex-1 text-[0.68rem] uppercase leading-snug tracking-wide text-muted-foreground">
-                        Forked from your chat — seeded with this Ping and recent context
+                        Forked from chat · seeded with this ping
                       </span>
                     </button>
                     <Show when={seedExpanded()}>
@@ -334,6 +334,7 @@ function SideChatPanel(props: { sc: string }) {
                         <MessageBubble
                           message={m}
                           refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
+                          showQuote={m.ref !== null}
                           highlighted={highlightedId() === m.id}
                           queued={false}
                           onTapQuote={scrollToId}

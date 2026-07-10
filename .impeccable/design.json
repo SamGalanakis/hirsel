@@ -41,7 +41,9 @@
     "breakpoints": [
       { "name": "app-column", "value": "560px", "purpose": "Default single-column app width (phone-first)." },
       { "name": "split", "value": "900px", "purpose": "Side Chat becomes a right rail (was a full-screen sheet); shell can widen." },
-      { "name": "split-max", "value": "980px", "purpose": "Widened shell max-width when a Side Chat split is active." }
+      { "name": "split-max", "value": "980px", "purpose": "Widened shell max-width when a Side Chat split is active (900–1099 mid-width band)." },
+      { "name": "rail", "value": "1100px", "purpose": "Desktop: the persistent 3-pane shell (nav rail ∣ chat ∣ context) engages." },
+      { "name": "shell-max", "value": "1600px", "purpose": "Desktop 3-pane frame fills to this cap, then centers." }
     ]
   },
   "components": [
@@ -112,7 +114,7 @@
   ],
   "narrative": {
     "northStar": "The Quiet Instrument",
-    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default — dark is the brand's resting state — but light now ships as a first-class, user-selectable peer (System / Light / Dark, default System) built from the same canonical tokens and held to the same bar. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width (rails and a Slack-style split). Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
+    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default — dark is the brand's resting state — but light now ships as a first-class, user-selectable peer (System / Light / Dark, default System) built from the same canonical tokens and held to the same bar. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width, where a persistent 3-pane shell (a left nav rail ∣ the center chat pane ∣ an always-present right context pane) fills to a ~1600px cap and only then centers. The three panes share one top datum (an h-12 baseline with a continuous border-b), the center pane's slim header carries a calm agent-status indicator, and the composer bar spans the pane full-width while its input stays at the prose measure. Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
     "keyCharacteristics": [
       "Dark-only, near-black base (oklch(0.141)) with hairline white/10 borders doing the structural work.",
       "One brand accent — a muted indigo (oklch(0.55 0.13 264)) — reserved for interaction and 'attend to this.'",
@@ -121,7 +123,7 @@
       "Restraint as respect: muted for everything, escalation is rare and legible without relying on hue alone."
     ],
     "rules": [
-      { "name": "The One Escalation Rule", "body": "Exactly one color means 'genuinely blocked on you': danger red, and only on the Tray badge for an open requires-response Ping. Indigo means 'interactive / worth a look,' amber means 'transient hiccup,' but red is the single interrupt. Do not multiply reds.", "section": "colors" },
+      { "name": "The One Escalation Rule", "body": "Exactly one color means 'genuinely blocked on you': danger red, and only on the single Inbox badge for an open requires-response Ping — the phone Tray shelf badge, or on desktop the nav rail's Inbox badge. The standing Pings rail header count stays muted and the nav's Processes badge is a status-active tint chip (not a solid disc), so the interrupt is never doubled. Indigo means 'interactive / worth a look,' amber means 'transient hiccup,' but red is the single interrupt. Do not multiply reds.", "section": "colors" },
       { "name": "The Color-Is-Never-Alone Rule", "body": "No state is conveyed by hue alone. A requires-response Ping also carries a persistent left border, bolder text, and an expanded reply input; a Done Ping dims to 60% and shows a labeled tag; a Process state carries its literal word. Strip the color and the meaning must survive.", "section": "colors" },
       { "name": "The Monospace-Earns-It Rule", "body": "Monospace is for machine tokens only: tool names, commands, ids, @name handles, keyboard hints. Prose is never monospace, and a label is never monospace just for flavor.", "section": "typography" },
       { "name": "The No-Display Rule", "body": "There is no display type and no hero. 16px is the top of the scale. Confidence comes from spacing and restraint, never from a big headline.", "section": "typography" },

@@ -24,6 +24,7 @@ data/
 .env
 .env.*
 *.local
+**/iroh-secret-key
 !*.example
 
 # Logs & scratch

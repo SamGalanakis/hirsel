@@ -55,6 +55,8 @@ impl ReconnectPolicy {
 pub struct ClientConfig {
     /// Host and optional port, or a complete `ws://` / `wss://` base URL.
     pub host: String,
+    /// Canonical iroh endpoint ticket. When present, the client uses iroh instead of WebSocket.
+    pub iroh_ticket: Option<String>,
     pub token: String,
     pub reconnect: ReconnectPolicy,
 }
@@ -63,14 +65,27 @@ impl ClientConfig {
     pub fn new(host: String, token: String) -> Self {
         Self {
             host,
+            iroh_ticket: None,
+            token,
+            reconnect: ReconnectPolicy::default(),
+        }
+    }
+
+    pub fn new_iroh(ticket: String, token: String) -> Self {
+        Self {
+            host: String::new(),
+            iroh_ticket: Some(ticket),
             token,
             reconnect: ReconnectPolicy::default(),
         }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.host.trim().is_empty() {
-            return Err(ConfigError::EmptyHost);
+        match self.iroh_ticket.as_deref() {
+            Some(ticket) if ticket.trim().is_empty() => return Err(ConfigError::EmptyIrohTicket),
+            Some(_) => {}
+            None if self.host.trim().is_empty() => return Err(ConfigError::EmptyHost),
+            None => {}
         }
         self.reconnect.validate()
     }
@@ -92,12 +107,27 @@ impl ClientConfig {
             format!("{base}/ws")
         }
     }
+
+    pub(crate) fn transport_target(&self) -> TransportTarget {
+        self.iroh_ticket.as_ref().map_or_else(
+            || TransportTarget::WebSocket(self.websocket_url()),
+            |ticket| TransportTarget::Iroh(ticket.trim().to_owned()),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TransportTarget {
+    WebSocket(String),
+    Iroh(String),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     #[error("host must not be empty")]
     EmptyHost,
+    #[error("iroh ticket must not be empty")]
+    EmptyIrohTicket,
     #[error("initial reconnect delay must be greater than zero")]
     ZeroInitialDelay,
     #[error("maximum reconnect delay must be at least the initial delay")]
@@ -128,6 +158,16 @@ mod tests {
             ClientConfig::new("https://example.test".into(), "token".into()).websocket_url(),
             "wss://example.test/ws"
         );
+    }
+
+    #[test]
+    fn iroh_ticket_selects_iroh_transport_without_a_websocket_host() {
+        let config = ClientConfig::new_iroh("endpointticket".into(), "token".into());
+        assert_eq!(
+            config.transport_target(),
+            TransportTarget::Iroh("endpointticket".into())
+        );
+        assert_eq!(config.validate(), Ok(()));
     }
 
     #[test]

@@ -111,6 +111,7 @@ async fn wait_for_snapshot(
 fn test_config(address: std::net::SocketAddr) -> ClientConfig {
     ClientConfig {
         host: address.to_string(),
+        iroh_ticket: None,
         token: "secret".into(),
         reconnect: ReconnectPolicy {
             initial_delay_ms: 150,

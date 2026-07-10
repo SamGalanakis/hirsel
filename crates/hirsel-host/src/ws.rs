@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use axum::{
     extract::{
         State,
@@ -5,15 +6,12 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures_util::{SinkExt, StreamExt};
-use hirsel_proto::{ClientToHost, HostToClient, Ping};
-use tokio::sync::broadcast;
+use hirsel_proto::HostToClient;
 
 use crate::{
     AppState,
-    attachments::{
-        MAX_BLOB_BASE64_BYTES, decode_blob_data_b64, normalize_mime, sanitize_blob_name,
-    },
+    attachments::MAX_BLOB_BASE64_BYTES,
+    protocol::{IncomingFrame, ProtocolChannel, decode_json, run_protocol},
 };
 
 const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -25,347 +23,26 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    let hello = match socket.recv().await {
-        Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientToHost>(&text) {
-            Ok(ClientToHost::Hello {
-                token,
-                last_seen_msg_id,
-            }) => {
-                if token != state.token.as_ref() {
-                    send_json(
-                        &mut socket,
-                        &HostToClient::Error {
-                            detail: "invalid token".to_string(),
-                            client_id: None,
-                        },
-                    )
-                    .await;
-                    return;
-                }
-                last_seen_msg_id
-            }
-            Ok(_) => {
-                send_json(
-                    &mut socket,
-                    &HostToClient::Error {
-                        detail: "hello must be the first frame".to_string(),
-                        client_id: None,
-                    },
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                send_json(
-                    &mut socket,
-                    &HostToClient::Error {
-                        detail: format!("invalid hello: {error}"),
-                        client_id: None,
-                    },
-                )
-                .await;
-                return;
-            }
-        },
-        _ => return,
-    };
-
-    let mut broadcasts = state.broadcaster.subscribe();
-    #[cfg(test)]
-    run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
-
-    let snapshot = match state.storage.hello_snapshot(hello).await {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            send_json(
-                &mut socket,
-                &HostToClient::Error {
-                    detail: format!("hello snapshot failed: {error}"),
-                    client_id: None,
-                },
-            )
-            .await;
-            return;
-        }
-    };
-    #[cfg(test)]
-    run_hello_test_hook(HelloTestHookPoint::Snapshotted, &state).await;
-    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
-    send_json(
-        &mut socket,
-        &HostToClient::HelloOk {
-            latest_msg_id: snapshot.latest_msg_id,
-            messages: snapshot.messages,
-            pings: snapshot.pings,
-            processes: state.process_snapshot().await.unwrap_or_default(),
-            side_chats: state.side_chats.summaries().await,
-        },
-    )
-    .await;
-    #[cfg(test)]
-    run_hello_test_hook(HelloTestHookPoint::HelloOkSent, &state).await;
-
-    let (mut sink, mut stream) = socket.split();
-    loop {
-        tokio::select! {
-            frame = stream.next() => {
-                match frame {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Err(error) = handle_client_frame(&state, &mut sink, &text).await {
-                            let client_id = serde_json::from_str::<serde_json::Value>(&text)
-                                .ok()
-                                .and_then(|v| v.get("client_id")?.as_str().map(String::from));
-                            let response = HostToClient::Error { detail: error.to_string(), client_id };
-                            if send_json_sink(&mut sink, &response).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(error)) => {
-                        tracing::debug!(%error, "websocket receive failed");
-                        break;
-                    }
-                }
-            }
-            event = broadcasts.recv() => {
-                match event {
-                    Ok(event) => {
-                        if !dedupe.should_send(&event) {
-                            continue;
-                        }
-                        if send_json_sink(&mut sink, &event).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
+    run_protocol(&mut WebSocketChannel(&mut socket), state).await;
 }
 
-struct HelloBroadcastDedupe {
-    latest_msg_id: u64,
-    pings: Vec<Ping>,
-}
+struct WebSocketChannel<'a>(&'a mut WebSocket);
 
-impl HelloBroadcastDedupe {
-    fn new(latest_msg_id: u64, pings: Vec<Ping>) -> Self {
-        Self {
-            latest_msg_id,
-            pings,
+#[async_trait]
+impl ProtocolChannel for WebSocketChannel<'_> {
+    async fn receive(&mut self) -> anyhow::Result<Option<IncomingFrame>> {
+        match self.0.recv().await {
+            Some(Ok(Message::Text(text))) => Ok(Some(decode_json(text.as_bytes()))),
+            Some(Ok(Message::Close(_))) | None => Ok(None),
+            Some(Ok(_)) => Ok(Some(IncomingFrame::Ignored)),
+            Some(Err(error)) => Err(error.into()),
         }
     }
 
-    fn should_send(&self, event: &HostToClient) -> bool {
-        match event {
-            HostToClient::Msg { message, sc } => sc.is_some() || message.id > self.latest_msg_id,
-            HostToClient::PingUpsert { ping } => {
-                !self.pings.iter().any(|snapshot| snapshot == ping)
-            }
-            _ => true,
-        }
-    }
-}
-
-async fn handle_client_frame(
-    state: &AppState,
-    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    text: &str,
-) -> anyhow::Result<()> {
-    match serde_json::from_str::<ClientToHost>(text)? {
-        ClientToHost::Hello { .. } => {
-            send_json_sink(
-                sink,
-                &HostToClient::Error {
-                    detail: "hello already completed".to_string(),
-                    client_id: None,
-                },
-            )
-            .await?;
-        }
-        ClientToHost::SendMessage {
-            client_id,
-            body,
-            r#ref,
-            attachments,
-            mode,
-            sc,
-            mentions,
-        } => {
-            if let Some(sc) = sc {
-                state.side_chats.send(&sc, body, mentions).await?;
-            } else {
-                let submission = state
-                    .submit_owner_message(client_id, body, r#ref, attachments, mentions, mode)
-                    .await?;
-                if !submission.inserted {
-                    send_json_sink(
-                        sink,
-                        &HostToClient::Msg {
-                            message: submission.message,
-                            sc: None,
-                        },
-                    )
-                    .await?;
-                }
-            }
-        }
-        ClientToHost::CancelTurn { sc } => {
-            if let Some(sc) = sc {
-                state.side_chats.cancel(&sc).await?;
-            } else {
-                state.cancel_turn().await?;
-            }
-        }
-        ClientToHost::CancelQueued { client_id } => {
-            state.cancel_queued_message(&client_id).await?;
-        }
-        ClientToHost::UploadBlob {
-            client_id,
-            name,
-            mime,
-            data_b64,
-        } => {
-            let data = decode_blob_data_b64(&data_b64)?;
-            let stored = state
-                .storage
-                .store_blob(
-                    &client_id,
-                    sanitize_blob_name(&name),
-                    normalize_mime(&mime),
-                    data,
-                )
-                .await?;
-            send_json_sink(
-                sink,
-                &HostToClient::BlobOk {
-                    client_id,
-                    blob: stored.blob,
-                },
-            )
-            .await?;
-        }
-        ClientToHost::ResolvePing { ping_id } => {
-            if let Some(ping) = state.storage.resolve_ping(ping_id).await? {
-                state.broadcast(HostToClient::PingUpsert { ping });
-            }
-        }
-        ClientToHost::ReadPing { ping_id } => {
-            let ping = state
-                .storage
-                .mark_ping_read(ping_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("unknown ping: {ping_id}"))?;
-            state.broadcast(HostToClient::PingUpsert { ping });
-        }
-        ClientToHost::RegisterPushToken { platform, token } => {
-            state.storage.register_push_token(platform, token).await?;
-        }
-        ClientToHost::UnregisterPushToken { token } => {
-            state.storage.unregister_push_token(&token).await?;
-        }
-        ClientToHost::OpenSideChat {
-            client_id: _,
-            ping_id,
-        } => {
-            let (sc, messages, _) = state.side_chats.open(ping_id).await?;
-            state.broadcast(HostToClient::SideChatOpen {
-                sc,
-                ping_id,
-                messages,
-            });
-        }
-        ClientToHost::ConcludeSideChat { sc } => {
-            state.side_chats.conclude(&sc).await?;
-        }
-        ClientToHost::ConfirmConclusion { sc, text } => {
-            state.side_chats.confirm(&sc, text, state).await?;
-        }
-        ClientToHost::DiscardSideChat { sc } => {
-            state.side_chats.discard(&sc).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn send_json(socket: &mut WebSocket, value: &HostToClient) {
-    match serde_json::to_string(value) {
-        Ok(text) => {
-            let _ = socket.send(Message::Text(text)).await;
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to encode websocket response");
-        }
-    }
-}
-
-async fn send_json_sink(
-    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    value: &HostToClient,
-) -> anyhow::Result<()> {
-    let text = serde_json::to_string(value)?;
-    sink.send(Message::Text(text)).await?;
-    Ok(())
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HelloTestHookPoint {
-    Subscribed,
-    Snapshotted,
-    HelloOkSent,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone)]
-struct HelloTestHook {
-    token: String,
-    point: HelloTestHookPoint,
-    body: String,
-}
-
-#[cfg(test)]
-fn hello_test_hooks() -> &'static std::sync::Mutex<std::collections::VecDeque<HelloTestHook>> {
-    static HOOKS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<HelloTestHook>>> =
-        std::sync::OnceLock::new();
-    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
-}
-
-#[cfg(test)]
-fn queue_hello_test_hook(token: String, point: HelloTestHookPoint, body: String) {
-    hello_test_hooks()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push_back(HelloTestHook { token, point, body });
-}
-
-#[cfg(test)]
-async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
-    use hirsel_proto::ChatAuthor;
-
-    let hook = {
-        let mut hooks = hello_test_hooks()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let Some(position) = hooks
-            .iter()
-            .position(|hook| hook.point == point && hook.token == state.token.as_ref())
-        else {
-            return;
-        };
-        hooks.remove(position)
-    };
-    if let Some(hook) = hook {
-        let message = state
-            .storage
-            .append_chat(ChatAuthor::Agent, hook.body, None)
-            .await
-            .expect("hello test hook appends chat");
-        state.broadcast(HostToClient::Msg { message, sc: None });
+    async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()> {
+        let text = serde_json::to_string(frame)?;
+        self.0.send(Message::Text(text)).await?;
+        Ok(())
     }
 }
 
@@ -529,9 +206,9 @@ mod tests {
     #[tokio::test]
     async fn websocket_hello_subscribe_first_covers_reconnect_races() {
         let cases = [
-            (super::HelloTestHookPoint::Subscribed, true),
-            (super::HelloTestHookPoint::Snapshotted, false),
-            (super::HelloTestHookPoint::HelloOkSent, false),
+            (crate::protocol::HelloTestHookPoint::Subscribed, true),
+            (crate::protocol::HelloTestHookPoint::Snapshotted, false),
+            (crate::protocol::HelloTestHookPoint::HelloOkSent, false),
         ];
         for (index, (point, should_be_in_snapshot)) in cases.into_iter().enumerate() {
             let dir = tempfile::tempdir().unwrap();
@@ -540,7 +217,7 @@ mod tests {
             let mut config = test_config(dir.path());
             config.token = token.clone();
             let state = build_state(config).await.unwrap();
-            super::queue_hello_test_hook(token.clone(), point, body.clone());
+            crate::protocol::queue_hello_test_hook(token.clone(), point, body.clone());
             let app = router_from_state(state);
             let addr = spawn_app(app).await;
 
@@ -769,7 +446,8 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "read_ping",
-                "ping_id": 99_999
+                "ping_id": 99_999,
+                "client_id": "raw-correlation"
             })
             .to_string(),
         ))
@@ -778,7 +456,7 @@ mod tests {
         match read_error(&mut ws).await {
             HostToClient::Error { detail, client_id } => {
                 assert!(detail.contains("unknown ping"));
-                assert_eq!(client_id, None);
+                assert_eq!(client_id.as_deref(), Some("raw-correlation"));
             }
             other => panic!("unexpected error response: {other:?}"),
         }

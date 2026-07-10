@@ -6,14 +6,19 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 hirsel-proto.workspace = true
+iroh.workspace = true
+iroh-tickets.workspace = true
 rand = "0.8.5"
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.24.0"
+tokio-util.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

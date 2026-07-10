@@ -391,10 +391,11 @@ impl SideChatManager {
         if session.closed.load(Ordering::Acquire) {
             return Ok(());
         }
-        if let Some(text) = self.execute_lash_turn(&session, body).await? {
-            if !session.closed.load(Ordering::Acquire) && !text.trim().is_empty() {
-                self.append_agent_reply(&session, text).await?;
-            }
+        if let Some(text) = self.execute_lash_turn(&session, body).await?
+            && !session.closed.load(Ordering::Acquire)
+            && !text.trim().is_empty()
+        {
+            self.append_agent_reply(&session, text).await?;
         }
         Ok(())
     }
@@ -560,10 +561,10 @@ impl SideChatManager {
         session.cancel_active_turn();
         let _turn_guard = session.turn_lock.lock().await;
         let delete_result = self.storage.delete_side_chat_transcript(sc).await;
-        if let Some(lash_session) = session.lash_session.lock().await.take() {
-            if let Err(error) = lash_session.close().await {
-                tracing::warn!(%error, %sc, "failed to close Lash side-chat session");
-            }
+        if let Some(lash_session) = session.lash_session.lock().await.take()
+            && let Err(error) = lash_session.close().await
+        {
+            tracing::warn!(%error, %sc, "failed to close Lash side-chat session");
         }
         delete_result?;
         Ok(())
@@ -1046,10 +1047,10 @@ mod tests {
     ) -> Vec<ChatMessage> {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if let Some(messages) = manager.transcript(sc).await {
-                    if messages.len() >= expected {
-                        return messages;
-                    }
+                if let Some(messages) = manager.transcript(sc).await
+                    && messages.len() >= expected
+                {
+                    return messages;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

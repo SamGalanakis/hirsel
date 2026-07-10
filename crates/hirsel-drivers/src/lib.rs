@@ -877,15 +877,15 @@ async fn read_codex_thread_id(
         if let Some(summary) = codex_progress(&value) {
             let _ = events.emit(SubagentEvent::Progress { summary });
         }
-        if value.get("id").and_then(Value::as_u64) == Some(2) {
-            if let Some(thread_id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
-                return Ok(thread_id.to_string());
-            }
+        if value.get("id").and_then(Value::as_u64) == Some(2)
+            && let Some(thread_id) = value.pointer("/result/thread/id").and_then(Value::as_str)
+        {
+            return Ok(thread_id.to_string());
         }
-        if value.get("method").and_then(Value::as_str) == Some("thread/started") {
-            if let Some(thread_id) = value.pointer("/params/thread/id").and_then(Value::as_str) {
-                return Ok(thread_id.to_string());
-            }
+        if value.get("method").and_then(Value::as_str) == Some("thread/started")
+            && let Some(thread_id) = value.pointer("/params/thread/id").and_then(Value::as_str)
+        {
+            return Ok(thread_id.to_string());
         }
     }
     Err(DriverError::MissingExternalId)
@@ -902,19 +902,16 @@ async fn read_codex_stdout(
             Ok(Some(line)) => match serde_json::from_str::<Value>(&line) {
                 Ok(value) => {
                     if let Some(turn_id) = value.pointer("/result/turn/id").and_then(Value::as_str)
+                        && let Ok(mut active_turn_id) = lock(&session.active_turn_id)
                     {
-                        if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
-                            *active_turn_id = Some(turn_id.to_string());
-                        }
+                        *active_turn_id = Some(turn_id.to_string());
                     }
-                    if value.get("method").and_then(Value::as_str) == Some("turn/started") {
-                        if let Some(turn_id) =
+                    if value.get("method").and_then(Value::as_str) == Some("turn/started")
+                        && let Some(turn_id) =
                             value.pointer("/params/turn/id").and_then(Value::as_str)
-                        {
-                            if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
-                                *active_turn_id = Some(turn_id.to_string());
-                            }
-                        }
+                        && let Ok(mut active_turn_id) = lock(&session.active_turn_id)
+                    {
+                        *active_turn_id = Some(turn_id.to_string());
                     }
                     if let Some(summary) = codex_progress(&value) {
                         let _ = session.events.emit(SubagentEvent::Progress { summary });

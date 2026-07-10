@@ -1,4 +1,4 @@
-use hirsel_host::{build_app, config::Config};
+use hirsel_host::{build_state, config::Config, iroh::IrohServer, router_from_state};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -12,7 +12,10 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env()?;
     let listen = config.listen;
-    let app = build_app(config).await?;
+    let data_dir = config.data_dir.clone();
+    let state = build_state(config).await?;
+    let app = router_from_state(state.clone());
+    let _iroh = IrohServer::start(state, data_dir).await?;
     let listener = TcpListener::bind(listen).await?;
     tracing::info!(%listen, "Hirsel Host listening");
     axum::serve(listener, app).await?;

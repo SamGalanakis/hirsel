@@ -275,6 +275,12 @@ struct ObserverAdapter {
     observer: Box<dyn ClientObserver>,
 }
 
+/// Generates a new persistent iroh identity for pairing and later reconnects.
+#[uniffi::export]
+pub fn generate_iroh_identity() -> String {
+    core::generate_iroh_identity()
+}
+
 impl core::ClientObserver for ObserverAdapter {
     fn on_state_changed(&self, snapshot: core::ClientSnapshot) {
         self.observer.on_state_changed(snapshot.into());

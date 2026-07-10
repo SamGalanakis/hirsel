@@ -78,6 +78,7 @@ import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ClientSnapshot
 import dev.hirsel.core.Ping
+import dev.hirsel.core.generateIrohIdentity
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -111,9 +112,10 @@ class MainActivity : ComponentActivity() {
  * Onboarding vs. chat is driven by whether a device token is persisted. When a
  * fresh pairing completes we keep the SAME authenticated [Connection] alive for
  * chat rather than swapping to a new one: the device token is pinned to the
- * client's iroh NodeId, and client-core generates that NodeId per [dev.hirsel.core.Client]
- * instance, so reusing the pairing client preserves the pinned identity for the
- * whole session. A cold relaunch takes the `newIroh` device-token path.
+ * client's iroh NodeId. The pairing flow generates one persistent iroh identity,
+ * passes it to that client, and saves it with the issued token. A cold relaunch
+ * takes the `newIroh` device-token path with the same identity and therefore the
+ * same pinned NodeId.
  */
 @Composable
 private fun HirselRoot() {
@@ -149,6 +151,7 @@ private fun HirselRoot() {
                         ticket = activeSpec.ticket,
                         deviceToken = it,
                         deviceLabel = activeSpec.label,
+                        irohSecretKey = activeSpec.irohSecretKey,
                     )
                     store.save(cred)
                     credential = cred
@@ -226,12 +229,18 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
     fun submit(raw: String) {
         when (val result = parsePairingLink(raw)) {
             is PairingLinkResult.Ok -> {
+                val irohSecretKey = runCatching { generateIrohIdentity() }
+                    .getOrElse {
+                        error = "Couldn't create a secure device identity. Try again."
+                        return
+                    }
                 error = null
                 onSubmit(
                     ConnectionSpec.Pairing(
                         ticket = result.link.ticket,
                         code = result.link.code,
                         label = label.trim().ifEmpty { defaultDeviceLabel() },
+                        irohSecretKey = irohSecretKey,
                     ),
                 )
             }

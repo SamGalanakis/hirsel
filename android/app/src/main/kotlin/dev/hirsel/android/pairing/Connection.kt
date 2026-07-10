@@ -17,7 +17,12 @@ import dev.hirsel.core.LifecycleEvent
 /** How a hirsel iroh connection should be established. */
 sealed interface ConnectionSpec {
     /** Redeem a one-time pairing code; the host issues a device token on success. */
-    data class Pairing(val ticket: String, val code: String, val label: String) : ConnectionSpec
+    data class Pairing(
+        val ticket: String,
+        val code: String,
+        val label: String,
+        val irohSecretKey: String,
+    ) : ConnectionSpec
 
     /** Reconnect with a previously issued, NodeId-pinned device token. */
     data class Device(val credential: DeviceCredential) : ConnectionSpec
@@ -118,9 +123,20 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
     val client = runCatching {
         when (spec) {
             is ConnectionSpec.Pairing ->
-                Client.newIrohPairing(spec.ticket, spec.code, spec.label, observer)
+                Client.newIrohPairing(
+                    spec.ticket,
+                    spec.code,
+                    spec.label,
+                    spec.irohSecretKey,
+                    observer,
+                )
             is ConnectionSpec.Device ->
-                Client.newIroh(spec.credential.ticket, spec.credential.deviceToken, observer)
+                Client.newIroh(
+                    spec.credential.ticket,
+                    spec.credential.deviceToken,
+                    spec.credential.irohSecretKey,
+                    observer,
+                )
         }
     }.getOrNull()
     return Connection(client).also { target.value = it }

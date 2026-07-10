@@ -7,21 +7,22 @@ import androidx.security.crypto.MasterKey
 
 /**
  * A paired device's persisted credential: the iroh ticket used to reach the host,
- * the long random device token issued at pairing (NodeId-pinned, revocable), and
- * the human label the token was minted for.
+ * the long random device token issued at pairing (NodeId-pinned, revocable), the
+ * persistent iroh identity that owns that NodeId, and the human label the token
+ * was minted for.
  */
 data class DeviceCredential(
     val ticket: String,
     val deviceToken: String,
     val deviceLabel: String,
+    val irohSecretKey: String,
 )
 
 /**
- * Persists the issued device token securely. The values live in an
+ * Persists the issued device token and iroh identity securely. The values live in an
  * AES-256 EncryptedSharedPreferences file whose master key is held in the Android
- * Keystore — never in plaintext prefs. The iroh secret identity that pins the
- * token lives in the Rust client-core data dir; this store keeps the token that
- * authenticates that identity on reconnect.
+ * Keystore — never in plaintext prefs. Keeping the secret identity next to the
+ * NodeId-pinned token lets a cold relaunch authenticate as the same iroh node.
  */
 class TokenStore(context: Context) {
     private val prefs: SharedPreferences by lazy {
@@ -41,8 +42,14 @@ class TokenStore(context: Context) {
         val ticket = prefs.getString(KEY_TICKET, null) ?: return null
         val token = prefs.getString(KEY_TOKEN, null) ?: return null
         val label = prefs.getString(KEY_LABEL, null) ?: return null
-        if (ticket.isBlank() || token.isBlank()) return null
-        return DeviceCredential(ticket = ticket, deviceToken = token, deviceLabel = label)
+        val irohSecretKey = prefs.getString(KEY_IROH_SECRET_KEY, null) ?: return null
+        if (ticket.isBlank() || token.isBlank() || irohSecretKey.isBlank()) return null
+        return DeviceCredential(
+            ticket = ticket,
+            deviceToken = token,
+            deviceLabel = label,
+            irohSecretKey = irohSecretKey,
+        )
     }
 
     fun save(credential: DeviceCredential) {
@@ -50,6 +57,7 @@ class TokenStore(context: Context) {
             .putString(KEY_TICKET, credential.ticket)
             .putString(KEY_TOKEN, credential.deviceToken)
             .putString(KEY_LABEL, credential.deviceLabel)
+            .putString(KEY_IROH_SECRET_KEY, credential.irohSecretKey)
             .apply()
     }
 
@@ -63,5 +71,6 @@ class TokenStore(context: Context) {
         const val KEY_TICKET = "ticket"
         const val KEY_TOKEN = "device_token"
         const val KEY_LABEL = "device_label"
+        const val KEY_IROH_SECRET_KEY = "iroh_secret_key"
     }
 }

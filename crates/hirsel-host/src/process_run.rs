@@ -99,7 +99,10 @@ mod tests {
         let pid_file = dir.path().join("sleep.pid");
         let cmd = format!("sleep 999 & echo $! > {}; wait", pid_file.display());
 
-        let output = run_bash_command(cmd, None, Duration::from_millis(100))
+        // Generous timeout: the child must reach `echo $! > pidfile` before the
+        // timeout fires. A tight 100ms races on a cold/loaded CI runner (bash
+        // startup + fork), leaving the pidfile unwritten. 999s sleep still times out.
+        let output = run_bash_command(cmd, None, Duration::from_secs(2))
             .await
             .unwrap();
 

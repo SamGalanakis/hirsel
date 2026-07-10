@@ -85,7 +85,7 @@ jobs:
       - name: Install Android SDK packages
         if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
         run: |
-          sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.3.13750724'
+          sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;27.3.13750724'
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
 
       - name: Set up Rust

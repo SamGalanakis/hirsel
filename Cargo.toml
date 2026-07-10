@@ -19,6 +19,12 @@ chrono = { version = "0.4.42", features = ["serde", "clock"] }
 futures-util = "0.3.31"
 hirsel-drivers = { path = "crates/hirsel-drivers" }
 hirsel-proto = { path = "crates/hirsel-proto" }
+lash-core = "=0.1.0-alpha.88"
+lash = { package = "lash-runtime", version = "=0.1.0-alpha.88", features = ["rlm"] }
+lash-provider-anthropic = "=0.1.0-alpha.88"
+lash-provider-openai = "=0.1.0-alpha.88"
+lash-protocol-rlm = "=0.1.0-alpha.88"
+lash-sqlite-store = "=0.1.0-alpha.88"
 libc = "0.2.177"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }

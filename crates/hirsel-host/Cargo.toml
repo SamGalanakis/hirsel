@@ -14,12 +14,12 @@ chrono.workspace = true
 futures-util.workspace = true
 hirsel-drivers.workspace = true
 hirsel-proto.workspace = true
-lash-core = { path = "/workspace/code/lash/crates/lash-core" }
-lash = { package = "lash-runtime", path = "/workspace/code/lash/crates/lash", features = ["rlm"] }
-lash-provider-anthropic = { path = "/workspace/code/lash/crates/lash-provider-anthropic" }
-lash-provider-openai = { path = "/workspace/code/lash/crates/lash-provider-openai" }
-lash-protocol-rlm = { path = "/workspace/code/lash/crates/lash-protocol-rlm" }
-lash-sqlite-store = { path = "/workspace/code/lash/crates/lash-sqlite-store" }
+lash-core.workspace = true
+lash.workspace = true
+lash-provider-anthropic.workspace = true
+lash-provider-openai.workspace = true
+lash-protocol-rlm.workspace = true
+lash-sqlite-store.workspace = true
 libc.workspace = true
 regex = "1.12.2"
 rusqlite.workspace = true

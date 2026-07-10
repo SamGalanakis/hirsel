@@ -11,7 +11,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.91"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
@@ -21,6 +21,7 @@ chrono = { version = "0.4.42", features = ["serde", "clock"] }
 futures-util = "0.3.31"
 hirsel-drivers = { path = "crates/hirsel-drivers" }
 hirsel-proto = { path = "crates/hirsel-proto" }
+iroh = "=1.0.2"
 lash-core = "=0.1.0-alpha.88"
 lash = { package = "lash-runtime", version = "=0.1.0-alpha.88", features = ["rlm"] }
 lash-provider-anthropic = "=0.1.0-alpha.88"

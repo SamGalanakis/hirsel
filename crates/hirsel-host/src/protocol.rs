@@ -8,7 +8,10 @@ use crate::{
 };
 
 pub(crate) enum IncomingFrame {
-    Message(ClientToHost),
+    Message {
+        frame: ClientToHost,
+        client_id: Option<String>,
+    },
     InvalidJson {
         detail: String,
         client_id: Option<String>,
@@ -17,13 +20,14 @@ pub(crate) enum IncomingFrame {
 }
 
 pub(crate) fn decode_json(bytes: &[u8]) -> IncomingFrame {
+    let client_id = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("client_id")?.as_str().map(String::from));
     match serde_json::from_slice(bytes) {
-        Ok(message) => IncomingFrame::Message(message),
+        Ok(frame) => IncomingFrame::Message { frame, client_id },
         Err(error) => IncomingFrame::InvalidJson {
             detail: error.to_string(),
-            client_id: serde_json::from_slice::<serde_json::Value>(bytes)
-                .ok()
-                .and_then(|value| value.get("client_id")?.as_str().map(String::from)),
+            client_id,
         },
     }
 }
@@ -39,10 +43,14 @@ where
     C: ProtocolChannel,
 {
     let hello = match channel.receive().await {
-        Ok(Some(IncomingFrame::Message(ClientToHost::Hello {
-            token,
-            last_seen_msg_id,
-        }))) => {
+        Ok(Some(IncomingFrame::Message {
+            frame:
+                ClientToHost::Hello {
+                    token,
+                    last_seen_msg_id,
+                },
+            ..
+        })) => {
             if token != state.token.as_ref() {
                 let _ = channel
                     .send(&HostToClient::Error {
@@ -54,7 +62,7 @@ where
             }
             last_seen_msg_id
         }
-        Ok(Some(IncomingFrame::Message(_))) => {
+        Ok(Some(IncomingFrame::Message { .. })) => {
             let _ = channel
                 .send(&HostToClient::Error {
                     detail: "hello must be the first frame".to_string(),
@@ -114,8 +122,7 @@ where
         tokio::select! {
             frame = channel.receive() => {
                 match frame {
-                    Ok(Some(IncomingFrame::Message(frame))) => {
-                        let client_id = frame_client_id(&frame);
+                    Ok(Some(IncomingFrame::Message { frame, client_id })) => {
                         if let Err(error) = handle_client_frame(&state, channel, frame).await {
                             let response = HostToClient::Error {
                                 detail: error.to_string(),
@@ -155,16 +162,6 @@ where
                 }
             }
         }
-    }
-}
-
-fn frame_client_id(frame: &ClientToHost) -> Option<String> {
-    match frame {
-        ClientToHost::SendMessage { client_id, .. }
-        | ClientToHost::CancelQueued { client_id }
-        | ClientToHost::UploadBlob { client_id, .. }
-        | ClientToHost::OpenSideChat { client_id, .. } => Some(client_id.clone()),
-        _ => None,
     }
 }
 

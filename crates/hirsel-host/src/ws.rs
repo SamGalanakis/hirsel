@@ -446,7 +446,8 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "read_ping",
-                "ping_id": 99_999
+                "ping_id": 99_999,
+                "client_id": "raw-correlation"
             })
             .to_string(),
         ))
@@ -455,7 +456,7 @@ mod tests {
         match read_error(&mut ws).await {
             HostToClient::Error { detail, client_id } => {
                 assert!(detail.contains("unknown ping"));
-                assert_eq!(client_id, None);
+                assert_eq!(client_id.as_deref(), Some("raw-correlation"));
             }
             other => panic!("unexpected error response: {other:?}"),
         }

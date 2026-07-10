@@ -290,7 +290,7 @@ export function Composer(props: Props) {
             fallback={
               <div
                 data-slot="mention-chips"
-                class="absolute inset-x-0 bottom-full mb-2 flex gap-1.5 overflow-x-auto pb-1"
+                class="no-scrollbar absolute inset-x-0 bottom-full mb-2 flex snap-x gap-1.5 overflow-x-auto pr-6 pb-1 [mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]"
                 role="listbox"
                 aria-label="Mention a Ping"
               >
@@ -300,7 +300,7 @@ export function Composer(props: Props) {
                       type="button"
                       role="option"
                       data-slot="mention-chip"
-                      class="flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-left"
+                      class="flex shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-left"
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => mentions.accept(ping)}
                     >

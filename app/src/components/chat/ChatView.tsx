@@ -82,6 +82,22 @@ export function ChatView() {
     return map;
   });
 
+  // The id of the message immediately preceding each message in the thread.
+  // A reply whose ref *is* that neighbour is the ordinary adjacent
+  // back-and-forth — the fill-vs-quiet bubble asymmetry already says who
+  // answered whom, so no quoted-preview card is drawn. A quote is only surfaced
+  // when the ref points somewhere non-contiguous (a quick-reply jump, an older
+  // message, a side-chat conclusion), where it actually aids orientation.
+  const prevIdOf = createMemo(() => {
+    const map = new Map<number, number | null>();
+    let prev: number | null = null;
+    for (const m of state.messages) {
+      map.set(m.id, prev);
+      prev = m.id;
+    }
+    return map;
+  });
+
   // Interleave day-break markers between messages when the calendar day changes.
   const rows = createMemo<Row[]>(() => {
     const out: Row[] = [];
@@ -256,6 +272,7 @@ export function ChatView() {
                             <MessageBubble
                               message={m}
                               refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
+                              showQuote={m.ref !== null && m.ref !== prevIdOf().get(m.id)}
                               turnDetails={state.turnDetails[m.id]}
                               isConclusion={state.conclusionChips.includes(m.id)}
                               highlighted={highlightedId() === m.id}

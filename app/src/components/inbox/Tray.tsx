@@ -214,7 +214,7 @@ function TrayScrim() {
 
   return (
     <div
-      class="absolute inset-0 z-20 rail:hidden"
+      class="absolute inset-0 z-20 bg-background/65 backdrop-blur-[2px] motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150 rail:hidden"
       aria-hidden="true"
       onClick={() => setTrayExpanded(false)}
     />

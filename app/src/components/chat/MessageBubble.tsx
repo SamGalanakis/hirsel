@@ -22,6 +22,10 @@ interface Props {
    * Never a link — the side transcript is discarded on conclude, so there is
    * nothing to view (critique P2). */
   isConclusion?: boolean;
+  /** Whether to draw the quoted-reply preview. False for the ordinary adjacent
+   * back-and-forth (the ref is the immediately-preceding message); true only
+   * when the ref is non-contiguous and the citation actually aids orientation. */
+  showQuote: boolean;
   highlighted: boolean;
   queued: boolean;
   onTapQuote: (id: number) => void;
@@ -80,7 +84,7 @@ export function MessageBubble(props: Props) {
             onPointerMove={cancelPress}
             onPointerCancel={cancelPress}
           >
-            <Show when={props.message.ref !== null}>
+            <Show when={props.showQuote}>
               <QuotedRef
                 message={props.refTarget}
                 onTap={() => props.onTapQuote(props.message.ref as number)}

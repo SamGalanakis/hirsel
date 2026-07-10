@@ -334,6 +334,7 @@ function SideChatPanel(props: { sc: string }) {
                         <MessageBubble
                           message={m}
                           refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
+                          showQuote={m.ref !== null}
                           highlighted={highlightedId() === m.id}
                           queued={false}
                           onTapQuote={scrollToId}

@@ -22,10 +22,12 @@ lash-protocol-rlm.workspace = true
 lash-sqlite-store.workspace = true
 libc.workspace = true
 regex = "1.12.2"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tower-http = { version = "0.6.6", features = ["fs"] }
 tracing.workspace = true
@@ -34,8 +36,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 jsonschema = "0.18"
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
-tempfile.workspace = true
 tokio-tungstenite = "0.24.0"
 
 [lib]

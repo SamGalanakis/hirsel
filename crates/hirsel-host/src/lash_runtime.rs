@@ -4450,6 +4450,7 @@ mod tests {
             .await
             .unwrap();
         let (broadcaster, _) = broadcast::channel(16);
+        let (pushes, _) = crate::push::PushGateway::recording(storage.clone());
         let tools = ToolSuite::new(
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
@@ -4459,6 +4460,7 @@ mod tests {
             broadcaster,
             BroadcastLog::default(),
             ProcessStore::default(),
+            pushes,
         );
         let anchors = Arc::new(Mutex::new(TurnAnchorState::default()));
         {

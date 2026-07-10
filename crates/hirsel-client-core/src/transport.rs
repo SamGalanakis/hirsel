@@ -203,8 +203,32 @@ where
     let Some(client) = upgrade(inner) else {
         return Err("client dropped".into());
     };
+    let frames = {
+        let mut pending = client
+            .pending_frames
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *pending)
+    };
     let pending: Vec<_> = client.read_store().pending_sends.iter().cloned().collect();
     drop(client);
+
+    let mut frames = frames.into_iter();
+    while let Some(frame) = frames.next() {
+        if let Err(error) = send_json(socket, &frame).await {
+            if let Some(client) = upgrade(inner) {
+                let mut unsent = std::collections::VecDeque::from([frame]);
+                unsent.extend(frames);
+                let mut pending = client
+                    .pending_frames
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner());
+                unsent.append(&mut pending);
+                *pending = unsent;
+            }
+            return Err(error);
+        }
+    }
     for send in pending {
         if sent_this_connection.insert(send.client_id.clone()) {
             send_json(socket, &pending_to_wire(&send)).await?;

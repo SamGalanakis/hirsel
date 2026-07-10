@@ -1,8 +1,11 @@
 package dev.hirsel.android
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -57,6 +60,10 @@ import dev.hirsel.core.ClientSnapshot
 import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.LifecycleEvent
 import dev.hirsel.core.Ping
+import com.google.firebase.messaging.FirebaseMessaging
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 
 private const val HOST = "http://10.0.2.2:3090"
 private const val TOKEN = "dev-token"
@@ -64,6 +71,9 @@ private const val TOKEN = "dev-token"
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
         setContent {
             MaterialTheme {
                 HirselApp()
@@ -100,6 +110,19 @@ private fun HirselApp() {
         runCatching { withContext(Dispatchers.IO) { client.connect() } }
             .onFailure { lifecycle = "Connection error: ${it.message}" }
     }
+    LaunchedEffect(client, clientSnapshot?.connection) {
+        if (clientSnapshot?.connection != ConnectionState.ONLINE) return@LaunchedEffect
+        runCatching {
+            val token = fetchFcmToken()
+            Log.i(FCM_LOG_TAG, "FCM token fetched: ${token.take(16)}…")
+            withContext(Dispatchers.IO) {
+                client.registerPushToken("android", token)
+            }
+            Log.i(FCM_LOG_TAG, "FCM token registered with Hirsel host")
+        }.onFailure {
+            Log.e(FCM_LOG_TAG, "FCM token registration failed", it)
+        }
+    }
     DisposableEffect(client) {
         onDispose {
             Thread {
@@ -121,6 +144,23 @@ private fun HirselApp() {
             lifecycle = lifecycle,
             onSend = client::sendMessage,
         )
+    }
+}
+
+private suspend fun fetchFcmToken(): String = suspendCoroutine { continuation ->
+    FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+        if (!task.isSuccessful) {
+            continuation.resumeWithException(
+                task.exception ?: IllegalStateException("Firebase token retrieval failed"),
+            )
+            return@addOnCompleteListener
+        }
+        val token = task.result
+        if (token.isNullOrBlank()) {
+            continuation.resumeWithException(IllegalStateException("Firebase returned an empty FCM token"))
+        } else {
+            continuation.resume(token)
+        }
     }
 }
 

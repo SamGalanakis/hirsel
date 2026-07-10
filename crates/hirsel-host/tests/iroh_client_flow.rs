@@ -5,7 +5,7 @@ use std::{
 
 use hirsel_client_core::{
     Client, ClientConfig, ClientObserver, ClientSnapshot, ConnectionState, LifecycleEvent,
-    ReconnectPolicy, SendMessageRequest,
+    ReconnectPolicy, SendMessageRequest, generate_iroh_identity,
 };
 use hirsel_host::{
     build_state,
@@ -20,7 +20,7 @@ const TOKEN: &str = "iroh-proof-token";
 const ROUND_TRIP_BODY: &str = "iroh client-core round-trip";
 
 #[tokio::test]
-async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
+async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(test_host_config(dir.path())).await.unwrap();
     let anchor = state
@@ -65,10 +65,12 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
     let pairing_code = pair["code"].as_str().unwrap().to_owned();
     assert_eq!(pair["ticket"], server.ticket());
 
+    let persisted_identity = generate_iroh_identity();
     let mut client_config = ClientConfig::new_iroh_pairing(
         server.ticket().to_owned(),
         pairing_code.clone(),
         "Owner phone".to_owned(),
+        persisted_identity.clone(),
     );
     client_config.reconnect = ReconnectPolicy {
         initial_delay_ms: 50,
@@ -114,6 +116,7 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
     assert!(!devices.to_string().contains(&device_token));
 
     client.disconnect().await;
+    drop(client);
 
     let reused = pairing_client(
         server.ticket(),
@@ -124,8 +127,14 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
     assert_protocol_error(&reused, "invalid pairing code").await;
     reused.disconnect().await;
 
-    client.connect().await.unwrap();
-    let reconnected = wait_for_snapshot(&client, |snapshot| {
+    let reconnected_client = device_client(
+        server.ticket(),
+        device_token.clone(),
+        persisted_identity,
+        test_reconnect_policy(),
+    );
+    reconnected_client.connect().await.unwrap();
+    let reconnected = wait_for_snapshot(&reconnected_client, |snapshot| {
         snapshot.connection == ConnectionState::Online
     })
     .await;
@@ -137,7 +146,7 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
     );
     assert!(reconnected.pings.iter().any(|item| item.id == ping.id));
 
-    client.send_message(SendMessageRequest::new(ROUND_TRIP_BODY.to_owned()));
+    reconnected_client.send_message(SendMessageRequest::new(ROUND_TRIP_BODY.to_owned()));
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if state
@@ -158,7 +167,7 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
     .await
     .expect("host did not persist the iroh owner message");
 
-    let round_tripped = wait_for_snapshot(&client, |snapshot| {
+    let round_tripped = wait_for_snapshot(&reconnected_client, |snapshot| {
         snapshot.messages.iter().any(|message| {
             message.author == ChatAuthor::Owner
                 && message.body == ROUND_TRIP_BODY
@@ -168,11 +177,12 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
     })
     .await;
     assert!(round_tripped.pings.iter().any(|item| item.id == ping.id));
-    client.disconnect().await;
+    reconnected_client.disconnect().await;
 
     let mismatch = device_client(
         server.ticket(),
         device_token.clone(),
+        generate_iroh_identity(),
         test_reconnect_policy(),
     );
     assert_protocol_error(&mismatch, "invalid device token").await;
@@ -190,8 +200,8 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
         .await
         .unwrap();
     assert_eq!(revoked["revoked"], 1);
-    assert_protocol_error(&client, "invalid device token").await;
-    client.disconnect().await;
+    assert_protocol_error(&reconnected_client, "invalid device token").await;
+    reconnected_client.disconnect().await;
 
     let expired_code = state
         .storage
@@ -212,13 +222,23 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
 }
 
 fn pairing_client(ticket: &str, code: String, label: &str, reconnect: ReconnectPolicy) -> Client {
-    let mut config = ClientConfig::new_iroh_pairing(ticket.to_owned(), code, label.to_owned());
+    let mut config = ClientConfig::new_iroh_pairing(
+        ticket.to_owned(),
+        code,
+        label.to_owned(),
+        generate_iroh_identity(),
+    );
     config.reconnect = reconnect;
     Client::new(config).unwrap()
 }
 
-fn device_client(ticket: &str, token: String, reconnect: ReconnectPolicy) -> Client {
-    let mut config = ClientConfig::new_iroh(ticket.to_owned(), token);
+fn device_client(
+    ticket: &str,
+    token: String,
+    iroh_identity: String,
+    reconnect: ReconnectPolicy,
+) -> Client {
+    let mut config = ClientConfig::new_iroh(ticket.to_owned(), token, iroh_identity);
     config.reconnect = reconnect;
     Client::new(config).unwrap()
 }

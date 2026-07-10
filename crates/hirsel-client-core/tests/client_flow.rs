@@ -112,6 +112,7 @@ fn test_config(address: std::net::SocketAddr) -> ClientConfig {
     ClientConfig {
         host: address.to_string(),
         iroh_ticket: None,
+        iroh_secret_key: None,
         auth: HelloAuth::StaticToken("secret".into()),
         reconnect: ReconnectPolicy {
             initial_delay_ms: 150,

@@ -408,3 +408,50 @@ async fn offline_queue_flushes_in_order_and_reconnect_resumes_last_seen() {
     client.disconnect().await;
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn push_token_registration_queues_until_the_client_is_online() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let _hello = receive_client(&mut socket).await;
+        send_server(&mut socket, &hello_ok(0, vec![], vec![], vec![])).await;
+        receive_client(&mut socket).await
+    });
+
+    let client = Client::new(test_config(address)).unwrap();
+    client
+        .register_push_token("android".into(), "fcm-token".into())
+        .unwrap();
+    client.connect().await.unwrap();
+
+    assert_eq!(
+        timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        ClientToHost::RegisterPushToken {
+            platform: hirsel_proto::PushPlatform::Android,
+            token: "fcm-token".into(),
+        }
+    );
+    client.disconnect().await;
+}
+
+#[test]
+fn push_token_registration_validates_input() {
+    let client = Client::new(ClientConfig::new("localhost:3090".into(), "secret".into())).unwrap();
+
+    assert!(
+        client
+            .register_push_token("desktop".into(), "token".into())
+            .is_err()
+    );
+    assert!(
+        client
+            .register_push_token("android".into(), "  ".into())
+            .is_err()
+    );
+}

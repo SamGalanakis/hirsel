@@ -241,6 +241,10 @@ pub enum ClientError {
     InvalidConfig { detail: String },
     #[error("client connection manager is already running")]
     AlreadyRunning,
+    #[error("unsupported push platform: {platform}")]
+    UnsupportedPushPlatform { platform: String },
+    #[error("push token must not be empty")]
+    EmptyPushToken,
     #[error("failed to initialize the client runtime: {detail}")]
     Runtime { detail: String },
 }
@@ -252,6 +256,10 @@ impl From<core::ClientError> for ClientError {
                 detail: error.to_string(),
             },
             core::ClientError::AlreadyRunning => Self::AlreadyRunning,
+            core::ClientError::UnsupportedPushPlatform(platform) => {
+                Self::UnsupportedPushPlatform { platform }
+            }
+            core::ClientError::EmptyPushToken => Self::EmptyPushToken,
         }
     }
 }
@@ -317,6 +325,12 @@ impl Client {
         SendReceipt {
             client_id: receipt.client_id,
         }
+    }
+
+    pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {
+        self.core
+            .register_push_token(platform, token)
+            .map_err(Into::into)
     }
 
     pub fn snapshot(&self) -> ClientSnapshot {

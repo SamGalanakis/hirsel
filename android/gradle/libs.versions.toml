@@ -4,6 +4,9 @@ kotlin = "2.4.0"
 composeBom = "2026.06.01"
 activityCompose = "1.13.0"
 jna = "5.19.0"
+# Firebase stable releases from 2026-06-16. BoM 34.15.0 maps Messaging to 25.1.0.
+googleServices = "4.5.0"
+firebaseBom = "34.15.0"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -13,7 +16,10 @@ androidx-compose-ui = { module = "androidx.compose.ui:ui" }
 androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
+firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

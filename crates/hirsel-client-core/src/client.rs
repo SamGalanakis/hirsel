@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use hirsel_proto::ClientToHost;
+use hirsel_proto::{ClientToHost, PushPlatform};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::JoinHandle;
@@ -40,6 +41,10 @@ pub enum ClientError {
     InvalidConfig(#[from] ConfigError),
     #[error("client connection manager is already running")]
     AlreadyRunning,
+    #[error("unsupported push platform: {0}")]
+    UnsupportedPushPlatform(String),
+    #[error("push token must not be empty")]
+    EmptyPushToken,
 }
 
 pub(crate) enum Command {
@@ -50,6 +55,7 @@ pub(crate) enum Command {
 pub(crate) struct ClientInner {
     pub config: ClientConfig,
     pub store: RwLock<LocalStore>,
+    pub pending_frames: Mutex<VecDeque<ClientToHost>>,
     observer: RwLock<Option<Arc<dyn ClientObserver>>>,
     command_tx: Mutex<Option<mpsc::UnboundedSender<Command>>>,
     task: AsyncMutex<Option<JoinHandle<()>>>,
@@ -106,6 +112,7 @@ impl Client {
             inner: Arc::new(ClientInner {
                 config,
                 store: RwLock::new(LocalStore::default()),
+                pending_frames: Mutex::new(VecDeque::new()),
                 observer: RwLock::new(None),
                 command_tx: Mutex::new(None),
                 task: AsyncMutex::new(None),
@@ -172,6 +179,36 @@ impl Client {
             let _ = sender.send(Command::SendPending);
         }
         SendReceipt { client_id }
+    }
+
+    /// Register a push token once the WebSocket is online. Registrations made
+    /// while disconnected remain queued until the next successful handshake.
+    pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {
+        let platform = match platform.as_str() {
+            "android" => PushPlatform::Android,
+            "web" => PushPlatform::Web,
+            "ios" => PushPlatform::Ios,
+            _ => return Err(ClientError::UnsupportedPushPlatform(platform)),
+        };
+        if token.trim().is_empty() {
+            return Err(ClientError::EmptyPushToken);
+        }
+
+        self.inner
+            .pending_frames
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_back(ClientToHost::RegisterPushToken { platform, token });
+        if let Some(sender) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(Command::SendPending);
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self) -> ClientSnapshot {

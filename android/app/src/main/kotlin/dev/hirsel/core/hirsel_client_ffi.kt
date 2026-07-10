@@ -705,6 +705,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_disconnect(
     ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_register_push_token(
+    ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_send_message(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_snapshot(
@@ -743,6 +745,8 @@ internal object UniffiLib {
     external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
     external fun uniffi_hirsel_client_ffi_fn_method_client_send_message(`ptr`: Long,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -873,6 +877,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_disconnect() != 57486) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_register_push_token() != 11929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_send_message() != 59325) {
@@ -1306,6 +1313,8 @@ public interface ClientInterface {
     
     fun `disconnect`()
     
+    fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
+
     fun `sendMessage`(`body`: kotlin.String): SendReceipt
     
     fun `snapshot`(): ClientSnapshot
@@ -1450,6 +1459,21 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     
     
+
+
+    @Throws(ClientException::class)override fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(ClientException) { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_register_push_token(
+        it,
+
+        FfiConverterString.lower(`platform`),
+        FfiConverterString.lower(`token`),_status)
+}
+    }
+
+
 
     override fun `sendMessage`(`body`: kotlin.String): SendReceipt {
             return FfiConverterTypeSendReceipt.lift(
@@ -2003,6 +2027,20 @@ sealed class ClientException: kotlin.Exception() {
             get() = ""
     }
     
+    class UnsupportedPushPlatform(
+
+        val `platform`: kotlin.String
+        ) : ClientException() {
+        override val message
+            get() = "platform=${ `platform` }"
+    }
+
+    class EmptyPushToken(
+        ) : ClientException() {
+        override val message
+            get() = ""
+    }
+
     class Runtime(
         
         val `detail`: kotlin.String
@@ -2034,7 +2072,11 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
                 FfiConverterString.read(buf),
                 )
             2 -> ClientException.AlreadyRunning()
-            3 -> ClientException.Runtime(
+            3 -> ClientException.UnsupportedPushPlatform(
+                FfiConverterString.read(buf),
+                )
+            4 -> ClientException.EmptyPushToken()
+            5 -> ClientException.Runtime(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -2049,6 +2091,15 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
                 + FfiConverterString.allocationSize(value.`detail`)
             )
             is ClientException.AlreadyRunning -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is ClientException.UnsupportedPushPlatform -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`platform`)
+            )
+            is ClientException.EmptyPushToken -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -2071,8 +2122,17 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
                 buf.putInt(2)
                 Unit
             }
-            is ClientException.Runtime -> {
+            is ClientException.UnsupportedPushPlatform -> {
                 buf.putInt(3)
+                FfiConverterString.write(value.`platform`, buf)
+                Unit
+            }
+            is ClientException.EmptyPushToken -> {
+                buf.putInt(4)
+                Unit
+            }
+            is ClientException.Runtime -> {
+                buf.putInt(5)
                 FfiConverterString.write(value.`detail`, buf)
                 Unit
             }

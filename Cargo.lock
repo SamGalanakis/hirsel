@@ -2454,9 +2454,8 @@ dependencies = [
 
 [[package]]
 name = "lash-core"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b72ec63990f653dc1b2ff5281244ebe369a1a7f02a54137cbc89bd6d2abe993a"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2478,9 +2477,8 @@ dependencies = [
 
 [[package]]
 name = "lash-lashlang-runtime"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a64a187cc3d17bdb19160f8d4b94e6c48f11389c8b17623cfe9bf982270bdbed"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2498,9 +2496,8 @@ dependencies = [
 
 [[package]]
 name = "lash-llm-transport"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "932e29d775752a518ceee9bcf362688a0d50003183c6945631063e0d2a36d777"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2513,9 +2510,8 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-tool-output-budget"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02a5f1b1cfe75483a771c9b8e93d6d5fbe3e99f8e04d33bad88678de766bbcc4"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "lash-core",
  "serde",
@@ -2525,9 +2521,8 @@ dependencies = [
 
 [[package]]
 name = "lash-protocol-rlm"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38fc4340662f07d2be8be571063141a5debf213195c29299bb0b6b93778274b5"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2544,9 +2539,8 @@ dependencies = [
 
 [[package]]
 name = "lash-protocol-standard"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05048cf6e1ffb3f7f90bd86010d55ef6ff5feda1c788c06bcc775ac871a9fea8"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2556,9 +2550,8 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-anthropic"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8de690c6e7ebf9dee28f7f1b047f4e9b37e03bb89c26a546ef4c8a89c48c392e"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "base64",
@@ -2572,9 +2565,8 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-auth"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9d478fb3fd8eea2a5c52357ed2d505402fa229953c190a8dfe359f657583022"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "base64",
  "reqwest 0.13.4",
@@ -2586,9 +2578,8 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-openai"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b3f730f00b2731054bdbcc17738eb22ccc288e44b85c7c3ee3bcfc51aba7ba1"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "base64",
@@ -2608,9 +2599,8 @@ dependencies = [
 
 [[package]]
 name = "lash-remote-protocol"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40099f4746ffbf631c74ed93f8173f86d3c9dc09b261c2639cb55ffdd6f48ff4"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "base64",
  "lash-core",
@@ -2622,9 +2612,8 @@ dependencies = [
 
 [[package]]
 name = "lash-rlm-types"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b9a6e49d09198c0a34e7ebf77b7a6af673432c3e3a088eb3de0de73808dafef"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "lash-sansio",
  "serde",
@@ -2633,9 +2622,8 @@ dependencies = [
 
 [[package]]
 name = "lash-runtime"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cdf19e20de52dedaf6c3b72631d405c890e7d4885f9031e32617e59361bf57a"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2658,9 +2646,8 @@ dependencies = [
 
 [[package]]
 name = "lash-sansio"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc319f3840d59c1ce0619113fe83c773e2b609ffd84c35c9dd6e02f7a18cb36c"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "schemars",
  "serde",
@@ -2669,9 +2656,8 @@ dependencies = [
 
 [[package]]
 name = "lash-sqlite-store"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85d9b1552224769ed4681c78c7ae30f0c6dcea4aac697cecc22b8fa81f8cebdb"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2690,9 +2676,8 @@ dependencies = [
 
 [[package]]
 name = "lash-tool-support"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6733151359ed9d424ad64251d36fe2c3475ba76298faa45a289c44919798ee88"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "ignore",
@@ -2707,9 +2692,8 @@ dependencies = [
 
 [[package]]
 name = "lash-trace"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11889721b9ac62236dc9c037851e256d54244df1d3d8a29b48ca600eb112ea3"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "chrono",
  "serde",
@@ -2721,9 +2705,8 @@ dependencies = [
 
 [[package]]
 name = "lashlang"
-version = "0.1.0-alpha.88"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8edb7dac8c21486189876efc780bf4239030c95e93ccd7971be055e12e3016e7"
+version = "0.0.0-dev"
+source = "git+https://github.com/SamGalanakis/lash?rev=9764f0b0#9764f0b016214415b63ca2f41bf7ece6dfdb560c"
 dependencies = [
  "async-trait",
  "compact_str",

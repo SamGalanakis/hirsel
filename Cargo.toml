@@ -2,6 +2,7 @@
 members = [
   "crates/hirsel-proto",
   "crates/hirsel-client-core",
+  "crates/hirsel-client-ffi",
   "crates/hirsel-drivers",
   "crates/hirsel-host",
 ]

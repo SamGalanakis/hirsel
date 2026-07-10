@@ -43,6 +43,7 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
     };
     let target = client.config.transport_target();
     let reconnect = client.config.reconnect.clone();
+    let iroh_secret_key = client.iroh_secret_key.clone();
     drop(client);
 
     let mut attempt = 0_u32;
@@ -54,7 +55,7 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
         client.notify_lifecycle(LifecycleEvent::Connecting { attempt });
         drop(client);
 
-        let connect = connect_transport(&target);
+        let connect = connect_transport(&target, iroh_secret_key.clone());
         tokio::pin!(connect);
         let channel = loop {
             tokio::select! {
@@ -109,7 +110,10 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
     }
 }
 
-async fn connect_transport(target: &TransportTarget) -> Result<Box<dyn ClientChannel>, String> {
+async fn connect_transport(
+    target: &TransportTarget,
+    iroh_secret_key: Option<iroh::SecretKey>,
+) -> Result<Box<dyn ClientChannel>, String> {
     match target {
         TransportTarget::WebSocket(url) => {
             let (socket, _response) = connect_async(url)
@@ -123,7 +127,11 @@ async fn connect_transport(target: &TransportTarget) -> Result<Box<dyn ClientCha
                 .map_err(|error| format!("invalid iroh ticket: {error}"))?;
             let address: iroh::EndpointAddr = ticket.into();
             let remote_id = address.id;
-            let endpoint = Endpoint::bind(presets::N0)
+            let secret_key = iroh_secret_key
+                .ok_or_else(|| "iroh transport is missing a client secret key".to_string())?;
+            let endpoint = Endpoint::builder(presets::N0)
+                .secret_key(secret_key)
+                .bind()
                 .await
                 .map_err(|error| format!("bind client iroh endpoint: {error}"))?;
             let connection = endpoint
@@ -148,8 +156,10 @@ async fn run_session(
     let Some(client) = upgrade(inner) else {
         return SessionEnd::Stop;
     };
+    let auth = client.current_auth();
+    let mut awaiting_paired = matches!(auth, hirsel_proto::HelloAuth::PairingCode { .. });
     let hello = ClientToHost::Hello {
-        token: client.config.token.clone(),
+        auth,
         last_seen_msg_id: client.read_store().last_seen_msg_id,
     };
     drop(client);
@@ -181,7 +191,25 @@ async fn run_session(
             },
             frame = channel.receive() => match frame {
                 Ok(ServerFrame::Message(message)) => {
+                    if let HostToClient::Paired { device_token } = message {
+                        if !awaiting_paired {
+                            notify_protocol_error(inner, "unexpected paired frame".to_string());
+                            continue;
+                        }
+                        if let Some(client) = upgrade(inner) {
+                            client.capture_paired_device_token(device_token);
+                        }
+                        awaiting_paired = false;
+                        continue;
+                    }
                     let hello_ok = matches!(message, HostToClient::HelloOk { .. });
+                    if hello_ok && awaiting_paired {
+                        notify_protocol_error(inner, "hello_ok arrived before paired".to_string());
+                        return SessionEnd::Disconnected {
+                            reason: "pairing handshake did not issue a device token".to_string(),
+                            became_online: false,
+                        };
+                    }
                     handle_server_message(inner, message);
                     if hello_ok {
                         online = true;

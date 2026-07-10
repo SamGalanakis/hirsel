@@ -279,3 +279,38 @@ time. Unregistration is idempotent. There is no server → client frame for eith
 
 The host sends a push only when `pings.send` creates a Ping with `requires_response: true`. Chat
 messages, non-response Pings, reads, resolves, and side-chat activity never trigger a push.
+
+## v2.3 — device pairing (2026-07-10)
+
+`hello` replaces its bare static token with an `auth` enum. The first frame is now one of:
+
+```json
+{ "type": "hello", "auth": { "static_token": "HIRSEL_TOKEN" }, "last_seen_msg_id": null }
+{ "type": "hello", "auth": { "device_token": "<issued-device-token>" }, "last_seen_msg_id": 42 }
+{ "type": "hello", "auth": { "pairing_code": { "code": "<one-time-code>", "device_label": "Owner phone" } }, "last_seen_msg_id": null }
+```
+
+- `static_token` preserves the existing shared `HIRSEL_TOKEN` authentication used by WSS/desktop.
+  For compatibility with the current browser client, the host also accepts the legacy inbound
+  `{ "type": "hello", "token": "HIRSEL_TOKEN", ... }` shape as `static_token`; new Rust clients
+  emit the `auth` form.
+- `device_token` is accepted only over iroh. The host looks it up in its per-device credential
+  store, rejects missing or revoked credentials, and updates `last_seen` on success.
+- `pairing_code` is accepted only over iroh. Codes are long random secrets with a short expiry and
+  are removed on the first redemption attempt, so an expired, reused, or unknown code fails. The
+  presented `device_label` must match the label for which the code was minted.
+- WSS connections have no iroh identity and accept only `static_token` authentication.
+
+On successful `pairing_code` redemption, the host derives the peer NodeId from the authenticated
+iroh connection, issues a long random device token pinned to that NodeId, and sends:
+
+```json
+{ "type": "paired", "device_token": "<issued-device-token>" }
+```
+
+`paired` is sent before the normal `hello_ok`; after it, the connection is a normal authenticated
+session and snapshot replay/streaming proceeds unchanged. The client persists the issued token and
+uses `device_token` on reconnect. The host never accepts a client-supplied NodeId: every device-token
+authentication compares the connection-derived NodeId with the credential's pinned NodeId, so a
+token presented by a different iroh identity fails. Revocation prevents all later authentication by
+that device token.

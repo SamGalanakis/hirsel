@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use hirsel_proto::{ClientToHost, PushPlatform};
+use hirsel_proto::{ClientToHost, HelloAuth, PushPlatform};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::JoinHandle;
@@ -56,6 +56,9 @@ pub(crate) struct ClientInner {
     pub config: ClientConfig,
     pub store: RwLock<LocalStore>,
     pub pending_frames: Mutex<VecDeque<ClientToHost>>,
+    pub auth: RwLock<HelloAuth>,
+    pub iroh_secret_key: Option<iroh::SecretKey>,
+    paired_device_token: RwLock<Option<String>>,
     observer: RwLock<Option<Arc<dyn ClientObserver>>>,
     command_tx: Mutex<Option<mpsc::UnboundedSender<Command>>>,
     task: AsyncMutex<Option<JoinHandle<()>>>,
@@ -97,6 +100,22 @@ impl ClientInner {
             .read()
             .unwrap_or_else(|error| error.into_inner())
     }
+
+    pub fn current_auth(&self) -> HelloAuth {
+        self.auth
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn capture_paired_device_token(&self, token: String) {
+        *self.auth.write().unwrap_or_else(|error| error.into_inner()) =
+            HelloAuth::DeviceToken(token.clone());
+        *self
+            .paired_device_token
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(token);
+    }
 }
 
 /// Cheaply cloneable handle to the shared client state and transport manager.
@@ -108,11 +127,19 @@ pub struct Client {
 impl Client {
     pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
         config.validate()?;
+        let auth = config.auth.clone();
+        let iroh_secret_key = config
+            .iroh_ticket
+            .as_ref()
+            .map(|_| iroh::SecretKey::generate());
         Ok(Self {
             inner: Arc::new(ClientInner {
                 config,
                 store: RwLock::new(LocalStore::default()),
                 pending_frames: Mutex::new(VecDeque::new()),
+                auth: RwLock::new(auth),
+                iroh_secret_key,
+                paired_device_token: RwLock::new(None),
                 observer: RwLock::new(None),
                 command_tx: Mutex::new(None),
                 task: AsyncMutex::new(None),
@@ -213,6 +240,15 @@ impl Client {
 
     pub fn snapshot(&self) -> ClientSnapshot {
         self.inner.read_store().snapshot()
+    }
+
+    /// Returns the token issued during this client's pairing handshake.
+    pub fn paired_device_token(&self) -> Option<String> {
+        self.inner
+            .paired_device_token
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Register or replace the observer. Passing `None` unregisters it.

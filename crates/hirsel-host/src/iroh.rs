@@ -26,6 +26,7 @@ const IROH_FRAME_ENVELOPE_BYTES: usize = 64 * 1024;
 pub struct IrohServer {
     endpoint: Endpoint,
     ticket: String,
+    state: AppState,
     accept_task: Option<JoinHandle<()>>,
     relay_task: Option<JoinHandle<()>>,
 }
@@ -43,7 +44,8 @@ impl IrohServer {
 
         let endpoint_id = endpoint.id();
         let ticket = EndpointTicket::new(endpoint.addr()).to_string();
-        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state));
+        state.set_iroh_ticket(Some(ticket.clone()));
+        let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state.clone()));
         tracing::info!(
             node_id = %endpoint_id,
             %ticket,
@@ -55,6 +57,7 @@ impl IrohServer {
         Ok(Self {
             endpoint,
             ticket,
+            state,
             accept_task: Some(accept_task),
             relay_task: Some(relay_task),
         })
@@ -69,6 +72,7 @@ impl IrohServer {
     }
 
     pub async fn shutdown(mut self) {
+        self.state.set_iroh_ticket(None);
         self.endpoint.close().await;
         if let Some(task) = self.accept_task.take() {
             let _ = task.await;
@@ -81,6 +85,7 @@ impl IrohServer {
 
 impl Drop for IrohServer {
     fn drop(&mut self) {
+        self.state.set_iroh_ticket(None);
         if let Some(task) = self.accept_task.take() {
             task.abort();
         }
@@ -134,7 +139,7 @@ async fn handle_connection(
     tracing::debug!(%remote_id, "iroh owner connection established");
 
     let mut channel = IrohChannel::new(send, recv);
-    run_protocol(&mut channel, state).await;
+    run_protocol(&mut channel, state, Some(remote_id.to_string())).await;
     let _ = channel.close().await;
     connection.close(0u32.into(), b"owner protocol complete");
     Ok(())
@@ -155,6 +160,11 @@ impl IrohChannel {
 
     async fn close(&mut self) -> anyhow::Result<()> {
         self.outbound.close().await?;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.outbound.get_ref().stopped(),
+        )
+        .await;
         Ok(())
     }
 }

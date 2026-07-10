@@ -17,7 +17,7 @@ pub mod ws;
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock},
     time::{Duration, SystemTime},
 };
 
@@ -47,6 +47,7 @@ pub struct AppState {
     pub pushes: push::PushGateway,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
+    iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -93,6 +94,20 @@ pub struct OwnerSubmission {
 }
 
 impl AppState {
+    pub fn set_iroh_ticket(&self, ticket: Option<String>) {
+        *self
+            .iroh_ticket
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = ticket;
+    }
+
+    pub fn iroh_ticket(&self) -> Option<String> {
+        self.iroh_ticket
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
     pub fn broadcast(&self, event: HostToClient) {
         self.broadcast_log.record(event.clone());
         let _ = self.broadcaster.send(event);
@@ -295,6 +310,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         pushes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
+        iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)
 }

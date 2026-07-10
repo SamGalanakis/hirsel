@@ -1,4 +1,4 @@
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -15,8 +15,10 @@ use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
     push::RecordedPush,
-    storage::{MonitorRecord, MonitorWakeOn, PushToken},
+    storage::{Device, MonitorRecord, MonitorWakeOn, PushToken},
 };
+
+const PAIRING_CODE_TTL: Duration = Duration::from_secs(5 * 60);
 
 pub fn routes(state: AppState) -> Router {
     Router::new()
@@ -40,6 +42,9 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/chat", get(chat))
         .route("/debug/pings", get(pings))
         .route("/debug/processes", get(processes))
+        .route("/debug/pair", post(pair))
+        .route("/debug/devices", get(devices))
+        .route("/debug/revoke-device", post(revoke_device))
         .route("/debug/health", get(health))
         .with_state(state)
 }
@@ -122,6 +127,22 @@ struct CreateMonitorRequest {
     label: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PairRequest {
+    #[serde(alias = "label")]
+    device_label: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeDeviceRequest {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    token_or_label: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct OwnerMessageResponse {
     client_id: String,
@@ -184,6 +205,38 @@ struct HealthResponse {
     latest_msg_id: u64,
     debug: bool,
     started_at_unix: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PairResponse {
+    code: String,
+    ticket: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DevicesResponse {
+    devices: Vec<DeviceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceResponse {
+    label: String,
+    node_id_prefix: String,
+    created: String,
+    last_seen: String,
+    revoked: Option<String>,
+}
+
+impl From<Device> for DeviceResponse {
+    fn from(device: Device) -> Self {
+        Self {
+            label: device.device_label,
+            node_id_prefix: device.node_id.chars().take(12).collect(),
+            created: device.created_ts.to_rfc3339(),
+            last_seen: device.last_seen_ts.to_rfc3339(),
+            revoked: device.revoked_ts.map(|timestamp| timestamp.to_rfc3339()),
+        }
+    }
 }
 
 async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
@@ -396,6 +449,47 @@ async fn processes(State(state): State<AppState>) -> Result<Json<serde_json::Val
     Ok(Json(serde_json::json!({
         "processes": state.process_snapshot().await?
     })))
+}
+
+async fn pair(
+    State(state): State<AppState>,
+    Json(request): Json<PairRequest>,
+) -> Result<Json<PairResponse>, DebugError> {
+    let ticket = state
+        .iroh_ticket()
+        .ok_or_else(|| anyhow::anyhow!("iroh endpoint is not available"))?;
+    let code = state
+        .storage
+        .mint_pairing_code(request.device_label, PAIRING_CODE_TTL)
+        .await?;
+    Ok(Json(PairResponse { code, ticket }))
+}
+
+async fn devices(State(state): State<AppState>) -> Result<Json<DevicesResponse>, DebugError> {
+    let devices = state
+        .storage
+        .list_devices()
+        .await?
+        .into_iter()
+        .map(DeviceResponse::from)
+        .collect();
+    Ok(Json(DevicesResponse { devices }))
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    Json(request): Json<RevokeDeviceRequest>,
+) -> Result<Json<serde_json::Value>, DebugError> {
+    let token_or_label = match (request.token, request.label, request.token_or_label) {
+        (Some(token), None, None) => token,
+        (None, Some(label), None) => label,
+        (None, None, Some(token_or_label)) => token_or_label,
+        _ => {
+            return Err(anyhow::anyhow!("provide exactly one device token or label").into());
+        }
+    };
+    let revoked = state.storage.revoke_device(&token_or_label).await?;
+    Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, DebugError> {

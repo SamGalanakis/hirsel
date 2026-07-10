@@ -17,6 +17,6 @@ pub use observer::{ClientObserver, LifecycleEvent};
 pub use store::{AgentActivity, ChatEntry, ClientSnapshot, ConnectionState};
 
 pub use hirsel_proto::{
-    AgentActivityState, Blob, ChatAuthor, ChatMessage, Ping, PingStatus, ProcessInfo, ProcessKind,
-    ProcessState, QuickReply, ToolCallSummary,
+    AgentActivityState, Blob, ChatAuthor, ChatMessage, HelloAuth, Ping, PingStatus, ProcessInfo,
+    ProcessKind, ProcessState, QuickReply, ToolCallSummary,
 };

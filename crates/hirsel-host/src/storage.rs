@@ -1,6 +1,8 @@
 use std::{
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -21,6 +23,21 @@ use crate::processes::{ProcessRecord, ProcessStatus};
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
     blobs_dir: Arc<PathBuf>,
+    pairing_codes: Arc<Mutex<PairingCodes>>,
+}
+
+const MAX_PAIRING_CODES: usize = 1_024;
+const MAX_PAIRING_REDEMPTIONS_PER_MINUTE: usize = 256;
+
+#[derive(Default)]
+struct PairingCodes {
+    codes: HashMap<String, PairingCode>,
+    recent_redemptions: VecDeque<Instant>,
+}
+
+struct PairingCode {
+    expires_at: Instant,
+    device_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +60,15 @@ pub struct PushToken {
     pub platform: PushPlatform,
     pub created_ts: DateTime<Utc>,
     pub last_seen_ts: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Device {
+    pub device_label: String,
+    pub node_id: String,
+    pub created_ts: DateTime<Utc>,
+    pub last_seen_ts: DateTime<Utc>,
+    pub revoked_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +112,7 @@ impl Storage {
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             blobs_dir: Arc::new(blobs_dir),
+            pairing_codes: Arc::new(Mutex::new(PairingCodes::default())),
         };
         storage.init().await?;
         Ok(storage)
@@ -167,6 +194,14 @@ impl Storage {
                 platform TEXT NOT NULL,
                 created_ts TEXT NOT NULL,
                 last_seen_ts TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                token TEXT PRIMARY KEY,
+                device_label TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                created_ts TEXT NOT NULL,
+                last_seen_ts TEXT NOT NULL,
+                revoked_ts TEXT NULL
             );
             ",
         )?;
@@ -613,6 +648,160 @@ impl Storage {
         )?;
         let rows = stmt.query_map([], push_token_from_row)?;
         collect_rows(rows)
+    }
+
+    pub async fn issue_device_token(
+        &self,
+        device_label: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> anyhow::Result<String> {
+        let device_label = device_label.into();
+        let node_id = node_id.into();
+        validate_device_label(&device_label)?;
+        if node_id.trim().is_empty() {
+            anyhow::bail!("device NodeId must not be empty");
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().await;
+        for _ in 0..4 {
+            let token = random_secret();
+            match conn.execute(
+                "
+                INSERT INTO device_tokens (
+                    token, device_label, node_id, created_ts, last_seen_ts, revoked_ts
+                )
+                VALUES (?1, ?2, ?3, ?4, ?4, NULL)
+                ",
+                params![token, device_label, node_id, now],
+            ) {
+                Ok(_) => return Ok(token),
+                Err(error) if is_unique_constraint(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        anyhow::bail!("failed to generate a unique device token")
+    }
+
+    pub async fn authenticate_device_token(
+        &self,
+        token: &str,
+        node_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().await;
+        let record = conn
+            .query_row(
+                "SELECT node_id, revoked_ts FROM device_tokens WHERE token = ?1",
+                params![token],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((pinned_node_id, revoked_ts)) = record else {
+            anyhow::bail!("unknown device token");
+        };
+        if revoked_ts.is_some() {
+            anyhow::bail!("revoked device token");
+        }
+        if node_id.is_some_and(|node_id| node_id != pinned_node_id) {
+            anyhow::bail!("device token NodeId mismatch");
+        }
+        conn.execute(
+            "UPDATE device_tokens SET last_seen_ts = ?2 WHERE token = ?1",
+            params![token, now],
+        )?;
+        Ok(())
+    }
+
+    pub async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "
+            SELECT device_label, node_id, created_ts, last_seen_ts, revoked_ts
+            FROM device_tokens
+            ORDER BY created_ts ASC, device_label ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], device_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub async fn revoke_device(&self, token_or_label: &str) -> anyhow::Result<usize> {
+        if token_or_label.trim().is_empty() {
+            anyhow::bail!("device token or label must not be empty");
+        }
+        let conn = self.conn.lock().await;
+        Ok(conn.execute(
+            "
+            UPDATE device_tokens
+            SET revoked_ts = ?2
+            WHERE revoked_ts IS NULL AND (token = ?1 OR device_label = ?1)
+            ",
+            params![token_or_label, Utc::now().to_rfc3339()],
+        )?)
+    }
+
+    pub async fn mint_pairing_code(
+        &self,
+        device_label: impl Into<String>,
+        ttl: Duration,
+    ) -> anyhow::Result<String> {
+        let device_label = device_label.into();
+        validate_device_label(&device_label)?;
+        let now = Instant::now();
+        let expires_at = now
+            .checked_add(ttl)
+            .ok_or_else(|| anyhow::anyhow!("pairing-code TTL is too large"))?;
+        let mut pairing_codes = self.pairing_codes.lock().await;
+        pairing_codes
+            .codes
+            .retain(|_, entry| entry.expires_at > now);
+        if pairing_codes.codes.len() >= MAX_PAIRING_CODES {
+            anyhow::bail!("too many outstanding pairing codes");
+        }
+        for _ in 0..4 {
+            let code = random_secret();
+            if pairing_codes
+                .codes
+                .insert(
+                    code.clone(),
+                    PairingCode {
+                        expires_at,
+                        device_label: device_label.clone(),
+                    },
+                )
+                .is_none()
+            {
+                return Ok(code);
+            }
+        }
+        anyhow::bail!("failed to generate a unique pairing code")
+    }
+
+    pub async fn redeem_pairing_code(&self, code: &str) -> anyhow::Result<String> {
+        let now = Instant::now();
+        let mut pairing_codes = self.pairing_codes.lock().await;
+        let window_start = now - Duration::from_secs(60);
+        while pairing_codes
+            .recent_redemptions
+            .front()
+            .is_some_and(|attempt| *attempt <= window_start)
+        {
+            pairing_codes.recent_redemptions.pop_front();
+        }
+        if pairing_codes.recent_redemptions.len() >= MAX_PAIRING_REDEMPTIONS_PER_MINUTE {
+            anyhow::bail!("too many pairing-code redemption attempts");
+        }
+        pairing_codes.recent_redemptions.push_back(now);
+        let entry = pairing_codes.codes.remove(code);
+        drop(pairing_codes);
+        let Some(entry) = entry else {
+            anyhow::bail!("unknown pairing code");
+        };
+        if entry.expires_at <= Instant::now() {
+            anyhow::bail!("expired pairing code");
+        }
+        Ok(entry.device_label)
     }
 
     pub async fn store_blob(
@@ -1440,6 +1629,41 @@ fn push_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushToken> {
     })
 }
 
+fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
+    let created_ts: String = row.get(2)?;
+    let last_seen_ts: String = row.get(3)?;
+    let revoked_ts: Option<String> = row.get(4)?;
+    Ok(Device {
+        device_label: row.get(0)?,
+        node_id: row.get(1)?,
+        created_ts: parse_ts(&created_ts)?,
+        last_seen_ts: parse_ts(&last_seen_ts)?,
+        revoked_ts: revoked_ts.as_deref().map(parse_ts).transpose()?,
+    })
+}
+
+fn validate_device_label(device_label: &str) -> anyhow::Result<()> {
+    if device_label.trim().is_empty() {
+        anyhow::bail!("device label must not be empty");
+    }
+    if device_label.chars().count() > 128 {
+        anyhow::bail!("device label must be at most 128 characters");
+    }
+    Ok(())
+}
+
+fn random_secret() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn is_unique_constraint(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
 fn parse_ts(value: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|ts| ts.with_timezone(&Utc))
@@ -2053,6 +2277,109 @@ mod tests {
         let reopened = Storage::open(dir.path()).await.unwrap();
         assert_eq!(reopened.all_chat().await.unwrap().len(), 1);
         assert_eq!(reopened.push_tokens().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn device_tokens_are_pinned_revocable_and_additive() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    author TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    ref INTEGER NULL,
+                    ts TEXT NOT NULL,
+                    tool_calls TEXT NOT NULL DEFAULT '[]'
+                );
+                INSERT INTO chat_messages (author, body, ref, ts)
+                VALUES ('agent', 'existing row', NULL, '2026-07-10T12:00:00Z');
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let token = storage
+            .issue_device_token("Owner phone", "node-a")
+            .await
+            .unwrap();
+        assert_eq!(token.len(), 64);
+        storage
+            .authenticate_device_token(&token, Some("node-a"))
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .authenticate_device_token(&token, Some("node-b"))
+                .await
+                .is_err()
+        );
+        assert_eq!(storage.list_devices().await.unwrap().len(), 1);
+        assert_eq!(storage.revoke_device("Owner phone").await.unwrap(), 1);
+        assert!(
+            storage
+                .authenticate_device_token(&token, Some("node-a"))
+                .await
+                .is_err()
+        );
+        drop(storage);
+
+        let reopened = Storage::open(dir.path()).await.unwrap();
+        assert_eq!(reopened.all_chat().await.unwrap().len(), 1);
+        let devices = reopened.list_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_label, "Owner phone");
+        assert!(devices[0].revoked_ts.is_some());
+    }
+
+    #[tokio::test]
+    async fn pairing_codes_are_long_single_use_and_expire() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+
+        let code = storage
+            .mint_pairing_code("Owner phone", Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(code.len(), 64);
+        assert_eq!(
+            storage.redeem_pairing_code(&code).await.unwrap(),
+            "Owner phone"
+        );
+        assert!(storage.redeem_pairing_code(&code).await.is_err());
+
+        let expired = storage
+            .mint_pairing_code("Old phone", Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(storage.redeem_pairing_code(&expired).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pairing_code_redemption_attempts_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let code = storage
+            .mint_pairing_code("Rate limited phone", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        for attempt in 0..MAX_PAIRING_REDEMPTIONS_PER_MINUTE {
+            assert!(
+                storage
+                    .redeem_pairing_code(&format!("unknown-{attempt}"))
+                    .await
+                    .is_err()
+            );
+        }
+        let error = storage.redeem_pairing_code(&code).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "too many pairing-code redemption attempts"
+        );
     }
 
     #[tokio::test]

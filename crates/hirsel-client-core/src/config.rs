@@ -1,3 +1,4 @@
+use hirsel_proto::HelloAuth;
 use thiserror::Error;
 
 /// Reconnect timing expressed as primitive values for a future UniFFI record.
@@ -57,7 +58,7 @@ pub struct ClientConfig {
     pub host: String,
     /// Canonical iroh endpoint ticket. When present, the client uses iroh instead of WebSocket.
     pub iroh_ticket: Option<String>,
-    pub token: String,
+    pub auth: HelloAuth,
     pub reconnect: ReconnectPolicy,
 }
 
@@ -66,16 +67,25 @@ impl ClientConfig {
         Self {
             host,
             iroh_ticket: None,
-            token,
+            auth: HelloAuth::StaticToken(token),
             reconnect: ReconnectPolicy::default(),
         }
     }
 
-    pub fn new_iroh(ticket: String, token: String) -> Self {
+    pub fn new_iroh(ticket: String, device_token: String) -> Self {
         Self {
             host: String::new(),
             iroh_ticket: Some(ticket),
-            token,
+            auth: HelloAuth::DeviceToken(device_token),
+            reconnect: ReconnectPolicy::default(),
+        }
+    }
+
+    pub fn new_iroh_pairing(ticket: String, code: String, device_label: String) -> Self {
+        Self {
+            host: String::new(),
+            iroh_ticket: Some(ticket),
+            auth: HelloAuth::PairingCode { code, device_label },
             reconnect: ReconnectPolicy::default(),
         }
     }
@@ -166,6 +176,24 @@ mod tests {
         assert_eq!(
             config.transport_target(),
             TransportTarget::Iroh("endpointticket".into())
+        );
+        assert_eq!(config.validate(), Ok(()));
+        assert_eq!(config.auth, HelloAuth::DeviceToken("token".into()));
+    }
+
+    #[test]
+    fn pairing_constructor_carries_code_and_label() {
+        let config = ClientConfig::new_iroh_pairing(
+            "endpointticket".into(),
+            "pairing-code".into(),
+            "Owner phone".into(),
+        );
+        assert_eq!(
+            config.auth,
+            HelloAuth::PairingCode {
+                code: "pairing-code".into(),
+                device_label: "Owner phone".into(),
+            }
         );
         assert_eq!(config.validate(), Ok(()));
     }

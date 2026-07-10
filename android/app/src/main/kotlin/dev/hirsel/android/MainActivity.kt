@@ -84,12 +84,9 @@ import dev.hirsel.android.pairing.rememberConnection
 import dev.hirsel.android.ui.Hirsel
 import dev.hirsel.android.ui.HirselMono
 import dev.hirsel.android.ui.HirselTheme
-import dev.hirsel.core.AgentActivity
-import dev.hirsel.core.AgentActivityState
 import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ClientSnapshot
-import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.Ping
 import dev.hirsel.core.PingStatus
 import dev.hirsel.core.generateIrohIdentity
@@ -107,10 +104,6 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        val previewScreen = intent?.getStringExtra("preview")
-        val pairTicket = intent?.getStringExtra("pair_ticket")
-        val pairCode = intent?.getStringExtra("pair_code")
-        val pairLabel = intent?.getStringExtra("pair_label") ?: "Owner phone"
         setContent {
             HirselTheme {
                 Surface(
@@ -119,18 +112,7 @@ class MainActivity : ComponentActivity() {
                         .semantics { testTagsAsResourceId = true },
                     color = Hirsel.Background,
                 ) {
-                    val livePairing = remember(pairTicket, pairCode) {
-                        if (pairTicket != null && pairCode != null) {
-                            runCatching {
-                                ConnectionSpec.Pairing(pairTicket, pairCode, pairLabel, generateIrohIdentity())
-                            }.getOrNull()
-                        } else null
-                    }
-                    when {
-                        livePairing != null -> HirselRoot(initialPairing = livePairing)
-                        previewScreen != null -> DesignPreview(previewScreen)
-                        else -> HirselRoot()
-                    }
+                    HirselRoot()
                 }
             }
         }
@@ -147,11 +129,11 @@ class MainActivity : ComponentActivity() {
  * same pinned NodeId.
  */
 @Composable
-private fun HirselRoot(initialPairing: ConnectionSpec.Pairing? = null) {
+private fun HirselRoot() {
     val context = LocalContext.current
     val store = remember { TokenStore(context) }
-    var credential by remember { mutableStateOf(if (initialPairing != null) null else store.load()) }
-    var pairingSpec by remember { mutableStateOf(initialPairing) }
+    var credential by remember { mutableStateOf(store.load()) }
+    var pairingSpec by remember { mutableStateOf<ConnectionSpec.Pairing?>(null) }
 
     // A live pairing session wins over any stored credential so the freshly
     // authenticated connection carries straight through into chat.
@@ -231,11 +213,11 @@ private fun defaultDeviceLabel(): String {
 }
 
 @Composable
-private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, previewError: String? = null) {
+private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
     val context = LocalContext.current
     var label by remember { mutableStateOf(defaultDeviceLabel()) }
-    var pasted by remember { mutableStateOf(if (previewError != null) "not-a-pairing-link" else "") }
-    var error by remember { mutableStateOf(previewError) }
+    var pasted by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
 
     var hasCamera by remember {
         mutableStateOf(
@@ -966,95 +948,6 @@ private fun HirselField(
             .testTag(testTag)
             .then(if (contentDescription != null) Modifier.semantics { this.contentDescription = contentDescription } else Modifier),
     )
-}
-
-// ---------------------------------------------------------------------------
-// Design preview harness (TEMPORARY — removed before final commit). Renders each
-// screen/state with deterministic fake data via `am start ... --es preview <name>`.
-// ---------------------------------------------------------------------------
-
-private fun fakeMessage(
-    id: ULong,
-    author: ChatAuthor,
-    body: String,
-    ts: String,
-    pending: Boolean = false,
-) = ChatMessage(
-    id = id,
-    author = author,
-    body = body,
-    replyTo = null,
-    timestamp = ts,
-    attachments = emptyList(),
-    toolCalls = emptyList(),
-    clientId = if (pending) "local-$id" else null,
-    pending = pending,
-)
-
-private fun fakePing(
-    id: ULong,
-    name: String,
-    description: String,
-    requiresResponse: Boolean,
-    read: Boolean,
-    status: PingStatus,
-    ts: String,
-) = Ping(
-    id = id,
-    name = name,
-    description = description,
-    content = description,
-    anchor = 0uL,
-    requiresResponse = requiresResponse,
-    quickReplies = emptyList(),
-    status = status,
-    read = read,
-    timestamp = ts,
-)
-
-@Composable
-private fun DesignPreview(name: String) {
-    val messages = listOf(
-        fakeMessage(1uL, ChatAuthor.OWNER, "Ship it. Ping me only if the tests go red.", "09:12"),
-        fakeMessage(2uL, ChatAuthor.AGENT, "Spun up the monitor. I'll ping you if the deploy stalls past 10 minutes.", "09:12"),
-        fakeMessage(3uL, ChatAuthor.AGENT, "Migration on stg-a is green; running the smoke suite now.", "09:14"),
-        fakeMessage(4uL, ChatAuthor.OWNER, "Which staging DB did it target?", "09:15"),
-        fakeMessage(5uL, ChatAuthor.OWNER, "Actually — hold the prod cutover until I'm back.", "09:16", pending = true),
-    )
-    val pings = listOf(
-        fakePing(10uL, "deploy-guard", "Which staging DB should the migration target — stg-a or stg-b?", requiresResponse = true, read = false, status = PingStatus.OPEN, ts = "09:24"),
-        fakePing(11uL, "smoke-suite", "Smoke suite passed on stg-a (42/42).", requiresResponse = false, read = true, status = PingStatus.DONE, ts = "09:20"),
-    )
-    fun snapshot(msgs: List<ChatMessage>, pgs: List<Ping>, state: ConnectionState) = ClientSnapshot(
-        connection = state,
-        messages = msgs,
-        pings = pgs,
-        agentActivity = AgentActivity(AgentActivityState.IDLE, null),
-        lastSeenMsgId = null,
-    )
-    when (name) {
-        "chat" -> ChatScreen(snapshot(messages, pings, ConnectionState.ONLINE), Phase.Online, "Owner phone", {}, {})
-        "chat_empty" -> ChatScreen(snapshot(emptyList(), emptyList(), ConnectionState.ONLINE), Phase.Online, "Owner phone", {}, {})
-        "chat_loading" -> ChatScreen(null, Phase.Connecting, "Owner phone", {}, {})
-        "chat_unpair" -> ChatScreenWithConfirm(snapshot(messages, pings, ConnectionState.ONLINE), Phase.Online, "Owner phone")
-        "pair_connecting" -> PairingProgress(Phase.Connecting, "Owner phone", {})
-        "pair_reconnecting" -> PairingProgress(Phase.Reconnecting(2), "Owner phone", {})
-        "pair_failed_code" -> PairingProgress(Phase.Failed("host rejected the pairing code"), "Owner phone", {})
-        "pair_failed_conn" -> PairingProgress(Phase.Failed("The host didn't answer."), "Owner phone", {})
-        "onboarding" -> PairEntry({})
-        "onboarding_error" -> PairEntry({}, previewError = "That doesn't look like a pairing link. Paste the full hirsel://pair… URL.")
-        else -> ChatScreen(snapshot(messages, pings, ConnectionState.ONLINE), Phase.Online, "Owner phone", {}, {})
-    }
-}
-
-@Composable
-private fun ChatScreenWithConfirm(snapshot: ClientSnapshot, phase: Phase, label: String) {
-    // Preview-only: force the unpair confirm open over a populated chat.
-    var open by remember { mutableStateOf(true) }
-    Box {
-        ChatScreen(snapshot, phase, label, {}, {})
-        if (open) UnpairConfirm(label = label, onConfirm = { open = false }, onDismiss = { open = false })
-    }
 }
 
 private suspend fun fetchFcmToken(): String = suspendCoroutine { continuation ->

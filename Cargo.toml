@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/hirsel-proto",
+  "crates/hirsel-client-core",
   "crates/hirsel-drivers",
   "crates/hirsel-host",
 ]

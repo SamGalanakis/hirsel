@@ -1,0 +1,205 @@
+use std::sync::{Arc, Mutex, RwLock, Weak};
+
+use hirsel_proto::ClientToHost;
+use thiserror::Error;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+use crate::config::{ClientConfig, ConfigError};
+use crate::observer::{ClientObserver, LifecycleEvent};
+use crate::store::{ClientSnapshot, LocalStore, PendingSend};
+use crate::transport;
+
+/// Owned send arguments. Later slices will add attachments and send mode here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendMessageRequest {
+    pub body: String,
+    pub reply_to: Option<u64>,
+    pub mentions: Vec<u64>,
+}
+
+impl SendMessageRequest {
+    pub fn new(body: String) -> Self {
+        Self {
+            body,
+            reply_to: None,
+            mentions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendReceipt {
+    pub client_id: String,
+}
+
+#[derive(Debug, Error)]
+pub enum ClientError {
+    #[error(transparent)]
+    InvalidConfig(#[from] ConfigError),
+    #[error("client connection manager is already running")]
+    AlreadyRunning,
+}
+
+pub(crate) enum Command {
+    SendPending,
+    Stop,
+}
+
+pub(crate) struct ClientInner {
+    pub config: ClientConfig,
+    pub store: RwLock<LocalStore>,
+    observer: RwLock<Option<Arc<dyn ClientObserver>>>,
+    command_tx: Mutex<Option<mpsc::UnboundedSender<Command>>>,
+    task: AsyncMutex<Option<JoinHandle<()>>>,
+}
+
+impl ClientInner {
+    pub fn set_connection(&self, state: crate::ConnectionState) {
+        self.write_store().connection = state;
+        self.notify_snapshot();
+    }
+
+    pub fn notify_snapshot(&self) {
+        let snapshot = self.read_store().snapshot();
+        let observer = { self.read_observer().clone() };
+        if let Some(observer) = observer {
+            observer.on_state_changed(snapshot);
+        }
+    }
+
+    pub fn notify_lifecycle(&self, event: LifecycleEvent) {
+        let observer = { self.read_observer().clone() };
+        if let Some(observer) = observer {
+            observer.on_lifecycle_event(event);
+        }
+    }
+
+    pub fn read_store(&self) -> std::sync::RwLockReadGuard<'_, LocalStore> {
+        self.store.read().unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub fn write_store(&self) -> std::sync::RwLockWriteGuard<'_, LocalStore> {
+        self.store
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn read_observer(&self) -> std::sync::RwLockReadGuard<'_, Option<Arc<dyn ClientObserver>>> {
+        self.observer
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+/// Cheaply cloneable handle to the shared client state and transport manager.
+#[derive(Clone)]
+pub struct Client {
+    inner: Arc<ClientInner>,
+}
+
+impl Client {
+    pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
+        config.validate()?;
+        Ok(Self {
+            inner: Arc::new(ClientInner {
+                config,
+                store: RwLock::new(LocalStore::default()),
+                observer: RwLock::new(None),
+                command_tx: Mutex::new(None),
+                task: AsyncMutex::new(None),
+            }),
+        })
+    }
+
+    /// Start the connection manager. This returns after spawning; observe the
+    /// `Connecting` and `Online` state transitions for readiness.
+    pub async fn connect(&self) -> Result<(), ClientError> {
+        let mut task = self.inner.task.lock().await;
+        if task.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            return Err(ClientError::AlreadyRunning);
+        }
+        if let Some(finished) = task.take() {
+            let _ = finished.await;
+        }
+
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        *self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(command_tx);
+        let weak = Arc::downgrade(&self.inner);
+        *task = Some(tokio::spawn(async move {
+            transport::run(weak, command_rx).await;
+        }));
+        Ok(())
+    }
+
+    /// Stop reconnecting and close the active socket, if any.
+    pub async fn disconnect(&self) {
+        let sender = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(Command::Stop);
+        }
+        if let Some(task) = self.inner.task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
+    pub fn send_message(&self, request: SendMessageRequest) -> SendReceipt {
+        let client_id = Uuid::new_v4().to_string();
+        self.inner.write_store().add_optimistic_send(PendingSend {
+            client_id: client_id.clone(),
+            body: request.body,
+            reply_to: request.reply_to,
+            mentions: request.mentions,
+        });
+        self.inner.notify_snapshot();
+        if let Some(sender) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(Command::SendPending);
+        }
+        SendReceipt { client_id }
+    }
+
+    pub fn snapshot(&self) -> ClientSnapshot {
+        self.inner.read_store().snapshot()
+    }
+
+    /// Register or replace the observer. Passing `None` unregisters it.
+    pub fn set_observer(&self, observer: Option<Arc<dyn ClientObserver>>) {
+        *self
+            .inner
+            .observer
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = observer;
+    }
+}
+
+pub(crate) fn pending_to_wire(pending: &PendingSend) -> ClientToHost {
+    ClientToHost::SendMessage {
+        client_id: pending.client_id.clone(),
+        body: pending.body.clone(),
+        r#ref: pending.reply_to,
+        attachments: Vec::new(),
+        mode: hirsel_proto::SendMode::Send,
+        sc: None,
+        mentions: pending.mentions.clone(),
+    }
+}
+
+pub(crate) fn upgrade(weak: &Weak<ClientInner>) -> Option<Arc<ClientInner>> {
+    weak.upgrade()
+}

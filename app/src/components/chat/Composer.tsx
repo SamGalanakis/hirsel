@@ -205,7 +205,13 @@ export function Composer(props: Props) {
   const canSend = () => value().trim().length > 0 || props.attachments.files().length > 0;
 
   return (
+    // The bar (border-t + bg-card) bleeds the full center-pane width on desktop;
+    // the inner wrapper re-centers the actual composer content at the prose
+    // measure (`rail:mx-auto rail:max-w-[680px]`), so the input aligns to the
+    // transcript while the bar spans rail-hairline → context-hairline. The
+    // measure is `rail:`-gated, so phone/split are pixel-identical to before.
     <div class="flex-shrink-0 border-t border-border bg-card px-3 py-2">
+      <div class="w-full rail:mx-auto rail:max-w-[680px]">
       <Show when={props.replyingTo}>
         {(replyingTo) => (
           <div class="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-black/15 px-2 py-1">
@@ -449,6 +455,7 @@ export function Composer(props: Props) {
           <span class="font-medium">@</span> mention
         </div>
       </Show>
+      </div>
     </div>
   );
 }

@@ -8,7 +8,7 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use hirsel_proto::HostToClient;
+use hirsel_proto::{HostToClient, IROH_OWNER_ALPN};
 use iroh::{Endpoint, EndpointId, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::task::JoinHandle;
@@ -20,7 +20,6 @@ use crate::{
     protocol::{IncomingFrame, ProtocolChannel, decode_json, run_protocol},
 };
 
-pub const OWNER_ALPN: &[u8] = b"hirsel/owner/1";
 pub const SECRET_KEY_FILE: &str = "iroh-secret-key";
 
 const IROH_FRAME_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -38,7 +37,7 @@ impl IrohServer {
         let secret_key = load_or_create_secret_key(&key_path)?;
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![OWNER_ALPN.to_vec()])
+            .alpns(vec![IROH_OWNER_ALPN.to_vec()])
             .bind()
             .await
             .context("bind host iroh endpoint")?;

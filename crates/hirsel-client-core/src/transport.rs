@@ -2,26 +2,46 @@ use std::collections::HashSet;
 use std::sync::Weak;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use hirsel_proto::{ClientToHost, HostToClient};
+use hirsel_proto::{ClientToHost, HostToClient, IROH_OWNER_ALPN};
+use iroh::{Endpoint, endpoint::presets};
+use iroh_tickets::endpoint::EndpointTicket;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::ConnectionState;
 use crate::client::{ClientInner, Command, pending_to_wire, upgrade};
+use crate::config::TransportTarget;
 use crate::observer::LifecycleEvent;
+
+const MAX_IROH_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 enum SessionEnd {
     Stop,
     Disconnected { reason: String, became_online: bool },
 }
 
+enum ServerFrame {
+    Message(HostToClient),
+    Invalid(String),
+    Ignored,
+}
+
+#[async_trait]
+trait ClientChannel: Send {
+    async fn receive(&mut self) -> Result<ServerFrame, String>;
+    async fn send(&mut self, frame: &ClientToHost) -> Result<(), String>;
+    async fn close(&mut self) -> Result<(), String>;
+}
+
 pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedReceiver<Command>) {
     let Some(client) = upgrade(&inner) else {
         return;
     };
-    let url = client.config.websocket_url();
+    let target = client.config.transport_target();
     let reconnect = client.config.reconnect.clone();
     drop(client);
 
@@ -34,9 +54,9 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
         client.notify_lifecycle(LifecycleEvent::Connecting { attempt });
         drop(client);
 
-        let connect = connect_async(&url);
+        let connect = connect_transport(&target);
         tokio::pin!(connect);
-        let socket = loop {
+        let channel = loop {
             tokio::select! {
                 result = &mut connect => break result,
                 command = commands.recv() => match command {
@@ -49,10 +69,10 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
             }
         };
 
-        let end = match socket {
-            Ok((socket, _response)) => run_session(&inner, &mut commands, socket).await,
+        let end = match channel {
+            Ok(mut channel) => run_session(&inner, &mut commands, channel.as_mut()).await,
             Err(error) => SessionEnd::Disconnected {
-                reason: error.to_string(),
+                reason: error,
                 became_online: false,
             },
         };
@@ -89,14 +109,42 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
     }
 }
 
-async fn run_session<S>(
+async fn connect_transport(target: &TransportTarget) -> Result<Box<dyn ClientChannel>, String> {
+    match target {
+        TransportTarget::WebSocket(url) => {
+            let (socket, _response) = connect_async(url)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(WebSocketChannel { socket }))
+        }
+        TransportTarget::Iroh(ticket) => {
+            let ticket = ticket
+                .parse::<EndpointTicket>()
+                .map_err(|error| format!("invalid iroh ticket: {error}"))?;
+            let address: iroh::EndpointAddr = ticket.into();
+            let remote_id = address.id;
+            let endpoint = Endpoint::bind(presets::N0)
+                .await
+                .map_err(|error| format!("bind client iroh endpoint: {error}"))?;
+            let connection = endpoint
+                .connect(address, IROH_OWNER_ALPN)
+                .await
+                .map_err(|error| format!("connect to host over iroh: {error}"))?;
+            let (send, recv) = connection
+                .open_bi()
+                .await
+                .map_err(|error| format!("open iroh owner stream: {error}"))?;
+            tracing::info!(host_node_id = %remote_id, "connection established over iroh");
+            Ok(Box::new(IrohChannel::new(endpoint, connection, send, recv)))
+        }
+    }
+}
+
+async fn run_session(
     inner: &Weak<ClientInner>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
-    mut socket: tokio_tungstenite::WebSocketStream<S>,
-) -> SessionEnd
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+    channel: &mut dyn ClientChannel,
+) -> SessionEnd {
     let Some(client) = upgrade(inner) else {
         return SessionEnd::Stop;
     };
@@ -105,7 +153,7 @@ where
         last_seen_msg_id: client.read_store().last_seen_msg_id,
     };
     drop(client);
-    if let Err(error) = send_json(&mut socket, &hello).await {
+    if let Err(error) = channel.send(&hello).await {
         return SessionEnd::Disconnected {
             reason: error,
             became_online: false,
@@ -118,11 +166,11 @@ where
         tokio::select! {
             command = commands.recv() => match command {
                 Some(Command::Stop) | None => {
-                    let _ = socket.close(None).await;
+                    let _ = channel.close().await;
                     return SessionEnd::Stop;
                 }
                 Some(Command::SendPending) if online => {
-                    if let Err(error) = flush_pending(inner, &mut socket, &mut sent_this_connection).await {
+                    if let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
                         return SessionEnd::Disconnected {
                             reason: error,
                             became_online: online,
@@ -131,15 +179,8 @@ where
                 }
                 Some(Command::SendPending) => {}
             },
-            frame = socket.next() => match frame {
-                Some(Ok(Message::Text(text))) => {
-                    let message = match serde_json::from_str::<HostToClient>(&text) {
-                        Ok(message) => message,
-                        Err(error) => {
-                            notify_protocol_error(inner, format!("invalid server frame: {error}"));
-                            continue;
-                        }
-                    };
+            frame = channel.receive() => match frame {
+                Ok(ServerFrame::Message(message)) => {
                     let hello_ok = matches!(message, HostToClient::HelloOk { .. });
                     handle_server_message(inner, message);
                     if hello_ok {
@@ -149,7 +190,7 @@ where
                             client.set_connection(ConnectionState::Online);
                             client.notify_lifecycle(LifecycleEvent::Online);
                         }
-                        if let Err(error) = flush_pending(inner, &mut socket, &mut sent_this_connection).await {
+                        if let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
                             return SessionEnd::Disconnected {
                                 reason: error,
                                 became_online: true,
@@ -157,33 +198,13 @@ where
                         }
                     }
                 }
-                Some(Ok(Message::Ping(payload))) => {
-                    if let Err(error) = socket.send(Message::Pong(payload)).await {
-                        return SessionEnd::Disconnected {
-                            reason: error.to_string(),
-                            became_online: online,
-                        };
-                    }
+                Ok(ServerFrame::Invalid(error)) => {
+                    notify_protocol_error(inner, format!("invalid server frame: {error}"));
                 }
-                Some(Ok(Message::Close(frame))) => {
+                Ok(ServerFrame::Ignored) => {}
+                Err(error) => {
                     return SessionEnd::Disconnected {
-                        reason: frame.map_or_else(
-                            || "websocket closed".into(),
-                            |frame| frame.to_string(),
-                        ),
-                        became_online: online,
-                    };
-                }
-                Some(Ok(_)) => {}
-                Some(Err(error)) => {
-                    return SessionEnd::Disconnected {
-                        reason: error.to_string(),
-                        became_online: online,
-                    };
-                }
-                None => {
-                    return SessionEnd::Disconnected {
-                        reason: "websocket stream ended".into(),
+                        reason: error,
                         became_online: online,
                     };
                 }
@@ -192,14 +213,11 @@ where
     }
 }
 
-async fn flush_pending<S>(
+async fn flush_pending(
     inner: &Weak<ClientInner>,
-    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    channel: &mut dyn ClientChannel,
     sent_this_connection: &mut HashSet<String>,
-) -> Result<(), String>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+) -> Result<(), String> {
     let Some(client) = upgrade(inner) else {
         return Err("client dropped".into());
     };
@@ -215,7 +233,7 @@ where
 
     let mut frames = frames.into_iter();
     while let Some(frame) = frames.next() {
-        if let Err(error) = send_json(socket, &frame).await {
+        if let Err(error) = channel.send(&frame).await {
             if let Some(client) = upgrade(inner) {
                 let mut unsent = std::collections::VecDeque::from([frame]);
                 unsent.extend(frames);
@@ -231,7 +249,7 @@ where
     }
     for send in pending {
         if sent_this_connection.insert(send.client_id.clone()) {
-            send_json(socket, &pending_to_wire(&send)).await?;
+            channel.send(&pending_to_wire(&send)).await?;
         }
     }
     Ok(())
@@ -301,16 +319,110 @@ fn set_offline(inner: &Weak<ClientInner>, reason: Option<String>) {
     }
 }
 
-async fn send_json<S>(
-    socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    message: &ClientToHost,
-) -> Result<(), String>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let text = serde_json::to_string(message).map_err(|error| error.to_string())?;
-    socket
-        .send(Message::Text(text))
-        .await
-        .map_err(|error| error.to_string())
+type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+struct WebSocketChannel {
+    socket: ClientWebSocket,
+}
+
+#[async_trait]
+impl ClientChannel for WebSocketChannel {
+    async fn receive(&mut self) -> Result<ServerFrame, String> {
+        match self.socket.next().await {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
+                Ok(message) => Ok(ServerFrame::Message(message)),
+                Err(error) => Ok(ServerFrame::Invalid(error.to_string())),
+            },
+            Some(Ok(Message::Ping(payload))) => {
+                self.socket
+                    .send(Message::Pong(payload))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(ServerFrame::Ignored)
+            }
+            Some(Ok(Message::Close(frame))) => {
+                Err(frame.map_or_else(|| "websocket closed".into(), |frame| frame.to_string()))
+            }
+            Some(Ok(_)) => Ok(ServerFrame::Ignored),
+            Some(Err(error)) => Err(error.to_string()),
+            None => Err("websocket stream ended".into()),
+        }
+    }
+
+    async fn send(&mut self, frame: &ClientToHost) -> Result<(), String> {
+        let text = serde_json::to_string(frame).map_err(|error| error.to_string())?;
+        self.socket
+            .send(Message::Text(text))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn close(&mut self) -> Result<(), String> {
+        self.socket
+            .close(None)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct IrohChannel {
+    endpoint: Endpoint,
+    connection: iroh::endpoint::Connection,
+    inbound: FramedRead<iroh::endpoint::RecvStream, LengthDelimitedCodec>,
+    outbound: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
+}
+
+impl IrohChannel {
+    fn new(
+        endpoint: Endpoint,
+        connection: iroh::endpoint::Connection,
+        send: iroh::endpoint::SendStream,
+        recv: iroh::endpoint::RecvStream,
+    ) -> Self {
+        Self {
+            endpoint,
+            connection,
+            inbound: FramedRead::new(recv, iroh_frame_codec()),
+            outbound: FramedWrite::new(send, iroh_frame_codec()),
+        }
+    }
+}
+
+#[async_trait]
+impl ClientChannel for IrohChannel {
+    async fn receive(&mut self) -> Result<ServerFrame, String> {
+        match self.inbound.next().await {
+            Some(Ok(bytes)) => match serde_json::from_slice(&bytes) {
+                Ok(message) => Ok(ServerFrame::Message(message)),
+                Err(error) => Ok(ServerFrame::Invalid(error.to_string())),
+            },
+            Some(Err(error)) => Err(error.to_string()),
+            None => Err("iroh stream ended".into()),
+        }
+    }
+
+    async fn send(&mut self, frame: &ClientToHost) -> Result<(), String> {
+        let bytes = serde_json::to_vec(frame).map_err(|error| error.to_string())?;
+        self.outbound
+            .send(bytes.into())
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn close(&mut self) -> Result<(), String> {
+        let result = self
+            .outbound
+            .close()
+            .await
+            .map_err(|error| error.to_string());
+        self.connection.close(0u32.into(), b"client disconnecting");
+        self.endpoint.close().await;
+        result
+    }
+}
+
+fn iroh_frame_codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .max_frame_length(MAX_IROH_FRAME_BYTES)
+        .new_codec()
 }

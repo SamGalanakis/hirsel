@@ -1651,14 +1651,19 @@ dependencies = [
 name = "hirsel-client-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures-util",
  "hirsel-proto",
+ "iroh",
+ "iroh-tickets",
  "rand 0.8.6",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 

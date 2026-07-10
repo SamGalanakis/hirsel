@@ -7,6 +7,12 @@ jna = "5.19.0"
 # Firebase stable releases from 2026-06-16. BoM 34.15.0 maps Messaging to 25.1.0.
 googleServices = "4.5.0"
 firebaseBom = "34.15.0"
+# CameraX + ML Kit power the scan-first pairing onboarding (validated on Google
+# maven 2026-07-10). security-crypto backs the encrypted device-token store.
+cameraX = "1.4.2"
+mlkitBarcode = "17.3.0"
+securityCrypto = "1.1.0-alpha07"
+lifecycleCompose = "2.9.4"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -15,6 +21,13 @@ androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 androidx-compose-ui = { module = "androidx.compose.ui:ui" }
 androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycleCompose" }
+androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "cameraX" }
+androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraX" }
+androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "cameraX" }
+androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "cameraX" }
+mlkit-barcode-scanning = { module = "com.google.mlkit:barcode-scanning", version.ref = "mlkitBarcode" }
+androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "securityCrypto" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging" }

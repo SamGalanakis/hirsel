@@ -26,13 +26,13 @@ export function QuotedRef(props: Props) {
       {(message) => (
         <button
           type="button"
-          class="mb-1 block w-full rounded-md border-l-2 border-current/50 bg-black/15 px-2 py-1 text-left transition-colors hover:bg-black/25"
+          class="mb-1.5 block w-full rounded-md border-l-2 border-current/40 bg-black/10 px-2 py-1 text-left transition-colors hover:bg-black/20"
           onClick={props.onTap}
         >
-          <div class="text-[0.7rem] font-semibold uppercase tracking-[0.03em] opacity-80">
+          <div class="text-[0.62rem] font-medium uppercase tracking-[0.04em] opacity-70">
             {message().author === "owner" ? "You" : "Agent"}
           </div>
-          <div class="overflow-hidden text-ellipsis whitespace-nowrap text-xs opacity-80">
+          <div class="overflow-hidden text-ellipsis whitespace-nowrap text-xs opacity-75">
             {snippet(message().body)}
           </div>
         </button>

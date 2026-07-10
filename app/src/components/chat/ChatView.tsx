@@ -208,10 +208,12 @@ export function ChatView() {
     <div class="relative flex min-h-0 flex-1 flex-col split:flex-row">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       {/* Measured inner: at `rail` width the chat pane fills the left zone but
-          its content is capped to a reading measure (~640px), left-anchored, so
-          bubbles never stretch to hostile line lengths. Below `rail` this is a
-          no-op and the phone/split widths are unchanged. */}
-      <div class="flex min-h-0 w-full flex-1 flex-col rail:max-w-[640px]">
+          its content is capped to a reading measure (~640px) and centred in the
+          zone (`rail:mx-auto`), so bubbles never stretch to hostile line lengths
+          and the leftover width breathes evenly on both sides instead of pooling
+          into one dead gutter beside the rail. Below `rail` this is a no-op and
+          the phone/split widths are unchanged. */}
+      <div class="flex min-h-0 w-full flex-1 flex-col rail:mx-auto rail:max-w-[640px]">
       <div
         class="relative flex min-h-0 flex-1 flex-col"
         onDragEnter={onDragEnter}

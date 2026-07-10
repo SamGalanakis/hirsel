@@ -262,6 +262,12 @@ async fn handle_client_frame(
                 .ok_or_else(|| anyhow::anyhow!("unknown ping: {ping_id}"))?;
             state.broadcast(HostToClient::PingUpsert { ping });
         }
+        ClientToHost::RegisterPushToken { platform, token } => {
+            state.storage.register_push_token(platform, token).await?;
+        }
+        ClientToHost::UnregisterPushToken { token } => {
+            state.storage.unregister_push_token(&token).await?;
+        }
         ClientToHost::OpenSideChat {
             client_id: _,
             ping_id,

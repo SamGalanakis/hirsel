@@ -38,6 +38,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+hirsel-client-core = { path = "../hirsel-client-core" }
 jsonschema = "0.18"
 tokio-tungstenite = "0.24.0"
 

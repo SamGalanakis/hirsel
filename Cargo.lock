@@ -1703,6 +1703,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures-util",
+ "hirsel-client-core",
  "hirsel-drivers",
  "hirsel-proto",
  "iroh",

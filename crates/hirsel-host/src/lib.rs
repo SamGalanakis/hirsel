@@ -6,6 +6,7 @@ pub mod lash_runtime;
 pub mod monitors;
 pub mod process_run;
 pub mod processes;
+mod protocol;
 pub mod push;
 pub mod side_chat;
 pub mod storage;

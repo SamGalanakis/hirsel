@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent};
 use hirsel_proto::{
     Blob, ChatAuthor, ChatMessage, Ping, PingStatus, ProcessInfo, ProcessKind, ProcessState,
-    QuickReply, ToolCallSummary,
+    PushPlatform, QuickReply, ToolCallSummary,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,14 @@ pub struct HelloSnapshot {
     pub latest_msg_id: u64,
     pub messages: Vec<ChatMessage>,
     pub pings: Vec<Ping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PushToken {
+    pub token: String,
+    pub platform: PushPlatform,
+    pub created_ts: DateTime<Utc>,
+    pub last_seen_ts: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +161,12 @@ impl Storage {
                 events TEXT NOT NULL,
                 started_ts TEXT NOT NULL,
                 last_event_ts TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS push_tokens (
+                token TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                created_ts TEXT NOT NULL,
+                last_seen_ts TEXT NOT NULL
             );
             ",
         )?;
@@ -559,6 +573,48 @@ impl Storage {
         collect_rows(rows)
     }
 
+    pub async fn register_push_token(
+        &self,
+        platform: PushPlatform,
+        token: impl Into<String>,
+    ) -> anyhow::Result<PushToken> {
+        let token = token.into();
+        if token.trim().is_empty() {
+            anyhow::bail!("push token must not be empty");
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "
+            INSERT INTO push_tokens (token, platform, created_ts, last_seen_ts)
+            VALUES (?1, ?2, ?3, ?3)
+            ON CONFLICT(token) DO UPDATE SET
+                platform = excluded.platform,
+                last_seen_ts = excluded.last_seen_ts
+            ",
+            params![token, push_platform_to_str(platform), now.to_rfc3339()],
+        )?;
+        get_push_token(&conn, &token).map_err(Into::into)
+    }
+
+    pub async fn unregister_push_token(&self, token: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().await;
+        Ok(conn.execute("DELETE FROM push_tokens WHERE token = ?1", params![token])? > 0)
+    }
+
+    pub async fn push_tokens(&self) -> anyhow::Result<Vec<PushToken>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "
+            SELECT token, platform, created_ts, last_seen_ts
+            FROM push_tokens
+            ORDER BY created_ts ASC, token ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], push_token_from_row)?;
+        collect_rows(rows)
+    }
+
     pub async fn store_blob(
         &self,
         client_id: &str,
@@ -927,6 +983,7 @@ impl Storage {
                 DELETE FROM side_chat_messages;
                 DELETE FROM monitors;
                 DELETE FROM subagent_processes;
+                DELETE FROM push_tokens;
                 DELETE FROM chat_messages;
                 DELETE FROM sqlite_sequence
                 WHERE name IN ('chat_messages', 'pings', 'side_chat_messages');
@@ -1235,6 +1292,18 @@ fn get_ping_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<Ping
     .optional()
 }
 
+fn get_push_token(conn: &Connection, token: &str) -> rusqlite::Result<PushToken> {
+    conn.query_row(
+        "
+        SELECT token, platform, created_ts, last_seen_ts
+        FROM push_tokens
+        WHERE token = ?1
+        ",
+        params![token],
+        push_token_from_row,
+    )
+}
+
 fn load_attachments_for_messages(
     conn: &Connection,
     messages: &mut [ChatMessage],
@@ -1359,6 +1428,18 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
     })
 }
 
+fn push_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushToken> {
+    let platform: String = row.get(1)?;
+    let created_ts: String = row.get(2)?;
+    let last_seen_ts: String = row.get(3)?;
+    Ok(PushToken {
+        token: row.get(0)?,
+        platform: push_platform_from_str(&platform)?,
+        created_ts: parse_ts(&created_ts)?,
+        last_seen_ts: parse_ts(&last_seen_ts)?,
+    })
+}
+
 fn parse_ts(value: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|ts| ts.with_timezone(&Utc))
@@ -1385,6 +1466,27 @@ fn status_from_str(value: &str) -> rusqlite::Result<PingStatus> {
         "open" => Ok(PingStatus::Open),
         "done" => Ok(PingStatus::Done),
         _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn push_platform_to_str(platform: PushPlatform) -> &'static str {
+    match platform {
+        PushPlatform::Android => "android",
+        PushPlatform::Web => "web",
+        PushPlatform::Ios => "ios",
+    }
+}
+
+fn push_platform_from_str(value: &str) -> rusqlite::Result<PushPlatform> {
+    match value {
+        "android" => Ok(PushPlatform::Android),
+        "web" => Ok(PushPlatform::Web),
+        "ios" => Ok(PushPlatform::Ios),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            1,
+            Type::Text,
+            format!("unknown push platform: {other}").into(),
+        )),
     }
 }
 
@@ -1892,6 +1994,65 @@ mod tests {
         assert!(done.read);
         assert_eq!(done.status, PingStatus::Done);
         assert!(storage.mark_ping_read(99_999).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn push_token_registration_upserts_and_unregisters() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+
+        let created = storage
+            .register_push_token(PushPlatform::Android, "token-1")
+            .await
+            .unwrap();
+        let refreshed = storage
+            .register_push_token(PushPlatform::Web, "token-1")
+            .await
+            .unwrap();
+
+        assert_eq!(refreshed.token, "token-1");
+        assert_eq!(refreshed.platform, PushPlatform::Web);
+        assert_eq!(refreshed.created_ts, created.created_ts);
+        assert!(refreshed.last_seen_ts >= created.last_seen_ts);
+        assert_eq!(storage.push_tokens().await.unwrap(), vec![refreshed]);
+        assert!(storage.unregister_push_token("token-1").await.unwrap());
+        assert!(!storage.unregister_push_token("token-1").await.unwrap());
+        assert!(storage.push_tokens().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_token_table_is_additive_for_an_existing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    author TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    ref INTEGER NULL,
+                    ts TEXT NOT NULL,
+                    tool_calls TEXT NOT NULL DEFAULT '[]'
+                );
+                INSERT INTO chat_messages (author, body, ref, ts)
+                VALUES ('agent', 'existing row', NULL, '2026-07-10T12:00:00Z');
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(dir.path()).await.unwrap();
+        assert_eq!(storage.all_chat().await.unwrap().len(), 1);
+        storage
+            .register_push_token(PushPlatform::Ios, "token-live")
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(dir.path()).await.unwrap();
+        assert_eq!(reopened.all_chat().await.unwrap().len(), 1);
+        assert_eq!(reopened.push_tokens().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ pub mod lash_runtime;
 pub mod monitors;
 pub mod process_run;
 pub mod processes;
+pub mod push;
 pub mod side_chat;
 pub mod storage;
 pub mod tools;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub agent: AgentRuntime,
     pub side_chats: Arc<side_chat::SideChatManager>,
     pub processes: ProcessStore,
+    pub pushes: push::PushGateway,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
 }
@@ -247,6 +249,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let (broadcaster, _) = broadcast::channel(512);
     let broadcast_log = BroadcastLog::default();
     let processes = ProcessStore::default();
+    let pushes = push::PushGateway::from_env(storage.clone()).await?;
     let tools = ToolSuite::new(
         ToolsConfig {
             driver_mode: config.driver,
@@ -256,6 +259,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcaster.clone(),
         broadcast_log.clone(),
         processes.clone(),
+        pushes.clone(),
     );
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
@@ -286,6 +290,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         agent,
         side_chats,
         processes,
+        pushes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
     };

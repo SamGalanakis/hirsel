@@ -114,6 +114,14 @@ impl SendMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PushPlatform {
+    Android,
+    Web,
+    Ios,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -154,6 +162,13 @@ pub enum ClientToHost {
     },
     ReadPing {
         ping_id: u64,
+    },
+    RegisterPushToken {
+        platform: PushPlatform,
+        token: String,
+    },
+    UnregisterPushToken {
+        token: String,
     },
     OpenSideChat {
         client_id: String,
@@ -452,6 +467,37 @@ mod tests {
         let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(parsed, ClientToHost::ReadPing { ping_id: 9 });
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn push_token_frames_round_trip() {
+        let register = json!({
+            "type": "register_push_token",
+            "platform": "android",
+            "token": "fcm-token"
+        });
+        let parsed: ClientToHost = serde_json::from_value(register.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::RegisterPushToken {
+                platform: PushPlatform::Android,
+                token: "fcm-token".to_string(),
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), register);
+
+        let unregister = json!({
+            "type": "unregister_push_token",
+            "token": "fcm-token"
+        });
+        let parsed: ClientToHost = serde_json::from_value(unregister.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::UnregisterPushToken {
+                token: "fcm-token".to_string(),
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), unregister);
     }
 
     #[test]

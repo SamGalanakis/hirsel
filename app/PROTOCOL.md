@@ -265,3 +265,17 @@ limited to 32 characters; `description` is one line. `send_message` accepts opti
 status, response requirement, and Anchor to the Agent turn context. Mentions are lifecycle-neutral:
 only an Owner message whose `ref` equals an open Ping's Anchor moves it to done and emits
 `ping_upsert`.
+
+## v2.2 — push tokens (2026-07-10)
+
+Client → server additions:
+```
+{ "type": "register_push_token", "platform": "android" | "web" | "ios", "token": string }
+{ "type": "unregister_push_token", "token": string }
+```
+
+Registration is an idempotent upsert: re-registering a token refreshes its platform and last-seen
+time. Unregistration is idempotent. There is no server → client frame for either operation.
+
+The host sends a push only when `pings.send` creates a Ping with `requires_response: true`. Chat
+messages, non-response Pings, reads, resolves, and side-chat activity never trigger a push.

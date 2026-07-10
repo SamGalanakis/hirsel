@@ -30,6 +30,7 @@ pub struct ToolSuite {
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
     processes: ProcessStore,
+    pushes: crate::push::PushGateway,
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
@@ -66,6 +67,7 @@ impl ToolSuite {
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
         processes: ProcessStore,
+        pushes: crate::push::PushGateway,
     ) -> Self {
         let (terminal_tx, _) = broadcast::channel(128);
         Self {
@@ -74,6 +76,7 @@ impl ToolSuite {
             broadcaster,
             broadcast_log,
             processes,
+            pushes,
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
@@ -146,6 +149,7 @@ impl ToolSuite {
             )
             .await?;
         self.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+        self.pushes.enqueue_ping(&ping).await;
         Ok(ping)
     }
 
@@ -442,6 +446,93 @@ mod tests {
     use crate::processes::ProcessStatus;
 
     #[tokio::test]
+    async fn requires_response_ping_records_one_push_and_unregister_stops_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(hirsel_proto::PushPlatform::Android, "token-1")
+            .await
+            .unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Owner, "Need a decision", None)
+            .await
+            .unwrap();
+        let (broadcaster, _) = broadcast::channel(16);
+        let (pushes, recording) = crate::push::PushGateway::recording(storage.clone());
+        let tools = ToolSuite::new(
+            ToolsConfig {
+                driver_mode: DriverMode::Fake,
+                fake_fixture: None,
+            },
+            storage.clone(),
+            broadcaster,
+            BroadcastLog::default(),
+            ProcessStore::default(),
+            pushes,
+        );
+
+        let requiring_response = tools
+            .pings_send(
+                "release-choice",
+                "Choose the release channel",
+                "Stable or beta?",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        wait_for_recorded_pushes(&recording, 1).await;
+        let recorded = recording.pushes();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].tokens, vec!["token-1"]);
+        assert_eq!(recorded[0].payload.title, "Hirsel");
+        assert_eq!(recorded[0].payload.body, "Choose the release channel");
+        assert_eq!(recorded[0].payload.data.ping_id, requiring_response.id);
+        assert_eq!(recorded[0].payload.data.name, "release-choice");
+
+        tools.pushes.enqueue_ping(&requiring_response).await;
+        tools
+            .pings_send(
+                "informational",
+                "No answer needed",
+                "FYI",
+                anchor.id,
+                false,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(recording.pushes().len(), 1);
+
+        assert!(storage.unregister_push_token("token-1").await.unwrap());
+        tools
+            .pings_send(
+                "second-choice",
+                "Choose again",
+                "A or B?",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(recording.pushes().len(), 1);
+    }
+
+    async fn wait_for_recorded_pushes(sender: &crate::push::RecordingPushSender, count: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while sender.pushes().len() < count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("recorded push count reached");
+    }
+
+    #[tokio::test]
     async fn subagent_abandon_retires_driver_session_and_stays_abandoned() {
         let dir = tempfile::tempdir().unwrap();
         let fixture = tempfile::NamedTempFile::new().unwrap();
@@ -458,6 +549,7 @@ mod tests {
         .unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
         let (broadcaster, _) = broadcast::channel(128);
+        let (pushes, _) = crate::push::PushGateway::recording(storage.clone());
         let tools = ToolSuite::new(
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
@@ -467,6 +559,7 @@ mod tests {
             broadcaster,
             BroadcastLog::default(),
             ProcessStore::default(),
+            pushes,
         );
         let spawned = tools
             .subagents_spawn(

@@ -102,13 +102,13 @@ describe("Discuss opens the Side Chat sheet", () => {
 
     expect(fakeClient.openSideChat).toHaveBeenCalledWith(1);
     await waitFor(() =>
-      expect(screen.getByText(/Forked from your chat/)).toBeTruthy(),
+      expect(screen.getByText(/Forked from chat/)).toBeTruthy(),
     );
     expect(screen.getByText(/Side chat ·/)).toBeTruthy();
 
     // Leave (header-left `‹ Chat`) hides the sheet without discarding/concluding.
     await fireEvent.click(screen.getByLabelText(/Leave side chat/));
-    expect(screen.queryByText(/Forked from your chat/)).toBeNull();
+    expect(screen.queryByText(/Forked from chat/)).toBeNull();
   });
 
   it("flips to 'in progress · resume' once a side chat is live for the item", async () => {

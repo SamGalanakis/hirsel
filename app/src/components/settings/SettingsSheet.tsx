@@ -1,7 +1,6 @@
-import { ChevronLeft, Settings as SettingsIcon, X } from "lucide-solid";
+import { ChevronLeft, X } from "lucide-solid";
 import { onCleanup, onMount, Show } from "solid-js";
 import { setSettingsOpen, state } from "../../store/store";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 
 function SettingsPanel() {
   onMount(() => {
@@ -24,7 +23,10 @@ function SettingsPanel() {
       class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
         rail:absolute rail:left-auto rail:z-30 rail:w-[420px] rail:border-l rail:border-border rail:pb-0"
     >
-      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:pt-3">
+      {/* h-12 on desktop (rail:) so the inspector header shares the top-bar
+          datum with the center chat header + Pings rail; phone keeps its
+          safe-area padding. */}
+      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:h-12 rail:py-0">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
@@ -43,21 +45,14 @@ function SettingsPanel() {
         <span class="w-[3.25rem] rail:hidden" aria-hidden="true" />
       </header>
 
-      {/* Clearly-marked placeholder for a later pass — a calm note plus a couple
-          of disabled "coming soon" scaffold rows, so it reads as intentional,
-          not broken. */}
-      <div class="thin-scrollbar flex flex-1 flex-col gap-4 overflow-y-auto p-4">
-        <Empty class="border-none">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <SettingsIcon />
-            </EmptyMedia>
-            <EmptyTitle>Settings</EmptyTitle>
-            <EmptyDescription>
-              Appearance, account, and theme settings arrive in a later pass.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+      {/* Clearly-marked placeholder for a later pass — left-aligned and top-
+          anchored (no hero medallion, no centered void): one calm sentence, then
+          the disabled scaffold rows stacked directly beneath. Reads as an
+          intentional placeholder, not an empty-state template. */}
+      <div class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto p-4">
+        <p class="text-sm text-muted-foreground">
+          Appearance, account, and theme settings arrive in a later pass.
+        </p>
 
         <div class="flex flex-col gap-2">
           <div

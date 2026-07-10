@@ -41,7 +41,9 @@
     "breakpoints": [
       { "name": "app-column", "value": "560px", "purpose": "Default single-column app width (phone-first)." },
       { "name": "split", "value": "900px", "purpose": "Side Chat becomes a right rail (was a full-screen sheet); shell can widen." },
-      { "name": "split-max", "value": "980px", "purpose": "Widened shell max-width when a Side Chat split is active." }
+      { "name": "split-max", "value": "980px", "purpose": "Widened shell max-width when a Side Chat split is active (900–1099 mid-width band)." },
+      { "name": "rail", "value": "1100px", "purpose": "Desktop: the persistent 3-pane shell (nav rail ∣ chat ∣ context) engages." },
+      { "name": "shell-max", "value": "1600px", "purpose": "Desktop 3-pane frame fills to this cap, then centers." }
     ]
   },
   "components": [
@@ -112,7 +114,7 @@
   ],
   "narrative": {
     "northStar": "The Quiet Instrument",
-    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default and dark by commitment; the light token theme is carried for parity but never shipped. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width (rails and a Slack-style split). Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
+    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default and dark by commitment; the light token theme is carried for parity but never shipped. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width, where a persistent 3-pane shell (a left nav rail ∣ the center chat pane ∣ an always-present right context pane) fills to a ~1600px cap and only then centers. Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
     "keyCharacteristics": [
       "Dark-only, near-black base (oklch(0.141)) with hairline white/10 borders doing the structural work.",
       "One brand accent — a muted indigo (oklch(0.55 0.13 264)) — reserved for interaction and 'attend to this.'",

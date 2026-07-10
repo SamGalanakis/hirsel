@@ -123,7 +123,7 @@ describe("Desktop shell: the standing Pings rail", () => {
 });
 
 describe("Desktop shell: right-region precedence", () => {
-  it("yields the rail to an open side chat and restores it from the header", async () => {
+  it("yields the rail to an open side chat and restores it from the NavRail Inbox item", async () => {
     const { screen } = await setupApp();
     // Default: rail present, no side chat surface.
     expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy();
@@ -140,11 +140,10 @@ describe("Desktop shell: right-region precedence", () => {
     await waitFor(() => expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeTruthy());
     expect(screen.queryByRole("complementary", { name: "Pings" })).toBeNull();
 
-    // The header restore affordance appears and brings the rail back (leaving
-    // the side chat alive/resumable).
-    const restore = screen.getByLabelText("Show Pings");
-    expect(restore.className).toContain("rail:flex");
-    await fireEvent.click(restore);
+    // The desktop restore affordance moved to the NavRail Inbox item: clicking
+    // it brings the rail back (leaving the side chat alive/resumable — it only
+    // clears the active sheet, not the sideChatRefs entry).
+    await fireEvent.click(screen.getByLabelText("Inbox"));
     await waitFor(() => expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy());
     expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeNull();
   });
@@ -188,16 +187,67 @@ describe("Desktop shell: right-region precedence", () => {
   });
 });
 
+describe("Desktop shell: the nav rail", () => {
+  it("mounts a Primary nav with Chat / Inbox / Processes / Settings items", async () => {
+    const { screen } = await setupApp();
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toBeTruthy();
+    // Each primary destination is a labeled control in the rail.
+    expect(within(nav).getByRole("button", { name: "Chat" })).toBeTruthy();
+    expect(within(nav).getByLabelText("Inbox")).toBeTruthy();
+    expect(within(nav).getByRole("button", { name: /Processes/ })).toBeTruthy();
+    expect(within(nav).getByLabelText("Settings")).toBeTruthy();
+  });
+
+  it("carries an Inbox badge with parity to the phone shelf badge", async () => {
+    await setupApp();
+    const navBadge = document.querySelector('[data-slot="nav-inbox-badge"]') as HTMLElement;
+    const shelfBadge = document.querySelector('[data-slot="tray-shelf-badge"]') as HTMLElement;
+    expect(navBadge).toBeTruthy();
+    expect(shelfBadge).toBeTruthy();
+    // Same count and same danger tone (one open requires_response item) — both
+    // derive from openUnreadCount / hasOpenRequiresResponse, so parity holds by
+    // construction; this pins it.
+    expect(navBadge.textContent).toBe("1");
+    expect(shelfBadge.textContent).toBe("1");
+    expect(navBadge.className).toContain("bg-status-danger");
+    expect(shelfBadge.className).toContain("bg-status-danger");
+  });
+
+  it("opens the Processes inspector from the NavRail Processes item", async () => {
+    const { screen } = await setupApp();
+    // Scope to the rail: the phone header's ProcessesButton also matches
+    // /Processes/, so pick the NavRail item specifically.
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(document.querySelector('[data-slot="processes-panel"]')).toBeNull();
+    await fireEvent.click(within(nav).getByRole("button", { name: /Processes/ }));
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="processes-panel"]')).toBeTruthy(),
+    );
+  });
+
+  it("opens the Settings inspector from the NavRail gear", async () => {
+    const { screen } = await setupApp();
+    expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
+    await fireEvent.click(screen.getByLabelText("Settings"));
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="settings-panel"]')).toBeTruthy(),
+    );
+  });
+});
+
 describe("Desktop shell: the frame cap", () => {
   it("caps and centres the frame at the rail breakpoint instead of stretching", async () => {
     await setupApp();
     const frame = document.querySelector('[data-slot="app-frame"]') as HTMLElement;
     expect(frame).toBeTruthy();
-    // Centred (mx-auto), phone-width by default, filled to a cap at `rail` — a
-    // bounded fill, never a stretch-to-glass. The 2560 void is fixed by this
-    // cap, which holds at every width ≥ rail.
+    // Centred (mx-auto), phone-width by default, and a ROW filled to a cap at
+    // `rail` — the 3-pane shell (nav ∣ chat ∣ context) uses the width via real
+    // structure, a bounded fill never stretched to glass. The 2560 void is fixed
+    // by this cap, which holds at every width ≥ rail.
     expect(frame.className).toContain("mx-auto");
     expect(frame.classList.contains("max-w-[560px]")).toBe(true);
-    expect(frame.classList.contains("rail:max-w-[1360px]")).toBe(true);
+    expect(frame.classList.contains("rail:flex-row")).toBe(true);
+    expect(frame.classList.contains("rail:max-w-[1600px]")).toBe(true);
   });
 });

@@ -29,8 +29,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -50,14 +55,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,10 +84,14 @@ import dev.hirsel.android.pairing.rememberConnection
 import dev.hirsel.android.ui.Hirsel
 import dev.hirsel.android.ui.HirselMono
 import dev.hirsel.android.ui.HirselTheme
+import dev.hirsel.core.AgentActivity
+import dev.hirsel.core.AgentActivityState
 import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ClientSnapshot
+import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.Ping
+import dev.hirsel.core.PingStatus
 import dev.hirsel.core.generateIrohIdentity
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlin.coroutines.resume
@@ -93,6 +107,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        val previewScreen = intent?.getStringExtra("preview")
         setContent {
             HirselTheme {
                 Surface(
@@ -101,7 +116,7 @@ class MainActivity : ComponentActivity() {
                         .semantics { testTagsAsResourceId = true },
                     color = Hirsel.Background,
                 ) {
-                    HirselRoot()
+                    if (previewScreen != null) DesignPreview(previewScreen) else HirselRoot()
                 }
             }
         }
@@ -180,7 +195,7 @@ private fun HirselRoot() {
     // While a fresh pairing is still handshaking (and no token yet), show progress;
     // otherwise render chat over the authenticated connection.
     if (activeSpec is ConnectionSpec.Pairing && credential == null) {
-        PairingProgress(connection = connection, label = activeSpec.label, onCancel = { pairingSpec = null })
+        PairingProgress(phase = connection.phase, label = activeSpec.label, onCancel = { pairingSpec = null })
     } else {
         ChatScreen(
             snapshot = connection.snapshot,
@@ -202,11 +217,11 @@ private fun defaultDeviceLabel(): String {
 }
 
 @Composable
-private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
+private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, previewError: String? = null) {
     val context = LocalContext.current
     var label by remember { mutableStateOf(defaultDeviceLabel()) }
-    var pasted by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
+    var pasted by remember { mutableStateOf(if (previewError != null) "not-a-pairing-link" else "") }
+    var error by remember { mutableStateOf(previewError) }
 
     var hasCamera by remember {
         mutableStateOf(
@@ -257,21 +272,26 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 20.dp),
     ) {
-        Text("hirsel", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, color = Hirsel.Foreground)
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "hirsel",
+            style = microLabel(),
+            color = Hirsel.MutedForeground,
+        )
+        Spacer(Modifier.height(10.dp))
         Text(
             "Pair with your host",
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
+            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
             color = Hirsel.Foreground,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
             "Point the camera at the pairing QR on your host, or paste its link.",
             fontSize = 13.sp,
+            lineHeight = 19.sp,
             color = Hirsel.MutedForeground,
         )
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(20.dp))
 
         // Scanner viewport — signature affordance of the scan-first flow.
         Box(
@@ -386,28 +406,35 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
 
 @Composable
 private fun ScannerReticle() {
-    Box(
+    // Four L-shaped corner brackets read as "scanner" without boxing in the frame.
+    val stroke = Hirsel.Foreground.copy(alpha = 0.85f)
+    Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .padding(40.dp),
-        contentAlignment = Alignment.Center,
+            .padding(44.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .border(2.dp, Hirsel.Foreground.copy(alpha = 0.65f), RoundedCornerShape(12.dp)),
-        )
+        val len = size.minDimension * 0.14f
+        val w = 2.5.dp.toPx()
+        val r = 12.dp.toPx()
+        val cap = androidx.compose.ui.graphics.StrokeCap.Round
+        fun corner(cx: Float, cy: Float, sx: Int, sy: Int) {
+            // Horizontal + vertical arm meeting near the corner, inset by the radius.
+            drawLine(stroke, Offset(cx + sx * r, cy), Offset(cx + sx * (r + len), cy), w, cap)
+            drawLine(stroke, Offset(cx, cy + sy * r), Offset(cx, cy + sy * (r + len)), w, cap)
+        }
+        corner(0f, 0f, 1, 1)
+        corner(size.width, 0f, -1, 1)
+        corner(0f, size.height, 1, -1)
+        corner(size.width, size.height, -1, -1)
     }
 }
 
 @Composable
 private fun PairingProgress(
-    connection: Connection,
+    phase: Phase,
     label: String,
     onCancel: () -> Unit,
 ) {
-    val phase = connection.phase
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -425,18 +452,23 @@ private fun PairingProgress(
                 StatusDot(Hirsel.StatusDanger)
                 Spacer(Modifier.height(14.dp))
                 Text("Pairing failed", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = Hirsel.Foreground)
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(8.dp))
                 Text(
                     friendlyPairError(detail),
                     color = Hirsel.MutedForeground,
                     fontSize = 13.sp,
-                    modifier = Modifier.testTag("pair-status"),
+                    lineHeight = 20.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .testTag("pair-status"),
                 )
-                Spacer(Modifier.height(22.dp))
+                Spacer(Modifier.height(24.dp))
                 Button(
                     onClick = onCancel,
                     colors = ButtonDefaults.buttonColors(containerColor = Hirsel.Accent, contentColor = Hirsel.Foreground),
                     shape = RoundedCornerShape(8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp),
                     modifier = Modifier.height(48.dp).testTag("pair-retry"),
                 ) { Text("Try another link", fontWeight = FontWeight.SemiBold) }
             }
@@ -451,10 +483,13 @@ private fun PairingProgress(
                     text,
                     color = Hirsel.MutedForeground,
                     fontSize = 13.sp,
-                    modifier = Modifier.testTag("pair-status"),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .testTag("pair-status"),
                 )
-                Spacer(Modifier.height(8.dp))
-                Text(label, style = microLabel(), color = Hirsel.MutedForeground)
+                Spacer(Modifier.height(10.dp))
+                Text(label, style = microLabel(), color = Hirsel.MutedForeground.copy(alpha = 0.8f))
             }
         }
     }
@@ -515,7 +550,6 @@ private fun ChatScreen(
         }
 
         if (confirmUnpair) {
-            Spacer(Modifier.height(8.dp))
             UnpairConfirm(label = label, onConfirm = onUnpair, onDismiss = { confirmUnpair = false })
         }
 
@@ -523,30 +557,49 @@ private fun ChatScreen(
         HairlineDivider()
         Spacer(Modifier.height(10.dp))
 
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .testTag("chat-list"),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (snapshot == null) {
-                item { EmptyLine("Connecting over iroh…") }
-            } else if (snapshot.messages.isEmpty()) {
-                item { EmptyLine("No messages yet.") }
+        val messages = snapshot?.messages.orEmpty()
+        val hasContent = messages.isNotEmpty() || pings.isNotEmpty()
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            if (!hasContent) {
+                val connecting = snapshot == null || phase is Phase.Connecting || phase is Phase.Reconnecting
+                ChatPlaceholder(connecting = connecting)
             } else {
-                items(
-                    snapshot.messages,
-                    key = { "message-${it.id?.toString() ?: it.clientId.orEmpty()}" },
-                ) { MessageRow(it) }
-            }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("chat-list"),
+                ) {
+                    itemsIndexed(
+                        messages,
+                        key = { _, m -> "message-${m.id?.toString() ?: m.clientId.orEmpty()}" },
+                    ) { index, message ->
+                        val prev = messages.getOrNull(index - 1)
+                        val gap = when {
+                            prev == null -> 0.dp
+                            prev.author == message.author -> 3.dp
+                            else -> 12.dp
+                        }
+                        Spacer(Modifier.height(gap))
+                        MessageRow(message)
+                    }
 
-            if (pings.isNotEmpty()) {
-                item {
-                    Spacer(Modifier.height(4.dp))
-                    Text("Pings", style = microLabel(), color = Hirsel.MutedForeground)
+                    if (pings.isNotEmpty()) {
+                        item {
+                            Spacer(Modifier.height(if (messages.isEmpty()) 0.dp else 20.dp))
+                            Text(
+                                "Pings",
+                                style = microLabel(),
+                                color = Hirsel.MutedForeground,
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                        }
+                        itemsIndexed(pings, key = { _, p -> "ping-${p.id}" }) { index, ping ->
+                            if (index > 0) Spacer(Modifier.height(8.dp))
+                            PingCard(ping)
+                        }
+                    }
+                    item { Spacer(Modifier.height(4.dp)) }
                 }
-                items(pings, key = { "ping-${it.id}" }) { PingCard(it) }
             }
         }
 
@@ -589,26 +642,38 @@ private fun ChatScreen(
 
 @Composable
 private fun UnpairConfirm(label: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, Hirsel.Border, RoundedCornerShape(10.dp))
-            .background(Hirsel.Card, RoundedCornerShape(10.dp))
-            .padding(14.dp),
-    ) {
-        Text("Forget this device?", fontWeight = FontWeight.SemiBold, color = Hirsel.Foreground, fontSize = 14.sp)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Clears the stored token for “$label”. You'll need a new pairing link to reconnect.",
-            color = Hirsel.MutedForeground,
-            fontSize = 12.sp,
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            TextButton(onClick = onDismiss) { Text("Cancel", color = Hirsel.MutedForeground) }
-            Spacer(Modifier.width(6.dp))
-            TextButton(onClick = onConfirm, modifier = Modifier.testTag("unpair-confirm")) {
-                Text("Forget", color = Hirsel.StatusDanger, fontWeight = FontWeight.SemiBold)
+    // A focused destructive confirm floats above the transcript on a dimmed scrim
+    // (the one place a real overlay is warranted).
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .shadow(24.dp, RoundedCornerShape(16.dp), clip = false)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Hirsel.Card, RoundedCornerShape(16.dp))
+                .border(1.dp, Hirsel.Border, RoundedCornerShape(16.dp))
+                .padding(20.dp),
+        ) {
+            Text(
+                "Forget this device?",
+                fontWeight = FontWeight.SemiBold,
+                color = Hirsel.Foreground,
+                fontSize = 16.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Clears the stored token for “$label”. You'll need a new pairing link to reconnect.",
+                color = Hirsel.MutedForeground,
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = onDismiss) { Text("Cancel", color = Hirsel.MutedForeground) }
+                Spacer(Modifier.width(6.dp))
+                TextButton(onClick = onConfirm, modifier = Modifier.testTag("unpair-confirm")) {
+                    Text("Forget", color = Hirsel.StatusDanger, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
@@ -640,13 +705,15 @@ private fun ConnectionPill(phase: Phase) {
 @Composable
 private fun MessageRow(message: ChatMessage) {
     val owner = message.author == ChatAuthor.OWNER
+    val time = shortTime(message.timestamp)
+    val metaColor = if (owner) Hirsel.Foreground.copy(alpha = 0.62f) else Hirsel.MutedForeground
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (owner) Arrangement.End else Arrangement.Start,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.82f)
+                .fillMaxWidth(0.80f)
                 .background(
                     if (owner) Hirsel.Accent else Hirsel.Secondary,
                     RoundedCornerShape(14.dp),
@@ -657,43 +724,125 @@ private fun MessageRow(message: ChatMessage) {
                 message.body,
                 color = Hirsel.Foreground,
                 fontSize = 14.sp,
+                lineHeight = 21.sp,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (owner && message.pending) {
-                Spacer(Modifier.height(2.dp))
-                Text("sending…", color = Hirsel.Foreground.copy(alpha = 0.7f), fontSize = 11.sp)
+            // Meta footer: "sending…" while pending, otherwise a quiet timestamp.
+            val footer = when {
+                owner && message.pending -> "sending…"
+                time != null -> time
+                else -> null
             }
+            if (footer != null) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    footer,
+                    color = metaColor,
+                    fontSize = 11.sp,
+                    modifier = Modifier.align(if (owner) Alignment.End else Alignment.Start),
+                )
+            }
+        }
+    }
+}
+
+/** Best-effort short HH:mm from an RFC3339/ISO timestamp; falls back to the raw
+ *  string when it is already short, or null when there is nothing legible. */
+private fun shortTime(raw: String): String? {
+    if (raw.isBlank()) return null
+    Regex("""T(\d{2}:\d{2})""").find(raw)?.let { return it.groupValues[1] }
+    Regex("""^(\d{1,2}:\d{2})""").find(raw)?.let { return it.groupValues[1] }
+    return raw.takeIf { it.length <= 8 }
+}
+
+@Composable
+private fun ChatPlaceholder(connecting: Boolean) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        if (connecting) {
+            CircularProgressIndicator(
+                color = Hirsel.AccentRing,
+                strokeWidth = 2.5.dp,
+                modifier = Modifier.size(26.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("Connecting over iroh…", color = Hirsel.MutedForeground, fontSize = 13.sp)
+        } else {
+            StatusDot(Hirsel.StatusIdle, size = 8)
+            Spacer(Modifier.height(14.dp))
+            Text("No messages yet", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = Hirsel.Foreground)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Send a message to your agent — it's listening.",
+                color = Hirsel.MutedForeground,
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 280.dp),
+            )
         }
     }
 }
 
 @Composable
 private fun PingCard(ping: Ping) {
-    val requires = ping.requiresResponse
+    val done = ping.status == PingStatus.DONE
+    // Requires-response is the "attend to this" state: persistent indigo stripe,
+    // unread dot, and full-strength question text. A Done ping dims and drops it.
+    val requires = ping.requiresResponse && !done
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(14.dp))
+            .alpha(if (done) 0.6f else 1f)
             .background(Hirsel.Card, RoundedCornerShape(14.dp))
             .border(1.dp, Hirsel.Border, RoundedCornerShape(14.dp)),
     ) {
-        // Requires-response Pings carry a persistent indigo left stripe.
         Box(
             modifier = Modifier
                 .width(3.dp)
-                .height(48.dp)
+                .fillMaxHeight()
                 .background(if (requires) Hirsel.Accent else androidx.compose.ui.graphics.Color.Transparent),
         )
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                if (requires && !ping.read) {
+                    StatusDot(Hirsel.Accent, size = 7)
+                    Spacer(Modifier.width(7.dp))
+                }
+                Text(
+                    "@${ping.name}",
+                    color = Hirsel.Foreground,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    fontFamily = HirselMono,
+                    modifier = Modifier.testTag("ping-name"),
+                )
+                Spacer(Modifier.weight(1f))
+                if (done) {
+                    Text("✓", color = Hirsel.StatusSuccess, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Done", style = microLabel(), color = Hirsel.MutedForeground)
+                } else {
+                    shortTime(ping.timestamp)?.let {
+                        Text(it, color = Hirsel.MutedForeground, fontSize = 11.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
             Text(
-                "@${ping.name}",
-                color = Hirsel.Foreground,
-                fontWeight = FontWeight.SemiBold,
+                ping.description,
+                color = if (requires) Hirsel.Foreground else Hirsel.MutedForeground,
+                fontWeight = if (requires) FontWeight.Medium else FontWeight.Normal,
                 fontSize = 13.sp,
-                fontFamily = HirselMono,
-                modifier = Modifier.testTag("ping-name"),
+                lineHeight = 20.sp,
             )
-            Spacer(Modifier.height(2.dp))
-            Text(ping.description, color = Hirsel.MutedForeground, fontSize = 13.sp)
         }
     }
 }
@@ -706,11 +855,6 @@ private fun PingCard(ping: Ping) {
 private fun microLabel() = androidx.compose.material3.MaterialTheme.typography.labelMedium.copy(
     letterSpacing = 0.5.sp,
 )
-
-@Composable
-private fun EmptyLine(text: String) {
-    Text(text, color = Hirsel.MutedForeground, fontSize = 13.sp)
-}
 
 @Composable
 private fun StatusDot(color: androidx.compose.ui.graphics.Color, size: Int = 10) {
@@ -788,6 +932,95 @@ private fun HirselField(
             .testTag(testTag)
             .then(if (contentDescription != null) Modifier.semantics { this.contentDescription = contentDescription } else Modifier),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Design preview harness (TEMPORARY — removed before final commit). Renders each
+// screen/state with deterministic fake data via `am start ... --es preview <name>`.
+// ---------------------------------------------------------------------------
+
+private fun fakeMessage(
+    id: ULong,
+    author: ChatAuthor,
+    body: String,
+    ts: String,
+    pending: Boolean = false,
+) = ChatMessage(
+    id = id,
+    author = author,
+    body = body,
+    replyTo = null,
+    timestamp = ts,
+    attachments = emptyList(),
+    toolCalls = emptyList(),
+    clientId = if (pending) "local-$id" else null,
+    pending = pending,
+)
+
+private fun fakePing(
+    id: ULong,
+    name: String,
+    description: String,
+    requiresResponse: Boolean,
+    read: Boolean,
+    status: PingStatus,
+    ts: String,
+) = Ping(
+    id = id,
+    name = name,
+    description = description,
+    content = description,
+    anchor = 0uL,
+    requiresResponse = requiresResponse,
+    quickReplies = emptyList(),
+    status = status,
+    read = read,
+    timestamp = ts,
+)
+
+@Composable
+private fun DesignPreview(name: String) {
+    val messages = listOf(
+        fakeMessage(1uL, ChatAuthor.OWNER, "Ship it. Ping me only if the tests go red.", "09:12"),
+        fakeMessage(2uL, ChatAuthor.AGENT, "Spun up the monitor. I'll ping you if the deploy stalls past 10 minutes.", "09:12"),
+        fakeMessage(3uL, ChatAuthor.AGENT, "Migration on stg-a is green; running the smoke suite now.", "09:14"),
+        fakeMessage(4uL, ChatAuthor.OWNER, "Which staging DB did it target?", "09:15"),
+        fakeMessage(5uL, ChatAuthor.OWNER, "Actually — hold the prod cutover until I'm back.", "09:16", pending = true),
+    )
+    val pings = listOf(
+        fakePing(10uL, "deploy-guard", "Which staging DB should the migration target — stg-a or stg-b?", requiresResponse = true, read = false, status = PingStatus.OPEN, ts = "09:24"),
+        fakePing(11uL, "smoke-suite", "Smoke suite passed on stg-a (42/42).", requiresResponse = false, read = true, status = PingStatus.DONE, ts = "09:20"),
+    )
+    fun snapshot(msgs: List<ChatMessage>, pgs: List<Ping>, state: ConnectionState) = ClientSnapshot(
+        connection = state,
+        messages = msgs,
+        pings = pgs,
+        agentActivity = AgentActivity(AgentActivityState.IDLE, null),
+        lastSeenMsgId = null,
+    )
+    when (name) {
+        "chat" -> ChatScreen(snapshot(messages, pings, ConnectionState.ONLINE), Phase.Online, "Owner phone", {}, {})
+        "chat_empty" -> ChatScreen(snapshot(emptyList(), emptyList(), ConnectionState.ONLINE), Phase.Online, "Owner phone", {}, {})
+        "chat_loading" -> ChatScreen(null, Phase.Connecting, "Owner phone", {}, {})
+        "chat_unpair" -> ChatScreenWithConfirm(snapshot(messages, pings, ConnectionState.ONLINE), Phase.Online, "Owner phone")
+        "pair_connecting" -> PairingProgress(Phase.Connecting, "Owner phone", {})
+        "pair_reconnecting" -> PairingProgress(Phase.Reconnecting(2), "Owner phone", {})
+        "pair_failed_code" -> PairingProgress(Phase.Failed("host rejected the pairing code"), "Owner phone", {})
+        "pair_failed_conn" -> PairingProgress(Phase.Failed("The host didn't answer."), "Owner phone", {})
+        "onboarding" -> PairEntry({})
+        "onboarding_error" -> PairEntry({}, previewError = "That doesn't look like a pairing link. Paste the full hirsel://pair… URL.")
+        else -> ChatScreen(snapshot(messages, pings, ConnectionState.ONLINE), Phase.Online, "Owner phone", {}, {})
+    }
+}
+
+@Composable
+private fun ChatScreenWithConfirm(snapshot: ClientSnapshot, phase: Phase, label: String) {
+    // Preview-only: force the unpair confirm open over a populated chat.
+    var open by remember { mutableStateOf(true) }
+    Box {
+        ChatScreen(snapshot, phase, label, {}, {})
+        if (open) UnpairConfirm(label = label, onConfirm = { open = false }, onDismiss = { open = false })
+    }
 }
 
 private suspend fun fetchFcmToken(): String = suspendCoroutine { continuation ->

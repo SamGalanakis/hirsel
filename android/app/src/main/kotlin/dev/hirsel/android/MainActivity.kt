@@ -108,6 +108,9 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         val previewScreen = intent?.getStringExtra("preview")
+        val pairTicket = intent?.getStringExtra("pair_ticket")
+        val pairCode = intent?.getStringExtra("pair_code")
+        val pairLabel = intent?.getStringExtra("pair_label") ?: "Owner phone"
         setContent {
             HirselTheme {
                 Surface(
@@ -116,7 +119,18 @@ class MainActivity : ComponentActivity() {
                         .semantics { testTagsAsResourceId = true },
                     color = Hirsel.Background,
                 ) {
-                    if (previewScreen != null) DesignPreview(previewScreen) else HirselRoot()
+                    val livePairing = remember(pairTicket, pairCode) {
+                        if (pairTicket != null && pairCode != null) {
+                            runCatching {
+                                ConnectionSpec.Pairing(pairTicket, pairCode, pairLabel, generateIrohIdentity())
+                            }.getOrNull()
+                        } else null
+                    }
+                    when {
+                        livePairing != null -> HirselRoot(initialPairing = livePairing)
+                        previewScreen != null -> DesignPreview(previewScreen)
+                        else -> HirselRoot()
+                    }
                 }
             }
         }
@@ -133,11 +147,11 @@ class MainActivity : ComponentActivity() {
  * same pinned NodeId.
  */
 @Composable
-private fun HirselRoot() {
+private fun HirselRoot(initialPairing: ConnectionSpec.Pairing? = null) {
     val context = LocalContext.current
     val store = remember { TokenStore(context) }
-    var credential by remember { mutableStateOf(store.load()) }
-    var pairingSpec by remember { mutableStateOf<ConnectionSpec.Pairing?>(null) }
+    var credential by remember { mutableStateOf(if (initialPairing != null) null else store.load()) }
+    var pairingSpec by remember { mutableStateOf(initialPairing) }
 
     // A live pairing session wins over any stored credential so the freshly
     // authenticated connection carries straight through into chat.
@@ -368,6 +382,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, previewError: 
             testTag = "paste-link-field",
             singleLine = false,
             mono = true,
+            isError = error != null,
             imeAction = ImeAction.Go,
             onImeAction = { submit(pasted) },
         )
@@ -488,8 +503,16 @@ private fun PairingProgress(
                         .widthIn(max = 300.dp)
                         .testTag("pair-status"),
                 )
-                Spacer(Modifier.height(10.dp))
-                Text(label, style = microLabel(), color = Hirsel.MutedForeground.copy(alpha = 0.8f))
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    label,
+                    fontSize = 12.sp,
+                    color = Hirsel.MutedForeground.copy(alpha = 0.55f),
+                )
+                Spacer(Modifier.height(28.dp))
+                TextButton(onClick = onCancel, modifier = Modifier.testTag("pair-cancel")) {
+                    Text("Cancel", color = Hirsel.MutedForeground, fontSize = 13.sp)
+                }
             }
         }
     }
@@ -655,7 +678,7 @@ private fun UnpairConfirm(label: String, onConfirm: () -> Unit, onDismiss: () ->
                 .padding(20.dp),
         ) {
             Text(
-                "Forget this device?",
+                "Unpair this device?",
                 fontWeight = FontWeight.SemiBold,
                 color = Hirsel.Foreground,
                 fontSize = 16.sp,
@@ -672,7 +695,7 @@ private fun UnpairConfirm(label: String, onConfirm: () -> Unit, onDismiss: () ->
                 TextButton(onClick = onDismiss) { Text("Cancel", color = Hirsel.MutedForeground) }
                 Spacer(Modifier.width(6.dp))
                 TextButton(onClick = onConfirm, modifier = Modifier.testTag("unpair-confirm")) {
-                    Text("Forget", color = Hirsel.StatusDanger, fontWeight = FontWeight.SemiBold)
+                    Text("Unpair", color = Hirsel.StatusDanger, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -773,8 +796,6 @@ private fun ChatPlaceholder(connecting: Boolean) {
             Spacer(Modifier.height(16.dp))
             Text("Connecting over iroh…", color = Hirsel.MutedForeground, fontSize = 13.sp)
         } else {
-            StatusDot(Hirsel.StatusIdle, size = 8)
-            Spacer(Modifier.height(14.dp))
             Text("No messages yet", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = Hirsel.Foreground)
             Spacer(Modifier.height(6.dp))
             Text(
@@ -896,6 +917,7 @@ private fun HirselField(
     testTag: String,
     singleLine: Boolean,
     mono: Boolean = false,
+    isError: Boolean = false,
     imeAction: ImeAction = ImeAction.Default,
     onImeAction: (() -> Unit)? = null,
     contentDescription: String? = null,
@@ -903,7 +925,15 @@ private fun HirselField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        placeholder = { Text(placeholder, color = Hirsel.MutedForeground.copy(alpha = 0.7f), fontSize = if (mono) 12.sp else 14.sp) },
+        placeholder = {
+            Text(
+                placeholder,
+                color = Hirsel.MutedForeground.copy(alpha = 0.7f),
+                fontSize = if (mono) 12.sp else 14.sp,
+                fontFamily = if (mono) HirselMono else androidx.compose.ui.text.font.FontFamily.Default,
+            )
+        },
+        isError = isError,
         singleLine = singleLine,
         maxLines = if (singleLine) 1 else 3,
         textStyle = androidx.compose.material3.MaterialTheme.typography.bodyMedium.copy(
@@ -920,11 +950,15 @@ private fun HirselField(
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Hirsel.AccentRing,
             unfocusedBorderColor = Hirsel.InputBorder,
+            errorBorderColor = Hirsel.StatusDanger,
+            errorCursorColor = Hirsel.StatusDanger,
             focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
             unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+            errorContainerColor = androidx.compose.ui.graphics.Color.Transparent,
             cursorColor = Hirsel.AccentRing,
             focusedTextColor = Hirsel.Foreground,
             unfocusedTextColor = Hirsel.Foreground,
+            errorTextColor = Hirsel.Foreground,
         ),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier

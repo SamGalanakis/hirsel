@@ -705,6 +705,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_disconnect(
     ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_issued_device_token(
+    ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_register_push_token(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_send_message(
@@ -712,6 +714,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_hirsel_client_ffi_checksum_method_client_snapshot(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_constructor_client_new(
+    ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh(
+    ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh_pairing(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_clientobserver_on_state_changed(
     ): Int
@@ -742,11 +748,17 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_hirsel_client_ffi_fn_constructor_client_new(`host`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(`ticket`: RustBuffer.ByValue,`deviceToken`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`deviceLabel`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_hirsel_client_ffi_fn_method_client_send_message(`ptr`: Long,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -879,6 +891,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_disconnect() != 57486) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_issued_device_token() != 11286) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_register_push_token() != 11929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -889,6 +904,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new() != 16526) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh() != 27940) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh_pairing() != 56513) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_clientobserver_on_state_changed() != 12455) {
@@ -1313,8 +1334,16 @@ public interface ClientInterface {
     
     fun `disconnect`()
     
+    /**
+     * Returns the device token issued by a successful pairing handshake.
+     *
+     * Pairing clients should persist this value after reaching `Online`, then
+     * use `new_iroh` for later connections.
+     */
+    fun `issuedDeviceToken`(): kotlin.String?
+    
     fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
-
+    
     fun `sendMessage`(`body`: kotlin.String): SendReceipt
     
     fun `snapshot`(): ClientSnapshot
@@ -1460,20 +1489,39 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     
     
 
+    
+    /**
+     * Returns the device token issued by a successful pairing handshake.
+     *
+     * Pairing clients should persist this value after reaching `Online`, then
+     * use `new_iroh` for later connections.
+     */override fun `issuedDeviceToken`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(ClientException::class)override fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
-        =
+        = 
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_register_push_token(
         it,
-
+        
         FfiConverterString.lower(`platform`),
         FfiConverterString.lower(`token`),_status)
 }
     }
-
-
+    
+    
 
     override fun `sendMessage`(`body`: kotlin.String): SendReceipt {
             return FfiConverterTypeSendReceipt.lift(
@@ -1508,11 +1556,46 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
 
     
-    
+    companion object {
+        
     /**
-     * @suppress
+     * Creates an iroh client authenticated by a previously issued device token.
      */
-    companion object
+    @Throws(ClientException::class) fun `newIroh`(`ticket`: kotlin.String, `deviceToken`: kotlin.String, `observer`: ClientObserver): Client {
+            return FfiConverterTypeClient.lift(
+    uniffiRustCallWithError(ClientException) { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(
+    
+        
+        FfiConverterString.lower(`ticket`),
+        FfiConverterString.lower(`deviceToken`),
+        FfiConverterTypeClientObserver.lower(`observer`),_status)
+}
+    )
+    }
+    
+
+        
+    /**
+     * Creates an iroh client that redeems a one-time pairing code.
+     */
+    @Throws(ClientException::class) fun `newIrohPairing`(`ticket`: kotlin.String, `code`: kotlin.String, `deviceLabel`: kotlin.String, `observer`: ClientObserver): Client {
+            return FfiConverterTypeClient.lift(
+    uniffiRustCallWithError(ClientException) { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(
+    
+        
+        FfiConverterString.lower(`ticket`),
+        FfiConverterString.lower(`code`),
+        FfiConverterString.lower(`deviceLabel`),
+        FfiConverterTypeClientObserver.lower(`observer`),_status)
+}
+    )
+    }
+    
+
+        
+    }
     
 }
 
@@ -2028,19 +2111,19 @@ sealed class ClientException: kotlin.Exception() {
     }
     
     class UnsupportedPushPlatform(
-
+        
         val `platform`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "platform=${ `platform` }"
     }
-
+    
     class EmptyPushToken(
         ) : ClientException() {
         override val message
             get() = ""
     }
-
+    
     class Runtime(
         
         val `detail`: kotlin.String

@@ -65,9 +65,11 @@ function NavItem(props: {
 export function NavRail() {
   return (
     <div class="hidden w-[224px] shrink-0 flex-col border-r border-border bg-background rail:flex">
-      {/* Brand block — the wordmark on the same ~h-14/px baseline as the panes,
-          kept quiet (reuses the title type). */}
-      <div class="flex h-14 flex-shrink-0 items-center px-4">
+      {/* Brand block — the wordmark on the shared desktop top-bar baseline (h-12,
+          same as the center chat header and the Pings/inspector pane headers), so
+          one continuous top hairline runs across all three panes. Kept quiet
+          (reuses the title type). */}
+      <div class="flex h-12 flex-shrink-0 items-center border-b border-border px-4">
         <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
       </div>
 
@@ -125,10 +127,17 @@ export function NavRail() {
           }}
           badge={
             <Show when={processCount() > 0}>
+              {/* Tint-chip vocabulary (not a solid saturated disc): a pulsing
+                  status-active dot + a muted-strength count on a 15% tint. Only
+                  the requires-response Inbox badge is ever loud/solid. */}
               <span
                 data-slot="nav-processes-badge"
-                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-status-active px-1 text-[0.65rem] font-bold text-primary-foreground"
+                class="ml-auto flex h-4 shrink-0 items-center gap-1 rounded-full bg-status-active/15 px-1.5 text-[0.62rem] font-semibold text-status-active"
               >
+                <span
+                  class="size-1.5 shrink-0 rounded-full bg-status-active motion-safe:animate-pulse"
+                  aria-hidden="true"
+                />
                 {clamp99(processCount())}
               </span>
             </Show>

@@ -99,18 +99,21 @@ describe("Desktop shell: the standing Pings rail", () => {
     expect(within(rail).getByText("Approve the deploy to prod?")).toBeTruthy();
   });
 
-  it("carries a badge with parity to the phone shelf", async () => {
+  it("carries a muted rail badge with count parity to the phone shelf", async () => {
     await setup();
     const railBadge = document.querySelector('[data-slot="pings-rail-badge"]') as HTMLElement;
     const shelfBadge = document.querySelector('[data-slot="tray-shelf-badge"]') as HTMLElement;
     expect(railBadge).toBeTruthy();
     expect(shelfBadge).toBeTruthy();
-    // Same count and same danger tone (one open requires_response item) — both
-    // derive from openUnreadCount / hasOpenRequiresResponse, so parity holds by
-    // construction; this pins it.
+    // Same COUNT (one open requires_response item) — both derive from
+    // openUnreadCount, so the number holds parity by construction.
     expect(railBadge.textContent).toBe("1");
     expect(shelfBadge.textContent).toBe("1");
-    expect(railBadge.className).toContain("bg-status-danger");
+    // One-Escalation: the rail header count is NEVER the interrupt red — on
+    // desktop the single sanctioned red is the nav Inbox badge (asserted in the
+    // nav-rail suite). The phone shelf keeps danger tone as the phone's one red.
+    expect(railBadge.className).toContain("bg-muted-foreground");
+    expect(railBadge.className).not.toContain("bg-status-danger");
     expect(shelfBadge.className).toContain("bg-status-danger");
   });
 

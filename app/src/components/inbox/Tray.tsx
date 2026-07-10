@@ -128,16 +128,16 @@ export function TrayShelf() {
   );
 }
 
-/** Shared badge chip (shelf + rail), so the count and the danger tone are
- * identical across every Pings surface by construction. The desktop NavRail's
- * Inbox badge reuses the same selectors, so it stays in parity too. */
+/** The standing Pings rail's header count. Same count selector as the shelf, so
+ * the number stays in parity — but this badge is ALWAYS the muted tone, never
+ * red: on desktop the ONE sanctioned interrupt red is the nav rail's Inbox badge
+ * (the One-Escalation Rule), so the rail header must not multiply it. */
 function PingsBadge(props: { slot?: string }) {
   return (
     <Show when={badgeCount() > 0}>
       <span
         data-slot={props.slot}
-        class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
-        classList={{ "bg-status-danger": danger(), "bg-muted-foreground": !danger() }}
+        class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
       >
         {badgeLabel()}
       </span>
@@ -160,7 +160,9 @@ export function PingsRail() {
         class="hidden min-h-0 w-[360px] shrink-0 flex-col border-l border-border bg-background rail:flex"
         aria-label="Pings"
       >
-        <div class="flex h-10 flex-shrink-0 items-center gap-2 border-b border-border px-3">
+        {/* h-12 to match the nav-rail brand block + the center chat header, so
+            one continuous top hairline runs across all three desktop panes. */}
+        <div class="flex h-12 flex-shrink-0 items-center gap-2 border-b border-border px-3">
           <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Pings</span>
           <Show when={thinking()}>

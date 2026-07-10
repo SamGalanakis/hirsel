@@ -49,3 +49,9 @@ local.properties
 captures/
 .cxx/
 **/.externalNativeBuild/
+
+# Firebase secrets — never commit
+**/google-services.json
+**/*service-account*.json
+**/fcm-*service*.json
+GoogleService-Info.plist

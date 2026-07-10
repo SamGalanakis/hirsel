@@ -5,7 +5,7 @@ use std::{
 
 use hirsel_client_core::{
     Client, ClientConfig, ClientObserver, ClientSnapshot, ConnectionState, LifecycleEvent,
-    ReconnectPolicy, SendMessageRequest,
+    ReconnectPolicy, SendMessageRequest, generate_iroh_identity,
 };
 use hirsel_host::{
     build_state,
@@ -69,6 +69,7 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
         server.ticket().to_owned(),
         pairing_code.clone(),
         "Owner phone".to_owned(),
+        generate_iroh_identity(),
     );
     client_config.reconnect = ReconnectPolicy {
         initial_delay_ms: 50,
@@ -212,13 +213,18 @@ async fn pairing_tokens_authenticate_and_reject_invalid_reuse_or_identity() {
 }
 
 fn pairing_client(ticket: &str, code: String, label: &str, reconnect: ReconnectPolicy) -> Client {
-    let mut config = ClientConfig::new_iroh_pairing(ticket.to_owned(), code, label.to_owned());
+    let mut config = ClientConfig::new_iroh_pairing(
+        ticket.to_owned(),
+        code,
+        label.to_owned(),
+        generate_iroh_identity(),
+    );
     config.reconnect = reconnect;
     Client::new(config).unwrap()
 }
 
 fn device_client(ticket: &str, token: String, reconnect: ReconnectPolicy) -> Client {
-    let mut config = ClientConfig::new_iroh(ticket.to_owned(), token);
+    let mut config = ClientConfig::new_iroh(ticket.to_owned(), token, generate_iroh_identity());
     config.reconnect = reconnect;
     Client::new(config).unwrap()
 }

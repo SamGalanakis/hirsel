@@ -7,12 +7,14 @@
 
 mod client;
 mod config;
+mod identity;
 mod observer;
 mod store;
 mod transport;
 
 pub use client::{Client, ClientError, SendMessageRequest, SendReceipt};
 pub use config::{ClientConfig, ConfigError, ReconnectPolicy};
+pub use identity::generate_iroh_identity;
 pub use observer::{ClientObserver, LifecycleEvent};
 pub use store::{AgentActivity, ChatEntry, ClientSnapshot, ConnectionState};
 

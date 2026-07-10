@@ -112,7 +112,7 @@
   ],
   "narrative": {
     "northStar": "The Quiet Instrument",
-    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default and dark by commitment; the light token theme is carried for parity but never shipped. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width (rails and a Slack-style split). Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
+    "overview": "hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default — dark is the brand's resting state — but light now ships as a first-class, user-selectable peer (System / Light / Dark, default System) built from the same canonical tokens and held to the same bar. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. Density is a feature, not a compromise; the same information presents at phone width (a single ~560px column with shelves and sheets) and desktop width (rails and a Slack-style split). Monospace earns its place and only its place: tool names, commands, ids, and keyboard hints. Motion is restrained to state changes and honors prefers-reduced-motion.",
     "keyCharacteristics": [
       "Dark-only, near-black base (oklch(0.141)) with hairline white/10 borders doing the structural work.",
       "One brand accent — a muted indigo (oklch(0.55 0.13 264)) — reserved for interaction and 'attend to this.'",
@@ -128,7 +128,7 @@
       { "name": "The Hairline-First Rule", "body": "Reach for a white/10 border before a shadow. Separation between siblings on the same plane is always a 1px hairline. A shadow means 'this floats above everything,' and most things do not float.", "section": "elevation" }
     ],
     "dos": [
-      "Do stay dark. The canvas is near-black oklch(0.141); raised surfaces step up one tone to card/secondary. Ship dark; the light theme exists only for token parity.",
+      "Do treat dark as the resting state. The canvas is near-black oklch(0.141); raised surfaces step up one tone to card/secondary. Light is a shipped, user-selectable peer (System default) from the same tokens — off-white canvas (never pure white), white-paper cards, dark-ink hairlines at 10% mirroring dark's white/10% — held to the same bar, not an afterthought.",
       "Do separate siblings with a white/10 hairline border first, and a foreground/10 ring on cards — reach for a shadow only when an element genuinely floats.",
       "Do keep indigo (--primary) rare and meaningful: interaction and 'attend to this,' nothing decorative.",
       "Do reserve monospace for machine tokens and keep all prose in Inter.",

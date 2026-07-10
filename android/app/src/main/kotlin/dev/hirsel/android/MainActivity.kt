@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -29,8 +30,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -50,14 +56,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -71,13 +82,16 @@ import dev.hirsel.android.pairing.PairingLinkResult
 import dev.hirsel.android.pairing.TokenStore
 import dev.hirsel.android.pairing.parsePairingLink
 import dev.hirsel.android.pairing.rememberConnection
-import dev.hirsel.android.ui.Hirsel
+import dev.hirsel.android.settings.SettingsStore
+import dev.hirsel.android.ui.LocalHirselColors
+import dev.hirsel.android.ui.ThemeMode
 import dev.hirsel.android.ui.HirselMono
 import dev.hirsel.android.ui.HirselTheme
 import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ClientSnapshot
 import dev.hirsel.core.Ping
+import dev.hirsel.core.PingStatus
 import dev.hirsel.core.generateIrohIdentity
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlin.coroutines.resume
@@ -93,15 +107,23 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        val settings = SettingsStore(this)
         setContent {
-            HirselTheme {
+            // Read synchronously from prefs so the chosen scheme is set before the
+            // first paint — no light/dark flash on cold start.
+            var themeMode by remember { mutableStateOf(settings.themeMode) }
+            HirselTheme(themeMode) {
                 Surface(
                     modifier = Modifier
                         .fillMaxSize()
                         .semantics { testTagsAsResourceId = true },
-                    color = Hirsel.Background,
+                    color = LocalHirselColors.current.Background,
                 ) {
-                    HirselRoot()
+                    HirselRoot(
+                        settings = settings,
+                        themeMode = themeMode,
+                        onThemeModeChange = { themeMode = it; settings.themeMode = it },
+                    )
                 }
             }
         }
@@ -118,19 +140,30 @@ class MainActivity : ComponentActivity() {
  * same pinned NodeId.
  */
 @Composable
-private fun HirselRoot() {
+private fun HirselRoot(
+    settings: SettingsStore,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+) {
     val context = LocalContext.current
     val store = remember { TokenStore(context) }
     var credential by remember { mutableStateOf(store.load()) }
     var pairingSpec by remember { mutableStateOf<ConnectionSpec.Pairing?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
+    // "Pair a new device" re-enters the scan flow even though a device is already
+    // paired; a successful pairing replaces this device's credential.
+    var addingDevice by remember { mutableStateOf(false) }
 
     // A live pairing session wins over any stored credential so the freshly
     // authenticated connection carries straight through into chat.
     val activeSpec: ConnectionSpec? = pairingSpec
         ?: credential?.let { ConnectionSpec.Device(it) }
 
-    if (activeSpec == null) {
-        PairEntry(onSubmit = { pairingSpec = it })
+    if (activeSpec == null || addingDevice) {
+        PairEntry(
+            onSubmit = { pairingSpec = it; addingDevice = false },
+            onBack = if (addingDevice) ({ addingDevice = false }) else null,
+        )
         return
     }
 
@@ -160,9 +193,10 @@ private fun HirselRoot() {
         }
     }
 
-    // Best-effort FCM registration once the transport is up (Ping push tokens).
+    // Best-effort FCM registration once the transport is up (Ping push tokens),
+    // gated on the user's push preference.
     LaunchedEffect(connection.isOnline) {
-        if (!connection.isOnline) return@LaunchedEffect
+        if (!connection.isOnline || !settings.pushEnabled) return@LaunchedEffect
         runCatching {
             val token = fetchFcmToken()
             Log.i(FCM_LOG_TAG, "FCM token fetched: ${token.take(16)}…")
@@ -171,26 +205,59 @@ private fun HirselRoot() {
         }.onFailure { Log.e(FCM_LOG_TAG, "FCM token registration failed", it) }
     }
 
-    val unpair = {
+    val forget = {
         store.clear()
         credential = null
         pairingSpec = null
+        showSettings = false
     }
 
-    // While a fresh pairing is still handshaking (and no token yet), show progress;
-    // otherwise render chat over the authenticated connection.
-    if (activeSpec is ConnectionSpec.Pairing && credential == null) {
-        PairingProgress(connection = connection, label = activeSpec.label, onCancel = { pairingSpec = null })
-    } else {
-        ChatScreen(
-            snapshot = connection.snapshot,
-            phase = connection.phase,
-            label = credential?.deviceLabel ?: (activeSpec as? ConnectionSpec.Pairing)?.label.orEmpty(),
-            onSend = connection::send,
-            onUnpair = unpair,
-        )
+    val activeLabel = credential?.deviceLabel
+        ?: (activeSpec as? ConnectionSpec.Pairing)?.label.orEmpty()
+
+    when {
+        // While a fresh pairing is still handshaking (and no token yet), show progress.
+        activeSpec is ConnectionSpec.Pairing && credential == null ->
+            PairingProgress(phase = connection.phase, label = activeSpec.label, onCancel = { pairingSpec = null })
+
+        showSettings ->
+            SettingsScreen(
+                themeMode = themeMode,
+                onThemeModeChange = onThemeModeChange,
+                settings = settings,
+                phase = connection.phase,
+                deviceLabel = activeLabel,
+                identitySecret = credential?.irohSecretKey,
+                appVersion = appVersionLabel(context),
+                onBack = { showSettings = false },
+                onRename = { newLabel ->
+                    credential?.let { current ->
+                        val updated = current.copy(deviceLabel = newLabel)
+                        store.save(updated)
+                        credential = updated
+                    }
+                },
+                onForget = forget,
+                onResetIdentity = forget,
+                onPairNew = { showSettings = false; addingDevice = true },
+            )
+
+        else ->
+            ChatScreen(
+                snapshot = connection.snapshot,
+                phase = connection.phase,
+                onSend = connection::send,
+                onOpenSettings = { showSettings = true },
+            )
     }
 }
+
+/** Human app version + build, e.g. "0.1 (1)", read from the package manager. */
+private fun appVersionLabel(context: android.content.Context): String = runCatching {
+    val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
+    val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode else pkg.versionCode.toLong()
+    "${pkg.versionName} ($code)"
+}.getOrDefault("unknown")
 
 // ---------------------------------------------------------------------------
 // Onboarding
@@ -202,7 +269,7 @@ private fun defaultDeviceLabel(): String {
 }
 
 @Composable
-private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
+private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
     var label by remember { mutableStateOf(defaultDeviceLabel()) }
     var pasted by remember { mutableStateOf("") }
@@ -257,21 +324,36 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 20.dp),
     ) {
-        Text("hirsel", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, color = Hirsel.Foreground)
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(8.dp))
+        if (onBack != null) {
+            TextButton(
+                onClick = onBack,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                modifier = Modifier.testTag("pair-back"),
+            ) {
+                Text("‹  Back", color = LocalHirselColors.current.MutedForeground, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(6.dp))
+        }
         Text(
-            "Pair with your host",
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Hirsel.Foreground,
+            "hirsel",
+            style = microLabel(),
+            color = LocalHirselColors.current.MutedForeground,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            if (onBack != null) "Pair a new device" else "Pair with your host",
+            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+            color = LocalHirselColors.current.Foreground,
+        )
+        Spacer(Modifier.height(6.dp))
         Text(
             "Point the camera at the pairing QR on your host, or paste its link.",
             fontSize = 13.sp,
-            color = Hirsel.MutedForeground,
+            lineHeight = 19.sp,
+            color = LocalHirselColors.current.MutedForeground,
         )
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(20.dp))
 
         // Scanner viewport — signature affordance of the scan-first flow.
         Box(
@@ -279,8 +361,8 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(14.dp))
-                .background(Hirsel.Card, RoundedCornerShape(14.dp))
-                .border(1.dp, Hirsel.Border, RoundedCornerShape(14.dp))
+                .background(LocalHirselColors.current.Card, RoundedCornerShape(14.dp))
+                .border(1.dp, LocalHirselColors.current.Border, RoundedCornerShape(14.dp))
                 .testTag("scanner-preview"),
             contentAlignment = Alignment.Center,
         ) {
@@ -302,22 +384,22 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
                 ) {
                     Text(
                         "Camera off",
-                        color = Hirsel.Foreground,
+                        color = LocalHirselColors.current.Foreground,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "Grant camera access to scan, or paste the link below.",
-                        color = Hirsel.MutedForeground,
+                        color = LocalHirselColors.current.MutedForeground,
                         fontSize = 12.sp,
                     )
                     Spacer(Modifier.height(12.dp))
                     TextButton(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                        Text("Enable camera", color = Hirsel.AccentRing)
+                        Text("Enable camera", color = LocalHirselColors.current.AccentRing)
                     }
                 }
-                else -> CircularProgressIndicator(color = Hirsel.AccentRing, modifier = Modifier.size(28.dp))
+                else -> CircularProgressIndicator(color = LocalHirselColors.current.AccentRing, modifier = Modifier.size(28.dp))
             }
         }
 
@@ -325,7 +407,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
         HairlineDivider(label = "or paste a link")
         Spacer(Modifier.height(16.dp))
 
-        Text("This device", style = microLabel(), color = Hirsel.MutedForeground)
+        Text("This device", style = microLabel(), color = LocalHirselColors.current.MutedForeground)
         Spacer(Modifier.height(6.dp))
         HirselField(
             value = label,
@@ -336,7 +418,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
         )
 
         Spacer(Modifier.height(14.dp))
-        Text("Pairing link", style = microLabel(), color = Hirsel.MutedForeground)
+        Text("Pairing link", style = microLabel(), color = LocalHirselColors.current.MutedForeground)
         Spacer(Modifier.height(6.dp))
         HirselField(
             value = pasted,
@@ -348,6 +430,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
             testTag = "paste-link-field",
             singleLine = false,
             mono = true,
+            isError = error != null,
             imeAction = ImeAction.Go,
             onImeAction = { submit(pasted) },
         )
@@ -356,7 +439,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
             Spacer(Modifier.height(8.dp))
             Text(
                 error!!,
-                color = Hirsel.StatusDanger,
+                color = LocalHirselColors.current.StatusDanger,
                 fontSize = 12.sp,
                 modifier = Modifier.testTag("link-error"),
             )
@@ -367,10 +450,10 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
             onClick = { submit(pasted) },
             enabled = pasted.isNotBlank(),
             colors = ButtonDefaults.buttonColors(
-                containerColor = Hirsel.Accent,
-                contentColor = Hirsel.Foreground,
-                disabledContainerColor = Hirsel.Secondary,
-                disabledContentColor = Hirsel.MutedForeground,
+                containerColor = LocalHirselColors.current.Accent,
+                contentColor = LocalHirselColors.current.OnAccent,
+                disabledContainerColor = LocalHirselColors.current.Secondary,
+                disabledContentColor = LocalHirselColors.current.MutedForeground,
             ),
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier
@@ -386,28 +469,35 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit) {
 
 @Composable
 private fun ScannerReticle() {
-    Box(
+    // Four L-shaped corner brackets read as "scanner" without boxing in the frame.
+    val stroke = LocalHirselColors.current.Foreground.copy(alpha = 0.85f)
+    Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .padding(40.dp),
-        contentAlignment = Alignment.Center,
+            .padding(44.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .border(2.dp, Hirsel.Foreground.copy(alpha = 0.65f), RoundedCornerShape(12.dp)),
-        )
+        val len = size.minDimension * 0.14f
+        val w = 2.5.dp.toPx()
+        val r = 12.dp.toPx()
+        val cap = androidx.compose.ui.graphics.StrokeCap.Round
+        fun corner(cx: Float, cy: Float, sx: Int, sy: Int) {
+            // Horizontal + vertical arm meeting near the corner, inset by the radius.
+            drawLine(stroke, Offset(cx + sx * r, cy), Offset(cx + sx * (r + len), cy), w, cap)
+            drawLine(stroke, Offset(cx, cy + sy * r), Offset(cx, cy + sy * (r + len)), w, cap)
+        }
+        corner(0f, 0f, 1, 1)
+        corner(size.width, 0f, -1, 1)
+        corner(0f, size.height, 1, -1)
+        corner(size.width, size.height, -1, -1)
     }
 }
 
 @Composable
 private fun PairingProgress(
-    connection: Connection,
+    phase: Phase,
     label: String,
     onCancel: () -> Unit,
 ) {
-    val phase = connection.phase
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -422,26 +512,31 @@ private fun PairingProgress(
                 val detail = (phase as? Phase.Failed)?.detail
                     ?: (phase as? Phase.Offline)?.reason
                     ?: "The host didn't answer."
-                StatusDot(Hirsel.StatusDanger)
+                StatusDot(LocalHirselColors.current.StatusDanger)
                 Spacer(Modifier.height(14.dp))
-                Text("Pairing failed", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = Hirsel.Foreground)
-                Spacer(Modifier.height(6.dp))
+                Text("Pairing failed", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = LocalHirselColors.current.Foreground)
+                Spacer(Modifier.height(8.dp))
                 Text(
                     friendlyPairError(detail),
-                    color = Hirsel.MutedForeground,
+                    color = LocalHirselColors.current.MutedForeground,
                     fontSize = 13.sp,
-                    modifier = Modifier.testTag("pair-status"),
+                    lineHeight = 20.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .testTag("pair-status"),
                 )
-                Spacer(Modifier.height(22.dp))
+                Spacer(Modifier.height(24.dp))
                 Button(
                     onClick = onCancel,
-                    colors = ButtonDefaults.buttonColors(containerColor = Hirsel.Accent, contentColor = Hirsel.Foreground),
+                    colors = ButtonDefaults.buttonColors(containerColor = LocalHirselColors.current.Accent, contentColor = LocalHirselColors.current.OnAccent),
                     shape = RoundedCornerShape(8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp),
                     modifier = Modifier.height(48.dp).testTag("pair-retry"),
                 ) { Text("Try another link", fontWeight = FontWeight.SemiBold) }
             }
             else -> {
-                CircularProgressIndicator(color = Hirsel.AccentRing, modifier = Modifier.size(30.dp))
+                CircularProgressIndicator(color = LocalHirselColors.current.AccentRing, modifier = Modifier.size(30.dp))
                 Spacer(Modifier.height(18.dp))
                 val text = when (phase) {
                     is Phase.Reconnecting -> "Reconnecting to your host…"
@@ -449,12 +544,23 @@ private fun PairingProgress(
                 }
                 Text(
                     text,
-                    color = Hirsel.MutedForeground,
+                    color = LocalHirselColors.current.MutedForeground,
                     fontSize = 13.sp,
-                    modifier = Modifier.testTag("pair-status"),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .testTag("pair-status"),
                 )
-                Spacer(Modifier.height(8.dp))
-                Text(label, style = microLabel(), color = Hirsel.MutedForeground)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    label,
+                    fontSize = 12.sp,
+                    color = LocalHirselColors.current.MutedForeground.copy(alpha = 0.55f),
+                )
+                Spacer(Modifier.height(28.dp))
+                TextButton(onClick = onCancel, modifier = Modifier.testTag("pair-cancel")) {
+                    Text("Cancel", color = LocalHirselColors.current.MutedForeground, fontSize = 13.sp)
+                }
             }
         }
     }
@@ -476,12 +582,10 @@ private fun friendlyPairError(detail: String): String = when {
 private fun ChatScreen(
     snapshot: ClientSnapshot?,
     phase: Phase,
-    label: String,
     onSend: (String) -> Unit,
-    onUnpair: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
-    var confirmUnpair by remember { mutableStateOf(false) }
     val pings = snapshot?.pings.orEmpty()
     val send = {
         draft.trim().takeIf(String::isNotEmpty)?.let {
@@ -504,49 +608,60 @@ private fun ChatScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("hirsel", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Hirsel.Foreground)
+            Text("hirsel", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = LocalHirselColors.current.Foreground)
             Spacer(Modifier.weight(1f))
             ConnectionPill(phase)
-            Spacer(Modifier.width(8.dp))
-            TextButton(
-                onClick = { confirmUnpair = true },
-                modifier = Modifier.testTag("unpair"),
-            ) { Text("Unpair", color = Hirsel.MutedForeground, fontSize = 13.sp) }
-        }
-
-        if (confirmUnpair) {
-            Spacer(Modifier.height(8.dp))
-            UnpairConfirm(label = label, onConfirm = onUnpair, onDismiss = { confirmUnpair = false })
+            Spacer(Modifier.width(6.dp))
+            GearButton(onClick = onOpenSettings)
         }
 
         Spacer(Modifier.height(10.dp))
         HairlineDivider()
         Spacer(Modifier.height(10.dp))
 
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .testTag("chat-list"),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (snapshot == null) {
-                item { EmptyLine("Connecting over iroh…") }
-            } else if (snapshot.messages.isEmpty()) {
-                item { EmptyLine("No messages yet.") }
+        val messages = snapshot?.messages.orEmpty()
+        val hasContent = messages.isNotEmpty() || pings.isNotEmpty()
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            if (!hasContent) {
+                val connecting = snapshot == null || phase is Phase.Connecting || phase is Phase.Reconnecting
+                ChatPlaceholder(connecting = connecting)
             } else {
-                items(
-                    snapshot.messages,
-                    key = { "message-${it.id?.toString() ?: it.clientId.orEmpty()}" },
-                ) { MessageRow(it) }
-            }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("chat-list"),
+                ) {
+                    itemsIndexed(
+                        messages,
+                        key = { _, m -> "message-${m.id?.toString() ?: m.clientId.orEmpty()}" },
+                    ) { index, message ->
+                        val prev = messages.getOrNull(index - 1)
+                        val gap = when {
+                            prev == null -> 0.dp
+                            prev.author == message.author -> 3.dp
+                            else -> 12.dp
+                        }
+                        Spacer(Modifier.height(gap))
+                        MessageRow(message)
+                    }
 
-            if (pings.isNotEmpty()) {
-                item {
-                    Spacer(Modifier.height(4.dp))
-                    Text("Pings", style = microLabel(), color = Hirsel.MutedForeground)
+                    if (pings.isNotEmpty()) {
+                        item {
+                            Spacer(Modifier.height(if (messages.isEmpty()) 0.dp else 20.dp))
+                            Text(
+                                "Pings",
+                                style = microLabel(),
+                                color = LocalHirselColors.current.MutedForeground,
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                        }
+                        itemsIndexed(pings, key = { _, p -> "ping-${p.id}" }) { index, ping ->
+                            if (index > 0) Spacer(Modifier.height(8.dp))
+                            PingCard(ping)
+                        }
+                    }
+                    item { Spacer(Modifier.height(4.dp)) }
                 }
-                items(pings, key = { "ping-${it.id}" }) { PingCard(it) }
             }
         }
 
@@ -572,10 +687,10 @@ private fun ChatScreen(
                 onClick = send,
                 enabled = draft.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Hirsel.Accent,
-                    contentColor = Hirsel.Foreground,
-                    disabledContainerColor = Hirsel.Secondary,
-                    disabledContentColor = Hirsel.MutedForeground,
+                    containerColor = LocalHirselColors.current.Accent,
+                    contentColor = LocalHirselColors.current.OnAccent,
+                    disabledContainerColor = LocalHirselColors.current.Secondary,
+                    disabledContentColor = LocalHirselColors.current.MutedForeground,
                 ),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier
@@ -587,113 +702,253 @@ private fun ChatScreen(
     }
 }
 
+/**
+ * A focused destructive confirm on a dimmed scrim — the one place a real overlay
+ * is warranted. Reused for "forget device" and "reset identity" in Settings.
+ */
 @Composable
-private fun UnpairConfirm(label: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, Hirsel.Border, RoundedCornerShape(10.dp))
-            .background(Hirsel.Card, RoundedCornerShape(10.dp))
-            .padding(14.dp),
-    ) {
-        Text("Forget this device?", fontWeight = FontWeight.SemiBold, color = Hirsel.Foreground, fontSize = 14.sp)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Clears the stored token for “$label”. You'll need a new pairing link to reconnect.",
-            color = Hirsel.MutedForeground,
-            fontSize = 12.sp,
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            TextButton(onClick = onDismiss) { Text("Cancel", color = Hirsel.MutedForeground) }
-            Spacer(Modifier.width(6.dp))
-            TextButton(onClick = onConfirm, modifier = Modifier.testTag("unpair-confirm")) {
-                Text("Forget", color = Hirsel.StatusDanger, fontWeight = FontWeight.SemiBold)
+internal fun DestructiveConfirmDialog(
+    title: String,
+    body: String,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    confirmTestTag: String = "destructive-confirm",
+) {
+    val c = LocalHirselColors.current
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .shadow(24.dp, RoundedCornerShape(16.dp), clip = false)
+                .clip(RoundedCornerShape(16.dp))
+                .background(c.Card, RoundedCornerShape(16.dp))
+                .border(1.dp, c.Border, RoundedCornerShape(16.dp))
+                .padding(20.dp),
+        ) {
+            Text(title, fontWeight = FontWeight.SemiBold, color = c.Foreground, fontSize = 16.sp)
+            Spacer(Modifier.height(8.dp))
+            Text(body, color = c.MutedForeground, fontSize = 13.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = onDismiss) { Text("Cancel", color = c.MutedForeground) }
+                Spacer(Modifier.width(6.dp))
+                TextButton(
+                    onClick = { onConfirm(); onDismiss() },
+                    modifier = Modifier.testTag(confirmTestTag),
+                ) {
+                    Text(confirmLabel, color = c.StatusDanger, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
 }
 
+/** A quiet gear affordance in the chat top bar — the entry to Settings. */
 @Composable
-private fun ConnectionPill(phase: Phase) {
+private fun GearButton(onClick: () -> Unit) {
+    val c = LocalHirselColors.current
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .clickable(onClick = onClick)
+            .testTag("open-settings")
+            .semantics { contentDescription = "Settings" },
+        contentAlignment = Alignment.Center,
+    ) {
+        GearGlyph(color = c.MutedForeground, modifier = Modifier.size(19.dp))
+    }
+}
+
+/** Minimal 8-tooth gear drawn with Canvas (no icon-font dependency). */
+@Composable
+internal fun GearGlyph(color: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val outer = size.minDimension * 0.46f
+        val inner = size.minDimension * 0.34f
+        val hole = size.minDimension * 0.17f
+        val stroke = size.minDimension * 0.11f
+        // Teeth as short radial spokes.
+        for (i in 0 until 8) {
+            val a = Math.toRadians((i * 45).toDouble())
+            val sx = cx + (inner * Math.cos(a)).toFloat()
+            val sy = cy + (inner * Math.sin(a)).toFloat()
+            val ex = cx + (outer * Math.cos(a)).toFloat()
+            val ey = cy + (outer * Math.sin(a)).toFloat()
+            drawLine(color, Offset(sx, sy), Offset(ex, ey), stroke, androidx.compose.ui.graphics.StrokeCap.Round)
+        }
+        // Gear body ring.
+        drawCircle(color, radius = inner, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke))
+        // Hub punch-out (redraw hole via a filled circle in the surface... approximated with a thinner ring).
+        drawCircle(color, radius = hole, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke * 0.85f))
+    }
+}
+
+@Composable
+internal fun ConnectionPill(phase: Phase) {
     val (color, text) = when (phase) {
-        is Phase.Online -> Hirsel.StatusSuccess to "online"
-        is Phase.Connecting -> Hirsel.StatusAttention to "connecting"
-        is Phase.Reconnecting -> Hirsel.StatusAttention to "reconnecting"
-        is Phase.Offline -> Hirsel.StatusIdle to "offline"
-        is Phase.Failed -> Hirsel.StatusDanger to "error"
+        is Phase.Online -> LocalHirselColors.current.StatusSuccess to "online"
+        is Phase.Connecting -> LocalHirselColors.current.StatusAttention to "connecting"
+        is Phase.Reconnecting -> LocalHirselColors.current.StatusAttention to "reconnecting"
+        is Phase.Offline -> LocalHirselColors.current.StatusIdle to "offline"
+        is Phase.Failed -> LocalHirselColors.current.StatusDanger to "error"
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .background(Hirsel.Secondary, RoundedCornerShape(9999.dp))
+            .background(LocalHirselColors.current.Secondary, RoundedCornerShape(9999.dp))
             .padding(horizontal = 8.dp, vertical = 3.dp)
             .testTag("connection-status")
             .semantics { contentDescription = "Connection $text" },
     ) {
         StatusDot(color, size = 7)
         Spacer(Modifier.width(6.dp))
-        Text(text, color = Hirsel.MutedForeground, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        Text(text, color = LocalHirselColors.current.MutedForeground, fontSize = 11.sp, fontWeight = FontWeight.Medium)
     }
 }
 
 @Composable
 private fun MessageRow(message: ChatMessage) {
     val owner = message.author == ChatAuthor.OWNER
+    val time = shortTime(message.timestamp)
+    val metaColor = if (owner) LocalHirselColors.current.OnAccent.copy(alpha = 0.72f) else LocalHirselColors.current.MutedForeground
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (owner) Arrangement.End else Arrangement.Start,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.82f)
+                .fillMaxWidth(0.80f)
                 .background(
-                    if (owner) Hirsel.Accent else Hirsel.Secondary,
+                    if (owner) LocalHirselColors.current.Accent else LocalHirselColors.current.Secondary,
                     RoundedCornerShape(14.dp),
                 )
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(
                 message.body,
-                color = Hirsel.Foreground,
+                color = if (owner) LocalHirselColors.current.OnAccent else LocalHirselColors.current.Foreground,
                 fontSize = 14.sp,
+                lineHeight = 21.sp,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (owner && message.pending) {
-                Spacer(Modifier.height(2.dp))
-                Text("sending…", color = Hirsel.Foreground.copy(alpha = 0.7f), fontSize = 11.sp)
+            // Meta footer: "sending…" while pending, otherwise a quiet timestamp.
+            val footer = when {
+                owner && message.pending -> "sending…"
+                time != null -> time
+                else -> null
             }
+            if (footer != null) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    footer,
+                    color = metaColor,
+                    fontSize = 11.sp,
+                    modifier = Modifier.align(if (owner) Alignment.End else Alignment.Start),
+                )
+            }
+        }
+    }
+}
+
+/** Best-effort short HH:mm from an RFC3339/ISO timestamp; falls back to the raw
+ *  string when it is already short, or null when there is nothing legible. */
+private fun shortTime(raw: String): String? {
+    if (raw.isBlank()) return null
+    Regex("""T(\d{2}:\d{2})""").find(raw)?.let { return it.groupValues[1] }
+    Regex("""^(\d{1,2}:\d{2})""").find(raw)?.let { return it.groupValues[1] }
+    return raw.takeIf { it.length <= 8 }
+}
+
+@Composable
+private fun ChatPlaceholder(connecting: Boolean) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        if (connecting) {
+            CircularProgressIndicator(
+                color = LocalHirselColors.current.AccentRing,
+                strokeWidth = 2.5.dp,
+                modifier = Modifier.size(26.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("Connecting over iroh…", color = LocalHirselColors.current.MutedForeground, fontSize = 13.sp)
+        } else {
+            Text("No messages yet", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = LocalHirselColors.current.Foreground)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Send a message to your agent — it's listening.",
+                color = LocalHirselColors.current.MutedForeground,
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 280.dp),
+            )
         }
     }
 }
 
 @Composable
 private fun PingCard(ping: Ping) {
-    val requires = ping.requiresResponse
+    val done = ping.status == PingStatus.DONE
+    // Requires-response is the "attend to this" state: persistent indigo stripe,
+    // unread dot, and full-strength question text. A Done ping dims and drops it.
+    val requires = ping.requiresResponse && !done
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Hirsel.Card, RoundedCornerShape(14.dp))
-            .border(1.dp, Hirsel.Border, RoundedCornerShape(14.dp)),
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(14.dp))
+            .alpha(if (done) 0.6f else 1f)
+            .background(LocalHirselColors.current.Card, RoundedCornerShape(14.dp))
+            .border(1.dp, LocalHirselColors.current.Border, RoundedCornerShape(14.dp)),
     ) {
-        // Requires-response Pings carry a persistent indigo left stripe.
         Box(
             modifier = Modifier
                 .width(3.dp)
-                .height(48.dp)
-                .background(if (requires) Hirsel.Accent else androidx.compose.ui.graphics.Color.Transparent),
+                .fillMaxHeight()
+                .background(if (requires) LocalHirselColors.current.Accent else androidx.compose.ui.graphics.Color.Transparent),
         )
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                if (requires && !ping.read) {
+                    StatusDot(LocalHirselColors.current.Accent, size = 7)
+                    Spacer(Modifier.width(7.dp))
+                }
+                Text(
+                    "@${ping.name}",
+                    color = LocalHirselColors.current.Foreground,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    fontFamily = HirselMono,
+                    modifier = Modifier.testTag("ping-name"),
+                )
+                Spacer(Modifier.weight(1f))
+                if (done) {
+                    Text("✓", color = LocalHirselColors.current.StatusSuccess, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Done", style = microLabel(), color = LocalHirselColors.current.MutedForeground)
+                } else {
+                    shortTime(ping.timestamp)?.let {
+                        Text(it, color = LocalHirselColors.current.MutedForeground, fontSize = 11.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
             Text(
-                "@${ping.name}",
-                color = Hirsel.Foreground,
-                fontWeight = FontWeight.SemiBold,
+                ping.description,
+                color = if (requires) LocalHirselColors.current.Foreground else LocalHirselColors.current.MutedForeground,
+                fontWeight = if (requires) FontWeight.Medium else FontWeight.Normal,
                 fontSize = 13.sp,
-                fontFamily = HirselMono,
-                modifier = Modifier.testTag("ping-name"),
+                lineHeight = 20.sp,
             )
-            Spacer(Modifier.height(2.dp))
-            Text(ping.description, color = Hirsel.MutedForeground, fontSize = 13.sp)
         }
     }
 }
@@ -703,17 +958,12 @@ private fun PingCard(ping: Ping) {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun microLabel() = androidx.compose.material3.MaterialTheme.typography.labelMedium.copy(
+internal fun microLabel() = androidx.compose.material3.MaterialTheme.typography.labelMedium.copy(
     letterSpacing = 0.5.sp,
 )
 
 @Composable
-private fun EmptyLine(text: String) {
-    Text(text, color = Hirsel.MutedForeground, fontSize = 13.sp)
-}
-
-@Composable
-private fun StatusDot(color: androidx.compose.ui.graphics.Color, size: Int = 10) {
+internal fun StatusDot(color: androidx.compose.ui.graphics.Color, size: Int = 10) {
     Box(
         modifier = Modifier
             .size(size.dp)
@@ -722,36 +972,37 @@ private fun StatusDot(color: androidx.compose.ui.graphics.Color, size: Int = 10)
 }
 
 @Composable
-private fun HairlineDivider(label: String? = null) {
+internal fun HairlineDivider(label: String? = null) {
     if (label == null) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(1.dp)
-                .background(Hirsel.Border),
+                .background(LocalHirselColors.current.Border),
         )
     } else {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.weight(1f).height(1.dp).background(Hirsel.Border))
+            Box(modifier = Modifier.weight(1f).height(1.dp).background(LocalHirselColors.current.Border))
             Text(
                 label,
-                color = Hirsel.MutedForeground,
+                color = LocalHirselColors.current.MutedForeground,
                 fontSize = 11.sp,
                 modifier = Modifier.padding(horizontal = 10.dp),
             )
-            Box(modifier = Modifier.weight(1f).height(1.dp).background(Hirsel.Border))
+            Box(modifier = Modifier.weight(1f).height(1.dp).background(LocalHirselColors.current.Border))
         }
     }
 }
 
 @Composable
-private fun HirselField(
+internal fun HirselField(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,
     testTag: String,
     singleLine: Boolean,
     mono: Boolean = false,
+    isError: Boolean = false,
     imeAction: ImeAction = ImeAction.Default,
     onImeAction: (() -> Unit)? = null,
     contentDescription: String? = null,
@@ -759,11 +1010,19 @@ private fun HirselField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        placeholder = { Text(placeholder, color = Hirsel.MutedForeground.copy(alpha = 0.7f), fontSize = if (mono) 12.sp else 14.sp) },
+        placeholder = {
+            Text(
+                placeholder,
+                color = LocalHirselColors.current.MutedForeground.copy(alpha = 0.7f),
+                fontSize = if (mono) 12.sp else 14.sp,
+                fontFamily = if (mono) HirselMono else androidx.compose.ui.text.font.FontFamily.Default,
+            )
+        },
+        isError = isError,
         singleLine = singleLine,
         maxLines = if (singleLine) 1 else 3,
         textStyle = androidx.compose.material3.MaterialTheme.typography.bodyMedium.copy(
-            color = Hirsel.Foreground,
+            color = LocalHirselColors.current.Foreground,
             fontFamily = if (mono) HirselMono else androidx.compose.ui.text.font.FontFamily.Default,
             fontSize = if (mono) 12.sp else 14.sp,
         ),
@@ -774,13 +1033,17 @@ private fun HirselField(
             onDone = { onImeAction?.invoke() },
         ),
         colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Hirsel.AccentRing,
-            unfocusedBorderColor = Hirsel.InputBorder,
+            focusedBorderColor = LocalHirselColors.current.AccentRing,
+            unfocusedBorderColor = LocalHirselColors.current.InputBorder,
+            errorBorderColor = LocalHirselColors.current.StatusDanger,
+            errorCursorColor = LocalHirselColors.current.StatusDanger,
             focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
             unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-            cursorColor = Hirsel.AccentRing,
-            focusedTextColor = Hirsel.Foreground,
-            unfocusedTextColor = Hirsel.Foreground,
+            errorContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+            cursorColor = LocalHirselColors.current.AccentRing,
+            focusedTextColor = LocalHirselColors.current.Foreground,
+            unfocusedTextColor = LocalHirselColors.current.Foreground,
+            errorTextColor = LocalHirselColors.current.Foreground,
         ),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier

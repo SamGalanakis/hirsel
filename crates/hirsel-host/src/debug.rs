@@ -7,14 +7,15 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hirsel_proto::{Blob, ChatMessage, HostToClient, Ping, SendMode};
+use hirsel_proto::{Blob, ChatMessage, HostToClient, Ping, PushPlatform, SendMode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
-    storage::{MonitorRecord, MonitorWakeOn},
+    push::RecordedPush,
+    storage::{MonitorRecord, MonitorWakeOn, PushToken},
 };
 
 pub fn routes(state: AppState) -> Router {
@@ -29,6 +30,9 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/side-chats", get(side_chats))
         .route("/debug/read-ping", post(read_ping))
         .route("/debug/resolve-ping", post(resolve_ping))
+        .route("/debug/register-push-token", post(register_push_token))
+        .route("/debug/unregister-push-token", post(unregister_push_token))
+        .route("/debug/pushes", get(recorded_pushes))
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
         .route("/debug/create-monitor", post(create_monitor))
@@ -70,6 +74,17 @@ struct UploadBlobRequest {
 #[derive(Debug, Deserialize)]
 struct PingRequest {
     ping_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterPushTokenRequest {
+    platform: PushPlatform,
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UnregisterPushTokenRequest {
+    token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +145,11 @@ struct PingsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct RecordedPushesResponse {
+    pushes: Vec<RecordedPush>,
+}
+
+#[derive(Debug, Serialize)]
 struct CreateMonitorResponse {
     monitor: MonitorRecord,
 }
@@ -171,6 +191,7 @@ async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
     state.storage.reset().await?;
     state.processes.reset()?;
     state.broadcast_log.clear();
+    state.pushes.clear_recorded_pushes();
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -309,6 +330,32 @@ async fn resolve_ping(
         .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
     state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
     Ok(Json(ping))
+}
+
+async fn register_push_token(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterPushTokenRequest>,
+) -> Result<Json<PushToken>, DebugError> {
+    Ok(Json(
+        state
+            .storage
+            .register_push_token(request.platform, request.token)
+            .await?,
+    ))
+}
+
+async fn unregister_push_token(
+    State(state): State<AppState>,
+    Json(request): Json<UnregisterPushTokenRequest>,
+) -> Result<Json<serde_json::Value>, DebugError> {
+    let removed = state.storage.unregister_push_token(&request.token).await?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+async fn recorded_pushes(State(state): State<AppState>) -> Json<RecordedPushesResponse> {
+    Json(RecordedPushesResponse {
+        pushes: state.pushes.recorded_pushes(),
+    })
 }
 
 async fn create_monitor(

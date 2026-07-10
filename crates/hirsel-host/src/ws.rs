@@ -445,6 +445,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_push_surface_registers_and_inspects_recorded_pushes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+        let client = reqwest::Client::new();
+
+        let registered: serde_json::Value = client
+            .post(format!("http://{addr}/debug/register-push-token"))
+            .json(&serde_json::json!({
+                "platform": "android",
+                "token": "debug-token"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(registered["token"], "debug-token");
+        assert_eq!(registered["platform"], "android");
+
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Owner, "Choose", None)
+            .await
+            .unwrap();
+        let ping = state
+            .storage
+            .create_ping(
+                "debug-choice",
+                "Choose from debug",
+                "A or B?",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        state.pushes.enqueue_ping(&ping).await;
+
+        let pushes = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let body: serde_json::Value = client
+                    .get(format!("http://{addr}/debug/pushes"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if !body["pushes"].as_array().unwrap().is_empty() {
+                    break body;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("debug push was recorded");
+        assert_eq!(pushes["pushes"][0]["payload"]["body"], "Choose from debug");
+        assert_eq!(pushes["pushes"][0]["payload"]["data"]["ping_id"], ping.id);
+
+        let removed: serde_json::Value = client
+            .post(format!("http://{addr}/debug/unregister-push-token"))
+            .json(&serde_json::json!({ "token": "debug-token" }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(removed["removed"], true);
+        assert!(state.storage.push_tokens().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn websocket_hello_subscribe_first_covers_reconnect_races() {
         let cases = [
             (super::HelloTestHookPoint::Subscribed, true),

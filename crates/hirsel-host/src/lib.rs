@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod blob_route;
 pub mod config;
 pub mod debug;
+pub mod iroh;
 pub mod lash_runtime;
 pub mod monitors;
 pub mod process_run;

@@ -4,6 +4,21 @@ plugins {
     alias(libs.plugins.google.services)
 }
 
+val signingKeystorePath = providers.environmentVariable("SIGNING_KEYSTORE_PATH")
+    .orElse(providers.gradleProperty("SIGNING_KEYSTORE_PATH"))
+val signingKeystorePassword = providers.environmentVariable("SIGNING_KEYSTORE_PASSWORD")
+    .orElse(providers.gradleProperty("SIGNING_KEYSTORE_PASSWORD"))
+val signingKeyAlias = providers.environmentVariable("SIGNING_KEY_ALIAS")
+    .orElse(providers.gradleProperty("SIGNING_KEY_ALIAS"))
+val signingKeyPassword = providers.environmentVariable("SIGNING_KEY_PASSWORD")
+    .orElse(providers.gradleProperty("SIGNING_KEY_PASSWORD"))
+val hasReleaseSigning = listOf(
+    signingKeystorePath,
+    signingKeystorePassword,
+    signingKeyAlias,
+    signingKeyPassword,
+).all { it.orNull?.isNotBlank() == true }
+
 android {
     namespace = "dev.hirsel.android"
     compileSdk = 37
@@ -17,6 +32,27 @@ android {
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = file(signingKeystorePath.get())
+                storePassword = signingKeystorePassword.get()
+                keyAlias = signingKeyAlias.get()
+                keyPassword = signingKeyPassword.get()
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

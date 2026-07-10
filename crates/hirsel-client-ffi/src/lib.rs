@@ -299,15 +299,31 @@ impl Client {
         token: String,
         observer: Box<dyn ClientObserver>,
     ) -> Result<Arc<Self>, ClientError> {
-        let core = core::Client::new(core::ClientConfig::new(host, token))?;
-        core.set_observer(Some(Arc::new(ObserverAdapter { observer })));
-        let runtime = Runtime::new().map_err(|error| ClientError::Runtime {
-            detail: error.to_string(),
-        })?;
-        Ok(Arc::new(Self {
-            core,
-            runtime: Mutex::new(Some(runtime)),
-        }))
+        Self::from_config(core::ClientConfig::new(host, token), observer)
+    }
+
+    /// Creates an iroh client authenticated by a previously issued device token.
+    #[uniffi::constructor]
+    pub fn new_iroh(
+        ticket: String,
+        device_token: String,
+        observer: Box<dyn ClientObserver>,
+    ) -> Result<Arc<Self>, ClientError> {
+        Self::from_config(core::ClientConfig::new_iroh(ticket, device_token), observer)
+    }
+
+    /// Creates an iroh client that redeems a one-time pairing code.
+    #[uniffi::constructor]
+    pub fn new_iroh_pairing(
+        ticket: String,
+        code: String,
+        device_label: String,
+        observer: Box<dyn ClientObserver>,
+    ) -> Result<Arc<Self>, ClientError> {
+        Self::from_config(
+            core::ClientConfig::new_iroh_pairing(ticket, code, device_label),
+            observer,
+        )
     }
 
     pub fn connect(&self) -> Result<(), ClientError> {
@@ -336,9 +352,32 @@ impl Client {
     pub fn snapshot(&self) -> ClientSnapshot {
         self.core.snapshot().into()
     }
+
+    /// Returns the device token issued by a successful pairing handshake.
+    ///
+    /// Pairing clients should persist this value after reaching `Online`, then
+    /// use `new_iroh` for later connections.
+    pub fn issued_device_token(&self) -> Option<String> {
+        self.core.paired_device_token()
+    }
 }
 
 impl Client {
+    fn from_config(
+        config: core::ClientConfig,
+        observer: Box<dyn ClientObserver>,
+    ) -> Result<Arc<Self>, ClientError> {
+        let core = core::Client::new(config)?;
+        core.set_observer(Some(Arc::new(ObserverAdapter { observer })));
+        let runtime = Runtime::new().map_err(|error| ClientError::Runtime {
+            detail: error.to_string(),
+        })?;
+        Ok(Arc::new(Self {
+            core,
+            runtime: Mutex::new(Some(runtime)),
+        }))
+    }
+
     fn with_runtime<T>(&self, f: impl FnOnce(&Runtime) -> T) -> Result<T, ClientError> {
         let runtime = self
             .runtime

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+# Two binaries live in this crate (the host + the `hirsel-pair` QR tool), so
+# `cargo run -p hirsel-host` (the live entr loop) needs an explicit default.
+default-run = "hirsel-host"
 
 [dependencies]
 anyhow.workspace = true
@@ -23,6 +26,8 @@ lash-provider-openai.workspace = true
 lash-protocol-rlm.workspace = true
 lash-sqlite-store.workspace = true
 libc.workspace = true
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 regex = "1.12.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite.workspace = true
@@ -36,6 +41,7 @@ tower-http = { version = "0.6.6", features = ["fs"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+url = "2.5.8"
 
 [dev-dependencies]
 hirsel-client-core = { path = "../hirsel-client-core" }

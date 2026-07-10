@@ -39,6 +39,15 @@ run port="3089":
     echo ""
     cargo run --release -p hirsel-host
 
+# Mint a one-time pairing code and render its URI as a terminal QR and PNG.
+# Usage: HIRSEL_HOST_URL=http://127.0.0.1:<port> HIRSEL_TOKEN=<token> just pair [label]
+pair label="Owner phone":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${HIRSEL_HOST_URL:?set HIRSEL_HOST_URL to the debug-enabled host URL}"
+    : "${HIRSEL_TOKEN:?set HIRSEL_TOKEN to the host static token}"
+    cargo run --quiet -p hirsel-host --bin hirsel-pair -- "$1"
+
 build:
     cargo build --release --workspace
     cd app && npm run build

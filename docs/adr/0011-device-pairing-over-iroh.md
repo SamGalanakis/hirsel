@@ -14,7 +14,9 @@ Two facts force the design. First, the host binds `127.0.0.1` — a phone on mob
 
 **QR pairing → per-device token.** Onboarding replaces "type the master token":
 1. The host mints a **one-time pairing code** — short TTL, single-use.
-2. A QR encodes an **iroh ticket** (NodeId + relay/direct addrs) **+ the pairing code**.
+2. A QR encodes `hirsel://pair?ticket=<iroh-ticket>&code=<pairing-code>`, with both query values
+   URL-encoded. The ticket contains the NodeId + relay/direct addrs; the QR never contains the
+   master token.
 3. The phone scans, iroh-connects, and sends `pair_request { code, device_label, node_id }`.
 4. The host validates the code (unexpired, unused), issues a random **per-device token** stored in a `device_tokens` table (token, device_label, node_id, created_ts, last_seen_ts, revoked), and returns it.
 5. The phone persists the token and authenticates future connects with it (the device token is the first frame on reconnect, replacing the static-token check on the iroh path).

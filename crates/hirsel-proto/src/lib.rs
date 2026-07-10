@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const IROH_OWNER_ALPN: &[u8] = b"hirsel/owner/1";
 
@@ -124,12 +124,52 @@ pub enum PushPlatform {
     Ios,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HelloAuth {
+    StaticToken(String),
+    DeviceToken(String),
+    PairingCode { code: String, device_label: String },
+}
+
+impl<'de> Deserialize<'de> for HelloAuth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum TaggedHelloAuth {
+            StaticToken(String),
+            DeviceToken(String),
+            PairingCode { code: String, device_label: String },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum HelloAuthWire {
+            LegacyStaticToken(String),
+            Tagged(TaggedHelloAuth),
+        }
+
+        Ok(match HelloAuthWire::deserialize(deserializer)? {
+            HelloAuthWire::LegacyStaticToken(token) => Self::StaticToken(token),
+            HelloAuthWire::Tagged(TaggedHelloAuth::StaticToken(token)) => Self::StaticToken(token),
+            HelloAuthWire::Tagged(TaggedHelloAuth::DeviceToken(token)) => Self::DeviceToken(token),
+            HelloAuthWire::Tagged(TaggedHelloAuth::PairingCode { code, device_label }) => {
+                Self::PairingCode { code, device_label }
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ClientToHost {
     Hello {
-        token: String,
+        #[serde(alias = "token")]
+        auth: HelloAuth,
         last_seen_msg_id: Option<u64>,
     },
     SendMessage {
@@ -229,6 +269,9 @@ pub enum TurnEventKind {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum HostToClient {
+    Paired {
+        device_token: String,
+    },
     HelloOk {
         latest_msg_id: u64,
         messages: Vec<ChatMessage>,
@@ -298,7 +341,7 @@ mod tests {
     fn client_hello_round_trips_with_nullable_last_seen() {
         let value = json!({
             "type": "hello",
-            "token": "secret",
+            "auth": { "static_token": "secret" },
             "last_seen_msg_id": null
         });
 
@@ -306,11 +349,55 @@ mod tests {
         assert_eq!(
             parsed,
             ClientToHost::Hello {
-                token: "secret".to_string(),
+                auth: HelloAuth::StaticToken("secret".to_string()),
                 last_seen_msg_id: None,
             }
         );
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn legacy_bare_token_hello_decodes_as_static_auth() {
+        let parsed: ClientToHost = serde_json::from_value(json!({
+            "type": "hello",
+            "token": "secret",
+            "last_seen_msg_id": null
+        }))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::Hello {
+                auth: HelloAuth::StaticToken("secret".to_string()),
+                last_seen_msg_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn pairing_auth_and_paired_response_round_trip() {
+        let hello = ClientToHost::Hello {
+            auth: HelloAuth::PairingCode {
+                code: "pairing-code".to_string(),
+                device_label: "Owner phone".to_string(),
+            },
+            last_seen_msg_id: Some(42),
+        };
+        let encoded = serde_json::to_value(&hello).unwrap();
+        assert_eq!(encoded["auth"]["pairing_code"]["code"], "pairing-code");
+        assert_eq!(
+            serde_json::from_value::<ClientToHost>(encoded).unwrap(),
+            hello
+        );
+
+        let paired = HostToClient::Paired {
+            device_token: "device-token".to_string(),
+        };
+        let encoded = serde_json::to_value(&paired).unwrap();
+        assert_eq!(encoded["type"], "paired");
+        assert_eq!(
+            serde_json::from_value::<HostToClient>(encoded).unwrap(),
+            paired
+        );
     }
 
     #[test]

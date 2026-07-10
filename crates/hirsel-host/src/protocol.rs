@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use hirsel_proto::{ClientToHost, HostToClient, Ping};
+use hirsel_proto::{ClientToHost, HelloAuth, HostToClient, Ping};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -38,30 +38,19 @@ pub(crate) trait ProtocolChannel: Send {
     async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()>;
 }
 
-pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState)
+pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer_node_id: Option<String>)
 where
     C: ProtocolChannel,
 {
-    let hello = match channel.receive().await {
+    let (auth, last_seen_msg_id) = match channel.receive().await {
         Ok(Some(IncomingFrame::Message {
             frame:
                 ClientToHost::Hello {
-                    token,
+                    auth,
                     last_seen_msg_id,
                 },
             ..
-        })) => {
-            if token != state.token.as_ref() {
-                let _ = channel
-                    .send(&HostToClient::Error {
-                        detail: "invalid token".to_string(),
-                        client_id: None,
-                    })
-                    .await;
-                return;
-            }
-            last_seen_msg_id
-        }
+        })) => (auth, last_seen_msg_id),
         Ok(Some(IncomingFrame::Message { .. })) => {
             let _ = channel
                 .send(&HostToClient::Error {
@@ -83,11 +72,32 @@ where
         Ok(Some(IncomingFrame::Ignored)) | Ok(None) | Err(_) => return,
     };
 
+    let paired_token = match authenticate(&state, auth, peer_node_id.as_deref()).await {
+        Ok(token) => token,
+        Err(detail) => {
+            let _ = channel
+                .send(&HostToClient::Error {
+                    detail,
+                    client_id: None,
+                })
+                .await;
+            return;
+        }
+    };
+    if let Some(device_token) = paired_token
+        && channel
+            .send(&HostToClient::Paired { device_token })
+            .await
+            .is_err()
+    {
+        return;
+    }
+
     let mut broadcasts = state.broadcaster.subscribe();
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
 
-    let snapshot = match state.storage.hello_snapshot(hello).await {
+    let snapshot = match state.storage.hello_snapshot(last_seen_msg_id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let _ = channel
@@ -161,6 +171,52 @@ where
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+        }
+    }
+}
+
+async fn authenticate(
+    state: &AppState,
+    auth: HelloAuth,
+    peer_node_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    match auth {
+        HelloAuth::StaticToken(token) => {
+            if token == state.token.as_ref() {
+                Ok(None)
+            } else {
+                Err("invalid token".to_string())
+            }
+        }
+        HelloAuth::DeviceToken(token) => {
+            let Some(node_id) = peer_node_id else {
+                return Err("device-token auth requires iroh".to_string());
+            };
+            state
+                .storage
+                .authenticate_device_token(&token, Some(node_id))
+                .await
+                .map_err(|_| "invalid device token".to_string())?;
+            Ok(None)
+        }
+        HelloAuth::PairingCode { code, device_label } => {
+            let Some(node_id) = peer_node_id else {
+                return Err("pairing-code auth requires iroh".to_string());
+            };
+            let expected_label = state
+                .storage
+                .redeem_pairing_code(&code)
+                .await
+                .map_err(|_| "invalid pairing code".to_string())?;
+            if device_label != expected_label {
+                return Err("invalid pairing code".to_string());
+            }
+            state
+                .storage
+                .issue_device_token(device_label, node_id)
+                .await
+                .map(Some)
+                .map_err(|_| "failed to issue device token".to_string())
         }
     }
 }

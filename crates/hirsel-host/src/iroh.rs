@@ -139,7 +139,7 @@ async fn handle_connection(
     tracing::debug!(%remote_id, "iroh owner connection established");
 
     let mut channel = IrohChannel::new(send, recv);
-    run_protocol(&mut channel, state).await;
+    run_protocol(&mut channel, state, Some(remote_id.to_string())).await;
     let _ = channel.close().await;
     connection.close(0u32.into(), b"owner protocol complete");
     Ok(())
@@ -160,6 +160,11 @@ impl IrohChannel {
 
     async fn close(&mut self) -> anyhow::Result<()> {
         self.outbound.close().await?;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.outbound.get_ref().stopped(),
+        )
+        .await;
         Ok(())
     }
 }

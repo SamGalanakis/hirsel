@@ -8,7 +8,7 @@ use hirsel_client_core::{
     ClientSnapshot, ConnectionState, LifecycleEvent, Ping, PingStatus, ProcessInfo, ProcessKind,
     ProcessState, ReconnectPolicy, SendMessageRequest,
 };
-use hirsel_proto::{ClientToHost, HostToClient};
+use hirsel_proto::{ClientToHost, HelloAuth, HostToClient};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
@@ -112,7 +112,7 @@ fn test_config(address: std::net::SocketAddr) -> ClientConfig {
     ClientConfig {
         host: address.to_string(),
         iroh_ticket: None,
-        token: "secret".into(),
+        auth: HelloAuth::StaticToken("secret".into()),
         reconnect: ReconnectPolicy {
             initial_delay_ms: 150,
             max_delay_ms: 150,
@@ -148,7 +148,7 @@ async fn connect_loads_state_and_observer_sees_online() {
         assert_eq!(
             receive_client(&mut socket).await,
             ClientToHost::Hello {
-                token: "secret".into(),
+                auth: HelloAuth::StaticToken("secret".into()),
                 last_seen_msg_id: None,
             }
         );
@@ -330,7 +330,7 @@ async fn offline_queue_flushes_in_order_and_reconnect_resumes_last_seen() {
         assert_eq!(
             receive_client(&mut first).await,
             ClientToHost::Hello {
-                token: "secret".into(),
+                auth: HelloAuth::StaticToken("secret".into()),
                 last_seen_msg_id: None,
             }
         );
@@ -385,7 +385,7 @@ async fn offline_queue_flushes_in_order_and_reconnect_resumes_last_seen() {
     assert_eq!(
         resume,
         ClientToHost::Hello {
-            token: "secret".into(),
+            auth: HelloAuth::StaticToken("secret".into()),
             last_seen_msg_id: Some(7),
         }
     );

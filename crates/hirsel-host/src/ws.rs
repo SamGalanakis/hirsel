@@ -23,7 +23,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    run_protocol(&mut WebSocketChannel(&mut socket), state).await;
+    run_protocol(&mut WebSocketChannel(&mut socket), state, None).await;
 }
 
 struct WebSocketChannel<'a>(&'a mut WebSocket);

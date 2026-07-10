@@ -111,7 +111,7 @@ components:
 
 **Creative North Star: "The Quiet Instrument"**
 
-hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default and dark by commitment (`<html class="dark">`; the light token theme is carried for parity but never shipped). Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. The instrument is dense but never noisy, exact rather than loud, and it earns trust by respecting attention. Its emotional register is calm competence, never cheer.
+hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default — dark is the brand's resting state — but light now ships as a first-class, user-selectable peer (System / Light / Dark, defaulting to System) built from the same canonical tokens, so it must hold the same ≥90 bar in both clients. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. The instrument is dense but never noisy, exact rather than loud, and it earns trust by respecting attention. Its emotional register is calm competence, never cheer.
 
 Density is a feature, not a compromise. The same information presents at phone width (a single ~560px column with shelves and full-screen sheets) and desktop width (rails and a Slack-style split that opens to ~980px when a Side Chat is live). Monospace earns its place and only its place: tool names in the turn timeline, monitor commands, ids, and keyboard hints. Motion is restrained to state changes — a pulse on a live status dot, a shimmer on "Thinking…", a 200ms slide when a sheet opens — and everything honors `prefers-reduced-motion`.
 
@@ -126,7 +126,12 @@ This system explicitly rejects three neighbors. It is **not corporate SaaS chat*
 
 ## 2. Colors
 
-A near-neutral dark palette with the faintest cool cast, one indigo accent, and a small, disciplined set of semantic status hues. Grays are OKLCH neutrals with a whisper of blue-violet (hue ~286) so the surface never reads as dead charcoal. **OKLCH is the source of truth** — every token is authored in OKLCH in `app/src/styles.css` and surfaced as CSS custom properties consumed through Tailwind 4's `@theme inline`.
+A near-neutral dark palette with the faintest cool cast, one indigo accent, and a small, disciplined set of semantic status hues. Grays are OKLCH neutrals with a whisper of blue-violet (hue ~286) so the surface never reads as dead charcoal. **OKLCH is the source of truth** — every token is authored in OKLCH in `app/src/styles.css` and surfaced as CSS custom properties consumed through Tailwind 4's `@theme inline`. The values below describe the dark scheme (the resting state); the light scheme is a shipped peer built from the same OKLCH tokens (see *Theme modes* below).
+
+### Theme modes (shipped, both clients)
+hirsel ships **three theme modes — System / Light / Dark**, defaulting to **System** (follows the OS: `prefers-color-scheme` on web, `isSystemInDarkTheme()` on Android; no Material-You / dynamic color). The choice is persisted (web `localStorage` `hirsel.theme`; Android DataStore/prefs) and applied before first paint so there is no flash. Dark stays the brand's resting register; **light is a first-class, user-selectable peer**, not a parity afterthought, and both schemes are held to the same ≥90 bar on every surface.
+
+The **light scheme** mirrors dark's structure: an off-white canvas `oklch(0.985 0.002 286)` (never pure white), white-paper cards `oklch(1 0 0)` layered on it, a `secondary` quiet fill a hair below canvas, and true hairline borders as dark ink at 10% alpha (`oklch(0.205 0.02 286 / 10%)`, mirroring dark's `white/10%`). The indigo primary and the status hues are darkened for WCAG-AA on the light canvas: `primary oklch(0.52 0.14 264)`, `status-active 0.52 0.12 221`, `status-success 0.52 0.17 149`, `status-attention 0.56 0.15 73`, `status-danger`/`destructive 0.55 0.22 27`, `status-idle 0.55 0 0`. These light values are canonical for **both** clients — the web `:root` and the Android `Theme.kt` light scheme render the same palette.
 
 ### Primary
 - **Muted Indigo** (`oklch(0.55 0.13 264.05)`, `--primary`): The single brand and interaction accent. It carries the send button, the unread-Ping dot, the `border-l` stripe on a Ping that requires a response, the reply-quote rail in the composer, and link-style actions. Its restraint is the point: when this indigo appears, it means "this is interactive" or "this wants you." A brighter ring variant (`oklch(0.62 0.14 264.05)`, `--ring`) is used only for focus.
@@ -231,7 +236,7 @@ hirsel is **flat by default**. Depth is conveyed by tonal layering (canvas → c
 ## 6. Do's and Don'ts
 
 ### Do:
-- **Do** stay dark. The canvas is near-black `oklch(0.141 …)`; raised surfaces step up one tone to `card`/`secondary`. Ship dark; the light theme exists only for token parity.
+- **Do** treat dark as the resting state. The canvas is near-black `oklch(0.141 …)`; raised surfaces step up one tone to `card`/`secondary`. Light is a shipped, user-selectable peer (System default) drawn from the same tokens — an off-white canvas (never pure white), white-paper cards, and black-ink hairlines mirroring dark's `white/10%` — and is held to the same bar, not an afterthought.
 - **Do** separate siblings with a `white/10` hairline border first, and a `foreground/10` ring on cards — reach for a shadow only when an element genuinely floats (overlay, popover, dialog, floating pill).
 - **Do** keep indigo (`--primary`) rare and meaningful: interaction and "attend to this," nothing decorative.
 - **Do** reserve monospace for machine tokens — tool names, commands, ids, `@name` handles, keyboard keys — and keep all prose in Inter.

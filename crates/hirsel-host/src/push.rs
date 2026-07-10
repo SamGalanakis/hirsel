@@ -150,6 +150,41 @@ impl FcmPushSender {
             serde_json::from_str(&body).context("parse FCM OAuth response")?;
         Ok(token.access_token)
     }
+
+    async fn send_to_token(
+        &self,
+        endpoint: &str,
+        access_token: &str,
+        token: &str,
+        payload: &PushPayload,
+    ) -> anyhow::Result<()> {
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({
+                "message": {
+                    "token": token,
+                    "notification": {
+                        "title": payload.title,
+                        "body": payload.body,
+                    },
+                    "data": {
+                        "ping_id": payload.data.ping_id.to_string(),
+                        "name": payload.data.name,
+                    }
+                }
+            }))
+            .send()
+            .await
+            .with_context(|| format!("send FCM message to token {token}"))?;
+        let status = response.status();
+        let body = response.text().await.context("read FCM send response")?;
+        if !status.is_success() {
+            anyhow::bail!("FCM send failed for token {token} ({status}): {body}");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,32 +200,17 @@ impl PushSender for FcmPushSender {
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             self.project
         );
+        let mut failures = Vec::new();
         for token in tokens {
-            let response = self
-                .client
-                .post(&endpoint)
-                .bearer_auth(&access_token)
-                .json(&serde_json::json!({
-                    "message": {
-                        "token": token,
-                        "notification": {
-                            "title": payload.title,
-                            "body": payload.body,
-                        },
-                        "data": {
-                            "ping_id": payload.data.ping_id.to_string(),
-                            "name": payload.data.name,
-                        }
-                    }
-                }))
-                .send()
+            if let Err(error) = self
+                .send_to_token(&endpoint, &access_token, token, payload)
                 .await
-                .with_context(|| format!("send FCM message to token {token}"))?;
-            let status = response.status();
-            let body = response.text().await.context("read FCM send response")?;
-            if !status.is_success() {
-                anyhow::bail!("FCM send failed for token {token} ({status}): {body}");
+            {
+                failures.push(error.to_string());
             }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("one or more FCM sends failed: {}", failures.join("; "));
         }
         Ok(())
     }

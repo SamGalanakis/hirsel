@@ -282,6 +282,17 @@ messages, non-response Pings, reads, resolves, and side-chat activity never trig
 
 ## v2.3 — device pairing (2026-07-10)
 
+The QR pairing URI is exactly:
+
+```text
+hirsel://pair?ticket=<iroh-ticket>&code=<pairing-code>
+```
+
+`ticket` and `code` are URL-encoded query values. Consumers must parse the URI, require the
+`hirsel` scheme and `pair` authority, and read exactly one non-empty value for each required query
+key. The URI contains the short-lived, single-use pairing code and never contains `HIRSEL_TOKEN` or
+a device token.
+
 `hello` replaces its bare static token with an `auth` enum. The first frame is now one of:
 
 ```json
@@ -314,3 +325,7 @@ uses `device_token` on reconnect. The host never accepts a client-supplied NodeI
 authentication compares the connection-derived NodeId with the credential's pinned NodeId, so a
 token presented by a different iroh identity fails. Revocation prevents all later authentication by
 that device token.
+
+The native UniFFI client exposes the token as nullable `Client.issuedDeviceToken()`. Kotlin reads it
+after the pairing client reaches `Online`, persists it, and supplies it to `Client.newIroh(...)` on
+later connections.

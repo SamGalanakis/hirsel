@@ -162,7 +162,10 @@ private fun ChatScreen(
             } else if (snapshot.messages.isEmpty()) {
                 item { Text("No messages yet") }
             } else {
-                items(snapshot.messages, key = { it.id?.toString() ?: it.clientId.orEmpty() }) {
+                items(
+                    snapshot.messages,
+                    key = { "message-${it.id?.toString() ?: it.clientId.orEmpty()}" },
+                ) {
                     MessageRow(it)
                 }
             }
@@ -174,7 +177,7 @@ private fun ChatScreen(
             if (pings.isEmpty()) {
                 item { Text("No pings") }
             } else {
-                items(pings, key = { it.id.toString() }) { PingRow(it) }
+                items(pings, key = { "ping-${it.id}" }) { PingRow(it) }
             }
         }
 

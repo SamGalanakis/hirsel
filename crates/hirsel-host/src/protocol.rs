@@ -203,14 +203,11 @@ async fn authenticate(
             let Some(node_id) = peer_node_id else {
                 return Err("pairing-code auth requires iroh".to_string());
             };
-            let expected_label = state
+            let _ = state
                 .storage
                 .redeem_pairing_code(&code)
                 .await
                 .map_err(|_| "invalid pairing code".to_string())?;
-            if device_label != expected_label {
-                return Err("invalid pairing code".to_string());
-            }
             state
                 .storage
                 .issue_device_token(device_label, node_id)
@@ -417,5 +414,64 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
             .await
             .expect("hello test hook appends chat");
         state.broadcast(HostToClient::Msg { message, sc: None });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use hirsel_proto::HelloAuth;
+
+    use super::authenticate;
+    use crate::{
+        build_state,
+        config::{AgentMode, Config, DriverMode, ProviderMode},
+    };
+
+    #[tokio::test]
+    async fn pairing_uses_the_apps_device_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: true,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+        let code = state
+            .storage
+            .mint_pairing_code("Mint-time label", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let device_token = authenticate(
+            &state,
+            HelloAuth::PairingCode {
+                code,
+                device_label: "App-chosen label".to_string(),
+            },
+            Some("node-a"),
+        )
+        .await
+        .unwrap()
+        .expect("pairing should issue a device token");
+
+        state
+            .storage
+            .authenticate_device_token(&device_token, Some("node-a"))
+            .await
+            .unwrap();
+        let devices = state.storage.list_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_label, "App-chosen label");
     }
 }

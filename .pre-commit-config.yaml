@@ -1,0 +1,53 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '^(android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi\.kt|\.vite/deps/)'
+      - id: end-of-file-fixer
+        exclude: '^(android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi\.kt|\.vite/deps/)'
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1500]
+        exclude: ^android/app/src/main/jniLibs/
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: block-sensitive-files
+        name: Block sensitive files
+        language: fail
+        entry: Sensitive files must never be committed
+        files: '(?i)(^|/)(google-services\.json|[^/]*service-account[^/]*\.json|fcm-[^/]*service[^/]*\.json|[^/]*\.(keystore|jks|p12|pem))$'
+
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --all -- --check
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        files: \.rs$
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: web-lint
+        name: web oxlint
+        language: system
+        entry: bash -c 'cd app && npm run lint'
+        files: ^app/
+        pass_filenames: false
+
+      - id: web-types
+        name: web TypeScript
+        language: system
+        entry: bash -c 'cd app && npm exec -- tsc --noEmit'
+        files: ^app/
+        pass_filenames: false

@@ -26,7 +26,8 @@ use lash::{
     process::{
         ProcessAwaitOutput, ProcessAwaiter, ProcessCompletionAuthority, ProcessEventAppendRequest,
         ProcessEventType, ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessTerminalState,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
+        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition,
+        SessionScope,
     },
     provider::{ProviderHandle, ProviderOptions},
     remote::{

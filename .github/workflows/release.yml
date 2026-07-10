@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version or tag (for example, v0.2.0)
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  android-release:
+    name: Signed Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
+      SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+      SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+      SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+      SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          tag="$INPUT_VERSION"
+          if [[ -z "$tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          if [[ "$tag" != v* ]]; then
+            tag="v$tag"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $tag" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${tag#v}" >> "$GITHUB_ENV"
+
+      - name: Require Firebase configuration
+        run: |
+          if [[ -z "$GOOGLE_SERVICES_JSON_B64" ]]; then
+            echo 'GOOGLE_SERVICES_JSON_B64 must be configured for an Android release.' >&2
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.3.13750724'
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Write Firebase configuration
+        run: printf '%s' "$GOOGLE_SERVICES_JSON_B64" | base64 --decode > android/app/google-services.json
+
+      - name: Configure release signing
+        run: |
+          configured=0
+          for value in "$SIGNING_KEYSTORE_B64" "$SIGNING_KEYSTORE_PASSWORD" "$SIGNING_KEY_ALIAS" "$SIGNING_KEY_PASSWORD"; do
+            if [[ -n "$value" ]]; then
+              configured=$((configured + 1))
+            fi
+          done
+          if [[ "$configured" -eq 0 ]]; then
+            echo 'No release keystore configured; using the debug signing fallback.'
+          elif [[ "$configured" -ne 4 ]]; then
+            echo 'Signing secrets are incomplete; configure all four or remove all four to use debug signing.' >&2
+            exit 1
+          else
+            keystore="$RUNNER_TEMP/hirsel-release.jks"
+            printf '%s' "$SIGNING_KEYSTORE_B64" | base64 --decode > "$keystore"
+            chmod 600 "$keystore"
+            echo "SIGNING_KEYSTORE_PATH=$keystore" >> "$GITHUB_ENV"
+          fi
+
+      - name: Regenerate Android native libraries and Kotlin bindings
+        run: |
+          rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
+          rm -f android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi.kt
+          cargo ndk \
+            --target arm64-v8a \
+            --target x86_64 \
+            --platform 26 \
+            --output-dir android/app/src/main/jniLibs \
+            build --release -p hirsel-client-ffi
+          cargo build --release -p hirsel-client-ffi
+          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)"
+          cargo run --release -p hirsel-client-ffi --features bindgen-cli --bin uniffi-bindgen -- \
+            generate \
+            --library "$target_dir/release/libhirsel_client_ffi.so" \
+            --language kotlin \
+            --config crates/hirsel-client-ffi/uniffi.toml \
+            --out-dir android/app/src/main/kotlin \
+            --no-format
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
+
+      - name: Verify and rename APK
+        run: |
+          source_apk=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner" verify --verbose "$source_apk"
+          mkdir -p dist
+          cp "$source_apk" "dist/hirsel-$RELEASE_VERSION.apk"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hirsel-${{ env.RELEASE_VERSION }}-apk
+          path: dist/hirsel-${{ env.RELEASE_VERSION }}.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Hirsel ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          body: |
+            Sideload: enable Install unknown apps, download the APK, then tap it to install.
+          files: dist/hirsel-${{ env.RELEASE_VERSION }}.apk

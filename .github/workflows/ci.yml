@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --run
+      - run: npm run lint
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Android-related paths
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            android:
+              - 'android/**'
+              - 'crates/hirsel-client-*/**'
+
+      - name: Explain missing Firebase configuration
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 == ''
+        run: echo 'Skipping Android build because GOOGLE_SERVICES_JSON_B64 is unavailable (expected for fork pull requests).'
+
+      - name: Set up JDK 21
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        run: |
+          sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.3.13750724'
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+
+      - name: Set up Rust
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Cache Rust builds
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Set up Gradle
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Write Firebase configuration
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        run: printf '%s' "$GOOGLE_SERVICES_JSON_B64" | base64 --decode > android/app/google-services.json
+
+      - name: Regenerate Android native libraries and Kotlin bindings
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        run: |
+          rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
+          rm -f android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi.kt
+          cargo ndk \
+            --target arm64-v8a \
+            --target x86_64 \
+            --platform 26 \
+            --output-dir android/app/src/main/jniLibs \
+            build --release -p hirsel-client-ffi
+          cargo build --release -p hirsel-client-ffi
+          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)"
+          cargo run --release -p hirsel-client-ffi --features bindgen-cli --bin uniffi-bindgen -- \
+            generate \
+            --library "$target_dir/release/libhirsel_client_ffi.so" \
+            --language kotlin \
+            --config crates/hirsel-client-ffi/uniffi.toml \
+            --out-dir android/app/src/main/kotlin \
+            --no-format
+
+      - name: Build debug APK
+        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        working-directory: android
+        run: ./gradlew assembleDebug

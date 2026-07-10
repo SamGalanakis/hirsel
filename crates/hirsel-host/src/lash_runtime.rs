@@ -3955,12 +3955,11 @@ impl ScriptedAgentRuntime {
                         continue;
                     }
                 }
-                if tick.wake {
-                    if let Some(text) = tick.wake_text {
-                        if let Err(error) = runtime.deliver_monitor_wake(text).await {
-                            tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor wake delivery failed");
-                        }
-                    }
+                if tick.wake
+                    && let Some(text) = tick.wake_text
+                    && let Err(error) = runtime.deliver_monitor_wake(text).await
+                {
+                    tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor wake delivery failed");
                 }
             }
         });
@@ -4032,10 +4031,10 @@ impl ScriptedAgentRuntime {
         turn: &OwnerTurn,
         cancel: &lash::CancellationToken,
     ) -> anyhow::Result<()> {
-        if let Some(duration) = slow_turn_duration(&turn.body)? {
-            if !sleep_until_done_or_cancelled(duration, cancel).await {
-                return Ok(());
-            }
+        if let Some(duration) = slow_turn_duration(&turn.body)?
+            && !sleep_until_done_or_cancelled(duration, cancel).await
+        {
+            return Ok(());
         }
         if cancel.is_cancelled() {
             return Ok(());

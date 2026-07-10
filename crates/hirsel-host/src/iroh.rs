@@ -53,7 +53,7 @@ impl IrohServer {
             "Hirsel iroh endpoint bound"
         );
 
-        let relay_task = tokio::spawn(log_relay_online(endpoint.clone(), key_path));
+        let relay_task = tokio::spawn(log_relay_online(endpoint.clone(), key_path, state.clone()));
         Ok(Self {
             endpoint,
             ticket,
@@ -95,7 +95,7 @@ impl Drop for IrohServer {
     }
 }
 
-async fn log_relay_online(endpoint: Endpoint, key_path: impl AsRef<Path>) {
+async fn log_relay_online(endpoint: Endpoint, key_path: impl AsRef<Path>, state: AppState) {
     let closed = endpoint.closed();
     if closed.run_until(endpoint.online()).await.is_none() {
         return;
@@ -103,6 +103,7 @@ async fn log_relay_online(endpoint: Endpoint, key_path: impl AsRef<Path>) {
 
     let endpoint_id = endpoint.id();
     let ticket = EndpointTicket::new(endpoint.addr()).to_string();
+    state.set_iroh_ticket(Some(ticket.clone()));
     tracing::info!(
         node_id = %endpoint_id,
         %ticket,

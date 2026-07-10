@@ -1,0 +1,6 @@
+appId: dev.hirsel.android
+---
+- launchApp
+- assertVisible: "Hirsel"
+- assertVisible: "Chat"
+- assertVisible: "Pings"

@@ -1,0 +1,3 @@
+[crates.hirsel_client_ffi.bindings.kotlin]
+package_name = "dev.hirsel.core"
+cdylib_name = "hirsel_client_ffi"

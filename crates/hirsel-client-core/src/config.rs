@@ -77,7 +77,11 @@ impl ClientConfig {
 
     pub(crate) fn websocket_url(&self) -> String {
         let host = self.host.trim().trim_end_matches('/');
-        let base = if host.starts_with("ws://") || host.starts_with("wss://") {
+        let base = if let Some(host) = host.strip_prefix("http://") {
+            format!("ws://{host}")
+        } else if let Some(host) = host.strip_prefix("https://") {
+            format!("wss://{host}")
+        } else if host.starts_with("ws://") || host.starts_with("wss://") {
             host.to_owned()
         } else {
             format!("ws://{host}")
@@ -114,6 +118,14 @@ mod tests {
         );
         assert_eq!(
             ClientConfig::new("wss://example.test/ws".into(), "token".into()).websocket_url(),
+            "wss://example.test/ws"
+        );
+        assert_eq!(
+            ClientConfig::new("http://10.0.2.2:3090".into(), "token".into()).websocket_url(),
+            "ws://10.0.2.2:3090/ws"
+        );
+        assert_eq!(
+            ClientConfig::new("https://example.test".into(), "token".into()).websocket_url(),
             "wss://example.test/ws"
         );
     }

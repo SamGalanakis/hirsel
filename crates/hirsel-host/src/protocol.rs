@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use hirsel_proto::{ClientToHost, HelloAuth, HostToClient, Ping};
+use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use crate::{
@@ -182,7 +183,10 @@ async fn authenticate(
 ) -> Result<Option<String>, String> {
     match auth {
         HelloAuth::StaticToken(token) => {
-            if token == state.token.as_ref() {
+            if !token.is_empty()
+                && !state.token.is_empty()
+                && bool::from(token.as_bytes().ct_eq(state.token.as_bytes()))
+            {
                 Ok(None)
             } else {
                 Err("invalid token".to_string())
@@ -473,5 +477,40 @@ mod tests {
         let devices = state.storage.list_devices().await.unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device_label, "App-chosen label");
+    }
+
+    #[tokio::test]
+    async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "real-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: false,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            authenticate(&state, HelloAuth::StaticToken(String::new()), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            authenticate(
+                &state,
+                HelloAuth::StaticToken("real-token".to_string()),
+                None
+            )
+            .await
+            .is_ok()
+        );
     }
 }

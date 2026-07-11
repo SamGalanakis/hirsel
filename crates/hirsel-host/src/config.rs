@@ -43,6 +43,7 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let token = env::var("HIRSEL_TOKEN")
             .context("HIRSEL_TOKEN is required for the Owner WebSocket protocol")?;
+        validate_owner_token(&token)?;
         let agent = match env::var("HIRSEL_AGENT")
             .unwrap_or_else(|_| "lash".to_string())
             .as_str()
@@ -111,5 +112,25 @@ impl Config {
             debug,
             sidechat_ttl_secs,
         })
+    }
+}
+
+fn validate_owner_token(token: &str) -> anyhow::Result<()> {
+    if token.trim().is_empty() {
+        anyhow::bail!("HIRSEL_TOKEN must not be empty or whitespace");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_owner_token;
+
+    #[test]
+    fn owner_token_rejects_empty_and_whitespace_values() {
+        for token in ["", " ", "\t\r\n"] {
+            assert!(validate_owner_token(token).is_err(), "accepted {token:?}");
+        }
+        validate_owner_token("real-token").unwrap();
     }
 }

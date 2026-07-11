@@ -1,4 +1,5 @@
 pub mod attachments;
+pub mod auth;
 pub mod blob_route;
 pub mod config;
 pub mod debug;

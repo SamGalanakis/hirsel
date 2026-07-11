@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use hirsel_proto::{ClientToHost, HelloAuth, HostToClient, Ping};
-use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
+    auth::owner_token_matches,
 };
 
 pub(crate) enum IncomingFrame {
@@ -183,10 +183,7 @@ async fn authenticate(
 ) -> Result<Option<String>, String> {
     match auth {
         HelloAuth::StaticToken(token) => {
-            if !token.is_empty()
-                && !state.token.is_empty()
-                && bool::from(token.as_bytes().ct_eq(state.token.as_bytes()))
-            {
+            if owner_token_matches(&state.token, &token) {
                 Ok(None)
             } else {
                 Err("invalid token".to_string())

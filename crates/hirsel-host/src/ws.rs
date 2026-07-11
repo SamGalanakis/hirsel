@@ -127,7 +127,14 @@ mod tests {
         let state = build_state(test_config(dir.path())).await.unwrap();
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
-        let client = reqwest::Client::new();
+        let client = owner_http_client();
+
+        let unauthorized = reqwest::Client::new()
+            .get(format!("http://{addr}/debug/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
 
         let registered: serde_json::Value = client
             .post(format!("http://{addr}/debug/register-push-token"))
@@ -593,6 +600,18 @@ mod tests {
             debug: true,
             sidechat_ttl_secs: 86_400,
         }
+    }
+
+    fn owner_http_client() -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            "Bearer test-token".parse().unwrap(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
     }
 
     async fn send_hello(

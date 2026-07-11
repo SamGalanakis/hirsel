@@ -17,6 +17,10 @@ const BASE_TITLE = "hirsel";
 
 function App() {
   const [token, setToken] = createSignal<string | null>(getStoredToken());
+  // A rejected/expired token surfaces here (C5): the ws client clears the stored
+  // token and calls back; we drop to the gate and show this inline error instead
+  // of the old "reconnecting…" forever dead-end.
+  const [authError, setAuthError] = createSignal<string | null>(null);
 
   // Whether a Side Chat is open — widens the shell for the desktop split.
   const splitActive = () => state.activeSideChatSc !== null;
@@ -27,7 +31,14 @@ function App() {
   createEffect(() => {
     const t = token();
     if (!t) return;
-    const client = startClient(WS_URL, t);
+    const client = startClient(WS_URL, t, {
+      onAuthReject: (detail) => {
+        // The client already cleared the stored token and stopped reconnecting;
+        // clearing the signal swaps back to the gate with the error line.
+        setToken(null);
+        setAuthError(detail);
+      },
+    });
     onCleanup(() => client.close());
   });
 
@@ -45,7 +56,9 @@ function App() {
       fallback={
         <div class="mx-auto flex w-full max-w-[560px] flex-1 flex-col">
           <TokenGate
+            error={authError()}
             onSubmit={(t) => {
+              setAuthError(null);
               setStoredToken(t);
               setToken(t);
             }}

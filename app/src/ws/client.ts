@@ -16,6 +16,29 @@ const FAILED_AFTER_MS = 30_000;
 /** Give up on an upload_blob whose blob_ok / error never arrives. */
 const UPLOAD_TIMEOUT_MS = 45_000;
 
+/** WebSocket close codes the host may use to reject a bad/expired token. The
+ * canonical code isn't pinned in PROTOCOL.md yet (coordinate with the backend
+ * lane — see report-web.md), so we match the plausible set: 1008 (policy
+ * violation, the standard "your frame/credentials are unacceptable") plus the
+ * 44xx app range hosts often use for auth. Any of these = auth failure with no
+ * reconnect. */
+const AUTH_REJECT_CODES = new Set([1008, 4001, 4401, 4403]);
+
+/** Heuristic fallback for hosts that just drop the socket on a bad token with a
+ * generic 1006/1000: if the VERY FIRST connection(s) close before we ever see a
+ * `hello_ok`, that's a rejected token, not a flaky network (a token that ever
+ * authenticated sets `everAuthed`, which permanently disables this path so a
+ * real mid-session drop keeps reconnecting forever). Two strikes before we give
+ * up, to ride out a one-off cold-start race. */
+const MAX_CONNECTS_WITHOUT_HELLO = 2;
+
+/** Signalled to the app when the token is rejected: the client has already
+ * cleared the stored token and stopped reconnecting; the app clears its token
+ * signal and routes back to the gate with `detail` as the inline error. */
+export interface ClientHandlers {
+  onAuthReject?: (detail: string) => void;
+}
+
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -91,10 +114,17 @@ class HirselWsClient {
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
   /** Per-pending-send "not echoed yet" timers, keyed by client_id. */
   private failTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** True once any `hello_ok` has arrived on this client — permanently disables
+   * the "closed before hello ⇒ bad token" heuristic (see MAX_CONNECTS...). */
+  private everAuthed = false;
+  /** Consecutive connections that closed before a `hello_ok` (auth heuristic). */
+  private connectsWithoutHello = 0;
+  private handlers: ClientHandlers;
 
-  constructor(url: string, token: string) {
+  constructor(url: string, token: string, handlers: ClientHandlers = {}) {
     this.url = url;
     this.token = token;
+    this.handlers = handlers;
   }
 
   connect(): void {
@@ -337,9 +367,18 @@ class HirselWsClient {
       this.handleServerMessage(JSON.parse(event.data as string) as ServerMessage);
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       this.socket = null;
       if (this.closedByClient) return;
+      // Auth rejection: an explicit reject code, or (only until the token has
+      // ever authenticated) the socket closing before `hello_ok` too many times.
+      const looksLikeAuthReject =
+        AUTH_REJECT_CODES.has((event as CloseEvent).code) ||
+        (!this.everAuthed && ++this.connectsWithoutHello >= MAX_CONNECTS_WITHOUT_HELLO);
+      if (looksLikeAuthReject) {
+        this.handleAuthReject();
+        return;
+      }
       dispatch({ type: "connection_status", status: "reconnecting" });
       this.scheduleReconnect();
     });
@@ -347,6 +386,22 @@ class HirselWsClient {
     socket.addEventListener("error", () => {
       socket.close();
     });
+  }
+
+  /** Terminal auth failure: stop everything, drop the stored token, and tell the
+   * app to return to the gate with an error. Reconnecting would just re-reject
+   * the same bad token forever (the C5 dead-end this replaces). */
+  private handleAuthReject(): void {
+    this.closedByClient = true; // suppress any in-flight reconnect/close paths
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    for (const t of this.failTimers.values()) clearTimeout(t);
+    this.failTimers.clear();
+    clearStoredToken();
+    dispatch({ type: "connection_status", status: "reconnecting" });
+    this.handlers.onAuthReject?.("Couldn't authenticate — check your token and try again.");
   }
 
   private scheduleReconnect(): void {
@@ -362,6 +417,10 @@ class HirselWsClient {
   private handleServerMessage(message: ServerMessage): void {
     switch (message.type) {
       case "hello_ok": {
+        // The token authenticated: retire the bad-token heuristic for the rest
+        // of this client's life so a later network drop reconnects, never gates.
+        this.everAuthed = true;
+        this.connectsWithoutHello = 0;
         dispatch({ type: "hello_ok", payload: message });
         setStoredLastSeen(message.latest_msg_id);
         dispatch({ type: "connection_status", status: "connected" });
@@ -514,10 +573,14 @@ class HirselWsClient {
 
 let client: HirselWsClient | null = null;
 
-export function startClient(url: string, token: string): HirselWsClient {
+export function startClient(
+  url: string,
+  token: string,
+  handlers: ClientHandlers = {},
+): HirselWsClient {
   client?.close();
   blobBase = deriveBlobBase(url);
-  client = new HirselWsClient(url, token);
+  client = new HirselWsClient(url, token, handlers);
   client.connect();
   return client;
 }

@@ -118,7 +118,7 @@ Density is a feature, not a compromise. The same information presents at phone w
 This system explicitly rejects three neighbors. It is **not corporate SaaS chat** (Intercom/Zendesk): no chirpy rounded-friendly bubbles, no marketing tone, no "How can I help you today!" energy. It is **not a consumer assistant** (Siri/Alexa/the ChatGPT mobile app): no mascot personality, no over-explaining, no empty enthusiasm. It is **not a notification slot machine**: no badge spam, no red dots everywhere, no engagement-bait urgency. hirsel signals "needs you" with one restrained escalation and stays silent otherwise.
 
 **Key Characteristics:**
-- Dark-only, near-black base (`oklch(0.141 …)`) with hairline `white/10` borders doing the structural work.
+- System / Light / Dark theme modes (default System), both schemes shipped from one canonical token set: dark rests on a near-black base (`oklch(0.141 …)`), light on an off-white canvas (`oklch(0.985 …)`, never pure white); hairline borders at 10% alpha do the structural work in both.
 - One brand accent — a muted indigo (`oklch(0.55 0.13 264)`) — reserved for interaction and "attend to this."
 - Inter (with cv-alternate feature settings) for everything human; a monospace stack for machine tokens only.
 - Flat by default: separation via hairline borders and a `foreground/10` ring, not drop shadows.

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The host is reached over iroh (its own encrypted QUIC transport), and FCM over
+  HTTPS — neither needs cleartext. Cleartext is permitted ONLY for loopback so a
+  dev build can point the client at a host running on the same device; everything
+  else is blocked (D12).
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

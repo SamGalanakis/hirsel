@@ -281,6 +281,13 @@ private fun defaultDeviceLabel(): String {
     return model.ifEmpty { "${Build.MANUFACTURER} phone" }
 }
 
+/** Max characters for a device label — the pairing label the host stores. */
+internal const val MAX_DEVICE_LABEL = 40
+
+/** Guards the device-name input: strips control/newline chars and caps length (D12). */
+internal fun sanitizeDeviceLabel(raw: String): String =
+    raw.replace(Regex("""[\r\n\t]"""), " ").take(MAX_DEVICE_LABEL)
+
 @Composable
 private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
@@ -424,7 +431,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, onBack: (() ->
         Spacer(Modifier.height(6.dp))
         HirselField(
             value = label,
-            onValueChange = { label = it },
+            onValueChange = { label = sanitizeDeviceLabel(it) },
             placeholder = "Device name",
             testTag = "device-label-field",
             singleLine = true,

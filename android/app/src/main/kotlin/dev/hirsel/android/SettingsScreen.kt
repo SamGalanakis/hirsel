@@ -229,7 +229,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
                 HirselField(
                     value = labelDraft,
-                    onValueChange = { labelDraft = it },
+                    onValueChange = { labelDraft = sanitizeDeviceLabel(it) },
                     placeholder = "Device name",
                     testTag = "rename-field",
                     singleLine = true,

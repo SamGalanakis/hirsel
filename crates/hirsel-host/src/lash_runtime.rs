@@ -112,6 +112,13 @@ enum AgentBackend {
 }
 
 impl AgentRuntime {
+    pub fn readiness(&self) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(_) | AgentBackend::Lash(_) => Ok(()),
+            AgentBackend::Degraded(_) => anyhow::bail!("Lash store is unavailable"),
+        }
+    }
+
     pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
         match self.backend.as_ref() {
             AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,

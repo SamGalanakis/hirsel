@@ -3,6 +3,7 @@ pub mod auth;
 pub mod blob_route;
 pub mod config;
 pub mod debug;
+pub mod health;
 pub mod iroh;
 pub mod lash_runtime;
 pub mod monitors;
@@ -48,6 +49,7 @@ pub struct AppState {
     pub pushes: push::PushGateway,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
+    pub data_dir: Arc<PathBuf>,
     pub auth_throttle: auth::AuthThrottle,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
@@ -312,6 +314,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         pushes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
+        data_dir: Arc::new(config.data_dir),
         auth_throttle: auth::AuthThrottle::default(),
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
@@ -320,6 +323,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
 
 pub fn router_from_state(state: AppState) -> Router {
     let mut app = Router::new()
+        .route("/livez", axum::routing::get(health::livez))
+        .route("/readyz", axum::routing::get(health::readyz))
         .route("/ws", axum::routing::get(ws::ws_handler))
         .route("/blob/:id", axum::routing::get(blob_route::blob_handler))
         .with_state(state.clone());
@@ -593,7 +598,7 @@ mod tests {
         }
     }
 
-    fn test_config(data_dir: &std::path::Path) -> Config {
+    pub(crate) fn test_config(data_dir: &std::path::Path) -> Config {
         Config {
             token: "test-token".to_string(),
             agent: AgentMode::Scripted,

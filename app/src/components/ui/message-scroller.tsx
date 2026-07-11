@@ -71,6 +71,10 @@ interface MessageScrollerContextValue {
   scrollToEnd: (behavior?: ScrollBehavior) => void;
   scrollToStart: (behavior?: ScrollBehavior) => void;
   scrollToElement: (el: HTMLElement, opts?: ScrollIntoViewOptions) => void;
+  /** Run `mutate` (which prepends older rows) while holding the viewport visually
+   * still: the content the user is looking at stays put instead of jumping down
+   * as height is added above it (D10 "load older"). */
+  preserveOnPrepend: (mutate: () => void) => void;
 }
 
 const MessageScrollerContext = createContext<MessageScrollerContextValue>();
@@ -114,7 +118,11 @@ function MessageScrollerProvider(props: { children: JSX.Element }) {
   // true so a freshly restored thread lands on the newest message.
   let stick = true;
 
-  const recomputeUnseen = () => {
+  // The unseen scan is O(items) getBoundingClientRect reads (a forced reflow
+  // each) — far too heavy to run on every scroll tick (D10). Coalesce all
+  // requests within a frame into a single scan on the next animation frame.
+  let unseenRaf = 0;
+  const recomputeUnseenNow = () => {
     const vp = viewport();
     if (!vp) return;
     const bottom = vp.getBoundingClientRect().bottom;
@@ -125,6 +133,13 @@ function MessageScrollerProvider(props: { children: JSX.Element }) {
       if (el.getBoundingClientRect().top >= bottom - 1) count += 1;
     }
     setUnseenCount(count);
+  };
+  const recomputeUnseen = () => {
+    if (unseenRaf) return;
+    unseenRaf = requestAnimationFrame(() => {
+      unseenRaf = 0;
+      recomputeUnseenNow();
+    });
   };
 
   const measure = () => {
@@ -149,6 +164,22 @@ function MessageScrollerProvider(props: { children: JSX.Element }) {
 
   const scrollToElement = (el: HTMLElement, opts?: ScrollIntoViewOptions) => {
     el.scrollIntoView({ behavior: "smooth", block: "center", ...opts });
+  };
+
+  const preserveOnPrepend = (mutate: () => void) => {
+    const vp = viewport();
+    if (!vp) {
+      mutate();
+      return;
+    }
+    // Record height/position, add the older rows, then restore the same content
+    // to the same place by pushing scrollTop down by exactly the height gained.
+    const beforeHeight = vp.scrollHeight;
+    const beforeTop = vp.scrollTop;
+    mutate();
+    requestAnimationFrame(() => {
+      vp.scrollTop = beforeTop + (vp.scrollHeight - beforeHeight);
+    });
   };
 
   const registerItem = (el: HTMLElement) => {
@@ -214,7 +245,12 @@ function MessageScrollerProvider(props: { children: JSX.Element }) {
     scrollToEnd,
     scrollToStart,
     scrollToElement,
+    preserveOnPrepend,
   };
+
+  onCleanup(() => {
+    if (unseenRaf) cancelAnimationFrame(unseenRaf);
+  });
 
   return (
     <MessageScrollerContext.Provider value={value}>

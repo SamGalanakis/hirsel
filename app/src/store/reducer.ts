@@ -16,6 +16,22 @@ import type {
  * A live chat session has few turns; this only guards a pathological long run. */
 const TURN_DETAILS_LIMIT = 50;
 
+/** Hard cap on the in-memory chat history (D10). An always-open PWA would
+ * otherwise grow `messages` without bound across a multi-day session — every
+ * append is O(n) to render and the unseen scan is O(n) per scroll. We keep the
+ * most-recent slice; older rows fall out of memory (the host still holds the
+ * canonical history, replayed from `last_seen` on reconnect). Comfortably larger
+ * than the render window (see ChatView) so "load older" has headroom. Oldest are
+ * dropped from the FRONT, so optimistic sends (always newest, at the tail) and
+ * the reconciliation that matches them are never disturbed. */
+export const MESSAGES_CAP = 600;
+
+/** Keep only the newest `MESSAGES_CAP` messages, dropping the oldest. A no-op
+ * (same reference) under the cap so the common case allocates nothing. */
+function capMessages(messages: DisplayMessage[]): DisplayMessage[] {
+  return messages.length > MESSAGES_CAP ? messages.slice(messages.length - MESSAGES_CAP) : messages;
+}
+
 function upsertPing(pings: Ping[], ping: Ping): Ping[] {
   const idx = pings.findIndex((existing) => existing.id === ping.id);
   if (idx === -1) return [...pings, ping];
@@ -146,7 +162,7 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
     }
   }
 
-  return { ...state, messages: [...state.messages, message] };
+  return { ...state, messages: capMessages([...state.messages, message]) };
 }
 
 /** Same idea as `reconcileOrAppend`, scoped to one side chat's own message
@@ -275,7 +291,7 @@ export function reduce(state: AppState, action: Action): AppState {
 
       return {
         ...state,
-        messages: [...merged, ...pending],
+        messages: capMessages([...merged, ...pending]),
         // Defensive, matching processes/side_chats below: a malformed frame
         // that omits `pings` must not white-screen the whole app.
         pings: pings ?? [],
@@ -468,7 +484,7 @@ export function reduce(state: AppState, action: Action): AppState {
       if (mentionIds.length > 0) pendingSend.mentions = mentionIds;
       return {
         ...state,
-        messages: [...state.messages, localMessage],
+        messages: capMessages([...state.messages, localMessage]),
         pendingSends: [...state.pendingSends, pendingSend],
         // v2.1 (ADR-0009): an anchored reply optimistically resolves its Ping.
         pings: resolveOpenPingByAnchor(state.pings, ref),

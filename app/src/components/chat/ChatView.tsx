@@ -1,5 +1,5 @@
-import { ArrowDown, MessagesSquare, Upload } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { ArrowDown, ChevronUp, MessagesSquare, Upload } from "lucide-solid";
+import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import {
   clearComposerDraft,
@@ -26,6 +26,8 @@ import {
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerViewport,
+  useMessageScroller,
+  useMessageScrollerScrollable,
   useMessageScrollerVisibility,
 } from "../ui/message-scroller";
 import { Composer } from "./Composer";
@@ -35,6 +37,13 @@ import { Timeline } from "./Timeline";
 import { createComposerAttachments } from "./useAttachments";
 
 const HIGHLIGHT_MS = 1600;
+
+/** Rendered chat window (D10): only the most-recent N rows are in the DOM at
+ * once; "load older" reveals `RENDER_STEP` more from the in-memory buffer (which
+ * the reducer caps at MESSAGES_CAP). Keeps the always-open PWA's render + unseen
+ * scan bounded no matter how long the session runs. */
+const RENDER_WINDOW = 200;
+const RENDER_STEP = 100;
 
 function dayKey(ts: string): string {
   const d = new Date(ts);
@@ -106,6 +115,15 @@ export function ChatView() {
 
   const attachments = createComposerAttachments();
 
+  // How many of the tail to render. Grows via "load older"; the window always
+  // slices from the end so newly-arrived messages stay visible at the bottom.
+  const [renderLimit, setRenderLimit] = createSignal(RENDER_WINDOW);
+  const windowStart = createMemo(() => Math.max(0, state.messages.length - renderLimit()));
+  const windowedMessages = createMemo(() => state.messages.slice(windowStart()));
+  const hasOlder = () => windowStart() > 0;
+
+  // ref/quote resolution stays over the FULL buffer so a reply can still cite a
+  // message that scrolled out of the render window.
   const messagesById = createMemo(() => {
     const map = new Map<number, DisplayMessage>();
     for (const m of state.messages) map.set(m.id, m);
@@ -129,10 +147,11 @@ export function ChatView() {
   });
 
   // Interleave day-break markers between messages when the calendar day changes.
+  // Built from the render window, not the full buffer.
   const rows = createMemo<Row[]>(() => {
     const out: Row[] = [];
     let lastDay: string | null = null;
-    for (const m of state.messages) {
+    for (const m of windowedMessages()) {
       const key = dayKey(m.ts);
       if (key !== lastDay) {
         out.push({ kind: "day", key: `day-${key}-${m.id}`, label: dayLabel(m.ts) });
@@ -222,6 +241,42 @@ export function ChatView() {
     return null;
   }
 
+  /** "Load older messages" header row (D10). Reveals RENDER_STEP more of the
+   * in-memory history, holding scroll position steady, and auto-loads when the
+   * Owner scrolls back to the top. Rendered inside the scroller so it can read
+   * the scroll edges + the prepend-preserving helper. */
+  function LoadOlder() {
+    const scroller = useMessageScroller();
+    const { atStart } = useMessageScrollerScrollable();
+    const load = () =>
+      scroller.preserveOnPrepend(() =>
+        setRenderLimit((l) => Math.min(state.messages.length, l + RENDER_STEP)),
+      );
+    // Auto-load on scroll-to-top, but only once the Owner has scrolled away from
+    // the top at least once — so the initial restore-to-bottom (where atStart is
+    // momentarily true) never triggers a spurious prepend.
+    let armed = false;
+    createEffect(() => {
+      if (!atStart()) {
+        armed = true;
+        return;
+      }
+      if (armed && untrack(() => hasOlder())) load();
+    });
+    return (
+      <MessageScrollerItem class="flex justify-center px-3 py-2">
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={load}
+        >
+          <ChevronUp class="size-3.5" aria-hidden="true" />
+          Load older messages
+        </button>
+      </MessageScrollerItem>
+    );
+  }
+
   // Drag-and-drop anywhere on the chat view. Depth counter avoids flicker as the
   // dragged item crosses child element boundaries.
   function onDragEnter(e: DragEvent) {
@@ -301,6 +356,9 @@ export function ChatView() {
                   overflows there is no free space and the scroll/stick machinery
                   is unaffected. */}
               <MessageScrollerContent class="justify-end gap-3">
+                <Show when={hasOlder()}>
+                  <LoadOlder />
+                </Show>
                 <For each={rows()}>
                   {(row) => (
                     <Show

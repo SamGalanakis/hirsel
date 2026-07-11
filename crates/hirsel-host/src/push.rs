@@ -68,7 +68,11 @@ impl RecordingPushSender {
 #[async_trait]
 impl PushSender for RecordingPushSender {
     async fn send(&self, tokens: &[String], payload: &PushPayload) -> anyhow::Result<()> {
-        tracing::info!(?tokens, ?payload, "FCM not configured — would push …");
+        tracing::info!(
+            token_count = tokens.len(),
+            ping_id = payload.data.ping_id,
+            "FCM not configured — would send push"
+        );
         self.pushes
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -178,14 +182,22 @@ impl FcmPushSender {
             }))
             .send()
             .await
-            .with_context(|| format!("send FCM message to token {token}"))?;
+            .context("send FCM message")?;
         let status = response.status();
-        let body = response.text().await.context("read FCM send response")?;
+        let _body = response.text().await.context("read FCM send response")?;
         if !status.is_success() {
-            anyhow::bail!("FCM send failed for token {token} ({status}): {body}");
+            anyhow::bail!(
+                "FCM send failed for token ending {} ({status})",
+                token_suffix(token)
+            );
         }
         Ok(())
     }
+}
+
+fn token_suffix(token: &str) -> String {
+    let suffix = token.chars().rev().take(4).collect::<Vec<_>>();
+    suffix.into_iter().rev().collect()
 }
 
 #[derive(Debug, Deserialize)]

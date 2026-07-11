@@ -1,11 +1,29 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#141414" />
     <title>hirsel</title>
+    <script>
+      // Apply the persisted theme BEFORE first paint so there is no flash of the
+      // wrong scheme on load. Kept in sync with app/src/lib/theme.ts (the runtime
+      // owner of the same class + meta). Mode is "system" | "light" | "dark";
+      // default "system" follows the OS via prefers-color-scheme.
+      (function () {
+        try {
+          var mode = localStorage.getItem("hirsel.theme") || "system";
+          var dark =
+            mode === "dark" ||
+            (mode === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", dark ? "#141414" : "#fafafb");
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

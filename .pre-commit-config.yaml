@@ -21,7 +21,7 @@ repos:
         name: Block sensitive files
         language: fail
         entry: Sensitive files must never be committed
-        files: '(?i)(^|/)(google-services\.json|[^/]*service-account[^/]*\.json|fcm-[^/]*service[^/]*\.json|[^/]*\.(keystore|jks|p12|pem))$'
+        files: '(?i)(^|/)(google-services\.json|[^/]*service[-_]account[^/]*\.json|fcm-[^/]*service[^/]*\.json|[^/]*firebase-admin[^/]*\.json|[^/]*credentials[^/]*\.json|[^/]*\.(keystore|jks|p12|pfx|pkcs12|pem|key|der|kdbx|mobileprovision))$'
 
       - id: cargo-fmt
         name: cargo fmt

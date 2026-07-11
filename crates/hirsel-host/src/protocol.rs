@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn pre_auth_frames_have_a_stricter_limit() {
         assert_eq!(PRE_AUTH_MAX_FRAME_BYTES, 8 * 1024);
-        assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES);
+        const { assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES) };
     }
 
     struct TestChannel {

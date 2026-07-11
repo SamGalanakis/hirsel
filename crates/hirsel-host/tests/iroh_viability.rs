@@ -5,6 +5,8 @@ use iroh::{Endpoint, endpoint::presets};
 const ALPN: &[u8] = b"hirsel/viability/1";
 
 #[tokio::test]
+// Requires the public n0 relay: cargo test -p hirsel-host --test iroh_viability -- --ignored
+#[ignore = "requires public n0 relay network access"]
 async fn endpoints_connect_by_node_id_and_round_trip_a_bi_stream() -> anyhow::Result<()> {
     let server = Endpoint::builder(presets::N0)
         .alpns(vec![ALPN.to_vec()])

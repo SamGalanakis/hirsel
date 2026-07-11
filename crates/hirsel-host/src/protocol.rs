@@ -98,7 +98,7 @@ where
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
 
-    let snapshot = match state.storage.hello_snapshot(last_seen_msg_id).await {
+    let (hello, mut dedupe) = match build_snapshot(&state, last_seen_msg_id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let _ = channel
@@ -112,18 +112,7 @@ where
     };
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Snapshotted, &state).await;
-    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
-    if channel
-        .send(&HostToClient::HelloOk {
-            latest_msg_id: snapshot.latest_msg_id,
-            messages: snapshot.messages,
-            pings: snapshot.pings,
-            processes: state.process_snapshot().await.unwrap_or_default(),
-            side_chats: state.side_chats.summaries().await,
-        })
-        .await
-        .is_err()
-    {
+    if channel.send(&hello).await.is_err() {
         return;
     }
     #[cfg(test)]
@@ -168,12 +157,43 @@ where
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "client broadcast receiver lagged; sending full resync");
+                        match build_snapshot(&state, None).await {
+                            Ok((hello, resynced)) if channel.send(&hello).await.is_ok() => {
+                                dedupe = resynced;
+                            }
+                            Ok(_) => break,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to resync lagged client");
+                                let _ = channel.send(&HostToClient::Error {
+                                    detail: format!("resync failed: {error}"),
+                                    client_id: None,
+                                }).await;
+                            }
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
     }
+}
+
+async fn build_snapshot(
+    state: &AppState,
+    last_seen_msg_id: Option<u64>,
+) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
+    let snapshot = state.storage.hello_snapshot(last_seen_msg_id).await?;
+    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
+    let hello = HostToClient::HelloOk {
+        latest_msg_id: snapshot.latest_msg_id,
+        messages: snapshot.messages,
+        pings: snapshot.pings,
+        processes: state.process_snapshot().await?,
+        side_chats: state.side_chats.summaries().await,
+    };
+    Ok((hello, dedupe))
 }
 
 async fn authenticate(
@@ -422,9 +442,9 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
 mod tests {
     use std::time::Duration;
 
-    use hirsel_proto::HelloAuth;
+    use hirsel_proto::{ChatAuthor, HelloAuth, HostToClient};
 
-    use super::authenticate;
+    use super::{authenticate, build_snapshot};
     use crate::{
         build_state,
         config::{AgentMode, Config, DriverMode, ProviderMode},
@@ -509,5 +529,44 @@ mod tests {
             .await
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn full_resync_snapshot_replays_all_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: false,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+        state
+            .storage
+            .append_chat(ChatAuthor::Agent, "missed", None)
+            .await
+            .unwrap();
+
+        let (frame, _) = build_snapshot(&state, None).await.unwrap();
+        match frame {
+            HostToClient::HelloOk {
+                latest_msg_id,
+                messages,
+                ..
+            } => {
+                assert_eq!(latest_msg_id, 1);
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].body, "missed");
+            }
+            other => panic!("unexpected resync frame: {other:?}"),
+        }
     }
 }

@@ -199,6 +199,10 @@ pub enum ClientToHost {
         mime: String,
         data_b64: String,
     },
+    GetBlobUrl {
+        client_id: String,
+        blob_id: String,
+    },
     ResolvePing {
         ping_id: u64,
     },
@@ -309,6 +313,12 @@ pub enum HostToClient {
     BlobOk {
         client_id: String,
         blob: Blob,
+    },
+    BlobUrl {
+        client_id: String,
+        blob_id: String,
+        url: String,
+        expires_at: u64,
     },
     Error {
         detail: String,
@@ -544,6 +554,27 @@ mod tests {
         let encoded = serde_json::to_string(&response).unwrap();
         let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, response);
+
+        let request = ClientToHost::GetBlobUrl {
+            client_id: "url-1".to_string(),
+            blob_id: "blob-1".to_string(),
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientToHost>(&encoded).unwrap(),
+            request
+        );
+        let response = HostToClient::BlobUrl {
+            client_id: "url-1".to_string(),
+            blob_id: "blob-1".to_string(),
+            url: "/blob/blob-1?exp=300&sig=signed".to_string(),
+            expires_at: 300,
+        };
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HostToClient>(&encoded).unwrap(),
+            response
+        );
     }
 
     #[test]

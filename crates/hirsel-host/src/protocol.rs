@@ -367,6 +367,20 @@ where
                 })
                 .await?;
         }
+        ClientToHost::GetBlobUrl { client_id, blob_id } => {
+            if state.storage.blob(&blob_id).await?.is_none() {
+                anyhow::bail!("unknown blob id: {blob_id}");
+            }
+            let signed = state.blob_signer.mint(&blob_id)?;
+            channel
+                .send(&HostToClient::BlobUrl {
+                    client_id,
+                    blob_id,
+                    url: signed.url,
+                    expires_at: signed.expires_at,
+                })
+                .await?;
+        }
         ClientToHost::ResolvePing { ping_id } => {
             if let Some(ping) = state.storage.resolve_ping(ping_id).await? {
                 state.broadcast(HostToClient::PingUpsert { ping });

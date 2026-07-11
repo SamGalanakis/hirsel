@@ -302,6 +302,33 @@ mod tests {
 
         ws.send(Message::Text(
             serde_json::json!({
+                "type": "get_blob_url",
+                "client_id": "blob-url-1",
+                "blob_id": first_blob.id.clone()
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let frame = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        match serde_json::from_str::<HostToClient>(&frame).unwrap() {
+            HostToClient::BlobUrl {
+                client_id,
+                blob_id,
+                url,
+                expires_at,
+            } => {
+                assert_eq!(client_id, "blob-url-1");
+                assert_eq!(blob_id, first_blob.id);
+                assert!(url.starts_with(&format!("/blob/{}?exp=", first_blob.id)));
+                assert!(url.contains("&sig="));
+                assert!(expires_at > 0);
+            }
+            other => panic!("unexpected blob URL response: {other:?}"),
+        }
+
+        ws.send(Message::Text(
+            serde_json::json!({
                 "type": "upload_blob",
                 "client_id": "upload-1",
                 "name": "different.txt",
@@ -527,6 +554,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let signed_text = state.blob_signer.mint(&text.blob.id).unwrap();
         let app = router_from_state(state);
         let addr = spawn_app(app).await;
         let client = reqwest::Client::new();
@@ -538,18 +566,23 @@ mod tests {
             .unwrap();
         assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-        let missing = client
+        let raw_query_token = client
             .get(format!("http://{addr}/blob/missing?token=test-token"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(raw_query_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let missing = client
+            .get(format!("http://{addr}/blob/missing"))
+            .bearer_auth("test-token")
             .send()
             .await
             .unwrap();
         assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
         let text_response = client
-            .get(format!(
-                "http://{addr}/blob/{}?token=test-token",
-                text.blob.id
-            ))
+            .get(format!("http://{addr}{}", signed_text.url))
             .send()
             .await
             .unwrap();

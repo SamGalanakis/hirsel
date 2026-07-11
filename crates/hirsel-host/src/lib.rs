@@ -51,6 +51,7 @@ pub struct AppState {
     pub debug_enabled: bool,
     pub data_dir: Arc<PathBuf>,
     pub auth_throttle: auth::AuthThrottle,
+    pub blob_signer: blob_route::BlobSigner,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
@@ -303,6 +304,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         storage.clone(),
     ));
     side_chats.spawn_reaper(Duration::from_secs(config.sidechat_ttl_secs));
+    let blob_signer = blob_route::BlobSigner::new(config.token.as_bytes());
     let state = AppState {
         token: Arc::from(config.token),
         storage,
@@ -316,6 +318,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         debug_enabled: config.debug,
         data_dir: Arc::new(config.data_dir),
         auth_throttle: auth::AuthThrottle::default(),
+        blob_signer,
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)

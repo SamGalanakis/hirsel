@@ -49,9 +49,15 @@ jobs:
             exit 1
           fi
           git checkout --detach "refs/tags/$tag"
+          if (( GITHUB_RUN_NUMBER > 2147483647 )); then
+            echo "GitHub run number exceeds Android's versionCode limit." >&2
+            exit 1
+          fi
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION=${tag#v}" >> "$GITHUB_ENV"
           echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "ORG_GRADLE_PROJECT_hirselVersionName=${tag#v}" >> "$GITHUB_ENV"
+          echo "ORG_GRADLE_PROJECT_hirselVersionCode=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Require successful CI for release commit
         env:

@@ -48,7 +48,7 @@ wait_health() {
   local timeout="${1:-30}"
   local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if curl -fsS "$BASE/debug/health" | jq -e '.ok == true and .debug == true' >/dev/null 2>&1; then
+    if curl -fsS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/health" | jq -e '.ok == true and .debug == true' >/dev/null 2>&1; then
       return 0
     fi
     if [[ -n "${HOST_PID:-}" ]] && ! kill -0 "$HOST_PID" 2>/dev/null; then
@@ -131,12 +131,12 @@ restart_hirsel_host() {
 post_json() {
   local path="$1"
   local body="$2"
-  curl -fsS -X POST "$BASE/$path" -H 'content-type: application/json' -d "$body"
+  curl -fsS -X POST "$BASE/$path" -H "authorization: Bearer $HIRSEL_TOKEN" -H 'content-type: application/json' -d "$body"
 }
 
 get_json() {
   local path="$1"
-  curl -fsS "$BASE/$path"
+  curl -fsS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path"
 }
 
 wait_jq() {

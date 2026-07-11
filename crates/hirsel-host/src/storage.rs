@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -115,6 +115,7 @@ impl Storage {
             pairing_codes: Arc::new(Mutex::new(PairingCodes::default())),
         };
         storage.init().await?;
+        storage.log_orphaned_blobs().await?;
         Ok(storage)
     }
 
@@ -122,6 +123,8 @@ impl Storage {
         let conn = self.conn.lock().await;
         conn.execute_batch(
             "
+            PRAGMA foreign_keys = ON;
+            PRAGMA busy_timeout = 5000;
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +213,13 @@ impl Storage {
         conn.execute("DELETE FROM side_chat_messages", [])?;
         migrate_pings_schema(&conn)?;
         ensure_chat_tool_calls_column(&conn)?;
+        let integrity = conn
+            .prepare("PRAGMA integrity_check")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if integrity.as_slice() != ["ok"] {
+            tracing::error!(?integrity, "SQLite integrity check failed");
+        }
         Ok(())
     }
 
@@ -412,18 +422,32 @@ impl Storage {
     ) -> anyhow::Result<HelloSnapshot> {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
-        let messages = replay_messages_from_conn(&tx, last_seen_msg_id)?;
+        let db_max: u64 = tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM chat_messages",
+            [],
+            |row| row.get(0),
+        )?;
+        let effective_cursor = last_seen_msg_id.filter(|cursor| *cursor <= db_max);
+        let messages = replay_messages_from_conn(&tx, effective_cursor)?;
         let pings = ping_snapshot_from_conn(&tx)?;
-        let latest_msg_id = messages
-            .last()
-            .map(|message| message.id)
-            .unwrap_or_else(|| last_seen_msg_id.unwrap_or(0));
         tx.commit()?;
         Ok(HelloSnapshot {
-            latest_msg_id,
+            latest_msg_id: db_max,
             messages,
             pings,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn force_hello_snapshot_error(&self) {
+        self.conn
+            .lock()
+            .await
+            .execute(
+                "ALTER TABLE chat_messages RENAME TO broken_chat_messages",
+                [],
+            )
+            .expect("break hello snapshot schema for test");
     }
 
     pub async fn all_chat(&self) -> anyhow::Result<Vec<ChatMessage>> {
@@ -818,9 +842,10 @@ impl Storage {
         tokio::fs::create_dir_all(self.blobs_dir.as_ref()).await?;
         let id = Uuid::new_v4().to_string();
         let path = self.blobs_dir.join(&id);
-        tokio::fs::write(&path, &data)
+        let temp_path = self.blobs_dir.join(format!(".{id}.tmp"));
+        tokio::fs::write(&temp_path, &data)
             .await
-            .with_context(|| format!("write blob file {}", path.display()))?;
+            .with_context(|| format!("write temporary blob file {}", temp_path.display()))?;
 
         let created_ts = Utc::now();
         let blob = Blob {
@@ -835,7 +860,7 @@ impl Storage {
             created_ts,
         };
 
-        let duplicate = {
+        let metadata_result: anyhow::Result<Option<StoredBlob>> = async {
             let mut conn = self.conn.lock().await;
             let tx = conn.transaction()?;
             let duplicate_id = tx
@@ -845,7 +870,7 @@ impl Storage {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
-            if let Some(duplicate_id) = duplicate_id {
+            let duplicate = if let Some(duplicate_id) = duplicate_id {
                 let duplicate = get_stored_blob(&tx, &duplicate_id)?;
                 tx.commit()?;
                 Some(duplicate)
@@ -870,17 +895,77 @@ impl Storage {
                 )?;
                 tx.commit()?;
                 None
+            };
+            Ok(duplicate)
+        }
+        .await;
+
+        let duplicate = match metadata_result {
+            Ok(duplicate) => duplicate,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(error);
             }
         };
 
         if let Some(duplicate) = duplicate {
-            if let Err(error) = tokio::fs::remove_file(&path).await {
-                tracing::debug!(%error, path = %path.display(), "failed to remove duplicate blob file");
+            if let Err(error) = tokio::fs::remove_file(&temp_path).await {
+                tracing::debug!(%error, path = %temp_path.display(), "failed to remove duplicate temporary blob file");
             }
             return Ok(duplicate);
         }
 
+        if let Err(error) = tokio::fs::rename(&temp_path, &path).await {
+            let mut conn = self.conn.lock().await;
+            let cleanup = conn.transaction().and_then(|tx| {
+                tx.execute(
+                    "DELETE FROM client_blobs WHERE client_id = ?1 AND blob_id = ?2",
+                    params![client_id, id],
+                )?;
+                tx.execute("DELETE FROM blobs WHERE id = ?1", params![id])?;
+                tx.commit()
+            });
+            if let Err(cleanup_error) = cleanup {
+                tracing::error!(%cleanup_error, blob_id = %id, "failed to roll back blob metadata after rename failure");
+            }
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error).with_context(|| {
+                format!(
+                    "publish blob file {} from {}",
+                    path.display(),
+                    temp_path.display()
+                )
+            });
+        }
+
         Ok(record)
+    }
+
+    async fn log_orphaned_blobs(&self) -> anyhow::Result<()> {
+        for path in self.orphaned_blob_paths().await? {
+            tracing::warn!(path = %path.display(), "orphaned blob file has no SQLite metadata");
+        }
+        Ok(())
+    }
+
+    async fn orphaned_blob_paths(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let known = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn.prepare("SELECT path FROM blobs")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .map(|path| path.map(PathBuf::from))
+                .collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        let mut entries = tokio::fs::read_dir(self.blobs_dir.as_ref()).await?;
+        let mut orphans = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if entry.file_type().await?.is_file() && !known.contains(&path) {
+                orphans.push(path);
+            }
+        }
+        orphans.sort();
+        Ok(orphans)
     }
 
     pub async fn blob(&self, id: &str) -> anyhow::Result<Option<StoredBlob>> {
@@ -2071,6 +2156,37 @@ mod tests {
         let empty = storage.hello_snapshot(Some(2)).await.unwrap();
         assert_eq!(empty.latest_msg_id, 2);
         assert!(empty.messages.is_empty());
+
+        let stale = storage.hello_snapshot(Some(99_999)).await.unwrap();
+        assert_eq!(stale.latest_msg_id, 2);
+        assert_eq!(
+            stale
+                .messages
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_storage_enables_foreign_keys_and_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let conn = storage.conn.lock().await;
+
+        let foreign_keys: u32 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        let busy_timeout: u64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(busy_timeout, 5_000);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
     }
 
     #[tokio::test]
@@ -2473,6 +2589,21 @@ mod tests {
             Some(first.blob.id.as_str())
         );
         assert!(first.path.is_absolute());
+        let files = std::fs::read_dir(dir.path().join("blobs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![first.path]);
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_reports_files_without_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let orphan = dir.path().join("blobs").join("orphan-file");
+        tokio::fs::write(&orphan, b"orphan").await.unwrap();
+
+        assert_eq!(storage.orphaned_blob_paths().await.unwrap(), vec![orphan]);
     }
 
     #[tokio::test]

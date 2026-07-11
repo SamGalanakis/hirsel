@@ -4,7 +4,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
     sync::{Arc, Mutex as StdMutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -18,6 +18,7 @@ use crate::storage::Storage;
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const OWNER_APP_NAME: &str = "Hirsel";
+const MAX_DELIVERY_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PushPayload {
@@ -67,7 +68,11 @@ impl RecordingPushSender {
 #[async_trait]
 impl PushSender for RecordingPushSender {
     async fn send(&self, tokens: &[String], payload: &PushPayload) -> anyhow::Result<()> {
-        tracing::info!(?tokens, ?payload, "FCM not configured — would push …");
+        tracing::info!(
+            token_count = tokens.len(),
+            ping_id = payload.data.ping_id,
+            "FCM not configured — would send push"
+        );
         self.pushes
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -177,14 +182,22 @@ impl FcmPushSender {
             }))
             .send()
             .await
-            .with_context(|| format!("send FCM message to token {token}"))?;
+            .context("send FCM message")?;
         let status = response.status();
-        let body = response.text().await.context("read FCM send response")?;
+        let _body = response.text().await.context("read FCM send response")?;
         if !status.is_success() {
-            anyhow::bail!("FCM send failed for token {token} ({status}): {body}");
+            anyhow::bail!(
+                "FCM send failed for token ending {} ({status})",
+                token_suffix(token)
+            );
         }
         Ok(())
     }
+}
+
+fn token_suffix(token: &str) -> String {
+    let suffix = token.chars().rev().take(4).collect::<Vec<_>>();
+    suffix.into_iter().rev().collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,7 +234,13 @@ pub struct PushGateway {
     storage: Storage,
     sender: Arc<dyn PushSender>,
     recording: Option<RecordingPushSender>,
-    sent_ping_ids: Arc<StdMutex<HashSet<u64>>>,
+    delivery_state: Arc<StdMutex<PushDeliveryState>>,
+}
+
+#[derive(Default)]
+struct PushDeliveryState {
+    in_flight: HashSet<u64>,
+    delivered: HashSet<u64>,
 }
 
 impl PushGateway {
@@ -278,7 +297,7 @@ impl PushGateway {
             storage,
             sender,
             recording,
-            sent_ping_ids: Arc::new(StdMutex::new(HashSet::new())),
+            delivery_state: Arc::new(StdMutex::new(PushDeliveryState::default())),
         }
     }
 
@@ -286,12 +305,7 @@ impl PushGateway {
         if !ping.requires_response {
             return;
         }
-        let first_send = self
-            .sent_ping_ids
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(ping.id);
-        if !first_send {
+        if !self.claim_delivery(ping.id) {
             return;
         }
 
@@ -302,10 +316,12 @@ impl PushGateway {
                 .collect::<Vec<_>>(),
             Err(error) => {
                 tracing::warn!(ping_id = ping.id, %error, "failed to load push tokens");
+                self.release_delivery(ping.id);
                 return;
             }
         };
         if tokens.is_empty() {
+            self.release_delivery(ping.id);
             return;
         }
 
@@ -322,11 +338,40 @@ impl PushGateway {
             },
         };
         let sender = self.sender.clone();
+        let delivery_state = Arc::clone(&self.delivery_state);
+        let ping_id = ping.id;
         tokio::spawn(async move {
-            if let Err(error) = sender.send(&tokens, &payload).await {
-                tracing::warn!(%error, "push delivery failed");
+            let result = send_with_retry(sender.as_ref(), &tokens, &payload).await;
+            let mut state = delivery_state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.in_flight.remove(&ping_id);
+            if result.is_ok() {
+                state.delivered.insert(ping_id);
+            } else if let Err(error) = result {
+                tracing::warn!(ping_id, %error, "push delivery failed after retries");
             }
         });
+    }
+
+    fn claim_delivery(&self, ping_id: u64) -> bool {
+        let mut state = self
+            .delivery_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.delivered.contains(&ping_id) || state.in_flight.contains(&ping_id) {
+            return false;
+        }
+        state.in_flight.insert(ping_id);
+        true
+    }
+
+    fn release_delivery(&self, ping_id: u64) {
+        self.delivery_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .in_flight
+            .remove(&ping_id);
     }
 
     pub fn recorded_pushes(&self) -> Vec<RecordedPush> {
@@ -340,6 +385,35 @@ impl PushGateway {
             recording.clear();
         }
     }
+}
+
+async fn send_with_retry(
+    sender: &dyn PushSender,
+    tokens: &[String],
+    payload: &PushPayload,
+) -> anyhow::Result<()> {
+    let mut last_error = None;
+    for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
+        match sender.send(tokens, payload).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(attempt, %error, "push delivery attempt failed");
+                last_error = Some(error);
+                if attempt < MAX_DELIVERY_ATTEMPTS {
+                    tokio::time::sleep(retry_delay(attempt)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("at least one push delivery attempt"))
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    #[cfg(test)]
+    const BASE: Duration = Duration::from_millis(5);
+    #[cfg(not(test))]
+    const BASE: Duration = Duration::from_millis(250);
+    BASE.saturating_mul(1 << (attempt.saturating_sub(1).min(4)))
 }
 
 #[cfg(not(test))]
@@ -397,4 +471,67 @@ fn service_account_jwt(account: &ServiceAccount) -> anyhow::Result<String> {
     }
     let signature = URL_SAFE_NO_PAD.encode(output.stdout);
     Ok(format!("{signing_input}.{signature}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use chrono::Utc;
+    use hirsel_proto::{PingStatus, PushPlatform};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FailOnceSender {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PushSender for FailOnceSender {
+        async fn send(&self, _tokens: &[String], _payload: &PushPayload) -> anyhow::Result<()> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("transient failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_push_is_retried_before_marking_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(PushPlatform::Android, "device-token")
+            .await
+            .unwrap();
+        let sender = Arc::new(FailOnceSender::default());
+        let gateway = PushGateway::new(storage, sender.clone(), None);
+        let ping = Ping {
+            id: 42,
+            name: "decision".to_string(),
+            description: "Choose".to_string(),
+            content: "A or B?".to_string(),
+            anchor: 1,
+            requires_response: true,
+            quick_replies: Vec::new(),
+            status: PingStatus::Open,
+            read: false,
+            ts: Utc::now(),
+        };
+
+        gateway.enqueue_ping(&ping).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while sender.attempts.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        gateway.enqueue_ping(&ping).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(sender.attempts.load(Ordering::SeqCst), 2);
+    }
 }

@@ -978,7 +978,15 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let client = reqwest::Client::new();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            "Bearer test-token".parse().unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
         let base = format!("http://{addr}");
 
         let opened: serde_json::Value = client

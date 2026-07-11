@@ -2,8 +2,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{StatusCode, header::WWW_AUTHENTICATE},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -14,6 +15,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
+    auth::owner_bearer_matches,
     push::RecordedPush,
     storage::{Device, MonitorRecord, MonitorWakeOn, PushToken},
 };
@@ -46,7 +48,25 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/devices", get(devices))
         .route("/debug/revoke-device", post(revoke_device))
         .route("/debug/health", get(health))
+        .layer(middleware::from_fn_with_state(state.clone(), require_owner))
         .with_state(state)
+}
+
+async fn require_owner(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    if owner_bearer_matches(request.headers(), &state.token) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(WWW_AUTHENTICATE, "Bearer")],
+            "owner authentication required",
+        )
+            .into_response()
+    }
 }
 
 #[derive(Debug, Deserialize)]

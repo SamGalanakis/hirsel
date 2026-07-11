@@ -1,19 +1,101 @@
+use anyhow::Context;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE},
+        header::{CONTENT_DISPOSITION, CONTENT_TYPE},
     },
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use crate::AppState;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+use crate::{AppState, auth::owner_bearer_matches};
+
+const SIGNED_BLOB_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Deserialize)]
 pub struct BlobQuery {
-    token: Option<String>,
+    exp: Option<u64>,
+    sig: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct BlobSigner {
+    secret: Arc<[u8]>,
+    ttl: Duration,
+}
+
+impl BlobSigner {
+    pub fn new(secret: impl AsRef<[u8]>) -> Self {
+        Self {
+            secret: Arc::from(secret.as_ref()),
+            ttl: SIGNED_BLOB_TTL,
+        }
+    }
+
+    pub fn mint(&self, blob_id: &str) -> anyhow::Result<SignedBlobUrl> {
+        self.mint_at(blob_id, SystemTime::now())
+    }
+
+    fn mint_at(&self, blob_id: &str, now: SystemTime) -> anyhow::Result<SignedBlobUrl> {
+        let expires_at = now
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before Unix epoch")?
+            .as_secs()
+            .saturating_add(self.ttl.as_secs());
+        let signature = self.signature(blob_id, expires_at)?;
+        Ok(SignedBlobUrl {
+            url: format!("/blob/{blob_id}?exp={expires_at}&sig={signature}"),
+            expires_at,
+        })
+    }
+
+    fn verify(&self, blob_id: &str, expires_at: u64, signature: &str) -> bool {
+        self.verify_at(blob_id, expires_at, signature, SystemTime::now())
+    }
+
+    fn verify_at(&self, blob_id: &str, expires_at: u64, signature: &str, now: SystemTime) -> bool {
+        let Ok(now) = now.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        if now.as_secs() > expires_at {
+            return false;
+        }
+        let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
+            return false;
+        };
+        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(&self.secret) else {
+            return false;
+        };
+        mac.update(signing_input(blob_id, expires_at).as_bytes());
+        mac.verify_slice(&signature).is_ok()
+    }
+
+    fn signature(&self, blob_id: &str, expires_at: u64) -> anyhow::Result<String> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret)
+            .map_err(|_| anyhow::anyhow!("invalid blob signing key"))?;
+        mac.update(signing_input(blob_id, expires_at).as_bytes());
+        Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedBlobUrl {
+    pub url: String,
+    pub expires_at: u64,
+}
+
+fn signing_input(blob_id: &str, expires_at: u64) -> String {
+    format!("hirsel-blob-v1\n{blob_id}\n{expires_at}")
 }
 
 pub async fn blob_handler(
@@ -22,7 +104,7 @@ pub async fn blob_handler(
     Query(query): Query<BlobQuery>,
     headers: HeaderMap,
 ) -> Result<Response, BlobRouteError> {
-    if !is_authorized(&state, &query, &headers) {
+    if !is_authorized(&state, &id, &query, &headers) {
         return Err(BlobRouteError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -43,17 +125,12 @@ pub async fn blob_handler(
     Ok(response)
 }
 
-fn is_authorized(state: &AppState, query: &BlobQuery, headers: &HeaderMap) -> bool {
-    if query.token.as_deref() == Some(state.token.as_ref()) {
-        return true;
-    }
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .is_some_and(|(scheme, token)| {
-            scheme.eq_ignore_ascii_case("bearer") && token == state.token.as_ref()
-        })
+fn is_authorized(state: &AppState, id: &str, query: &BlobQuery, headers: &HeaderMap) -> bool {
+    query
+        .exp
+        .zip(query.sig.as_deref())
+        .is_some_and(|(expires_at, signature)| state.blob_signer.verify(id, expires_at, signature))
+        || owner_bearer_matches(headers, &state.token)
 }
 
 fn content_type_header(mime: &str) -> HeaderValue {
@@ -139,5 +216,21 @@ mod tests {
             header.to_str().unwrap(),
             "attachment; filename=\"note.txt\""
         );
+    }
+
+    #[test]
+    fn signed_blob_urls_are_scoped_and_expire() {
+        let signer = BlobSigner {
+            secret: Arc::from(b"test-secret".as_slice()),
+            ttl: Duration::from_secs(300),
+        };
+        let expires_at = 400;
+        let signature = signer.signature("blob-a", expires_at).unwrap();
+        let before_expiry = UNIX_EPOCH + Duration::from_secs(399);
+        let after_expiry = UNIX_EPOCH + Duration::from_secs(401);
+
+        assert!(signer.verify_at("blob-a", expires_at, &signature, before_expiry));
+        assert!(!signer.verify_at("blob-b", expires_at, &signature, before_expiry));
+        assert!(!signer.verify_at("blob-a", expires_at, &signature, after_expiry));
     }
 }

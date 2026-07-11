@@ -28,7 +28,7 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `GET /debug/processes` returns v1.4 `ProcessInfo` rows for Sub-agents and monitors: `id`, `kind`, `label`, `agent`, `model`, `state`, timestamps, and `summary`.
 - `GET /debug/side-chats` returns only live side chats with their scoped transcripts.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
-- `GET /blob/{id}?token=...` returns blob bytes; `Authorization: Bearer ...` is also accepted. Images are served inline; other MIME types are served as attachments.
+- `get_blob_url` returns a short-lived, blob-scoped signed URL for `GET /blob/{id}`. `Authorization: Bearer ...` remains a migration path, but owner tokens are never accepted in query strings. Images are served inline; other MIME types are served as attachments.
 
 Agent Ping tools are `pings.send { name, description, content_md, requires_response, quick_replies? }`
 and `pings.resolve { ping_id }`. Tool summaries use the internal names `pings_send` and

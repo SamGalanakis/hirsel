@@ -20,6 +20,8 @@ const TOKEN: &str = "iroh-proof-token";
 const ROUND_TRIP_BODY: &str = "iroh client-core round-trip";
 
 #[tokio::test]
+// Requires the public n0 relay: cargo test -p hirsel-host --test iroh_client_flow -- --ignored
+#[ignore = "requires public n0 relay network access"]
 async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(test_host_config(dir.path())).await.unwrap();
@@ -50,7 +52,15 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
             .await
             .unwrap();
     });
-    let http = reqwest::Client::new();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {TOKEN}").parse().unwrap(),
+    );
+    let http = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap();
     let pair: serde_json::Value = http
         .post(format!("http://{http_addr}/debug/pair"))
         .json(&serde_json::json!({ "device_label": "Owner phone" }))

@@ -112,6 +112,13 @@ enum AgentBackend {
 }
 
 impl AgentRuntime {
+    pub fn readiness(&self) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(_) | AgentBackend::Lash(_) => Ok(()),
+            AgentBackend::Degraded(_) => anyhow::bail!("Lash store is unavailable"),
+        }
+    }
+
     pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
         match self.backend.as_ref() {
             AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
@@ -900,41 +907,53 @@ impl LashAgentRuntime {
         tokio::spawn(async move {
             let observable = session.observe();
             let current = observable.current_remote_observation();
-            let cursor = RemoteSessionCursor::new(current.cursor);
+            let mut cursor = RemoteSessionCursor::new(current.cursor);
             let mut timeline = TurnTimelineBridge::default();
-            let mut stream = match observable.subscribe_and_recover_remote(cursor) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to subscribe to Lash observation stream");
-                    return;
-                }
-            };
+            let mut retry = ObservationRetryBackoff::default();
             loop {
-                if timeline.has_pending() {
-                    let flush_delay = timeline.flush_delay();
-                    tokio::select! {
-                        item = stream.next() => {
-                            if !handle_observation_stream_item(
-                                item,
-                                &broadcast_log,
-                                &broadcaster,
-                                &mut timeline,
-                            ) {
-                                break;
+                let mut stream = match observable.subscribe_and_recover_remote(cursor.clone()) {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let delay = retry.next_delay();
+                        tracing::warn!(%error, ?delay, "failed to subscribe to Lash observation stream; retrying");
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                };
+                loop {
+                    let keep_stream = if timeline.has_pending() {
+                        let flush_delay = timeline.flush_delay();
+                        tokio::select! {
+                            item = stream.next() => {
+                                handle_observation_stream_item(
+                                    item,
+                                    &broadcast_log,
+                                    &broadcaster,
+                                    &mut timeline,
+                                )
+                            }
+                            () = tokio::time::sleep(flush_delay) => {
+                                timeline.flush_pending(&broadcast_log, &broadcaster);
+                                true
                             }
                         }
-                        () = tokio::time::sleep(flush_delay) => {
-                            timeline.flush_pending(&broadcast_log, &broadcaster);
-                        }
+                    } else {
+                        handle_observation_stream_item(
+                            stream.next().await,
+                            &broadcast_log,
+                            &broadcaster,
+                            &mut timeline,
+                        )
+                    };
+                    cursor = stream.cursor();
+                    if !keep_stream {
+                        break;
                     }
-                } else if !handle_observation_stream_item(
-                    stream.next().await,
-                    &broadcast_log,
-                    &broadcaster,
-                    &mut timeline,
-                ) {
-                    break;
+                    retry.reset();
                 }
+                let delay = retry.next_delay();
+                tracing::warn!(?delay, "Lash observation stream ended; resubscribing");
+                tokio::time::sleep(delay).await;
             }
         });
     }
@@ -1516,6 +1535,23 @@ where
             timeline.finish_turn(broadcast_log, broadcaster);
             false
         }
+    }
+}
+
+#[derive(Default)]
+struct ObservationRetryBackoff {
+    failures: u32,
+}
+
+impl ObservationRetryBackoff {
+    fn next_delay(&mut self) -> Duration {
+        let exponent = self.failures.min(5);
+        self.failures = self.failures.saturating_add(1);
+        Duration::from_millis(100).saturating_mul(1 << exponent)
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
     }
 }
 
@@ -4216,6 +4252,15 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn observation_resubscribe_backoff_grows_and_resets() {
+        let mut backoff = ObservationRetryBackoff::default();
+        let first = backoff.next_delay();
+        assert!(backoff.next_delay() > first);
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), first);
+    }
 
     #[test]
     fn timeline_flushes_prose_before_tool_events() {

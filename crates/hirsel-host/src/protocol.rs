@@ -5,7 +5,13 @@ use tokio::sync::broadcast;
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
+    auth::owner_token_matches,
 };
+
+const AUTH_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PRE_AUTH_MAX_FRAME_BYTES: usize = 8 * 1024;
+pub(crate) const POST_AUTH_MAX_FRAME_BYTES: usize =
+    crate::attachments::MAX_BLOB_BASE64_BYTES + 64 * 1024;
 
 pub(crate) enum IncomingFrame {
     Message {
@@ -34,47 +40,68 @@ pub(crate) fn decode_json(bytes: &[u8]) -> IncomingFrame {
 
 #[async_trait]
 pub(crate) trait ProtocolChannel: Send {
-    async fn receive(&mut self) -> anyhow::Result<Option<IncomingFrame>>;
+    async fn receive(&mut self, max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>>;
     async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()>;
 }
 
-pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer_node_id: Option<String>)
-where
+pub(crate) async fn run_protocol<C>(
+    channel: &mut C,
+    state: AppState,
+    peer_node_id: Option<String>,
+    peer_key: Option<String>,
+) where
     C: ProtocolChannel,
 {
-    let (auth, last_seen_msg_id) = match channel.receive().await {
-        Ok(Some(IncomingFrame::Message {
-            frame:
-                ClientToHost::Hello {
-                    auth,
-                    last_seen_msg_id,
-                },
-            ..
-        })) => (auth, last_seen_msg_id),
-        Ok(Some(IncomingFrame::Message { .. })) => {
-            let _ = channel
-                .send(&HostToClient::Error {
-                    detail: "hello must be the first frame".to_string(),
-                    client_id: None,
-                })
-                .await;
+    let first_frame = tokio::time::timeout(
+        AUTH_HANDSHAKE_TIMEOUT,
+        channel.receive(PRE_AUTH_MAX_FRAME_BYTES),
+    )
+    .await;
+    let (auth, last_seen_msg_id) = match first_frame {
+        Err(_) => {
+            tracing::warn!(
+                peer = peer_key.as_deref().unwrap_or("unknown"),
+                "auth handshake timed out"
+            );
             return;
         }
-        Ok(Some(IncomingFrame::InvalidJson { detail, .. })) => {
-            let _ = channel
-                .send(&HostToClient::Error {
-                    detail: format!("invalid hello: {detail}"),
-                    client_id: None,
-                })
-                .await;
-            return;
-        }
-        Ok(Some(IncomingFrame::Ignored)) | Ok(None) | Err(_) => return,
+        Ok(frame) => match frame {
+            Ok(Some(IncomingFrame::Message {
+                frame:
+                    ClientToHost::Hello {
+                        auth,
+                        last_seen_msg_id,
+                    },
+                ..
+            })) => (auth, last_seen_msg_id),
+            Ok(Some(IncomingFrame::Message { .. })) => {
+                let _ = channel
+                    .send(&HostToClient::Error {
+                        detail: "hello must be the first frame".to_string(),
+                        client_id: None,
+                    })
+                    .await;
+                return;
+            }
+            Ok(Some(IncomingFrame::InvalidJson { detail, .. })) => {
+                let _ = channel
+                    .send(&HostToClient::Error {
+                        detail: format!("invalid hello: {detail}"),
+                        client_id: None,
+                    })
+                    .await;
+                return;
+            }
+            Ok(Some(IncomingFrame::Ignored)) | Ok(None) | Err(_) => return,
+        },
     };
 
     let paired_token = match authenticate(&state, auth, peer_node_id.as_deref()).await {
         Ok(token) => token,
         Err(detail) => {
+            if let Some(peer) = peer_key.as_deref() {
+                tokio::time::sleep(state.auth_throttle.record_failure(peer)).await;
+            }
             let _ = channel
                 .send(&HostToClient::Error {
                     detail,
@@ -84,6 +111,9 @@ where
             return;
         }
     };
+    if let Some(peer) = peer_key.as_deref() {
+        state.auth_throttle.record_success(peer);
+    }
     if let Some(device_token) = paired_token
         && channel
             .send(&HostToClient::Paired { device_token })
@@ -97,7 +127,7 @@ where
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
 
-    let snapshot = match state.storage.hello_snapshot(last_seen_msg_id).await {
+    let (hello, mut dedupe) = match build_snapshot(&state, last_seen_msg_id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let _ = channel
@@ -111,18 +141,7 @@ where
     };
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Snapshotted, &state).await;
-    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
-    if channel
-        .send(&HostToClient::HelloOk {
-            latest_msg_id: snapshot.latest_msg_id,
-            messages: snapshot.messages,
-            pings: snapshot.pings,
-            processes: state.process_snapshot().await.unwrap_or_default(),
-            side_chats: state.side_chats.summaries().await,
-        })
-        .await
-        .is_err()
-    {
+    if channel.send(&hello).await.is_err() {
         return;
     }
     #[cfg(test)]
@@ -130,7 +149,7 @@ where
 
     loop {
         tokio::select! {
-            frame = channel.receive() => {
+            frame = channel.receive(POST_AUTH_MAX_FRAME_BYTES) => {
                 match frame {
                     Ok(Some(IncomingFrame::Message { frame, client_id })) => {
                         if let Err(error) = handle_client_frame(&state, channel, frame).await {
@@ -167,12 +186,43 @@ where
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "client broadcast receiver lagged; sending full resync");
+                        match build_snapshot(&state, None).await {
+                            Ok((hello, resynced)) if channel.send(&hello).await.is_ok() => {
+                                dedupe = resynced;
+                            }
+                            Ok(_) => break,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to resync lagged client");
+                                let _ = channel.send(&HostToClient::Error {
+                                    detail: format!("resync failed: {error}"),
+                                    client_id: None,
+                                }).await;
+                            }
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
     }
+}
+
+async fn build_snapshot(
+    state: &AppState,
+    last_seen_msg_id: Option<u64>,
+) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
+    let snapshot = state.storage.hello_snapshot(last_seen_msg_id).await?;
+    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
+    let hello = HostToClient::HelloOk {
+        latest_msg_id: snapshot.latest_msg_id,
+        messages: snapshot.messages,
+        pings: snapshot.pings,
+        processes: state.process_snapshot().await?,
+        side_chats: state.side_chats.summaries().await,
+    };
+    Ok((hello, dedupe))
 }
 
 async fn authenticate(
@@ -182,7 +232,7 @@ async fn authenticate(
 ) -> Result<Option<String>, String> {
     match auth {
         HelloAuth::StaticToken(token) => {
-            if token == state.token.as_ref() {
+            if owner_token_matches(&state.token, &token) {
                 Ok(None)
             } else {
                 Err("invalid token".to_string())
@@ -317,6 +367,20 @@ where
                 })
                 .await?;
         }
+        ClientToHost::GetBlobUrl { client_id, blob_id } => {
+            if state.storage.blob(&blob_id).await?.is_none() {
+                anyhow::bail!("unknown blob id: {blob_id}");
+            }
+            let signed = state.blob_signer.mint(&blob_id)?;
+            channel
+                .send(&HostToClient::BlobUrl {
+                    client_id,
+                    blob_id,
+                    url: signed.url,
+                    expires_at: signed.expires_at,
+                })
+                .await?;
+        }
         ClientToHost::ResolvePing { ping_id } => {
             if let Some(ping) = state.storage.resolve_ping(ping_id).await? {
                 state.broadcast(HostToClient::PingUpsert { ping });
@@ -419,11 +483,15 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::VecDeque, time::Duration};
 
-    use hirsel_proto::HelloAuth;
+    use async_trait::async_trait;
+    use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
 
-    use super::authenticate;
+    use super::{
+        IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
+        authenticate, build_snapshot, run_protocol,
+    };
     use crate::{
         build_state,
         config::{AgentMode, Config, DriverMode, ProviderMode},
@@ -473,5 +541,141 @@ mod tests {
         let devices = state.storage.list_devices().await.unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device_label, "App-chosen label");
+    }
+
+    #[tokio::test]
+    async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "real-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: false,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            authenticate(&state, HelloAuth::StaticToken(String::new()), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            authenticate(
+                &state,
+                HelloAuth::StaticToken("real-token".to_string()),
+                None
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn full_resync_snapshot_replays_all_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: false,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+        state
+            .storage
+            .append_chat(ChatAuthor::Agent, "missed", None)
+            .await
+            .unwrap();
+
+        let (frame, _) = build_snapshot(&state, None).await.unwrap();
+        match frame {
+            HostToClient::HelloOk {
+                latest_msg_id,
+                messages,
+                ..
+            } => {
+                assert_eq!(latest_msg_id, 1);
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].body, "missed");
+            }
+            other => panic!("unexpected resync frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_auth_frames_have_a_stricter_limit() {
+        assert_eq!(PRE_AUTH_MAX_FRAME_BYTES, 8 * 1024);
+        assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES);
+    }
+
+    struct TestChannel {
+        incoming: VecDeque<IncomingFrame>,
+        sent: Vec<HostToClient>,
+    }
+
+    #[async_trait]
+    impl ProtocolChannel for TestChannel {
+        async fn receive(&mut self, _max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>> {
+            Ok(self.incoming.pop_front())
+        }
+
+        async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()> {
+            self.sent.push(frame.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_failure_sends_error_instead_of_empty_hello() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: false,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+        state.storage.force_hello_snapshot_error().await;
+        let mut channel = TestChannel {
+            incoming: VecDeque::from([IncomingFrame::Message {
+                frame: ClientToHost::Hello {
+                    auth: HelloAuth::StaticToken("test-token".to_string()),
+                    last_seen_msg_id: None,
+                },
+                client_id: None,
+            }]),
+            sent: Vec::new(),
+        };
+
+        run_protocol(&mut channel, state, None, None).await;
+
+        assert_eq!(channel.sent.len(), 1);
+        assert!(matches!(
+            &channel.sent[0],
+            HostToClient::Error { detail, .. } if detail.starts_with("hello snapshot failed:")
+        ));
     }
 }

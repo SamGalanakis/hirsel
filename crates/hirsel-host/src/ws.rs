@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use axum::{
     extract::{
-        State,
+        ConnectInfo, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
 use hirsel_proto::HostToClient;
+use std::net::SocketAddr;
 
 use crate::{
     AppState,
@@ -16,23 +17,30 @@ use crate::{
 
 const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> impl IntoResponse {
     ws.max_message_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
         .max_frame_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| handle_socket(socket, state, peer.map(|peer| peer.0.to_string())))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    run_protocol(&mut WebSocketChannel(&mut socket), state, None).await;
+async fn handle_socket(mut socket: WebSocket, state: AppState, peer: Option<String>) {
+    run_protocol(&mut WebSocketChannel(&mut socket), state, None, peer).await;
 }
 
 struct WebSocketChannel<'a>(&'a mut WebSocket);
 
 #[async_trait]
 impl ProtocolChannel for WebSocketChannel<'_> {
-    async fn receive(&mut self) -> anyhow::Result<Option<IncomingFrame>> {
+    async fn receive(&mut self, max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>> {
         match self.0.recv().await {
-            Some(Ok(Message::Text(text))) => Ok(Some(decode_json(text.as_bytes()))),
+            Some(Ok(Message::Text(text))) if text.len() <= max_bytes => {
+                Ok(Some(decode_json(text.as_bytes())))
+            }
+            Some(Ok(Message::Text(_))) => anyhow::bail!("protocol frame exceeds size limit"),
             Some(Ok(Message::Close(_))) | None => Ok(None),
             Some(Ok(_)) => Ok(Some(IncomingFrame::Ignored)),
             Some(Err(error)) => Err(error.into()),
@@ -127,7 +135,14 @@ mod tests {
         let state = build_state(test_config(dir.path())).await.unwrap();
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
-        let client = reqwest::Client::new();
+        let client = owner_http_client();
+
+        let unauthorized = reqwest::Client::new()
+            .get(format!("http://{addr}/debug/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
 
         let registered: serde_json::Value = client
             .post(format!("http://{addr}/debug/register-push-token"))
@@ -284,6 +299,33 @@ mod tests {
             HostToClient::BlobOk { blob, .. } => blob,
             other => panic!("unexpected blob response: {other:?}"),
         };
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "get_blob_url",
+                "client_id": "blob-url-1",
+                "blob_id": first_blob.id.clone()
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let frame = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        match serde_json::from_str::<HostToClient>(&frame).unwrap() {
+            HostToClient::BlobUrl {
+                client_id,
+                blob_id,
+                url,
+                expires_at,
+            } => {
+                assert_eq!(client_id, "blob-url-1");
+                assert_eq!(blob_id, first_blob.id);
+                assert!(url.starts_with(&format!("/blob/{}?exp=", first_blob.id)));
+                assert!(url.contains("&sig="));
+                assert!(expires_at > 0);
+            }
+            other => panic!("unexpected blob URL response: {other:?}"),
+        }
 
         ws.send(Message::Text(
             serde_json::json!({
@@ -512,6 +554,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let signed_text = state.blob_signer.mint(&text.blob.id).unwrap();
         let app = router_from_state(state);
         let addr = spawn_app(app).await;
         let client = reqwest::Client::new();
@@ -523,18 +566,23 @@ mod tests {
             .unwrap();
         assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-        let missing = client
+        let raw_query_token = client
             .get(format!("http://{addr}/blob/missing?token=test-token"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(raw_query_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let missing = client
+            .get(format!("http://{addr}/blob/missing"))
+            .bearer_auth("test-token")
             .send()
             .await
             .unwrap();
         assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
         let text_response = client
-            .get(format!(
-                "http://{addr}/blob/{}?token=test-token",
-                text.blob.id
-            ))
+            .get(format!("http://{addr}{}", signed_text.url))
             .send()
             .await
             .unwrap();
@@ -593,6 +641,18 @@ mod tests {
             debug: true,
             sidechat_ttl_secs: 86_400,
         }
+    }
+
+    fn owner_http_client() -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            "Bearer test-token".parse().unwrap(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
     }
 
     async fn send_hello(

@@ -27,8 +27,11 @@ android {
         applicationId = "dev.hirsel.android"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1"
+        // Version is stamped by CI from Gradle project properties
+        // (`-PhirselVersionName=… -PhirselVersionCode=…`); local/dev builds fall
+        // back to a sane placeholder so the app still installs off the branch.
+        versionName = (project.findProperty("hirselVersionName") as String?) ?: "0.0.0-dev"
+        versionCode = (project.findProperty("hirselVersionCode") as String?)?.toInt() ?: 1
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

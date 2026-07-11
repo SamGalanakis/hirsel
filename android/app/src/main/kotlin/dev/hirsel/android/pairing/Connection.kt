@@ -5,6 +5,7 @@ import android.os.Looper
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,20 +38,51 @@ sealed interface Phase {
     data class Failed(val detail: String) : Phase
 }
 
+/** An outbound message that never reached the host, kept so the UI can offer a retry. */
+data class FailedSend(val id: Long, val body: String)
+
 /**
  * Live, observable state of a single native [Client]. Callbacks arrive on native
  * threads and are marshalled to the main thread before touching Compose state.
  */
-class Connection internal constructor(val client: Client?) {
+class Connection internal constructor(
+    val client: Client?,
+    private val mainHandler: Handler,
+) {
     var snapshot by mutableStateOf<ClientSnapshot?>(null)
         internal set
     var phase by mutableStateOf<Phase>(if (client == null) Phase.Failed("Invalid pairing link.") else Phase.Connecting)
         internal set
 
+    /**
+     * Sends that threw before the host accepted them. The happy path is owned by
+     * native: `sendMessage` inserts an optimistic message (keyed by its
+     * `clientId`) with `pending = true`, then the host's ack flips it to sent via
+     * a fresh snapshot — that reconciliation needs no bookkeeping here. Only the
+     * failure case surfaces, as a retryable bubble.
+     */
+    val failedSends = mutableStateListOf<FailedSend>()
+    private var failCounter = 0L
+
     val isOnline: Boolean get() = phase is Phase.Online
 
+    /** Fire-and-forget send off the main thread; a throw becomes a retryable [FailedSend]. */
     fun send(body: String) {
-        client?.sendMessage(body)
+        val c = client ?: run { recordFailure(body); return }
+        Thread {
+            runCatching { c.sendMessage(body) }
+                .onFailure { mainHandler.post { recordFailure(body) } }
+        }.start()
+    }
+
+    /** Drop the failed entry and try the same body again. */
+    fun retry(failed: FailedSend) {
+        failedSends.remove(failed)
+        send(failed.body)
+    }
+
+    private fun recordFailure(body: String) {
+        failedSends.add(FailedSend(failCounter++, body))
     }
 
     /** The device token the host issued during a successful pairing handshake. */
@@ -139,7 +171,7 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                 )
         }
     }.getOrNull()
-    return Connection(client).also { target.value = it }
+    return Connection(client, mainHandler).also { target.value = it }
 }
 
 private class ConnectionRef {

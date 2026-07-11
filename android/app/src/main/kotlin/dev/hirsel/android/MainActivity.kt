@@ -1,6 +1,7 @@
 package dev.hirsel.android
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -8,17 +9,18 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,20 +33,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,9 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
@@ -66,13 +57,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import dev.hirsel.android.chat.ChatScreen
 import dev.hirsel.android.onboarding.QrScanner
 import dev.hirsel.android.pairing.Connection
 import dev.hirsel.android.pairing.ConnectionSpec
@@ -83,15 +73,10 @@ import dev.hirsel.android.pairing.TokenStore
 import dev.hirsel.android.pairing.parsePairingLink
 import dev.hirsel.android.pairing.rememberConnection
 import dev.hirsel.android.settings.SettingsStore
+import dev.hirsel.android.ui.ErrorCopy
 import dev.hirsel.android.ui.LocalHirselColors
 import dev.hirsel.android.ui.ThemeMode
-import dev.hirsel.android.ui.HirselMono
 import dev.hirsel.android.ui.HirselTheme
-import dev.hirsel.core.ChatAuthor
-import dev.hirsel.core.ChatMessage
-import dev.hirsel.core.ClientSnapshot
-import dev.hirsel.core.Ping
-import dev.hirsel.core.PingStatus
 import dev.hirsel.core.generateIrohIdentity
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlin.coroutines.resume
@@ -104,6 +89,9 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Edge-to-edge with transparent system bars; the icon appearance is driven
+        // reactively from the active theme below so light mode gets dark icons.
+        enableEdgeToEdge()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
@@ -112,6 +100,21 @@ class MainActivity : ComponentActivity() {
             // Read synchronously from prefs so the chosen scheme is set before the
             // first paint — no light/dark flash on cold start.
             var themeMode by remember { mutableStateOf(settings.themeMode) }
+            // Status/nav-bar icons must contrast the theme canvas: dark glyphs on
+            // the light scheme, light glyphs on dark. Recomputed on theme change.
+            val dark = when (themeMode) {
+                ThemeMode.SYSTEM -> isSystemInDarkTheme()
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+            val view = LocalView.current
+            LaunchedEffect(dark) {
+                val window = (view.context as Activity).window
+                WindowCompat.getInsetsController(window, view).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            }
             HirselTheme(themeMode) {
                 Surface(
                     modifier = Modifier
@@ -244,9 +247,7 @@ private fun HirselRoot(
 
         else ->
             ChatScreen(
-                snapshot = connection.snapshot,
-                phase = connection.phase,
-                onSend = connection::send,
+                connection = connection,
                 onOpenSettings = { showSettings = true },
             )
     }
@@ -267,6 +268,13 @@ private fun defaultDeviceLabel(): String {
     val model = Build.MODEL?.trim().orEmpty()
     return model.ifEmpty { "${Build.MANUFACTURER} phone" }
 }
+
+/** Max characters for a device label — the pairing label the host stores. */
+internal const val MAX_DEVICE_LABEL = 40
+
+/** Guards the device-name input: strips control/newline chars and caps length (D12). */
+internal fun sanitizeDeviceLabel(raw: String): String =
+    raw.replace(Regex("""[\r\n\t]"""), " ").take(MAX_DEVICE_LABEL)
 
 @Composable
 private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, onBack: (() -> Unit)? = null) {
@@ -411,7 +419,7 @@ private fun PairEntry(onSubmit: (ConnectionSpec.Pairing) -> Unit, onBack: (() ->
         Spacer(Modifier.height(6.dp))
         HirselField(
             value = label,
-            onValueChange = { label = it },
+            onValueChange = { label = sanitizeDeviceLabel(it) },
             placeholder = "Device name",
             testTag = "device-label-field",
             singleLine = true,
@@ -566,492 +574,7 @@ private fun PairingProgress(
     }
 }
 
-private fun friendlyPairError(detail: String): String = when {
-    detail.contains("pairing code", ignoreCase = true) ->
-        "This pairing code is expired or already used. Generate a fresh one on your host."
-    detail.contains("device_label", ignoreCase = true) ->
-        "This device's name doesn't match the pairing code. Re-pair with the name the host expects."
-    else -> detail
-}
-
-// ---------------------------------------------------------------------------
-// Chat
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun ChatScreen(
-    snapshot: ClientSnapshot?,
-    phase: Phase,
-    onSend: (String) -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    var draft by remember { mutableStateOf("") }
-    val pings = snapshot?.pings.orEmpty()
-    val send = {
-        draft.trim().takeIf(String::isNotEmpty)?.let {
-            onSend(it)
-            draft = ""
-        }
-        Unit
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .imePadding()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-    ) {
-        // Thin top bar: wordmark left, connection pill + overflow right.
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("hirsel", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = LocalHirselColors.current.Foreground)
-            Spacer(Modifier.weight(1f))
-            ConnectionPill(phase)
-            Spacer(Modifier.width(6.dp))
-            GearButton(onClick = onOpenSettings)
-        }
-
-        Spacer(Modifier.height(10.dp))
-        HairlineDivider()
-        Spacer(Modifier.height(10.dp))
-
-        val messages = snapshot?.messages.orEmpty()
-        val hasContent = messages.isNotEmpty() || pings.isNotEmpty()
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (!hasContent) {
-                val connecting = snapshot == null || phase is Phase.Connecting || phase is Phase.Reconnecting
-                ChatPlaceholder(connecting = connecting)
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("chat-list"),
-                ) {
-                    itemsIndexed(
-                        messages,
-                        key = { _, m -> "message-${m.id?.toString() ?: m.clientId.orEmpty()}" },
-                    ) { index, message ->
-                        val prev = messages.getOrNull(index - 1)
-                        val gap = when {
-                            prev == null -> 0.dp
-                            prev.author == message.author -> 3.dp
-                            else -> 12.dp
-                        }
-                        Spacer(Modifier.height(gap))
-                        MessageRow(message)
-                    }
-
-                    if (pings.isNotEmpty()) {
-                        item {
-                            Spacer(Modifier.height(if (messages.isEmpty()) 0.dp else 20.dp))
-                            Text(
-                                "Pings",
-                                style = microLabel(),
-                                color = LocalHirselColors.current.MutedForeground,
-                                modifier = Modifier.padding(bottom = 8.dp),
-                            )
-                        }
-                        itemsIndexed(pings, key = { _, p -> "ping-${p.id}" }) { index, ping ->
-                            if (index > 0) Spacer(Modifier.height(8.dp))
-                            PingCard(ping)
-                        }
-                    }
-                    item { Spacer(Modifier.height(4.dp)) }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(modifier = Modifier.weight(1f)) {
-                HirselField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    placeholder = "Message",
-                    testTag = "message-composer",
-                    singleLine = true,
-                    imeAction = ImeAction.Send,
-                    onImeAction = { send() },
-                    contentDescription = "Message composer",
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = send,
-                enabled = draft.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = LocalHirselColors.current.Accent,
-                    contentColor = LocalHirselColors.current.OnAccent,
-                    disabledContainerColor = LocalHirselColors.current.Secondary,
-                    disabledContentColor = LocalHirselColors.current.MutedForeground,
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .height(48.dp)
-                    .testTag("send-message")
-                    .semantics { contentDescription = "Send message" },
-            ) { Text("Send") }
-        }
-    }
-}
-
-/**
- * A focused destructive confirm on a dimmed scrim — the one place a real overlay
- * is warranted. Reused for "forget device" and "reset identity" in Settings.
- */
-@Composable
-internal fun DestructiveConfirmDialog(
-    title: String,
-    body: String,
-    confirmLabel: String,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-    confirmTestTag: String = "destructive-confirm",
-) {
-    val c = LocalHirselColors.current
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .shadow(24.dp, RoundedCornerShape(16.dp), clip = false)
-                .clip(RoundedCornerShape(16.dp))
-                .background(c.Card, RoundedCornerShape(16.dp))
-                .border(1.dp, c.Border, RoundedCornerShape(16.dp))
-                .padding(20.dp),
-        ) {
-            Text(title, fontWeight = FontWeight.SemiBold, color = c.Foreground, fontSize = 16.sp)
-            Spacer(Modifier.height(8.dp))
-            Text(body, color = c.MutedForeground, fontSize = 13.sp, lineHeight = 20.sp)
-            Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = onDismiss) { Text("Cancel", color = c.MutedForeground) }
-                Spacer(Modifier.width(6.dp))
-                TextButton(
-                    onClick = { onConfirm(); onDismiss() },
-                    modifier = Modifier.testTag(confirmTestTag),
-                ) {
-                    Text(confirmLabel, color = c.StatusDanger, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-    }
-}
-
-/** A quiet gear affordance in the chat top bar — the entry to Settings. */
-@Composable
-private fun GearButton(onClick: () -> Unit) {
-    val c = LocalHirselColors.current
-    Box(
-        modifier = Modifier
-            .size(34.dp)
-            .clip(RoundedCornerShape(9.dp))
-            .clickable(onClick = onClick)
-            .testTag("open-settings")
-            .semantics { contentDescription = "Settings" },
-        contentAlignment = Alignment.Center,
-    ) {
-        GearGlyph(color = c.MutedForeground, modifier = Modifier.size(19.dp))
-    }
-}
-
-/** Minimal 8-tooth gear drawn with Canvas (no icon-font dependency). */
-@Composable
-internal fun GearGlyph(color: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val cx = size.width / 2f
-        val cy = size.height / 2f
-        val outer = size.minDimension * 0.46f
-        val inner = size.minDimension * 0.34f
-        val hole = size.minDimension * 0.17f
-        val stroke = size.minDimension * 0.11f
-        // Teeth as short radial spokes.
-        for (i in 0 until 8) {
-            val a = Math.toRadians((i * 45).toDouble())
-            val sx = cx + (inner * Math.cos(a)).toFloat()
-            val sy = cy + (inner * Math.sin(a)).toFloat()
-            val ex = cx + (outer * Math.cos(a)).toFloat()
-            val ey = cy + (outer * Math.sin(a)).toFloat()
-            drawLine(color, Offset(sx, sy), Offset(ex, ey), stroke, androidx.compose.ui.graphics.StrokeCap.Round)
-        }
-        // Gear body ring.
-        drawCircle(color, radius = inner, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke))
-        // Hub punch-out (redraw hole via a filled circle in the surface... approximated with a thinner ring).
-        drawCircle(color, radius = hole, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke * 0.85f))
-    }
-}
-
-@Composable
-internal fun ConnectionPill(phase: Phase) {
-    val (color, text) = when (phase) {
-        is Phase.Online -> LocalHirselColors.current.StatusSuccess to "online"
-        is Phase.Connecting -> LocalHirselColors.current.StatusAttention to "connecting"
-        is Phase.Reconnecting -> LocalHirselColors.current.StatusAttention to "reconnecting"
-        is Phase.Offline -> LocalHirselColors.current.StatusIdle to "offline"
-        is Phase.Failed -> LocalHirselColors.current.StatusDanger to "error"
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .background(LocalHirselColors.current.Secondary, RoundedCornerShape(9999.dp))
-            .padding(horizontal = 8.dp, vertical = 3.dp)
-            .testTag("connection-status")
-            .semantics { contentDescription = "Connection $text" },
-    ) {
-        StatusDot(color, size = 7)
-        Spacer(Modifier.width(6.dp))
-        Text(text, color = LocalHirselColors.current.MutedForeground, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-    }
-}
-
-@Composable
-private fun MessageRow(message: ChatMessage) {
-    val owner = message.author == ChatAuthor.OWNER
-    val time = shortTime(message.timestamp)
-    val metaColor = if (owner) LocalHirselColors.current.OnAccent.copy(alpha = 0.72f) else LocalHirselColors.current.MutedForeground
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (owner) Arrangement.End else Arrangement.Start,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth(0.80f)
-                .background(
-                    if (owner) LocalHirselColors.current.Accent else LocalHirselColors.current.Secondary,
-                    RoundedCornerShape(14.dp),
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            Text(
-                message.body,
-                color = if (owner) LocalHirselColors.current.OnAccent else LocalHirselColors.current.Foreground,
-                fontSize = 14.sp,
-                lineHeight = 21.sp,
-                overflow = TextOverflow.Ellipsis,
-            )
-            // Meta footer: "sending…" while pending, otherwise a quiet timestamp.
-            val footer = when {
-                owner && message.pending -> "sending…"
-                time != null -> time
-                else -> null
-            }
-            if (footer != null) {
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    footer,
-                    color = metaColor,
-                    fontSize = 11.sp,
-                    modifier = Modifier.align(if (owner) Alignment.End else Alignment.Start),
-                )
-            }
-        }
-    }
-}
-
-/** Best-effort short HH:mm from an RFC3339/ISO timestamp; falls back to the raw
- *  string when it is already short, or null when there is nothing legible. */
-private fun shortTime(raw: String): String? {
-    if (raw.isBlank()) return null
-    Regex("""T(\d{2}:\d{2})""").find(raw)?.let { return it.groupValues[1] }
-    Regex("""^(\d{1,2}:\d{2})""").find(raw)?.let { return it.groupValues[1] }
-    return raw.takeIf { it.length <= 8 }
-}
-
-@Composable
-private fun ChatPlaceholder(connecting: Boolean) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        if (connecting) {
-            CircularProgressIndicator(
-                color = LocalHirselColors.current.AccentRing,
-                strokeWidth = 2.5.dp,
-                modifier = Modifier.size(26.dp),
-            )
-            Spacer(Modifier.height(16.dp))
-            Text("Connecting over iroh…", color = LocalHirselColors.current.MutedForeground, fontSize = 13.sp)
-        } else {
-            Text("No messages yet", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = LocalHirselColors.current.Foreground)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Send a message to your agent — it's listening.",
-                color = LocalHirselColors.current.MutedForeground,
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.widthIn(max = 280.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun PingCard(ping: Ping) {
-    val done = ping.status == PingStatus.DONE
-    // Requires-response is the "attend to this" state: persistent indigo stripe,
-    // unread dot, and full-strength question text. A Done ping dims and drops it.
-    val requires = ping.requiresResponse && !done
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .clip(RoundedCornerShape(14.dp))
-            .alpha(if (done) 0.6f else 1f)
-            .background(LocalHirselColors.current.Card, RoundedCornerShape(14.dp))
-            .border(1.dp, LocalHirselColors.current.Border, RoundedCornerShape(14.dp)),
-    ) {
-        Box(
-            modifier = Modifier
-                .width(3.dp)
-                .fillMaxHeight()
-                .background(if (requires) LocalHirselColors.current.Accent else androidx.compose.ui.graphics.Color.Transparent),
-        )
-        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                if (requires && !ping.read) {
-                    StatusDot(LocalHirselColors.current.Accent, size = 7)
-                    Spacer(Modifier.width(7.dp))
-                }
-                Text(
-                    "@${ping.name}",
-                    color = LocalHirselColors.current.Foreground,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
-                    fontFamily = HirselMono,
-                    modifier = Modifier.testTag("ping-name"),
-                )
-                Spacer(Modifier.weight(1f))
-                if (done) {
-                    Text("✓", color = LocalHirselColors.current.StatusSuccess, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Done", style = microLabel(), color = LocalHirselColors.current.MutedForeground)
-                } else {
-                    shortTime(ping.timestamp)?.let {
-                        Text(it, color = LocalHirselColors.current.MutedForeground, fontSize = 11.sp)
-                    }
-                }
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                ping.description,
-                color = if (requires) LocalHirselColors.current.Foreground else LocalHirselColors.current.MutedForeground,
-                fontWeight = if (requires) FontWeight.Medium else FontWeight.Normal,
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-            )
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shared building blocks
-// ---------------------------------------------------------------------------
-
-@Composable
-internal fun microLabel() = androidx.compose.material3.MaterialTheme.typography.labelMedium.copy(
-    letterSpacing = 0.5.sp,
-)
-
-@Composable
-internal fun StatusDot(color: androidx.compose.ui.graphics.Color, size: Int = 10) {
-    Box(
-        modifier = Modifier
-            .size(size.dp)
-            .background(color, RoundedCornerShape(9999.dp)),
-    )
-}
-
-@Composable
-internal fun HairlineDivider(label: String? = null) {
-    if (label == null) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(LocalHirselColors.current.Border),
-        )
-    } else {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.weight(1f).height(1.dp).background(LocalHirselColors.current.Border))
-            Text(
-                label,
-                color = LocalHirselColors.current.MutedForeground,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(horizontal = 10.dp),
-            )
-            Box(modifier = Modifier.weight(1f).height(1.dp).background(LocalHirselColors.current.Border))
-        }
-    }
-}
-
-@Composable
-internal fun HirselField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    placeholder: String,
-    testTag: String,
-    singleLine: Boolean,
-    mono: Boolean = false,
-    isError: Boolean = false,
-    imeAction: ImeAction = ImeAction.Default,
-    onImeAction: (() -> Unit)? = null,
-    contentDescription: String? = null,
-) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
-        placeholder = {
-            Text(
-                placeholder,
-                color = LocalHirselColors.current.MutedForeground.copy(alpha = 0.7f),
-                fontSize = if (mono) 12.sp else 14.sp,
-                fontFamily = if (mono) HirselMono else androidx.compose.ui.text.font.FontFamily.Default,
-            )
-        },
-        isError = isError,
-        singleLine = singleLine,
-        maxLines = if (singleLine) 1 else 3,
-        textStyle = androidx.compose.material3.MaterialTheme.typography.bodyMedium.copy(
-            color = LocalHirselColors.current.Foreground,
-            fontFamily = if (mono) HirselMono else androidx.compose.ui.text.font.FontFamily.Default,
-            fontSize = if (mono) 12.sp else 14.sp,
-        ),
-        keyboardOptions = KeyboardOptions(imeAction = imeAction),
-        keyboardActions = KeyboardActions(
-            onSend = { onImeAction?.invoke() },
-            onGo = { onImeAction?.invoke() },
-            onDone = { onImeAction?.invoke() },
-        ),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = LocalHirselColors.current.AccentRing,
-            unfocusedBorderColor = LocalHirselColors.current.InputBorder,
-            errorBorderColor = LocalHirselColors.current.StatusDanger,
-            errorCursorColor = LocalHirselColors.current.StatusDanger,
-            focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-            unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-            errorContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-            cursorColor = LocalHirselColors.current.AccentRing,
-            focusedTextColor = LocalHirselColors.current.Foreground,
-            unfocusedTextColor = LocalHirselColors.current.Foreground,
-            errorTextColor = LocalHirselColors.current.Foreground,
-        ),
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag(testTag)
-            .then(if (contentDescription != null) Modifier.semantics { this.contentDescription = contentDescription } else Modifier),
-    )
-}
+private fun friendlyPairError(detail: String): String = ErrorCopy.pairing(detail)
 
 private suspend fun fetchFcmToken(): String = suspendCoroutine { continuation ->
     FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->

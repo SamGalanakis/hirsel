@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Switch
@@ -38,8 +40,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -110,16 +115,15 @@ fun SettingsScreen(
         ) {
             Box(
                 modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(9.dp))
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(12.dp))
                     .clickable(onClick = onBack)
                     .testTag("settings-back")
-                    .semantics { contentDescription = "Back" },
+                    .semantics { role = Role.Button; contentDescription = "Back" },
                 contentAlignment = Alignment.Center,
             ) {
                 Text("‹", color = c.Foreground, fontSize = 22.sp, fontWeight = FontWeight.Medium)
             }
-            Spacer(Modifier.width(4.dp))
             Text("Settings", color = c.Foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         HairlineDivider()
@@ -191,18 +195,13 @@ fun SettingsScreen(
             // ── Notifications ─────────────────────────────────────────────
             SectionHeader("Notifications")
             SettingsCard(contentPadding = 0.dp) {
-                InsetRow {
-                    Column(Modifier.weight(1f)) {
-                        Text("Push notifications", color = c.Foreground, fontSize = 14.sp)
-                        Spacer(Modifier.height(2.dp))
-                        Text("Register this device for Ping pushes.", color = c.MutedForeground, fontSize = 12.sp)
-                    }
-                    HirselSwitch(
-                        checked = pushEnabled,
-                        onCheckedChange = { pushEnabled = it; settings.pushEnabled = it },
-                        testTag = "push-toggle",
-                    )
-                }
+                ToggleRow(
+                    title = "Push notifications",
+                    subtitle = "Register this device for Ping pushes.",
+                    checked = pushEnabled,
+                    onCheckedChange = { pushEnabled = it; settings.pushEnabled = it },
+                    testTag = "push-toggle",
+                )
                 RowDivider()
                 Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                     RowLabel(
@@ -230,7 +229,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
                 HirselField(
                     value = labelDraft,
-                    onValueChange = { labelDraft = it },
+                    onValueChange = { labelDraft = sanitizeDeviceLabel(it) },
                     placeholder = "Device name",
                     testTag = "rename-field",
                     singleLine = true,
@@ -288,18 +287,13 @@ fun SettingsScreen(
                     Text("Not reported", color = c.MutedForeground, fontSize = 13.sp)
                 }
                 RowDivider()
-                InsetRow {
-                    Column(Modifier.weight(1f)) {
-                        Text("Debug mode", color = c.Foreground, fontSize = 14.sp)
-                        Spacer(Modifier.height(2.dp))
-                        Text("Verbose client logging for diagnostics.", color = c.MutedForeground, fontSize = 12.sp)
-                    }
-                    HirselSwitch(
-                        checked = debugMode,
-                        onCheckedChange = { debugMode = it; settings.debugMode = it },
-                        testTag = "debug-toggle",
-                    )
-                }
+                ToggleRow(
+                    title = "Debug mode",
+                    subtitle = "Verbose client logging for diagnostics.",
+                    checked = debugMode,
+                    onCheckedChange = { debugMode = it; settings.debugMode = it },
+                    testTag = "debug-toggle",
+                )
                 RowDivider()
                 TappableRow(
                     onClick = {
@@ -400,7 +394,7 @@ private fun TappableRow(onClick: () -> Unit, testTag: String, content: @Composab
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 13.dp)
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
@@ -414,7 +408,7 @@ private fun TappableRaw(onClick: () -> Unit, testTag: String, content: @Composab
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClick = onClick)
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
         content = content,
@@ -467,14 +461,16 @@ private fun <T> SegmentedControl(
     testTag: String,
 ) {
     val c = LocalHirselColors.current
+    // 48dp tall so each segment clears the minimum touch target (C28).
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(38.dp)
+            .height(48.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(c.Secondary, RoundedCornerShape(10.dp))
             .border(1.dp, c.Border, RoundedCornerShape(10.dp))
             .padding(3.dp)
+            .semantics { role = Role.RadioButton }
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -489,7 +485,13 @@ private fun <T> SegmentedControl(
                         if (isSelected) c.Accent.copy(alpha = if (enabled) 0.16f else 0.07f) else Color.Transparent,
                         RoundedCornerShape(8.dp),
                     )
-                    .then(if (enabled) Modifier.clickable { onSelect(value) } else Modifier)
+                    .selectable(
+                        selected = isSelected,
+                        enabled = enabled,
+                        role = Role.RadioButton,
+                        onClick = { onSelect(value) },
+                    )
+                    .semantics { stateDescription = if (isSelected) "Selected" else "Not selected" }
                     .testTag("segment-$label"),
                 contentAlignment = Alignment.Center,
             ) {
@@ -510,22 +512,51 @@ private fun <T> SegmentedControl(
     }
 }
 
+/**
+ * A settings row whose entire surface is a single Switch toggle for TalkBack: the
+ * row carries the toggleable semantics (Role.Switch + on/off state) and the visual
+ * [Switch] is decorative (onCheckedChange = null), so the whole row flips (C29).
+ */
 @Composable
-private fun HirselSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, testTag: String) {
+private fun ToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String,
+) {
     val c = LocalHirselColors.current
-    Switch(
-        checked = checked,
-        onCheckedChange = onCheckedChange,
-        modifier = Modifier.testTag(testTag),
-        colors = SwitchDefaults.colors(
-            checkedThumbColor = c.OnAccent,
-            checkedTrackColor = c.Accent,
-            checkedBorderColor = c.Accent,
-            uncheckedThumbColor = c.MutedForeground,
-            uncheckedTrackColor = c.Secondary,
-            uncheckedBorderColor = c.InputBorder,
-        ),
-    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = c.Foreground, fontSize = 14.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(subtitle, color = c.MutedForeground, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(
+            checked = checked,
+            onCheckedChange = null,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = c.OnAccent,
+                checkedTrackColor = c.Accent,
+                checkedBorderColor = c.Accent,
+                uncheckedThumbColor = c.MutedForeground,
+                uncheckedTrackColor = c.Secondary,
+                uncheckedBorderColor = c.InputBorder,
+            ),
+        )
+    }
 }
 
 @Composable

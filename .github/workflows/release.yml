@@ -13,20 +13,21 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   android-release:
     name: Signed Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
-      SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
-      SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
-      SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-      SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve release version
         env:
@@ -43,15 +44,57 @@ jobs:
             echo "Invalid release version: $tag" >&2
             exit 1
           fi
+          if ! git rev-parse --verify --quiet "refs/tags/$tag^{commit}" >/dev/null; then
+            echo "Release tag does not exist: $tag" >&2
+            exit 1
+          fi
+          git checkout --detach "refs/tags/$tag"
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION=${tag#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Require Firebase configuration
+      - name: Require successful CI for release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          successful_runs="$(gh api \
+            --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$RELEASE_SHA" \
+            -f status=completed \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')"
+          if [[ "$successful_runs" -lt 1 ]]; then
+            echo "Commit $RELEASE_SHA has no successful completed CI workflow run." >&2
+            exit 1
+          fi
+
+      - name: Write Firebase configuration
+        env:
+          GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
         run: |
           if [[ -z "$GOOGLE_SERVICES_JSON_B64" ]]; then
             echo 'GOOGLE_SERVICES_JSON_B64 must be configured for an Android release.' >&2
             exit 1
           fi
+          printf '%s' "$GOOGLE_SERVICES_JSON_B64" | base64 --decode > android/app/google-services.json
+
+      - name: Configure release signing
+        env:
+          SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          for name in SIGNING_KEYSTORE_B64 SIGNING_KEYSTORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "$name must be configured for an Android release." >&2
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/hirsel-release.jks"
+          printf '%s' "$SIGNING_KEYSTORE_B64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          echo "SIGNING_KEYSTORE_PATH=$keystore" >> "$GITHUB_ENV"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -80,29 +123,6 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Write Firebase configuration
-        run: printf '%s' "$GOOGLE_SERVICES_JSON_B64" | base64 --decode > android/app/google-services.json
-
-      - name: Configure release signing
-        run: |
-          configured=0
-          for value in "$SIGNING_KEYSTORE_B64" "$SIGNING_KEYSTORE_PASSWORD" "$SIGNING_KEY_ALIAS" "$SIGNING_KEY_PASSWORD"; do
-            if [[ -n "$value" ]]; then
-              configured=$((configured + 1))
-            fi
-          done
-          if [[ "$configured" -eq 0 ]]; then
-            echo 'No release keystore configured; using the debug signing fallback.'
-          elif [[ "$configured" -ne 4 ]]; then
-            echo 'Signing secrets are incomplete; configure all four or remove all four to use debug signing.' >&2
-            exit 1
-          else
-            keystore="$RUNNER_TEMP/hirsel-release.jks"
-            printf '%s' "$SIGNING_KEYSTORE_B64" | base64 --decode > "$keystore"
-            chmod 600 "$keystore"
-            echo "SIGNING_KEYSTORE_PATH=$keystore" >> "$GITHUB_ENV"
-          fi
-
       - name: Regenerate Android native libraries and Kotlin bindings
         run: |
           rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
@@ -125,12 +145,30 @@ jobs:
 
       - name: Build release APK
         working-directory: android
+        env:
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: ./gradlew assembleRelease
 
-      - name: Verify and rename APK
+      - name: Verify signing certificate and rename APK
+        env:
+          EXPECTED_SIGNING_CERT_SHA256: ${{ vars.EXPECTED_SIGNING_CERT_SHA256 }}
         run: |
           source_apk=android/app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner" verify --verbose "$source_apk"
+          apksigner="$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+          "$apksigner" verify --verbose "$source_apk"
+          expected="$(printf '%s' "$EXPECTED_SIGNING_CERT_SHA256" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
+          actual="$("$apksigner" verify --print-certs "$source_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
+          actual="$(printf '%s' "$actual" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'EXPECTED_SIGNING_CERT_SHA256 must be a 64-digit SHA-256 fingerprint.' >&2
+            exit 1
+          fi
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Signing certificate fingerprint mismatch: got $actual" >&2
+            exit 1
+          fi
           mkdir -p dist
           cp "$source_apk" "dist/hirsel-$RELEASE_VERSION.apk"
 

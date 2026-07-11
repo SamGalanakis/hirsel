@@ -326,7 +326,10 @@ function SettingsPanel() {
         <span class="w-[3.25rem] rail:hidden" aria-hidden="true" />
       </header>
 
-      <div class="thin-scrollbar flex flex-1 flex-col overflow-y-auto px-4 pt-4 pb-8">
+      {/* Block flow (not a flex column): as a flex item this scroll region can
+          shrink to the available height (min-h-0) and scroll, while its cards
+          keep their natural height instead of compressing to fit. */}
+      <div class="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-8">
         {/* ── Appearance ─────────────────────────────────────────────── */}
         <SectionHeader>Appearance</SectionHeader>
         <Card class="p-3.5">

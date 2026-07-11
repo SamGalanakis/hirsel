@@ -66,7 +66,9 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -597,7 +599,15 @@ internal fun DestructiveConfirmDialog(
     confirmTestTag: String = "destructive-confirm",
 ) {
     val c = LocalHirselColors.current
-    Dialog(onDismissRequest = onDismiss) {
+    // Predictable dismissal: back press and scrim tap both cancel; the dialog
+    // window traps accessibility focus so its controls are reachable (C21).
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+        ),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -605,7 +615,9 @@ internal fun DestructiveConfirmDialog(
                 .clip(RoundedCornerShape(16.dp))
                 .background(c.Card, RoundedCornerShape(16.dp))
                 .border(1.dp, c.Border, RoundedCornerShape(16.dp))
-                .padding(20.dp),
+                .padding(20.dp)
+                .semantics(mergeDescendants = false) { paneTitle = title }
+                .testTag("confirm-dialog"),
         ) {
             Text(title, fontWeight = FontWeight.SemiBold, color = c.Foreground, fontSize = 16.sp)
             Spacer(Modifier.height(8.dp))

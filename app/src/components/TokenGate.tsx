@@ -37,6 +37,7 @@ export function TokenGate(props: Props) {
           autocorrect="off"
           spellcheck={false}
           placeholder="access token"
+          aria-label="Access token"
           class="h-11 text-center text-base"
           value={value()}
           onInput={(e) => setValue(e.currentTarget.value)}

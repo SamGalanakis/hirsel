@@ -214,7 +214,7 @@ export function Composer(props: Props) {
       <div class="w-full rail:mx-auto rail:max-w-[680px]">
       <Show when={props.replyingTo}>
         {(replyingTo) => (
-          <div class="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-black/15 px-2 py-1">
+          <div class="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted px-2 py-1">
             <div class="min-w-0 flex-1">
               <div class="text-[0.68rem] uppercase tracking-[0.03em] text-primary">
                 Replying to {replyingTo().author === "owner" ? "you" : "Agent"}
@@ -305,6 +305,7 @@ export function Composer(props: Props) {
                     <button
                       type="button"
                       role="option"
+                      aria-selected={false}
                       data-slot="mention-chip"
                       class="flex shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-left"
                       onMouseDown={(e) => e.preventDefault()}
@@ -394,6 +395,7 @@ export function Composer(props: Props) {
           data-composer="main"
           class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
           placeholder="Message the Agent…"
+          aria-label="Message the Agent"
           value={value()}
           onInput={(e) => {
             setValue(e.currentTarget.value);

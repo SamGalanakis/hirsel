@@ -25,6 +25,8 @@ data/
 .env.*
 *.local
 **/iroh-secret-key
+secrets/
+.secrets/
 !*.example
 
 # Logs & scratch
@@ -49,6 +51,7 @@ Thumbs.db
 # Android / Gradle
 .gradle/
 **/build/
+android/app/src/main/jniLibs/**/*.so
 android/local.properties
 .cxx/
 **/.externalNativeBuild/
@@ -62,12 +65,21 @@ captures/
 *.keystore
 *.jks
 *.p12
+*.pfx
+*.pkcs12
 *.pem
+*.key
+*.der
+*.kdbx
+*.mobileprovision
 keystore.properties
 signing.properties
 
 # Firebase secrets — never commit
 **/google-services.json
 **/*service-account*.json
+**/*service_account*.json
 **/fcm-*service*.json
+**/*firebase-admin*.json
+**/*credentials*.json
 GoogleService-Info.plist

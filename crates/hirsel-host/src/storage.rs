@@ -437,6 +437,18 @@ impl Storage {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) async fn force_hello_snapshot_error(&self) {
+        self.conn
+            .lock()
+            .await
+            .execute(
+                "ALTER TABLE chat_messages RENAME TO broken_chat_messages",
+                [],
+            )
+            .expect("break hello snapshot schema for test");
+    }
+
     pub async fn all_chat(&self) -> anyhow::Result<Vec<ChatMessage>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(

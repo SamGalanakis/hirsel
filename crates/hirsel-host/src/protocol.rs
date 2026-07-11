@@ -469,12 +469,14 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::VecDeque, time::Duration};
 
-    use hirsel_proto::{ChatAuthor, HelloAuth, HostToClient};
+    use async_trait::async_trait;
+    use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
 
     use super::{
-        POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, authenticate, build_snapshot,
+        IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
+        authenticate, build_snapshot, run_protocol,
     };
     use crate::{
         build_state,
@@ -605,5 +607,61 @@ mod tests {
     fn pre_auth_frames_have_a_stricter_limit() {
         assert_eq!(PRE_AUTH_MAX_FRAME_BYTES, 8 * 1024);
         assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES);
+    }
+
+    struct TestChannel {
+        incoming: VecDeque<IncomingFrame>,
+        sent: Vec<HostToClient>,
+    }
+
+    #[async_trait]
+    impl ProtocolChannel for TestChannel {
+        async fn receive(&mut self, _max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>> {
+            Ok(self.incoming.pop_front())
+        }
+
+        async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()> {
+            self.sent.push(frame.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_failure_sends_error_instead_of_empty_hello() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(Config {
+            token: "test-token".to_string(),
+            agent: AgentMode::Scripted,
+            provider: ProviderMode::Anthropic,
+            anthropic_api_key: None,
+            model: "test-model".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            driver: DriverMode::Fake,
+            fake_fixture: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            debug: false,
+            sidechat_ttl_secs: 86_400,
+        })
+        .await
+        .unwrap();
+        state.storage.force_hello_snapshot_error().await;
+        let mut channel = TestChannel {
+            incoming: VecDeque::from([IncomingFrame::Message {
+                frame: ClientToHost::Hello {
+                    auth: HelloAuth::StaticToken("test-token".to_string()),
+                    last_seen_msg_id: None,
+                },
+                client_id: None,
+            }]),
+            sent: Vec::new(),
+        };
+
+        run_protocol(&mut channel, state, None, None).await;
+
+        assert_eq!(channel.sent.len(), 1);
+        assert!(matches!(
+            &channel.sent[0],
+            HostToClient::Error { detail, .. } if detail.starts_with("hello snapshot failed:")
+        ));
     }
 }

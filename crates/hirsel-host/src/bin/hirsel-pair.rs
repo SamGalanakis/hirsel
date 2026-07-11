@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
     let png = code.render::<Luma<u8>>().module_dimensions(8, 8).build();
     let png_path = png_path()?;
+    let artifact = PairingArtifact::create(png_path.clone())?;
     png.save_with_format(&png_path, ImageFormat::Png)
         .with_context(|| format!("write QR PNG to {}", png_path.display()))?;
     let png_bytes = fs::metadata(&png_path)
@@ -75,7 +76,48 @@ async fn main() -> anyhow::Result<()> {
         png.height()
     );
 
+    artifact.remove()?;
+
     Ok(())
+}
+
+struct PairingArtifact {
+    path: PathBuf,
+    removed: bool,
+}
+
+impl PairingArtifact {
+    fn create(path: PathBuf) -> anyhow::Result<Self> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&path)
+            .with_context(|| format!("securely create QR PNG at {}", path.display()))?;
+        Ok(Self {
+            path,
+            removed: false,
+        })
+    }
+
+    fn remove(mut self) -> anyhow::Result<()> {
+        fs::remove_file(&self.path)
+            .with_context(|| format!("remove QR PNG at {}", self.path.display()))?;
+        self.removed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PairingArtifact {
+    fn drop(&mut self) {
+        if !self.removed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 fn required_env(name: &str) -> anyhow::Result<String> {
@@ -139,5 +181,22 @@ mod tests {
                 .as_str(),
             "https://hirsel.example/debug/pair"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pairing_artifact_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pair.png");
+        {
+            let _artifact = PairingArtifact::create(path.clone()).unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(!path.exists());
     }
 }

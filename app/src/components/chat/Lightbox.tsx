@@ -27,6 +27,9 @@ export function Lightbox(props: Props) {
     <Show when={props.src}>
       {(src) => (
         <Portal>
+          {/* Tap-anywhere-to-dismiss viewer; keyboard parity is the FocusTrap's
+              Escape, which the linter can't see on this element. */}
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions */}
           <div
             ref={panelRef}
             tabindex={-1}

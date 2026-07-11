@@ -210,11 +210,14 @@ function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: () => voi
   });
 
   return (
-    // Centered within the panel (absolute), calm dim + hairline card. A backdrop
-    // click cancels; Escape cancels via the focus trap.
+    // Centered within the panel (absolute), calm dim + hairline card. A click on
+    // the backdrop (not the card) cancels; Escape cancels via the focus trap.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
       class="absolute inset-0 z-50 flex items-center justify-center bg-background/70 p-6"
-      onClick={props.onCancel}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onCancel();
+      }}
     >
       <div
         ref={dialogRef}
@@ -222,7 +225,6 @@ function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: () => voi
         role="alertdialog"
         aria-label="Forget token"
         class="w-full max-w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg outline-none"
-        onClick={(e) => e.stopPropagation()}
       >
         <h3 class="m-0 text-sm font-semibold text-foreground">Forget this token?</h3>
         <p class="mt-1.5 mb-4 text-[0.8125rem] leading-relaxed text-muted-foreground">

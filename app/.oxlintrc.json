@@ -1,5 +1,7 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "oxc"],
-  "rules": {}
+  "plugins": ["typescript", "oxc", "jsx-a11y"],
+  "rules": {
+    "jsx-a11y/prefer-tag-over-role": "off"
+  }
 }

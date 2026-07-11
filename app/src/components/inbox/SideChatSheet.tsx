@@ -561,9 +561,14 @@ function DiscardConfirmDialog(props: { onCancel: () => void; onConfirm: () => vo
   });
 
   return (
+    // A click on the backdrop (not the card) cancels; Escape cancels via the
+    // focus trap.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 split:absolute split:z-30"
-      onClick={props.onCancel}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onCancel();
+      }}
     >
       <div
         ref={dialogRef}
@@ -572,7 +577,6 @@ function DiscardConfirmDialog(props: { onCancel: () => void; onConfirm: () => vo
         role="alertdialog"
         aria-modal="true"
         aria-label="Discard this side chat?"
-        onClick={(e) => e.stopPropagation()}
       >
         <h2 class="m-0 text-sm font-semibold text-foreground">Discard this side chat?</h2>
         <p class="mt-1 text-sm text-muted-foreground">

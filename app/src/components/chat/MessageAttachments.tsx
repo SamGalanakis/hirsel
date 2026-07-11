@@ -37,6 +37,7 @@ export function MessageAttachments(props: Props) {
                   target="_blank"
                   rel="noreferrer"
                   download={blob.name}
+                  aria-label={`Download ${blob.name}`}
                   class="block no-underline"
                 >
                   <Attachment size="sm" class="w-full max-w-xs">

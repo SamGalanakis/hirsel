@@ -216,6 +216,42 @@ describe("HirselWsClient auth rejection (C5)", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
+  it("gates immediately on a pre-auth error frame with no client_id (the real host signal)", async () => {
+    const { client } = await load();
+    localStorage.setItem("hirsel.token", "bad");
+    const onAuthReject = vi.fn();
+    client.startClient("wss://host/ws", "bad", { onAuthReject });
+    const ws = FakeWebSocket.instances[0];
+    ws.serverOpen();
+    // Host rejects the hello: an error frame (no client_id), then a plain close.
+    ws.serverSend({ type: "error", detail: "invalid hello: bad token" });
+
+    expect(onAuthReject).toHaveBeenCalledOnce();
+    // The host's reason is surfaced verbatim.
+    expect(onAuthReject.mock.calls[0][0]).toBe("invalid hello: bad token");
+    expect(client.getStoredToken()).toBeNull();
+
+    // The subsequent plain close must not schedule a reconnect.
+    ws.serverClose(1000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("does NOT treat a post-auth error frame as an auth rejection", async () => {
+    const { client } = await load();
+    localStorage.setItem("hirsel.token", "good");
+    const onAuthReject = vi.fn();
+    const c = client.startClient("wss://host/ws", "good", { onAuthReject });
+    const ws = FakeWebSocket.instances[0];
+    ws.serverOpen();
+    ws.serverSend(HELLO_OK); // authenticated
+    void c;
+
+    // A global error after authentication is a runtime error, never a gate-out.
+    ws.serverSend({ type: "error", detail: "something went wrong" });
+    expect(onAuthReject).not.toHaveBeenCalled();
+    expect(client.getStoredToken()).toBe("good"); // token untouched
+  });
+
   it("treats repeated pre-hello closes on a never-authed token as auth failure", async () => {
     vi.useFakeTimers();
     const { client } = await load();

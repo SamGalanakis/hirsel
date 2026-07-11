@@ -397,8 +397,11 @@ class HirselWsClient {
     socket.addEventListener("close", (event) => {
       this.socket = null;
       if (this.closedByClient) return;
-      // Auth rejection: an explicit reject code, or (only until the token has
-      // ever authenticated) the socket closing before `hello_ok` too many times.
+      // The precise, instant auth-reject signal is the pre-auth `error` frame
+      // (handled in handleServerMessage); this close-side check is the FALLBACK
+      // for a host that just drops the socket with no error frame — an explicit
+      // reject code, or (only until the token has ever authenticated) the socket
+      // closing before `hello_ok` too many times.
       const looksLikeAuthReject =
         AUTH_REJECT_CODES.has((event as CloseEvent).code) ||
         (!this.everAuthed && ++this.connectsWithoutHello >= MAX_CONNECTS_WITHOUT_HELLO);
@@ -417,8 +420,11 @@ class HirselWsClient {
 
   /** Terminal auth failure: stop everything, drop the stored token, and tell the
    * app to return to the gate with an error. Reconnecting would just re-reject
-   * the same bad token forever (the C5 dead-end this replaces). */
-  private handleAuthReject(): void {
+   * the same bad token forever (the C5 dead-end this replaces). `detail` is the
+   * host's reason when we have one (a pre-auth `error` frame), else a generic
+   * message for the socket-just-dropped heuristic path. */
+  private handleAuthReject(detail?: string): void {
+    if (this.closedByClient) return; // already torn down (e.g. error then close)
     this.closedByClient = true; // suppress any in-flight reconnect/close paths
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -426,9 +432,14 @@ class HirselWsClient {
     }
     for (const t of this.failTimers.values()) clearTimeout(t);
     this.failTimers.clear();
+    this.socket?.close();
     clearStoredToken();
     dispatch({ type: "connection_status", status: "reconnecting" });
-    this.handlers.onAuthReject?.("Couldn't authenticate — check your token and try again.");
+    this.handlers.onAuthReject?.(
+      detail && detail.trim().length > 0
+        ? detail
+        : "Couldn't authenticate — check your token and try again.",
+    );
   }
 
   private scheduleReconnect(): void {
@@ -547,6 +558,17 @@ class HirselWsClient {
         break;
       }
       case "error": {
+        // C5: the host rejects a bad hello with a plain `error` frame carrying a
+        // reason and NO client_id, then closes the socket (no numeric close
+        // code). Before this client has ever authenticated, that is an auth
+        // rejection — act on it immediately (precise + instant) rather than
+        // waiting out the close-before-hello heuristic. A correlated error
+        // (upload/blob) always has a client_id and is handled below; a global
+        // error that arrives AFTER authentication is a normal runtime error.
+        if (!this.everAuthed && !message.client_id) {
+          this.handleAuthReject(message.detail);
+          break;
+        }
         // An error carrying a client_id correlates to an in-flight upload or
         // blob-url request; reject its promise and mark the chip. Others are
         // surfaced to the log.

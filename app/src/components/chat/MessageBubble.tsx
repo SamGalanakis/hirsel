@@ -1,7 +1,7 @@
 import { Check, Clock, Copy, GitFork, RotateCcw, X } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
 import type { DisplayMessage, TimelineEvent } from "../../store/types";
-import { toast } from "../../lib/toast";
+import { copyWithToast } from "../../lib/clipboard";
 import { Markdown } from "../Markdown";
 import { Bubble, BubbleContent } from "../ui/bubble";
 import { Message, MessageContent, MessageFooter } from "../ui/message";
@@ -50,13 +50,9 @@ export function MessageBubble(props: Props) {
   let pressTimer: ReturnType<typeof setTimeout> | undefined;
 
   async function copyBody() {
-    try {
-      await navigator.clipboard.writeText(props.message.body);
+    if (await copyWithToast(props.message.body, "Copied message")) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
-      toast("Copied message");
-    } catch {
-      toast("Couldn't copy", { variant: "error" });
     }
   }
 

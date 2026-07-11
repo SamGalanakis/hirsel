@@ -8,3 +8,13 @@ export function backoffDelayMs(attempt: number): number {
   const delay = MIN_BACKOFF_MS * 2 ** attempt;
   return Math.min(delay, MAX_BACKOFF_MS);
 }
+
+/** ±20% of uniform jitter on the exponential base, so a fleet of clients that
+ * dropped together (host restart) don't all reconnect on the same tick and
+ * thundering-herd the host. `rng` is injectable for deterministic tests. */
+export function jitteredDelayMs(attempt: number, rng: () => number = Math.random): number {
+  const base = backoffDelayMs(attempt);
+  // factor ∈ [0.8, 1.2)
+  const factor = 0.8 + 0.4 * rng();
+  return Math.round(base * factor);
+}

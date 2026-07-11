@@ -11,7 +11,12 @@ const LABEL: Record<ConnectionStatus, string> = {
 export function ConnectionPill() {
   const pending = () => state.connection !== "connected";
   return (
-    <Badge variant="outline" class="gap-1.5 text-muted-foreground">
+    <Badge
+      variant="outline"
+      class="gap-1.5 text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
       <span
         aria-hidden="true"
         class="size-1.5 rounded-full"

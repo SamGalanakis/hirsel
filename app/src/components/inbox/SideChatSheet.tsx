@@ -1,7 +1,7 @@
 import { ArrowUp, ChevronDown, ChevronRight, MoreHorizontal, TriangleAlert, X } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { Ping } from "../../protocol";
-import { focusMainComposer } from "../../lib/focus";
+import { createFocusTrap, focusMainComposer } from "../../lib/focus";
 import { dispatch, setActiveSideChatSc, state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
@@ -52,6 +52,10 @@ import { Textarea } from "../ui/textarea";
 const HIGHLIGHT_MS = 1600;
 const MAX_COMPOSER_HEIGHT_PX = 112;
 const HINT_DISMISSED_KEY = "hirsel.sidechat.hintDismissed";
+/** Below `split` the side chat is a full-screen sheet over the chat (trap Tab);
+ * at/above it an in-flow rail beside a still-live main chat, where trapping Tab
+ * would strand the keyboard on that side, so Tab stays free (C21). */
+const SPLIT_MQ = "(min-width: 900px)";
 
 function hintDismissed(): boolean {
   try {
@@ -95,6 +99,7 @@ function SideChatPanel(props: { sc: string }) {
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(
     MAX_COMPOSER_HEIGHT_PX,
   );
+  let panelRef: HTMLDivElement | undefined;
 
   const offline = () => state.connection !== "connected";
   const thinking = () => sideChat()?.agentActivity.state === "thinking";
@@ -117,23 +122,20 @@ function SideChatPanel(props: { sc: string }) {
     queueMicrotask(() => focus());
   });
 
-  // Esc: priority-ordered by what's on top. Discard confirm -> cancel it.
-  // Confirm-draft sheet -> "Keep editing" (never discard — the anti-pattern
-  // this design guards against is a Back that silently throws work away).
-  // Otherwise -> leave-alive.
+  // Focus management + Escape (C21). Esc priority is now the trap stack's job:
+  // the confirm-draft sheet and the discard dialog each push their own trap and
+  // own Escape while up ("Keep editing" / cancel — never a silent discard); with
+  // neither open, this panel's trap is topmost and Escape leaves-alive. Tab is
+  // trapped only when the sheet is full-screen (phone), never on the desktop
+  // split where it sits beside a live main chat.
   onMount(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (discardConfirmOpen()) {
-        setDiscardConfirmOpen(false);
-      } else if (showingDraft()) {
-        dispatch({ type: "side_chat_keep_editing", sc: props.sc });
-      } else {
-        leave();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+    createFocusTrap(() => panelRef, {
+      onEscape: leave,
+      trapTab: () => !window.matchMedia(SPLIT_MQ).matches,
+      // Focus lands in the side composer (below) on open; don't yank it back.
+      restoreTo: () =>
+        document.querySelector<HTMLTextAreaElement>('[data-composer="main"]'),
+    });
   });
 
   const messagesById = createMemo(() => {
@@ -190,8 +192,10 @@ function SideChatPanel(props: { sc: string }) {
 
   return (
     <div
+      ref={panelRef}
+      tabindex={-1}
       data-slot="side-chat-sheet"
-      class="flex flex-col bg-background
+      class="flex flex-col bg-background outline-none
         fixed inset-0 z-40 pb-[env(safe-area-inset-bottom)]
         animate-in fade-in slide-in-from-bottom duration-200
         split:relative split:inset-auto split:z-auto
@@ -404,7 +408,8 @@ function SideChatPanel(props: { sc: string }) {
                 rows={1}
                 data-composer="side"
                 class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
-                placeholder="Message the Agent…"
+                placeholder="Reply in this side chat…"
+                aria-label="Reply in this side chat"
                 value={value()}
                 disabled={sideChat()?.drafting}
                 onInput={(e) => setValue(e.currentTarget.value)}
@@ -467,6 +472,7 @@ function ConcludeConfirmSheet(props: {
   onSend: (text: string) => void;
 }) {
   const [text, setText] = createSignal(props.draft);
+  let dialogRef: HTMLDivElement | undefined;
 
   // A resumed/late-arriving draft can replace an empty seed; once the Owner
   // starts editing we never clobber their edits from underneath them.
@@ -478,13 +484,21 @@ function ConcludeConfirmSheet(props: {
     }
   });
 
+  // Topmost modal over the side chat: trap focus and route Escape to "Keep
+  // editing" (never a silent discard of the drafted reply) (C21).
+  onMount(() => {
+    createFocusTrap(() => dialogRef, { onEscape: () => props.onKeepEditing() });
+  });
+
   return (
     // Phone: a full-screen sheet (room to edit with the keyboard up). Desktop
     // (`split`): a centered, scrimmed, capped modal over the side-panel region —
     // never a whole-screen blank for a two-line confirmation (P2). The chat
     // stays visible on the left; only the side panel is scrimmed.
     <div
-      class="fixed inset-0 z-50 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
+      ref={dialogRef}
+      tabindex={-1}
+      class="fixed inset-0 z-50 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
         split:absolute split:z-30 split:items-center split:justify-center split:bg-black/40 split:p-3 split:pb-3"
       role="dialog"
       aria-modal="true"
@@ -541,17 +555,29 @@ function ConcludeConfirmSheet(props: {
 /** Discard's confirm — deliberately a separate, effortful step (critique: the
  * one exit that must never be a fat-finger away from "leave"). */
 function DiscardConfirmDialog(props: { onCancel: () => void; onConfirm: () => void }) {
+  let dialogRef: HTMLDivElement | undefined;
+  // Topmost modal: trap focus, Escape cancels (C21).
+  onMount(() => {
+    createFocusTrap(() => dialogRef, { onEscape: () => props.onCancel() });
+  });
+
   return (
+    // A click on the backdrop (not the card) cancels; Escape cancels via the
+    // focus trap.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 split:absolute split:z-30"
-      onClick={props.onCancel}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onCancel();
+      }}
     >
       <div
-        class="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-lg"
+        ref={dialogRef}
+        tabindex={-1}
+        class="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-lg outline-none"
         role="alertdialog"
         aria-modal="true"
         aria-label="Discard this side chat?"
-        onClick={(e) => e.stopPropagation()}
       >
         <h2 class="m-0 text-sm font-semibold text-foreground">Discard this side chat?</h2>
         <p class="mt-1 text-sm text-muted-foreground">

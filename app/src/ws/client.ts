@@ -4,7 +4,7 @@
 // upload correlation and the v1.2 send-mode / cancel frames.
 import type { Blob, ClientMessage, SendMode, ServerMessage } from "../protocol";
 import { dispatch, state } from "../store/store";
-import { backoffDelayMs } from "./backoff";
+import { jitteredDelayMs } from "./backoff";
 
 const TOKEN_KEY = "hirsel.token";
 const LAST_SEEN_KEY = "hirsel.lastSeenMsgId";
@@ -15,6 +15,33 @@ const FAILED_AFTER_MS = 30_000;
 
 /** Give up on an upload_blob whose blob_ok / error never arrives. */
 const UPLOAD_TIMEOUT_MS = 45_000;
+
+/** Give up on a get_blob_url whose blob_url / error never arrives (blocks an
+ * image thumbnail / download link from resolving; fail into a placeholder). */
+const BLOB_URL_TIMEOUT_MS = 20_000;
+
+/** WebSocket close codes the host may use to reject a bad/expired token. The
+ * canonical code isn't pinned in PROTOCOL.md yet (coordinate with the backend
+ * lane — see report-web.md), so we match the plausible set: 1008 (policy
+ * violation, the standard "your frame/credentials are unacceptable") plus the
+ * 44xx app range hosts often use for auth. Any of these = auth failure with no
+ * reconnect. */
+const AUTH_REJECT_CODES = new Set([1008, 4001, 4401, 4403]);
+
+/** Heuristic fallback for hosts that just drop the socket on a bad token with a
+ * generic 1006/1000: if the VERY FIRST connection(s) close before we ever see a
+ * `hello_ok`, that's a rejected token, not a flaky network (a token that ever
+ * authenticated sets `everAuthed`, which permanently disables this path so a
+ * real mid-session drop keeps reconnecting forever). Two strikes before we give
+ * up, to ride out a one-off cold-start race. */
+const MAX_CONNECTS_WITHOUT_HELLO = 2;
+
+/** Signalled to the app when the token is rejected: the client has already
+ * cleared the stored token and stopped reconnecting; the app clears its token
+ * signal and routes back to the gate with `detail` as the inline error. */
+export interface ClientHandlers {
+  onAuthReject?: (detail: string) => void;
+}
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -57,9 +84,10 @@ function makeLocalId(): number {
   return id;
 }
 
-/** Base for out-of-band blob asset fetches (`GET /blob/{id}?token=…`), derived
- * from the WS URL: ws→http, wss→https, and a trailing `/ws` path dropped (the
- * host serves the app + blobs from the same origin root). */
+/** Origin for out-of-band blob asset fetches, derived from the WS URL: ws→http,
+ * wss→https, and a trailing `/ws` path dropped (the host serves the app + blobs
+ * from the same origin root). The signed blob URL (D9) is host-relative, so this
+ * prefixes it. */
 let blobBase = "";
 function deriveBlobBase(wsUrl: string): string {
   try {
@@ -72,13 +100,6 @@ function deriveBlobBase(wsUrl: string): string {
   }
 }
 
-/** URL for an attachment's content. Token is carried as a query param since the
- * fetch is a plain asset load (img src / anchor href), not a protocol frame. */
-export function blobUrl(id: string): string {
-  const token = getStoredToken() ?? "";
-  return `${blobBase}/blob/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
-}
-
 class HirselWsClient {
   private url: string;
   private token: string;
@@ -89,12 +110,21 @@ class HirselWsClient {
   private outbox: ClientMessage[] = [];
   /** Unresolved upload_blob promises, keyed by their client_id. */
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
+  /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
+  private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
   /** Per-pending-send "not echoed yet" timers, keyed by client_id. */
   private failTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** True once any `hello_ok` has arrived on this client — permanently disables
+   * the "closed before hello ⇒ bad token" heuristic (see MAX_CONNECTS...). */
+  private everAuthed = false;
+  /** Consecutive connections that closed before a `hello_ok` (auth heuristic). */
+  private connectsWithoutHello = 0;
+  private handlers: ClientHandlers;
 
-  constructor(url: string, token: string) {
+  constructor(url: string, token: string, handlers: ClientHandlers = {}) {
     this.url = url;
     this.token = token;
+    this.handlers = handlers;
   }
 
   connect(): void {
@@ -193,6 +223,33 @@ class HirselWsClient {
         mime,
         data_b64: dataB64,
       });
+    });
+  }
+
+  /** Request a short-lived signed URL for a blob's bytes (D9), resolving with an
+   * absolute, ready-to-fetch URL. Replaces the old `?token=` construction the
+   * host now rejects — so `<img src>` / download links must resolve through
+   * this. Fresh on every call (the URL expires ≈5 min out), so callers request
+   * again at point of use rather than caching a URL that may have gone stale. */
+  getBlobUrl(blobId: string): Promise<string> {
+    const clientId = makeClientId();
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.blobUrlReqs.delete(clientId)) reject(new Error("blob url timed out"));
+      }, BLOB_URL_TIMEOUT_MS);
+      this.blobUrlReqs.set(clientId, {
+        resolve: (url) => {
+          clearTimeout(timer);
+          resolve(url);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      // Enqueued so a request fired right as the socket blips still resolves once
+      // reconnected (until the timeout), like upload_blob.
+      this.enqueue({ type: "get_blob_url", client_id: clientId, blob_id: blobId });
     });
   }
 
@@ -337,9 +394,21 @@ class HirselWsClient {
       this.handleServerMessage(JSON.parse(event.data as string) as ServerMessage);
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       this.socket = null;
       if (this.closedByClient) return;
+      // The precise, instant auth-reject signal is the pre-auth `error` frame
+      // (handled in handleServerMessage); this close-side check is the FALLBACK
+      // for a host that just drops the socket with no error frame — an explicit
+      // reject code, or (only until the token has ever authenticated) the socket
+      // closing before `hello_ok` too many times.
+      const looksLikeAuthReject =
+        AUTH_REJECT_CODES.has((event as CloseEvent).code) ||
+        (!this.everAuthed && ++this.connectsWithoutHello >= MAX_CONNECTS_WITHOUT_HELLO);
+      if (looksLikeAuthReject) {
+        this.handleAuthReject();
+        return;
+      }
       dispatch({ type: "connection_status", status: "reconnecting" });
       this.scheduleReconnect();
     });
@@ -349,9 +418,33 @@ class HirselWsClient {
     });
   }
 
+  /** Terminal auth failure: stop everything, drop the stored token, and tell the
+   * app to return to the gate with an error. Reconnecting would just re-reject
+   * the same bad token forever (the C5 dead-end this replaces). `detail` is the
+   * host's reason when we have one (a pre-auth `error` frame), else a generic
+   * message for the socket-just-dropped heuristic path. */
+  private handleAuthReject(detail?: string): void {
+    if (this.closedByClient) return; // already torn down (e.g. error then close)
+    this.closedByClient = true; // suppress any in-flight reconnect/close paths
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    for (const t of this.failTimers.values()) clearTimeout(t);
+    this.failTimers.clear();
+    this.socket?.close();
+    clearStoredToken();
+    dispatch({ type: "connection_status", status: "reconnecting" });
+    this.handlers.onAuthReject?.(
+      detail && detail.trim().length > 0
+        ? detail
+        : "Couldn't authenticate — check your token and try again.",
+    );
+  }
+
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
-    const delay = backoffDelayMs(this.reconnectAttempt);
+    const delay = jitteredDelayMs(this.reconnectAttempt);
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -362,6 +455,10 @@ class HirselWsClient {
   private handleServerMessage(message: ServerMessage): void {
     switch (message.type) {
       case "hello_ok": {
+        // The token authenticated: retire the bad-token heuristic for the rest
+        // of this client's life so a later network drop reconnects, never gates.
+        this.everAuthed = true;
+        this.connectsWithoutHello = 0;
         dispatch({ type: "hello_ok", payload: message });
         setStoredLastSeen(message.latest_msg_id);
         dispatch({ type: "connection_status", status: "connected" });
@@ -451,14 +548,40 @@ class HirselWsClient {
         dispatch({ type: "blob_ok", clientId: message.client_id, blob: message.blob });
         break;
       }
+      case "blob_url": {
+        const pending = this.blobUrlReqs.get(message.client_id);
+        if (pending) {
+          // Signed URL is host-relative; prefix the blob origin.
+          pending.resolve(`${blobBase}${message.url}`);
+          this.blobUrlReqs.delete(message.client_id);
+        }
+        break;
+      }
       case "error": {
-        // An error carrying a client_id correlates to an in-flight upload;
-        // reject its promise and mark the chip. Others are surfaced to the log.
+        // C5: the host rejects a bad hello with a plain `error` frame carrying a
+        // reason and NO client_id, then closes the socket (no numeric close
+        // code). Before this client has ever authenticated, that is an auth
+        // rejection — act on it immediately (precise + instant) rather than
+        // waiting out the close-before-hello heuristic. A correlated error
+        // (upload/blob) always has a client_id and is handled below; a global
+        // error that arrives AFTER authentication is a normal runtime error.
+        if (!this.everAuthed && !message.client_id) {
+          this.handleAuthReject(message.detail);
+          break;
+        }
+        // An error carrying a client_id correlates to an in-flight upload or
+        // blob-url request; reject its promise and mark the chip. Others are
+        // surfaced to the log.
         if (message.client_id) {
           const pending = this.uploads.get(message.client_id);
           if (pending) {
             pending.reject(new Error(message.detail));
             this.uploads.delete(message.client_id);
+          }
+          const blobReq = this.blobUrlReqs.get(message.client_id);
+          if (blobReq) {
+            blobReq.reject(new Error(message.detail));
+            this.blobUrlReqs.delete(message.client_id);
           }
           dispatch({ type: "upload_error", clientId: message.client_id });
         }
@@ -514,10 +637,14 @@ class HirselWsClient {
 
 let client: HirselWsClient | null = null;
 
-export function startClient(url: string, token: string): HirselWsClient {
+export function startClient(
+  url: string,
+  token: string,
+  handlers: ClientHandlers = {},
+): HirselWsClient {
   client?.close();
   blobBase = deriveBlobBase(url);
-  client = new HirselWsClient(url, token);
+  client = new HirselWsClient(url, token, handlers);
   client.connect();
   return client;
 }

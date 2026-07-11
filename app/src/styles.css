@@ -37,11 +37,11 @@
   --popover-foreground: oklch(0.215 0.006 286);
   --primary: oklch(0.52 0.14 264);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.965 0.002 286);
+  --secondary: oklch(0.955 0.002 286);
   --secondary-foreground: oklch(0.26 0.006 286);
-  --muted: oklch(0.965 0.002 286);
+  --muted: oklch(0.955 0.002 286);
   --muted-foreground: oklch(0.505 0.016 286);
-  --accent: oklch(0.965 0.002 286);
+  --accent: oklch(0.955 0.002 286);
   --accent-foreground: oklch(0.26 0.006 286);
   --destructive: oklch(0.55 0.22 27);
   --destructive-solid: oklch(0.55 0.22 27);
@@ -210,8 +210,21 @@ textarea {
   }
 }
 
+/* Durable reduced-motion guard (C32): a global reset so animation call sites
+   (ConnectionPill/Tray/ProcessRow pulses, spinners, sheet slide-ins) don't each
+   have to remember `motion-safe:`. Near-instant rather than 0s so
+   animation/transition `end` events still fire and stateful transitions settle. */
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

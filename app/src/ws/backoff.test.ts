@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { backoffDelayMs, MAX_BACKOFF_MS, MIN_BACKOFF_MS } from "./backoff";
+import { backoffDelayMs, jitteredDelayMs, MAX_BACKOFF_MS, MIN_BACKOFF_MS } from "./backoff";
 
 describe("backoffDelayMs", () => {
   it("starts at the minimum delay on the first attempt", () => {
@@ -16,6 +16,26 @@ describe("backoffDelayMs", () => {
   it("caps at the maximum delay", () => {
     expect(backoffDelayMs(5)).toBe(MAX_BACKOFF_MS);
     expect(backoffDelayMs(20)).toBe(MAX_BACKOFF_MS);
+  });
+});
+
+describe("jitteredDelayMs", () => {
+  it("spans exactly ±20% of the base across the rng range", () => {
+    // rng=0 → 0.8×base (floor), rng→1 → 1.2×base (open ceiling).
+    expect(jitteredDelayMs(2, () => 0)).toBe(Math.round(4000 * 0.8));
+    expect(jitteredDelayMs(2, () => 0.999999)).toBe(Math.round(4000 * (0.8 + 0.4 * 0.999999)));
+    expect(jitteredDelayMs(2, () => 0.5)).toBe(4000); // midpoint = base
+  });
+
+  it("keeps every sample within ±20% of the exponential base", () => {
+    for (let attempt = 0; attempt <= 8; attempt++) {
+      const base = backoffDelayMs(attempt);
+      for (const r of [0, 0.13, 0.5, 0.87, 0.9999]) {
+        const d = jitteredDelayMs(attempt, () => r);
+        expect(d).toBeGreaterThanOrEqual(Math.round(base * 0.8));
+        expect(d).toBeLessThanOrEqual(Math.round(base * 1.2));
+      }
+    }
   });
 });
 

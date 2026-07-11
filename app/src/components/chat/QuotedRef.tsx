@@ -1,15 +1,11 @@
 import { CornerUpLeft } from "lucide-solid";
 import { Show } from "solid-js";
+import { snippet } from "../../lib/format";
 import type { DisplayMessage } from "../../store/types";
 
 interface Props {
   message: DisplayMessage | undefined;
   onTap: () => void;
-}
-
-function snippet(body: string): string {
-  const oneLine = body.replace(/\s+/g, " ").trim();
-  return oneLine.length > 80 ? `${oneLine.slice(0, 80)}…` : oneLine;
 }
 
 /** A quiet one-line citation of the referenced message — drawn only when the

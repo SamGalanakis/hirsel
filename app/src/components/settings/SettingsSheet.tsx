@@ -1,6 +1,9 @@
 import { ChevronLeft, Copy, X } from "lucide-solid";
-import { createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, For, type JSX, onMount, Show } from "solid-js";
+import { copyWithToast } from "../../lib/clipboard";
 import { resolveWsUrl } from "../../lib/endpoint";
+import { createFocusTrap } from "../../lib/focus";
+import { setTitleBadgeEnabled, titleBadgeEnabled } from "../../lib/prefs";
 import { cn } from "../../lib/utils";
 import { setThemeMode, themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
@@ -19,6 +22,10 @@ import { Input } from "../ui/input";
 // diagnostics blob, never sent to the Host.
 const DEVICE_LABEL_KEY = "hirsel.deviceLabel";
 const DEBUG_KEY = "hirsel.debug";
+
+/** At/above `rail` Settings is a right-docked inspector (Tab stays free); below
+ * it a full-screen sheet whose Tab is trapped (C21). */
+const RAIL_MQ = "(min-width: 1100px)";
 
 const PHASE_WORD: Record<ConnectionStatus, string> = {
   connecting: "connecting…",
@@ -61,17 +68,7 @@ function maskToken(token: string | null): string {
 }
 
 function copyText(value: string, label: string): void {
-  const ok = () => toast(`Copied ${label}`);
-  const fail = () => toast("Couldn't copy", { variant: "error" });
-  try {
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(value).then(ok).catch(fail);
-      return;
-    }
-  } catch {
-    /* fall through */
-  }
-  fail();
+  void copyWithToast(value, `Copied ${label}`);
 }
 
 // ── Small building blocks ──────────────────────────────────────────────────
@@ -196,18 +193,30 @@ function CopyRow(props: { value: string; label: string; mono?: boolean }) {
 }
 
 function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: () => void }) {
+  let dialogRef: HTMLDivElement | undefined;
+  // Topmost modal over the Settings sheet: trap focus in the card and own
+  // Escape (cancel) while it's up; the stack hands control back to the Settings
+  // panel trap on close (C21).
+  onMount(() => {
+    createFocusTrap(() => dialogRef, { onEscape: () => props.onCancel() });
+  });
+
   return (
-    // Centered within the panel (absolute), calm dim + hairline card. The
-    // panel owns Escape (closes this before Settings); a backdrop click cancels.
+    // Centered within the panel (absolute), calm dim + hairline card. A click on
+    // the backdrop (not the card) cancels; Escape cancels via the focus trap.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
       class="absolute inset-0 z-50 flex items-center justify-center bg-background/70 p-6"
-      onClick={props.onCancel}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onCancel();
+      }}
     >
       <div
+        ref={dialogRef}
+        tabindex={-1}
         role="alertdialog"
         aria-label="Forget token"
-        class="w-full max-w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg"
-        onClick={(e) => e.stopPropagation()}
+        class="w-full max-w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg outline-none"
       >
         <h3 class="m-0 text-sm font-semibold text-foreground">Forget this token?</h3>
         <p class="mt-1.5 mb-4 text-[0.8125rem] leading-relaxed text-muted-foreground">
@@ -238,18 +247,18 @@ function SettingsPanel() {
   const [fingerprint, setFingerprint] = createSignal("…");
   const [confirmForget, setConfirmForget] = createSignal(false);
 
+  let panelRef: HTMLDivElement | undefined;
+
   onMount(() => {
     void computeFingerprint(getStoredToken()).then(setFingerprint);
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (confirmForget()) {
-        setConfirmForget(false);
-        return;
-      }
-      setSettingsOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+    // Focus management (C21): full-screen sheet on phone (trap Tab so the chat
+    // behind stays out of the tab order), right-docked inspector at `rail`
+    // (leave Tab free). Escape closes Settings; when the Forget-token dialog is
+    // up it sits on top of the trap stack and owns Escape instead.
+    createFocusTrap(() => panelRef, {
+      onEscape: () => setSettingsOpen(false),
+      trapTab: () => !window.matchMedia(RAIL_MQ).matches,
+    });
   });
 
   const canSaveLabel = () => {
@@ -305,9 +314,11 @@ function SettingsPanel() {
     // `absolute` inside ChatView's `relative` row, overlaying the right region
     // (Pings rail / Side Chat) only, never the chat measure on the left.
     <div
+      ref={panelRef}
+      tabindex={-1}
       data-slot="settings-panel"
-      class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
-        rail:absolute rail:left-auto rail:z-30 rail:w-[420px] rail:border-l rail:border-border rail:pb-0"
+      class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
+        rail:absolute rail:left-auto rail:z-30 rail:w-[360px] rail:border-l rail:border-border rail:pb-0"
     >
       <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:h-12 rail:py-0">
         <button
@@ -412,9 +423,11 @@ function SettingsPanel() {
               title="Tab title badge"
               subtitle="Unread Pings show as “(3) hirsel” in this browser tab."
             />
-            <span class="shrink-0 rounded-full bg-status-success/15 px-2 py-0.5 text-[0.65rem] font-medium text-status-success">
-              On
-            </span>
+            <Toggle
+              ariaLabel="Tab title badge"
+              checked={titleBadgeEnabled()}
+              onChange={setTitleBadgeEnabled}
+            />
           </div>
           <div class="px-3.5 py-3">
             <Field

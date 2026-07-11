@@ -1,3 +1,4 @@
+import { Settings } from "lucide-solid";
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { ChatView } from "./components/chat/ChatView";
 import { ConnectionPill } from "./components/ConnectionPill";
@@ -6,8 +7,9 @@ import { ProcessesButton } from "./components/processes/ProcessesButton";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
+import { titleBadgeEnabled } from "./lib/prefs";
 import { openUnreadCount } from "./store/selectors";
-import { state } from "./store/store";
+import { setSettingsOpen, state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
 const WS_URL = resolveWsUrl();
@@ -16,6 +18,10 @@ const BASE_TITLE = "hirsel";
 
 function App() {
   const [token, setToken] = createSignal<string | null>(getStoredToken());
+  // A rejected/expired token surfaces here (C5): the ws client clears the stored
+  // token and calls back; we drop to the gate and show this inline error instead
+  // of the old "reconnecting…" forever dead-end.
+  const [authError, setAuthError] = createSignal<string | null>(null);
 
   // Whether a Side Chat is open — widens the shell for the desktop split.
   const splitActive = () => state.activeSideChatSc !== null;
@@ -26,7 +32,14 @@ function App() {
   createEffect(() => {
     const t = token();
     if (!t) return;
-    const client = startClient(WS_URL, t);
+    const client = startClient(WS_URL, t, {
+      onAuthReject: (detail) => {
+        // The client already cleared the stored token and stopped reconnecting;
+        // clearing the signal swaps back to the gate with the error line.
+        setToken(null);
+        setAuthError(detail);
+      },
+    });
     onCleanup(() => client.close());
   });
 
@@ -35,7 +48,8 @@ function App() {
   // notifications. (Replaces the React useTitleBadge hook with a plain effect.)
   createEffect(() => {
     const count = openUnreadCount(state.pings, state.unreadOverrides);
-    document.title = count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
+    document.title =
+      titleBadgeEnabled() && count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
   });
 
   return (
@@ -44,7 +58,9 @@ function App() {
       fallback={
         <div class="mx-auto flex w-full max-w-[560px] flex-1 flex-col">
           <TokenGate
+            error={authError()}
             onSubmit={(t) => {
+              setAuthError(null);
               setStoredToken(t);
               setToken(t);
             }}
@@ -82,6 +98,19 @@ function App() {
             <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
             <div class="flex items-center gap-1.5">
               <ProcessesButton />
+              {/* Settings is otherwise reachable only from the desktop NavRail
+                  gear, which is gone below `rail`; this header entry is the sole
+                  phone path to theme, Forget token, diagnostics, and the endpoint
+                  (C3). The whole header is `rail:hidden`, so it doesn't double up
+                  with the NavRail item at desktop widths. */}
+              <button
+                type="button"
+                class="flex items-center rounded-full p-1.5 text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => setSettingsOpen(true)}
+                aria-label="Settings"
+              >
+                <Settings class="size-5" aria-hidden="true" />
+              </button>
               <ConnectionPill />
             </div>
           </header>

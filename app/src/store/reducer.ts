@@ -16,6 +16,22 @@ import type {
  * A live chat session has few turns; this only guards a pathological long run. */
 const TURN_DETAILS_LIMIT = 50;
 
+/** Hard cap on the in-memory chat history (D10). An always-open PWA would
+ * otherwise grow `messages` without bound across a multi-day session — every
+ * append is O(n) to render and the unseen scan is O(n) per scroll. We keep the
+ * most-recent slice; older rows fall out of memory (the host still holds the
+ * canonical history, replayed from `last_seen` on reconnect). Comfortably larger
+ * than the render window (see ChatView) so "load older" has headroom. Oldest are
+ * dropped from the FRONT, so optimistic sends (always newest, at the tail) and
+ * the reconciliation that matches them are never disturbed. */
+export const MESSAGES_CAP = 600;
+
+/** Keep only the newest `MESSAGES_CAP` messages, dropping the oldest. A no-op
+ * (same reference) under the cap so the common case allocates nothing. */
+function capMessages(messages: DisplayMessage[]): DisplayMessage[] {
+  return messages.length > MESSAGES_CAP ? messages.slice(messages.length - MESSAGES_CAP) : messages;
+}
+
 function upsertPing(pings: Ping[], ping: Ping): Ping[] {
   const idx = pings.findIndex((existing) => existing.id === ping.id);
   if (idx === -1) return [...pings, ping];
@@ -146,7 +162,7 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
     }
   }
 
-  return { ...state, messages: [...state.messages, message] };
+  return { ...state, messages: capMessages([...state.messages, message]) };
 }
 
 /** Same idea as `reconcileOrAppend`, scoped to one side chat's own message
@@ -230,13 +246,34 @@ export function reduce(state: AppState, action: Action): AppState {
     case "hello_ok": {
       const { latest_msg_id, pings } = action.payload;
       // Never re-admit a tombstoned (cancelled) id from replay.
-      const messages = action.payload.messages.filter((m) => !state.removedIds.includes(m.id));
+      const snapshot = action.payload.messages.filter((m) => !state.removedIds.includes(m.id));
+      // The snapshot is AUTHORITATIVE for the id range it covers (>= its minimum
+      // id). A C7 full resync (host `build_snapshot` with no cursor, sent when a
+      // client's broadcast receiver lags) starts at the true minimum, so it
+      // supersedes the whole range — a message removed during the lag gap is
+      // dropped rather than left as residue, making a second hello_ok an
+      // idempotent full-state replace. A handshake replay is cursor-based (only
+      // ids > the client's last_seen), so local history BELOW the snapshot range
+      // is preserved instead of wiped. One rule handles both (the client can't
+      // tell them apart on the wire).
+      let snapshotMin = Number.POSITIVE_INFINITY;
+      for (const m of snapshot) if (m.id < snapshotMin) snapshotMin = m.id;
+      // Ids already held locally (committed) — used only to decide which replayed
+      // messages are GENUINELY new (for the pending reconciliation below), kept
+      // separate from the range-merge so an already-known message can't be
+      // mistaken for a fresh echo of an optimistic send that shares its body.
+      const localIds = new Set<number>();
+      for (const m of state.messages) if (!m.pending) localIds.add(m.id);
+      // Range-authoritative merge: keep local history strictly BELOW the
+      // snapshot's covered range; the snapshot owns everything from its minimum
+      // id up (so a full resync drops residue, a partial replay preserves older
+      // local rows).
       const known = new Map<number, DisplayMessage>();
       for (const m of state.messages) {
-        if (!m.pending) known.set(m.id, m);
+        if (!m.pending && m.id < snapshotMin) known.set(m.id, m);
       }
-      const newlyReplayed = messages.filter((m) => !known.has(m.id));
-      for (const m of messages) known.set(m.id, m);
+      const newlyReplayed = snapshot.filter((m) => !localIds.has(m.id));
+      for (const m of snapshot) known.set(m.id, m);
       const merged = Array.from(known.values()).sort((a, b) => a.id - b.id);
 
       // Reconcile optimistic entries against the replay: a send may have
@@ -275,10 +312,16 @@ export function reduce(state: AppState, action: Action): AppState {
 
       return {
         ...state,
-        messages: [...merged, ...pending],
+        messages: capMessages([...merged, ...pending]),
         // Defensive, matching processes/side_chats below: a malformed frame
         // that omits `pings` must not white-screen the whole app.
         pings: pings ?? [],
+        // Recompute unread against the authoritative ping set: drop client-only
+        // "mark unread" overrides for pings the snapshot no longer contains, so a
+        // resync leaves no stale unread residue.
+        unreadOverrides: state.unreadOverrides.filter((id) =>
+          (pings ?? []).some((p) => p.id === id),
+        ),
         lastSeenMsgId: latest_msg_id,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
@@ -468,7 +511,7 @@ export function reduce(state: AppState, action: Action): AppState {
       if (mentionIds.length > 0) pendingSend.mentions = mentionIds;
       return {
         ...state,
-        messages: [...state.messages, localMessage],
+        messages: capMessages([...state.messages, localMessage]),
         pendingSends: [...state.pendingSends, pendingSend],
         // v2.1 (ADR-0009): an anchored reply optimistically resolves its Ping.
         pings: resolveOpenPingByAnchor(state.pings, ref),

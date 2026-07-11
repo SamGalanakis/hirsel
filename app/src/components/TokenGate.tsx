@@ -1,9 +1,12 @@
-import { createSignal, onMount } from "solid-js";
+import { createSignal, onMount, Show } from "solid-js";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
 interface Props {
   onSubmit: (token: string) => void;
+  /** Set when a prior token was rejected (C5) — shown as an inline error line
+   * and cleared by the caller on the next submit. */
+  error?: string | null;
 }
 
 /** First-run prompt for the bearer token (protocol.md Auth). Persisted to
@@ -37,6 +40,7 @@ export function TokenGate(props: Props) {
           autocorrect="off"
           spellcheck={false}
           placeholder="access token"
+          aria-label="Access token"
           class="h-11 text-center text-base"
           value={value()}
           onInput={(e) => setValue(e.currentTarget.value)}
@@ -44,6 +48,13 @@ export function TokenGate(props: Props) {
         <Button type="submit" size="lg" class="h-11 text-base" disabled={value().trim().length === 0}>
           Connect
         </Button>
+        <Show when={props.error}>
+          {(error) => (
+            <p class="m-0 text-sm text-status-danger" role="alert">
+              {error()}
+            </p>
+          )}
+        </Show>
       </form>
     </div>
   );

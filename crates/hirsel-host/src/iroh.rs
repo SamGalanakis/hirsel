@@ -140,7 +140,13 @@ async fn handle_connection(
     tracing::debug!(%remote_id, "iroh owner connection established");
 
     let mut channel = IrohChannel::new(send, recv);
-    run_protocol(&mut channel, state, Some(remote_id.to_string())).await;
+    run_protocol(
+        &mut channel,
+        state,
+        Some(remote_id.to_string()),
+        Some(remote_id.to_string()),
+    )
+    .await;
     let _ = channel.close().await;
     connection.close(0u32.into(), b"owner protocol complete");
     Ok(())
@@ -172,9 +178,10 @@ impl IrohChannel {
 
 #[async_trait]
 impl ProtocolChannel for IrohChannel {
-    async fn receive(&mut self) -> anyhow::Result<Option<IncomingFrame>> {
+    async fn receive(&mut self, max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>> {
         match self.inbound.next().await {
-            Some(Ok(bytes)) => Ok(Some(decode_json(&bytes))),
+            Some(Ok(bytes)) if bytes.len() <= max_bytes => Ok(Some(decode_json(&bytes))),
+            Some(Ok(_)) => anyhow::bail!("protocol frame exceeds size limit"),
             Some(Err(error)) => Err(error.into()),
             None => Ok(None),
         }

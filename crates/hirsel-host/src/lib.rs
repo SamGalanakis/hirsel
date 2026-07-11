@@ -48,6 +48,7 @@ pub struct AppState {
     pub pushes: push::PushGateway,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
+    pub auth_throttle: auth::AuthThrottle,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
@@ -311,6 +312,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         pushes,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
+        auth_throttle: auth::AuthThrottle::default(),
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)

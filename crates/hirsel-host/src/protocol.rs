@@ -8,6 +8,11 @@ use crate::{
     auth::owner_token_matches,
 };
 
+const AUTH_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PRE_AUTH_MAX_FRAME_BYTES: usize = 8 * 1024;
+pub(crate) const POST_AUTH_MAX_FRAME_BYTES: usize =
+    crate::attachments::MAX_BLOB_BASE64_BYTES + 64 * 1024;
+
 pub(crate) enum IncomingFrame {
     Message {
         frame: ClientToHost,
@@ -35,47 +40,68 @@ pub(crate) fn decode_json(bytes: &[u8]) -> IncomingFrame {
 
 #[async_trait]
 pub(crate) trait ProtocolChannel: Send {
-    async fn receive(&mut self) -> anyhow::Result<Option<IncomingFrame>>;
+    async fn receive(&mut self, max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>>;
     async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()>;
 }
 
-pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer_node_id: Option<String>)
-where
+pub(crate) async fn run_protocol<C>(
+    channel: &mut C,
+    state: AppState,
+    peer_node_id: Option<String>,
+    peer_key: Option<String>,
+) where
     C: ProtocolChannel,
 {
-    let (auth, last_seen_msg_id) = match channel.receive().await {
-        Ok(Some(IncomingFrame::Message {
-            frame:
-                ClientToHost::Hello {
-                    auth,
-                    last_seen_msg_id,
-                },
-            ..
-        })) => (auth, last_seen_msg_id),
-        Ok(Some(IncomingFrame::Message { .. })) => {
-            let _ = channel
-                .send(&HostToClient::Error {
-                    detail: "hello must be the first frame".to_string(),
-                    client_id: None,
-                })
-                .await;
+    let first_frame = tokio::time::timeout(
+        AUTH_HANDSHAKE_TIMEOUT,
+        channel.receive(PRE_AUTH_MAX_FRAME_BYTES),
+    )
+    .await;
+    let (auth, last_seen_msg_id) = match first_frame {
+        Err(_) => {
+            tracing::warn!(
+                peer = peer_key.as_deref().unwrap_or("unknown"),
+                "auth handshake timed out"
+            );
             return;
         }
-        Ok(Some(IncomingFrame::InvalidJson { detail, .. })) => {
-            let _ = channel
-                .send(&HostToClient::Error {
-                    detail: format!("invalid hello: {detail}"),
-                    client_id: None,
-                })
-                .await;
-            return;
-        }
-        Ok(Some(IncomingFrame::Ignored)) | Ok(None) | Err(_) => return,
+        Ok(frame) => match frame {
+            Ok(Some(IncomingFrame::Message {
+                frame:
+                    ClientToHost::Hello {
+                        auth,
+                        last_seen_msg_id,
+                    },
+                ..
+            })) => (auth, last_seen_msg_id),
+            Ok(Some(IncomingFrame::Message { .. })) => {
+                let _ = channel
+                    .send(&HostToClient::Error {
+                        detail: "hello must be the first frame".to_string(),
+                        client_id: None,
+                    })
+                    .await;
+                return;
+            }
+            Ok(Some(IncomingFrame::InvalidJson { detail, .. })) => {
+                let _ = channel
+                    .send(&HostToClient::Error {
+                        detail: format!("invalid hello: {detail}"),
+                        client_id: None,
+                    })
+                    .await;
+                return;
+            }
+            Ok(Some(IncomingFrame::Ignored)) | Ok(None) | Err(_) => return,
+        },
     };
 
     let paired_token = match authenticate(&state, auth, peer_node_id.as_deref()).await {
         Ok(token) => token,
         Err(detail) => {
+            if let Some(peer) = peer_key.as_deref() {
+                tokio::time::sleep(state.auth_throttle.record_failure(peer)).await;
+            }
             let _ = channel
                 .send(&HostToClient::Error {
                     detail,
@@ -85,6 +111,9 @@ where
             return;
         }
     };
+    if let Some(peer) = peer_key.as_deref() {
+        state.auth_throttle.record_success(peer);
+    }
     if let Some(device_token) = paired_token
         && channel
             .send(&HostToClient::Paired { device_token })
@@ -120,7 +149,7 @@ where
 
     loop {
         tokio::select! {
-            frame = channel.receive() => {
+            frame = channel.receive(POST_AUTH_MAX_FRAME_BYTES) => {
                 match frame {
                     Ok(Some(IncomingFrame::Message { frame, client_id })) => {
                         if let Err(error) = handle_client_frame(&state, channel, frame).await {
@@ -444,7 +473,9 @@ mod tests {
 
     use hirsel_proto::{ChatAuthor, HelloAuth, HostToClient};
 
-    use super::{authenticate, build_snapshot};
+    use super::{
+        POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, authenticate, build_snapshot,
+    };
     use crate::{
         build_state,
         config::{AgentMode, Config, DriverMode, ProviderMode},
@@ -568,5 +599,11 @@ mod tests {
             }
             other => panic!("unexpected resync frame: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pre_auth_frames_have_a_stricter_limit() {
+        assert_eq!(PRE_AUTH_MAX_FRAME_BYTES, 8 * 1024);
+        assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES);
     }
 }

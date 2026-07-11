@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use axum::{
     extract::{
-        State,
+        ConnectInfo, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
 use hirsel_proto::HostToClient;
+use std::net::SocketAddr;
 
 use crate::{
     AppState,
@@ -16,23 +17,30 @@ use crate::{
 
 const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> impl IntoResponse {
     ws.max_message_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
         .max_frame_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| handle_socket(socket, state, peer.map(|peer| peer.0.to_string())))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    run_protocol(&mut WebSocketChannel(&mut socket), state, None).await;
+async fn handle_socket(mut socket: WebSocket, state: AppState, peer: Option<String>) {
+    run_protocol(&mut WebSocketChannel(&mut socket), state, None, peer).await;
 }
 
 struct WebSocketChannel<'a>(&'a mut WebSocket);
 
 #[async_trait]
 impl ProtocolChannel for WebSocketChannel<'_> {
-    async fn receive(&mut self) -> anyhow::Result<Option<IncomingFrame>> {
+    async fn receive(&mut self, max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>> {
         match self.0.recv().await {
-            Some(Ok(Message::Text(text))) => Ok(Some(decode_json(text.as_bytes()))),
+            Some(Ok(Message::Text(text))) if text.len() <= max_bytes => {
+                Ok(Some(decode_json(text.as_bytes())))
+            }
+            Some(Ok(Message::Text(_))) => anyhow::bail!("protocol frame exceeds size limit"),
             Some(Ok(Message::Close(_))) | None => Ok(None),
             Some(Ok(_)) => Ok(Some(IncomingFrame::Ignored)),
             Some(Err(error)) => Err(error.into()),

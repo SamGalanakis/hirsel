@@ -122,6 +122,8 @@ impl Storage {
         let conn = self.conn.lock().await;
         conn.execute_batch(
             "
+            PRAGMA foreign_keys = ON;
+            PRAGMA busy_timeout = 5000;
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +212,13 @@ impl Storage {
         conn.execute("DELETE FROM side_chat_messages", [])?;
         migrate_pings_schema(&conn)?;
         ensure_chat_tool_calls_column(&conn)?;
+        let integrity = conn
+            .prepare("PRAGMA integrity_check")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if integrity.as_slice() != ["ok"] {
+            tracing::error!(?integrity, "SQLite integrity check failed");
+        }
         Ok(())
     }
 
@@ -2084,6 +2093,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["one", "two"]
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_storage_enables_foreign_keys_and_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let conn = storage.conn.lock().await;
+
+        let foreign_keys: u32 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        let busy_timeout: u64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(busy_timeout, 5_000);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
     }
 
     #[tokio::test]

@@ -11,7 +11,6 @@ repos:
       - id: check-toml
       - id: check-added-large-files
         args: [--maxkb=1500]
-        exclude: ^android/app/src/main/jniLibs/
       - id: check-merge-conflict
       - id: detect-private-key
 

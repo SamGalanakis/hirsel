@@ -51,6 +51,7 @@ Thumbs.db
 # Android / Gradle
 .gradle/
 **/build/
+android/app/src/main/jniLibs/**/*.so
 android/local.properties
 .cxx/
 **/.externalNativeBuild/

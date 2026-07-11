@@ -130,7 +130,7 @@ jobs:
           }
           JSON
 
-      - name: Regenerate Android native libraries and Kotlin bindings
+      - name: Build Android native libraries and Kotlin bindings from source
         if: steps.changes.outputs.android == 'true'
         run: |
           rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64

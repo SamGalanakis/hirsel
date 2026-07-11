@@ -130,7 +130,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@da187c8e6ffbd3802e00f2477aa5a822b25f2dda # v4.4.4
 
-      - name: Regenerate Android native libraries and Kotlin bindings
+      - name: Build Android native libraries and Kotlin bindings from source
         run: |
           rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
           rm -f android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi.kt

@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use futures_util::StreamExt;
 use hirsel_drivers::{
@@ -34,7 +38,7 @@ pub struct ToolSuite {
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
-    terminal_tx: broadcast::Sender<ProcessTerminal>,
+    terminal_events: TerminalEventBus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +46,87 @@ pub struct ProcessTerminal {
     pub process_id: String,
     pub handle: SessionHandle,
     pub outcome: TerminalOutcome,
+}
+
+#[derive(Clone)]
+struct TerminalEventBus {
+    tx: broadcast::Sender<ProcessTerminal>,
+    retained: Arc<Mutex<HashMap<String, ProcessTerminal>>>,
+}
+
+pub(crate) struct TerminalEventReceiver {
+    rx: broadcast::Receiver<ProcessTerminal>,
+    retained: Arc<Mutex<HashMap<String, ProcessTerminal>>>,
+    pending: VecDeque<ProcessTerminal>,
+    seen: HashSet<String>,
+}
+
+impl TerminalEventBus {
+    fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self {
+            tx,
+            retained: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn subscribe(&self) -> TerminalEventReceiver {
+        let rx = self.tx.subscribe();
+        let pending = self.retained_events();
+        TerminalEventReceiver {
+            rx,
+            retained: Arc::clone(&self.retained),
+            pending,
+            seen: HashSet::new(),
+        }
+    }
+
+    fn publish(&self, event: ProcessTerminal) {
+        self.retained
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(event.process_id.clone(), event.clone());
+        let _ = self.tx.send(event);
+    }
+
+    fn retained_events(&self) -> VecDeque<ProcessTerminal> {
+        let mut events = self
+            .retained
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| left.process_id.cmp(&right.process_id));
+        events.into()
+    }
+}
+
+impl TerminalEventReceiver {
+    pub(crate) async fn recv(&mut self) -> Result<ProcessTerminal, broadcast::error::RecvError> {
+        loop {
+            while let Some(event) = self.pending.pop_front() {
+                if self.seen.insert(event.process_id.clone()) {
+                    return Ok(event);
+                }
+            }
+            match self.rx.recv().await {
+                Ok(event) if self.seen.insert(event.process_id.clone()) => return Ok(event),
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    self.pending = self
+                        .retained
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .values()
+                        .filter(|event| !self.seen.contains(&event.process_id))
+                        .cloned()
+                        .collect();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,7 +154,6 @@ impl ToolSuite {
         processes: ProcessStore,
         pushes: crate::push::PushGateway,
     ) -> Self {
-        let (terminal_tx, _) = broadcast::channel(128);
         Self {
             config,
             storage,
@@ -80,12 +164,12 @@ impl ToolSuite {
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
-            terminal_tx,
+            terminal_events: TerminalEventBus::new(128),
         }
     }
 
-    pub fn terminal_events(&self) -> broadcast::Receiver<ProcessTerminal> {
-        self.terminal_tx.subscribe()
+    pub(crate) fn terminal_events(&self) -> TerminalEventReceiver {
+        self.terminal_events.subscribe()
     }
 
     pub async fn restore_subagent_processes_after_restart(&self) -> anyhow::Result<Vec<String>> {
@@ -220,7 +304,7 @@ impl ToolSuite {
         let storage = self.storage.clone();
         let broadcaster = self.broadcaster.clone();
         let broadcast_log = self.broadcast_log.clone();
-        let terminal_tx = self.terminal_tx.clone();
+        let terminal_events = self.terminal_events.clone();
         let driver_for_task = driver.clone();
         let process_id_for_task = process_id.clone();
         let handle_for_task = handle.clone();
@@ -246,7 +330,7 @@ impl ToolSuite {
                     if let Err(error) = driver_for_task.retire(&handle_for_task).await {
                         tracing::warn!(%error, "failed to retire Sub-agent driver session");
                     }
-                    let _ = terminal_tx.send(ProcessTerminal {
+                    terminal_events.publish(ProcessTerminal {
                         process_id: process_id_for_task.clone(),
                         handle: handle_for_task.clone(),
                         outcome,
@@ -444,6 +528,26 @@ fn truncate_output(output: impl AsRef<str>) -> String {
 mod tests {
     use super::*;
     use crate::processes::ProcessStatus;
+
+    #[tokio::test]
+    async fn terminal_events_are_retained_for_late_subscribers() {
+        let bus = TerminalEventBus::new(2);
+        bus.publish(ProcessTerminal {
+            process_id: "proc-finished".to_string(),
+            handle: SessionHandle {
+                id: "session-finished".to_string(),
+                agent: AgentKind::Codex,
+            },
+            outcome: TerminalOutcome::Done {
+                summary: "complete".to_string(),
+            },
+        });
+
+        let mut late = bus.subscribe();
+        let event = late.recv().await.unwrap();
+        assert_eq!(event.process_id, "proc-finished");
+        assert!(matches!(event.outcome, TerminalOutcome::Done { .. }));
+    }
 
     #[tokio::test]
     async fn requires_response_ping_records_one_push_and_unregister_stops_delivery() {

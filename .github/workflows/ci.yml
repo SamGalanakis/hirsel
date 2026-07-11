@@ -53,8 +53,6 @@ jobs:
     name: Android
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,53 +63,71 @@ jobs:
           filters: |
             android:
               - 'android/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - 'crates/hirsel-client-*/**'
-
-      - name: Explain missing Firebase configuration
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 == ''
-        run: echo 'Skipping Android build because GOOGLE_SERVICES_JSON_B64 is unavailable (expected for fork pull requests).'
+              - 'crates/hirsel-proto/**'
+              - '.github/workflows/ci.yml'
 
       - name: Set up JDK 21
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
 
       - name: Set up Android SDK
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK packages
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         run: |
           sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;27.3.13750724'
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
 
       - name: Set up Rust
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, x86_64-linux-android
 
       - name: Cache Rust builds
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-ndk
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         run: cargo install cargo-ndk --version 4.1.2 --locked
 
       - name: Set up Gradle
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Write Firebase configuration
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
-        run: printf '%s' "$GOOGLE_SERVICES_JSON_B64" | base64 --decode > android/app/google-services.json
+      - name: Write placeholder Firebase configuration
+        if: steps.changes.outputs.android == 'true'
+        run: |
+          cat > android/app/google-services.json <<'JSON'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "hirsel-ci"
+            },
+            "client": [{
+              "client_info": {
+                "mobilesdk_app_id": "1:000000000000:android:0000000000000000",
+                "android_client_info": {
+                  "package_name": "dev.hirsel.android"
+                }
+              },
+              "api_key": [{"current_key": "ci-placeholder-not-a-real-api-key"}]
+            }],
+            "configuration_version": "1"
+          }
+          JSON
 
       - name: Regenerate Android native libraries and Kotlin bindings
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         run: |
           rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
           rm -f android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi.kt
@@ -132,6 +148,6 @@ jobs:
             --no-format
 
       - name: Build debug APK
-        if: steps.changes.outputs.android == 'true' && env.GOOGLE_SERVICES_JSON_B64 != ''
+        if: steps.changes.outputs.android == 'true'
         working-directory: android
         run: ./gradlew assembleDebug

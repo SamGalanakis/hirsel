@@ -198,7 +198,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
     expect(sideSheet().getAllByText(/Approve the deploy to prod\?/).length).toBeGreaterThan(0);
 
     // --- Side conversation: sc-scoped timeline visible, main chat untouched ---
-    const composer = sideSheet().getByPlaceholderText("Message the Agent…") as HTMLTextAreaElement;
+    const composer = sideSheet().getByPlaceholderText("Reply in this side chat…") as HTMLTextAreaElement;
     fireEvent.input(composer, { target: { value: "What do you think?" } });
     await fireEvent.click(sideSheet().getByLabelText("Send"));
 
@@ -256,7 +256,7 @@ describe("Resume after reconnect", () => {
     await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
-    const composer = sideSheet().getByPlaceholderText("Message the Agent…") as HTMLTextAreaElement;
+    const composer = sideSheet().getByPlaceholderText("Reply in this side chat…") as HTMLTextAreaElement;
     fireEvent.input(composer, { target: { value: "Any concerns?" } });
     await fireEvent.click(sideSheet().getByLabelText("Send"));
     await waitFor(() => expect(screen.getByText("Looks safe to ship — tests are green.")).toBeTruthy());

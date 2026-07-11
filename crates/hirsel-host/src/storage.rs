@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -115,6 +115,7 @@ impl Storage {
             pairing_codes: Arc::new(Mutex::new(PairingCodes::default())),
         };
         storage.init().await?;
+        storage.log_orphaned_blobs().await?;
         Ok(storage)
     }
 
@@ -841,9 +842,10 @@ impl Storage {
         tokio::fs::create_dir_all(self.blobs_dir.as_ref()).await?;
         let id = Uuid::new_v4().to_string();
         let path = self.blobs_dir.join(&id);
-        tokio::fs::write(&path, &data)
+        let temp_path = self.blobs_dir.join(format!(".{id}.tmp"));
+        tokio::fs::write(&temp_path, &data)
             .await
-            .with_context(|| format!("write blob file {}", path.display()))?;
+            .with_context(|| format!("write temporary blob file {}", temp_path.display()))?;
 
         let created_ts = Utc::now();
         let blob = Blob {
@@ -858,7 +860,7 @@ impl Storage {
             created_ts,
         };
 
-        let duplicate = {
+        let metadata_result: anyhow::Result<Option<StoredBlob>> = async {
             let mut conn = self.conn.lock().await;
             let tx = conn.transaction()?;
             let duplicate_id = tx
@@ -868,7 +870,7 @@ impl Storage {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
-            if let Some(duplicate_id) = duplicate_id {
+            let duplicate = if let Some(duplicate_id) = duplicate_id {
                 let duplicate = get_stored_blob(&tx, &duplicate_id)?;
                 tx.commit()?;
                 Some(duplicate)
@@ -893,17 +895,77 @@ impl Storage {
                 )?;
                 tx.commit()?;
                 None
+            };
+            Ok(duplicate)
+        }
+        .await;
+
+        let duplicate = match metadata_result {
+            Ok(duplicate) => duplicate,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(error);
             }
         };
 
         if let Some(duplicate) = duplicate {
-            if let Err(error) = tokio::fs::remove_file(&path).await {
-                tracing::debug!(%error, path = %path.display(), "failed to remove duplicate blob file");
+            if let Err(error) = tokio::fs::remove_file(&temp_path).await {
+                tracing::debug!(%error, path = %temp_path.display(), "failed to remove duplicate temporary blob file");
             }
             return Ok(duplicate);
         }
 
+        if let Err(error) = tokio::fs::rename(&temp_path, &path).await {
+            let mut conn = self.conn.lock().await;
+            let cleanup = conn.transaction().and_then(|tx| {
+                tx.execute(
+                    "DELETE FROM client_blobs WHERE client_id = ?1 AND blob_id = ?2",
+                    params![client_id, id],
+                )?;
+                tx.execute("DELETE FROM blobs WHERE id = ?1", params![id])?;
+                tx.commit()
+            });
+            if let Err(cleanup_error) = cleanup {
+                tracing::error!(%cleanup_error, blob_id = %id, "failed to roll back blob metadata after rename failure");
+            }
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error).with_context(|| {
+                format!(
+                    "publish blob file {} from {}",
+                    path.display(),
+                    temp_path.display()
+                )
+            });
+        }
+
         Ok(record)
+    }
+
+    async fn log_orphaned_blobs(&self) -> anyhow::Result<()> {
+        for path in self.orphaned_blob_paths().await? {
+            tracing::warn!(path = %path.display(), "orphaned blob file has no SQLite metadata");
+        }
+        Ok(())
+    }
+
+    async fn orphaned_blob_paths(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let known = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn.prepare("SELECT path FROM blobs")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .map(|path| path.map(PathBuf::from))
+                .collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        let mut entries = tokio::fs::read_dir(self.blobs_dir.as_ref()).await?;
+        let mut orphans = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if entry.file_type().await?.is_file() && !known.contains(&path) {
+                orphans.push(path);
+            }
+        }
+        orphans.sort();
+        Ok(orphans)
     }
 
     pub async fn blob(&self, id: &str) -> anyhow::Result<Option<StoredBlob>> {
@@ -2527,6 +2589,21 @@ mod tests {
             Some(first.blob.id.as_str())
         );
         assert!(first.path.is_absolute());
+        let files = std::fs::read_dir(dir.path().join("blobs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![first.path]);
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_reports_files_without_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let orphan = dir.path().join("blobs").join("orphan-file");
+        tokio::fs::write(&orphan, b"orphan").await.unwrap();
+
+        assert_eq!(storage.orphaned_blob_paths().await.unwrap(), vec![orphan]);
     }
 
     #[tokio::test]

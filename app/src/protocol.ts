@@ -141,6 +141,15 @@ export interface UploadBlobMsg {
   data_b64: string;
 }
 
+/** D9: request a short-lived signed URL to fetch a blob's bytes. Replaces the
+ * removed `GET /blob/{id}?token=<owner-token>` scheme (the host now rejects the
+ * raw-token query param). Correlated to a `blob_url` by `client_id`. */
+export interface GetBlobUrlMsg {
+  type: "get_blob_url";
+  client_id: string;
+  blob_id: string;
+}
+
 /** v1.2: cooperatively interrupt the active agent turn (Esc). No-op if idle. */
 export interface CancelTurnMsg {
   type: "cancel_turn";
@@ -189,6 +198,7 @@ export type ClientMessage =
   | ResolvePingMsg
   | ReadPingMsg
   | UploadBlobMsg
+  | GetBlobUrlMsg
   | CancelTurnMsg
   | CancelQueuedMsg
   | OpenSideChatMsg
@@ -246,6 +256,18 @@ export interface BlobOkMsg {
   type: "blob_ok";
   client_id: string;
   blob: Blob;
+}
+
+/** D9: a short-lived, HMAC-signed URL for fetching a blob's bytes, answering
+ * `get_blob_url` (correlated by `client_id`). `url` is host-relative
+ * (`/blob/{id}?exp=&sig=`) — prefix the blob origin; `expires_at` is unix
+ * seconds (≈5 min out). Superseded the removed `?token=` scheme. */
+export interface BlobUrlMsg {
+  type: "blob_url";
+  client_id: string;
+  blob_id: string;
+  url: string;
+  expires_at: number;
 }
 
 /** v1.2: tombstone for a cancelled queued message; clients drop the bubble. */
@@ -325,6 +347,7 @@ export type ServerMessage =
   | AgentActivityMsg
   | PingUpsertMsg
   | BlobOkMsg
+  | BlobUrlMsg
   | MsgRemovedMsg
   | ProcessUpsertMsg
   | TurnEventMsg

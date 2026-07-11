@@ -16,6 +16,10 @@ const FAILED_AFTER_MS = 30_000;
 /** Give up on an upload_blob whose blob_ok / error never arrives. */
 const UPLOAD_TIMEOUT_MS = 45_000;
 
+/** Give up on a get_blob_url whose blob_url / error never arrives (blocks an
+ * image thumbnail / download link from resolving; fail into a placeholder). */
+const BLOB_URL_TIMEOUT_MS = 20_000;
+
 /** WebSocket close codes the host may use to reject a bad/expired token. The
  * canonical code isn't pinned in PROTOCOL.md yet (coordinate with the backend
  * lane — see report-web.md), so we match the plausible set: 1008 (policy
@@ -80,9 +84,10 @@ function makeLocalId(): number {
   return id;
 }
 
-/** Base for out-of-band blob asset fetches (`GET /blob/{id}?token=…`), derived
- * from the WS URL: ws→http, wss→https, and a trailing `/ws` path dropped (the
- * host serves the app + blobs from the same origin root). */
+/** Origin for out-of-band blob asset fetches, derived from the WS URL: ws→http,
+ * wss→https, and a trailing `/ws` path dropped (the host serves the app + blobs
+ * from the same origin root). The signed blob URL (D9) is host-relative, so this
+ * prefixes it. */
 let blobBase = "";
 function deriveBlobBase(wsUrl: string): string {
   try {
@@ -95,13 +100,6 @@ function deriveBlobBase(wsUrl: string): string {
   }
 }
 
-/** URL for an attachment's content. Token is carried as a query param since the
- * fetch is a plain asset load (img src / anchor href), not a protocol frame. */
-export function blobUrl(id: string): string {
-  const token = getStoredToken() ?? "";
-  return `${blobBase}/blob/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
-}
-
 class HirselWsClient {
   private url: string;
   private token: string;
@@ -112,6 +110,8 @@ class HirselWsClient {
   private outbox: ClientMessage[] = [];
   /** Unresolved upload_blob promises, keyed by their client_id. */
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
+  /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
+  private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
   /** Per-pending-send "not echoed yet" timers, keyed by client_id. */
   private failTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** True once any `hello_ok` has arrived on this client — permanently disables
@@ -223,6 +223,33 @@ class HirselWsClient {
         mime,
         data_b64: dataB64,
       });
+    });
+  }
+
+  /** Request a short-lived signed URL for a blob's bytes (D9), resolving with an
+   * absolute, ready-to-fetch URL. Replaces the old `?token=` construction the
+   * host now rejects — so `<img src>` / download links must resolve through
+   * this. Fresh on every call (the URL expires ≈5 min out), so callers request
+   * again at point of use rather than caching a URL that may have gone stale. */
+  getBlobUrl(blobId: string): Promise<string> {
+    const clientId = makeClientId();
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.blobUrlReqs.delete(clientId)) reject(new Error("blob url timed out"));
+      }, BLOB_URL_TIMEOUT_MS);
+      this.blobUrlReqs.set(clientId, {
+        resolve: (url) => {
+          clearTimeout(timer);
+          resolve(url);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      // Enqueued so a request fired right as the socket blips still resolves once
+      // reconnected (until the timeout), like upload_blob.
+      this.enqueue({ type: "get_blob_url", client_id: clientId, blob_id: blobId });
     });
   }
 
@@ -510,14 +537,29 @@ class HirselWsClient {
         dispatch({ type: "blob_ok", clientId: message.client_id, blob: message.blob });
         break;
       }
+      case "blob_url": {
+        const pending = this.blobUrlReqs.get(message.client_id);
+        if (pending) {
+          // Signed URL is host-relative; prefix the blob origin.
+          pending.resolve(`${blobBase}${message.url}`);
+          this.blobUrlReqs.delete(message.client_id);
+        }
+        break;
+      }
       case "error": {
-        // An error carrying a client_id correlates to an in-flight upload;
-        // reject its promise and mark the chip. Others are surfaced to the log.
+        // An error carrying a client_id correlates to an in-flight upload or
+        // blob-url request; reject its promise and mark the chip. Others are
+        // surfaced to the log.
         if (message.client_id) {
           const pending = this.uploads.get(message.client_id);
           if (pending) {
             pending.reject(new Error(message.detail));
             this.uploads.delete(message.client_id);
+          }
+          const blobReq = this.blobUrlReqs.get(message.client_id);
+          if (blobReq) {
+            blobReq.reject(new Error(message.detail));
+            this.blobUrlReqs.delete(message.client_id);
           }
           dispatch({ type: "upload_error", clientId: message.client_id });
         }

@@ -68,16 +68,22 @@ Client → server additions:
 { "type": "upload_blob", "client_id": string, "name": string, "mime": string, "data_b64": string }
   // decoded size cap 15 MB; server stores under data_dir/blobs/ and replies blob_ok (or error)
 { "type": "send_message", ..., "attachments": [blob_id] }   // optional, default []
+{ "type": "get_blob_url", "client_id": string, "blob_id": string }   // D9: ask for a signed fetch URL
 ```
 
 Server → client additions:
 ```
 { "type": "blob_ok", "client_id": string, "blob": Blob }
+{ "type": "blob_url", "client_id": string, "blob_id": string, "url": string, "expires_at": u64 }
+  // D9: `url` is host-relative (/blob/{id}?exp=&sig=); `expires_at` is unix seconds (≈5 min out)
 ChatMessage gains "attachments": [Blob]   // default []
 ```
 
-Blob CONTENT is fetched as an asset (like the static app shell, outside the message protocol):
-`GET /blob/{id}?token=<HIRSEL_TOKEN>` — same-origin from the PWA; image/* renders inline, others download.
+Blob CONTENT is fetched as an asset (like the static app shell, outside the message protocol) via a
+short-lived HMAC-signed URL (D9): send `get_blob_url` and fetch the returned `blob_url.url` (prefixed
+with the host origin) before `expires_at`. The former `GET /blob/{id}?token=<HIRSEL_TOKEN>` scheme is
+rejected by the host — clients must not construct blob URLs with the raw token. image/* renders
+inline, others download.
 
 Agent-side semantics (host): image/* attachments are fed to the model turn via lash `TurnInput::with_image_blob`
 (vision); all attachments are also written to disk and the turn text notes each stored path so the Agent

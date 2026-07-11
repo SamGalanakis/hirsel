@@ -157,6 +157,48 @@ describe("HirselWsClient lifecycle", () => {
   });
 });
 
+describe("HirselWsClient signed blob URLs (D9)", () => {
+  function connected(client: Awaited<ReturnType<typeof load>>["client"]) {
+    const c = client.startClient("wss://host.example/ws", "good");
+    const ws = FakeWebSocket.instances[0];
+    ws.serverOpen();
+    ws.serverSend(HELLO_OK);
+    return { c, ws };
+  }
+  function lastGetBlobUrl(ws: FakeWebSocket): { type: string; client_id: string; blob_id: string } {
+    return ws.sent.map((s) => JSON.parse(s)).find((f) => f.type === "get_blob_url");
+  }
+
+  it("resolves get_blob_url with an absolute, origin-prefixed signed URL", async () => {
+    const { client } = await load();
+    const { c, ws } = connected(client);
+
+    const p = c.getBlobUrl("blob-1");
+    const frame = lastGetBlobUrl(ws);
+    expect(frame.blob_id).toBe("blob-1");
+
+    ws.serverSend({
+      type: "blob_url",
+      client_id: frame.client_id,
+      blob_id: "blob-1",
+      url: "/blob/blob-1?exp=123&sig=abc",
+      expires_at: 123,
+    });
+    await expect(p).resolves.toBe("https://host.example/blob/blob-1?exp=123&sig=abc");
+  });
+
+  it("rejects the request when the host returns a correlated error", async () => {
+    const { client } = await load();
+    const { c, ws } = connected(client);
+
+    const p = c.getBlobUrl("gone");
+    const frame = lastGetBlobUrl(ws);
+    ws.serverSend({ type: "error", detail: "no such blob", client_id: frame.client_id });
+
+    await expect(p).rejects.toThrow(/no such blob/);
+  });
+});
+
 describe("HirselWsClient auth rejection (C5)", () => {
   it("clears the token and routes to the gate on an auth-reject close code", async () => {
     const { client } = await load();

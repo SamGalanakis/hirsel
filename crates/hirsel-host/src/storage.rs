@@ -412,15 +412,17 @@ impl Storage {
     ) -> anyhow::Result<HelloSnapshot> {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
-        let messages = replay_messages_from_conn(&tx, last_seen_msg_id)?;
+        let db_max: u64 = tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM chat_messages",
+            [],
+            |row| row.get(0),
+        )?;
+        let effective_cursor = last_seen_msg_id.filter(|cursor| *cursor <= db_max);
+        let messages = replay_messages_from_conn(&tx, effective_cursor)?;
         let pings = ping_snapshot_from_conn(&tx)?;
-        let latest_msg_id = messages
-            .last()
-            .map(|message| message.id)
-            .unwrap_or_else(|| last_seen_msg_id.unwrap_or(0));
         tx.commit()?;
         Ok(HelloSnapshot {
-            latest_msg_id,
+            latest_msg_id: db_max,
             messages,
             pings,
         })
@@ -2071,6 +2073,17 @@ mod tests {
         let empty = storage.hello_snapshot(Some(2)).await.unwrap();
         assert_eq!(empty.latest_msg_id, 2);
         assert!(empty.messages.is_empty());
+
+        let stale = storage.hello_snapshot(Some(99_999)).await.unwrap();
+        assert_eq!(stale.latest_msg_id, 2);
+        assert_eq!(
+            stale
+                .messages
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
     }
 
     #[tokio::test]

@@ -307,7 +307,7 @@ function SettingsPanel() {
     <div
       data-slot="settings-panel"
       class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
-        rail:absolute rail:left-auto rail:z-30 rail:w-[420px] rail:border-l rail:border-border rail:pb-0"
+        rail:absolute rail:left-auto rail:z-30 rail:w-[360px] rail:border-l rail:border-border rail:pb-0"
     >
       <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:h-12 rail:py-0">
         <button

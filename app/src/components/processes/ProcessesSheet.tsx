@@ -21,7 +21,7 @@ function ProcessesPanel() {
     <div
       data-slot="processes-panel"
       class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
-        rail:absolute rail:left-auto rail:z-30 rail:w-[420px] rail:border-l rail:border-border rail:pb-0"
+        rail:absolute rail:left-auto rail:z-30 rail:w-[360px] rail:border-l rail:border-border rail:pb-0"
     >
       {/* h-12 on desktop (rail:) so the inspector header shares the top-bar
           datum with the center chat header + Pings rail; phone keeps its

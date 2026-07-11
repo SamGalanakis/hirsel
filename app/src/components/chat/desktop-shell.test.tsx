@@ -182,8 +182,10 @@ describe("Desktop shell: right-region precedence", () => {
     expect(panel.className).toContain("fixed");
     expect(panel.className).toContain("inset-0");
     expect(panel.className).toContain("rail:absolute");
+    // Width matches the standing Pings rail (360px) so the inspector overlays
+    // only the right region, never the chat measure to its left (C20).
     expect(panel.className).toContain("rail:left-auto");
-    expect(panel.className).toContain("rail:w-[420px]");
+    expect(panel.className).toContain("rail:w-[360px]");
     // The chat is still live behind it (not unmounted/replaced) — the composer
     // remains in the tree.
     expect(screen.getByPlaceholderText("Message the Agent…")).toBeTruthy();

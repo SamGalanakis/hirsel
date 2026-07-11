@@ -1,3 +1,4 @@
+import { Settings } from "lucide-solid";
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { ChatView } from "./components/chat/ChatView";
 import { ConnectionPill } from "./components/ConnectionPill";
@@ -7,7 +8,7 @@ import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
 import { openUnreadCount } from "./store/selectors";
-import { state } from "./store/store";
+import { setSettingsOpen, state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
 const WS_URL = resolveWsUrl();
@@ -82,6 +83,19 @@ function App() {
             <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
             <div class="flex items-center gap-1.5">
               <ProcessesButton />
+              {/* Settings is otherwise reachable only from the desktop NavRail
+                  gear, which is gone below `rail`; this header entry is the sole
+                  phone path to theme, Forget token, diagnostics, and the endpoint
+                  (C3). The whole header is `rail:hidden`, so it doesn't double up
+                  with the NavRail item at desktop widths. */}
+              <button
+                type="button"
+                class="flex items-center rounded-full p-1.5 text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => setSettingsOpen(true)}
+                aria-label="Settings"
+              >
+                <Settings class="size-5" aria-hidden="true" />
+              </button>
               <ConnectionPill />
             </div>
           </header>

@@ -24,6 +24,15 @@ export function setStoredToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
 }
 
+/** Drop this browser's stored credentials (token + replay cursor). Used by
+ * Settings → "Forget token": the honest web analog of the Android client's
+ * forget-device — the browser holds only the token, so clearing it returns the
+ * app to the first-run gate. The caller reloads to tear the socket down. */
+export function clearStoredToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(LAST_SEEN_KEY);
+}
+
 function getStoredLastSeen(): number | null {
   const raw = localStorage.getItem(LAST_SEEN_KEY);
   if (raw === null) return null;

@@ -12,43 +12,51 @@
 
 /* --- zaidan foundation (primitive=kobalte, style=vega, baseColor=neutral,
    theme=neutral, font=inter, radius=default), copied from lashapp so hirsel is
-   visually kin. hirsel ships dark-only (index.html sets <html class="dark">),
-   but both token themes are carried over verbatim for parity. --------------- */
+   visually kin. hirsel ships three theme modes — System / Light / Dark (default
+   System; see index.html's pre-paint script + app/src/lib/theme.ts) — so BOTH
+   token blocks below are shipped, user-selectable schemes. `:root` is the
+   canonical calm-terminal LIGHT palette (shared verbatim with the Android app's
+   light scheme); `.dark` is the brand's resting register. ----------------- */
 @custom-variant dark (&:is(.dark *));
 
+/* Canonical hirsel LIGHT palette — the ONE light scheme for both clients (web
+   `:root` here + android Theme.kt light scheme). Near-white canvas (never pure
+   white), tonal layering (canvas → card → quiet fill), dark-ink hairlines at
+   10% alpha mirroring dark's white/10%, muted-indigo primary, WCAG-AA on every
+   text/UI pair, status hues darkened for AA on the light canvas. */
 :root {
   --radius: 0.625rem;
   --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace;
 
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.823);
+  --background: oklch(0.985 0.002 286);
+  --foreground: oklch(0.215 0.006 286);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.823);
+  --card-foreground: oklch(0.215 0.006 286);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.52 0.12 264.05);
+  --popover-foreground: oklch(0.215 0.006 286);
+  --primary: oklch(0.52 0.14 264);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.52 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-solid: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.55 0.13 264.05);
+  --secondary: oklch(0.965 0.002 286);
+  --secondary-foreground: oklch(0.26 0.006 286);
+  --muted: oklch(0.965 0.002 286);
+  --muted-foreground: oklch(0.505 0.016 286);
+  --accent: oklch(0.965 0.002 286);
+  --accent-foreground: oklch(0.26 0.006 286);
+  --destructive: oklch(0.55 0.22 27);
+  --destructive-solid: oklch(0.55 0.22 27);
+  --border: oklch(0.205 0.02 286 / 10%);
+  --input: oklch(0.205 0.02 286 / 14%);
+  --ring: oklch(0.55 0.14 264);
 
-  --surface: oklch(0.98 0 0);
-  --surface-foreground: var(--foreground);
+  --surface: oklch(0.97 0.001 286);
+  --surface-foreground: oklch(0.45 0 0);
 
-  --status-active: oklch(0.6 0.108 221);
-  --status-idle: oklch(0.556 0 0);
-  --status-success: oklch(0.627 0.19 149);
+  --status-active: oklch(0.52 0.12 221);
+  --status-idle: oklch(0.55 0 0);
+  --status-success: oklch(0.52 0.17 149);
   --status-danger: var(--destructive);
-  --status-attention: oklch(0.681 0.156 76);
+  --status-attention: oklch(0.56 0.15 73);
 
   color-scheme: light;
   font-feature-settings:

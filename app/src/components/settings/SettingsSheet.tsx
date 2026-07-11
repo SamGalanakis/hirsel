@@ -1,7 +1,9 @@
 import { ChevronLeft, Copy, X } from "lucide-solid";
 import { createSignal, For, type JSX, onMount, Show } from "solid-js";
+import { copyWithToast } from "../../lib/clipboard";
 import { resolveWsUrl } from "../../lib/endpoint";
 import { createFocusTrap } from "../../lib/focus";
+import { setTitleBadgeEnabled, titleBadgeEnabled } from "../../lib/prefs";
 import { cn } from "../../lib/utils";
 import { setThemeMode, themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
@@ -66,17 +68,7 @@ function maskToken(token: string | null): string {
 }
 
 function copyText(value: string, label: string): void {
-  const ok = () => toast(`Copied ${label}`);
-  const fail = () => toast("Couldn't copy", { variant: "error" });
-  try {
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(value).then(ok).catch(fail);
-      return;
-    }
-  } catch {
-    /* fall through */
-  }
-  fail();
+  void copyWithToast(value, `Copied ${label}`);
 }
 
 // ── Small building blocks ──────────────────────────────────────────────────
@@ -431,9 +423,11 @@ function SettingsPanel() {
               title="Tab title badge"
               subtitle="Unread Pings show as “(3) hirsel” in this browser tab."
             />
-            <span class="shrink-0 rounded-full bg-status-success/15 px-2 py-0.5 text-[0.65rem] font-medium text-status-success">
-              On
-            </span>
+            <Toggle
+              ariaLabel="Tab title badge"
+              checked={titleBadgeEnabled()}
+              onChange={setTitleBadgeEnabled}
+            />
           </div>
           <div class="px-3.5 py-3">
             <Field

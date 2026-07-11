@@ -7,6 +7,7 @@ import { ProcessesButton } from "./components/processes/ProcessesButton";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
+import { titleBadgeEnabled } from "./lib/prefs";
 import { openUnreadCount } from "./store/selectors";
 import { setSettingsOpen, state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
@@ -47,7 +48,8 @@ function App() {
   // notifications. (Replaces the React useTitleBadge hook with a plain effect.)
   createEffect(() => {
     const count = openUnreadCount(state.pings, state.unreadOverrides);
-    document.title = count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
+    document.title =
+      titleBadgeEnabled() && count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
   });
 
   return (

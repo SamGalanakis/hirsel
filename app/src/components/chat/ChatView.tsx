@@ -414,7 +414,7 @@ export function ChatView() {
 
       {/* Processes / Settings: full-screen sheets on phone, right-docked
           inspectors over the right region on desktop — never covering the chat.
-          Settings is a placeholder surface reachable only from the NavRail. */}
+          Settings is reachable from the phone-header gear and the NavRail. */}
       <ProcessesSheet />
       <SettingsSheet />
     </div>

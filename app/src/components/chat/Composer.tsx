@@ -3,7 +3,7 @@ import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
-import { formatBytes } from "../../lib/format";
+import { formatBytes, snippet } from "../../lib/format";
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
@@ -25,6 +25,8 @@ import type { AttachmentsController } from "./useAttachments";
 
 const MAX_HEIGHT_PX = 112;
 const LONG_PRESS_MS = 450;
+/** Reply-quote preview length — kept at the composer's tighter 60 chars. */
+const REPLY_SNIPPET_MAX = 60;
 
 interface Props {
   replyingTo: DisplayMessage | undefined | null;
@@ -43,11 +45,6 @@ interface Props {
   ) => void;
   onStop: () => void;
   getLastOwnerBody: () => string | null;
-}
-
-function snippet(body: string): string {
-  const oneLine = body.replace(/\s+/g, " ").trim();
-  return oneLine.length > 60 ? `${oneLine.slice(0, 60)}…` : oneLine;
 }
 
 /** Composer anchored at the bottom of Chat, below the Tray shelf. CLI-grade keyboard map on fine-pointer
@@ -220,7 +217,7 @@ export function Composer(props: Props) {
                 Replying to {replyingTo().author === "owner" ? "you" : "Agent"}
               </div>
               <div class="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
-                {snippet(replyingTo().body)}
+                {snippet(replyingTo().body, REPLY_SNIPPET_MAX)}
               </div>
             </div>
             <button

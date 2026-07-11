@@ -144,7 +144,8 @@ export function NavRail() {
           }
         />
 
-        {/* Settings — toggles the placeholder inspector (a later pass). */}
+        {/* Settings — toggles the Settings inspector (also reachable from the
+            phone header gear). */}
         <NavItem
           icon={<Settings class="size-4 shrink-0" aria-hidden="true" />}
           label="Settings"

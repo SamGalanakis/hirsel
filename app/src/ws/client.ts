@@ -4,7 +4,7 @@
 // upload correlation and the v1.2 send-mode / cancel frames.
 import type { Blob, ClientMessage, SendMode, ServerMessage } from "../protocol";
 import { dispatch, state } from "../store/store";
-import { backoffDelayMs } from "./backoff";
+import { jitteredDelayMs } from "./backoff";
 
 const TOKEN_KEY = "hirsel.token";
 const LAST_SEEN_KEY = "hirsel.lastSeenMsgId";
@@ -406,7 +406,7 @@ class HirselWsClient {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
-    const delay = backoffDelayMs(this.reconnectAttempt);
+    const delay = jitteredDelayMs(this.reconnectAttempt);
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

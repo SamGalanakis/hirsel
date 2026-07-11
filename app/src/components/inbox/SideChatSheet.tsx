@@ -408,7 +408,8 @@ function SideChatPanel(props: { sc: string }) {
                 rows={1}
                 data-composer="side"
                 class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
-                placeholder="Message the Agent…"
+                placeholder="Reply in this side chat…"
+                aria-label="Reply in this side chat"
                 value={value()}
                 disabled={sideChat()?.drafting}
                 onInput={(e) => setValue(e.currentTarget.value)}

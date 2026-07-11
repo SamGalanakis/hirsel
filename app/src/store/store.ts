@@ -27,8 +27,8 @@ interface UiState {
   /** Processes full-screen sheet open/closed, launched from the header icon
    * (phone) or the desktop NavRail's Processes item. */
   processesOpen: boolean;
-  /** Settings inspector open/closed, launched from the desktop NavRail's gear.
-   * Placeholder surface for a later pass; only reachable on desktop. */
+  /** Settings inspector open/closed, launched from the desktop NavRail's gear
+   * or the phone header's Settings gear. */
   settingsOpen: boolean;
   /** Set when something (a quoted ref, a quick reply) wants Chat to scroll to
    * and highlight a message; consumed once then cleared. */

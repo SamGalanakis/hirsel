@@ -1,15 +1,22 @@
 import { ChevronLeft, X } from "lucide-solid";
-import { onCleanup, onMount, Show } from "solid-js";
+import { onMount, Show } from "solid-js";
+import { createFocusTrap } from "../../lib/focus";
 import { setProcessesOpen, state } from "../../store/store";
 import { ProcessesView } from "./ProcessesView";
 
+// At/above `rail` this is an in-flow-feeling right inspector, not a modal, so
+// Tab stays free there; below it the panel is a full-screen sheet over the chat
+// and Tab is trapped so focus can't wander behind it (C21).
+const RAIL_MQ = "(min-width: 1100px)";
+
 function ProcessesPanel() {
+  let panelRef: HTMLDivElement | undefined;
+
   onMount(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setProcessesOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+    createFocusTrap(() => panelRef, {
+      onEscape: () => setProcessesOpen(false),
+      trapTab: () => !window.matchMedia(RAIL_MQ).matches,
+    });
   });
 
   return (
@@ -19,8 +26,10 @@ function ProcessesPanel() {
     // only, never the chat measure on the left, and its bounded width keeps the
     // ProcessRow status pill next to its label instead of flung across the void.
     <div
+      ref={panelRef}
+      tabindex={-1}
       data-slot="processes-panel"
-      class="fixed inset-0 z-40 flex flex-col bg-background pb-[env(safe-area-inset-bottom)]
+      class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
         rail:absolute rail:left-auto rail:z-30 rail:w-[360px] rail:border-l rail:border-border rail:pb-0"
     >
       {/* h-12 on desktop (rail:) so the inspector header shares the top-bar

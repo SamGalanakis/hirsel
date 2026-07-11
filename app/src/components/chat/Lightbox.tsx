@@ -1,6 +1,7 @@
 import { X } from "lucide-solid";
-import { createEffect, onCleanup, Show } from "solid-js";
+import { createEffect, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { createFocusTrap } from "../../lib/focus";
 
 interface Props {
   src: string | null;
@@ -12,13 +13,14 @@ interface Props {
  * centered; tap anywhere (or Esc) to dismiss. Pinch/scroll zoom is out of
  * scope per the spec. */
 export function Lightbox(props: Props) {
+  let panelRef: HTMLDivElement | undefined;
+
+  // Focus management (C21): move focus into the viewer, trap Tab, restore focus
+  // to the trigger on close. Escape-to-dismiss folds into the trap. Keyed on
+  // `props.src` so it arms/disarms with the (un)mount of the portal content.
   createEffect(() => {
     if (!props.src) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    createFocusTrap(() => panelRef, { onEscape: () => props.onClose() });
   });
 
   return (
@@ -26,7 +28,9 @@ export function Lightbox(props: Props) {
       {(src) => (
         <Portal>
           <div
-            class="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
+            ref={panelRef}
+            tabindex={-1}
+            class="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm outline-none"
             role="dialog"
             aria-modal="true"
             aria-label={props.alt}

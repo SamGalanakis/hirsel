@@ -233,8 +233,28 @@ describe("Desktop shell: the nav rail", () => {
 
   it("opens the Settings inspector from the NavRail gear", async () => {
     const { screen } = await setupApp();
+    // Scope to the rail: the phone header's Settings gear (C3) also carries the
+    // "Settings" label, so pick the NavRail item specifically.
+    const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
-    await fireEvent.click(screen.getByLabelText("Settings"));
+    await fireEvent.click(within(nav).getByLabelText("Settings"));
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="settings-panel"]')).toBeTruthy(),
+    );
+  });
+
+  it("also reaches Settings from the phone-header gear (C3)", async () => {
+    const { screen } = await setupApp();
+    // Two entry points now: the desktop NavRail item and the phone-header gear
+    // (the header is `rail:hidden`, the rail is `rail:flex`, so exactly one shows
+    // at any width — but both mount, so the query returns both).
+    const gears = screen.getAllByLabelText("Settings");
+    expect(gears.length).toBe(2);
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    const headerGear = gears.find((el) => !nav.contains(el));
+    expect(headerGear).toBeTruthy();
+    expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
+    await fireEvent.click(headerGear as HTMLElement);
     await waitFor(() =>
       expect(document.querySelector('[data-slot="settings-panel"]')).toBeTruthy(),
     );

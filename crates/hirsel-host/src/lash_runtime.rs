@@ -29,7 +29,7 @@ use lash::{
         ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition,
         SessionScope,
     },
-    provider::{ProviderHandle, ProviderOptions},
+    provider::{ProviderHandle, ProviderOptions, ReasoningSelection},
     remote::{
         observations::{RemoteSessionCursor, RemoteSessionObservationEventPayload},
         usage::RemoteTurnEvent,
@@ -43,9 +43,9 @@ use lash::{
 };
 use lash_core::{
     DurabilityTier, ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
-    ProcessEventSemanticsSpec, ProcessOriginator, ProcessTerminalSpec, ProcessValueSelector,
-    SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputCheckpointBoundary,
-    TurnInputIngress, plugin::ProcessEngineContributionContext,
+    ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, ProcessTerminalSpec,
+    ProcessValueSelector, SessionPolicy, TriggerStore, TriggerSubscriptionFilter,
+    TurnInputCheckpointBoundary, TurnInputIngress, plugin::ProcessEngineContributionContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -314,9 +314,13 @@ impl LashAgentRuntime {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&lash_dir.join("processes.db")).await?,
         ) as Arc<dyn lash::process::ProcessRegistry>;
-        let model_spec =
-            lash::ModelSpec::from_token_limits(config.model.clone(), None, 200_000, None)
-                .map_err(|error| anyhow::anyhow!("invalid HIRSEL_MODEL metadata: {error}"))?;
+        let model_spec = lash::ModelSpec::from_token_limits(
+            config.model.clone(),
+            ReasoningSelection::ProviderDefault,
+            200_000,
+            None,
+        )
+        .map_err(|error| anyhow::anyhow!("invalid HIRSEL_MODEL metadata: {error}"))?;
         let rlm_config = lash_protocol_rlm::RlmProtocolPluginConfig::default()
             .with_lashlang_abilities(
                 lash_protocol_rlm::LashlangAbilities::default()
@@ -2736,15 +2740,11 @@ impl ProcessEngine for HirselSubagentEngine {
         SubagentProcessPayload::from_value(payload).map(|_| ())
     }
 
-    async fn run(
-        &self,
-        context: ProcessEngineRunContext<'_>,
-        payload: Value,
-    ) -> ProcessAwaitOutput {
+    async fn run(&self, context: ProcessEngineRunContext<'_>, payload: Value) -> ProcessRunOutcome {
         let process_id = context.registration().id.to_string();
         let payload = match SubagentProcessPayload::from_value(&payload) {
             Ok(payload) => payload,
-            Err(error) => return cancelled_await_output(error.to_string()),
+            Err(error) => return cancelled_await_output(error.to_string()).into(),
         };
         if let Err(error) = self
             .tools
@@ -2757,14 +2757,17 @@ impl ProcessEngine for HirselSubagentEngine {
             )
             .await
         {
-            return cancelled_await_output(format!("failed to start Sub-agent Driver: {error}"));
+            return cancelled_await_output(format!("failed to start Sub-agent Driver: {error}"))
+                .into();
         }
         match ProcessAwaiter::polling(context.registry())
             .await_terminal(&process_id)
             .await
         {
-            Ok(output) => output,
-            Err(error) => cancelled_await_output(format!("failed to await Sub-agent: {error}")),
+            Ok(output) => output.into(),
+            Err(error) => {
+                cancelled_await_output(format!("failed to await Sub-agent: {error}")).into()
+            }
         }
     }
 
@@ -2801,14 +2804,10 @@ impl ProcessEngine for HirselMonitorEngine {
         MonitorProcessPayload::from_value(payload).map(|_| ())
     }
 
-    async fn run(
-        &self,
-        context: ProcessEngineRunContext<'_>,
-        payload: Value,
-    ) -> ProcessAwaitOutput {
+    async fn run(&self, context: ProcessEngineRunContext<'_>, payload: Value) -> ProcessRunOutcome {
         let payload = match MonitorProcessPayload::from_value(&payload) {
             Ok(payload) => payload,
-            Err(error) => return cancelled_await_output(error.to_string()),
+            Err(error) => return cancelled_await_output(error.to_string()).into(),
         };
         let process_id = context.registration().id.to_string();
         let cancellation = context.cancellation_token();
@@ -2818,24 +2817,34 @@ impl ProcessEngine for HirselMonitorEngine {
         loop {
             let record = match self.tools.monitor(&payload.monitor_id).await {
                 Ok(Some(record)) if record.cancelled_ts.is_none() => record,
-                Ok(Some(_)) => return cancelled_await_output("monitor cancelled".to_string()),
-                Ok(None) => return cancelled_await_output("monitor spec missing".to_string()),
+                Ok(Some(_)) => {
+                    return cancelled_await_output("monitor cancelled".to_string()).into();
+                }
+                Ok(None) => {
+                    return cancelled_await_output("monitor spec missing".to_string()).into();
+                }
                 Err(error) => {
-                    return cancelled_await_output(format!("monitor lookup failed: {error}"));
+                    return cancelled_await_output(format!("monitor lookup failed: {error}"))
+                        .into();
                 }
             };
             tokio::select! {
                 () = cancellation.cancelled() => {
-                    return cancelled_await_output("monitor cancelled".to_string());
+                    return cancelled_await_output("monitor cancelled".to_string()).into();
                 }
                 () = tokio::time::sleep(Duration::from_secs(record.every_secs)) => {}
             }
             let record = match self.tools.monitor(&payload.monitor_id).await {
                 Ok(Some(record)) if record.cancelled_ts.is_none() => record,
-                Ok(Some(_)) => return cancelled_await_output("monitor cancelled".to_string()),
-                Ok(None) => return cancelled_await_output("monitor spec missing".to_string()),
+                Ok(Some(_)) => {
+                    return cancelled_await_output("monitor cancelled".to_string()).into();
+                }
+                Ok(None) => {
+                    return cancelled_await_output("monitor spec missing".to_string()).into();
+                }
                 Err(error) => {
-                    return cancelled_await_output(format!("monitor lookup failed: {error}"));
+                    return cancelled_await_output(format!("monitor lookup failed: {error}"))
+                        .into();
                 }
             };
             let tick = run_monitor_tick(&record).await;
@@ -2849,7 +2858,9 @@ impl ProcessEngine for HirselMonitorEngine {
                 .await
             {
                 Ok(Some(updated)) => updated,
-                Ok(None) => return cancelled_await_output("monitor cancelled".to_string()),
+                Ok(None) => {
+                    return cancelled_await_output("monitor cancelled".to_string()).into();
+                }
                 Err(error) => {
                     tracing::warn!(%error, monitor_id = %payload.monitor_id, "failed to persist monitor tick");
                     continue;

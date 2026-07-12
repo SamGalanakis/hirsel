@@ -3,6 +3,15 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install a process-default rustls CryptoProvider before any TLS is used.
+    // The dep tree links both `ring` (iroh) and `aws-lc-rs` (reqwest), so rustls
+    // cannot pick one automatically; without this, the first HTTPS request the
+    // agent's model provider makes panics inside its task and the turn silently
+    // produces no reply. aws-lc-rs is reqwest's default backend.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install rustls CryptoProvider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

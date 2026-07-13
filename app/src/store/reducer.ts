@@ -1,7 +1,7 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { ChatMessage, Ping, ProcessInfo, ViewInstance } from "../protocol";
+import type { ChatMessage, EventItem, Ping, ProcessInfo, ViewInstance } from "../protocol";
 import type {
   Action,
   AppState,
@@ -37,6 +37,16 @@ function upsertPing(pings: Ping[], ping: Ping): Ping[] {
   if (idx === -1) return [...pings, ping];
   const next = pings.slice();
   next[idx] = ping;
+  return next;
+}
+
+/** Upsert an Event by id, preserving list position for a known id (the queue
+ * ordering is applied by the selector, not stored) — same shape as upsertPing. */
+function upsertEvent(events: EventItem[], event: EventItem): EventItem[] {
+  const idx = events.findIndex((e) => e.id === event.id);
+  if (idx === -1) return [...events, event];
+  const next = events.slice();
+  next[idx] = event;
   return next;
 }
 
@@ -328,6 +338,17 @@ export function reduce(state: AppState, action: Action): AppState {
         // Defensive, matching processes/side_chats below: a malformed frame
         // that omits `pings` must not white-screen the whole app.
         pings: pings ?? [],
+        // Typed event queue (ADR-0012): the snapshot's event set is
+        // authoritative on reconnect — a full replace (an event resolved while
+        // offline is reflected). Defensive default like pings so a malformed
+        // frame can't white-screen the app.
+        events: action.payload.events ?? [],
+        // Drop optimistic decide overrides for events the snapshot no longer
+        // carries, so a resync leaves no stale override residue (mirrors the
+        // unreadOverrides recompute).
+        eventDecideOverrides: state.eventDecideOverrides.filter((id) =>
+          (action.payload.events ?? []).some((e) => e.id === id),
+        ),
         // Recompute unread against the authoritative ping set: drop client-only
         // "mark unread" overrides for pings the snapshot no longer contains, so a
         // resync leaves no stale unread residue.
@@ -534,6 +555,52 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         resolveOverrides: state.resolveOverrides.filter((id) => id !== action.pingId),
       };
+    }
+
+    // ---- Typed event queue (ADR-0012), generalizing the ping slice above ----
+
+    case "event_upsert": {
+      const event = action.payload.event;
+      return {
+        ...state,
+        events: upsertEvent(state.events, event),
+        // A committed resolve (host `done` event_upsert) supersedes any pending
+        // optimistic decide override for this id — prune it so the wire truth and
+        // the optimistic layer never disagree once the action has landed (twin of
+        // the ping_upsert resolveOverrides prune).
+        eventDecideOverrides:
+          event.status !== "open"
+            ? state.eventDecideOverrides.filter((id) => id !== event.id)
+            : state.eventDecideOverrides,
+      };
+    }
+
+    case "event_decide_local": {
+      // Optimistic decide flip (mirrors `resolve_local`): record the id so the
+      // event renders/counts as decided at once, while `event_action` is sent to
+      // the host and a ~5s Undo window offers recovery.
+      const eventDecideOverrides = state.eventDecideOverrides.includes(action.eventId)
+        ? state.eventDecideOverrides
+        : [...state.eventDecideOverrides, action.eventId].slice(-200);
+      return { ...state, eventDecideOverrides };
+    }
+
+    case "event_undecide_local": {
+      // Undo (mirrors `unresolve_local`): drop the optimistic override so the
+      // event returns to its wire status.
+      return {
+        ...state,
+        eventDecideOverrides: state.eventDecideOverrides.filter((id) => id !== action.eventId),
+      };
+    }
+
+    case "event_read_local": {
+      // Awareness auto-read as the scroller passes it (mirrors `read_local`):
+      // flip read=true locally; the host's event_upsert reconciles the truth.
+      const events = state.events.map((e) =>
+        e.id === action.eventId ? { ...e, read: true } : e,
+      );
+      return { ...state, events };
     }
 
     case "send_local": {

@@ -32,7 +32,18 @@ export type RightRegion = "pings" | "sideChat" | "canvas" | "processes" | "setti
  *
  * v2.3 (single-owner right region): the right region is owned by one exclusive
  * `rightRegion` enum rather than a set of independent booleans. */
+/** The root surface of the app (ADR-0012 cutover). `queue` is the home — the
+ * vertical event scroller; `chat` is the drill-in shell (the 3-pane
+ * chat/side-chat/inspectors layout) reached from a judgment's Discuss, the
+ * NavRail, or the phone overflow. The scroller is the phone home and the desktop
+ * center measure; every summoned pane (Processes/Settings/Canvas/Side Chat)
+ * lives in the chat shell, so opening one drills in. */
+export type Home = "queue" | "chat";
+
 interface UiState {
+  /** The root surface: the queue scroller (home) or the chat drill-in shell.
+   * Default `queue` (ADR-0012). */
+  home: Home;
   /** Tray overlay expanded/collapsed. Only ever set true by an explicit tap on
    * the shelf (or the equivalent test action) — never auto-expanded. Orthogonal
    * to `rightRegion`: it is the phone Pings overlay's expand state within the
@@ -85,6 +96,7 @@ type Store = AppState & UiState;
 function initialStore(): Store {
   return {
     ...initialState(),
+    home: "queue",
     trayExpanded: false,
     rightRegion: "pings",
     scrollToMessageId: null,
@@ -104,6 +116,8 @@ function appSnapshot(): AppState {
   return {
     messages: state.messages,
     pings: state.pings,
+    events: state.events,
+    eventDecideOverrides: state.eventDecideOverrides,
     agentActivity: state.agentActivity,
     connection: state.connection,
     lastSeenMsgId: state.lastSeenMsgId,
@@ -143,6 +157,10 @@ export function dispatch(action: Action): void {
     const next = reduce(appSnapshot(), action);
     setState("messages", reconcile(next.messages, { key: "id" }));
     setState("pings", reconcile(next.pings, { key: "id" }));
+    // Typed event queue: reconcile keyed by id so only the DOM bound to a
+    // genuinely-changed event (a re-upsert / decide flip) re-renders.
+    setState("events", reconcile(next.events, { key: "id" }));
+    setState("eventDecideOverrides", next.eventDecideOverrides);
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
     setState("unreadOverrides", next.unreadOverrides);
@@ -195,12 +213,27 @@ export function goToChat(opts?: {
   composerPrefill?: string;
 }): void {
   setState({
+    home: "chat",
     rightRegion: "pings",
     trayExpanded: false,
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
     composerPrefill: opts?.composerPrefill ?? null,
   });
+}
+
+/** Return to the queue scroller home (the root). Leaves the chat shell state
+ * (rightRegion, active side chat) alive underneath so a later drill-in resumes
+ * where it was. */
+export function goToQueue(): void {
+  setState("home", "queue");
+}
+
+/** Drill into the chat shell from the queue (a judgment's Discuss, or any nav
+ * that needs the shell). Does not change the right region — the caller sets the
+ * pane it wants (or leaves the resting Pings rail). */
+export function goToChatDrillIn(): void {
+  setState("home", "chat");
 }
 
 /** The single low-level setter for the exclusive right region. Every intent
@@ -216,21 +249,22 @@ export function closeRightRegion(): void {
 }
 
 /** Select the Pings resting state (the standing rail on desktop / the Tray on
- * phone). */
+ * phone). Drills into the chat shell if we were on the queue home, since every
+ * right-region pane lives there. */
 export function openPings(): void {
-  setState("rightRegion", "pings");
+  setState({ home: "chat", rightRegion: "pings" });
 }
 
-/** Dock the Processes inspector into the right region. */
+/** Dock the Processes inspector into the right region (chat shell). */
 export function openProcesses(): void {
-  setState("rightRegion", "processes");
+  setState({ home: "chat", rightRegion: "processes" });
 }
 
 /** Dock the Settings inspector into the right region. An optional `section`
  * points the pane at a specific group on open (e.g. the phone overflow "Model
  * settings" row opens Settings scrolled to Models); omitted opens at the top. */
 export function openSettings(section?: SettingsSection): void {
-  setState({ rightRegion: "settings", settingsScrollTarget: section ?? null });
+  setState({ home: "chat", rightRegion: "settings", settingsScrollTarget: section ?? null });
 }
 
 /** Consume the one-shot Settings scroll target (SettingsPanel reads it on
@@ -242,7 +276,7 @@ export function clearSettingsScrollTarget(): void {
 /** Surface the Canvas view in the right region. Collapses the phone Tray
  * overlay so the region isn't double-booked there. */
 export function showCanvas(): void {
-  setState({ rightRegion: "canvas", trayExpanded: false });
+  setState({ home: "chat", rightRegion: "canvas", trayExpanded: false });
 }
 
 /** Open the Side Chat pane: records which sc backs it AND selects the region.
@@ -250,7 +284,7 @@ export function showCanvas(): void {
  * reconnect reconciliation seeds `sideChatRefs`/`sideChats` but never touches
  * this, so a live side chat never auto-reopens on launch (critique, binding). */
 export function openSideChat(sc: string): void {
-  setState({ activeSideChatSc: sc, rightRegion: "sideChat" });
+  setState({ home: "chat", activeSideChatSc: sc, rightRegion: "sideChat" });
 }
 
 /** Set only the current-side-chat DATA (which sc), without changing the pane

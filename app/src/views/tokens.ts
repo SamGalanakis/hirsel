@@ -84,3 +84,26 @@ export function calloutToneClass(tone: string | undefined): string {
 /** Progress-bar fill color. Progress carries no tone in the catalog, so it uses
  * the single accent (`primary`) — the one sanctioned emphasis color. */
 export const PROGRESS_FILL = "bg-primary";
+
+// ---- Event-card vocabulary (ADR-0013) — the interactive sibling maps ----
+// The event queue's `eyebrow` carries a wider tone set than `text` (an `accent`
+// tone → the one indigo, for a taste-boundary label). Kept here beside the other
+// tone maps so the palette authority stays in one file.
+
+/** Foreground color for an `eyebrow` tone. `accent` is the one indigo (a
+ * taste-boundary / attend-to label); `danger` the one red; default is muted
+ * (a quiet section label). Every branch is a COMPLETE literal class (JIT). */
+export function eyebrowToneClass(tone: string | undefined): string {
+  switch (tone) {
+    case "accent":
+      return "text-primary";
+    case "danger":
+      return "text-status-danger";
+    case "success":
+      return "text-status-success";
+    case "warning":
+      return "text-status-attention";
+    default:
+      return "text-muted-foreground";
+  }
+}

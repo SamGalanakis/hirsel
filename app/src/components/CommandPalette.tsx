@@ -261,7 +261,7 @@ export const CommandPalette: Component<{
 
 // ---- Shortcut cheat-sheet (`?`) --------------------------------------------
 
-const GROUP_ORDER = ["General", "Navigate", "Chat"] as const;
+const GROUP_ORDER = ["Queue", "General", "Navigate", "Chat"] as const;
 
 export const ShortcutHelp: Component<{
   open: boolean;

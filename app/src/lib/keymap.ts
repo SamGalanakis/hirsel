@@ -77,10 +77,17 @@ export interface Shortcut {
    * a chord (`g` then `i`); a comma in a single token means "or". */
   keys: string[];
   label: string;
-  group: "General" | "Navigate" | "Chat";
+  group: "Queue" | "General" | "Navigate" | "Chat";
 }
 
 export const SHORTCUTS: Shortcut[] = [
+  // Queue — the home. These live on the scroller (see EventScroller), surfaced
+  // here so the `?` sheet tells the truth about the home surface's keys.
+  { keys: ["J / K"], label: "Next / previous event", group: "Queue" },
+  { keys: ["→"], label: "Accept the recommended pick", group: "Queue" },
+  { keys: ["←"], label: "Snooze to the end", group: "Queue" },
+  { keys: ["A–Z"], label: "Choose that option", group: "Queue" },
+  { keys: ["P"], label: "Peek the whole queue", group: "Queue" },
   { keys: ["⌘", "K"], label: "Command palette", group: "General" },
   { keys: ["?"], label: "Keyboard shortcuts", group: "General" },
   { keys: ["/"], label: "Focus composer", group: "Chat" },

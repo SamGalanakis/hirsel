@@ -21,22 +21,15 @@ struct RegistryEntry {
     default_variant: &'static str,
 }
 
-// Current ChatGPT-account model metadata confirms these IDs and effort tokens.
-// Keep this deliberately curated until the host has a provider-backed catalog.
-const REGISTRY: &[RegistryEntry] = &[
-    RegistryEntry {
-        id: "gpt-5.6-sol",
-        label: "GPT-5.6 Sol",
-        variants: &["low", "medium", "high", "xhigh", "max"],
-        default_variant: "medium",
-    },
-    RegistryEntry {
-        id: "gpt-5.5",
-        label: "GPT-5.5",
-        variants: &["low", "medium", "high"],
-        default_variant: "medium",
-    },
-];
+// Current ChatGPT-account model metadata confirms this ID and its effort tokens.
+// The main agent is deliberately pinned to GPT-5.6 Sol; keep this curated until
+// the host has a provider-backed catalog.
+const REGISTRY: &[RegistryEntry] = &[RegistryEntry {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    variants: &["low", "medium", "high", "xhigh", "max"],
+    default_variant: "medium",
+}];
 
 #[derive(Clone)]
 pub struct ModelSelectionState {
@@ -59,9 +52,20 @@ impl ModelSelectionState {
                     serde_json::from_slice(&bytes).with_context(|| {
                         format!("parse persisted model selection at {}", path.display())
                     })?;
-                validate_selection(&persisted.model_id, &persisted.variant).with_context(|| {
-                    format!("validate persisted model selection at {}", path.display())
-                })?
+                // A previously-persisted model may have left the registry (e.g. the
+                // main agent was pinned to a single model). Fall back to the
+                // configured model rather than bricking boot on a stale selection.
+                match validate_selection(&persisted.model_id, &persisted.variant) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "persisted model selection is no longer available; falling back to configured model"
+                        );
+                        selection_for_configured_model(configured_model)?
+                    }
+                }
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 selection_for_configured_model(configured_model)?
@@ -233,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn persistence_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let state = ModelSelectionState::load(dir.path(), "gpt-5.5")
+        let state = ModelSelectionState::load(dir.path(), "gpt-5.6-sol")
             .await
             .unwrap();
         state
@@ -244,7 +248,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded = ModelSelectionState::load(dir.path(), "gpt-5.5")
+        let reloaded = ModelSelectionState::load(dir.path(), "gpt-5.6-sol")
             .await
             .unwrap();
         assert_eq!(

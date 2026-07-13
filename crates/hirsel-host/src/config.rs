@@ -74,7 +74,7 @@ impl Config {
             .filter(|value| !value.is_empty());
         let model = env::var("HIRSEL_MODEL").unwrap_or_else(|_| match provider {
             ProviderMode::Anthropic => "claude-opus-4-7".to_string(),
-            ProviderMode::Codex => "gpt-5.5".to_string(),
+            ProviderMode::Codex => "gpt-5.6-sol".to_string(),
         });
         let data_dir = env::var_os("HIRSEL_DATA_DIR")
             .map(PathBuf::from)

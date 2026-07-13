@@ -661,7 +661,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = test_config(dir.path());
         config.provider = ProviderMode::Codex;
-        config.model = "gpt-5.5".to_string();
+        config.model = "gpt-5.6-sol".to_string();
         let state = build_state(config).await.unwrap();
 
         let selected = state.set_model("gpt-5.6-sol", "high").await.unwrap();
@@ -686,15 +686,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = test_config(dir.path());
         config.provider = ProviderMode::Codex;
-        config.model = "gpt-5.5".to_string();
+        config.model = "gpt-5.6-sol".to_string();
         let state = build_state(config).await.unwrap();
 
-        assert!(state.set_model("gpt-5", "high").await.is_err());
+        // gpt-5.5 is no longer offered for the main agent — reject it, and any
+        // unknown variant, while leaving the configured selection untouched.
+        assert!(state.set_model("gpt-5.5", "high").await.is_err());
         assert!(state.set_model("gpt-5.6-sol", "impossible").await.is_err());
         assert_eq!(
             state.model_snapshot().unwrap().current,
             ModelSelection {
-                id: "gpt-5.5".to_string(),
+                id: "gpt-5.6-sol".to_string(),
                 variant: "medium".to_string(),
             }
         );

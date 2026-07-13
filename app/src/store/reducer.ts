@@ -1,7 +1,7 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { ChatMessage, Ping, ProcessInfo } from "../protocol";
+import type { ChatMessage, Ping, ProcessInfo, ViewInstance } from "../protocol";
 import type {
   Action,
   AppState,
@@ -52,6 +52,18 @@ function resolveOpenPingByAnchor(pings: Ping[], ref: number | null): Ping[] {
   if (idx === -1) return pings;
   const next = pings.slice();
   next[idx] = { ...next[idx], status: "done" };
+  return next;
+}
+
+/** Upsert a view by `instance_id`, preserving list position for a known id so a
+ * re-`view_upsert` (update in place) re-renders that slot rather than reordering
+ * it. Solid's `reconcile` (keyed by instance_id) then re-renders only the DOM
+ * bound to the changed spec. */
+function upsertView(views: ViewInstance[], view: ViewInstance): ViewInstance[] {
+  const idx = views.findIndex((v) => v.instance_id === view.instance_id);
+  if (idx === -1) return [...views, view];
+  const next = views.slice();
+  next[idx] = view;
   return next;
 }
 
@@ -334,6 +346,11 @@ export function reduce(state: AppState, action: Action): AppState {
         turnEvents: [],
         sideChatRefs,
         sideChats,
+        // Generative-UI tier: the snapshot's view set is authoritative on
+        // reconnect — a full replace (a view cleared while offline is gone).
+        // Defensive default like pings/processes so a malformed frame can't
+        // white-screen the app.
+        views: action.payload.views ?? [],
       };
     }
 
@@ -786,6 +803,20 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "clear_last_conclusion":
       return { ...state, lastConclusion: null };
+
+    case "view_upsert": {
+      const { instance_id, placement, spec } = action.payload;
+      return {
+        ...state,
+        views: upsertView(state.views, { instance_id, placement, spec }),
+      };
+    }
+
+    case "view_removed":
+      return {
+        ...state,
+        views: state.views.filter((v) => v.instance_id !== action.payload.instance_id),
+      };
 
     default:
       return state;

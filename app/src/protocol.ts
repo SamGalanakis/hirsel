@@ -87,6 +87,32 @@ export interface Ping {
   read?: boolean;
 }
 
+/** Generative-UI tier (view templates): a resolved, concrete component tree the
+ * host sends for the client to render natively. The client NEVER resolves
+ * templates or bindings — `spec` is always the finished JSON tree of catalog
+ * components (see templates/CATALOG.md). Typed loosely on the wire (a `type`
+ * discriminator plus arbitrary resolved props/children); the renderer narrows
+ * per catalog component and degrades gracefully on anything it doesn't know. */
+export interface ViewSpec {
+  type: string;
+  [prop: string]: unknown;
+}
+
+/** Where a view is surfaced. `canvas` → the shared right context surface (a
+ * full-screen sheet on phone); `chat` → an inline block in the transcript;
+ * `ping:<id>` → inside the matching Ping card. A `view_event` from a `ping:<id>`
+ * view becomes the anchor-refed owner reply that auto-resolves the Ping (the
+ * host does that — the client just emits the event). */
+export type ViewPlacement = "canvas" | "chat" | (string & {});
+
+/** One active view instance. Keyed by `instance_id`; an update in place is just
+ * a re-`view_upsert` of the same id. */
+export interface ViewInstance {
+  instance_id: string;
+  placement: ViewPlacement;
+  spec: ViewSpec;
+}
+
 // ---- Client -> server ----
 
 export interface HelloMsg {
@@ -192,6 +218,21 @@ export interface DiscardSideChatMsg {
   sc: string;
 }
 
+/** Generative-UI tier: an owner-initiated event from an interactive view
+ * component (`action` / `optionSet` / `form`). The host looks the instance up
+ * and routes it through the normal owner-submission path — for a `ping:<id>`
+ * view it becomes the anchor-refed reply that auto-resolves the Ping. The
+ * client must NOT create Chat messages, resolve Pings, or open any side channel
+ * directly; it only emits this frame. `data` is the component's declared payload
+ * (`null` for a bare `action`, `{ value }` for `optionSet`, an object keyed by
+ * field `name` for `form`). */
+export interface ViewEventMsg {
+  type: "view_event";
+  instance_id: string;
+  action: string;
+  data: unknown;
+}
+
 export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
@@ -204,7 +245,8 @@ export type ClientMessage =
   | OpenSideChatMsg
   | ConcludeSideChatMsg
   | ConfirmConclusionMsg
-  | DiscardSideChatMsg;
+  | DiscardSideChatMsg
+  | ViewEventMsg;
 
 // ---- Server -> client ----
 
@@ -227,6 +269,9 @@ export interface HelloOkMsg {
   /** v2.0: live side chats surviving reconnect. Optional on the wire; absent
    * is treated as []. */
   side_chats?: SideChatRef[];
+  /** Generative-UI tier: the authoritative active view set on (re)connect.
+   * Optional on the wire (serde-default []); absent is treated as []. */
+  views?: ViewInstance[];
   /** Host build identity (crate version + git sha), shown in Settings → About.
    * Optional on the wire; older hosts omit it and About shows "Not reported". */
   host_version?: string;
@@ -344,6 +389,21 @@ export interface SideChatClosedMsg {
   sc: string;
 }
 
+/** Generative-UI tier: seed or update a view in place, keyed by `instance_id`.
+ * An update in place is a re-send of the same id with a new resolved `spec`. */
+export interface ViewUpsertMsg {
+  type: "view_upsert";
+  instance_id: string;
+  placement: ViewPlacement;
+  spec: ViewSpec;
+}
+
+/** Generative-UI tier: drop the view with this `instance_id`. */
+export interface ViewRemovedMsg {
+  type: "view_removed";
+  instance_id: string;
+}
+
 export type ServerMessage =
   | HelloOkMsg
   | MsgMsg
@@ -357,4 +417,6 @@ export type ServerMessage =
   | ErrorMsg
   | SideChatOpenMsg
   | ConclusionDraftMsg
-  | SideChatClosedMsg;
+  | SideChatClosedMsg
+  | ViewUpsertMsg
+  | ViewRemovedMsg;

@@ -8,6 +8,7 @@ import {
   openUnreadCount,
 } from "../../store/selectors";
 import { setTrayExpanded, state } from "../../store/store";
+import { canvasDesktopActive } from "../views/CanvasSurface";
 import { PingsView } from "./PingsView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
@@ -154,7 +155,7 @@ function PingsBadge(props: { slot?: string }) {
  * sole Pings surface there. */
 export function PingsRail() {
   return (
-    <Show when={state.activeSideChatSc === null}>
+    <Show when={state.activeSideChatSc === null && !canvasDesktopActive()}>
       <aside
         data-slot="pings-rail"
         class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex"

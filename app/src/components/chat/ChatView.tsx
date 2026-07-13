@@ -9,10 +9,13 @@ import {
   clearProtocolError,
   clearScrollTarget,
   setActiveSideChatSc,
+  setCanvasOpen,
   setComposerReplyTarget,
   state,
 } from "../../store/store";
-import { sideChatForPing } from "../../store/selectors";
+import { canvasViews, chatViews, sideChatForPing } from "../../store/selectors";
+import { CanvasButton, CanvasRail, CanvasSheet } from "../views/CanvasSurface";
+import { ViewRenderer } from "../../views/ViewRenderer";
 import { focusMainComposer } from "../../lib/focus";
 import { AgentStatus } from "./AgentStatus";
 import type { DisplayMessage } from "../../store/types";
@@ -220,6 +223,22 @@ export function ChatView() {
     clearLastConclusion();
   });
 
+  // Generative-UI tier: auto-surface a NEW canvas view. Tracks the newest
+  // canvas instance id; when it changes to a fresh id (a genuinely new view,
+  // not an in-place content update to a dismissed one) the Canvas surface
+  // opens. An in-place update to an already-dismissed view does NOT re-nag.
+  let lastCanvasId: string | undefined;
+  createEffect(() => {
+    const list = canvasViews(state.views);
+    const newest = list.length > 0 ? list[list.length - 1].instance_id : undefined;
+    if (newest && newest !== lastCanvasId) {
+      lastCanvasId = newest;
+      setCanvasOpen(true);
+    } else if (!newest) {
+      lastCanvasId = undefined;
+    }
+  });
+
   const replyingTo = () =>
     state.composerDraft ? messagesById().get(state.composerDraft.ref) : null;
 
@@ -351,7 +370,7 @@ export function ChatView() {
           home. Right side is reserved (kept clean). Phone is untouched. */}
       <header class="hidden h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 rail:flex">
         <AgentStatus />
-        <span aria-hidden="true" />
+        <CanvasButton />
       </header>
       {/* Measured inner: at `rail` width the chat pane fills the center of the
           3-pane shell but its content is capped to a reading measure (~680px)
@@ -474,6 +493,22 @@ export function ChatView() {
                   )}
                 </For>
 
+                {/* Generative-UI tier: `chat`-placed views render as inline
+                    blocks at the foot of the transcript, in arrival order. */}
+                <Show when={chatViews(state.views).length > 0}>
+                  <MessageScrollerItem class="flex flex-col gap-3 px-3 py-1">
+                    <For each={chatViews(state.views)}>
+                      {(v) => (
+                        <ViewRenderer
+                          spec={v.spec}
+                          instanceId={v.instance_id}
+                          placement={v.placement}
+                        />
+                      )}
+                    </For>
+                  </MessageScrollerItem>
+                </Show>
+
                 {/* Live "Thinking…" status via a shimmering Marker (ephemeral),
                     with the running turn's timeline (prose ↔ tools ↔ reasoning,
                     in seq order) beneath it. */}
@@ -552,14 +587,19 @@ export function ChatView() {
           • Side Chat panel when state.activeSideChatSc is set (fork-ui: a
             full-screen `fixed` sheet on phone, an in-flow right rail on wide
             viewports; never auto-opened — see the pendingSideChatPingId effect).
+          • Else the Canvas rail when a `canvas`-placed view is surfaced
+            (CanvasRail self-gates on canvasOpen + no active side chat).
           • Otherwise the standing Pings rail at `rail` width (PingsRail hides
-            itself while a side chat holds the region). */}
+            itself while a side chat holds the region; a shown Canvas rail sits
+            in front of it in source order and takes the slot). */}
       <SideChatSheet />
+      <CanvasRail />
       <PingsRail />
 
-      {/* Processes / Settings: full-screen sheets on phone, right-docked
+      {/* Processes / Settings / Canvas: full-screen sheets on phone, right-docked
           inspectors over the right region on desktop — never covering the chat.
           Settings is reachable from the phone-header gear and the NavRail. */}
+      <CanvasSheet />
       <ProcessesSheet />
       <SettingsSheet />
     </div>

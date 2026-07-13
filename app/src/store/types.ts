@@ -12,6 +12,9 @@ import type {
   SideChatRef,
   TurnEvent,
   TurnEventMsg,
+  ViewInstance,
+  ViewRemovedMsg,
+  ViewUpsertMsg,
 } from "../protocol";
 
 /** A chat message as rendered locally. `pending`/`clientId`/`mode`/`failed`
@@ -177,6 +180,13 @@ export interface AppState {
    * close the sheet (if it's the active one) and land-and-highlight the new
    * owner bubble — the same pattern as `scrollToMessageId` et al. in UiState. */
   lastConclusion: { sc: string; messageId: number } | null;
+  /** Generative-UI tier: active host-authored views keyed by `instance_id`.
+   * Seeded from `hello_ok.views` (authoritative on reconnect), upserted by
+   * `view_upsert` (an update in place re-sends the same id), dropped by
+   * `view_removed`. `spec` is always the resolved concrete catalog tree; the
+   * client never resolves templates/bindings. Held as an ordered array so the
+   * store can `reconcile` it keyed by `instance_id` like messages/pings. */
+  views: ViewInstance[];
 }
 
 export type Action =
@@ -229,7 +239,10 @@ export type Action =
   | { type: "side_chat_confirm_sent"; sc: string; anchor: number }
   | { type: "side_chat_discard_sent"; sc: string }
   | { type: "side_chat_closed"; sc: string }
-  | { type: "clear_last_conclusion" };
+  | { type: "clear_last_conclusion" }
+  // ---- Generative-UI tier (view templates) ----
+  | { type: "view_upsert"; payload: ViewUpsertMsg }
+  | { type: "view_removed"; payload: ViewRemovedMsg };
 
 export function initialState(): AppState {
   return {
@@ -252,5 +265,6 @@ export function initialState(): AppState {
     awaitingConclusions: {},
     conclusionChips: [],
     lastConclusion: null,
+    views: [],
   };
 }

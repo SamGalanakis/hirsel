@@ -31,9 +31,17 @@ fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
 fn ping(id: u64, read: bool, status: PingStatus) -> Ping {
     Ping {
         id,
+        kind: hirsel_proto::EventKind::Judgment,
+        source: hirsel_proto::EventSource {
+            kind: hirsel_proto::EventSourceKind::Agent,
+            r#ref: None,
+        },
         name: format!("ping-{id}"),
         description: "Needs attention".into(),
-        content: "Check this".into(),
+        ui: serde_json::json!({
+            "type": "card",
+            "children": [{ "type": "text", "text": "Check this" }]
+        }),
         anchor: 1,
         requires_response: true,
         quick_replies: Vec::new(),
@@ -66,7 +74,7 @@ fn hello_ok(
     HostToClient::HelloOk {
         latest_msg_id,
         messages,
-        pings,
+        events: pings,
         processes,
         side_chats: Vec::new(),
         host_version: "0.1.0 (test)".to_string(),
@@ -227,8 +235,8 @@ async fn ping_and_process_upserts_replace_existing_rows() {
         let _ = push_rx.await;
         send_server(
             &mut socket,
-            &HostToClient::PingUpsert {
-                ping: ping(9, true, PingStatus::Done),
+            &HostToClient::EventUpsert {
+                event: ping(9, true, PingStatus::Done),
             },
         )
         .await;

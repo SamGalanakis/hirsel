@@ -157,20 +157,17 @@ export function PingsRail() {
     <Show when={state.activeSideChatSc === null}>
       <aside
         data-slot="pings-rail"
-        class="hidden min-h-0 w-[360px] shrink-0 flex-col border-l border-border bg-background rail:flex"
+        class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex"
         aria-label="Pings"
       >
         {/* h-12 to match the nav-rail brand block + the center chat header, so
-            one continuous top hairline runs across all three desktop panes. */}
+            one continuous top hairline runs across all three desktop panes.
+            No agent-activity pulse here: the center chat header owns the single
+            "what is my agent doing" indicator (One-Escalation Rule — two live
+            pulses would double the accent). */}
         <div class="flex h-12 flex-shrink-0 items-center gap-2 border-b border-border px-3">
           <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Pings</span>
-          <Show when={thinking()}>
-            <span class="flex shrink-0 items-center gap-1.5 text-[0.68rem] text-muted-foreground">
-              <span class="size-1.5 animate-pulse rounded-full bg-status-active" aria-hidden="true" />
-              working
-            </span>
-          </Show>
           <PingsBadge slot="pings-rail-badge" />
         </div>
         <PingsView />

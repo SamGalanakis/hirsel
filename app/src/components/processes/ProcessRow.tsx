@@ -46,6 +46,30 @@ function StateChip(props: { state: ProcessState }) {
   );
 }
 
+/** Row-mode state: the literal word plus one semantic dot — status as text +
+ * a single mark, never a repeated pill (the promoted card keeps the fuller
+ * StateChip). */
+function StateMark(props: { state: ProcessState }) {
+  return (
+    <span
+      class="inline-flex shrink-0 items-center gap-1.5 text-[0.68rem] text-muted-foreground"
+      data-state={props.state}
+    >
+      <span
+        class="size-1.5 rounded-full"
+        classList={{
+          "bg-status-active": props.state === "running",
+          "bg-status-danger": props.state === "failed",
+          "bg-status-attention": props.state === "abandoned",
+          "bg-muted-foreground": props.state === "done" || props.state === "cancelled",
+        }}
+        aria-hidden="true"
+      />
+      {STATE_LABEL[props.state]}
+    </span>
+  );
+}
+
 export function ProcessRow(props: Props) {
   const [expanded, setExpanded] = createSignal(false);
   const p = () => props.process;
@@ -54,8 +78,46 @@ export function ProcessRow(props: Props) {
   const running = () => p().state === "running";
   // A monitor has "fired" once its last event is distinct from its start.
   const hasFired = () => p().last_event_ts !== p().started_ts;
+  // Resting (finished) processes render as dense hairline rows; the active
+  // (running) process — or one the Owner taps open — is promoted to a card.
+  const asCard = () => running() || expanded();
+
+  const Row = () => (
+    <div
+      class="flex min-h-11 items-center gap-2 border-b border-border/60 px-3"
+      data-slot="process-row"
+      data-kind={p().kind}
+      data-state={p().state}
+    >
+      <button
+        type="button"
+        class="flex min-w-0 flex-1 items-center gap-2 py-2.5 text-left"
+        aria-expanded={false}
+        onClick={() => setExpanded(true)}
+      >
+        <span class="shrink-0 text-muted-foreground">
+          <Show when={isSubagent()} fallback={<Radar class="size-4" aria-label="Monitor" />}>
+            <Bot class="size-4" aria-label="Sub-agent" />
+          </Show>
+        </span>
+        <Show
+          when={isMonitor()}
+          fallback={
+            <span class="min-w-0 flex-1 truncate text-sm text-muted-foreground">{p().label}</span>
+          }
+        >
+          <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-[0.72rem] text-muted-foreground">
+            {p().label}
+          </code>
+        </Show>
+      </button>
+      <StateMark state={p().state} />
+      <ChevronRight class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+    </div>
+  );
 
   return (
+    <Show when={asCard()} fallback={<Row />}>
     <Card
       size="sm"
       class="mx-3 gap-2 px-3 py-3"
@@ -178,5 +240,6 @@ export function ProcessRow(props: Props) {
         </div>
       </Show>
     </Card>
+    </Show>
   );
 }

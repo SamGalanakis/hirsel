@@ -11,21 +11,30 @@ const DONE_LIMIT = 20;
 
 /** Content of the expanded Tray: the open Pings (this component's sole caller
  * is now `TrayOverlay` / `PingsRail`) plus the collapsed Done section (ADR-0009:
- * was "Deleted"). */
+ * was "Deleted").
+ *
+ * Triage layout (v2.2): open Pings split into a **Needs reply** priority
+ * section — the active `requires_response` items, each promoted to a full card
+ * with its reply affordance — and the rest, which rest as dense one-line rows
+ * that expand to a card when tapped (single-selection accordion). This keeps the
+ * rail glanceable: only the item that wants you (or the one you're looking at)
+ * carries card weight. */
 export function PingsView() {
   const [doneExpanded, setDoneExpanded] = createSignal(false);
+  // The one FYI/read row currently promoted to a card (tap to expand, tap again
+  // to collapse). requires_response items are always cards and never selected.
+  const [selectedId, setSelectedId] = createSignal<number | null>(null);
 
   const partitioned = createMemo(() => {
     const sorted = [...state.pings].sort((a, b) => b.id - a.id);
     const open = sorted.filter((p) => p.status === "open");
-    // Tray (v1.6): requires_response Pings float to the top of the open list —
-    // a triage affordance a chronological-only feed lacks, per the design
-    // critique's [P1] fix. Each bucket stays newest-first internally so
-    // arrival order is still legible within a bucket.
-    const requiresResponse = open.filter((p) => p.requires_response);
-    const rest = open.filter((p) => !p.requires_response);
+    // Tray (v1.6): requires_response Pings float to the top as their own
+    // "Needs reply" section — a triage affordance a chronological-only feed
+    // lacks, per the design critique's [P1] fix. Each bucket stays newest-first
+    // internally so arrival order is still legible within a bucket.
     return {
-      open: [...requiresResponse, ...rest],
+      needsReply: open.filter((p) => p.requires_response),
+      other: open.filter((p) => !p.requires_response),
       // ADR-0009: resolved Pings (done, or legacy archived) collect here.
       done: sorted.filter((p) => isResolvedStatus(p.status)).slice(0, DONE_LIMIT),
     };
@@ -44,7 +53,7 @@ export function PingsView() {
   }
 
   // Mark done = the wire `resolve_ping` (ADR-0009: the Ping's terminal state,
-  // presented as "Done"); non-destructive, reached from a card's ⋯ menu.
+  // presented as "Done"); non-destructive, now a one-tap control on the card.
   function handleResolve(ping: Ping) {
     getClient()?.resolvePing(ping.id);
   }
@@ -69,9 +78,28 @@ export function PingsView() {
     requestSideChatOpen(ping.id);
   }
 
+  // Row tap: promote to a card (or collapse it back). Single selection.
+  function toggleSelect(ping: Ping) {
+    setSelectedId((cur) => (cur === ping.id ? null : ping.id));
+  }
+
+  const cardProps = (ping: Ping) => ({
+    ping,
+    onSendReply: handleSendReply,
+    onJumpToChat: handleJumpToChat,
+    onResolve: handleResolve,
+    onRead: handleRead,
+    onMarkUnread: handleMarkUnread,
+    onDiscuss: handleDiscuss,
+  });
+
   return (
     <Show
-      when={partitioned().open.length > 0 || partitioned().done.length > 0}
+      when={
+        partitioned().needsReply.length > 0 ||
+        partitioned().other.length > 0 ||
+        partitioned().done.length > 0
+      }
       fallback={
         <div class="flex flex-1 flex-col p-3">
           <Empty class="border-none">
@@ -86,25 +114,41 @@ export function PingsView() {
         </div>
       }
     >
-      <div class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
-        <div class="flex flex-col gap-3">
-          <For each={partitioned().open}>
-            {(ping) => (
-              <PingCard
-                ping={ping}
-                onSendReply={handleSendReply}
-                onJumpToChat={handleJumpToChat}
-                onResolve={handleResolve}
-                onRead={handleRead}
-                onMarkUnread={handleMarkUnread}
-                onDiscuss={handleDiscuss}
-              />
-            )}
-          </For>
-        </div>
+      <div class="thin-scrollbar flex flex-1 flex-col gap-4 overflow-y-auto py-3 pb-6">
+        {/* Needs reply: the active requires_response items, expanded as cards. */}
+        <Show when={partitioned().needsReply.length > 0}>
+          <section class="flex flex-col gap-3">
+            <h2 class="mx-3 text-[0.68rem] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+              Needs reply ({partitioned().needsReply.length})
+            </h2>
+            <For each={partitioned().needsReply}>
+              {(ping) => <PingCard {...cardProps(ping)} expanded={true} />}
+            </For>
+          </section>
+        </Show>
+
+        {/* Everything else rests as dense hairline rows; tap to promote one. */}
+        <Show when={partitioned().other.length > 0}>
+          <section class="flex flex-col">
+            <Show when={partitioned().needsReply.length > 0}>
+              <h2 class="mx-3 mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                Inbox
+              </h2>
+            </Show>
+            <For each={partitioned().other}>
+              {(ping) => (
+                <PingCard
+                  {...cardProps(ping)}
+                  expanded={selectedId() === ping.id}
+                  onSelect={toggleSelect}
+                />
+              )}
+            </For>
+          </section>
+        </Show>
 
         <Show when={partitioned().done.length > 0}>
-          <div class="mt-2">
+          <div>
             <button
               type="button"
               class="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-1 border-t border-border py-3 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -118,17 +162,7 @@ export function PingsView() {
             <Show when={doneExpanded()}>
               <div class="flex flex-col gap-3">
                 <For each={partitioned().done}>
-                  {(ping) => (
-                    <PingCard
-                      ping={ping}
-                      onSendReply={handleSendReply}
-                      onJumpToChat={handleJumpToChat}
-                      onResolve={handleResolve}
-                      onRead={handleRead}
-                      onMarkUnread={handleMarkUnread}
-                      onDiscuss={handleDiscuss}
-                    />
-                  )}
+                  {(ping) => <PingCard {...cardProps(ping)} expanded={true} />}
                 </For>
               </div>
             </Show>

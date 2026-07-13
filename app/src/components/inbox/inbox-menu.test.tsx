@@ -53,19 +53,25 @@ async function openMenu(screen: ReturnType<typeof render>) {
 }
 
 describe("Inbox card ⋯ context menu", () => {
-  it("Mark done sends the resolve action (wire resolve_ping) via onResolve", async () => {
+  it("Mark done is a one-tap visible control (wire resolve_ping) via onResolve", async () => {
     const { screen, onResolve } = renderCard({ id: 42 });
-    const user = await openMenu(screen);
-    await user.click(await menu().findByRole("menuitem", { name: "Mark done" }));
+    const user = userEvent.setup();
+    // Promoted out of the ⋯ menu: a labeled control on the card itself.
+    await user.click(screen.getByLabelText("Mark done"));
     await waitFor(() => expect(onResolve).toHaveBeenCalledTimes(1));
     expect(onResolve.mock.calls[0][0]).toMatchObject({ id: 42 });
   });
 
-  it("there is no inline Mark done/Delete affordance outside the ⋯ menu", () => {
+  it("Mark done lives on the card, not in the ⋯ menu; no destructive affordance", async () => {
     const { screen } = renderCard();
+    // The one-tap Mark done control is visible without opening any menu.
+    expect(screen.getByLabelText("Mark done")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /archive|delete/i })).toBeNull();
-    // The ⋯ menu is closed by default, so "Mark done" is not in the document yet.
-    expect(menu().queryByText("Mark done")).toBeNull();
+    // Opening the ⋯ menu, "Mark done" is no longer one of its items.
+    const user = await openMenu(screen);
+    expect(await menu().findByRole("menuitem", { name: "View in chat" })).toBeTruthy();
+    expect(menu().queryByRole("menuitem", { name: "Mark done" })).toBeNull();
+    void user;
   });
 
   it("an unread card offers Mark read (→ onRead)", async () => {

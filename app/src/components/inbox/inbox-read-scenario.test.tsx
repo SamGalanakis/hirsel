@@ -211,12 +211,13 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       // but present in the jsdom tree), so an unscoped card query matches twice.
       const tray = () => within(document.querySelector('[data-slot="tray-panel"]') as HTMLElement);
 
-      // --- 1. Arrives UNREAD: unread dot + badge 1 ---
-      const card = (await tray().findByText("Deploy finished — anything else?")).closest(
-        '[data-slot="card"]',
+      // --- 1. Arrives UNREAD: a dense row (FYI/read items rest as one-liners,
+      // led by the human description) with its unread dot + badge 1. ---
+      const row = (await tray().findByText("Review the completed deployment")).closest(
+        "[data-ping-id]",
       ) as HTMLElement;
-      expect(card.getAttribute("data-read")).toBe("false");
-      expect(within(card).getByLabelText("Unread")).toBeTruthy();
+      expect(row.getAttribute("data-read")).toBe("false");
+      expect(within(row).getByLabelText("Unread")).toBeTruthy();
       expect(openUnreadCount(store.state.pings, store.state.unreadOverrides)).toBe(1);
       expect(document.title).toContain("(1)");
 
@@ -226,12 +227,17 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
         { timeout: 10000 },
       );
       await waitFor(() => expect(store.state.pings[0].read).toBe(true), { timeout: 10000 });
-      expect(card.getAttribute("data-read")).toBe("true");
-      expect(within(card).queryByLabelText("Unread")).toBeNull();
+      expect(row.getAttribute("data-read")).toBe("true");
+      expect(within(row).queryByLabelText("Unread")).toBeNull();
       expect(openUnreadCount(store.state.pings, store.state.unreadOverrides)).toBe(0);
       await waitFor(() => expect(document.title).toBe("hirsel"));
 
-      // --- 3. Reply (quick reply) → ADR-0009: resolves into the Done section ---
+      // --- 3. Tap the row to promote it to a card, then reply (quick reply) →
+      // ADR-0009: the anchored reply resolves it into the Done section. ---
+      fireEvent.click(within(row).getByText("Review the completed deployment"));
+      const card = (await tray().findByText("Deploy finished — anything else?")).closest(
+        '[data-slot="card"]',
+      ) as HTMLElement;
       fireEvent.click(within(card).getByText("All good"));
       await waitFor(
         () => expect(store.state.messages.some((m) => m.body === "all good" && !m.pending)).toBe(true),

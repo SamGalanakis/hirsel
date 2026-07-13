@@ -1,4 +1,12 @@
-import type { Ping, ProcessInfo, ProcessState, SideChatRef, ViewInstance } from "../protocol";
+import type {
+  EventItem,
+  Ping,
+  ProcessInfo,
+  ProcessState,
+  SideChatRef,
+  ViewInstance,
+  ViewSpec,
+} from "../protocol";
 import type { DisplayMessage } from "./types";
 
 /** v2.1 (ADR-0009): a Ping is "resolved" (rendered under Done) when its status
@@ -105,6 +113,104 @@ export function latestReplyForAnchor(
     }
   }
   return null;
+}
+
+// ---- Typed event queue (ADR-0012), generalizing the ping selectors above ----
+
+/** Effective "decided/resolved" state for an Event, folding in the optimistic
+ * decide override (`eventDecideOverrides`) — the event twin of `isPingResolved`:
+ * resolved when the wire status is done OR the Owner has just decided it and the
+ * ~5s Undo window has not yet committed. One place so the queue partition, the
+ * counts, and the card visuals all agree. */
+export function isEventResolved(event: EventItem, decideOverrides: number[]): boolean {
+  return event.status !== "open" || decideOverrides.includes(event.id);
+}
+
+/** A judgment still needing the Owner: kind judgment, open, not optimistically
+ * decided. The queue's hero rank. */
+export function isOpenJudgment(event: EventItem, decideOverrides: number[]): boolean {
+  return event.kind === "judgment" && !isEventResolved(event, decideOverrides);
+}
+
+/** The ONE red on the surface (ADR-0012): the "N need you" count = open,
+ * undecided judgments. Awareness never contributes. */
+export function openJudgmentCount(events: EventItem[], decideOverrides: number[]): number {
+  return events.filter((e) => isOpenJudgment(e, decideOverrides)).length;
+}
+
+/** Wait time drives ordering within the judgment band — oldest first is the most
+ * blocking. Older ts sorts earlier; unparseable ts sinks to the end. */
+function tsAsc(a: EventItem, b: EventItem): number {
+  const da = Date.parse(a.ts);
+  const db = Date.parse(b.ts);
+  const na = Number.isFinite(da) ? da : Number.POSITIVE_INFINITY;
+  const nb = Number.isFinite(db) ? db : Number.POSITIVE_INFINITY;
+  return na - nb;
+}
+
+/** The queue rank (ADR-0012 interrupt-vs-accrue invariant, expressed as
+ * ordering): blocking judgments first → other needs-you judgments → decided
+ * judgments (kept in place for undo) → the awareness tail (summary/info).
+ * `snoozed` ids (a client-only "sent to the tail" gesture) drop to just above
+ * awareness. Lower rank sorts earlier. */
+function queueRank(event: EventItem, decideOverrides: number[], snoozed: Set<number>): number {
+  const open = isOpenJudgment(event, decideOverrides);
+  if (open && event.blocking && !snoozed.has(event.id)) return 0;
+  if (open && !snoozed.has(event.id)) return 1;
+  if (open && snoozed.has(event.id)) return 2;
+  if (event.kind === "judgment") return 3; // decided judgment, kept in place
+  return 4; // awareness (summary/info)
+}
+
+/** Order the queue for the scroller: priority band first, oldest-waited first
+ * within a band, id as a stable final tiebreak. Pure + total (never throws) so
+ * the scroller and its tests share one ordering. */
+export function orderedQueue(
+  events: EventItem[],
+  decideOverrides: number[],
+  snoozed: Set<number> = new Set(),
+): EventItem[] {
+  return events.slice().sort((a, b) => {
+    const ra = queueRank(a, decideOverrides, snoozed);
+    const rb = queueRank(b, decideOverrides, snoozed);
+    if (ra !== rb) return ra - rb;
+    const t = tsAsc(a, b);
+    if (t !== 0) return t;
+    return a.id - b.id;
+  });
+}
+
+/** The `ui` field normalized to an array of nodes: the wire carries either the
+ * blessed `{type:"card",children:[…]}` root or a bare array of nodes (the
+ * spikes). A card root unwraps to its children; an array passes through; a
+ * single non-card node wraps into a one-element list; anything malformed → []. */
+export function eventUiNodes(ui: ViewSpec | ViewSpec[] | undefined): ViewSpec[] {
+  if (Array.isArray(ui)) return ui.filter((n) => n && typeof n.type === "string");
+  if (ui && typeof ui.type === "string") {
+    if (ui.type === "card" && Array.isArray(ui.children)) {
+      return (ui.children as ViewSpec[]).filter((n) => n && typeof n.type === "string");
+    }
+    return [ui];
+  }
+  return [];
+}
+
+/** A one-line title for an Event, for the peek overview / accessibility: the
+ * first heading, else the first status/text label, else the `@`-name. Backtick
+ * tokens are stripped (they're a render hint, not content). */
+export function eventTitle(event: EventItem): string {
+  const nodes = eventUiNodes(event.ui);
+  const pick = (type: string, field: string): string | null => {
+    const n = nodes.find((x) => x.type === type);
+    const v = n ? (n as Record<string, unknown>)[field] : null;
+    return typeof v === "string" ? v.replace(/`/g, "") : null;
+  };
+  return (
+    pick("heading", "text") ??
+    pick("status", "label") ??
+    pick("text", "text") ??
+    (event.description || event.name)
+  );
 }
 
 // ---- v1.4 processes ----

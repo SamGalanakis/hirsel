@@ -1,8 +1,8 @@
-import { Activity, Inbox as InboxIcon, Settings } from "lucide-solid";
+import { Activity, Inbox as InboxIcon, Layers, Settings } from "lucide-solid";
 import { type JSX, Show } from "solid-js";
 import { setCommandPaletteOpen } from "../lib/keymap";
-import { openUnreadCount, runningProcessCount } from "../store/selectors";
-import { openPings, openProcesses, openSettings, state } from "../store/store";
+import { openJudgmentCount, openUnreadCount, runningProcessCount } from "../store/selectors";
+import { goToQueue, openPings, openProcesses, openSettings, state } from "../store/store";
 import { ConnectionPill } from "./ConnectionPill";
 
 // The desktop nav rail (desktop-shell / 3-pane). A persistent vertical rail —
@@ -22,6 +22,15 @@ import { ConnectionPill } from "./ConnectionPill";
 
 function pingsCount(): number {
   return openUnreadCount(state.pings, state.unreadOverrides, state.resolveOverrides);
+}
+/** The queue's needs-you count = open judgments (the ONE red). */
+function queueNeedsYou(): number {
+  return openJudgmentCount(state.events, state.eventDecideOverrides);
+}
+/** A right-region pane is "current" only while we're actually in the chat shell
+ * — on the queue home nothing in the shell owns the region. */
+function regionActive(region: string): boolean {
+  return state.home === "chat" && state.rightRegion === region;
 }
 function processCount(): number {
   return runningProcessCount(state.processes);
@@ -62,13 +71,38 @@ export function NavRail() {
     <div class="hidden w-[224px] shrink-0 flex-col border-r border-border bg-background rail:flex">
       {/* Brand block — the wordmark on the shared desktop top-bar baseline (h-12,
           same as the center chat header and the Pings/inspector pane headers), so
-          one continuous top hairline runs across all three panes. Kept quiet
-          (reuses the title type). */}
-      <div class="flex h-12 flex-shrink-0 items-center border-b border-border px-4">
+          one continuous top hairline runs across all three panes. Doubles as the
+          home affordance: clicking it returns to the queue scroller. */}
+      <button
+        type="button"
+        class="flex h-12 flex-shrink-0 items-center border-b border-border px-4 text-left transition-colors hover:bg-muted/60"
+        aria-label="Home — the event queue"
+        onClick={goToQueue}
+      >
         <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-      </div>
+      </button>
 
       <nav aria-label="Primary" class="flex flex-col gap-0.5 px-2 pt-2">
+        {/* Queue — the home (ADR-0012): the vertical event scroller. Current when
+            we're on the queue home; carries the ONE red needs-you count. */}
+        <NavItem
+          icon={<Layers class="size-4 shrink-0" aria-hidden="true" />}
+          label="Queue"
+          ariaLabel="Queue"
+          active={state.home === "queue"}
+          onClick={goToQueue}
+          badge={
+            <Show when={queueNeedsYou() > 0}>
+              <span
+                data-slot="nav-queue-badge"
+                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-status-danger px-1 text-[0.65rem] font-bold text-primary-foreground"
+              >
+                {clamp99(queueNeedsYou())}
+              </span>
+            </Show>
+          }
+        />
+
         {/* Pings — the resting state of the right region (the standing rail).
             Active when it owns the region. A MUTED count rides here for
             cross-pane awareness ONLY when Pings is NOT the shown pane: when
@@ -82,10 +116,10 @@ export function NavRail() {
           icon={<InboxIcon class="size-4 shrink-0" aria-hidden="true" />}
           label="Pings"
           ariaLabel="Pings"
-          active={state.rightRegion === "pings"}
+          active={regionActive("pings")}
           onClick={openPings}
           badge={
-            <Show when={pingsCount() > 0 && state.rightRegion !== "pings"}>
+            <Show when={pingsCount() > 0 && !regionActive("pings")}>
               <span
                 data-slot="nav-pings-badge"
                 class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
@@ -101,7 +135,7 @@ export function NavRail() {
         <NavItem
           icon={<Activity class="size-4 shrink-0" aria-hidden="true" />}
           label="Processes"
-          active={state.rightRegion === "processes"}
+          active={regionActive("processes")}
           onClick={openProcesses}
           badge={
             <Show when={processCount() > 0}>
@@ -128,7 +162,7 @@ export function NavRail() {
           icon={<Settings class="size-4 shrink-0" aria-hidden="true" />}
           label="Settings"
           ariaLabel="Settings"
-          active={state.rightRegion === "settings"}
+          active={regionActive("settings")}
           onClick={openSettings}
         />
       </nav>

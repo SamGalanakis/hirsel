@@ -180,6 +180,9 @@ describe("Headless scenario: answer two Inbox items back-to-back, in the Inbox",
       closeClient = () => getClient()?.close();
 
       const screen = render(() => <App />);
+      // Cutover (ADR-0012): the Pings inbox is a chat-shell drill-in off the
+      // event-scroller home; this scenario lives in the inbox, so drill in.
+      store.goToChatDrillIn();
 
       // Connected + inbox replayed: both scripted items are queued in the Tray.
       await waitFor(() => expect(store.state.pings).toHaveLength(2), { timeout: 10000 });

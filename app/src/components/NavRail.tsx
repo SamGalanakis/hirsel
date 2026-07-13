@@ -1,27 +1,41 @@
-import { Activity, Inbox as InboxIcon, Settings } from "lucide-solid";
+import { Activity, Layers, MessageSquare, Settings } from "lucide-solid";
 import { type JSX, Show } from "solid-js";
 import { setCommandPaletteOpen } from "../lib/keymap";
-import { openUnreadCount, runningProcessCount } from "../store/selectors";
-import { openPings, openProcesses, openSettings, state } from "../store/store";
+import { openJudgmentCount, runningProcessCount } from "../store/selectors";
+import { goToChat, goToQueue, openProcesses, openSettings, state } from "../store/store";
 import { ConnectionPill } from "./ConnectionPill";
 
 // The desktop nav rail (desktop-shell / 3-pane). A persistent vertical rail —
 // calm and dense, Linear/Slack/Superhuman lineage — that owns the brand, the
-// right-region navigation, and the connection pill on desktop. Desktop-only:
+// surface navigation, and the connection pill on desktop. Desktop-only:
 // `hidden … rail:flex`, so below the `rail` breakpoint the phone header carries
 // the brand + agent status + overflow instead and this rail never shows. Flat by
 // design: a single hairline `border-r`, no shadow (the Hairline-First rule).
 //
-// v2.3 (single-owner right region): the rail navigates the ONE exclusive right
-// region — Pings · Processes · Settings — and each item is `aria-current` when
-// it owns `state.rightRegion` (no more "Chat active = !processesOpen &&
-// !settingsOpen" fiction). Chat is always the center pane, so it is no longer a
-// nav destination; the standing right rail IS the Pings surface, so there is no
-// separate "Inbox" row; the command palette is ⌘K (a quiet footer hint, not a
+// ADR-0012 cutover: the home is the event Queue, and the Queue IS the pings
+// surface now — so the separate "Pings" nav destination is retired (§6). The
+// rows are Queue (home) · Chat (the drill-in shell, also the way back to the
+// resting Pings rail) · Processes · Settings; each is `aria-current` for exactly
+// the surface it owns, so at most one is current at a time. The legacy Pings
+// inbox stays reachable as a chat-shell drill-in (Chat rests on it) and via
+// `g i` / the command palette. The palette is ⌘K (a quiet footer hint, not a
 // standing "Commands" row).
 
-function pingsCount(): number {
-  return openUnreadCount(state.pings, state.unreadOverrides, state.resolveOverrides);
+/** The queue's needs-you count = open judgments (drives the muted Queue badge). */
+function queueNeedsYou(): number {
+  return openJudgmentCount(state.events, state.eventDecideOverrides);
+}
+/** A right-region inspector (Processes/Settings) is "current" only while we're
+ * in the chat shell with that pane docked. */
+function regionActive(region: string): boolean {
+  return state.home === "chat" && state.rightRegion === region;
+}
+/** Chat (the center pane) is "current" whenever we're in the shell and no
+ * inspector has taken the right region — the resting Pings rail, an open Side
+ * Chat, or the Canvas all read as "you're looking at Chat." Keeps exactly one
+ * row current: an inspector displaces it, the Queue home is the other pole. */
+function chatActive(): boolean {
+  return state.home === "chat" && state.rightRegion !== "processes" && state.rightRegion !== "settings";
 }
 function processCount(): number {
   return runningProcessCount(state.processes);
@@ -62,38 +76,54 @@ export function NavRail() {
     <div class="hidden w-[224px] shrink-0 flex-col border-r border-border bg-background rail:flex">
       {/* Brand block — the wordmark on the shared desktop top-bar baseline (h-12,
           same as the center chat header and the Pings/inspector pane headers), so
-          one continuous top hairline runs across all three panes. Kept quiet
-          (reuses the title type). */}
-      <div class="flex h-12 flex-shrink-0 items-center border-b border-border px-4">
+          one continuous top hairline runs across all three panes. Doubles as the
+          home affordance: clicking it returns to the queue scroller. */}
+      <button
+        type="button"
+        class="flex h-12 flex-shrink-0 items-center border-b border-border px-4 text-left transition-colors hover:bg-muted/60"
+        aria-label="Home — the event queue"
+        onClick={goToQueue}
+      >
         <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-      </div>
+      </button>
 
       <nav aria-label="Primary" class="flex flex-col gap-0.5 px-2 pt-2">
-        {/* Pings — the resting state of the right region (the standing rail).
-            Active when it owns the region. A MUTED count rides here for
-            cross-pane awareness ONLY when Pings is NOT the shown pane: when
-            `rightRegion === "pings"` (the default), the standing rail header
-            already carries the count, so the nav badge would just duplicate it
-            (spec item 4) — the nav ITEM stays (the way home + `g i` target + the
-            count's home when the rail is displaced), only the redundant badge
-            is hidden. The single red interrupt lives on the rail header
-            (One-Escalation Rule), never on the nav. */}
+        {/* Queue — the home (ADR-0012): the vertical event scroller, and the
+            pings surface itself. Current on the queue home. The needs-you count
+            rides here as a MUTED badge (never the interrupt red — the single red
+            is the pager's "N need you" pill on the home itself), and is HIDDEN
+            entirely while we're on the queue home, where it would only duplicate
+            that pager pill (§2). It earns its keep only once you've drilled away
+            into the shell, as quiet cross-surface awareness. */}
         <NavItem
-          icon={<InboxIcon class="size-4 shrink-0" aria-hidden="true" />}
-          label="Pings"
-          ariaLabel="Pings"
-          active={state.rightRegion === "pings"}
-          onClick={openPings}
+          icon={<Layers class="size-4 shrink-0" aria-hidden="true" />}
+          label="Queue"
+          ariaLabel="Queue"
+          active={state.home === "queue"}
+          onClick={goToQueue}
           badge={
-            <Show when={pingsCount() > 0 && state.rightRegion !== "pings"}>
+            <Show when={queueNeedsYou() > 0 && state.home !== "queue"}>
               <span
-                data-slot="nav-pings-badge"
+                data-slot="nav-queue-badge"
                 class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
               >
-                {clamp99(pingsCount())}
+                {clamp99(queueNeedsYou())}
               </span>
             </Show>
           }
+        />
+
+        {/* Chat — the drill-in shell (§3): a quiet, demoted door to "talk to the
+            agent," never a promoted destination (no badge, no red). Also the
+            desktop way back to the resting Pings rail — `goToChat` returns the
+            right region to its idle `pings` state, so selecting Chat re-stands
+            the rail after a Side Chat / inspector displaced it. */}
+        <NavItem
+          icon={<MessageSquare class="size-4 shrink-0" aria-hidden="true" />}
+          label="Chat"
+          ariaLabel="Chat"
+          active={chatActive()}
+          onClick={() => goToChat()}
         />
 
         {/* Processes — docks the Processes inspector; carries the running count
@@ -101,7 +131,7 @@ export function NavRail() {
         <NavItem
           icon={<Activity class="size-4 shrink-0" aria-hidden="true" />}
           label="Processes"
-          active={state.rightRegion === "processes"}
+          active={regionActive("processes")}
           onClick={openProcesses}
           badge={
             <Show when={processCount() > 0}>
@@ -128,7 +158,7 @@ export function NavRail() {
           icon={<Settings class="size-4 shrink-0" aria-hidden="true" />}
           label="Settings"
           ariaLabel="Settings"
-          active={state.rightRegion === "settings"}
+          active={regionActive("settings")}
           onClick={openSettings}
         />
       </nav>

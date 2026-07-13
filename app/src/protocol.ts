@@ -113,6 +113,63 @@ export interface ViewInstance {
   spec: ViewSpec;
 }
 
+// ---- Typed event queue (ADR-0012 / ADR-0013) ----
+//
+// `Event` (wire) generalizes `Ping`: a Ping is exactly a `judgment` Event. It
+// is named `EventItem` here to avoid shadowing the DOM `Event` global (the wire
+// tags stay `event_upsert` / `event_action`). The card body rides the wire as
+// an OPAQUE JSON UI tree (`ui`) — the same pattern as `ViewInstance.spec` — and
+// is validated/rendered client-side by the constrained catalog (ADR-0013), so a
+// vocabulary skew degrades gracefully rather than breaking a card.
+
+/** The interrupt-vs-accrue axis, baked into the type (ADR-0012). `judgment`
+ * needs a decision (the hero — a Ping's `requires_response` maps here);
+ * `summary` is a digest; `info` a quiet notification. Ordering (not a flag)
+ * keeps info from drowning judgment. Open set on the wire — an unknown kind is
+ * tolerated as awareness. */
+export type EventKind = "judgment" | "summary" | "info";
+
+/** Who produced an Event: the main Agent, a sub-agent at its own taste
+ * boundary, a scheduled lash job (the "morning brief" is one), or a monitor.
+ * `ref` is the producer handle (process_id / job_id / monitor label). */
+export interface EventSource {
+  kind: "agent" | "subagent" | "scheduled" | "monitor";
+  ref: string | null;
+}
+
+/** Lifecycle mirrors a Ping (ADR-0009): `open` needs the Owner; `done` is
+ * decided/dismissed and kept findable. A judgment resolves when decided;
+ * summary/info auto-read on pass. */
+export type EventStatus = "open" | "done";
+
+/** One typed event in the home queue. `ui` is the constrained JSON-UI card body
+ * (ADR-0013): the blessed judgment template (eyebrow · fork · optionList ·
+ * viewSlot) for a judgment, a light tree for summary/info. Carried loosely
+ * (opaque `ViewSpec`, or an array of nodes) so the renderer narrows per catalog
+ * component and never trusts the shape. */
+export interface EventItem {
+  id: number;
+  kind: EventKind;
+  source: EventSource;
+  /** Short `@`-handle (≤32 chars, mono in the UI). */
+  name: string;
+  /** One-line subtitle. */
+  description: string;
+  /** The constrained JSON-UI card body — a root node or an array of nodes. */
+  ui: ViewSpec | ViewSpec[];
+  /** True for a judgment; a judgment's options also live in `ui.optionList`. */
+  requires_response: boolean;
+  quick_replies: QuickReply[];
+  status: EventStatus;
+  read: boolean;
+  anchor: number;
+  ts: string;
+  /** Host hint: this judgment stopped the fleet, so it leads the queue (ADR-0012
+   * "blocking judgments first"). Optional on the wire; absent is treated as
+   * false. Ordering is otherwise derived (kind + wait time). */
+  blocking?: boolean;
+}
+
 // ---- Model configuration (main agent + sub-agent catalog) ----
 
 /** The main agent's current model + reasoning variant. `variant` is one of the
@@ -292,6 +349,21 @@ export interface ViewEventMsg {
   data: unknown;
 }
 
+/** Typed event queue (ADR-0012/0013): an owner-initiated action from an event
+ * card's constrained UI. Generalizes the quick-reply resolution + `view_event`.
+ * `action` is `choose` (data.choice = option key; resolves a judgment; optional
+ * `data.record_rule` seeds the taste store), `submit` (data = field values),
+ * `snooze`, `dismiss`, or `reopen` (Done-as-toggle recovery — the peer of a
+ * choose, per the reopen machinery on main). The host looks the event up and
+ * routes it through the normal owner-submission path; the client never resolves
+ * the event itself, it only emits this frame. */
+export interface EventActionMsg {
+  type: "event_action";
+  event_id: number;
+  action: string;
+  data: unknown;
+}
+
 /** Select the main agent's model + reasoning variant. The host applies it and
  * broadcasts the truth back as `model_changed`. */
 export interface SetModelMsg {
@@ -326,6 +398,7 @@ export type ClientMessage =
   | ConfirmConclusionMsg
   | DiscardSideChatMsg
   | ViewEventMsg
+  | EventActionMsg
   | SetModelMsg
   | SetSubagentModelMsg;
 
@@ -344,6 +417,11 @@ export interface HelloOkMsg {
   latest_msg_id: number;
   messages: ChatMessage[];
   pings: Ping[];
+  /** Typed event queue (ADR-0012): the authoritative open + recent event set on
+   * (re)connect, generalizing `pings`. Optional on the wire (serde-default []);
+   * absent is treated as []. Pings continue to arrive on `pings` until the host
+   * cutover; the client keeps both slices. */
+  events?: EventItem[];
   /** v1.4: all non-terminal processes + the last 10 terminal ones. Optional on
    * the wire; absent is treated as []. */
   processes?: ProcessInfo[];
@@ -384,6 +462,13 @@ export interface AgentActivityMsg {
 export interface PingUpsertMsg {
   type: "ping_upsert";
   ping: Ping;
+}
+
+/** Typed event queue (ADR-0012): seed or update one Event in place, keyed by
+ * `id`. Generalizes `ping_upsert` (an update is a re-send of the same id). */
+export interface EventUpsertMsg {
+  type: "event_upsert";
+  event: EventItem;
 }
 
 /** v1.1: ack for an upload_blob, correlated by `client_id`. */
@@ -511,6 +596,7 @@ export type ServerMessage =
   | MsgMsg
   | AgentActivityMsg
   | PingUpsertMsg
+  | EventUpsertMsg
   | BlobOkMsg
   | BlobUrlMsg
   | MsgRemovedMsg

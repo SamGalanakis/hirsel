@@ -2,6 +2,8 @@ import type {
   AgentActivityState,
   Blob,
   ChatMessage,
+  EventItem,
+  EventUpsertMsg,
   HelloOkMsg,
   ModelSelection,
   ModelSnapshot,
@@ -123,6 +125,25 @@ export interface TimelineEvent {
 export interface AppState {
   messages: DisplayMessage[];
   pings: Ping[];
+  /** Typed event queue (ADR-0012): the home scroller's data, generalizing
+   * `pings`. Seeded from `hello_ok.events` (authoritative on reconnect) and kept
+   * current by `event_upsert`. Held as an ordered array so the store can
+   * `reconcile` it keyed by `id` like messages/pings. */
+  events: EventItem[];
+  /** Event ids optimistically decided ("Marked done" / chosen) but not yet
+   * committed by the host — the event twin of `resolveOverrides`. An event is
+   * effectively resolved if its status is done OR its id is here; on commit the
+   * host's done `event_upsert` supersedes it (the reducer prunes the id). Undo
+   * drops the id back off. Bounded. */
+  eventDecideOverrides: number[];
+  /** Bumped every time `hello_ok` replaces the event set wholesale (connect and
+   * every resync). The queue scroller keys its session bookkeeping on this: a
+   * snapshot swap must re-anchor the viewport (the browser-preserved scroll
+   * offset is meaningless against a new set) and reset per-session state
+   * (snoozed ids, viewed-page tracking) instead of letting it leak across —
+   * the DEV mock-seed → hello_ok sequence made that leak visible as phantom
+   * decided/read tallies. Incremental `event_upsert`s do NOT bump it. */
+  eventsSnapshotSeq: number;
   agentActivity: AgentActivity;
   connection: ConnectionStatus;
   lastSeenMsgId: number | null;
@@ -218,6 +239,10 @@ export type Action =
   | { type: "process_upsert"; payload: ProcessUpsertMsg }
   | { type: "turn_event"; payload: TurnEventMsg }
   | { type: "ping_upsert"; payload: PingUpsertMsg }
+  | { type: "event_upsert"; payload: EventUpsertMsg }
+  | { type: "event_decide_local"; eventId: number }
+  | { type: "event_undecide_local"; eventId: number }
+  | { type: "event_read_local"; eventId: number }
   | { type: "read_local"; pingId: number }
   | { type: "mark_unread_local"; pingId: number }
   | { type: "resolve_local"; pingId: number }
@@ -274,6 +299,9 @@ export function initialState(): AppState {
   return {
     messages: [],
     pings: [],
+    events: [],
+    eventDecideOverrides: [],
+    eventsSnapshotSeq: 0,
     agentActivity: { state: "idle", text: null },
     connection: "connecting",
     lastSeenMsgId: null,

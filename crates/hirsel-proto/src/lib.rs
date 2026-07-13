@@ -130,25 +130,55 @@ pub struct QuickReply {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PingStatus {
+pub enum EventStatus {
     Open,
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    Judgment,
+    Summary,
+    Info,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSourceKind {
+    Agent,
+    Subagent,
+    Scheduled,
+    Monitor,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Ping {
+pub struct EventSource {
+    pub kind: EventSourceKind,
+    #[serde(rename = "ref")]
+    pub r#ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
     pub id: u64,
+    pub kind: EventKind,
+    pub source: EventSource,
     pub name: String,
     pub description: String,
-    pub content: String,
+    pub ui: serde_json::Value,
     pub anchor: u64,
     pub requires_response: bool,
     pub quick_replies: Vec<QuickReply>,
-    pub status: PingStatus,
+    pub status: EventStatus,
     #[serde(default)]
     pub read: bool,
     pub ts: DateTime<Utc>,
 }
+
+/// Source compatibility for the Rust client and the existing agent-tool surface.
+pub type Ping = Event;
+pub type PingStatus = EventStatus;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -270,6 +300,12 @@ pub enum ClientToHost {
     ReadPing {
         ping_id: u64,
     },
+    EventAction {
+        event_id: u64,
+        action: String,
+        #[serde(default)]
+        data: serde_json::Value,
+    },
     RegisterPushToken {
         platform: PushPlatform,
         token: String,
@@ -346,7 +382,7 @@ pub enum HostToClient {
     HelloOk {
         latest_msg_id: u64,
         messages: Vec<ChatMessage>,
-        pings: Vec<Ping>,
+        events: Vec<Event>,
         processes: Vec<ProcessInfo>,
         #[serde(default)]
         side_chats: Vec<SideChatSummary>,
@@ -386,8 +422,8 @@ pub enum HostToClient {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,
     },
-    PingUpsert {
-        ping: Ping,
+    EventUpsert {
+        event: Event,
     },
     ModelChanged {
         current: ModelSelection,
@@ -695,6 +731,66 @@ mod tests {
     }
 
     #[test]
+    fn event_action_round_trips_with_authoritative_wire_tag() {
+        let value = json!({
+            "type": "event_action",
+            "event_id": 7,
+            "action": "choose",
+            "data": { "choice": "A", "record_rule": "Prefer explicit wire ops" }
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            ClientToHost::EventAction {
+                event_id: 7,
+                action: "choose".to_string(),
+                data: json!({
+                    "choice": "A",
+                    "record_rule": "Prefer explicit wire ops"
+                }),
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn event_and_event_upsert_round_trip_with_authoritative_shape() {
+        let event = Event {
+            id: 3,
+            kind: EventKind::Summary,
+            source: EventSource {
+                kind: EventSourceKind::Scheduled,
+                r#ref: Some("morning-digest".to_string()),
+            },
+            name: "digest".to_string(),
+            description: "Morning digest".to_string(),
+            ui: json!({
+                "type": "card",
+                "children": [{ "type": "status", "state": "success", "label": "ready" }]
+            }),
+            requires_response: false,
+            quick_replies: Vec::new(),
+            status: EventStatus::Open,
+            read: false,
+            anchor: 1,
+            ts: Utc.with_ymd_and_hms(2026, 7, 13, 7, 0, 0).unwrap(),
+        };
+        let frame = HostToClient::EventUpsert {
+            event: event.clone(),
+        };
+        let encoded = serde_json::to_value(&frame).unwrap();
+        assert_eq!(encoded["type"], "event_upsert");
+        assert_eq!(encoded["event"]["kind"], "summary");
+        assert_eq!(encoded["event"]["source"]["kind"], "scheduled");
+        assert_eq!(encoded["event"]["ui"], event.ui);
+        assert_eq!(
+            serde_json::from_value::<HostToClient>(encoded).unwrap(),
+            frame
+        );
+    }
+
+    #[test]
     fn view_frames_round_trip_with_resolved_specs_and_event_data() {
         let spec = json!({
             "type": "action",
@@ -799,9 +895,17 @@ mod tests {
         };
         let ping = Ping {
             id: 9,
+            kind: EventKind::Judgment,
+            source: EventSource {
+                kind: EventSourceKind::Agent,
+                r#ref: None,
+            },
             name: "release-ready".to_string(),
             description: "Release is ready to ship".to_string(),
-            content: "Done".to_string(),
+            ui: json!({
+                "type": "card",
+                "children": [{ "type": "text", "text": "Done" }]
+            }),
             anchor: 1,
             requires_response: true,
             quick_replies: vec![QuickReply {
@@ -826,7 +930,7 @@ mod tests {
         let response = HostToClient::HelloOk {
             latest_msg_id: 1,
             messages: vec![message],
-            pings: vec![ping],
+            events: vec![ping],
             processes: vec![process],
             side_chats: Vec::new(),
             host_version: "0.1.0 (test)".to_string(),
@@ -978,12 +1082,14 @@ mod tests {
     }
 
     #[test]
-    fn ping_without_read_deserializes_as_unread() {
+    fn event_without_read_deserializes_as_unread() {
         let value = json!({
             "id": 9,
+            "kind": "judgment",
+            "source": { "kind": "agent", "ref": null },
             "name": "old-ping",
             "description": "Old ping",
-            "content": "old ping",
+            "ui": { "type": "card", "children": [] },
             "anchor": 1,
             "requires_response": true,
             "quick_replies": [],
@@ -1077,7 +1183,7 @@ mod tests {
             "type": "hello_ok",
             "latest_msg_id": 0,
             "messages": [],
-            "pings": [],
+            "events": [],
             "processes": []
         });
         let parsed: HostToClient = serde_json::from_value(old).unwrap();
@@ -1086,7 +1192,7 @@ mod tests {
             HostToClient::HelloOk {
                 latest_msg_id: 0,
                 messages: Vec::new(),
-                pings: Vec::new(),
+                events: Vec::new(),
                 processes: Vec::new(),
                 side_chats: Vec::new(),
                 host_version: String::new(),

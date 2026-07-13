@@ -352,6 +352,18 @@ class HirselWsClient {
     this.enqueue({ type: "view_event", instance_id: instanceId, action, data });
   }
 
+  // ---- Typed event queue (ADR-0012 / ADR-0013) ----
+
+  /** Emit an owner action from an event card (`choose` / `submit` / `snooze` /
+   * `dismiss` / `reopen`). Generalizes the quick-reply resolution + view_event.
+   * Enqueued so a tap right as the socket blips still fires once reconnected;
+   * there is no direct ack — the reply returns through the normal event flow (a
+   * `done` event_upsert), so callers show a brief optimistic state and let it
+   * land. The client never resolves the event itself. */
+  sendEventAction(eventId: number, action: string, data: unknown): void {
+    this.enqueue({ type: "event_action", event_id: eventId, action, data });
+  }
+
   // ---- Model configuration ----
 
   /** Select the main agent's model + reasoning variant. Enqueued so a tap right
@@ -550,6 +562,10 @@ class HirselWsClient {
       }
       case "ping_upsert": {
         dispatch({ type: "ping_upsert", payload: message });
+        break;
+      }
+      case "event_upsert": {
+        dispatch({ type: "event_upsert", payload: message });
         break;
       }
       case "process_upsert": {

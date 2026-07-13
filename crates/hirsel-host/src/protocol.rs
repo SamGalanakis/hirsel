@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use hirsel_proto::{ClientToHost, HelloAuth, HostToClient, Ping, ViewInstance};
+use hirsel_proto::{ClientToHost, Event, HelloAuth, HostToClient, ViewInstance};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -223,13 +223,13 @@ async fn build_snapshot(
     let views = state.views.snapshot().await;
     let dedupe = HelloBroadcastDedupe::new(
         snapshot.latest_msg_id,
-        snapshot.pings.clone(),
+        snapshot.events.clone(),
         views.clone(),
     );
     let hello = HostToClient::HelloOk {
         latest_msg_id: snapshot.latest_msg_id,
         messages: snapshot.messages,
-        pings: snapshot.pings,
+        events: snapshot.events,
         processes: state.process_snapshot().await?,
         side_chats: state.side_chats.summaries().await,
         host_version: host_version(),
@@ -285,15 +285,15 @@ async fn authenticate(
 
 struct HelloBroadcastDedupe {
     latest_msg_id: u64,
-    pings: Vec<Ping>,
+    events: Vec<Event>,
     views: Vec<ViewInstance>,
 }
 
 impl HelloBroadcastDedupe {
-    fn new(latest_msg_id: u64, pings: Vec<Ping>, views: Vec<ViewInstance>) -> Self {
+    fn new(latest_msg_id: u64, events: Vec<Event>, views: Vec<ViewInstance>) -> Self {
         Self {
             latest_msg_id,
-            pings,
+            events,
             views,
         }
     }
@@ -301,8 +301,8 @@ impl HelloBroadcastDedupe {
     fn should_send(&self, event: &HostToClient) -> bool {
         match event {
             HostToClient::Msg { message, sc } => sc.is_some() || message.id > self.latest_msg_id,
-            HostToClient::PingUpsert { ping } => {
-                !self.pings.iter().any(|snapshot| snapshot == ping)
+            HostToClient::EventUpsert { event } => {
+                !self.events.iter().any(|snapshot| snapshot == event)
             }
             HostToClient::ViewUpsert {
                 instance_id,
@@ -421,22 +421,29 @@ where
                 .await?;
         }
         ClientToHost::ResolvePing { ping_id } => {
-            if let Some(ping) = state.storage.resolve_ping(ping_id).await? {
-                state.broadcast(HostToClient::PingUpsert { ping });
+            if let Some(event) = state.storage.resolve_ping(ping_id).await? {
+                state.broadcast(HostToClient::EventUpsert { event });
             }
         }
         ClientToHost::ReopenPing { ping_id } => {
-            if let Some(ping) = state.storage.reopen_ping(ping_id).await? {
-                state.broadcast(HostToClient::PingUpsert { ping });
+            if let Some(event) = state.storage.reopen_ping(ping_id).await? {
+                state.broadcast(HostToClient::EventUpsert { event });
             }
         }
         ClientToHost::ReadPing { ping_id } => {
-            let ping = state
+            let event = state
                 .storage
                 .mark_ping_read(ping_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("unknown ping: {ping_id}"))?;
-            state.broadcast(HostToClient::PingUpsert { ping });
+            state.broadcast(HostToClient::EventUpsert { event });
+        }
+        ClientToHost::EventAction {
+            event_id,
+            action,
+            data,
+        } => {
+            state.handle_event_action(event_id, action, data).await?;
         }
         ClientToHost::RegisterPushToken { platform, token } => {
             state.storage.register_push_token(platform, token).await?;

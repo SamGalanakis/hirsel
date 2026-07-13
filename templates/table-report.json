@@ -1,0 +1,19 @@
+{
+  "id": "table-report",
+  "title": "Table report",
+  "params_schema": {
+    "title": "string",
+    "summary": "string",
+    "columns": "array",
+    "rows": "array",
+    "caption": "string"
+  },
+  "spec": {
+    "type": "card",
+    "title": "{{title}}",
+    "children": [
+      { "type": "text", "text": "{{summary}}", "tone": "muted" },
+      { "type": "table", "columns": "{{columns}}", "rows": "{{rows}}", "caption": "{{caption}}" }
+    ]
+  }
+}

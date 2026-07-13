@@ -1,0 +1,29 @@
+{
+  "id": "task-progress",
+  "title": "Task progress",
+  "params_schema": {
+    "title": "string",
+    "value": "number",
+    "progress_label": "string",
+    "current_step": "string",
+    "state_label": "string",
+    "state": "string"
+  },
+  "spec": {
+    "type": "card",
+    "title": "{{title}}",
+    "children": [
+      { "type": "progress", "value": "{{value}}", "label": "{{progress_label}}" },
+      {
+        "type": "row",
+        "gap": "sm",
+        "align": "center",
+        "wrap": true,
+        "children": [
+          { "type": "status", "label": "{{state_label}}", "state": "{{state}}" },
+          { "type": "text", "text": "{{current_step}}", "tone": "muted" }
+        ]
+      }
+    ]
+  }
+}

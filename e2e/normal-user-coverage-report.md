@@ -19,7 +19,34 @@ Date: 2026-07-10
 | Turn timeline and tool visibility | `e2e/turn-timeline` | Covered ordered `turn_event` and tool summaries. | New scenarios also exercise `continue_as`, `shell_run`, `subagents_*`, and `pings_resolve` visibility. |
 | Debug resolution surface | `POST /debug/resolve-ping` | Explicit Owner resolution needed a debug gate. | The canonical debug route now exercises it and emits `ping_upsert`. |
 
-Residual lower-priority gaps: worktree hygiene/no redundant sibling enforcement is still only indirectly observed through Agent tool choices, not asserted as a dedicated scenario. Channel-discipline edge cases such as delayed completion choosing Ping vs Chat are partially exercised but not exhaustively scored.
+Residual lower-priority gaps (as of the 2026-07-10 pass): worktree hygiene/no redundant sibling enforcement is still only indirectly observed through Agent tool choices, not asserted as a dedicated scenario. Channel-discipline edge cases such as delayed completion choosing Ping vs Chat are partially exercised but not exhaustively scored. **These are closed by the second pass below.**
+
+## Second Pass (2026-07-13): Behavior & Composite Coverage
+
+The first pass proved the plumbing; the residual gaps it flagged were all *judgment* behaviors —
+which surface an output lands on, how the Agent delegates, when it interrupts. Five real-Agent
+runbooks were authored to assert those directly. They require Codex OAuth (`~/.codex/auth.json`) and
+run `HIRSEL_DRIVER=fake` for deterministic terminal timing; a scripted double cannot exhibit
+surface-choice judgment, so these are run on demand against a live Codex Agent rather than in the
+scripted batch above.
+
+| Scenario | Convention proven (`prompts/agent.md` / ADR) | Binding mechanical gate |
+| --- | --- | --- |
+| `channel-discipline` | Warm result → Chat; cooled result → Ping; acknowledgment → nowhere; never both. | Which surface (Chat row vs Ping) the output landed on; no double-file. |
+| `delegation-hygiene` | Delegation note before spawn; no redundant sibling sessions; one workdir per Sub-agent. | `subagents_prompt` reuse with Sub-agent count staying at 1; ≥2 distinct workdirs on disk. |
+| `interruption-and-reporting` | One `requires_response` Ping when blocked, then move on; single decision Ping, not report+question split. | `requires_response` count == 1; no nag Chat re-asking the open question; single outcome-phrased Ping. |
+| `recovery-judgment` | ADR-0004: no mechanical respawn; re-spawn only what's still wanted; cancelled stays dead. | No auto-respawn after reboot; nudge re-spawns ≤ the KEEP workstream; DROP never resurrected. |
+| `daily-driver` | The whole SCOPE Slice-1 loop composes continuously in one session. | All six sub-gates pass under a **single** `debug/reset`, in order. |
+
+These close the previously-residual worktree-hygiene / redundant-sibling / channel-discipline gaps.
+`delegation-hygiene` also exercises `subagents.prompt` and `subagents.list`, which no prior runbook
+covered.
+
+The `compaction` runbook was also fleshed out: post-compaction recall is now formally documented as
+a **known-fail** driven by upstream lash #8 (the queued-turn path drops the `continue_as` seed on
+frame materialization — see the runbook's "Known limitation"). The runner records that outcome
+without aborting; the visible control event remains the hard mechanical gate. It flips to a real
+pass when lash #8 lands. This is the same queued-turn-path defect class as the qwc claim-renewal bug.
 
 ## Execution Results
 

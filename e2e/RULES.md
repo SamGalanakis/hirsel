@@ -52,6 +52,11 @@ description; runbooks must never synthesize these fields outside the Agent tool 
 - `side-chats` - side-chat loop: seeded open, scoped conversation, resume, conclude, confirm, reply-driven Ping resolution, teardown, and main-Agent reaction.
 - `timers` - timer trigger source registration and wake.
 - `turn-timeline` - live turn timeline ordering and tool event summaries.
+- `channel-discipline` - real-Agent surface choice: a warm result is answered in Chat, a cooled-off result becomes a Ping, a pure acknowledgment is filed nowhere, and nothing is ever double-filed.
+- `delegation-hygiene` - delegation note before the spawn, no redundant sibling sessions (`subagents.list`/`subagents.prompt` reuse), and one working directory per Sub-agent.
+- `interruption-and-reporting` - blocked work sends exactly one `requires_response` Ping then moves on without nagging, and a decision-carrying completion is a single outcome-phrased Ping (never split report + question).
+- `recovery-judgment` - ADR-0004 judgment layer over `abandoned-recovery`: no mechanical respawn after reboot, a nudge re-spawns only what the Agent still wants, and Owner-cancelled work stays dead.
+- `daily-driver` - the whole SCOPE Slice-1 loop (warm Chat exchange → delegation + note → progress → one `requires_response` Ping with Quick Replies → auto-resolving tap → acknowledgement) chained end-to-end in one continuous session with a single reset.
 
 ## Neutral Working Directories
 

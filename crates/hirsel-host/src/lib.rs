@@ -361,9 +361,16 @@ impl AppState {
                     .get("choice")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("event choose requires data.choice"))?;
-                if !event_has_choice(&current.ui, choice) {
-                    anyhow::bail!("unknown event choice: {choice}");
-                }
+                let choice_label = event_choice_label(&current.ui, choice)
+                    .ok_or_else(|| anyhow::anyhow!("unknown event choice: {choice}"))?;
+                let body = match data.get("note") {
+                    Some(note) => format!(
+                        "{choice_label}\n{}",
+                        note.as_str()
+                            .ok_or_else(|| anyhow::anyhow!("event note must be a string"))?
+                    ),
+                    None => choice_label.to_string(),
+                };
                 if let Some(rule) = data.get("record_rule") {
                     let rule = rule
                         .as_str()
@@ -372,7 +379,16 @@ impl AppState {
                         .record_taste_rule(event_id, Some(choice), rule)
                         .await?;
                 }
-                self.storage.resolve_ping(event_id).await?
+                self.submit_owner_message(
+                    format!("event-action-choose-{event_id}"),
+                    body,
+                    Some(current.anchor),
+                    Vec::new(),
+                    Vec::new(),
+                    SendMode::Send,
+                )
+                .await?;
+                self.storage.ping(event_id).await?
             }
             "submit" | "dismiss" => self.storage.resolve_ping(event_id).await?,
             "snooze" => self.storage.reopen_ping(event_id).await?,
@@ -386,7 +402,7 @@ impl AppState {
     }
 }
 
-fn event_has_choice(ui: &serde_json::Value, choice: &str) -> bool {
+fn event_choice_label<'a>(ui: &'a serde_json::Value, choice: &str) -> Option<&'a str> {
     ui.get("children")
         .and_then(serde_json::Value::as_array)
         .into_iter()
@@ -394,11 +410,13 @@ fn event_has_choice(ui: &serde_json::Value, choice: &str) -> bool {
         .find(|node| node.get("type").and_then(serde_json::Value::as_str) == Some("optionList"))
         .and_then(|node| node.get("options"))
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|options| {
-            options
-                .iter()
-                .any(|option| option.get("key").and_then(serde_json::Value::as_str) == Some(choice))
+        .and_then(|options| {
+            options.iter().find(|option| {
+                option.get("key").and_then(serde_json::Value::as_str) == Some(choice)
+            })
         })
+        .and_then(|option| option.get("label"))
+        .and_then(serde_json::Value::as_str)
 }
 
 async fn view_anchor(view: &ViewInstance, storage: &Storage) -> anyhow::Result<Option<u64>> {
@@ -921,7 +939,7 @@ mod tests {
         let state = build_state(test_config(dir.path())).await.unwrap();
         let anchor = state
             .storage
-            .append_chat(ChatAuthor::Owner, "Choose the release", None)
+            .append_chat(ChatAuthor::Agent, "Choose the release", None)
             .await
             .unwrap();
         let event = state
@@ -971,6 +989,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.status, PingStatus::Done);
+        let owner_reply = state
+            .storage
+            .all_chat()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| {
+                message.author == ChatAuthor::Owner && message.r#ref == Some(event.anchor)
+            })
+            .expect("choose should inject an anchor-refed Owner reply");
+        assert_eq!(owner_reply.body, "Stable");
         let taste = state.storage.taste_decisions().await.unwrap();
         assert_eq!(taste.len(), 1);
         assert_eq!(taste[0].event_id, event.id);
@@ -978,6 +1007,66 @@ mod tests {
         assert_eq!(
             taste[0].rule,
             "Default releases to stable unless feedback speed is critical"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_action_choose_appends_note_to_owner_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Choose the storage design", None)
+            .await
+            .unwrap();
+        let event = state
+            .tools
+            .pings_send(
+                "storage-design",
+                "Where should views be stored?",
+                "Choose the durable representation.",
+                anchor.id,
+                true,
+                vec![
+                    hirsel_proto::QuickReply {
+                        value: "Store views in their own table".to_string(),
+                        label: "sqlite views table".to_string(),
+                    },
+                    hirsel_proto::QuickReply {
+                        value: "Store views alongside events".to_string(),
+                        label: "serialized event field".to_string(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let resolved = state
+            .handle_event_action(
+                event.id,
+                "choose".to_string(),
+                json!({
+                    "choice": "A",
+                    "note": "Keep the schema queryable for debugging."
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.status, PingStatus::Done);
+        let owner_reply = state
+            .storage
+            .all_chat()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| {
+                message.author == ChatAuthor::Owner && message.r#ref == Some(event.anchor)
+            })
+            .expect("choose should inject an anchor-refed Owner reply");
+        assert_eq!(
+            owner_reply.body,
+            "sqlite views table\nKeep the schema queryable for debugging."
         );
     }
 

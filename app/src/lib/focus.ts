@@ -39,6 +39,16 @@ function focusablesWithin(panel: HTMLElement): HTMLElement[] {
 // two traps fighting over focus.
 const trapStack: symbol[] = [];
 
+/** Whether any modal overlay / focus trap is currently open (the Side Chat
+ * sheet, its confirm/discard dialogs, the Lightbox, the Processes/Settings
+ * sheets — anything built on `createFocusTrap`). Callers use this to yield Esc:
+ * an Esc meant to dismiss an open overlay must not also trigger a background
+ * action (e.g. the main composer stopping a live agent turn). Derived from the
+ * trap stack so it stays accurate as overlays open and close. */
+export function anyOverlayOpen(): boolean {
+  return trapStack.length > 0;
+}
+
 export interface FocusTrapOptions {
   /** Called when Escape is pressed while this trap is topmost (folds in the
    * per-overlay hand-rolled Escape listeners). */

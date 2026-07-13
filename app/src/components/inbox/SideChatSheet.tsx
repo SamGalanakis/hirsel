@@ -1,7 +1,9 @@
-import { ArrowUp, ChevronDown, ChevronRight, MoreHorizontal, TriangleAlert, X } from "lucide-solid";
+import { ArrowUp, ChevronDown, ChevronRight, MoreHorizontal, Square, TriangleAlert, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { Ping } from "../../protocol";
 import { createFocusTrap, focusMainComposer } from "../../lib/focus";
+import { handleSubmitKeys } from "../../lib/submitKeymap";
+import { toast } from "../../lib/toast";
 import { dispatch, setActiveSideChatSc, state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
@@ -98,6 +100,7 @@ function SideChatPanel(props: { sc: string }) {
   const [discardConfirmOpen, setDiscardConfirmOpen] = createSignal(false);
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(
     MAX_COMPOSER_HEIGHT_PX,
+    `sc:${props.sc}`,
   );
   let panelRef: HTMLDivElement | undefined;
 
@@ -174,19 +177,32 @@ function SideChatPanel(props: { sc: string }) {
       }
       return; // the window-level handler above handles leave/keep-editing
     }
-    if (e.key === "ArrowUp" && value().length === 0) {
-      const last = lastOwnerBody();
-      if (last !== null) {
-        e.preventDefault();
-        setValue(last);
+    // Shared submit keymap: Cmd/Ctrl+Enter always sends (parity with the main
+    // composer), coarse guard, Enter send, ArrowUp recall of the last reply.
+    handleSubmitKeys(e, {
+      value,
+      coarse,
+      onSend: submit,
+      recallLast: lastOwnerBody,
+      onRecall: (text) => {
+        setValue(text);
         caretToEnd();
+      },
+    });
+  }
+
+  // Paste-to-attach isn't supported in a side chat (text-only per ADR-0008's v1
+  // side-send model). Rather than silently swallow a pasted file, tell the Owner
+  // so they know to attach it from the main composer instead.
+  function handlePaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file") {
+        e.preventDefault();
+        toast("Attachments aren't supported in a side chat — send files from the main composer.");
+        return;
       }
-      return;
-    }
-    if (coarse()) return;
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      submit();
     }
   }
 
@@ -197,11 +213,11 @@ function SideChatPanel(props: { sc: string }) {
       data-slot="side-chat-sheet"
       class="flex flex-col bg-background outline-none
         fixed inset-0 z-40 pb-[env(safe-area-inset-bottom)]
-        animate-in fade-in slide-in-from-bottom duration-200
+        motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
         split:relative split:inset-auto split:z-auto
         split:w-[clamp(340px,38vw,440px)] split:shrink-0 split:pb-0
         split:border-l split:border-border
-        split:slide-in-from-bottom-0 split:slide-in-from-right-4"
+        motion-safe:split:slide-in-from-bottom-0 motion-safe:split:slide-in-from-right-4"
     >
       {/* Header: pure orientation now (leave · title · status · ⋯) — Conclude
           has moved to the wrap-up bar above the composer. Single row (density
@@ -414,11 +430,28 @@ function SideChatPanel(props: { sc: string }) {
                 disabled={sideChat()?.drafting}
                 onInput={(e) => setValue(e.currentTarget.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
               />
+              {/* Thinking-guarded Stop — parity with the main Composer, so a side
+                  turn can be cancelled by touch (not only via Esc on desktop). */}
+              <Show when={thinking()}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon"
+                  class="shrink-0 rounded-full"
+                  classList={{ "size-11": coarse() }}
+                  aria-label="Stop the agent"
+                  onClick={() => getClient()?.cancelSideTurn(props.sc)}
+                >
+                  <Square class="size-4 fill-current" />
+                </Button>
+              </Show>
               <Button
                 type="button"
                 size="icon"
                 class="shrink-0 rounded-full"
+                classList={{ "size-11": coarse() }}
                 onClick={submit}
                 disabled={value().trim().length === 0 || sideChat()?.drafting}
                 aria-label="Send"

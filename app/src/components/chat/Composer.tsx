@@ -1,11 +1,19 @@
-import { ArrowUp, AtSign, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
+import { ArrowUp, AtSign, ChevronDown, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
+import { anyOverlayOpen } from "../../lib/focus";
 import { formatBytes, snippet } from "../../lib/format";
+import { handleSubmitKeys } from "../../lib/submitKeymap";
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import { Textarea } from "../ui/textarea";
 import { resolveMentionIds } from "./mentions";
 import { useMentionPicker } from "./useMentionPicker";
@@ -54,8 +62,10 @@ interface Props {
 export function Composer(props: Props) {
   // Shared input mechanics (value signal, coarse-pointer detection, auto-grow)
   // with the Inbox inline ReplyInput.
-  const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX);
+  const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, "main");
   const [sending, setSending] = createSignal(false);
+  const [focused, setFocused] = createSignal(false);
+  const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
   let textareaRef: HTMLTextAreaElement | undefined;
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
@@ -125,40 +135,37 @@ export function Composer(props: Props) {
     // the composer keymap below (Enter=send, Tab=queue, Esc=cancel) is intact
     // whenever the picker is closed.
     if (mentions.handleKeyDown(e)) return;
-    // Esc interrupts the active turn (no-op if idle).
+    // Esc priority is picker → modal/overlay → stop turn. The picker (above)
+    // owns Esc while open; an open overlay owns it next — gate stop-on-Esc on
+    // `!anyOverlayOpen()` so one Esc dismissing a sheet/dialog never *also*
+    // kills a live agent turn behind it; only with nothing else up does Esc
+    // interrupt the turn (no-op if idle).
     if (e.key === "Escape") {
-      if (props.thinking) {
+      if (props.thinking && !anyOverlayOpen()) {
         e.preventDefault();
         props.onStop();
       }
       return;
     }
-    // ArrowUp on an empty composer recalls the last owner message.
-    if (e.key === "ArrowUp" && value().length === 0) {
-      const last = props.getLastOwnerBody();
-      if (last !== null) {
-        e.preventDefault();
-        setValue(last);
-        caretToEnd();
-      }
+    // Shared submit keymap (Cmd/Ctrl+Enter send · coarse guard · Enter send ·
+    // ArrowUp recall). Returns true when it consumed the key.
+    if (
+      handleSubmitKeys(e, {
+        value,
+        coarse,
+        onSend: () => void submit("send"),
+        recallLast: props.getLastOwnerBody,
+        onRecall: (text) => {
+          setValue(text);
+          caretToEnd();
+        },
+      })
+    ) {
       return;
     }
-    // Ctrl/Cmd+Enter always sends, on every device.
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      void submit("send");
-      return;
-    }
-    if (coarse()) return; // phone: Enter stays a newline; send button submits.
-    // Desktop:
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void submit("send");
-      return;
-    }
-    // Tab with a non-empty composer queues a next-turn message; empty Tab keeps
-    // normal focus movement.
-    if (e.key === "Tab" && !e.shiftKey && value().trim().length > 0) {
+    // Tab with a non-empty composer queues a next-turn message (desktop only);
+    // empty Tab keeps normal focus movement.
+    if (!coarse() && e.key === "Tab" && !e.shiftKey && value().trim().length > 0) {
       e.preventDefault();
       void submit("next_turn");
     }
@@ -378,6 +385,7 @@ export function Composer(props: Props) {
           variant="ghost"
           size="icon"
           class="shrink-0 rounded-full text-muted-foreground"
+          classList={{ "size-11": coarse() }}
           aria-label="Attach files"
           onClick={() => fileInputRef?.click()}
         >
@@ -411,7 +419,11 @@ export function Composer(props: Props) {
             }
           }}
           onClick={() => mentions.sync()}
-          onBlur={() => mentions.close()}
+          onFocus={() => setFocused(true)}
+          onBlur={() => {
+            setFocused(false);
+            mentions.close();
+          }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
         />
@@ -421,37 +433,78 @@ export function Composer(props: Props) {
             variant="secondary"
             size="icon"
             class="shrink-0 rounded-full"
+            classList={{ "size-11": coarse() }}
             aria-label="Stop the agent"
             onClick={() => props.onStop()}
           >
             <Square class="size-4 fill-current" />
           </Button>
         </Show>
-        <Button
-          type="button"
-          size="icon"
-          class="shrink-0 rounded-full"
-          onPointerDown={onSendPointerDown}
-          onPointerUp={onSendPointerUp}
-          onPointerLeave={onSendPointerUp}
-          onClick={onSendClick}
-          disabled={!canSend() || sending()}
-          aria-label="Send"
-        >
-          <Show when={sending()} fallback={<ArrowUp class="size-5" />}>
-            <LoaderCircle class="size-5 animate-spin" />
-          </Show>
-        </Button>
+        {/* Send + a labeled overflow for the otherwise-hidden queue action. The
+            round Send stays the primary target (tap = send; long-press on touch
+            still queues); the small caret exposes "Queue for next turn" — the
+            desktop Tab shortcut — as a discoverable, labeled affordance so it is
+            reachable by touch and by anyone who never learns the gesture. */}
+        <div class="flex shrink-0 items-end gap-0.5">
+          <Button
+            type="button"
+            size="icon"
+            class="shrink-0 rounded-full"
+            classList={{ "size-11": coarse() }}
+            onPointerDown={onSendPointerDown}
+            onPointerUp={onSendPointerUp}
+            onPointerLeave={onSendPointerUp}
+            onClick={onSendClick}
+            disabled={!canSend() || sending()}
+            aria-label="Send"
+          >
+            <Show when={sending()} fallback={<ArrowUp class="size-5" />}>
+              <LoaderCircle class="size-5 animate-spin" />
+            </Show>
+          </Button>
+          <DropdownMenu placement="top-end">
+            <DropdownMenuTrigger
+              class="flex shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+              classList={{ "size-11": coarse(), "size-7": !coarse() }}
+              aria-label="More send options"
+              disabled={!canSend() || sending()}
+            >
+              <ChevronDown class="size-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem onSelect={() => void submit("send")}>Send now</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void submit("next_turn")}>
+                Queue for next turn
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
-      {/* Subtle desktop keyboard hint. */}
-      <Show when={!coarse()}>
-        <div class="mt-1 px-1 text-[0.66rem] text-muted-foreground/70">
-          <span class="font-medium">Enter</span> send ·{" "}
-          <span class="font-medium">Shift+Enter</span> newline ·{" "}
-          <span class="font-medium">Tab</span> queue ·{" "}
-          <span class="font-medium">Esc</span> stop ·{" "}
-          <span class="font-medium">@</span> mention
+      {/* Bottom hint row: the keyboard hint surfaces only while the composer is
+          focused (not standing chrome), and the offline cue mirrors the Side
+          Chat wrap-up bar's "reconnect" pattern. The row only takes vertical
+          space when it has something to say. */}
+      <Show when={(focused() && !coarse()) || offline()}>
+        <div class="mt-1 flex items-center gap-2 px-1">
+          <Show when={focused() && !coarse()}>
+            <div class="min-w-0 flex-1 truncate text-[0.66rem] text-muted-foreground/70">
+              <span class="font-medium">Enter</span> send ·{" "}
+              <span class="font-medium">Shift+Enter</span> newline ·{" "}
+              <span class="font-medium">Tab</span> queue ·{" "}
+              <span class="font-medium">Esc</span> stop ·{" "}
+              <span class="font-medium">@</span> mention
+            </div>
+          </Show>
+          <Show when={offline()}>
+            <span class="ml-auto flex shrink-0 items-center gap-1 text-[0.66rem] text-status-attention">
+              <span
+                class="size-1.5 animate-pulse rounded-full bg-status-attention"
+                aria-hidden="true"
+              />
+              offline · will queue
+            </span>
+          </Show>
         </div>
       </Show>
       </div>

@@ -379,7 +379,8 @@ export function ChatView() {
           h-12 top-bar height + border-b with the nav-rail brand block and the
           Pings/inspector pane headers, so one continuous hairline runs across
           all three panes and the "what is my agent doing" datum has a persistent
-          home. Right side is reserved (kept clean). Phone is untouched. */}
+          home. Right side carries the ModelChip + Canvas reopen affordance.
+          Phone is untouched. */}
       <header class="hidden h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 rail:flex">
         <AgentStatus />
         <div class="flex min-w-0 shrink items-center gap-2">

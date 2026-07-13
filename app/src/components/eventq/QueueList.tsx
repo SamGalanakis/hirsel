@@ -134,11 +134,12 @@ export function QueueList(props: {
             />
           )}
         </For>
-        {/* The inbox-zero end state as the list's tail, so "you're at the
-            bottom" reads in the index too and is one click away. */}
+        {/* The end page as the list's tail, so "you're at the bottom" reads in
+            the index too and is one click away. Labelled by the same predicate
+            the pager uses: it only says "clear" when nothing is open. */}
         <button
           type="button"
-          aria-label="Jump to the cleared queue"
+          aria-label="Jump to the end of the queue"
           class={cn(
             "mt-0.5 flex w-full items-center gap-2.5 rounded-md border border-transparent px-2 py-1.5 text-left text-xs transition-colors",
             "hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
@@ -150,7 +151,9 @@ export function QueueList(props: {
             class={cn("size-3.5 shrink-0", props.openCount === 0 ? "text-status-success" : "text-muted-foreground/60")}
             aria-hidden="true"
           />
-          <span class="text-muted-foreground">Queue clear</span>
+          <span class="text-muted-foreground">
+            {props.openCount === 0 ? "Queue clear" : "End of the queue"}
+          </span>
         </button>
       </div>
     </aside>

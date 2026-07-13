@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { awarenessToAutoRead, nextOpenIndex } from "./queue";
+import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 import type { EventItem } from "../../protocol";
 
 function ev(overrides: Partial<EventItem> = {}): EventItem {
@@ -40,18 +40,32 @@ describe("nextOpenIndex", () => {
   });
 });
 
-describe("awarenessToAutoRead", () => {
-  it("returns unread awareness strictly before the cursor, never judgments", () => {
+describe("firstOpenIndex", () => {
+  it("anchors to the first still-open judgment, else 0", () => {
     const ordered = [
-      ev({ id: 1 }), // judgment
-      ev({ id: 2, kind: "summary", requires_response: false, read: false }),
-      ev({ id: 3, kind: "info", requires_response: false, read: true }),
-      ev({ id: 4, kind: "info", requires_response: false, read: false }),
+      ev({ id: 1, kind: "summary", requires_response: false }),
+      ev({ id: 2 }),
+      ev({ id: 3 }),
     ];
-    // Cursor at index 3: events 0..2 are behind. Judgment (0) excluded; summary
-    // (1) unread → included; info (2) already read → excluded.
-    expect(awarenessToAutoRead(ordered, 3).map((e) => e.id)).toEqual([2]);
-    // Nothing behind the first page.
-    expect(awarenessToAutoRead(ordered, 0)).toEqual([]);
+    // Event 2 is the first open judgment.
+    expect(firstOpenIndex(ordered, [])).toBe(1);
+    // Event 2 optimistically decided → the next open one.
+    expect(firstOpenIndex(ordered, [2])).toBe(2);
+    // Nothing open → the top of the queue, never a wild offset.
+    expect(firstOpenIndex(ordered, [2, 3])).toBe(0);
+    expect(firstOpenIndex([], [])).toBe(0);
+  });
+});
+
+describe("shouldMarkReadOnLeave", () => {
+  it("marks only unread awareness — never judgments, read cards, or missing events", () => {
+    expect(shouldMarkReadOnLeave(ev({ kind: "summary", requires_response: false, read: false }))).toBe(true);
+    expect(shouldMarkReadOnLeave(ev({ kind: "info", requires_response: false, read: false }))).toBe(true);
+    // A judgment is decided, not "read".
+    expect(shouldMarkReadOnLeave(ev({ kind: "judgment" }))).toBe(false);
+    // Already read → nothing to do.
+    expect(shouldMarkReadOnLeave(ev({ kind: "summary", requires_response: false, read: true }))).toBe(false);
+    // The viewed event vanished in a snapshot swap → never marks.
+    expect(shouldMarkReadOnLeave(undefined)).toBe(false);
   });
 });

@@ -136,6 +136,14 @@ export interface AppState {
    * host's done `event_upsert` supersedes it (the reducer prunes the id). Undo
    * drops the id back off. Bounded. */
   eventDecideOverrides: number[];
+  /** Bumped every time `hello_ok` replaces the event set wholesale (connect and
+   * every resync). The queue scroller keys its session bookkeeping on this: a
+   * snapshot swap must re-anchor the viewport (the browser-preserved scroll
+   * offset is meaningless against a new set) and reset per-session state
+   * (snoozed ids, viewed-page tracking) instead of letting it leak across —
+   * the DEV mock-seed → hello_ok sequence made that leak visible as phantom
+   * decided/read tallies. Incremental `event_upsert`s do NOT bump it. */
+  eventsSnapshotSeq: number;
   agentActivity: AgentActivity;
   connection: ConnectionStatus;
   lastSeenMsgId: number | null;
@@ -293,6 +301,7 @@ export function initialState(): AppState {
     pings: [],
     events: [],
     eventDecideOverrides: [],
+    eventsSnapshotSeq: 0,
     agentActivity: { state: "idle", text: null },
     connection: "connecting",
     lastSeenMsgId: null,

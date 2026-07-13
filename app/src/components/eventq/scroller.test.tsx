@@ -98,9 +98,26 @@ describe("EventScroller — the vertical event queue home", () => {
     expect(toast.toasts().length).toBe(0);
   });
 
-  it("renders the inbox-zero clear page and opens the phone peek overview", async () => {
+  it("keeps the end page honest and flips it to Queue clear only when the pager agrees", async () => {
     const { screen, reader } = await setup([judgment(9, "A judgment")]);
-    expect(within(reader).getByText("Queue clear")).toBeTruthy();
+    const end = reader.querySelector('[data-slot="queue-end"]') as HTMLElement;
+    // With an open judgment the end page NEVER claims clear — it derives from
+    // the same openCount predicate as the pager's red pill.
+    expect(end.textContent).toContain("End of the queue");
+    expect(end.textContent).toContain("1 judgment above still needs you");
+    expect(end.textContent).not.toContain("Queue clear");
+    // Decide it: both surfaces flip together — pager "all clear", page "Queue
+    // clear" with an honest 0-waiting tally.
+    fireEvent.click(screen.getByRole("button", { name: /Pick A for 9/ }));
+    await waitFor(() => expect(end.textContent).toContain("Queue clear"));
+    const need = screen.container.querySelector('[data-slot="pager-need"]') as HTMLElement;
+    expect(need.textContent).toBe("all clear");
+    expect(end.textContent).toContain("1 decided");
+    expect(end.textContent).toContain("0 waiting");
+  });
+
+  it("opens the phone peek overview from the pager", async () => {
+    const { screen } = await setup([judgment(9, "A judgment")]);
     // Tap the pager to peek the whole queue.
     fireEvent.click(screen.getByLabelText("Open queue overview"));
     const peek = await waitFor(
@@ -150,5 +167,87 @@ describe("EventScroller — the vertical event queue home", () => {
     reader.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
     expect(toast.toasts().some((t) => /Snoozed/.test(t.message))).toBe(true);
     expect(toast.toasts().some((t) => t.action?.label === "Undo")).toBe(true);
+  });
+});
+
+describe("EventScroller — hello_ok snapshot replacement (live-stack regression)", () => {
+  function summaryEvent(id: number, text: string): EventItem {
+    return {
+      id,
+      kind: "summary",
+      source: { kind: "scheduled", ref: "digest" },
+      name: `@s${id}`,
+      description: text,
+      requires_response: false,
+      quick_replies: [],
+      status: "open",
+      read: false,
+      anchor: 0,
+      ts: `2026-07-13T0${id}:30:00Z`,
+      ui: [{ type: "text", text }],
+    };
+  }
+
+  it("re-anchors to the first needs-you card with zero decided/read residue", async () => {
+    // Mirror the live sequence exactly: mount against an EMPTY store — the DEV
+    // mock seed fires — then the real host's hello_ok replaces the set with one
+    // open unread judgment and one open unread summary ~a moment later.
+    const store = await import("../../store/store");
+    vi.doMock("../../ws/client", () => ({ getClient: () => ({ sendEventAction: () => {} }) }));
+    const { EventScroller } = await import("./EventScroller");
+    const screen = render(() => <EventScroller />);
+    // The DEV mocks are on screen (the pre-cutover demo pass).
+    expect(store.state.events.length).toBeGreaterThan(0);
+
+    store.dispatch({
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 0,
+        messages: [],
+        pings: [],
+        events: [judgment(1, "Persist the canvas?"), summaryEvent(2, "Morning digest")],
+      },
+    });
+
+    // (a) The visible page is the JUDGMENT — the first needs-you card — not the
+    // clear page the browser-preserved offset used to land on.
+    await waitFor(() => {
+      const pos = screen.container.querySelector('[data-slot="pager-pos"]') as HTMLElement;
+      expect(pos.textContent).toBe("1 of 2");
+    });
+    // (b) The swap left no session residue: nothing decided, nothing read — the
+    // mock pass and the initial jump never count as "passed" pages.
+    expect(store.state.eventDecideOverrides).toEqual([]);
+    expect(store.state.events.map((e) => e.id).sort()).toEqual([1, 2]);
+    expect(store.state.events.every((e) => !e.read)).toBe(true);
+    // (c) The pager and the end page derive from the SAME predicate and agree:
+    // one open judgment → the red "1 need you", and the end page says so too —
+    // no "Queue clear", no phantom decided/read chips.
+    const need = screen.container.querySelector('[data-slot="pager-need"]') as HTMLElement;
+    expect(need.textContent).toBe("1 need you");
+    const end = screen.container.querySelector('[data-slot="queue-end"]') as HTMLElement;
+    expect(end.textContent).toContain("End of the queue");
+    expect(end.textContent).toContain("1 judgment above still needs you");
+    expect(end.textContent).not.toContain("Queue clear");
+    expect(end.textContent).not.toContain("decided");
+    expect(end.textContent).not.toContain("read");
+  });
+
+  it("marks awareness read only when the Owner actually leaves its page", async () => {
+    const { store, reader } = await setup([judgment(1, "One")]);
+    // Append a summary AFTER mount (an event_upsert, not a snapshot swap).
+    store.dispatch({
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: summaryEvent(2, "Digest") },
+    });
+    expect(store.state.events.find((e) => e.id === 2)?.read).toBe(false);
+    reader.focus();
+    // Page down onto the summary: it is CENTRED, not passed — still unread.
+    reader.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true }));
+    expect(store.state.events.find((e) => e.id === 2)?.read).toBe(false);
+    // Page past it: the Owner actually viewed it and left — now it reads.
+    reader.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true }));
+    await waitFor(() => expect(store.state.events.find((e) => e.id === 2)?.read).toBe(true));
   });
 });

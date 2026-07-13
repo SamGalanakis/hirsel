@@ -349,6 +349,10 @@ export function reduce(state: AppState, action: Action): AppState {
         eventDecideOverrides: state.eventDecideOverrides.filter((id) =>
           (action.payload.events ?? []).some((e) => e.id === id),
         ),
+        // Signal the wholesale event-set swap to the queue scroller so it
+        // re-anchors its viewport and drops per-session bookkeeping (see
+        // AppState.eventsSnapshotSeq).
+        eventsSnapshotSeq: state.eventsSnapshotSeq + 1,
         // Recompute unread against the authoritative ping set: drop client-only
         // "mark unread" overrides for pings the snapshot no longer contains, so a
         // resync leaves no stale unread residue.

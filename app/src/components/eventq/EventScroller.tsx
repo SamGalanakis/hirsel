@@ -12,8 +12,8 @@
 // reader). Chat + the inspectors are drill-ins reached from a judgment's Discuss
 // or the NavRail; nothing here can recolor a card — it only pages, decides, and
 // advances.
-import { ArrowRight, Check, ChevronDown, CircleCheck, List, MessageSquare } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { ArrowRight, ArrowUp, Check, ChevronDown, CircleCheck, List, MessageSquare } from "lucide-solid";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
 import { DECIDE_UNDO_WINDOW_MS, decideEventWithUndo, undoDecide } from "../../lib/event-decide";
@@ -30,7 +30,7 @@ import {
 import { dispatch, goToChat, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { QueueList, QueueRow } from "./QueueList";
-import { awarenessToAutoRead, nextOpenIndex } from "./queue";
+import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 
 /** How long the decided card lingers (confirmation + Undo reachable) before the
  * pager auto-advances to the next open event. Undo within the window cancels it
@@ -102,6 +102,12 @@ export function EventScroller() {
   );
   const total = () => ordered().length;
   const openCount = () => openJudgmentCount(state.events, state.eventDecideOverrides);
+  // The end-page "decided" tally: DECIDED JUDGMENTS only — the exact complement
+  // of `openCount` over the judgment set, so the two can never disagree (the
+  // old `total - openCount` counted open awareness as "decided"). */
+  const decidedJudgmentCount = () =>
+    ordered().filter((e) => e.kind === "judgment" && isEventResolved(e, state.eventDecideOverrides))
+      .length;
   const onClear = () => current() >= total();
   // The id of the event currently centred in the reader — highlights its row in
   // the standing list / peek. Undefined on the clear page.
@@ -111,13 +117,16 @@ export function EventScroller() {
     return scrollerRef?.clientHeight || 0;
   }
 
-  function goTo(idx: number): void {
+  function goTo(idx: number, opts?: { instant?: boolean }): void {
     const max = total(); // clear page = total
     const clamped = Math.max(0, Math.min(idx, max));
     const h = pageHeight();
     // jsdom has no layout (h === 0): fall back to just tracking the index.
     if (h > 0 && scrollerRef) {
-      scrollerRef.scrollTo({ top: clamped * h, behavior: prefersReduced() ? "auto" : "smooth" });
+      // `instant` is the store-driven re-anchor (snapshot swap): it must not
+      // animate through pages the Owner never chose to pass.
+      const behavior = opts?.instant || prefersReduced() ? ("auto" as const) : ("smooth" as const);
+      scrollerRef.scrollTo({ top: clamped * h, behavior });
     }
     setCurrent(clamped);
   }
@@ -136,13 +145,65 @@ export function EventScroller() {
     });
   }
 
-  // Auto-read runs off the tracked index (works in tests that set current
-  // directly too): any awareness event now behind the cursor and still unread
-  // gets an optimistic read flip.
+  // ---- Session bookkeeping vs. snapshot swaps (regression fix) --------------
+  // The id of the page the Owner is ACTUALLY viewing — the only page auto-read
+  // may ever mark. Kept as an id (not an index) so a set replacement can never
+  // silently re-point it at a different event.
+  let viewedId: number | null = null;
+
+  // Whether the queue currently has any events — a memo so the reposition
+  // effect below re-runs only when this FLIPS (first data arriving), not on
+  // every incremental change to the set.
+  const hasEvents = createMemo(() => ordered().length > 0);
+
+  // Re-anchor on snapshot replacement (every `hello_ok`) and on first data.
+  // The pager mounts against an empty store (only the clear page exists), and
+  // the browser's snap-target tracking / preserved scroll offset then follows
+  // that surviving clear-page node as real pages are inserted above it — which
+  // is how the live stack landed on "Queue clear" with open events. The event
+  // set swap makes the old offset meaningless, so position is re-derived
+  // explicitly: follow the viewed card if it survived (a same-set resync keeps
+  // the Owner's place), else land on the first needs-you card. Session
+  // bookkeeping (snoozed ids, view tracking) is pruned to the surviving set so
+  // nothing from a previous set (e.g. the DEV mocks) leaks into tallies.
   createEffect(() => {
-    for (const e of awarenessToAutoRead(ordered(), current())) {
-      dispatch({ type: "event_read_local", eventId: e.id });
+    void state.eventsSnapshotSeq; // track: bumps on every hello_ok
+    if (!hasEvents()) {
+      // No events (pre-data / emptied set): the clear page is the only page.
+      viewedId = null;
+      return;
     }
+    untrack(() => {
+      setSnoozed((prev) => {
+        const surviving = new Set([...prev].filter((id) => state.events.some((e) => e.id === id)));
+        return surviving.size === prev.size ? prev : surviving;
+      });
+      const list = ordered();
+      const kept = viewedId !== null ? list.findIndex((e) => e.id === viewedId) : -1;
+      const target = kept !== -1 ? kept : firstOpenIndex(list, state.eventDecideOverrides);
+      viewedId = list[target]?.id ?? null;
+      goTo(target, { instant: true });
+    });
+  });
+
+  // Awareness auto-read, leave-based: ONLY the page the Owner actually viewed
+  // (it was the current page) is marked read, at the moment they navigate off
+  // it — never pages skipped by a jump, and never pages an event-set swap
+  // shuffled underneath the cursor (the reposition effect above resets
+  // `viewedId` first, so a store-driven index change cannot convert into a
+  // read). Tracks only `current()`.
+  createEffect(() => {
+    const idx = current();
+    untrack(() => {
+      const curId = ordered()[idx]?.id ?? null;
+      if (viewedId !== null && viewedId !== curId) {
+        const prev = state.events.find((e) => e.id === viewedId);
+        if (shouldMarkReadOnLeave(prev)) {
+          dispatch({ type: "event_read_local", eventId: prev.id });
+        }
+      }
+      viewedId = curId;
+    });
   });
 
   function decide(ev: EventItem, action: string, data: unknown): void {
@@ -330,7 +391,14 @@ export function EventScroller() {
           >
             <div class="flex items-center gap-2.5 px-4 py-2">
               <span class="text-xs font-semibold tabular-nums text-muted-foreground" data-slot="pager-pos">
-                {onClear() ? "Queue clear" : `${current() + 1} of ${total()}`}
+                {/* The end page only claims "clear" when the same predicate the
+                    red pill uses agrees — with anything still open it is just
+                    the end of the queue, never a contradiction. */}
+                {onClear()
+                  ? openCount() > 0
+                    ? "End of queue"
+                    : "Queue clear"
+                  : `${current() + 1} of ${total()}`}
               </span>
               <span class="flex-1" />
               <span
@@ -357,10 +425,14 @@ export function EventScroller() {
             </div>
           </button>
 
-          {/* The scroll-snap pager. */}
+          {/* The scroll-snap pager. `overflow-anchor: none`: position is OWNED
+              by the pager (goTo / the snapshot re-anchor effect) — the browser
+              must never adjust the offset itself when the event set changes
+              under the viewport (scroll anchoring + mandatory snap otherwise
+              glue the view to the surviving clear page on a hello_ok swap). */}
           <div
             ref={setScrollerRef}
-            class="absolute inset-0 snap-y snap-mandatory overflow-y-auto overflow-x-hidden scroll-smooth [scrollbar-width:none] motion-reduce:scroll-auto"
+            class="absolute inset-0 snap-y snap-mandatory overflow-y-auto overflow-x-hidden scroll-smooth [overflow-anchor:none] [scrollbar-width:none] motion-reduce:scroll-auto"
             onScroll={onScroll}
           >
             <For each={ordered()}>
@@ -377,7 +449,15 @@ export function EventScroller() {
                 />
               )}
             </For>
-            <ClearPage decided={total() - openCount()} awarenessRead={ordered().filter((e) => e.kind !== "judgment" && e.read).length} />
+            <ClearPage
+              decided={decidedJudgmentCount()}
+              awarenessRead={ordered().filter((e) => e.kind !== "judgment" && e.read).length}
+              openCount={openCount()}
+              onJumpBack={() => {
+                goTo(firstOpenIndex(ordered(), state.eventDecideOverrides));
+                rootRef?.focus();
+              }}
+            />
           </div>
 
           {/* The phone peek overlay — the whole-queue index on phone (the
@@ -619,34 +699,68 @@ function DecidedStrip(props: { ev: EventItem; onUndo: (id: number) => void }) {
   );
 }
 
-/** The inbox-zero end state — the peak-end reward. Calm, no confetti. */
-function ClearPage(props: { decided: number; awarenessRead: number }) {
+/** The end of the queue. Truly clear (nothing open) → the inbox-zero peak-end
+ * reward, calm, no confetti. Anything still open → an honest "end, not clear"
+ * state that AGREES with the pager's red pill (same `openCount` predicate) and
+ * offers the way back up — the page never contradicts the chrome above it. */
+function ClearPage(props: {
+  decided: number;
+  awarenessRead: number;
+  openCount: number;
+  onJumpBack: () => void;
+}) {
   return (
-    <div class="h-full snap-start snap-always">
-      <div class="flex h-full flex-col items-center justify-center px-6 pb-11 pt-14 text-center">
-        <span class="mb-4 grid size-14 place-items-center rounded-full border border-status-success/25 bg-status-success/12 text-status-success">
-          <CircleCheck class="size-7" aria-hidden="true" />
-        </span>
-        <div class="text-base font-semibold tracking-[-0.005em] text-foreground">Queue clear</div>
-        <p class="mx-auto mt-2 max-w-[16rem] text-xs leading-relaxed text-muted-foreground">
-          Everything that needed you is decided and posted back. The fleet has what it was waiting on.
-        </p>
-        <div class="mt-4 flex flex-wrap justify-center gap-2">
-          <Show when={props.decided > 0}>
-            <span class="rounded-full bg-status-success/12 px-2 py-0.5 text-[0.68rem] font-semibold text-status-success">
-              {props.decided} decided
+    <div class="h-full snap-start snap-always" data-slot="queue-end">
+      <Show
+        when={props.openCount === 0}
+        fallback={
+          <div class="flex h-full flex-col items-center justify-center px-6 pb-11 pt-14 text-center">
+            <span class="mb-4 grid size-14 place-items-center rounded-full border border-border bg-muted/60 text-muted-foreground">
+              <ArrowUp class="size-6" aria-hidden="true" />
             </span>
-          </Show>
-          <Show when={props.awarenessRead > 0}>
-            <span class="rounded-full bg-muted px-2 py-0.5 text-[0.68rem] font-semibold text-muted-foreground">
-              {props.awarenessRead} read
-            </span>
-          </Show>
-          <span class="rounded-full bg-primary/[0.12] px-2 py-0.5 text-[0.68rem] font-semibold text-primary">
-            0 waiting
+            <div class="text-base font-semibold tracking-[-0.005em] text-foreground">
+              End of the queue
+            </div>
+            <p class="mx-auto mt-2 max-w-[16rem] text-xs leading-relaxed text-muted-foreground">
+              {props.openCount === 1
+                ? "1 judgment above still needs you."
+                : `${props.openCount} judgments above still need you.`}
+            </p>
+            <button
+              type="button"
+              class="mt-4 inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3.5 text-xs font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              onClick={props.onJumpBack}
+            >
+              <ArrowUp class="size-3.5" aria-hidden="true" /> Back to the first
+            </button>
+          </div>
+        }
+      >
+        <div class="flex h-full flex-col items-center justify-center px-6 pb-11 pt-14 text-center">
+          <span class="mb-4 grid size-14 place-items-center rounded-full border border-status-success/25 bg-status-success/12 text-status-success">
+            <CircleCheck class="size-7" aria-hidden="true" />
           </span>
+          <div class="text-base font-semibold tracking-[-0.005em] text-foreground">Queue clear</div>
+          <p class="mx-auto mt-2 max-w-[16rem] text-xs leading-relaxed text-muted-foreground">
+            Everything that needed you is decided and posted back. The fleet has what it was waiting on.
+          </p>
+          <div class="mt-4 flex flex-wrap justify-center gap-2">
+            <Show when={props.decided > 0}>
+              <span class="rounded-full bg-status-success/12 px-2 py-0.5 text-[0.68rem] font-semibold text-status-success">
+                {props.decided} decided
+              </span>
+            </Show>
+            <Show when={props.awarenessRead > 0}>
+              <span class="rounded-full bg-muted px-2 py-0.5 text-[0.68rem] font-semibold text-muted-foreground">
+                {props.awarenessRead} read
+              </span>
+            </Show>
+            <span class="rounded-full bg-primary/[0.12] px-2 py-0.5 text-[0.68rem] font-semibold text-primary">
+              {props.openCount} waiting
+            </span>
+          </div>
         </div>
-      </div>
+      </Show>
     </div>
   );
 }

@@ -35,6 +35,7 @@ pub struct ToolSuite {
     broadcast_log: BroadcastLog,
     processes: ProcessStore,
     pushes: crate::push::PushGateway,
+    views: crate::templates::ViewManager,
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
@@ -153,6 +154,7 @@ impl ToolSuite {
         broadcast_log: BroadcastLog,
         processes: ProcessStore,
         pushes: crate::push::PushGateway,
+        views: crate::templates::ViewManager,
     ) -> Self {
         Self {
             config,
@@ -161,6 +163,7 @@ impl ToolSuite {
             broadcast_log,
             processes,
             pushes,
+            views,
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
@@ -243,6 +246,38 @@ impl ToolSuite {
             self.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
         }
         Ok(ping)
+    }
+
+    pub async fn views_show(
+        &self,
+        template_id: Option<String>,
+        spec: Option<serde_json::Value>,
+        params: Option<serde_json::Value>,
+        instance_id: Option<String>,
+        placement: String,
+    ) -> anyhow::Result<hirsel_proto::ViewInstance> {
+        self.views
+            .show(template_id, spec, params, instance_id, placement)
+            .await
+    }
+
+    pub async fn views_update(
+        &self,
+        instance_id: &str,
+        params: Option<serde_json::Value>,
+        patch: Option<serde_json::Value>,
+    ) -> anyhow::Result<hirsel_proto::ViewInstance> {
+        self.views.update(instance_id, params, patch).await
+    }
+
+    pub async fn views_clear(&self, instance_id: &str) -> anyhow::Result<()> {
+        self.views.clear(instance_id).await
+    }
+
+    pub async fn views_list_templates(
+        &self,
+    ) -> anyhow::Result<Vec<crate::templates::TemplateSummary>> {
+        self.views.templates().list().await
     }
 
     fn broadcast(&self, event: HostToClient) {
@@ -563,6 +598,16 @@ mod tests {
             .unwrap();
         let (broadcaster, _) = broadcast::channel(16);
         let (pushes, recording) = crate::push::PushGateway::recording(storage.clone());
+        let broadcast_log = BroadcastLog::default();
+        let templates =
+            crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
+                .await
+                .unwrap();
+        let views = crate::templates::ViewManager::new(
+            templates,
+            broadcaster.clone(),
+            broadcast_log.clone(),
+        );
         let tools = ToolSuite::new(
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
@@ -570,9 +615,10 @@ mod tests {
             },
             storage.clone(),
             broadcaster,
-            BroadcastLog::default(),
+            broadcast_log,
             ProcessStore::default(),
             pushes,
+            views,
         );
 
         let requiring_response = tools
@@ -654,6 +700,16 @@ mod tests {
         let storage = Storage::open(dir.path()).await.unwrap();
         let (broadcaster, _) = broadcast::channel(128);
         let (pushes, _) = crate::push::PushGateway::recording(storage.clone());
+        let broadcast_log = BroadcastLog::default();
+        let templates =
+            crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
+                .await
+                .unwrap();
+        let views = crate::templates::ViewManager::new(
+            templates,
+            broadcaster.clone(),
+            broadcast_log.clone(),
+        );
         let tools = ToolSuite::new(
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
@@ -661,9 +717,10 @@ mod tests {
             },
             storage.clone(),
             broadcaster,
-            BroadcastLog::default(),
+            broadcast_log,
             ProcessStore::default(),
             pushes,
+            views,
         );
         let spawned = tools
             .subagents_spawn(

@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hirsel_proto::{Blob, ChatMessage, HostToClient, Ping, PushPlatform, SendMode};
+use hirsel_proto::{Blob, ChatMessage, HostToClient, Ping, PushPlatform, SendMode, ViewInstance};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,6 +40,9 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
         .route("/debug/create-monitor", post(create_monitor))
+        .route("/debug/show-view", post(show_view))
+        .route("/debug/views", get(views))
+        .route("/debug/view-event", post(view_event))
         .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
         .route("/debug/pings", get(pings))
@@ -148,6 +151,25 @@ struct CreateMonitorRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ShowViewRequest {
+    #[serde(default)]
+    template_id: Option<String>,
+    #[serde(default)]
+    spec: Option<serde_json::Value>,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+    placement: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewEventRequest {
+    instance_id: String,
+    action: String,
+    #[serde(default)]
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 struct PairRequest {
     #[serde(alias = "label")]
     device_label: String,
@@ -220,6 +242,11 @@ struct BroadcastsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ViewsResponse {
+    views: Vec<ViewInstance>,
+}
+
+#[derive(Debug, Serialize)]
 struct HealthResponse {
     ok: bool,
     latest_msg_id: u64,
@@ -263,9 +290,47 @@ async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
     state.side_chats.discard_all().await;
     state.storage.reset().await?;
     state.processes.reset()?;
+    state.views.clear_all().await;
     state.broadcast_log.clear();
     state.pushes.clear_recorded_pushes();
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn show_view(
+    State(state): State<AppState>,
+    Json(request): Json<ShowViewRequest>,
+) -> Result<Json<ViewInstance>, DebugError> {
+    Ok(Json(
+        state
+            .views
+            .show(
+                request.template_id,
+                request.spec,
+                request.params,
+                None,
+                request.placement,
+            )
+            .await?,
+    ))
+}
+
+async fn views(State(state): State<AppState>) -> Json<ViewsResponse> {
+    Json(ViewsResponse {
+        views: state.views.snapshot().await,
+    })
+}
+
+async fn view_event(
+    State(state): State<AppState>,
+    Json(request): Json<ViewEventRequest>,
+) -> Result<Json<serde_json::Value>, DebugError> {
+    let submission = state
+        .handle_view_event(request.instance_id, request.action, request.data)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "client_id": submission.client_id,
+        "message": submission.message,
+    })))
 }
 
 async fn open_side_chat(

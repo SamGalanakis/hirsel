@@ -32,6 +32,7 @@ pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub model: String,
     pub data_dir: PathBuf,
+    pub templates_dir: PathBuf,
     pub driver: DriverMode,
     pub fake_fixture: Option<PathBuf>,
     pub listen: SocketAddr,
@@ -78,6 +79,9 @@ impl Config {
         let data_dir = env::var_os("HIRSEL_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("./data"));
+        let templates_dir = env::var_os("HIRSEL_TEMPLATES_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("./templates"));
         let driver = match env::var("HIRSEL_DRIVER")
             .unwrap_or_else(|_| "real".to_string())
             .as_str()
@@ -106,6 +110,7 @@ impl Config {
             anthropic_api_key,
             model,
             data_dir,
+            templates_dir,
             driver,
             fake_fixture,
             listen,

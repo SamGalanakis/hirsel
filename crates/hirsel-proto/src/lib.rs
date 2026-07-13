@@ -75,6 +75,13 @@ pub struct SideChatSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewInstance {
+    pub instance_id: String,
+    pub placement: String,
+    pub spec: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickReply {
     pub value: String,
     pub label: String,
@@ -230,6 +237,12 @@ pub enum ClientToHost {
     DiscardSideChat {
         sc: String,
     },
+    ViewEvent {
+        instance_id: String,
+        action: String,
+        #[serde(default)]
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +300,8 @@ pub enum HostToClient {
         /// `#[serde(default)]` keeps older hosts/snapshots that omit it parseable.
         #[serde(default)]
         host_version: String,
+        #[serde(default)]
+        views: Vec<ViewInstance>,
     },
     Msg {
         message: ChatMessage,
@@ -342,6 +357,14 @@ pub enum HostToClient {
     },
     SideChatClosed {
         sc: String,
+    },
+    ViewUpsert {
+        instance_id: String,
+        placement: String,
+        spec: serde_json::Value,
+    },
+    ViewRemoved {
+        instance_id: String,
     },
 }
 
@@ -594,6 +617,49 @@ mod tests {
     }
 
     #[test]
+    fn view_frames_round_trip_with_resolved_specs_and_event_data() {
+        let spec = json!({
+            "type": "action",
+            "label": "Approve",
+            "action": "approve"
+        });
+        let upsert = HostToClient::ViewUpsert {
+            instance_id: "view-1".to_string(),
+            placement: "ping:7".to_string(),
+            spec: spec.clone(),
+        };
+        let encoded = serde_json::to_value(&upsert).unwrap();
+        assert_eq!(encoded["type"], "view_upsert");
+        assert_eq!(encoded["spec"], spec);
+        assert_eq!(
+            serde_json::from_value::<HostToClient>(encoded).unwrap(),
+            upsert
+        );
+
+        let event = ClientToHost::ViewEvent {
+            instance_id: "view-1".to_string(),
+            action: "approve".to_string(),
+            data: json!({ "value": true }),
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(encoded["type"], "view_event");
+        assert_eq!(
+            serde_json::from_value::<ClientToHost>(encoded).unwrap(),
+            event
+        );
+
+        let removed = HostToClient::ViewRemoved {
+            instance_id: "view-1".to_string(),
+        };
+        let encoded = serde_json::to_value(&removed).unwrap();
+        assert_eq!(encoded["type"], "view_removed");
+        assert_eq!(
+            serde_json::from_value::<HostToClient>(encoded).unwrap(),
+            removed
+        );
+    }
+
+    #[test]
     fn push_token_frames_round_trip() {
         let register = json!({
             "type": "register_push_token",
@@ -686,6 +752,7 @@ mod tests {
             processes: vec![process],
             side_chats: Vec::new(),
             host_version: "0.1.0 (test)".to_string(),
+            views: Vec::new(),
         };
 
         let encoded = serde_json::to_string(&response).unwrap();
@@ -920,6 +987,7 @@ mod tests {
                 processes: Vec::new(),
                 side_chats: Vec::new(),
                 host_version: String::new(),
+                views: Vec::new(),
             }
         );
     }

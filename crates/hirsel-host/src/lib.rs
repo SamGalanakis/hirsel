@@ -13,6 +13,7 @@ mod protocol;
 pub mod push;
 pub mod side_chat;
 pub mod storage;
+pub mod templates;
 pub mod tools;
 pub mod ws;
 
@@ -25,7 +26,9 @@ use std::{
 
 use anyhow::Context;
 use axum::Router;
-use hirsel_proto::{AgentActivityState, ChatMessage, HostToClient, ProcessInfo, SendMode};
+use hirsel_proto::{
+    AgentActivityState, ChatMessage, HostToClient, ProcessInfo, SendMode, ViewInstance,
+};
 use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
@@ -47,6 +50,7 @@ pub struct AppState {
     pub side_chats: Arc<side_chat::SideChatManager>,
     pub processes: ProcessStore,
     pub pushes: push::PushGateway,
+    pub views: templates::ViewManager,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
     pub data_dir: Arc<PathBuf>,
@@ -197,6 +201,36 @@ impl AppState {
         }
     }
 
+    pub async fn handle_view_event(
+        &self,
+        instance_id: String,
+        action: String,
+        data: serde_json::Value,
+    ) -> anyhow::Result<OwnerSubmission> {
+        if action.trim().is_empty() {
+            anyhow::bail!("view action must be a non-empty string");
+        }
+        let view = self
+            .views
+            .get(&instance_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("unknown view instance `{instance_id}`"))?;
+        let anchor = view_anchor(&view, &self.storage).await?;
+        let body = format!(
+            "View `{instance_id}` emitted action `{action}` with data {}.",
+            serde_json::to_string(&data)?
+        );
+        self.submit_owner_message(
+            format!("view-event-{}", uuid::Uuid::new_v4()),
+            body,
+            anchor,
+            Vec::new(),
+            Vec::new(),
+            SendMode::Send,
+        )
+        .await
+    }
+
     pub async fn process_snapshot(&self) -> anyhow::Result<Vec<ProcessInfo>> {
         let mut all = self.processes.snapshot()?;
         all.extend(self.storage.monitor_snapshot().await?);
@@ -259,6 +293,20 @@ impl AppState {
     }
 }
 
+async fn view_anchor(view: &ViewInstance, storage: &Storage) -> anyhow::Result<Option<u64>> {
+    let Some(ping_id) = view.placement.strip_prefix("ping:") else {
+        return Ok(None);
+    };
+    let ping_id = ping_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("view has invalid ping placement `{}`", view.placement))?;
+    let ping = storage
+        .ping(ping_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("view references unknown ping `{ping_id}`"))?;
+    Ok(Some(ping.anchor))
+}
+
 pub async fn build_app(config: Config) -> anyhow::Result<Router> {
     let state = build_state(config).await?;
     Ok(router_from_state(state))
@@ -270,6 +318,16 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         .with_context(|| format!("open storage under {}", config.data_dir.display()))?;
     let (broadcaster, _) = broadcast::channel(512);
     let broadcast_log = BroadcastLog::default();
+    let template_store = templates::TemplateStore::load(config.templates_dir.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "load view templates from {}",
+                config.templates_dir.display()
+            )
+        })?;
+    let views =
+        templates::ViewManager::new(template_store, broadcaster.clone(), broadcast_log.clone());
     let processes = ProcessStore::default();
     let pushes = push::PushGateway::from_env(storage.clone()).await?;
     let tools = ToolSuite::new(
@@ -282,6 +340,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcast_log.clone(),
         processes.clone(),
         pushes.clone(),
+        views.clone(),
     );
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
@@ -314,6 +373,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         side_chats,
         processes,
         pushes,
+        views,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
         data_dir: Arc::new(config.data_dir),
@@ -352,6 +412,7 @@ mod tests {
     use std::time::Duration;
 
     use hirsel_proto::{ChatAuthor, PingStatus, SendMode};
+    use serde_json::json;
 
     use super::*;
     use crate::config::{AgentMode, Config, DriverMode, ProviderMode};
@@ -575,6 +636,95 @@ mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn canvas_view_event_enters_main_chat_as_owner_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        state
+            .views
+            .show(
+                None,
+                Some(json!({ "type": "action", "label": "Retry", "action": "retry" })),
+                None,
+                Some("view-canvas".to_string()),
+                "canvas".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let submission = state
+            .handle_view_event(
+                "view-canvas".to_string(),
+                "retry".to_string(),
+                json!({ "attempt": 2 }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(submission.message.author, ChatAuthor::Owner);
+        assert_eq!(submission.message.r#ref, None);
+        assert!(submission.message.body.contains("`retry`"));
+        assert!(submission.message.body.contains(r#"{"attempt":2}"#));
+    }
+
+    #[tokio::test]
+    async fn ping_view_event_replies_to_anchor_and_auto_resolves_ping() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Choose", None)
+            .await
+            .unwrap();
+        let ping = state
+            .storage
+            .create_ping(
+                "release-window",
+                "Choose a release window",
+                "Choose",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        state
+            .views
+            .show(
+                None,
+                Some(json!({
+                    "type": "optionSet",
+                    "action": "window_selected",
+                    "choices": [{ "label": "Tonight", "value": "tonight" }]
+                })),
+                None,
+                Some("view-ping".to_string()),
+                format!("ping:{}", ping.id),
+            )
+            .await
+            .unwrap();
+
+        let submission = state
+            .handle_view_event(
+                "view-ping".to_string(),
+                "window_selected".to_string(),
+                json!({ "value": "tonight" }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(submission.message.r#ref, Some(anchor.id));
+        assert_eq!(
+            state.storage.ping(ping.id).await.unwrap().unwrap().status,
+            PingStatus::Done
+        );
+        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+            event,
+            HostToClient::PingUpsert { ping: update }
+                if update.id == ping.id && update.status == PingStatus::Done
+        )));
+    }
+
     async fn read_until_agent_activity(
         broadcasts: &mut tokio::sync::broadcast::Receiver<HostToClient>,
         state: AgentActivityState,
@@ -609,6 +759,7 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: data_dir.to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),

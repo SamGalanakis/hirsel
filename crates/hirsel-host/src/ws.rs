@@ -81,6 +81,7 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: dir.path().to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -118,6 +119,7 @@ mod tests {
                 processes,
                 side_chats,
                 host_version,
+                views,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
@@ -125,6 +127,7 @@ mod tests {
                 assert!(pings.is_empty());
                 assert!(processes.is_empty());
                 assert!(side_chats.is_empty());
+                assert!(views.is_empty());
                 assert!(!host_version.is_empty());
             }
             other => panic!("unexpected hello response: {other:?}"),
@@ -218,6 +221,70 @@ mod tests {
             .unwrap();
         assert_eq!(removed["removed"], true);
         assert!(state.storage.push_tokens().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn debug_view_surface_shows_lists_and_posts_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+        let client = owner_http_client();
+
+        let shown: serde_json::Value = client
+            .post(format!("http://{addr}/debug/show-view"))
+            .json(&serde_json::json!({
+                "spec": {
+                    "type": "action",
+                    "label": "Continue",
+                    "action": "continue"
+                },
+                "placement": "chat"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let instance_id = shown["instance_id"].as_str().unwrap();
+        assert_eq!(shown["placement"], "chat");
+
+        let active: serde_json::Value = client
+            .get(format!("http://{addr}/debug/views"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(active["views"].as_array().unwrap().len(), 1);
+        assert_eq!(active["views"][0]["instance_id"], instance_id);
+
+        let event: serde_json::Value = client
+            .post(format!("http://{addr}/debug/view-event"))
+            .json(&serde_json::json!({
+                "instance_id": instance_id,
+                "action": "continue",
+                "data": { "confirmed": true }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(event["message"]["author"], "owner");
+        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::ViewUpsert { instance_id: id, .. } if id == instance_id
+        )));
     }
 
     #[tokio::test]
@@ -637,6 +704,7 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: data_dir.to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),

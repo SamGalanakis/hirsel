@@ -185,8 +185,12 @@ describe("Desktop shell: right-region precedence", () => {
     expect(panel.className).toContain("rail:relative");
     expect(panel.className).toContain("rail:shrink-0");
     expect(panel.className).toContain("rail:w-[clamp(340px,38vw,440px)]");
-    // Dialog semantics for the phone modal sheet (a11y §5).
-    expect(panel.getAttribute("role")).toBe("dialog");
+    // A11y (spec item 1): at rail (desktop, in-flow) this is a NON-modal
+    // inspector — role=complementary with no aria-modal, NOT a dialog. Only the
+    // phone media flag flips it to a modal role=dialog + aria-modal. (jsdom's
+    // matchMedia defaults to the desktop/rail case, so `phone()` is false here.)
+    expect(panel.getAttribute("role")).toBe("complementary");
+    expect(panel.getAttribute("aria-modal")).toBeNull();
     // The chat is still live beside it (not unmounted/replaced) — the composer
     // remains in the tree.
     expect(screen.getByPlaceholderText("Message the Agent…")).toBeTruthy();
@@ -228,19 +232,32 @@ describe("Desktop shell: the nav rail", () => {
     expect(settings.getAttribute("aria-current")).toBeNull();
   });
 
-  it("carries a MUTED Pings count on the nav (the red lives on the rail header)", async () => {
-    await setupApp();
-    const navBadge = document.querySelector('[data-slot="nav-pings-badge"]') as HTMLElement;
+  it("hides the redundant nav Pings badge at rest, showing it (muted) only when Pings isn't the shown pane", async () => {
+    const { store } = await setupApp();
+    // At rest (rightRegion === "pings") the standing rail header already carries
+    // the count, so the nav badge would just duplicate it — hidden (spec item
+    // 4). The rail header / phone shelf still carry the count + the single red.
+    expect(document.querySelector('[data-slot="nav-pings-badge"]')).toBeNull();
+    const railBadge = document.querySelector('[data-slot="pings-rail-badge"]') as HTMLElement;
     const shelfBadge = document.querySelector('[data-slot="tray-shelf-badge"]') as HTMLElement;
-    expect(navBadge).toBeTruthy();
+    expect(railBadge).toBeTruthy();
     expect(shelfBadge).toBeTruthy();
-    // Count parity with the phone shelf — but the nav badge is ALWAYS muted (the
-    // single red is the Pings rail header / phone shelf, never the nav).
-    expect(navBadge.textContent).toBe("1");
+    expect(railBadge.textContent).toBe("1");
     expect(shelfBadge.textContent).toBe("1");
+    expect(railBadge.className).toContain("bg-status-danger");
+    expect(shelfBadge.className).toContain("bg-status-danger");
+
+    // Displace the Pings rail (open another pane): the nav badge now earns its
+    // keep for cross-pane awareness — count parity, but ALWAYS muted (the single
+    // red is the rail header / phone shelf, never the nav).
+    store.openProcesses();
+    const navBadge = await waitFor(
+      () => document.querySelector('[data-slot="nav-pings-badge"]') as HTMLElement,
+    );
+    expect(navBadge).toBeTruthy();
+    expect(navBadge.textContent).toBe("1");
     expect(navBadge.className).toContain("bg-muted-foreground");
     expect(navBadge.className).not.toContain("bg-status-danger");
-    expect(shelfBadge.className).toContain("bg-status-danger");
   });
 
   it("opens the Processes inspector from the NavRail Processes item", async () => {
@@ -264,12 +281,15 @@ describe("Desktop shell: the nav rail", () => {
   });
 
   it("also reaches Settings from the phone-header overflow (§4)", async () => {
-    const { screen } = await setupApp();
+    await setupApp();
     // On phone the header folds Model · Canvas · Processes · Settings behind one
     // ⋯ overflow so AgentStatus keeps its width. Settings is a menu item there.
     const user = userEvent.setup();
     expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
-    await user.click(screen.getByLabelText("More"));
+    // Scope to the phone header: the PingCard ⋯ shares the "More actions" label
+    // (both are more-menus), so disambiguate to the header's overflow trigger.
+    const header = document.querySelector("header") as HTMLElement;
+    await user.click(within(header).getByLabelText(/More actions/));
     // The menu content is portaled to document.body (outside the container).
     await user.click(await within(document.body).findByRole("menuitem", { name: "Settings" }));
     await waitFor(() =>

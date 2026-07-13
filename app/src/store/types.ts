@@ -161,6 +161,15 @@ export interface AppState {
    * wire `read` flag: a Ping is effectively unread if `!read` OR its id is
    * here. Auto-read/"Mark read" removes the id (and sends read_ping). Bounded. */
   unreadOverrides: number[];
+  /** Ping ids optimistically "Marked done" but not yet committed to the host.
+   * `resolve_ping` is terminal on the wire (there is no reopen op), so Mark
+   * done is made recoverable client-side: the id lands here on tap (the card
+   * flips to Done at once, modelled on the `unreadOverrides` optimistic flip),
+   * a 5s "Undo" window debounces the actual `resolve_ping` send, and Undo drops
+   * the id back off. On commit the host's `done` ping_upsert supersedes it (the
+   * reducer prunes the id). A Ping is effectively resolved if its status is
+   * resolved OR its id is here. Bounded. */
+  resolveOverrides: number[];
   /** v2.0: live side chats, keyed by `sc` — mirrors `hello_ok.side_chats`
    * (seeded there, kept in sync by side_chat_open/side_chat_closed) so a Ping
    * card can derive "in progress · resume" for its Ping without ever hydrating
@@ -211,6 +220,8 @@ export type Action =
   | { type: "ping_upsert"; payload: PingUpsertMsg }
   | { type: "read_local"; pingId: number }
   | { type: "mark_unread_local"; pingId: number }
+  | { type: "resolve_local"; pingId: number }
+  | { type: "unresolve_local"; pingId: number }
   | {
       type: "send_local";
       localId: number;
@@ -276,6 +287,7 @@ export function initialState(): AppState {
     turnDetails: {},
     removedIds: [],
     unreadOverrides: [],
+    resolveOverrides: [],
     sideChatRefs: [],
     sideChats: {},
     pendingSideSends: [],

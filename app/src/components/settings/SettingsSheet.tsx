@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronLeft, Copy, LoaderCircle, X } from "lucide-solid";
+import { ChevronDown, ChevronLeft, Copy, LoaderCircle, Settings as SettingsIcon } from "lucide-solid";
 import { createEffect, createSignal, For, type JSX, onMount, Show } from "solid-js";
 import type { ModelSelection, SubagentModel } from "../../protocol";
 import { copyWithToast } from "../../lib/clipboard";
@@ -9,12 +9,13 @@ import { cn } from "../../lib/utils";
 import { setThemeMode, themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
 import { APP_VERSION } from "../../lib/version";
-import { closeRightRegion, state } from "../../store/store";
+import { clearSettingsScrollTarget, closeRightRegion, state } from "../../store/store";
 import type { ConnectionStatus } from "../../store/types";
 import { clearStoredToken, getClient, getStoredToken } from "../../ws/client";
 import { ConnectionPill } from "../ConnectionPill";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { PaneHeader } from "../ui/PaneHeader";
 
 // Local-only client preferences. The WS protocol (see PROTOCOL.md) carries only
 // a token + replay cursor from this client — no device label, no roster, no
@@ -84,9 +85,12 @@ function Card(props: { children: JSX.Element; class?: string }) {
   );
 }
 
-function SectionHeader(props: { children: JSX.Element }) {
+function SectionHeader(props: { children: JSX.Element; id?: string }) {
   return (
-    <h2 class="mt-6 mb-2 px-1 text-[0.68rem] font-medium uppercase tracking-[0.06em] text-muted-foreground first:mt-0">
+    <h2
+      id={props.id}
+      class="mt-6 mb-2 px-1 text-[0.68rem] font-medium uppercase tracking-[0.06em] text-muted-foreground first:mt-0 scroll-mt-4"
+    >
       {props.children}
     </h2>
   );
@@ -469,7 +473,7 @@ function SubagentModels() {
 function ModelsSection() {
   return (
     <Show when={state.model || state.subagentModels}>
-      <SectionHeader>Models</SectionHeader>
+      <SectionHeader id="settings-models">Models</SectionHeader>
       <MainAgentModel />
       <SubagentModels />
     </Show>
@@ -500,6 +504,19 @@ function SettingsPanel() {
       onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
     });
+    // Consume a one-shot scroll target (spec item 6): the phone overflow "Model
+    // settings" row opens Settings pointed at the Models section — an honest
+    // affordance instead of silently landing on Appearance. Deferred a
+    // microtask so the panel + its scroll region have laid out first.
+    const target = state.settingsScrollTarget;
+    if (target === "models") {
+      queueMicrotask(() =>
+        document
+          .getElementById("settings-models")
+          ?.scrollIntoView({ block: "start", behavior: "auto" }),
+      );
+    }
+    clearSettingsScrollTarget();
   });
 
   const canSaveLabel = () => {
@@ -559,31 +576,43 @@ function SettingsPanel() {
       ref={panelRef}
       tabindex={-1}
       data-slot="settings-panel"
-      role="dialog"
+      role={phone() ? "dialog" : "complementary"}
       aria-modal={phone() ? "true" : undefined}
-      aria-labelledby="settings-panel-heading"
+      aria-labelledby={phone() ? "settings-panel-heading" : "settings-pane-title"}
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
-        rail:relative rail:inset-auto rail:z-auto rail:min-h-0 rail:w-[clamp(340px,38vw,440px)] rail:shrink-0 rail:border-l rail:border-border rail:pb-0"
+        rail:relative rail:inset-auto rail:z-auto rail:min-h-0 rail:w-[clamp(340px,38vw,440px)] rail:shrink-0 rail:border-l rail:border-border rail:pb-0
+        motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
+        motion-safe:rail:slide-in-from-bottom-0 motion-safe:rail:slide-in-from-right-2 motion-safe:rail:duration-150"
     >
-      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:h-12 rail:py-0">
+      {/* Phone header (rail:hidden): back affordance to Chat. */}
+      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:hidden">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
           onClick={closeRightRegion}
           aria-label="Close Settings"
         >
-          <ChevronLeft class="size-5 rail:hidden" aria-hidden="true" />
-          <X class="hidden size-4 rail:block" aria-hidden="true" />
-          <span class="rail:hidden">Chat</span>
+          <ChevronLeft class="size-5" aria-hidden="true" />
+          <span>Chat</span>
         </button>
         <h1
           id="settings-panel-heading"
-          class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em] rail:text-left"
+          class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em]"
         >
           Settings
         </h1>
-        <span class="w-[3.25rem] rail:hidden" aria-hidden="true" />
+        <span class="w-[3.25rem]" aria-hidden="true" />
       </header>
+      {/* Desktop header (hidden rail:flex): shared PaneHeader — one datum,
+          trailing × close with the sibling focus-visible ring. */}
+      <PaneHeader
+        class="hidden rail:flex"
+        icon={<SettingsIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+        title="Settings"
+        titleId="settings-pane-title"
+        onClose={closeRightRegion}
+        closeLabel="Close Settings"
+      />
 
       {/* Block flow (not a flex column): as a flex item this scroll region can
           shrink to the available height (min-h-0) and scroll, while its cards

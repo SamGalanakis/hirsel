@@ -21,7 +21,7 @@ import { ConnectionPill } from "./ConnectionPill";
 // standing "Commands" row).
 
 function pingsCount(): number {
-  return openUnreadCount(state.pings, state.unreadOverrides);
+  return openUnreadCount(state.pings, state.unreadOverrides, state.resolveOverrides);
 }
 function processCount(): number {
   return runningProcessCount(state.processes);
@@ -71,8 +71,13 @@ export function NavRail() {
       <nav aria-label="Primary" class="flex flex-col gap-0.5 px-2 pt-2">
         {/* Pings — the resting state of the right region (the standing rail).
             Active when it owns the region. A MUTED count rides here for
-            cross-pane awareness; the single red interrupt lives on the Pings rail
-            header (One-Escalation Rule), never on the nav. */}
+            cross-pane awareness ONLY when Pings is NOT the shown pane: when
+            `rightRegion === "pings"` (the default), the standing rail header
+            already carries the count, so the nav badge would just duplicate it
+            (spec item 4) — the nav ITEM stays (the way home + `g i` target + the
+            count's home when the rail is displaced), only the redundant badge
+            is hidden. The single red interrupt lives on the rail header
+            (One-Escalation Rule), never on the nav. */}
         <NavItem
           icon={<InboxIcon class="size-4 shrink-0" aria-hidden="true" />}
           label="Pings"
@@ -80,7 +85,7 @@ export function NavRail() {
           active={state.rightRegion === "pings"}
           onClick={openPings}
           badge={
-            <Show when={pingsCount() > 0}>
+            <Show when={pingsCount() > 0 && state.rightRegion !== "pings"}>
               <span
                 data-slot="nav-pings-badge"
                 class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"

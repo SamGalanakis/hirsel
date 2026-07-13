@@ -1,12 +1,21 @@
 import { Settings } from "lucide-solid";
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { AgentStatus } from "./components/chat/AgentStatus";
 import { ChatView } from "./components/chat/ChatView";
+import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { NavRail } from "./components/NavRail";
 import { ProcessesButton } from "./components/processes/ProcessesButton";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
+import {
+  commandPaletteOpen,
+  installGlobalKeymap,
+  setCommandPaletteOpen,
+  setShortcutHelpOpen,
+  shortcutHelpOpen,
+} from "./lib/keymap";
 import { titleBadgeEnabled } from "./lib/prefs";
 import { openUnreadCount } from "./store/selectors";
 import { setSettingsOpen, state } from "./store/store";
@@ -25,6 +34,15 @@ function App() {
 
   // Whether a Side Chat is open — widens the shell for the desktop split.
   const splitActive = () => state.activeSideChatSc !== null;
+
+  // The global keyboard layer (focus composer, `g`-chord pane switches, jump to
+  // latest, ⌘K palette, `?` cheat-sheet). Window-level; it suppresses itself
+  // while the Owner is typing or an overlay owns input, so it never fights the
+  // composer or a focus-trap.
+  onMount(() => {
+    const dispose = installGlobalKeymap();
+    onCleanup(dispose);
+  });
 
   // Open (and tear down) the single WebSocket connection whenever the token is
   // set. Components run once in Solid; this effect re-runs only when token()
@@ -94,9 +112,18 @@ function App() {
             ChatView, which owns the chat measure + the shared right context
             region (Pings rail / Side Chat / Processes + Settings inspectors). */}
         <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header class="flex flex-shrink-0 items-center justify-between border-b border-border px-4 py-3 rail:hidden">
-            <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-            <div class="flex items-center gap-1.5">
+          <header class="flex flex-shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 rail:hidden">
+            {/* The wordmark paired with the live agent-status indicator, so the
+                north-star "what is my agent doing" is answerable at rest on the
+                phone's glance-first surface (previously the header showed only a
+                static wordmark). AgentStatus is the shared extracted component
+                (dot + idle/thinking/tool-name label). */}
+            <div class="flex min-w-0 items-center gap-2.5">
+              <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
+              <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
+              <AgentStatus />
+            </div>
+            <div class="flex shrink-0 items-center gap-1.5">
               <ProcessesButton />
               {/* Settings is otherwise reachable only from the desktop NavRail
                   gear, which is gone below `rail`; this header entry is the sole
@@ -121,6 +148,10 @@ function App() {
         </div>
       </div>
       <Toaster />
+      {/* Summoned surfaces — no standing chrome. Opened from the keymap (⌘K /
+          `?`) and the NavRail palette affordance. */}
+      <CommandPalette open={commandPaletteOpen()} onOpenChange={setCommandPaletteOpen} />
+      <ShortcutHelp open={shortcutHelpOpen()} onOpenChange={setShortcutHelpOpen} />
     </Show>
   );
 }

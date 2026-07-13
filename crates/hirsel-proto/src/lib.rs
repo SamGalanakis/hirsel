@@ -75,6 +75,26 @@ pub struct SideChatSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelection {
+    pub id: String,
+    pub variant: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableModel {
+    pub id: String,
+    pub label: String,
+    pub variants: Vec<String>,
+    pub default_variant: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSnapshot {
+    pub current: ModelSelection,
+    pub available: Vec<AvailableModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickReply {
     pub value: String,
     pub label: String,
@@ -193,6 +213,10 @@ pub enum ClientToHost {
     CancelQueued {
         client_id: String,
     },
+    SetModel {
+        model_id: String,
+        variant: String,
+    },
     UploadBlob {
         client_id: String,
         name: String,
@@ -287,6 +311,9 @@ pub enum HostToClient {
         /// `#[serde(default)]` keeps older hosts/snapshots that omit it parseable.
         #[serde(default)]
         host_version: String,
+        /// Runtime-selectable main-agent model state. Older hosts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<ModelSnapshot>,
     },
     Msg {
         message: ChatMessage,
@@ -313,6 +340,9 @@ pub enum HostToClient {
     },
     PingUpsert {
         ping: Ping,
+    },
+    ModelChanged {
+        current: ModelSelection,
     },
     BlobOk {
         client_id: String,
@@ -686,6 +716,18 @@ mod tests {
             processes: vec![process],
             side_chats: Vec::new(),
             host_version: "0.1.0 (test)".to_string(),
+            model: Some(ModelSnapshot {
+                current: ModelSelection {
+                    id: "gpt-5.6-sol".to_string(),
+                    variant: "high".to_string(),
+                },
+                available: vec![AvailableModel {
+                    id: "gpt-5.6-sol".to_string(),
+                    label: "GPT-5.6 Sol".to_string(),
+                    variants: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                    default_variant: "medium".to_string(),
+                }],
+            }),
         };
 
         let encoded = serde_json::to_string(&response).unwrap();
@@ -920,7 +962,38 @@ mod tests {
                 processes: Vec::new(),
                 side_chats: Vec::new(),
                 host_version: String::new(),
+                model: None,
             }
+        );
+    }
+
+    #[test]
+    fn model_selection_frames_use_snake_case_protocol_names() {
+        let command = ClientToHost::SetModel {
+            model_id: "gpt-5.6-sol".to_string(),
+            variant: "high".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            json!({
+                "type": "set_model",
+                "model_id": "gpt-5.6-sol",
+                "variant": "high"
+            })
+        );
+
+        let event = HostToClient::ModelChanged {
+            current: ModelSelection {
+                id: "gpt-5.6-sol".to_string(),
+                variant: "high".to_string(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({
+                "type": "model_changed",
+                "current": { "id": "gpt-5.6-sol", "variant": "high" }
+            })
         );
     }
 

@@ -118,6 +118,7 @@ mod tests {
                 processes,
                 side_chats,
                 host_version,
+                model,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
@@ -126,6 +127,7 @@ mod tests {
                 assert!(processes.is_empty());
                 assert!(side_chats.is_empty());
                 assert!(!host_version.is_empty());
+                assert!(model.is_none());
             }
             other => panic!("unexpected hello response: {other:?}"),
         }

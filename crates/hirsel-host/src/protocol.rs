@@ -228,6 +228,7 @@ async fn build_snapshot(
         processes: state.process_snapshot().await?,
         side_chats: state.side_chats.summaries().await,
         host_version: host_version(),
+        model: state.model_snapshot(),
     };
     Ok((hello, dedupe))
 }
@@ -350,6 +351,9 @@ where
         }
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
+        }
+        ClientToHost::SetModel { model_id, variant } => {
+            state.set_model(&model_id, &variant).await?;
         }
         ClientToHost::UploadBlob {
             client_id,

@@ -45,7 +45,7 @@ describe("keymap", () => {
   it("runs `g`-prefixed pane chords", () => {
     press("g");
     press("i");
-    expect(handlers.goPane).toHaveBeenCalledWith("inbox");
+    expect(handlers.goPane).toHaveBeenCalledWith("pings");
     press("g");
     press("p");
     expect(handlers.goPane).toHaveBeenCalledWith("processes");

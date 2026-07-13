@@ -27,7 +27,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Settings: device label persistence", () => {
   it("saves a trimmed device label to localStorage", async () => {
     const store = await import("../../store/store");
-    store.setSettingsOpen(true);
+    store.openSettings();
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByLabelText, getByText } = render(() => <SettingsSheet />);
 
@@ -52,7 +52,7 @@ describe("Settings: Forget token confirm flow (C5)", () => {
     vi.stubGlobal("location", { reload });
 
     const store = await import("../../store/store");
-    store.setSettingsOpen(true);
+    store.openSettings();
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText, getByRole, queryByRole } = render(() => <SettingsSheet />);
 
@@ -76,7 +76,7 @@ describe("Settings: Forget token confirm flow (C5)", () => {
     }));
 
     const store = await import("../../store/store");
-    store.setSettingsOpen(true);
+    store.openSettings();
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText, getByRole, queryByRole } = render(() => <SettingsSheet />);
 

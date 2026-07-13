@@ -1,13 +1,10 @@
-import { Settings } from "lucide-solid";
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AgentStatus } from "./components/chat/AgentStatus";
 import { ChatView } from "./components/chat/ChatView";
-import { ModelChip } from "./components/chat/ModelChip";
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { NavRail } from "./components/NavRail";
-import { ProcessesButton } from "./components/processes/ProcessesButton";
-import { CanvasButton } from "./components/views/CanvasSurface";
+import { PhoneOverflowMenu } from "./components/PhoneOverflowMenu";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
@@ -20,7 +17,7 @@ import {
 } from "./lib/keymap";
 import { titleBadgeEnabled } from "./lib/prefs";
 import { openUnreadCount } from "./store/selectors";
-import { setSettingsOpen, state } from "./store/store";
+import { state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
 const WS_URL = resolveWsUrl();
@@ -34,8 +31,11 @@ function App() {
   // of the old "reconnecting…" forever dead-end.
   const [authError, setAuthError] = createSignal<string | null>(null);
 
-  // Whether a Side Chat is open — widens the shell for the desktop split.
-  const splitActive = () => state.activeSideChatSc !== null;
+  // Whether the Side Chat pane owns the right region — widens the shell for the
+  // desktop split. Keys on the region (the pane SELECTION), not on
+  // `activeSideChatSc` (the data), so leaving the side chat narrows the shell
+  // back even though the side chat stays alive/resumable underneath.
+  const splitActive = () => state.rightRegion === "sideChat";
 
   // The global keyboard layer (focus composer, `g`-chord pane switches, jump to
   // latest, ⌘K palette, `?` cheat-sheet). Window-level; it suppresses itself
@@ -114,38 +114,22 @@ function App() {
             ChatView, which owns the chat measure + the shared right context
             region (Pings rail / Side Chat / Processes + Settings inspectors). */}
         <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header class="flex flex-shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 rail:hidden">
-            {/* The wordmark paired with the live agent-status indicator, so the
-                north-star "what is my agent doing" is answerable at rest on the
-                phone's glance-first surface (previously the header showed only a
-                static wordmark). AgentStatus is the shared extracted component
-                (dot + idle/thinking/tool-name label). */}
-            <div class="flex min-w-0 items-center gap-2.5">
+          {/* Phone header (§4 IA cleanup). The north-star — brand + FULL agent
+              status — gets priority width (the left group is `flex-1 min-w-0`,
+              AgentStatus never truncates to "Agen…"); the right group is a bare
+              connection dot (expands to the full pill only when reconnecting/
+              offline) plus ONE overflow (Model · Canvas · Processes · Settings),
+              so the header holds ≤4 chunks. The whole header is `rail:hidden`, so
+              it doesn't double up with the NavRail at desktop widths. */}
+          <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
               <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
               <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
               <AgentStatus />
             </div>
-            <div class="flex min-w-0 shrink items-center gap-1.5">
-              {/* Quick main-model variant switch; collapses to just the variant
-                  on narrow phones (its label hides < 400px). Full model +
-                  sub-agent config lives in Settings. */}
-              <ModelChip />
-              <CanvasButton />
-              <ProcessesButton />
-              {/* Settings is otherwise reachable only from the desktop NavRail
-                  gear, which is gone below `rail`; this header entry is the sole
-                  phone path to theme, Forget token, diagnostics, and the endpoint
-                  (C3). The whole header is `rail:hidden`, so it doesn't double up
-                  with the NavRail item at desktop widths. */}
-              <button
-                type="button"
-                class="flex items-center rounded-full p-1.5 text-muted-foreground transition-colors hover:text-foreground"
-                onClick={() => setSettingsOpen(true)}
-                aria-label="Settings"
-              >
-                <Settings class="size-5" aria-hidden="true" />
-              </button>
-              <ConnectionPill />
+            <div class="flex shrink-0 items-center gap-0.5">
+              <ConnectionPill compact />
+              <PhoneOverflowMenu />
             </div>
           </header>
           {/* Chat is the whole app (spec [P1]). */}

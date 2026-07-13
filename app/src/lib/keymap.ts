@@ -8,7 +8,7 @@
 // focus-trap Escape handling own it, and this layer must not fight them.
 
 import { createSignal } from "solid-js";
-import { goToChat, setActiveSideChatSc, setProcessesOpen, setSettingsOpen, setTrayExpanded, state } from "../store/store";
+import { goToChat, openPings, openProcesses, openSettings, setTrayExpanded, state } from "../store/store";
 import { getClient } from "../ws/client";
 // SEAM (created in a parallel worktree): true while a modal/overlay/focus-trap
 // owns input. Used to suppress the bare-key layer so summoned surfaces keep the
@@ -18,7 +18,7 @@ import { anyOverlayOpen, focusMainComposer } from "./focus";
 /** Max gap (ms) between the `g` leader and its second key for a chord to count. */
 const CHORD_MS = 900;
 
-export type PaneTarget = "chat" | "inbox" | "processes" | "settings";
+export type PaneTarget = "chat" | "pings" | "processes" | "settings";
 
 // ---- Summoned-overlay visibility (module singletons; one app instance) -------
 // The command palette and the shortcut cheat-sheet are summoned, never standing,
@@ -35,28 +35,25 @@ export function focusComposer(): void {
   focusMainComposer();
 }
 
-/** Switch the primary surface. Mirrors the NavRail's own item semantics so the
- * keyboard and the rail never disagree about what "Inbox"/"Processes" mean. */
+/** Switch the primary surface. Every case sets exactly one `rightRegion` (via
+ * the store intents) so the keyboard and the NavRail can never disagree about
+ * what a pane switch means, and nothing lingers behind the newly-selected pane
+ * (the single-owner model). `pings` additionally expands the phone Tray overlay
+ * — the desktop rail ignores that flag. */
 export function goPane(target: PaneTarget): void {
   switch (target) {
     case "chat":
       goToChat();
       break;
-    case "inbox":
-      setProcessesOpen(false);
-      setSettingsOpen(false);
-      setActiveSideChatSc(null);
+    case "pings":
+      openPings();
       setTrayExpanded(true);
       break;
     case "processes":
-      setSettingsOpen(false);
-      setActiveSideChatSc(null);
-      setProcessesOpen(true);
+      openProcesses();
       break;
     case "settings":
-      setProcessesOpen(false);
-      setActiveSideChatSc(null);
-      setSettingsOpen(true);
+      openSettings();
       break;
   }
 }
@@ -89,7 +86,7 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: ["/"], label: "Focus composer", group: "Chat" },
   { keys: ["G"], label: "Jump to latest", group: "Chat" },
   { keys: ["g", "c"], label: "Chat", group: "Navigate" },
-  { keys: ["g", "i"], label: "Inbox", group: "Navigate" },
+  { keys: ["g", "i"], label: "Pings", group: "Navigate" },
   { keys: ["g", "p"], label: "Processes", group: "Navigate" },
   { keys: ["g", "s"], label: "Settings", group: "Navigate" },
 ];
@@ -126,7 +123,7 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 
 const CHORD_PANES: Record<string, PaneTarget> = {
   c: "chat",
-  i: "inbox",
+  i: "pings",
   p: "processes",
   s: "settings",
 };

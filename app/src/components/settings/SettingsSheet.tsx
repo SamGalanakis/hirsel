@@ -3,13 +3,13 @@ import { createEffect, createSignal, For, type JSX, onMount, Show } from "solid-
 import type { ModelSelection, SubagentModel } from "../../protocol";
 import { copyWithToast } from "../../lib/clipboard";
 import { resolveWsUrl } from "../../lib/endpoint";
-import { createFocusTrap } from "../../lib/focus";
+import { createFocusTrap, createMediaFlag } from "../../lib/focus";
 import { setTitleBadgeEnabled, titleBadgeEnabled } from "../../lib/prefs";
 import { cn } from "../../lib/utils";
 import { setThemeMode, themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
 import { APP_VERSION } from "../../lib/version";
-import { setSettingsOpen, state } from "../../store/store";
+import { closeRightRegion, state } from "../../store/store";
 import type { ConnectionStatus } from "../../store/types";
 import { clearStoredToken, getClient, getStoredToken } from "../../ws/client";
 import { ConnectionPill } from "../ConnectionPill";
@@ -24,8 +24,8 @@ import { Input } from "../ui/input";
 const DEVICE_LABEL_KEY = "hirsel.deviceLabel";
 const DEBUG_KEY = "hirsel.debug";
 
-/** At/above `rail` Settings is a right-docked inspector (Tab stays free); below
- * it a full-screen sheet whose Tab is trapped (C21). */
+/** At/above `rail` Settings is an in-flow right-region inspector (Tab stays
+ * free, non-modal); below it a full-screen modal sheet whose Tab is trapped. */
 const RAIL_MQ = "(min-width: 1100px)";
 
 const PHASE_WORD: Record<ConnectionStatus, string> = {
@@ -127,7 +127,7 @@ function SegmentedControl<T extends string>(props: {
               type="button"
               role="radio"
               aria-checked={selected()}
-              class="flex-1 rounded-md px-2 py-1.5 text-[0.8125rem] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+              class="flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
               classList={{
                 "bg-card font-medium text-foreground shadow-[0_1px_2px_0_rgb(0_0_0/0.06)]":
                   selected(),
@@ -221,7 +221,7 @@ function CopyRow(props: { value: string; label: string; mono?: boolean }) {
       aria-label={`Copy ${props.label}`}
     >
       <span
-        class="min-w-0 flex-1 truncate text-[0.8125rem] text-foreground"
+        class="min-w-0 flex-1 truncate text-sm text-foreground"
         classList={{ "font-mono": props.mono }}
       >
         {props.value}
@@ -258,7 +258,7 @@ function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: () => voi
         class="w-full max-w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg outline-none"
       >
         <h3 class="m-0 text-sm font-semibold text-foreground">Forget this token?</h3>
-        <p class="mt-1.5 mb-4 text-[0.8125rem] leading-relaxed text-muted-foreground">
+        <p class="mt-1.5 mb-4 text-sm leading-relaxed text-muted-foreground">
           Clears the access token stored in this browser and reloads to the connect screen. You'll
           need the token again to reconnect. The Host and its history are untouched.
         </p>
@@ -488,15 +488,16 @@ function SettingsPanel() {
   const [confirmForget, setConfirmForget] = createSignal(false);
 
   let panelRef: HTMLDivElement | undefined;
+  const phone = createMediaFlag("(max-width: 1099.98px)");
 
   onMount(() => {
     void computeFingerprint(getStoredToken()).then(setFingerprint);
-    // Focus management (C21): full-screen sheet on phone (trap Tab so the chat
-    // behind stays out of the tab order), right-docked inspector at `rail`
-    // (leave Tab free). Escape closes Settings; when the Forget-token dialog is
-    // up it sits on top of the trap stack and owns Escape instead.
+    // Focus management (C21): full-screen modal sheet on phone (trap Tab so the
+    // chat behind stays out of the tab order), in-flow inspector at `rail`
+    // (leave Tab free). Escape returns the right region to Pings; when the
+    // Forget-token dialog is up it sits on top of the trap stack and owns Escape.
     createFocusTrap(() => panelRef, {
-      onEscape: () => setSettingsOpen(false),
+      onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
     });
   });
@@ -550,29 +551,35 @@ function SettingsPanel() {
   }
 
   return (
-    // Same responsive docking as ProcessesPanel — phone: a full-screen `fixed`
-    // sheet with a back affordance; desktop (`rail`): a right-docked inspector
-    // `absolute` inside ChatView's `relative` row, overlaying the right region
-    // (Pings rail / Side Chat) only, never the chat measure on the left.
+    // Same responsive presentation as ProcessesPanel — phone: a full-screen
+    // modal `fixed` sheet with a back affordance; desktop (`rail`): an in-flow
+    // right-edge inspector inside ChatView's row, one exclusive slot, never over
+    // the chat measure on the left.
     <div
       ref={panelRef}
       tabindex={-1}
       data-slot="settings-panel"
+      role="dialog"
+      aria-modal={phone() ? "true" : undefined}
+      aria-labelledby="settings-panel-heading"
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
-        rail:absolute rail:left-auto rail:z-30 rail:w-[360px] rail:border-l rail:border-border rail:pb-0"
+        rail:relative rail:inset-auto rail:z-auto rail:min-h-0 rail:w-[clamp(340px,38vw,440px)] rail:shrink-0 rail:border-l rail:border-border rail:pb-0"
     >
       <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:h-12 rail:py-0">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
-          onClick={() => setSettingsOpen(false)}
+          onClick={closeRightRegion}
           aria-label="Close Settings"
         >
           <ChevronLeft class="size-5 rail:hidden" aria-hidden="true" />
           <X class="hidden size-4 rail:block" aria-hidden="true" />
           <span class="rail:hidden">Chat</span>
         </button>
-        <h1 class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em] rail:text-left">
+        <h1
+          id="settings-panel-heading"
+          class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em] rail:text-left"
+        >
           Settings
         </h1>
         <span class="w-[3.25rem] rail:hidden" aria-hidden="true" />
@@ -752,15 +759,16 @@ function SettingsPanel() {
   );
 }
 
-/** Settings surface (desktop-shell): a right-docked inspector reachable from the
- * NavRail gear (a full-screen sheet on phone). Grouped calm-terminal sections —
+/** Settings surface (single-owner right region / desktop-shell): an in-flow
+ * inspector reachable from the NavRail gear or the phone header overflow (a
+ * full-screen modal sheet on phone). Grouped calm-terminal sections —
  * Appearance, Connection & devices, Notifications, Device label & identity,
  * About & debug — mirroring the Android Settings screen, adapted honestly to the
  * browser WS client's actual capabilities. Mounted inside ChatView's row so the
- * desktop dock resolves against the frame, not the viewport. */
+ * desktop aside resolves against the frame, not the viewport. */
 export function SettingsSheet() {
   return (
-    <Show when={state.settingsOpen}>
+    <Show when={state.rightRegion === "settings"}>
       <SettingsPanel />
     </Show>
   );

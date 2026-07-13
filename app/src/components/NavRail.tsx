@@ -1,33 +1,27 @@
-import { Activity, Command, Inbox as InboxIcon, MessagesSquare, Settings } from "lucide-solid";
+import { Activity, Inbox as InboxIcon, Settings } from "lucide-solid";
 import { type JSX, Show } from "solid-js";
 import { setCommandPaletteOpen } from "../lib/keymap";
-import {
-  hasOpenRequiresResponse,
-  openUnreadCount,
-  runningProcessCount,
-} from "../store/selectors";
-import {
-  setActiveSideChatSc,
-  setProcessesOpen,
-  setSettingsOpen,
-  state,
-} from "../store/store";
+import { openUnreadCount, runningProcessCount } from "../store/selectors";
+import { openPings, openProcesses, openSettings, state } from "../store/store";
 import { ConnectionPill } from "./ConnectionPill";
 
 // The desktop nav rail (desktop-shell / 3-pane). A persistent vertical rail —
-// calm and dense, Linear/Slack/Superhuman lineage — that owns the brand,
-// primary navigation, and the connection pill on desktop. Desktop-only:
+// calm and dense, Linear/Slack/Superhuman lineage — that owns the brand, the
+// right-region navigation, and the connection pill on desktop. Desktop-only:
 // `hidden … rail:flex`, so below the `rail` breakpoint the phone header carries
-// the brand + Processes + connection instead and this rail never shows. Flat by
+// the brand + agent status + overflow instead and this rail never shows. Flat by
 // design: a single hairline `border-r`, no shadow (the Hairline-First rule).
+//
+// v2.3 (single-owner right region): the rail navigates the ONE exclusive right
+// region — Pings · Processes · Settings — and each item is `aria-current` when
+// it owns `state.rightRegion` (no more "Chat active = !processesOpen &&
+// !settingsOpen" fiction). Chat is always the center pane, so it is no longer a
+// nav destination; the standing right rail IS the Pings surface, so there is no
+// separate "Inbox" row; the command palette is ⌘K (a quiet footer hint, not a
+// standing "Commands" row).
 
-/** Shared count/danger for the Inbox item — the SAME selectors the Tray shelf
- * and Pings rail badges use, so count + danger tone hold parity by construction. */
-function inboxCount(): number {
+function pingsCount(): number {
   return openUnreadCount(state.pings, state.unreadOverrides);
-}
-function inboxDanger(): boolean {
-  return hasOpenRequiresResponse(state.pings);
 }
 function processCount(): number {
   return runningProcessCount(state.processes);
@@ -74,63 +68,41 @@ export function NavRail() {
         <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
       </div>
 
-      <nav aria-label="Primary" class="flex flex-col gap-0.5 px-2">
-        {/* Chat — the calm default (chat + context). Returns to it without
-            closing an open Side Chat. */}
-        <NavItem
-          icon={<MessagesSquare class="size-4 shrink-0" aria-hidden="true" />}
-          label="Chat"
-          active={!state.processesOpen && !state.settingsOpen}
-          onClick={() => {
-            setProcessesOpen(false);
-            setSettingsOpen(false);
-          }}
-        />
-
-        {/* Inbox — the desktop replacement for the old header "Show Pings"
-            restore affordance. The unread badge (danger tone when a
-            requires-response Ping is open) is its signal; no persistent active
-            fill. Reveals the Pings rail by clearing the side chat. */}
+      <nav aria-label="Primary" class="flex flex-col gap-0.5 px-2 pt-2">
+        {/* Pings — the resting state of the right region (the standing rail).
+            Active when it owns the region. A MUTED count rides here for
+            cross-pane awareness; the single red interrupt lives on the Pings rail
+            header (One-Escalation Rule), never on the nav. */}
         <NavItem
           icon={<InboxIcon class="size-4 shrink-0" aria-hidden="true" />}
-          label="Inbox"
-          ariaLabel="Inbox"
-          onClick={() => {
-            setProcessesOpen(false);
-            setSettingsOpen(false);
-            setActiveSideChatSc(null);
-          }}
+          label="Pings"
+          ariaLabel="Pings"
+          active={state.rightRegion === "pings"}
+          onClick={openPings}
           badge={
-            <Show when={inboxCount() > 0}>
+            <Show when={pingsCount() > 0}>
               <span
-                data-slot="nav-inbox-badge"
-                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
-                classList={{
-                  "bg-status-danger": inboxDanger(),
-                  "bg-muted-foreground": !inboxDanger(),
-                }}
+                data-slot="nav-pings-badge"
+                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
               >
-                {clamp99(inboxCount())}
+                {clamp99(pingsCount())}
               </span>
             </Show>
           }
         />
 
-        {/* Processes — toggles the Processes inspector; carries the running
-            count in status-active tone (parity with the old header button). */}
+        {/* Processes — docks the Processes inspector; carries the running count
+            in a status-active tint chip (parity with the phone overflow). */}
         <NavItem
           icon={<Activity class="size-4 shrink-0" aria-hidden="true" />}
           label="Processes"
-          active={state.processesOpen}
-          onClick={() => {
-            setSettingsOpen(false);
-            setProcessesOpen(!state.processesOpen);
-          }}
+          active={state.rightRegion === "processes"}
+          onClick={openProcesses}
           badge={
             <Show when={processCount() > 0}>
               {/* Tint-chip vocabulary (not a solid saturated disc): a pulsing
                   status-active dot + a muted-strength count on a 15% tint. Only
-                  the requires-response Inbox badge is ever loud/solid. */}
+                  the requires-response Pings badge is ever loud/solid. */}
               <span
                 data-slot="nav-processes-badge"
                 class="ml-auto flex h-4 shrink-0 items-center gap-1 rounded-full bg-status-active/15 px-1.5 text-[0.62rem] font-semibold text-status-active"
@@ -145,41 +117,32 @@ export function NavRail() {
           }
         />
 
-        {/* Settings — toggles the Settings inspector (also reachable from the
-            phone header gear). */}
+        {/* Settings — docks the Settings inspector (also reachable from the phone
+            header overflow). */}
         <NavItem
           icon={<Settings class="size-4 shrink-0" aria-hidden="true" />}
           label="Settings"
           ariaLabel="Settings"
-          active={state.settingsOpen}
-          onClick={() => {
-            setProcessesOpen(false);
-            setSettingsOpen(!state.settingsOpen);
-          }}
+          active={state.rightRegion === "settings"}
+          onClick={openSettings}
         />
       </nav>
 
-      {/* Command palette affordance — summons the ⌘K surface (also bound
-          globally in the keymap). Kept quiet: a ghost row with a mono keyhint,
-          not standing chrome. The keyhint is the only mono in the rail. */}
-      <div class="mt-1 px-2">
-        <NavItem
-          icon={<Command class="size-4 shrink-0" aria-hidden="true" />}
-          label="Commands"
-          ariaLabel="Open command palette"
-          onClick={() => setCommandPaletteOpen(true)}
-          badge={
-            <kbd class="ml-auto grid h-5 shrink-0 place-items-center rounded-sm border border-border bg-muted px-1.5 font-mono text-[0.68rem] text-muted-foreground">
-              ⌘K
-            </kbd>
-          }
-        />
-      </div>
-
-      {/* Footer — the connection pill pinned to the foot, left-aligned and calm.
-          (It also still renders in the phone header below the rail breakpoint.) */}
-      <div class="mt-auto border-t border-border px-3 py-3">
+      {/* Footer — the connection pill pinned to the foot, with a quiet ⌘K
+          command-palette hint beside it. The hint is a keycap affordance, not a
+          standing nav row (the palette is summoned, never chrome). */}
+      <div class="mt-auto flex items-center justify-between gap-2 border-t border-border px-3 py-3">
         <ConnectionPill />
+        <button
+          type="button"
+          class="flex shrink-0 items-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Open command palette"
+          onClick={() => setCommandPaletteOpen(true)}
+        >
+          <kbd class="grid h-5 place-items-center rounded-sm border border-border bg-muted px-1.5 font-mono text-[0.68rem] text-muted-foreground">
+            ⌘K
+          </kbd>
+        </button>
       </div>
     </div>
   );

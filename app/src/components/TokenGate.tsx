@@ -27,7 +27,7 @@ export function TokenGate(props: Props) {
   return (
     <div class="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
       <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-      <p class="m-0 max-w-[32ch] text-[0.95rem] text-muted-foreground">
+      <p class="m-0 max-w-[32ch] text-sm text-muted-foreground">
         Enter the access token for your Hirsel Host. It's stored only on this device.
       </p>
       <form class="flex w-full max-w-[320px] flex-col gap-3" onSubmit={handleSubmit}>

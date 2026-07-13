@@ -132,7 +132,7 @@ export function PingsView() {
           <section class="flex flex-col">
             <Show when={partitioned().needsReply.length > 0}>
               <h2 class="mx-3 mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-                Inbox
+                Other
               </h2>
             </Show>
             <For each={partitioned().other}>

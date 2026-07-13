@@ -8,7 +8,6 @@ import {
   openUnreadCount,
 } from "../../store/selectors";
 import { setTrayExpanded, state } from "../../store/store";
-import { canvasDesktopActive } from "../views/CanvasSurface";
 import { PingsView } from "./PingsView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
@@ -129,16 +128,19 @@ export function TrayShelf() {
   );
 }
 
-/** The standing Pings rail's header count. Same count selector as the shelf, so
- * the number stays in parity — but this badge is ALWAYS the muted tone, never
- * red: on desktop the ONE sanctioned interrupt red is the nav rail's Inbox badge
- * (the One-Escalation Rule), so the rail header must not multiply it. */
+/** The standing Pings rail's header count. Same count selector as the phone
+ * shelf, so the number holds parity — and now the desktop home of the ONE
+ * sanctioned interrupt red (v2.3): with the nav "Inbox" badge gone, the rail
+ * header carries the `status-danger` accent when an open requires-response Ping
+ * exists (muted otherwise), so there is exactly one red source per surface —
+ * the rail header on desktop, the shelf badge on phone. */
 function PingsBadge(props: { slot?: string }) {
   return (
     <Show when={badgeCount() > 0}>
       <span
         data-slot={props.slot}
-        class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
+        class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
+        classList={{ "bg-status-danger": danger(), "bg-muted-foreground": !danger() }}
       >
         {badgeLabel()}
       </span>
@@ -149,13 +151,14 @@ function PingsBadge(props: { slot?: string }) {
 /** The standing Pings rail (desktop-shell): the Tray promoted from a bottom
  * shelf to a persistent right column at `rail` width. Same `PingsView` body the
  * phone overlay uses (one component, two mount points), under a slim header that
- * mirrors the shelf's count/danger badge. It yields the right region when a Side
- * Chat is open (precedence) — rendered only while `activeSideChatSc` is null,
- * and `hidden` below the rail breakpoint so the phone shelf/overlay stay the
- * sole Pings surface there. */
+ * mirrors the shelf's count/danger badge. It is the idle resting state of the
+ * exclusive right region (v2.3) — rendered only while `rightRegion === "pings"`,
+ * so opening any other pane UNMOUNTS it (nothing to clip, no hidden focus) — and
+ * `hidden` below the rail breakpoint so the phone shelf/overlay stay the sole
+ * Pings surface there. */
 export function PingsRail() {
   return (
-    <Show when={state.activeSideChatSc === null && !canvasDesktopActive()}>
+    <Show when={state.rightRegion === "pings"}>
       <aside
         data-slot="pings-rail"
         class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex"

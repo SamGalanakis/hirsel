@@ -2400,7 +2400,8 @@ impl HirselToolExecutor {
     async fn pings_send(&self, args: &Value) -> Result<Value, String> {
         let name = required_string_any(args, &["name"])?;
         let description = required_string_any(args, &["description"])?;
-        let content = required_string_any(args, &["content_md", "content", "body"])?;
+        let content = optional_string_any_allow_empty(args, &["content_md", "content", "body"])?
+            .unwrap_or_default();
         let requires_response = args
             .get("requires_response")
             .and_then(Value::as_bool)
@@ -3357,20 +3358,39 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.pings_send",
             "pings_send",
-            "Emit a judgment Event (or an info Event when requires_response is false) anchored to the current Agent turn.",
+            "Emit a judgment Event (or an info Event when requires_response is false) anchored to the current Agent turn. For judgments, content_md is optional context that must add information beyond the question in description (state the stakes or constraint; omit it instead of echoing the question), options must contain 2–4 choices with exactly one recommended, and unblocks is an optional count of agents this decision will unblock.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["name", "description", "content_md"],
+                "required": ["name", "description"],
                 "properties": {
-                    "name": { "type": "string", "minLength": 1, "maxLength": 32 },
-                    "description": { "type": "string", "minLength": 1 },
-                    "content_md": { "type": "string" },
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32,
+                        "description": "Short event handle."
+                    },
+                    "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The judgment question shown as the card heading."
+                    },
+                    "content_md": {
+                        "type": "string",
+                        "description": "Optional judgment context. It must add stakes or constraints beyond the heading; omit it or pass an empty string when no context is needed."
+                    },
                     "requires_response": { "type": "boolean", "default": true },
                     "view": { "type": ["object", "array", "null"] },
-                    "unblocks": { "type": "integer", "minimum": 0 },
+                    "unblocks": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Optional count of agents unblocked by this judgment."
+                    },
                     "quick_replies": {
                         "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "description": "Legacy judgment choices; the first is recommended. Prefer options.",
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
@@ -3384,7 +3404,8 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "options": {
                         "type": "array",
                         "minItems": 2,
-                        "maxItems": 3,
+                        "maxItems": 4,
+                        "description": "Judgment choices. Exactly one option must set recommended to true.",
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
@@ -4198,6 +4219,20 @@ fn required_string_any(args: &Value, keys: &[&str]) -> Result<String, String> {
         .ok_or_else(|| format!("missing required string field `{}`", keys.join("` or `")))
 }
 
+fn optional_string_any_allow_empty(args: &Value, keys: &[&str]) -> Result<Option<String>, String> {
+    let Some((key, value)) = keys
+        .iter()
+        .find_map(|key| args.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(None);
+    };
+    value
+        .as_str()
+        .map(str::to_string)
+        .map(Some)
+        .ok_or_else(|| format!("field `{key}` must be a string"))
+}
+
 fn required_u64_any(args: &Value, keys: &[&str]) -> Result<u64, String> {
     keys.iter()
         .find_map(|key| args.get(*key).and_then(Value::as_u64))
@@ -4603,10 +4638,16 @@ impl ScriptedAgentRuntime {
                                 content,
                                 anchor.id,
                                 true,
-                                vec![QuickReply {
-                                    value: "ship it".to_string(),
-                                    label: "Ship it".to_string(),
-                                }],
+                                vec![
+                                    QuickReply {
+                                        value: "ship it".to_string(),
+                                        label: "Ship it".to_string(),
+                                    },
+                                    QuickReply {
+                                        value: "revise it".to_string(),
+                                        label: "Revise it".to_string(),
+                                    },
+                                ],
                             )
                             .await
                         {
@@ -4974,7 +5015,20 @@ mod tests {
                 "name": "active-turn-result",
                 "description": "Result for the active turn",
                 "content": "A result for the active turn",
-                "requires_response": true
+                "requires_response": true,
+                "options": [
+                    {
+                        "key": "A",
+                        "label": "Accept",
+                        "detail": "Accept the result",
+                        "recommended": true
+                    },
+                    {
+                        "key": "B",
+                        "label": "Revise",
+                        "detail": "Revise the result"
+                    }
+                ]
             }))
             .await
             .unwrap();

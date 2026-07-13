@@ -227,6 +227,9 @@ export interface HelloOkMsg {
   /** v2.0: live side chats surviving reconnect. Optional on the wire; absent
    * is treated as []. */
   side_chats?: SideChatRef[];
+  /** Host build identity (crate version + git sha), shown in Settings → About.
+   * Optional on the wire; older hosts omit it and About shows "Not reported". */
+  host_version?: string;
 }
 
 export interface MsgMsg {

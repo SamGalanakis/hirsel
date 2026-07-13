@@ -197,6 +197,8 @@ pub struct ClientSnapshot {
     pub pings: Vec<Ping>,
     pub agent_activity: AgentActivity,
     pub last_seen_msg_id: Option<u64>,
+    /// Host build identity from the last `hello_ok`; `None` until reported.
+    pub host_version: Option<String>,
 }
 
 impl From<core::ClientSnapshot> for ClientSnapshot {
@@ -207,6 +209,7 @@ impl From<core::ClientSnapshot> for ClientSnapshot {
             pings: value.pings.into_iter().map(Into::into).collect(),
             agent_activity: value.agent_activity.into(),
             last_seen_msg_id: value.last_seen_msg_id,
+            host_version: value.host_version,
         }
     }
 }

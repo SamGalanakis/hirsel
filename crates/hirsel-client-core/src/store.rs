@@ -69,6 +69,9 @@ pub struct ClientSnapshot {
     pub processes: Vec<ProcessInfo>,
     pub agent_activity: AgentActivity,
     pub last_seen_msg_id: Option<u64>,
+    /// Host build identity from the last `hello_ok`; `None` until a host that
+    /// reports it connects (Settings → About shows "Not reported" then).
+    pub host_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +89,7 @@ pub(crate) struct LocalStore {
     pub processes: Vec<ProcessInfo>,
     pub agent_activity: AgentActivity,
     pub last_seen_msg_id: Option<u64>,
+    pub host_version: Option<String>,
     pub pending_sends: VecDeque<PendingSend>,
 }
 
@@ -98,6 +102,7 @@ impl Default for LocalStore {
             processes: Vec::new(),
             agent_activity: AgentActivity::default(),
             last_seen_msg_id: None,
+            host_version: None,
             pending_sends: VecDeque::new(),
         }
     }
@@ -112,6 +117,7 @@ impl LocalStore {
             processes: self.processes.clone(),
             agent_activity: self.agent_activity.clone(),
             last_seen_msg_id: self.last_seen_msg_id,
+            host_version: self.host_version.clone(),
         }
     }
 
@@ -136,7 +142,13 @@ impl LocalStore {
         messages: Vec<ChatMessage>,
         pings: Vec<Ping>,
         processes: Vec<ProcessInfo>,
+        host_version: String,
     ) {
+        // An older host that doesn't report its version sends "" — keep it None
+        // so the UI can show "Not reported" rather than a blank line.
+        if !host_version.is_empty() {
+            self.host_version = Some(host_version);
+        }
         let known_ids: Vec<u64> = self.messages.iter().filter_map(|entry| entry.id).collect();
         let newly_replayed: Vec<ChatMessage> = messages
             .iter()
@@ -270,6 +282,7 @@ mod tests {
             vec![message(1, ChatAuthor::Owner, "same")],
             vec![],
             vec![],
+            "0.1.0 (test)".to_string(),
         );
         assert_eq!(store.pending_sends.len(), 1);
         assert!(store.messages.last().unwrap().pending);

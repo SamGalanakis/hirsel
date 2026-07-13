@@ -78,6 +78,7 @@ fun SettingsScreen(
     deviceLabel: String,
     identitySecret: String?,
     appVersion: String,
+    hostVersion: String?,
     onBack: () -> Unit,
     onRename: (String) -> Unit,
     onForget: () -> Unit,
@@ -284,7 +285,12 @@ fun SettingsScreen(
                 InsetRow {
                     Text("Host version", color = c.Foreground, fontSize = 14.sp)
                     Spacer(Modifier.weight(1f))
-                    Text("Not reported", color = c.MutedForeground, fontSize = 13.sp)
+                    Text(
+                        hostVersion ?: "Not reported",
+                        color = c.MutedForeground,
+                        fontSize = 13.sp,
+                        fontFamily = if (hostVersion != null) HirselMono else null,
+                    )
                 }
                 RowDivider()
                 ToggleRow(
@@ -300,7 +306,7 @@ fun SettingsScreen(
                         copyToClipboard(
                             context,
                             "hirsel diagnostics",
-                            buildDiagnostics(appVersion, themeMode, phase, pushEnabled, notifyScope, debugMode, deviceLabel, fingerprint),
+                            buildDiagnostics(appVersion, hostVersion, themeMode, phase, pushEnabled, notifyScope, debugMode, deviceLabel, fingerprint),
                         )
                     },
                     testTag = "copy-diagnostics",
@@ -634,6 +640,7 @@ private fun copyToClipboard(context: Context, label: String, value: String) {
 
 private fun buildDiagnostics(
     appVersion: String,
+    hostVersion: String?,
     themeMode: ThemeMode,
     phase: Phase,
     pushEnabled: Boolean,
@@ -644,6 +651,7 @@ private fun buildDiagnostics(
 ): String = buildString {
     appendLine("hirsel diagnostics")
     appendLine("app version: $appVersion")
+    appendLine("host version: ${hostVersion ?: "not reported"}")
     appendLine("device: ${Build.MANUFACTURER} ${Build.MODEL}")
     appendLine("android: ${Build.VERSION.RELEASE} (sdk ${Build.VERSION.SDK_INT})")
     appendLine("theme: ${themeMode.name.lowercase()}")

@@ -232,6 +232,7 @@ private fun HirselRoot(
                 deviceLabel = activeLabel,
                 identitySecret = credential?.irohSecretKey,
                 appVersion = appVersionLabel(context),
+                hostVersion = connection.snapshot?.hostVersion,
                 onBack = { showSettings = false },
                 onRename = { newLabel ->
                     credential?.let { current ->

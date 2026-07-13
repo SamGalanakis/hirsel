@@ -117,6 +117,7 @@ mod tests {
                 pings,
                 processes,
                 side_chats,
+                host_version,
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
@@ -124,6 +125,7 @@ mod tests {
                 assert!(pings.is_empty());
                 assert!(processes.is_empty());
                 assert!(side_chats.is_empty());
+                assert!(!host_version.is_empty());
             }
             other => panic!("unexpected hello response: {other:?}"),
         }

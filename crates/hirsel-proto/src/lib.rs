@@ -283,6 +283,10 @@ pub enum HostToClient {
         processes: Vec<ProcessInfo>,
         #[serde(default)]
         side_chats: Vec<SideChatSummary>,
+        /// Host build identity (crate version + git sha), shown in Settings → About.
+        /// `#[serde(default)]` keeps older hosts/snapshots that omit it parseable.
+        #[serde(default)]
+        host_version: String,
     },
     Msg {
         message: ChatMessage,
@@ -681,6 +685,7 @@ mod tests {
             pings: vec![ping],
             processes: vec![process],
             side_chats: Vec::new(),
+            host_version: "0.1.0 (test)".to_string(),
         };
 
         let encoded = serde_json::to_string(&response).unwrap();
@@ -914,6 +919,7 @@ mod tests {
                 pings: Vec::new(),
                 processes: Vec::new(),
                 side_chats: Vec::new(),
+                host_version: String::new(),
             }
         );
     }

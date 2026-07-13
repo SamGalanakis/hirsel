@@ -209,6 +209,12 @@ pub(crate) async fn run_protocol<C>(
     }
 }
 
+/// Host build identity reported to clients in `hello_ok` (Settings → About).
+/// Combines the crate version with the git sha embedded at build time.
+pub fn host_version() -> String {
+    format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("HIRSEL_GIT_SHA"))
+}
+
 async fn build_snapshot(
     state: &AppState,
     last_seen_msg_id: Option<u64>,
@@ -221,6 +227,7 @@ async fn build_snapshot(
         pings: snapshot.pings,
         processes: state.process_snapshot().await?,
         side_chats: state.side_chats.summaries().await,
+        host_version: host_version(),
     };
     Ok((hello, dedupe))
 }

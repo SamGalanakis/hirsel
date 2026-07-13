@@ -292,6 +292,7 @@ function SettingsPanel() {
     return [
       "hirsel diagnostics",
       `app version: ${APP_VERSION}`,
+      `host version: ${state.hostVersion ?? "not reported"}`,
       `endpoint: ${endpoint}`,
       `connection: ${PHASE_WORD[state.connection]}`,
       `theme: ${themeMode()}`,
@@ -479,7 +480,7 @@ function SettingsPanel() {
           </div>
           <div class="flex items-center justify-between gap-3 px-3.5 py-3">
             <span class="text-sm text-foreground">Host version</span>
-            <span class="text-xs text-muted-foreground">Not reported</span>
+            <span class="font-mono text-xs text-muted-foreground">{state.hostVersion ?? "Not reported"}</span>
           </div>
           <div class="flex items-center gap-3 px-3.5 py-3">
             <Field title="Debug mode" subtitle="Verbose client logging for diagnostics." />

@@ -114,6 +114,10 @@ export interface AppState {
   agentActivity: AgentActivity;
   connection: ConnectionStatus;
   lastSeenMsgId: number | null;
+  /** Host build identity from the last `hello_ok` (crate version + git sha),
+   * shown in Settings → About. `null` until a host that reports it connects
+   * (older hosts omit the field; About shows "Not reported"). */
+  hostVersion: string | null;
   pendingSends: PendingSend[];
   uploads: Upload[];
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
@@ -228,6 +232,7 @@ export function initialState(): AppState {
     agentActivity: { state: "idle", text: null },
     connection: "connecting",
     lastSeenMsgId: null,
+    hostVersion: null,
     pendingSends: [],
     uploads: [],
     processes: [],

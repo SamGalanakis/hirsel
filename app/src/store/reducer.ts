@@ -323,6 +323,9 @@ export function reduce(state: AppState, action: Action): AppState {
           (pings ?? []).some((p) => p.id === id),
         ),
         lastSeenMsgId: latest_msg_id,
+        // Keep the last reported host version if this frame (or an older host)
+        // omits it, so a resync never regresses About to "Not reported".
+        hostVersion: action.payload.host_version ?? state.hostVersion,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
         // never replayed) does not survive a resync. Retained turn details for

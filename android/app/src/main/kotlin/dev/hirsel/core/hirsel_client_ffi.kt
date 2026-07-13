@@ -1803,6 +1803,11 @@ data class ClientSnapshot (
     var `agentActivity`: AgentActivity
     , 
     var `lastSeenMsgId`: kotlin.ULong?
+    , 
+    /**
+     * Host build identity from the last `hello_ok`; `None` until reported.
+     */
+    var `hostVersion`: kotlin.String?
     
 ){
     
@@ -1824,6 +1829,7 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
             FfiConverterSequenceTypePing.read(buf),
             FfiConverterTypeAgentActivity.read(buf),
             FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -1832,7 +1838,8 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
             FfiConverterSequenceTypeChatMessage.allocationSize(value.`messages`) +
             FfiConverterSequenceTypePing.allocationSize(value.`pings`) +
             FfiConverterTypeAgentActivity.allocationSize(value.`agentActivity`) +
-            FfiConverterOptionalULong.allocationSize(value.`lastSeenMsgId`)
+            FfiConverterOptionalULong.allocationSize(value.`lastSeenMsgId`) +
+            FfiConverterOptionalString.allocationSize(value.`hostVersion`)
     )
 
     override fun write(value: ClientSnapshot, buf: ByteBuffer) {
@@ -1841,6 +1848,7 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
             FfiConverterSequenceTypePing.write(value.`pings`, buf)
             FfiConverterTypeAgentActivity.write(value.`agentActivity`, buf)
             FfiConverterOptionalULong.write(value.`lastSeenMsgId`, buf)
+            FfiConverterOptionalString.write(value.`hostVersion`, buf)
     }
 }
 

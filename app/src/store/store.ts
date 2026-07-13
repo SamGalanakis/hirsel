@@ -78,6 +78,7 @@ function appSnapshot(): AppState {
     agentActivity: state.agentActivity,
     connection: state.connection,
     lastSeenMsgId: state.lastSeenMsgId,
+    hostVersion: state.hostVersion,
     pendingSends: state.pendingSends,
     uploads: state.uploads,
     processes: state.processes,

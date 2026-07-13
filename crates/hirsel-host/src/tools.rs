@@ -18,13 +18,14 @@ use tokio::{sync::broadcast, time::Duration};
 use crate::storage::{MonitorRecord, MonitorWakeOn, monitor_process_info};
 use crate::{
     BroadcastLog, config::DriverMode, process_run::run_bash_command, processes::ProcessStore,
-    storage::Storage,
+    storage::Storage, subagent_models::SubagentModelState,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolsConfig {
     pub driver_mode: DriverMode,
     pub fake_fixture: Option<PathBuf>,
+    pub subagent_models: SubagentModelState,
 }
 
 #[derive(Clone)]
@@ -36,6 +37,7 @@ pub struct ToolSuite {
     processes: ProcessStore,
     pushes: crate::push::PushGateway,
     views: crate::templates::ViewManager,
+    subagent_models: SubagentModelState,
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
@@ -156,6 +158,7 @@ impl ToolSuite {
         pushes: crate::push::PushGateway,
         views: crate::templates::ViewManager,
     ) -> Self {
+        let subagent_models = config.subagent_models.clone();
         Self {
             config,
             storage,
@@ -164,6 +167,7 @@ impl ToolSuite {
             processes,
             pushes,
             views,
+            subagent_models,
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
@@ -293,11 +297,12 @@ impl ToolSuite {
         &self,
         agent: AgentKind,
         model: Option<String>,
+        variant: Option<String>,
         prompt: impl Into<String>,
         cwd: PathBuf,
     ) -> anyhow::Result<SpawnedProcess> {
         let process_id = format!("proc-{}", uuid::Uuid::new_v4());
-        self.subagents_spawn_with_process_id(agent, model, prompt, cwd, process_id)
+        self.subagents_spawn_with_process_id(agent, model, variant, prompt, cwd, process_id)
             .await
     }
 
@@ -305,16 +310,23 @@ impl ToolSuite {
         &self,
         agent: AgentKind,
         model: Option<String>,
+        variant: Option<String>,
         prompt: impl Into<String>,
         cwd: PathBuf,
         process_id: String,
     ) -> anyhow::Result<SpawnedProcess> {
+        let resolved = self
+            .subagent_models
+            .resolve(agent, model.as_deref(), variant.as_deref())?;
+        let model = Some(resolved.model_id);
+        let variant = Some(resolved.variant);
         let prompt = prompt.into();
         let driver = self.driver_for(agent);
         let handle = driver
             .spawn(SpawnSpec {
                 agent,
                 model: model.clone(),
+                variant,
                 prompt: prompt.clone(),
                 cwd: cwd.clone(),
                 fake_fixture: self.config.fake_fixture.clone(),
@@ -612,6 +624,7 @@ mod tests {
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
                 fake_fixture: None,
+                subagent_models: test_subagent_models(dir.path()).await,
             },
             storage.clone(),
             broadcaster,
@@ -682,6 +695,17 @@ mod tests {
         .expect("recorded push count reached");
     }
 
+    async fn test_subagent_models(path: &std::path::Path) -> SubagentModelState {
+        let store = crate::host_config::ConfigStore::load(
+            path.join("hirsel.toml"),
+            path,
+            std::path::Path::new("/docs/hirsel-config.md"),
+        )
+        .await
+        .unwrap();
+        SubagentModelState::load(store)
+    }
+
     #[tokio::test]
     async fn subagent_abandon_retires_driver_session_and_stays_abandoned() {
         let dir = tempfile::tempdir().unwrap();
@@ -714,6 +738,7 @@ mod tests {
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
                 fake_fixture: Some(fixture.path().to_path_buf()),
+                subagent_models: test_subagent_models(dir.path()).await,
             },
             storage.clone(),
             broadcaster,
@@ -726,11 +751,16 @@ mod tests {
             .subagents_spawn(
                 AgentKind::Codex,
                 None,
+                None,
                 "keep running",
                 dir.path().to_path_buf(),
             )
             .await
             .unwrap();
+        assert_eq!(spawned.model.as_deref(), Some("gpt-5.5"));
+        let specs = tools.fake.spawned_specs().unwrap();
+        assert_eq!(specs[0].model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(specs[0].variant.as_deref(), Some("high"));
 
         tools
             .subagents_abandon_process(&spawned.process_id)
@@ -758,5 +788,33 @@ mod tests {
             .unwrap();
         assert_eq!(restored.records.len(), 1);
         assert_eq!(restored.records[0].status, ProcessStatus::Abandoned);
+
+        tools
+            .subagent_models
+            .set("codex", "gpt-5.5", false, "high")
+            .await
+            .unwrap();
+        let disabled = tools
+            .subagents_spawn(
+                AgentKind::Codex,
+                Some("gpt-5.5".to_string()),
+                None,
+                "must be rejected",
+                dir.path().to_path_buf(),
+            )
+            .await
+            .unwrap_err();
+        assert!(disabled.to_string().contains("enabled models: none"));
+        let unknown = tools
+            .subagents_spawn(
+                AgentKind::Claude,
+                Some("unknown".to_string()),
+                None,
+                "must be rejected",
+                dir.path().to_path_buf(),
+            )
+            .await
+            .unwrap_err();
+        assert!(unknown.to_string().contains("unknown or disabled"));
     }
 }

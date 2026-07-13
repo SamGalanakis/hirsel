@@ -15,6 +15,10 @@ pub fn bundled_templates_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates")
 }
 
+pub fn bundled_docs_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/hirsel-config.md")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TemplateFile {
     id: String,

@@ -25,7 +25,10 @@ const CONCLUSION_INSTRUCTION: &str = "Draft the Owner's reply to this Ping now, 
 
 #[derive(Clone)]
 pub(crate) enum SideChatBackend {
-    Lash(Arc<lash::LashCore>),
+    Lash {
+        core: Arc<lash::LashCore>,
+        agent_guidance: Arc<str>,
+    },
     Scripted,
     Degraded(String),
 }
@@ -141,12 +144,15 @@ impl SideChatManager {
         let context = render_context_block(&ping, &anchor, &recent);
         let sc = format!("side:{}", Uuid::new_v4());
         let lash_session = match &self.backend {
-            SideChatBackend::Lash(core) => Some(
+            SideChatBackend::Lash {
+                core,
+                agent_guidance,
+            } => Some(
                 core.session(sc.clone())
                     .store(Arc::new(lash::persistence::InMemorySessionStore::new()))
                     .prompt_contribution(lash::prompt::PromptContribution::guidance(
                         "Hirsel Agent",
-                        crate::lash_runtime::AGENT_PROMPT,
+                        agent_guidance.as_ref(),
                     ))
                     .prompt_contribution(lash::prompt::PromptContribution::guidance(
                         "Side Chat Context",
@@ -205,7 +211,7 @@ impl SideChatManager {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let result = match manager.backend {
-                SideChatBackend::Lash(_) => {
+                SideChatBackend::Lash { .. } => {
                     manager
                         .run_lash_reply(Arc::clone(&session), agent_input)
                         .await
@@ -242,7 +248,7 @@ impl SideChatManager {
             anyhow::bail!("side chat is closed: {sc}");
         }
         let text = match self.backend {
-            SideChatBackend::Lash(_) => self
+            SideChatBackend::Lash { .. } => self
                 .execute_lash_turn(&session, CONCLUSION_INSTRUCTION.to_string())
                 .await?
                 .filter(|text| !text.trim().is_empty())
@@ -1110,6 +1116,8 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: data_dir.to_path_buf(),
+            config_path: data_dir.join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,

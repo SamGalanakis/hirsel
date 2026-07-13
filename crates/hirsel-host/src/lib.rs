@@ -4,6 +4,7 @@ pub mod blob_route;
 pub mod config;
 pub mod debug;
 pub mod health;
+pub mod host_config;
 pub mod iroh;
 pub mod lash_runtime;
 pub mod model_selection;
@@ -14,6 +15,7 @@ mod protocol;
 pub mod push;
 pub mod side_chat;
 pub mod storage;
+pub mod subagent_models;
 pub mod templates;
 pub mod tools;
 pub mod ws;
@@ -29,7 +31,7 @@ use anyhow::Context;
 use axum::Router;
 use hirsel_proto::{
     AgentActivityState, ChatMessage, HostToClient, ModelSelection, ModelSnapshot, ProcessInfo,
-    SendMode, ViewInstance,
+    SendMode, SubagentModelCatalog, ViewInstance,
 };
 use tokio::sync::{Mutex, broadcast};
 use tower_http::services::ServeDir;
@@ -53,12 +55,14 @@ pub struct AppState {
     pub processes: ProcessStore,
     pub pushes: push::PushGateway,
     pub views: templates::ViewManager,
+    pub subagent_models: subagent_models::SubagentModelState,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
     pub data_dir: Arc<PathBuf>,
     pub auth_throttle: auth::AuthThrottle,
     pub blob_signer: blob_route::BlobSigner,
     model_change_lock: Arc<Mutex<()>>,
+    subagent_model_change_lock: Arc<Mutex<()>>,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
@@ -139,6 +143,31 @@ impl AppState {
             });
         }
         Ok(current)
+    }
+
+    pub fn subagent_model_snapshot(&self) -> SubagentModelCatalog {
+        self.subagent_models.snapshot()
+    }
+
+    pub async fn set_subagent_model(
+        &self,
+        provider: &str,
+        model_id: &str,
+        enabled: bool,
+        default_variant: &str,
+    ) -> anyhow::Result<SubagentModelCatalog> {
+        let _guard = self.subagent_model_change_lock.lock().await;
+        let previous = self.subagent_model_snapshot();
+        let catalog = self
+            .subagent_models
+            .set(provider, model_id, enabled, default_variant)
+            .await?;
+        if catalog != previous {
+            self.broadcast(HostToClient::SubagentModelsChanged {
+                catalog: catalog.clone(),
+            });
+        }
+        Ok(catalog)
     }
 
     pub async fn submit_owner_message(
@@ -332,6 +361,14 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
 }
 
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
+    let config_store = host_config::ConfigStore::load(
+        config.config_path.clone(),
+        &config.data_dir,
+        &config.docs_path,
+    )
+    .await
+    .with_context(|| format!("load host config from {}", config.config_path.display()))?;
+    let subagent_models = subagent_models::SubagentModelState::load(config_store.clone());
     let storage = Storage::open(&config.data_dir)
         .await
         .with_context(|| format!("open storage under {}", config.data_dir.display()))?;
@@ -353,6 +390,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         ToolsConfig {
             driver_mode: config.driver,
             fake_fixture: config.fake_fixture.clone(),
+            subagent_models: subagent_models.clone(),
         },
         storage.clone(),
         broadcaster.clone(),
@@ -369,6 +407,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             model: config.model.clone(),
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
+            config_store,
+            agent_guidance: lash_runtime::agent_guidance(&config),
         },
         tools,
         broadcaster.clone(),
@@ -393,12 +433,14 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         processes,
         pushes,
         views,
+        subagent_models,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
         data_dir: Arc::new(config.data_dir),
         auth_throttle: auth::AuthThrottle::default(),
         blob_signer,
         model_change_lock: Arc::new(Mutex::new(())),
+        subagent_model_change_lock: Arc::new(Mutex::new(())),
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)
@@ -703,6 +745,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_subagent_model_persists_and_broadcasts_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let catalog = state
+            .set_subagent_model("claude", "claude-sonnet-5", false, "low")
+            .await
+            .unwrap();
+        let sonnet = &catalog.providers[1].models[1];
+        assert!(!sonnet.enabled);
+        assert_eq!(sonnet.default_variant, "low");
+        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+            event,
+            HostToClient::SubagentModelsChanged { catalog }
+                if !catalog.providers[1].models[1].enabled
+        )));
+        let persisted = std::fs::read_to_string(dir.path().join("hirsel.toml")).unwrap();
+        assert!(persisted.contains("[subagent_models.claude.claude-sonnet-5]"));
+        assert!(persisted.contains("default_variant = \"low\""));
+    }
+
+    #[tokio::test]
     async fn canvas_view_event_enters_main_chat_as_owner_message() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
@@ -825,6 +888,8 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: data_dir.to_path_buf(),
+            config_path: data_dir.join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,

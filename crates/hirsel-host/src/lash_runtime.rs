@@ -55,7 +55,8 @@ use uuid::Uuid;
 
 use crate::{
     BroadcastLog,
-    config::{AgentMode, DriverMode, ProviderMode},
+    config::{AgentMode, Config, DriverMode, ProviderMode},
+    host_config::ConfigStore,
     model_selection::{ModelSelectionState, model_spec},
     monitors::{output_tail, run_monitor_tick},
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
@@ -75,7 +76,7 @@ const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;
 pub(crate) const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RuntimeConfig {
     pub agent_mode: AgentMode,
     pub provider_mode: ProviderMode,
@@ -83,6 +84,16 @@ pub struct RuntimeConfig {
     pub model: String,
     pub data_dir: PathBuf,
     pub driver_mode: DriverMode,
+    pub config_store: ConfigStore,
+    pub agent_guidance: String,
+}
+
+pub(crate) fn agent_guidance(config: &Config) -> String {
+    format!(
+        "{AGENT_PROMPT}\n\n## Host configuration\n\nYour runtime configuration lives at `{}` (hand-editable TOML, hot-reloaded). It is documented at `{}` — read that before changing models or other settings.\n",
+        config.config_path.display(),
+        config.docs_path.display()
+    )
 }
 
 #[derive(Clone)]
@@ -125,9 +136,10 @@ impl AgentRuntime {
     pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
         match self.backend.as_ref() {
             AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
-            AgentBackend::Lash(runtime) => {
-                crate::side_chat::SideChatBackend::Lash(Arc::new(runtime.core.clone()))
-            }
+            AgentBackend::Lash(runtime) => crate::side_chat::SideChatBackend::Lash {
+                core: Arc::new(runtime.core.clone()),
+                agent_guidance: Arc::clone(&runtime.agent_guidance),
+            },
             AgentBackend::Degraded(runtime) => {
                 crate::side_chat::SideChatBackend::Degraded(runtime.reason.clone())
             }
@@ -142,7 +154,7 @@ impl AgentRuntime {
     ) -> anyhow::Result<Self> {
         let model_selection = match config.provider_mode {
             ProviderMode::Codex => Some(
-                ModelSelectionState::load(&config.data_dir, &config.model)
+                ModelSelectionState::load(config.config_store.clone(), &config.model)
                     .await
                     .context("load main-agent model selection")?,
             ),
@@ -314,6 +326,7 @@ struct LashAgentRuntime {
     drain_retry_scheduled: AtomicBool,
     drain_retry_attempts: AtomicU64,
     model_selection: Option<ModelSelectionState>,
+    agent_guidance: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -434,7 +447,7 @@ impl LashAgentRuntime {
             ))
             .prompt_contribution(lash::prompt::PromptContribution::guidance(
                 "Hirsel Agent",
-                AGENT_PROMPT,
+                config.agent_guidance.clone(),
             ))
             .open()
             .await?;
@@ -457,6 +470,7 @@ impl LashAgentRuntime {
             drain_retry_scheduled: AtomicBool::new(false),
             drain_retry_attempts: AtomicU64::new(0),
             model_selection,
+            agent_guidance: Arc::from(config.agent_guidance),
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
@@ -2462,6 +2476,7 @@ impl HirselToolExecutor {
                 .unwrap_or("claude"),
         )?;
         let model = optional_string(args, "model")?;
+        let variant = optional_string(args, "variant")?.or(optional_string(args, "effort")?);
         let prompt = required_string_any(args, &["prompt", "task"])?;
         let cwd = optional_path(args, "cwd")?
             .map(Ok)
@@ -2475,6 +2490,7 @@ impl HirselToolExecutor {
                 "kind": HIRSEL_SUBAGENT_ENGINE,
                 "agent": agent,
                 "model": model,
+                "variant": variant,
                 "prompt": prompt,
                 "cwd": cwd,
             }),
@@ -2488,7 +2504,14 @@ impl HirselToolExecutor {
             .map_err(|error| error.to_string())?;
         if let Err(error) = self
             .tools
-            .subagents_spawn_with_process_id(agent, model.clone(), prompt, cwd, process_id.clone())
+            .subagents_spawn_with_process_id(
+                agent,
+                model.clone(),
+                variant.clone(),
+                prompt,
+                cwd,
+                process_id.clone(),
+            )
             .await
         {
             let _ = context
@@ -2898,6 +2921,7 @@ impl ProcessEngine for HirselSubagentEngine {
             .subagents_spawn_with_process_id(
                 payload.agent,
                 payload.model,
+                payload.variant,
                 payload.prompt,
                 payload.cwd,
                 process_id.clone(),
@@ -3059,6 +3083,7 @@ impl MonitorProcessPayload {
 struct SubagentProcessPayload {
     agent: AgentKind,
     model: Option<String>,
+    variant: Option<String>,
     prompt: String,
     cwd: PathBuf,
 }
@@ -3068,6 +3093,7 @@ impl SubagentProcessPayload {
         let agent = parse_agent_kind(value.get("agent").and_then(Value::as_str).unwrap_or(""))
             .map_err(PluginError::Session)?;
         let model = optional_string(value, "model").map_err(PluginError::Session)?;
+        let variant = optional_string(value, "variant").map_err(PluginError::Session)?;
         let prompt = required_string(value, "prompt").map_err(PluginError::Session)?;
         let cwd = optional_path(value, "cwd")
             .map_err(PluginError::Session)?
@@ -3075,6 +3101,7 @@ impl SubagentProcessPayload {
         Ok(Self {
             agent,
             model,
+            variant,
             prompt,
             cwd,
         })
@@ -3435,6 +3462,8 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "agent": { "type": "string", "enum": ["claude", "codex"] },
                     "model": { "type": "string" },
+                    "variant": { "type": "string", "enum": ["low", "medium", "high"] },
+                    "effort": { "type": "string", "enum": ["low", "medium", "high"] },
                     "prompt": { "type": "string" },
                     "cwd": { "type": "string" }
                 }
@@ -4476,6 +4505,7 @@ impl ScriptedAgentRuntime {
             .subagents_spawn(
                 AgentKind::Claude,
                 None,
+                None,
                 "Make the trivial repo fix and report back.",
                 cwd,
             )
@@ -4776,6 +4806,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_guidance_references_runtime_config_and_docs_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::tests::test_config(dir.path());
+        let guidance = agent_guidance(&config);
+        assert!(guidance.contains(config.config_path.to_str().unwrap()));
+        assert!(guidance.contains(config.docs_path.to_str().unwrap()));
+        assert!(guidance.contains("## Host configuration"));
+    }
+
     #[tokio::test]
     async fn pings_send_uses_active_turn_anchor_when_later_owner_message_is_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -4800,10 +4840,18 @@ mod tests {
             broadcaster.clone(),
             broadcast_log.clone(),
         );
+        let config_store = crate::host_config::ConfigStore::load(
+            dir.path().join("hirsel.toml"),
+            dir.path(),
+            std::path::Path::new("/docs/hirsel-config.md"),
+        )
+        .await
+        .unwrap();
         let tools = ToolSuite::new(
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
                 fake_fixture: None,
+                subagent_models: crate::subagent_models::SubagentModelState::load(config_store),
             },
             storage,
             broadcaster,

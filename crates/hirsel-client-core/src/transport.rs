@@ -25,7 +25,7 @@ enum SessionEnd {
 }
 
 enum ServerFrame {
-    Message(HostToClient),
+    Message(Box<HostToClient>),
     Invalid(String),
     Ignored,
 }
@@ -191,6 +191,7 @@ async fn run_session(
             },
             frame = channel.receive() => match frame {
                 Ok(ServerFrame::Message(message)) => {
+                    let message = *message;
                     if let HostToClient::Paired { device_token } = message {
                         if !awaiting_paired {
                             notify_protocol_error(inner, "unexpected paired frame".to_string());
@@ -359,7 +360,7 @@ impl ClientChannel for WebSocketChannel {
     async fn receive(&mut self) -> Result<ServerFrame, String> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-                Ok(message) => Ok(ServerFrame::Message(message)),
+                Ok(message) => Ok(ServerFrame::Message(Box::new(message))),
                 Err(error) => Ok(ServerFrame::Invalid(error.to_string())),
             },
             Some(Ok(Message::Ping(payload))) => {
@@ -422,7 +423,7 @@ impl ClientChannel for IrohChannel {
     async fn receive(&mut self) -> Result<ServerFrame, String> {
         match self.inbound.next().await {
             Some(Ok(bytes)) => match serde_json::from_slice(&bytes) {
-                Ok(message) => Ok(ServerFrame::Message(message)),
+                Ok(message) => Ok(ServerFrame::Message(Box::new(message))),
                 Err(error) => Ok(ServerFrame::Invalid(error.to_string())),
             },
             Some(Err(error)) => Err(error.to_string()),

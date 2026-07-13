@@ -318,6 +318,8 @@ fn test_host_config(data_dir: &std::path::Path) -> Config {
         anthropic_api_key: None,
         model: "claude-opus-4-7".to_owned(),
         data_dir: data_dir.to_owned(),
+        config_path: data_dir.join("hirsel.toml"),
+        docs_path: hirsel_host::templates::bundled_docs_path(),
         templates_dir: hirsel_host::templates::bundled_templates_dir(),
         driver: DriverMode::Fake,
         fake_fixture: None,

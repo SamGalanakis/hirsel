@@ -95,6 +95,27 @@ pub struct ModelSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentModel {
+    pub id: String,
+    pub label: String,
+    pub variants: Vec<String>,
+    pub default_variant: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentProviderModels {
+    pub provider: String,
+    pub label: String,
+    pub models: Vec<SubagentModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentModelCatalog {
+    pub providers: Vec<SubagentProviderModels>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewInstance {
     pub instance_id: String,
     pub placement: String,
@@ -224,6 +245,12 @@ pub enum ClientToHost {
         model_id: String,
         variant: String,
     },
+    SetSubagentModel {
+        provider: String,
+        model_id: String,
+        enabled: bool,
+        default_variant: String,
+    },
     UploadBlob {
         client_id: String,
         name: String,
@@ -327,6 +354,9 @@ pub enum HostToClient {
         /// Runtime-selectable main-agent model state. Older hosts omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelSnapshot>,
+        /// Runtime-selectable Sub-agent model catalog. Older hosts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_models: Option<SubagentModelCatalog>,
         #[serde(default)]
         views: Vec<ViewInstance>,
     },
@@ -358,6 +388,9 @@ pub enum HostToClient {
     },
     ModelChanged {
         current: ModelSelection,
+    },
+    SubagentModelsChanged {
+        catalog: SubagentModelCatalog,
     },
     BlobOk {
         client_id: String,
@@ -794,6 +827,19 @@ mod tests {
                     default_variant: "medium".to_string(),
                 }],
             }),
+            subagent_models: Some(SubagentModelCatalog {
+                providers: vec![SubagentProviderModels {
+                    provider: "codex".to_string(),
+                    label: "Codex CLI".to_string(),
+                    models: vec![SubagentModel {
+                        id: "gpt-5.5".to_string(),
+                        label: "GPT-5.5".to_string(),
+                        variants: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                        default_variant: "high".to_string(),
+                        enabled: true,
+                    }],
+                }],
+            }),
             views: Vec::new(),
         };
 
@@ -1030,6 +1076,7 @@ mod tests {
                 side_chats: Vec::new(),
                 host_version: String::new(),
                 model: None,
+                subagent_models: None,
                 views: Vec::new(),
             }
         );
@@ -1062,6 +1109,72 @@ mod tests {
                 "type": "model_changed",
                 "current": { "id": "gpt-5.6-sol", "variant": "high" }
             })
+        );
+
+        let command = ClientToHost::SetSubagentModel {
+            provider: "codex".to_string(),
+            model_id: "gpt-5.5".to_string(),
+            enabled: false,
+            default_variant: "medium".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            json!({
+                "type": "set_subagent_model",
+                "provider": "codex",
+                "model_id": "gpt-5.5",
+                "enabled": false,
+                "default_variant": "medium"
+            })
+        );
+
+        let catalog = SubagentModelCatalog {
+            providers: vec![SubagentProviderModels {
+                provider: "codex".to_string(),
+                label: "Codex CLI".to_string(),
+                models: vec![SubagentModel {
+                    id: "gpt-5.5".to_string(),
+                    label: "GPT-5.5".to_string(),
+                    variants: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                    default_variant: "high".to_string(),
+                    enabled: true,
+                }],
+            }],
+        };
+        let event = HostToClient::SubagentModelsChanged {
+            catalog: catalog.clone(),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({
+                "type": "subagent_models_changed",
+                "catalog": {
+                    "providers": [{
+                        "provider": "codex",
+                        "label": "Codex CLI",
+                        "models": [{
+                            "id": "gpt-5.5",
+                            "label": "GPT-5.5",
+                            "variants": ["low", "medium", "high"],
+                            "default_variant": "high",
+                            "enabled": true
+                        }]
+                    }]
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientToHost>(serde_json::to_value(command).unwrap()).unwrap(),
+            ClientToHost::SetSubagentModel {
+                provider: "codex".to_string(),
+                model_id: "gpt-5.5".to_string(),
+                enabled: false,
+                default_variant: "medium".to_string(),
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<HostToClient>(serde_json::to_value(event).unwrap()).unwrap(),
+            HostToClient::SubagentModelsChanged { catalog }
         );
     }
 

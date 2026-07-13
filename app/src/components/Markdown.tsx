@@ -116,7 +116,7 @@ export function Markdown(props: { children: string; class?: string }) {
           <Show
             when={block.kind !== "code"}
             fallback={
-              <pre class="thin-scrollbar overflow-auto rounded-md border border-border bg-black/20 p-2.5 text-[0.8rem] leading-5">
+              <pre class="thin-scrollbar overflow-auto rounded-md border border-border bg-black/20 p-2.5 text-xs leading-5">
                 <code class="font-mono">{(block as { text: string }).text}</code>
               </pre>
             }

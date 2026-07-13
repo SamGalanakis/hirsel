@@ -350,7 +350,7 @@ export function Composer(props: Props) {
                     onMouseEnter={() => mentions.setActiveIndex(i())}
                     onClick={() => mentions.accept(ping)}
                   >
-                    <span class="shrink-0 font-mono text-[0.8rem] text-foreground">
+                    <span class="shrink-0 font-mono text-xs text-foreground">
                       @{ping.name}
                     </span>
                     <Show when={ping.description.trim().length > 0}>

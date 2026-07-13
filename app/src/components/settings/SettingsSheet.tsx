@@ -1,5 +1,6 @@
-import { ChevronLeft, Copy, X } from "lucide-solid";
-import { createSignal, For, type JSX, onMount, Show } from "solid-js";
+import { ChevronDown, ChevronLeft, Copy, LoaderCircle, X } from "lucide-solid";
+import { createEffect, createSignal, For, type JSX, onMount, Show } from "solid-js";
+import type { ModelSelection, SubagentModel } from "../../protocol";
 import { copyWithToast } from "../../lib/clipboard";
 import { resolveWsUrl } from "../../lib/endpoint";
 import { createFocusTrap } from "../../lib/focus";
@@ -10,7 +11,7 @@ import { toast } from "../../lib/toast";
 import { APP_VERSION } from "../../lib/version";
 import { setSettingsOpen, state } from "../../store/store";
 import type { ConnectionStatus } from "../../store/types";
-import { clearStoredToken, getStoredToken } from "../../ws/client";
+import { clearStoredToken, getClient, getStoredToken } from "../../ws/client";
 import { ConnectionPill } from "../ConnectionPill";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -172,6 +173,44 @@ function Toggle(props: { checked: boolean; onChange: (v: boolean) => void; ariaL
   );
 }
 
+/** Compact styled native select — the app's form-select building block (used by
+ * the Models section). Native for honest keyboard/AT behaviour and platform
+ * option lists; the chevron is decorative (appearance stripped). */
+function Select<T extends string>(props: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  class?: string;
+}) {
+  return (
+    <div class={cn("relative inline-flex", props.class)}>
+      <select
+        aria-label={props.ariaLabel}
+        disabled={props.disabled}
+        value={props.value}
+        onChange={(e) => props.onChange(e.currentTarget.value as T)}
+        class="h-9 w-full appearance-none rounded-lg border border-border bg-surface pl-2.5 pr-8 text-sm text-foreground outline-none transition-colors hover:border-input focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <For each={props.options}>{(o) => <option value={o.value}>{o.label}</option>}</For>
+      </select>
+      <ChevronDown
+        class="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+        aria-hidden="true"
+      />
+    </div>
+  );
+}
+
+/** A sub-heading within a section (e.g. "Main agent" / a provider name inside
+ * the Models section). Quieter than a SectionHeader, louder than a Field. */
+function SubHeading(props: { children: JSX.Element }) {
+  return (
+    <h3 class="mt-4 mb-1.5 px-1 text-xs font-medium text-foreground first:mt-0">{props.children}</h3>
+  );
+}
+
 /** A copyable value in a raised inset field (endpoint, identity fingerprint). */
 function CopyRow(props: { value: string; label: string; mono?: boolean }) {
   return (
@@ -233,6 +272,207 @@ function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: () => voi
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Models ─────────────────────────────────────────────────────────────────
+
+function titleCase(s: string): string {
+  return s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/** Main-agent model + reasoning-variant controls, reflecting `state.model`.
+ * Changing either sends `set_model`; the tapped control shows a brief pending
+ * spinner and the `model_changed` broadcast settles the store. Hidden when the
+ * host reports no model snapshot (older hosts). */
+function MainAgentModel() {
+  const current = () => state.model?.current;
+  const available = () => state.model?.available ?? [];
+  const selectedModel = () => available().find((m) => m.id === current()?.id);
+
+  // The selection we've sent and are awaiting the broadcast for, plus which
+  // control originated it — so the spinner sits on the changed control only.
+  const [pending, setPending] = createSignal<{ sel: ModelSelection; control: "model" | "variant" } | null>(
+    null,
+  );
+  createEffect(() => {
+    const p = pending();
+    const c = current();
+    if (p && c && c.id === p.sel.id && c.variant === p.sel.variant) setPending(null);
+  });
+
+  function send(sel: ModelSelection, control: "model" | "variant") {
+    setPending({ sel, control });
+    getClient()?.setModel(sel.id, sel.variant);
+  }
+
+  function onModelChange(id: string) {
+    if (id === current()?.id) return;
+    const m = available().find((a) => a.id === id);
+    if (!m) return;
+    // A model swap resets to that model's default variant (its `variant`s are a
+    // different set); the variant control then reflects the settled truth.
+    send({ id, variant: m.default_variant }, "model");
+  }
+
+  function onVariantChange(variant: string) {
+    const id = current()?.id;
+    if (!id || variant === current()?.variant) return;
+    send({ id, variant }, "variant");
+  }
+
+  const busy = () => pending() !== null;
+
+  return (
+    <Show when={current()}>
+      <SubHeading>Main agent</SubHeading>
+      <Card class="divide-y divide-border">
+        <div class="flex items-center justify-between gap-3 px-3.5 py-3">
+          <div class="flex min-w-0 items-center gap-2">
+            <span class="text-sm text-foreground">Model</span>
+            <Show when={busy() && pending()?.control === "model"}>
+              <LoaderCircle class="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Saving" />
+            </Show>
+          </div>
+          <Select
+            ariaLabel="Main agent model"
+            class="w-[10.5rem] shrink-0"
+            disabled={busy()}
+            value={current()?.id ?? ""}
+            onChange={onModelChange}
+            options={available().map((m) => ({ value: m.id, label: m.label }))}
+          />
+        </div>
+        <div class="flex items-center justify-between gap-3 px-3.5 py-3">
+          <div class="flex min-w-0 items-center gap-2">
+            <span class="text-sm text-foreground">Reasoning</span>
+            <Show when={busy() && pending()?.control === "variant"}>
+              <LoaderCircle class="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Saving" />
+            </Show>
+          </div>
+          <Select
+            ariaLabel="Main agent reasoning variant"
+            class="w-[10.5rem] shrink-0"
+            disabled={busy() || !selectedModel()}
+            value={current()?.variant ?? ""}
+            onChange={onVariantChange}
+            options={(selectedModel()?.variants ?? []).map((v) => ({ value: v, label: titleCase(v) }))}
+          />
+        </div>
+      </Card>
+    </Show>
+  );
+}
+
+/** One sub-agent model row: label + enable toggle + default-variant select
+ * (disabled when off). Any change sends the FULL row state via
+ * `set_subagent_model`; `pending` (shared across the section) fades the row
+ * until the `subagent_models_changed` broadcast settles the catalog. */
+function SubagentModelRow(props: {
+  provider: string;
+  model: SubagentModel;
+  pending: boolean;
+  onChange: (patch: { enabled?: boolean; default_variant?: string }) => void;
+}) {
+  return (
+    <div
+      class="flex items-center gap-3 px-3.5 py-3 transition-opacity"
+      classList={{ "opacity-60": props.pending }}
+    >
+      <div class="min-w-0 flex-1">
+        <div class="truncate text-sm text-foreground">{props.model.label}</div>
+        <div class="mt-0.5 truncate font-mono text-[0.7rem] text-muted-foreground">
+          {props.model.id}
+        </div>
+      </div>
+      <Select
+        ariaLabel={`${props.model.label} default variant`}
+        class="w-[7.5rem] shrink-0"
+        disabled={!props.model.enabled || props.pending}
+        value={props.model.default_variant}
+        onChange={(v) => props.onChange({ default_variant: v })}
+        options={props.model.variants.map((v) => ({ value: v, label: titleCase(v) }))}
+      />
+      <Toggle
+        ariaLabel={`Enable ${props.model.label}`}
+        checked={props.model.enabled}
+        onChange={(enabled) => props.onChange({ enabled })}
+      />
+    </div>
+  );
+}
+
+/** Sub-agent model catalog, grouped by provider. Hidden when the host reports
+ * no catalog (older hosts). */
+function SubagentModels() {
+  const catalog = () => state.subagentModels;
+
+  // Rows awaiting the broadcast, keyed `provider modelId`. Cleared whenever
+  // the catalog reference changes (a broadcast settled the truth); coarse but
+  // correct — the replacement catalog IS the latest state for every row.
+  const [pending, setPending] = createSignal<Set<string>>(new Set());
+  createEffect(() => {
+    catalog(); // track: a new catalog object means a broadcast landed.
+    setPending(new Set<string>());
+  });
+
+  const keyOf = (provider: string, id: string) => `${provider} ${id}`;
+
+  function change(
+    provider: string,
+    model: SubagentModel,
+    patch: { enabled?: boolean; default_variant?: string },
+  ) {
+    const enabled = patch.enabled ?? model.enabled;
+    const defaultVariant = patch.default_variant ?? model.default_variant;
+    setPending((s) => new Set<string>(s).add(keyOf(provider, model.id)));
+    getClient()?.setSubagentModel(provider, model.id, enabled, defaultVariant);
+  }
+
+  return (
+    <Show when={catalog()}>
+      <SubHeading>Sub-agent models</SubHeading>
+      <p class="mb-2 px-1 text-xs leading-snug text-muted-foreground">
+        Models an Agent may spawn Sub-agents with. Disabled models can't be used.
+      </p>
+      <div class="flex flex-col gap-3">
+        <For each={catalog()?.providers ?? []}>
+          {(group) => (
+            <div>
+              <div class="mb-1.5 px-1 text-[0.68rem] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+                {group.label}
+              </div>
+              <Card class="divide-y divide-border">
+                <For each={group.models}>
+                  {(model) => (
+                    <SubagentModelRow
+                      provider={group.provider}
+                      model={model}
+                      pending={pending().has(keyOf(group.provider, model.id))}
+                      onChange={(patch) => change(group.provider, model, patch)}
+                    />
+                  )}
+                </For>
+              </Card>
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
+}
+
+/** Settings → Models: the canonical home for main-agent model selection and the
+ * sub-agent model catalog. Each subsection self-hides when its store field is
+ * null (older hosts), so the whole section collapses to nothing on a host that
+ * reports neither. */
+function ModelsSection() {
+  return (
+    <Show when={state.model || state.subagentModels}>
+      <SectionHeader>Models</SectionHeader>
+      <MainAgentModel />
+      <SubagentModels />
+    </Show>
   );
 }
 
@@ -359,6 +599,9 @@ function SettingsPanel() {
             />
           </div>
         </Card>
+
+        {/* ── Models ─────────────────────────────────────────────────── */}
+        <ModelsSection />
 
         {/* ── Connection & devices ───────────────────────────────────── */}
         <SectionHeader>Connection &amp; devices</SectionHeader>

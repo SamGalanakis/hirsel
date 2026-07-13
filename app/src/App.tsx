@@ -2,6 +2,7 @@ import { Settings } from "lucide-solid";
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AgentStatus } from "./components/chat/AgentStatus";
 import { ChatView } from "./components/chat/ChatView";
+import { ModelChip } from "./components/chat/ModelChip";
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { NavRail } from "./components/NavRail";
@@ -124,7 +125,11 @@ function App() {
               <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
               <AgentStatus />
             </div>
-            <div class="flex shrink-0 items-center gap-1.5">
+            <div class="flex min-w-0 shrink items-center gap-1.5">
+              {/* Quick main-model variant switch; collapses to just the variant
+                  on narrow phones (its label hides < 400px). Full model +
+                  sub-agent config lives in Settings. */}
+              <ModelChip />
               <CanvasButton />
               <ProcessesButton />
               {/* Settings is otherwise reachable only from the desktop NavRail

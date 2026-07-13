@@ -18,6 +18,7 @@ import { CanvasButton, CanvasRail, CanvasSheet } from "../views/CanvasSurface";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { focusMainComposer } from "../../lib/focus";
 import { AgentStatus } from "./AgentStatus";
+import { ModelChip } from "./ModelChip";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { PingsRail, TrayOverlay, TrayShelf } from "../inbox/Tray";
@@ -370,7 +371,10 @@ export function ChatView() {
           home. Right side is reserved (kept clean). Phone is untouched. */}
       <header class="hidden h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 rail:flex">
         <AgentStatus />
-        <CanvasButton />
+        <div class="flex min-w-0 shrink items-center gap-2">
+          <ModelChip />
+          <CanvasButton />
+        </div>
       </header>
       {/* Measured inner: at `rail` width the chat pane fills the center of the
           3-pane shell but its content is capped to a reading measure (~680px)

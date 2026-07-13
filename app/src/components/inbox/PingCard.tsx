@@ -4,7 +4,7 @@ import type { Ping, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
 import {
   isPingRead,
-  isResolvedStatus,
+  isPingResolved,
   latestReplyForAnchor,
   sideChatForPing,
   viewsForPing,
@@ -71,10 +71,13 @@ const prefersReducedMotion = () =>
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 export function PingCard(props: Props) {
-  const isOpen = () => props.ping.status === "open";
   // v2.1 (ADR-0009): "done" is the terminal state (legacy "archived" is a
-  // synonym); the card dims and shows a non-destructive "Done" tag.
-  const isDone = () => isResolvedStatus(props.ping.status);
+  // synonym); the card dims and shows a non-destructive "Done" tag. Folds in the
+  // optimistic Mark-done override (spec item 2) so the card flips to Done the
+  // instant it is marked — hiding the Mark-done control / swipe so it can't
+  // double-resolve — and flips back if Undo is taken inside the 5s window.
+  const isDone = () => isPingResolved(props.ping, state.resolveOverrides);
+  const isOpen = () => !isDone();
   // Effective read state (wire `read` minus any local "Mark unread" override).
   const read = () => isPingRead(props.ping, state.unreadOverrides);
   // Email-like "unread" = an open Ping not yet seen. Done Pings are never

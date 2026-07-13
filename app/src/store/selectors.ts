@@ -10,6 +10,16 @@ export function isResolvedStatus(status: string): boolean {
   return status !== "open";
 }
 
+/** Effective "resolved" (rendered under Done) state for a Ping, folding in the
+ * client-only optimistic Mark-done override (`resolveOverrides`): a Ping is
+ * resolved when its wire status is resolved OR the Owner has just Marked it
+ * done and the 5s Undo window has not yet committed. Kept in one place so the
+ * open/Done partition, the counts, and the card visuals all agree — the same
+ * role `isPingRead` plays for the read override. */
+export function isPingResolved(ping: Ping, resolveOverrides: number[]): boolean {
+  return isResolvedStatus(ping.status) || resolveOverrides.includes(ping.id);
+}
+
 /** Effective "seen" state for a Ping (v1.3). A Ping is read when the wire
  * `read` flag is true AND the Owner has not manually "Marked unread" it (a
  * client-only override). Kept in one place so the badge, the card visual
@@ -23,15 +33,29 @@ export function isPingRead(ping: Ping, unreadOverrides: number[]): boolean {
  * (was open + requires_response). requires_response no longer affects the
  * badge count — it only drives the card accent and (Tray, v1.6) the shelf
  * badge's tone. */
-export function openUnreadCount(pings: Ping[], unreadOverrides: number[]): number {
-  return pings.filter((p) => p.status === "open" && !isPingRead(p, unreadOverrides)).length;
+export function openUnreadCount(
+  pings: Ping[],
+  unreadOverrides: number[],
+  resolveOverrides: number[] = [],
+): number {
+  return pings.filter(
+    (p) =>
+      p.status === "open" &&
+      !resolveOverrides.includes(p.id) &&
+      !isPingRead(p, unreadOverrides),
+  ).length;
 }
 
 /** Tray (v1.6): true when any open Ping still requires a response — drives the
  * shelf badge's `status-danger` accent (muted neutral otherwise). Independent
  * of the unread count so a Ping can be read but still awaiting a reply. */
-export function hasOpenRequiresResponse(pings: Ping[]): boolean {
-  return pings.some((p) => p.status === "open" && p.requires_response);
+export function hasOpenRequiresResponse(
+  pings: Ping[],
+  resolveOverrides: number[] = [],
+): boolean {
+  return pings.some(
+    (p) => p.status === "open" && p.requires_response && !resolveOverrides.includes(p.id),
+  );
 }
 
 /** Tray (v1.6): the single Ping the collapsed shelf previews — the most
@@ -42,8 +66,11 @@ export function hasOpenRequiresResponse(pings: Ping[]): boolean {
 export function mostActionablePing(
   pings: Ping[],
   unreadOverrides: number[],
+  resolveOverrides: number[] = [],
 ): Ping | null {
-  const open = pings.filter((p) => p.status === "open").sort((a, b) => b.id - a.id);
+  const open = pings
+    .filter((p) => p.status === "open" && !resolveOverrides.includes(p.id))
+    .sort((a, b) => b.id - a.id);
   if (open.length === 0) return null;
   return (
     open.find((p) => p.requires_response) ??

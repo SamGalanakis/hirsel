@@ -483,6 +483,13 @@ export function reduce(state: AppState, action: Action): AppState {
       return {
         ...state,
         pings: upsertPing(state.pings, ping),
+        // A committed resolve (host `done` ping_upsert) supersedes any pending
+        // optimistic Mark-done override for this id — prune it so the wire truth
+        // and the optimistic layer never disagree once the send has landed.
+        resolveOverrides:
+          ping.status !== "open"
+            ? state.resolveOverrides.filter((id) => id !== ping.id)
+            : state.resolveOverrides,
         sideChats,
       };
     }
@@ -508,6 +515,25 @@ export function reduce(state: AppState, action: Action): AppState {
         ? state.unreadOverrides
         : [...state.unreadOverrides, action.pingId].slice(-200);
       return { ...state, unreadOverrides };
+    }
+
+    case "resolve_local": {
+      // Optimistic "Marked done" flip (mirrors `mark_unread_local`): record the
+      // id so the Ping renders/counts as resolved at once, while a 5s Undo
+      // window (lib/resolve-undo) debounces the actual `resolve_ping` send.
+      const resolveOverrides = state.resolveOverrides.includes(action.pingId)
+        ? state.resolveOverrides
+        : [...state.resolveOverrides, action.pingId].slice(-200);
+      return { ...state, resolveOverrides };
+    }
+
+    case "unresolve_local": {
+      // Undo tapped inside the window (or the send superseded): drop the
+      // optimistic override so the Ping returns to its wire status.
+      return {
+        ...state,
+        resolveOverrides: state.resolveOverrides.filter((id) => id !== action.pingId),
+      };
     }
 
     case "send_local": {

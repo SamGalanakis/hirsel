@@ -1,5 +1,5 @@
 import { X } from "lucide-solid";
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import { cn } from "@/lib/utils";
 import { dismissToast, toasts } from "../lib/toast";
 
@@ -19,6 +19,17 @@ export function Toaster() {
             )}
           >
             <span class="min-w-0 flex-1 wrap-break-word">{t.message}</span>
+            <Show when={t.action}>
+              {(action) => (
+                <button
+                  type="button"
+                  class="shrink-0 rounded-sm px-1.5 py-0.5 text-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => action().onClick()}
+                >
+                  {action().label}
+                </button>
+              )}
+            </Show>
             <button
               type="button"
               class="shrink-0 text-muted-foreground transition-colors hover:text-foreground"

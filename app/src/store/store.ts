@@ -69,7 +69,16 @@ interface UiState {
    * dismissed by the Owner. Lives in the UI slice — not the wire-protocol
    * AppState — since it is presentational, not sync state. */
   protocolError: string | null;
+  /** One-shot: which Settings section to scroll into view when the Settings
+   * pane opens (e.g. the phone overflow "Model settings" row opens Settings
+   * scrolled to Models, an honest affordance instead of landing on Appearance).
+   * Consumed once by SettingsPanel then cleared. `null` = open at the top. */
+  settingsScrollTarget: SettingsSection | null;
 }
+
+/** A jump-to target within the Settings pane, used by callers that open
+ * Settings pointed at a specific section (see `settingsScrollTarget`). */
+export type SettingsSection = "models";
 
 type Store = AppState & UiState;
 
@@ -84,6 +93,7 @@ function initialStore(): Store {
     activeSideChatSc: null,
     pendingSideChatPingId: null,
     protocolError: null,
+    settingsScrollTarget: null,
   };
 }
 
@@ -107,6 +117,7 @@ function appSnapshot(): AppState {
     turnDetails: state.turnDetails,
     removedIds: state.removedIds,
     unreadOverrides: state.unreadOverrides,
+    resolveOverrides: state.resolveOverrides,
     sideChatRefs: state.sideChatRefs,
     sideChats: state.sideChats,
     pendingSideSends: state.pendingSideSends,
@@ -135,6 +146,7 @@ export function dispatch(action: Action): void {
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
     setState("unreadOverrides", next.unreadOverrides);
+    setState("resolveOverrides", next.resolveOverrides);
     setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("processes", reconcile(next.processes, { key: "id" }));
     setState("turnEvents", next.turnEvents);
@@ -214,9 +226,17 @@ export function openProcesses(): void {
   setState("rightRegion", "processes");
 }
 
-/** Dock the Settings inspector into the right region. */
-export function openSettings(): void {
-  setState("rightRegion", "settings");
+/** Dock the Settings inspector into the right region. An optional `section`
+ * points the pane at a specific group on open (e.g. the phone overflow "Model
+ * settings" row opens Settings scrolled to Models); omitted opens at the top. */
+export function openSettings(section?: SettingsSection): void {
+  setState({ rightRegion: "settings", settingsScrollTarget: section ?? null });
+}
+
+/** Consume the one-shot Settings scroll target (SettingsPanel reads it on
+ * mount, scrolls, then clears it so a later open lands at the top). */
+export function clearSettingsScrollTarget(): void {
+  setState("settingsScrollTarget", null);
 }
 
 /** Surface the Canvas view in the right region. Collapses the phone Tray

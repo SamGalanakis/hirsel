@@ -25,12 +25,14 @@ sudo install -d -o root -g root /opt/hirsel/releases/<release-id>/app
 sudo install -m 0755 target/release/hirsel-host \
   /opt/hirsel/releases/<release-id>/hirsel-host
 sudo cp -a app/dist /opt/hirsel/releases/<release-id>/app/
+sudo cp -a templates /opt/hirsel/releases/<release-id>/
 sudo ln -sfn /opt/hirsel/releases/<release-id> /opt/hirsel/current.new
 sudo mv -Tf /opt/hirsel/current.new /opt/hirsel/current
 ```
 
 The versioned directory is immutable after promotion. `HIRSEL_APP_DIR` below
-follows the atomically replaced `current` symlink to the matching web build.
+and the unit's `HIRSEL_TEMPLATES_DIR` both follow the atomically replaced
+`current` symlink to the matching web build and view-template catalog.
 
 ## One-time service setup
 

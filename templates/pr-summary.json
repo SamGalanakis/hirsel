@@ -1,0 +1,47 @@
+{
+  "id": "pr-summary",
+  "title": "PR summary",
+  "params_schema": {
+    "title": "string",
+    "branch": "string",
+    "files": "number",
+    "tests_ok": "boolean",
+    "tests_label": "string",
+    "tests_state": "string",
+    "checks": "array"
+  },
+  "spec": {
+    "type": "card",
+    "title": "{{title}}",
+    "subtitle": "{{branch}}",
+    "children": [
+      {
+        "type": "row",
+        "gap": "sm",
+        "align": "center",
+        "wrap": true,
+        "children": [
+          { "type": "badge", "label": "{{files}} files changed", "tone": "muted" },
+          { "type": "status", "label": "{{tests_label}}", "state": "{{tests_state}}" }
+        ]
+      },
+      { "type": "divider" },
+      { "type": "checklist", "items": [{ "label": "Test suite", "checked": "{{tests_ok}}" }] },
+      {
+        "type": "checklist",
+        "items": [
+          { "{{#each checks}}": { "label": "{{label}}", "checked": "{{checked}}", "detail": "{{detail}}" } }
+        ]
+      },
+      {
+        "type": "optionSet",
+        "label": "Review outcome",
+        "action": "review_decision",
+        "choices": [
+          { "label": "Approve", "value": "approve", "description": "Ready to merge." },
+          { "label": "Request changes", "value": "request_changes", "description": "Send a focused revision note." }
+        ]
+      }
+    ]
+  }
+}

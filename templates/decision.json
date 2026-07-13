@@ -1,0 +1,26 @@
+{
+  "id": "decision",
+  "title": "Decision",
+  "params_schema": {
+    "title": "string",
+    "context": "string",
+    "question": "string",
+    "choices": "array"
+  },
+  "spec": {
+    "type": "card",
+    "title": "{{title}}",
+    "children": [
+      { "type": "callout", "tone": "warning", "body": "{{context}}" },
+      { "type": "text", "text": "{{question}}" },
+      {
+        "type": "optionSet",
+        "label": "Choose a direction",
+        "action": "decision_selected",
+        "choices": [
+          { "{{#each choices}}": { "label": "{{label}}", "value": "{{value}}", "description": "{{description}}" } }
+        ]
+      }
+    ]
+  }
+}

@@ -1916,6 +1916,12 @@ fn condense_args(name: &str, payload: &Value) -> Option<String> {
             labeled_first_scalar(payload, &["content_md", "content", "body"], "content")
         }
         "pings_resolve" => scalar_any(payload, &["ping_id", "id"]).map(|id| format!("ping {id}")),
+        "views_show" => scalar_any(payload, &["template_id", "instance_id"])
+            .map(|value| format!("view {value}")),
+        "views_update" | "views_clear" => {
+            scalar_field(payload, "instance_id").map(|id| format!("view {}", tail_identifier(&id)))
+        }
+        "views_list_templates" => None,
         "subagents_spawn" => {
             let agent = scalar_field(payload, "agent").unwrap_or_else(|| "subagent".to_string());
             scalar_any(payload, &["prompt", "task"]).map(|prompt| format!("{agent}: {prompt}"))
@@ -1948,6 +1954,12 @@ fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
             .and_then(|ping| scalar_field(ping, "ping_id"))
             .or_else(|| scalar_any(args, &["ping_id", "id"]))
             .map(|id| format!("ping {id}")),
+        "views_show" | "views_update" | "views_clear" => scalar_field(payload, "instance_id")
+            .or_else(|| scalar_field(args, "instance_id"))
+            .map(|id| format!("view {}", tail_identifier(&id))),
+        "views_list_templates" => payload
+            .as_array()
+            .map(|templates| format!("{} templates", templates.len())),
         "subagents_spawn" => scalar_any(payload, &["process_id"])
             .or_else(|| {
                 payload
@@ -2333,6 +2345,10 @@ impl HirselToolExecutor {
         match call.name {
             "pings_send" => self.pings_send(call.args).await,
             "pings_resolve" => self.pings_resolve(call.args).await,
+            "views_show" => self.views_show(call.args).await,
+            "views_update" => self.views_update(call.args).await,
+            "views_clear" => self.views_clear(call.args).await,
+            "views_list_templates" => self.views_list_templates().await,
             "subagents_spawn" => self.subagents_spawn(call.args, call.context).await,
             "subagents_prompt" => self.subagents_prompt(call.args).await,
             "subagents_interrupt" => self.subagents_interrupt(call.args).await,
@@ -2389,6 +2405,50 @@ impl HirselToolExecutor {
             .await
             .map_err(|error| error.to_string())?;
         pings_resolve_result(ping.as_ref())
+    }
+
+    async fn views_show(&self, args: &Value) -> Result<Value, String> {
+        let template_id = optional_string(args, "template_id")?;
+        let spec = args.get("spec").cloned().filter(|value| !value.is_null());
+        let params = args.get("params").cloned().filter(|value| !value.is_null());
+        let instance_id = optional_string(args, "instance_id")?;
+        let placement = required_string(args, "placement")?;
+        let view = self
+            .tools
+            .views_show(template_id, spec, params, instance_id, placement)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(view_instance_result(&view))
+    }
+
+    async fn views_update(&self, args: &Value) -> Result<Value, String> {
+        let instance_id = required_string(args, "instance_id")?;
+        let params = args.get("params").cloned().filter(|value| !value.is_null());
+        let patch = args.get("patch").cloned().filter(|value| !value.is_null());
+        let view = self
+            .tools
+            .views_update(&instance_id, params, patch)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(view_instance_result(&view))
+    }
+
+    async fn views_clear(&self, args: &Value) -> Result<Value, String> {
+        let instance_id = required_string(args, "instance_id")?;
+        self.tools
+            .views_clear(&instance_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(json!({ "ok": true, "instance_id": instance_id }))
+    }
+
+    async fn views_list_templates(&self) -> Result<Value, String> {
+        let templates = self
+            .tools
+            .views_list_templates()
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(templates).map_err(|error| error.to_string())
     }
 
     async fn subagents_spawn(
@@ -2591,6 +2651,10 @@ fn pings_send_result(ping: &hirsel_proto::Ping) -> Value {
 fn pings_resolve_result(ping: Option<&hirsel_proto::Ping>) -> Result<Value, String> {
     let ping = ping.map(ping_result).transpose()?;
     Ok(json!({ "ping": ping }))
+}
+
+fn view_instance_result(view: &hirsel_proto::ViewInstance) -> Value {
+    json!({ "instance_id": view.instance_id })
 }
 
 fn ping_result(ping: &hirsel_proto::Ping) -> Result<Value, String> {
@@ -3263,6 +3327,104 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
             ToolScheduling::Serial,
         ),
         tool_definition(
+            "hirsel.views_show",
+            "views_show",
+            "Resolve and show a validated component view in canvas, chat, or a Ping.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["placement"],
+                "properties": {
+                    "template_id": { "type": "string", "minLength": 1 },
+                    "spec": { "type": "object" },
+                    "params": { "type": "object" },
+                    "instance_id": { "type": "string", "minLength": 1 },
+                    "placement": {
+                        "type": "string",
+                        "pattern": "^(canvas|chat|ping:[1-9][0-9]*)$"
+                    }
+                },
+                "oneOf": [
+                    { "required": ["template_id"], "not": { "required": ["spec"] } },
+                    { "required": ["spec"], "not": { "required": ["template_id"] } }
+                ]
+            }),
+            view_instance_output_schema(),
+            ["views"],
+            "show",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.views_update",
+            "views_update",
+            "Update an active view by merging params and/or applying RFC 6902 JSON Patch.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["instance_id"],
+                "properties": {
+                    "instance_id": { "type": "string", "minLength": 1 },
+                    "params": { "type": "object" },
+                    "patch": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["op", "path"],
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["add", "remove", "replace", "move", "copy", "test"]
+                                },
+                                "path": { "type": "string" },
+                                "from": { "type": "string" },
+                                "value": true
+                            }
+                        }
+                    }
+                },
+                "anyOf": [
+                    { "required": ["params"] },
+                    { "required": ["patch"] }
+                ]
+            }),
+            view_instance_output_schema(),
+            ["views"],
+            "update",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.views_clear",
+            "views_clear",
+            "Remove an active component view.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["instance_id"],
+                "properties": {
+                    "instance_id": { "type": "string", "minLength": 1 }
+                }
+            }),
+            view_clear_output_schema(),
+            ["views"],
+            "clear",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.views_list_templates",
+            "views_list_templates",
+            "List the file-based view templates currently available to the Agent.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+            }),
+            views_list_templates_output_schema(),
+            ["views"],
+            "list_templates",
+            ToolScheduling::Parallel,
+        ),
+        tool_definition(
             "hirsel.subagents_spawn",
             "subagents_spawn",
             "Start a Claude or Codex Sub-agent as a Lash Runtime Process.",
@@ -3451,6 +3613,44 @@ fn pings_send_output_schema() -> Value {
             "ping_id": { "type": "integer", "minimum": 1 },
             "anchor": { "type": "integer", "minimum": 1 },
             "requires_response": { "type": "boolean" }
+        }
+    })
+}
+
+fn view_instance_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["instance_id"],
+        "properties": {
+            "instance_id": { "type": "string", "minLength": 1 }
+        }
+    })
+}
+
+fn view_clear_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ok", "instance_id"],
+        "properties": {
+            "ok": { "const": true },
+            "instance_id": { "type": "string", "minLength": 1 }
+        }
+    })
+}
+
+fn views_list_templates_output_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title"],
+            "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "title": { "type": "string", "minLength": 1 }
+            }
         }
     })
 }
@@ -4590,6 +4790,16 @@ mod tests {
             .unwrap();
         let (broadcaster, _) = broadcast::channel(16);
         let (pushes, _) = crate::push::PushGateway::recording(storage.clone());
+        let broadcast_log = BroadcastLog::default();
+        let templates =
+            crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
+                .await
+                .unwrap();
+        let views = crate::templates::ViewManager::new(
+            templates,
+            broadcaster.clone(),
+            broadcast_log.clone(),
+        );
         let tools = ToolSuite::new(
             ToolsConfig {
                 driver_mode: DriverMode::Fake,
@@ -4597,9 +4807,10 @@ mod tests {
             },
             storage,
             broadcaster,
-            BroadcastLog::default(),
+            broadcast_log,
             ProcessStore::default(),
             pushes,
+            views,
         );
         let anchors = Arc::new(Mutex::new(TurnAnchorState::default()));
         {
@@ -4732,6 +4943,21 @@ mod tests {
                 pings_resolve_result(Some(&ping)).unwrap(),
                 pings_resolve_result(None).unwrap(),
             ],
+        );
+        let view = hirsel_proto::ViewInstance {
+            instance_id: "view-1".to_string(),
+            placement: "canvas".to_string(),
+            spec: json!({ "type": "text", "text": "Ready" }),
+        };
+        results.insert("views_show", vec![view_instance_result(&view)]);
+        results.insert("views_update", vec![view_instance_result(&view)]);
+        results.insert(
+            "views_clear",
+            vec![json!({ "ok": true, "instance_id": "view-1" })],
+        );
+        results.insert(
+            "views_list_templates",
+            vec![json!([{ "id": "status", "title": "Status" }])],
         );
         results.insert("subagents_spawn", vec![subagent_spawn_result("proc-1")]);
         results.insert("subagents_prompt", vec![acknowledgement_result()]);

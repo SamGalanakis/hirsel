@@ -318,6 +318,7 @@ fn test_host_config(data_dir: &std::path::Path) -> Config {
         anthropic_api_key: None,
         model: "claude-opus-4-7".to_owned(),
         data_dir: data_dir.to_owned(),
+        templates_dir: hirsel_host::templates::bundled_templates_dir(),
         driver: DriverMode::Fake,
         fake_fixture: None,
         listen: "127.0.0.1:0".parse().unwrap(),

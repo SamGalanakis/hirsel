@@ -1,0 +1,41 @@
+{
+  "id": "status-digest",
+  "title": "Status digest",
+  "params_schema": {
+    "title": "string",
+    "updated": "string",
+    "workstreams": "array"
+  },
+  "spec": {
+    "type": "card",
+    "title": "{{title}}",
+    "subtitle": "Updated {{updated}}",
+    "children": [
+      {
+        "type": "keyValue",
+        "items": [
+          { "{{#each workstreams}}": { "label": "{{name}}", "value": "{{detail}}" } }
+        ]
+      },
+      { "type": "divider" },
+      {
+        "type": "stack",
+        "gap": "sm",
+        "children": [
+          {
+            "{{#each workstreams}}": {
+              "type": "row",
+              "gap": "sm",
+              "align": "center",
+              "wrap": true,
+              "children": [
+                { "type": "status", "label": "{{name}}", "state": "{{state}}" },
+                { "type": "text", "text": "{{detail}}", "tone": "muted" }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use hirsel_proto::{ClientToHost, HelloAuth, HostToClient, Ping};
+use hirsel_proto::{ClientToHost, HelloAuth, HostToClient, Ping, ViewInstance};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -220,7 +220,12 @@ async fn build_snapshot(
     last_seen_msg_id: Option<u64>,
 ) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
     let snapshot = state.storage.hello_snapshot(last_seen_msg_id).await?;
-    let dedupe = HelloBroadcastDedupe::new(snapshot.latest_msg_id, snapshot.pings.clone());
+    let views = state.views.snapshot().await;
+    let dedupe = HelloBroadcastDedupe::new(
+        snapshot.latest_msg_id,
+        snapshot.pings.clone(),
+        views.clone(),
+    );
     let hello = HostToClient::HelloOk {
         latest_msg_id: snapshot.latest_msg_id,
         messages: snapshot.messages,
@@ -229,6 +234,7 @@ async fn build_snapshot(
         side_chats: state.side_chats.summaries().await,
         host_version: host_version(),
         model: state.model_snapshot(),
+        views,
     };
     Ok((hello, dedupe))
 }
@@ -279,13 +285,15 @@ async fn authenticate(
 struct HelloBroadcastDedupe {
     latest_msg_id: u64,
     pings: Vec<Ping>,
+    views: Vec<ViewInstance>,
 }
 
 impl HelloBroadcastDedupe {
-    fn new(latest_msg_id: u64, pings: Vec<Ping>) -> Self {
+    fn new(latest_msg_id: u64, pings: Vec<Ping>, views: Vec<ViewInstance>) -> Self {
         Self {
             latest_msg_id,
             pings,
+            views,
         }
     }
 
@@ -295,6 +303,15 @@ impl HelloBroadcastDedupe {
             HostToClient::PingUpsert { ping } => {
                 !self.pings.iter().any(|snapshot| snapshot == ping)
             }
+            HostToClient::ViewUpsert {
+                instance_id,
+                placement,
+                spec,
+            } => !self.views.iter().any(|snapshot| {
+                snapshot.instance_id == *instance_id
+                    && snapshot.placement == *placement
+                    && snapshot.spec == *spec
+            }),
             _ => true,
         }
     }
@@ -431,6 +448,13 @@ where
         ClientToHost::DiscardSideChat { sc } => {
             state.side_chats.discard(&sc).await?;
         }
+        ClientToHost::ViewEvent {
+            instance_id,
+            action,
+            data,
+        } => {
+            state.handle_view_event(instance_id, action, data).await?;
+        }
     }
     Ok(())
 }
@@ -498,6 +522,7 @@ mod tests {
 
     use async_trait::async_trait;
     use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
+    use serde_json::json;
 
     use super::{
         IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
@@ -518,6 +543,7 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -564,6 +590,7 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -599,6 +626,7 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -612,17 +640,31 @@ mod tests {
             .append_chat(ChatAuthor::Agent, "missed", None)
             .await
             .unwrap();
+        state
+            .views
+            .show(
+                None,
+                Some(json!({ "type": "text", "text": "Still active" })),
+                None,
+                Some("view-reconnect".to_string()),
+                "chat".to_string(),
+            )
+            .await
+            .unwrap();
 
         let (frame, _) = build_snapshot(&state, None).await.unwrap();
         match frame {
             HostToClient::HelloOk {
                 latest_msg_id,
                 messages,
+                views,
                 ..
             } => {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].body, "missed");
+                assert_eq!(views.len(), 1);
+                assert_eq!(views[0].instance_id, "view-reconnect");
             }
             other => panic!("unexpected resync frame: {other:?}"),
         }
@@ -661,6 +703,7 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),

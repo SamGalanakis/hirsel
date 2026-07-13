@@ -3,7 +3,7 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import type { Ping } from "../../protocol";
 import { dispatch, goToChat, requestSideChatOpen, state } from "../../store/store";
 import { isPingResolved } from "../../store/selectors";
-import { markDoneWithUndo } from "../../lib/resolve-undo";
+import { markDoneWithUndo, reopenPing } from "../../lib/resolve-undo";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { PingCard } from "./PingCard";
@@ -31,6 +31,7 @@ export function PingsView() {
     // Fold in the optimistic Mark-done override so a just-resolved Ping moves to
     // Done at once (and a mid-window Undo brings it back) — spec item 2.
     const open = sorted.filter((p) => !isPingResolved(p, state.resolveOverrides));
+    const doneAll = sorted.filter((p) => isPingResolved(p, state.resolveOverrides));
     // Tray (v1.6): requires_response Pings float to the top as their own
     // "Needs reply" section — a triage affordance a chronological-only feed
     // lacks, per the design critique's [P1] fix. Each bucket stays newest-first
@@ -39,10 +40,10 @@ export function PingsView() {
       needsReply: open.filter((p) => p.requires_response),
       other: open.filter((p) => !p.requires_response),
       // ADR-0009: resolved Pings (done, or legacy archived, or optimistically
-      // Marked done) collect here.
-      done: sorted
-        .filter((p) => isPingResolved(p, state.resolveOverrides))
-        .slice(0, DONE_LIMIT),
+      // Marked done) collect here. Capped at DONE_LIMIT (Done is history, not a
+      // full archive); `doneTotal` surfaces the cap honestly (spec item 4).
+      done: doneAll.slice(0, DONE_LIMIT),
+      doneTotal: doneAll.length,
     };
   });
 
@@ -58,13 +59,20 @@ export function PingsView() {
     goToChat({ scrollToMessageId: ping.anchor });
   }
 
-  // Mark done (ADR-0009: the Ping's terminal `resolve_ping` state, presented as
-  // "Done"). Routed through the Undo controller (spec item 2): the card flips to
-  // Done at once, but the wire send is debounced behind a 5s "Undo" toast so a
-  // mis-tap/mis-swipe is recoverable before it commits (resolve is terminal on
-  // the host — there is no reopen op).
+  // Mark done (ADR-0009: the Ping's `resolve_ping` state, presented as "Done").
+  // Routed through the Undo controller (spec item 2): the card flips to Done at
+  // once and `resolve_ping` is sent immediately, with a 5s "Undo" toast whose
+  // Undo reopens the Ping via the real `reopen_ping` op — no lost send if the
+  // app closes mid-window.
   function handleResolve(ping: Ping) {
     markDoneWithUndo(ping.id);
+  }
+
+  // Reopen a Done Ping (⋯ "Reopen", spec item 3): `reopen_ping` + optimistic
+  // un-flip. A mistakenly-done Ping is recoverable at any time, not only inside
+  // the 5s toast window.
+  function handleReopen(ping: Ping) {
+    reopenPing(ping.id);
   }
 
   // Auto-read / "Mark read": optimistic read flip + read_ping on the wire.
@@ -100,6 +108,7 @@ export function PingsView() {
     onRead: handleRead,
     onMarkUnread: handleMarkUnread,
     onDiscuss: handleDiscuss,
+    onReopen: handleReopen,
   });
 
   return (
@@ -177,14 +186,29 @@ export function PingsView() {
               <Show when={doneExpanded()} fallback={<ChevronRight class="size-3.5" />}>
                 <ChevronDown class="size-3.5" />
               </Show>
-              Done ({partitioned().done.length})
+              Done ({partitioned().doneTotal})
             </button>
             <Show when={doneExpanded()}>
-              <div class="flex flex-col gap-3">
+              {/* Done is history, not active work (spec item 4): its items rest
+                  as dense one-line rows (tap to promote one to a card — e.g. to
+                  Reopen it), never full cards. */}
+              <div class="flex flex-col">
                 <For each={partitioned().done}>
-                  {(ping) => <PingCard {...cardProps(ping)} expanded={true} />}
+                  {(ping) => (
+                    <PingCard
+                      {...cardProps(ping)}
+                      expanded={selectedId() === ping.id}
+                      onSelect={toggleSelect}
+                    />
+                  )}
                 </For>
               </div>
+              {/* Honest truncation: the DONE_LIMIT cap is surfaced, never silent. */}
+              <Show when={partitioned().doneTotal > DONE_LIMIT}>
+                <p class="mx-3 pt-2 text-[0.68rem] text-muted-foreground">
+                  Showing latest {DONE_LIMIT}
+                </p>
+              </Show>
             </Show>
           </div>
         </Show>

@@ -26,6 +26,27 @@ let nextId = 1;
 
 const DEFAULT_MS = 4000;
 
+/** Per-toast auto-dismiss timer state, so the countdown can PAUSE while the
+ * toast is hovered/keyboard-focused (spec item 7) — a user reaching for "Undo"
+ * must not lose it — and RESUME with the time it had left on leave. */
+interface Countdown {
+  handle: ReturnType<typeof setTimeout> | null;
+  /** Milliseconds still owed when the current run started. */
+  remaining: number;
+  /** When the current run started, so a pause can debit the elapsed slice. */
+  startedAt: number;
+}
+const countdowns = new Map<number, Countdown>();
+
+function run(id: number, ms: number): void {
+  const cd: Countdown = {
+    handle: setTimeout(() => dismissToast(id), ms),
+    remaining: ms,
+    startedAt: Date.now(),
+  };
+  countdowns.set(id, cd);
+}
+
 /** Enqueue a toast; returns its id so a caller can dismiss it early (e.g. when
  * its action is taken before the timeout). */
 export function toast(
@@ -37,12 +58,33 @@ export function toast(
     ...list,
     { id, message, variant: opts?.variant ?? "default", action: opts?.action },
   ]);
-  const ms = opts?.durationMs ?? DEFAULT_MS;
-  setTimeout(() => dismissToast(id), ms);
+  run(id, opts?.durationMs ?? DEFAULT_MS);
   return id;
 }
 
+/** Pause a toast's auto-dismiss (hover/focus enter). Debits the elapsed slice
+ * from what's left and clears the pending timer; idempotent. */
+export function pauseToast(id: number): void {
+  const cd = countdowns.get(id);
+  if (!cd || cd.handle === null) return;
+  clearTimeout(cd.handle);
+  cd.remaining = Math.max(0, cd.remaining - (Date.now() - cd.startedAt));
+  cd.handle = null;
+}
+
+/** Resume a paused toast's auto-dismiss (hover/focus leave) with the time it
+ * had left; idempotent (a no-op if already running or already gone). */
+export function resumeToast(id: number): void {
+  const cd = countdowns.get(id);
+  if (!cd || cd.handle !== null) return;
+  cd.startedAt = Date.now();
+  cd.handle = setTimeout(() => dismissToast(id), cd.remaining);
+}
+
 export function dismissToast(id: number): void {
+  const cd = countdowns.get(id);
+  if (cd?.handle) clearTimeout(cd.handle);
+  countdowns.delete(id);
   setToasts((list) => list.filter((t) => t.id !== id));
 }
 

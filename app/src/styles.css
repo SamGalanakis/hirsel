@@ -210,6 +210,24 @@ textarea {
   }
 }
 
+/* Dense Done rows (spec item 6): their actions cluster (⋯ Reopen / View in
+   chat) rests hidden and reveals on hover or keyboard focus — but ONLY where a
+   fine pointer can actually hover. On touch (coarse pointer) and for AT the
+   controls stay present and visible; using `opacity` (not display/visibility)
+   keeps them in the accessibility tree and keyboard-reachable, so
+   `:focus-within` reveals them on Tab. Named group is `group/pingrow` on the
+   row (Tailwind emits the escaped `.group\/pingrow`). */
+@media (pointer: fine) {
+  .done-row-actions {
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .group\/pingrow:hover .done-row-actions,
+  .group\/pingrow:focus-within .done-row-actions {
+    opacity: 1;
+  }
+}
+
 /* Durable reduced-motion guard (C32): a global reset so animation call sites
    (ConnectionPill/Tray/ProcessRow pulses, spinners, sheet slide-ins) don't each
    have to remember `motion-safe:`. Near-instant rather than 0s so

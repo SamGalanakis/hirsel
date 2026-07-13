@@ -30,6 +30,7 @@ function renderCard(overrides: Partial<Ping> = {}) {
   const onJumpToChat = vi.fn();
   const onSendReply = vi.fn();
   const onDiscuss = vi.fn();
+  const onReopen = vi.fn();
   const screen = render(() => (
     <PingCard
       ping={item(overrides)}
@@ -39,9 +40,10 @@ function renderCard(overrides: Partial<Ping> = {}) {
       onRead={onRead}
       onMarkUnread={onMarkUnread}
       onDiscuss={onDiscuss}
+      onReopen={onReopen}
     />
   ));
-  return { screen, onResolve, onRead, onMarkUnread, onJumpToChat };
+  return { screen, onResolve, onRead, onMarkUnread, onJumpToChat, onReopen };
 }
 
 const menu = () => within(document.body);
@@ -95,5 +97,20 @@ describe("Inbox card ⋯ context menu", () => {
     const user = await openMenu(screen);
     await user.click(await menu().findByRole("menuitem", { name: "View in chat" }));
     await waitFor(() => expect(onJumpToChat).toHaveBeenCalledTimes(1));
+  });
+
+  it("an open card offers no Reopen (Mark done is the affordance instead)", async () => {
+    const { screen } = renderCard({ id: 7, status: "open" });
+    await openMenu(screen);
+    expect(await menu().findByRole("menuitem", { name: "View in chat" })).toBeTruthy();
+    expect(menu().queryByRole("menuitem", { name: "Reopen" })).toBeNull();
+  });
+
+  it("a Done card offers Reopen (→ onReopen, spec item 3)", async () => {
+    const { screen, onReopen } = renderCard({ id: 8, status: "done", read: true });
+    const user = await openMenu(screen);
+    await user.click(await menu().findByRole("menuitem", { name: "Reopen" }));
+    await waitFor(() => expect(onReopen).toHaveBeenCalledTimes(1));
+    expect(onReopen.mock.calls[0][0]).toMatchObject({ id: 8 });
   });
 });

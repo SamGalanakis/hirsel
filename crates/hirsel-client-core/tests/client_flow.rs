@@ -70,6 +70,7 @@ fn hello_ok(
         processes,
         side_chats: Vec::new(),
         host_version: "0.1.0 (test)".to_string(),
+        model: None,
     }
 }
 

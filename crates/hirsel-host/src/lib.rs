@@ -6,6 +6,7 @@ pub mod debug;
 pub mod health;
 pub mod iroh;
 pub mod lash_runtime;
+pub mod model_selection;
 pub mod monitors;
 pub mod process_run;
 pub mod processes;
@@ -25,8 +26,11 @@ use std::{
 
 use anyhow::Context;
 use axum::Router;
-use hirsel_proto::{AgentActivityState, ChatMessage, HostToClient, ProcessInfo, SendMode};
-use tokio::sync::broadcast;
+use hirsel_proto::{
+    AgentActivityState, ChatMessage, HostToClient, ModelSelection, ModelSnapshot, ProcessInfo,
+    SendMode,
+};
+use tokio::sync::{Mutex, broadcast};
 use tower_http::services::ServeDir;
 
 use crate::{
@@ -52,6 +56,7 @@ pub struct AppState {
     pub data_dir: Arc<PathBuf>,
     pub auth_throttle: auth::AuthThrottle,
     pub blob_signer: blob_route::BlobSigner,
+    model_change_lock: Arc<Mutex<()>>,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
@@ -116,6 +121,22 @@ impl AppState {
     pub fn broadcast(&self, event: HostToClient) {
         self.broadcast_log.record(event.clone());
         let _ = self.broadcaster.send(event);
+    }
+
+    pub fn model_snapshot(&self) -> Option<ModelSnapshot> {
+        self.agent.model_snapshot()
+    }
+
+    pub async fn set_model(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
+        let _guard = self.model_change_lock.lock().await;
+        let previous = self.model_snapshot().map(|snapshot| snapshot.current);
+        let current = self.agent.set_model(model_id, variant).await?;
+        if previous.as_ref() != Some(&current) {
+            self.broadcast(HostToClient::ModelChanged {
+                current: current.clone(),
+            });
+        }
+        Ok(current)
     }
 
     pub async fn submit_owner_message(
@@ -319,6 +340,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         data_dir: Arc::new(config.data_dir),
         auth_throttle: auth::AuthThrottle::default(),
         blob_signer,
+        model_change_lock: Arc::new(Mutex::new(())),
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)
@@ -573,6 +595,50 @@ mod tests {
             event,
             HostToClient::PingUpsert { ping: update } if update.id == ping.id
         )));
+    }
+
+    #[tokio::test]
+    async fn set_model_changes_the_next_turn_model_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.provider = ProviderMode::Codex;
+        config.model = "gpt-5.5".to_string();
+        let state = build_state(config).await.unwrap();
+
+        let selected = state.set_model("gpt-5.6-sol", "high").await.unwrap();
+        let spec = state
+            .agent
+            .next_turn_model_spec()
+            .expect("Codex runtime has a selectable model");
+
+        assert_eq!(selected.id, "gpt-5.6-sol");
+        assert_eq!(selected.variant, "high");
+        assert_eq!(spec.id, "gpt-5.6-sol");
+        assert_eq!(spec.variant.effort(), Some("high"));
+        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+            event,
+            HostToClient::ModelChanged { current }
+                if current.id == "gpt-5.6-sol" && current.variant == "high"
+        )));
+    }
+
+    #[tokio::test]
+    async fn set_model_rejects_unknown_models_and_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.provider = ProviderMode::Codex;
+        config.model = "gpt-5.5".to_string();
+        let state = build_state(config).await.unwrap();
+
+        assert!(state.set_model("gpt-5", "high").await.is_err());
+        assert!(state.set_model("gpt-5.6-sol", "impossible").await.is_err());
+        assert_eq!(
+            state.model_snapshot().unwrap().current,
+            ModelSelection {
+                id: "gpt-5.5".to_string(),
+                variant: "medium".to_string(),
+            }
+        );
     }
 
     async fn read_until_agent_activity(

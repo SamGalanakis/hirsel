@@ -14,7 +14,8 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{
-    AgentActivityState, HostToClient, Ping, QuickReply, SendMode, ToolCallSummary, TurnEventKind,
+    AgentActivityState, HostToClient, ModelSelection, ModelSnapshot, Ping, QuickReply, SendMode,
+    ToolCallSummary, TurnEventKind,
 };
 use lash::{
     InputItem, PromptLayerSink, TurnInput,
@@ -55,6 +56,7 @@ use uuid::Uuid;
 use crate::{
     BroadcastLog,
     config::{AgentMode, DriverMode, ProviderMode},
+    model_selection::{ModelSelectionState, model_spec},
     monitors::{output_tail, run_monitor_tick},
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
     tools::ToolSuite,
@@ -86,6 +88,7 @@ pub struct RuntimeConfig {
 #[derive(Clone)]
 pub struct AgentRuntime {
     backend: Arc<AgentBackend>,
+    model_selection: Option<ModelSelectionState>,
 }
 
 #[derive(Debug)]
@@ -137,6 +140,14 @@ impl AgentRuntime {
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
     ) -> anyhow::Result<Self> {
+        let model_selection = match config.provider_mode {
+            ProviderMode::Codex => Some(
+                ModelSelectionState::load(&config.data_dir, &config.model)
+                    .await
+                    .context("load main-agent model selection")?,
+            ),
+            ProviderMode::Anthropic => None,
+        };
         match config.agent_mode {
             AgentMode::Scripted => Ok(Self {
                 backend: Arc::new(AgentBackend::Scripted(start_scripted_runtime(
@@ -145,18 +156,56 @@ impl AgentRuntime {
                     broadcaster,
                     broadcast_log,
                 ))),
+                model_selection,
             }),
             AgentMode::Lash => {
-                match LashAgentRuntime::start(config, tools, broadcaster, broadcast_log).await? {
+                match LashAgentRuntime::start(
+                    config,
+                    model_selection.clone(),
+                    tools,
+                    broadcaster,
+                    broadcast_log,
+                )
+                .await?
+                {
                     LashStartup::Ready(runtime) => Ok(Self {
                         backend: Arc::new(AgentBackend::Lash(runtime)),
+                        model_selection,
                     }),
                     LashStartup::Unavailable(runtime) => Ok(Self {
                         backend: Arc::new(AgentBackend::Degraded(runtime)),
+                        model_selection,
                     }),
                 }
             }
         }
+    }
+
+    pub fn model_snapshot(&self) -> Option<ModelSnapshot> {
+        self.model_selection
+            .as_ref()
+            .map(ModelSelectionState::snapshot)
+    }
+
+    pub async fn set_model(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
+        let state = self.model_selection.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("runtime model selection requires HIRSEL_PROVIDER=codex")
+        })?;
+        let selection = state.validate(model_id, variant)?;
+        state.persist_and_select(selection.clone()).await?;
+        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
+            runtime.apply_selected_model().await?;
+        }
+        Ok(selection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_turn_model_spec(&self) -> Option<lash::ModelSpec> {
+        self.model_selection
+            .as_ref()
+            .map(ModelSelectionState::model_spec)
+            .transpose()
+            .expect("selected model metadata is valid")
     }
 
     pub async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
@@ -264,6 +313,7 @@ struct LashAgentRuntime {
     drain_boot_ms: u64,
     drain_retry_scheduled: AtomicBool,
     drain_retry_attempts: AtomicU64,
+    model_selection: Option<ModelSelectionState>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +330,7 @@ struct TurnAnchorState {
 impl LashAgentRuntime {
     async fn start(
         config: RuntimeConfig,
+        model_selection: Option<ModelSelectionState>,
         tools: ToolSuite,
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
@@ -314,13 +365,21 @@ impl LashAgentRuntime {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&lash_dir.join("processes.db")).await?,
         ) as Arc<dyn lash::process::ProcessRegistry>;
-        let model_spec = lash::ModelSpec::from_token_limits(
-            config.model.clone(),
-            ReasoningSelection::ProviderDefault,
-            200_000,
-            None,
-        )
-        .map_err(|error| anyhow::anyhow!("invalid HIRSEL_MODEL metadata: {error}"))?;
+        let model_spec = match config.provider_mode {
+            ProviderMode::Codex => model_selection
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Lash main-agent runtime requires a Codex model selection")
+                })?
+                .model_spec()?,
+            ProviderMode::Anthropic => lash::ModelSpec::from_token_limits(
+                config.model.clone(),
+                ReasoningSelection::ProviderDefault,
+                200_000,
+                None,
+            )
+            .map_err(|error| anyhow::anyhow!("invalid HIRSEL_MODEL metadata: {error}"))?,
+        };
         let rlm_config = lash_protocol_rlm::RlmProtocolPluginConfig::default()
             .with_lashlang_abilities(
                 lash_protocol_rlm::LashlangAbilities::default()
@@ -397,6 +456,7 @@ impl LashAgentRuntime {
                 .unwrap_or(0),
             drain_retry_scheduled: AtomicBool::new(false),
             drain_retry_attempts: AtomicU64::new(0),
+            model_selection,
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
@@ -415,12 +475,31 @@ impl LashAgentRuntime {
         runtime.resume_active_monitors().await;
         runtime.notify_if_work_pending().await;
         tracing::info!(
-            model = %config.model,
+            model = %runtime.session.policy_snapshot().model.id,
+            variant = ?runtime.session.policy_snapshot().model.variant,
             provider = ?config.provider_mode,
             data_dir = %config.data_dir.display(),
             "Lash Agent runtime opened session agent"
         );
         Ok(LashStartup::Ready(runtime))
+    }
+
+    async fn apply_selected_model(&self) -> anyhow::Result<()> {
+        let Some(selection) = &self.model_selection else {
+            return Ok(());
+        };
+        let selected = selection.current();
+        let spec = model_spec(&selected)?;
+        if self.session.policy_snapshot().model == spec {
+            return Ok(());
+        }
+        self.session
+            .configure(lash::SessionConfigPatch {
+                model: Some(spec),
+                ..lash::SessionConfigPatch::default()
+            })
+            .await
+            .context("apply selected model to main-agent Lash session")
     }
 
     async fn enqueue_inner(&self, turn: OwnerTurn) -> anyhow::Result<()> {
@@ -689,6 +768,10 @@ impl LashAgentRuntime {
                 runtime.notify.notified().await;
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
+                    if let Err(error) = runtime.apply_selected_model().await {
+                        tracing::warn!(%error, "failed to reconcile main-agent model before queued turn");
+                        break;
+                    }
                     let drain_id = runtime.next_drain_id();
                     runtime.activate_anchor_for_next_drain().await;
                     runtime.set_active_turn_id(Some(drain_id.clone())).await;

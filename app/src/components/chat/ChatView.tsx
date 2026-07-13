@@ -8,9 +8,11 @@ import {
   clearPendingSideChatOpen,
   clearProtocolError,
   clearScrollTarget,
+  closeRightRegion,
+  openSideChat,
   setActiveSideChatSc,
-  setCanvasOpen,
   setComposerReplyTarget,
+  showCanvas,
   state,
 } from "../../store/store";
 import { canvasViews, chatViews, sideChatForPing } from "../../store/selectors";
@@ -204,7 +206,7 @@ export function ChatView() {
     if (pingId === null) return;
     const ref = sideChatForPing(state.sideChatRefs, pingId);
     if (!ref) return;
-    setActiveSideChatSc(ref.sc);
+    openSideChat(ref.sc);
     clearPendingSideChatOpen();
   });
 
@@ -215,8 +217,12 @@ export function ChatView() {
   createEffect(() => {
     const lastConclusion = state.lastConclusion;
     if (!lastConclusion) return;
-    if (state.activeSideChatSc === lastConclusion.sc) {
+    // Only tear the sheet down if it's the one currently on screen for this sc:
+    // the region owns the pane, `activeSideChatSc` is the backing data.
+    if (state.rightRegion === "sideChat" && state.activeSideChatSc === lastConclusion.sc) {
+      // Genuine teardown — the sc concluded; clear the data and return to Pings.
       setActiveSideChatSc(null);
+      closeRightRegion();
       // The side composer is gone; hand focus back to the main composer.
       focusMainComposer();
     }
@@ -224,20 +230,25 @@ export function ChatView() {
     clearLastConclusion();
   });
 
-  // Generative-UI tier: auto-surface a NEW canvas view. Tracks the newest
-  // canvas instance id; when it changes to a fresh id (a genuinely new view,
-  // not an in-place content update to a dismissed one) the Canvas surface
-  // opens. An in-place update to an already-dismissed view does NOT re-nag.
+  // Generative-UI tier: auto-surface a NEW canvas view — but never STEAL an
+  // occupied right region. Tracks the newest canvas instance id; when it changes
+  // to a fresh id (a genuinely new view, not an in-place content update to a
+  // dismissed one) the Canvas surfaces ONLY if the region is idle
+  // (`rightRegion === "pings"`). If the user is in Settings/Processes/Side Chat,
+  // the arrival is recorded (so it won't ambush them later) and the availability
+  // affordance — the CanvasButton — appears instead. An in-place update to an
+  // already-seen view does NOT re-nag.
   let lastCanvasId: string | undefined;
   createEffect(() => {
     const list = canvasViews(state.views);
     const newest = list.length > 0 ? list[list.length - 1].instance_id : undefined;
-    if (newest && newest !== lastCanvasId) {
-      lastCanvasId = newest;
-      setCanvasOpen(true);
-    } else if (!newest) {
+    if (!newest) {
       lastCanvasId = undefined;
+      return;
     }
+    if (newest === lastCanvasId) return;
+    lastCanvasId = newest;
+    if (untrack(() => state.rightRegion) === "pings") showCanvas();
   });
 
   const replyingTo = () =>
@@ -396,7 +407,7 @@ export function ChatView() {
         {/* A post-auth protocol error, made visible inline instead of vanishing
             into the console. Sits above the transcript; dismissed by the Owner. */}
         <Show when={state.protocolError}>
-          <div class="mx-3 mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[0.8rem] text-destructive">
+          <div class="mx-3 mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             <CircleAlert class="mt-px size-4 shrink-0" aria-hidden="true" />
             <span class="min-w-0 flex-1 wrap-break-word">{state.protocolError}</span>
             <button
@@ -587,22 +598,22 @@ export function ChatView() {
       />
       </div>
 
-      {/* Right region — precedence-ordered, one slot:
-          • Side Chat panel when state.activeSideChatSc is set (fork-ui: a
-            full-screen `fixed` sheet on phone, an in-flow right rail on wide
-            viewports; never auto-opened — see the pendingSideChatPingId effect).
-          • Else the Canvas rail when a `canvas`-placed view is surfaced
-            (CanvasRail self-gates on canvasOpen + no active side chat).
-          • Otherwise the standing Pings rail at `rail` width (PingsRail hides
-            itself while a side chat holds the region; a shown Canvas rail sits
-            in front of it in source order and takes the slot). */}
+      {/* Right region — ONE exclusive owner (v2.3): `state.rightRegion` picks
+          exactly one of these to render; the others UNMOUNT (no hidden-focus
+          leak, nothing to clip). Each desktop presentation is a single in-flow
+          `<aside>` at the shared width token (Pings `clamp(340px,38vw,440px)`);
+          on phone each is a full-screen sheet. Each self-gates on the region, so
+          source order no longer encodes precedence — the enum does. Chat (the
+          center pane) is always live to the left; closing any pane returns the
+          region to `pings`.
+            • Side Chat  — `rightRegion === "sideChat"` (backed by activeSideChatSc)
+            • Canvas     — `rightRegion === "canvas"`   (CanvasRail / CanvasSheet)
+            • Processes  — `rightRegion === "processes"`
+            • Settings   — `rightRegion === "settings"`
+            • Pings      — `rightRegion === "pings"` (idle resting state) */}
       <SideChatSheet />
       <CanvasRail />
       <PingsRail />
-
-      {/* Processes / Settings / Canvas: full-screen sheets on phone, right-docked
-          inspectors over the right region on desktop — never covering the chat.
-          Settings is reachable from the phone-header gear and the NavRail. */}
       <CanvasSheet />
       <ProcessesSheet />
       <SettingsSheet />

@@ -1,4 +1,5 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Ping } from "../../protocol";
 
@@ -99,7 +100,7 @@ describe("Desktop shell: the standing Pings rail", () => {
     expect(within(rail).getByText("Approve the deploy to prod?")).toBeTruthy();
   });
 
-  it("carries a muted rail badge with count parity to the phone shelf", async () => {
+  it("carries the desktop interrupt red on the rail header, with count parity to the phone shelf", async () => {
     await setup();
     const railBadge = document.querySelector('[data-slot="pings-rail-badge"]') as HTMLElement;
     const shelfBadge = document.querySelector('[data-slot="tray-shelf-badge"]') as HTMLElement;
@@ -109,11 +110,11 @@ describe("Desktop shell: the standing Pings rail", () => {
     // openUnreadCount, so the number holds parity by construction.
     expect(railBadge.textContent).toBe("1");
     expect(shelfBadge.textContent).toBe("1");
-    // One-Escalation: the rail header count is NEVER the interrupt red — on
-    // desktop the single sanctioned red is the nav Inbox badge (asserted in the
-    // nav-rail suite). The phone shelf keeps danger tone as the phone's one red.
-    expect(railBadge.className).toContain("bg-muted-foreground");
-    expect(railBadge.className).not.toContain("bg-status-danger");
+    // One-Escalation (v2.3): with the nav "Inbox" badge gone, the standing Pings
+    // rail header is the ONE desktop home of the interrupt red — danger tone when
+    // an open requires-response Ping exists (the seeded item is one). The phone
+    // shelf keeps danger tone as the phone's one red.
+    expect(railBadge.className).toContain("bg-status-danger");
     expect(shelfBadge.className).toContain("bg-status-danger");
   });
 
@@ -126,7 +127,7 @@ describe("Desktop shell: the standing Pings rail", () => {
 });
 
 describe("Desktop shell: right-region precedence", () => {
-  it("yields the rail to an open side chat and restores it from the NavRail Inbox item", async () => {
+  it("yields the rail to an open side chat and restores it from the NavRail Pings item", async () => {
     const { screen } = await setupApp();
     // Default: rail present, no side chat surface.
     expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy();
@@ -143,10 +144,10 @@ describe("Desktop shell: right-region precedence", () => {
     await waitFor(() => expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeTruthy());
     expect(screen.queryByRole("complementary", { name: "Pings" })).toBeNull();
 
-    // The desktop restore affordance moved to the NavRail Inbox item: clicking
-    // it brings the rail back (leaving the side chat alive/resumable — it only
-    // clears the active sheet, not the sideChatRefs entry).
-    await fireEvent.click(screen.getByLabelText("Inbox"));
+    // The desktop restore affordance is the NavRail "Pings" item: selecting it
+    // returns the region to `pings` — the rail comes back and the side chat
+    // stays alive/resumable underneath (its sideChatRefs entry is untouched).
+    await fireEvent.click(screen.getByLabelText("Pings"));
     await waitFor(() => expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy());
     expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeNull();
   });
@@ -170,59 +171,80 @@ describe("Desktop shell: right-region precedence", () => {
         },
       },
     });
-    store.setProcessesOpen(true);
+    store.openProcesses();
 
     const panel = await waitFor(
       () => document.querySelector('[data-slot="processes-panel"]') as HTMLElement,
     );
     expect(panel).toBeTruthy();
-    // Phone base: a full-screen sheet. Desktop: docks to the right edge of the
-    // frame (absolute, right-anchored, bounded width) — never the full bleed
-    // that flung the status pill across the void, and never over the chat.
+    // Phone base: a full-screen sheet. Desktop (v2.3 single-slot): an IN-FLOW
+    // right-edge aside (relative, not an absolute overlay) at the shared Pings
+    // width token — the inactive panes unmount, so nothing clips behind it.
     expect(panel.className).toContain("fixed");
     expect(panel.className).toContain("inset-0");
-    expect(panel.className).toContain("rail:absolute");
-    // Width matches the standing Pings rail (360px) so the inspector overlays
-    // only the right region, never the chat measure to its left (C20).
-    expect(panel.className).toContain("rail:left-auto");
-    expect(panel.className).toContain("rail:w-[360px]");
-    // The chat is still live behind it (not unmounted/replaced) — the composer
+    expect(panel.className).toContain("rail:relative");
+    expect(panel.className).toContain("rail:shrink-0");
+    expect(panel.className).toContain("rail:w-[clamp(340px,38vw,440px)]");
+    // Dialog semantics for the phone modal sheet (a11y §5).
+    expect(panel.getAttribute("role")).toBe("dialog");
+    // The chat is still live beside it (not unmounted/replaced) — the composer
     // remains in the tree.
     expect(screen.getByPlaceholderText("Message the Agent…")).toBeTruthy();
   });
 });
 
 describe("Desktop shell: the nav rail", () => {
-  it("mounts a Primary nav with Chat / Inbox / Processes / Settings items", async () => {
+  it("mounts a Primary nav with Pings / Processes / Settings items (no Chat/Inbox/Commands)", async () => {
     const { screen } = await setupApp();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(nav).toBeTruthy();
-    // Each primary destination is a labeled control in the rail.
-    expect(within(nav).getByRole("button", { name: "Chat" })).toBeTruthy();
-    expect(within(nav).getByLabelText("Inbox")).toBeTruthy();
+    // v2.3: the rail navigates the ONE right region. Chat is always the center
+    // pane (no nav row); the standing rail IS the Pings surface (one "Pings"
+    // item, no separate "Inbox"); the palette is ⌘K (no "Commands" row).
+    expect(within(nav).getByLabelText("Pings")).toBeTruthy();
     expect(within(nav).getByRole("button", { name: /Processes/ })).toBeTruthy();
     expect(within(nav).getByLabelText("Settings")).toBeTruthy();
+    expect(within(nav).queryByRole("button", { name: "Chat" })).toBeNull();
+    expect(within(nav).queryByRole("button", { name: "Inbox" })).toBeNull();
+    expect(within(nav).queryByRole("button", { name: /Commands/ })).toBeNull();
   });
 
-  it("carries an Inbox badge with parity to the phone shelf badge", async () => {
+  it("marks exactly the nav item that owns rightRegion as aria-current", async () => {
+    const { screen, store } = await setupApp();
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    const pings = within(nav).getByLabelText("Pings");
+    const processes = within(nav).getByRole("button", { name: /Processes/ });
+    const settings = within(nav).getByLabelText("Settings");
+
+    // Default resting state: Pings owns the region (no more "Chat active =
+    // !processesOpen && !settingsOpen" fiction).
+    expect(pings.getAttribute("aria-current")).toBe("page");
+    expect(processes.getAttribute("aria-current")).toBeNull();
+    expect(settings.getAttribute("aria-current")).toBeNull();
+
+    store.openProcesses();
+    await waitFor(() => expect(processes.getAttribute("aria-current")).toBe("page"));
+    expect(pings.getAttribute("aria-current")).toBeNull();
+    expect(settings.getAttribute("aria-current")).toBeNull();
+  });
+
+  it("carries a MUTED Pings count on the nav (the red lives on the rail header)", async () => {
     await setupApp();
-    const navBadge = document.querySelector('[data-slot="nav-inbox-badge"]') as HTMLElement;
+    const navBadge = document.querySelector('[data-slot="nav-pings-badge"]') as HTMLElement;
     const shelfBadge = document.querySelector('[data-slot="tray-shelf-badge"]') as HTMLElement;
     expect(navBadge).toBeTruthy();
     expect(shelfBadge).toBeTruthy();
-    // Same count and same danger tone (one open requires_response item) — both
-    // derive from openUnreadCount / hasOpenRequiresResponse, so parity holds by
-    // construction; this pins it.
+    // Count parity with the phone shelf — but the nav badge is ALWAYS muted (the
+    // single red is the Pings rail header / phone shelf, never the nav).
     expect(navBadge.textContent).toBe("1");
     expect(shelfBadge.textContent).toBe("1");
-    expect(navBadge.className).toContain("bg-status-danger");
+    expect(navBadge.className).toContain("bg-muted-foreground");
+    expect(navBadge.className).not.toContain("bg-status-danger");
     expect(shelfBadge.className).toContain("bg-status-danger");
   });
 
   it("opens the Processes inspector from the NavRail Processes item", async () => {
     const { screen } = await setupApp();
-    // Scope to the rail: the phone header's ProcessesButton also matches
-    // /Processes/, so pick the NavRail item specifically.
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(document.querySelector('[data-slot="processes-panel"]')).toBeNull();
     await fireEvent.click(within(nav).getByRole("button", { name: /Processes/ }));
@@ -233,8 +255,6 @@ describe("Desktop shell: the nav rail", () => {
 
   it("opens the Settings inspector from the NavRail gear", async () => {
     const { screen } = await setupApp();
-    // Scope to the rail: the phone header's Settings gear (C3) also carries the
-    // "Settings" label, so pick the NavRail item specifically.
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
     await fireEvent.click(within(nav).getByLabelText("Settings"));
@@ -243,18 +263,15 @@ describe("Desktop shell: the nav rail", () => {
     );
   });
 
-  it("also reaches Settings from the phone-header gear (C3)", async () => {
+  it("also reaches Settings from the phone-header overflow (§4)", async () => {
     const { screen } = await setupApp();
-    // Two entry points now: the desktop NavRail item and the phone-header gear
-    // (the header is `rail:hidden`, the rail is `rail:flex`, so exactly one shows
-    // at any width — but both mount, so the query returns both).
-    const gears = screen.getAllByLabelText("Settings");
-    expect(gears.length).toBe(2);
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    const headerGear = gears.find((el) => !nav.contains(el));
-    expect(headerGear).toBeTruthy();
+    // On phone the header folds Model · Canvas · Processes · Settings behind one
+    // ⋯ overflow so AgentStatus keeps its width. Settings is a menu item there.
+    const user = userEvent.setup();
     expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
-    await fireEvent.click(headerGear as HTMLElement);
+    await user.click(screen.getByLabelText("More"));
+    // The menu content is portaled to document.body (outside the container).
+    await user.click(await within(document.body).findByRole("menuitem", { name: "Settings" }));
     await waitFor(() =>
       expect(document.querySelector('[data-slot="settings-panel"]')).toBeTruthy(),
     );

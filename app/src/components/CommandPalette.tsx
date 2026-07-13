@@ -18,7 +18,7 @@ import {
   Settings,
 } from "lucide-solid";
 import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
-import { goToChat, setActiveSideChatSc, state } from "../store/store";
+import { goToChat, openSideChat, state } from "../store/store";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS, stopActiveTurn } from "../lib/keymap";
 import { cn } from "@/lib/utils";
 
@@ -64,12 +64,12 @@ export const CommandPalette: Component<{
         run: () => goPane("chat"),
       },
       {
-        id: "go-inbox",
-        label: "Open Inbox",
+        id: "go-pings",
+        label: "Open Pings",
         hint: ["g", "i"],
-        keywords: "pings tray",
+        keywords: "pings inbox tray",
         icon: <InboxIcon class={iconClass} aria-hidden="true" />,
-        run: () => goPane("inbox"),
+        run: () => goPane("pings"),
       },
       {
         id: "go-processes",
@@ -128,7 +128,7 @@ export const CommandPalette: Component<{
         label: `Resume ${name}`,
         keywords: `side chat resume ${ping?.name ?? ""}`,
         icon: <MessageSquareReply class={iconClass} aria-hidden="true" />,
-        run: () => setActiveSideChatSc(ref.sc),
+        run: () => openSideChat(ref.sc),
       });
     }
 

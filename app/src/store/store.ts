@@ -9,6 +9,16 @@ export interface ComposerDraft {
   ref: number;
 }
 
+/** The one exclusive owner of the desktop right region / phone secondary sheet.
+ * Exactly one of these is showing at a time (the single-slot model): `pings` is
+ * the idle resting state (the standing Pings rail on desktop, the Tray shelf on
+ * phone), and everything else takes the slot until dismissed — closing any of
+ * them returns to `pings`. This replaces the four independent flags
+ * (processesOpen/settingsOpen/canvasOpen + `activeSideChatSc !== null`) that
+ * used to fight over the region: with one enum, inactive panes UNMOUNT (no
+ * hidden-focus leak, nothing to clip) and "last explicit user action wins." */
+export type RightRegion = "pings" | "sideChat" | "canvas" | "processes" | "settings";
+
 /** Cross-view navigation/UI state layered on top of the protocol AppState.
  * This is still "one store": the protocol side is kept in a pure,
  * independently-tested reducer (see reducer.ts) while this thin UI slice
@@ -18,18 +28,20 @@ export interface ComposerDraft {
  * v1.6 (Tray): Chat is the whole app now, so there is no more tab-switching
  * plumbing. Inbox lives in the Tray (an overlay local to ChatView, expanded
  * state kept here so `goToChat` can centrally collapse it — e.g. "View in
- * chat" from inside the expanded tray). Processes is a header-launched
- * full-screen sheet, tracked by `processesOpen`. */
+ * chat" from inside the expanded tray).
+ *
+ * v2.3 (single-owner right region): the right region is owned by one exclusive
+ * `rightRegion` enum rather than a set of independent booleans. */
 interface UiState {
   /** Tray overlay expanded/collapsed. Only ever set true by an explicit tap on
-   * the shelf (or the equivalent test action) — never auto-expanded. */
+   * the shelf (or the equivalent test action) — never auto-expanded. Orthogonal
+   * to `rightRegion`: it is the phone Pings overlay's expand state within the
+   * `pings` region (the desktop rail ignores it). */
   trayExpanded: boolean;
-  /** Processes full-screen sheet open/closed, launched from the header icon
-   * (phone) or the desktop NavRail's Processes item. */
-  processesOpen: boolean;
-  /** Settings inspector open/closed, launched from the desktop NavRail's gear
-   * or the phone header's Settings gear. */
-  settingsOpen: boolean;
+  /** The single owner of the right region (desktop) / secondary full-screen
+   * sheet (phone). Default `pings`. Every pane switch sets exactly this — so
+   * nothing lingers behind — and closing any pane returns it to `pings`. */
+  rightRegion: RightRegion;
   /** Set when something (a quoted ref, a quick reply) wants Chat to scroll to
    * and highlight a message; consumed once then cleared. */
   scrollToMessageId: number | null;
@@ -38,11 +50,13 @@ interface UiState {
   /** Set when something wants Chat's composer pre-filled with body text (v1.4
    * "Ask to stop"); consumed once by the Composer then cleared. */
   composerPrefill: string | null;
-  /** v2.0 (ADR-0008): the `sc` of the one Side Chat sheet currently on screen,
-   * or null. One sheet at a time (critique, binding); every other in-progress
-   * side chat is "in progress · resume" from its Inbox card. Deliberately
-   * never set by a cold-reconnect reconciliation — resuming is always a
-   * deliberate tap (critique: "do not auto-reopen"). */
+  /** v2.0 (ADR-0008): the `sc` of the current Side Chat — the DATA of which one
+   * the `sideChat` region shows. The pane SELECTION is `rightRegion` (v2.3): the
+   * sheet is on screen only while `rightRegion === "sideChat"`, but the sc stays
+   * set when you leave its pane so the side chat is alive/resumable underneath.
+   * One at a time (critique, binding); every other in-progress side chat is "in
+   * progress · resume" from its Ping card. Deliberately never set by a
+   * cold-reconnect reconciliation — resuming is always a deliberate tap. */
   activeSideChatSc: string | null;
   /** v2.0: the Ping id whose Discuss/Resume tap is awaiting a `sideChatRefs`
    * entry before the sheet can open (its `sc` isn't known yet on a fresh
@@ -55,12 +69,6 @@ interface UiState {
    * dismissed by the Owner. Lives in the UI slice — not the wire-protocol
    * AppState — since it is presentational, not sync state. */
   protocolError: string | null;
-  /** Generative-UI tier: whether the Canvas surface is on screen (the shared
-   * right context pane on desktop, a full-screen sheet on phone). Auto-opened
-   * when a `canvas`-placed view arrives; dismissable to a slim reopen
-   * affordance, and reopened from it. Purely presentational, like the other
-   * sheet-visibility flags here. */
-  canvasOpen: boolean;
 }
 
 type Store = AppState & UiState;
@@ -69,15 +77,13 @@ function initialStore(): Store {
   return {
     ...initialState(),
     trayExpanded: false,
-    processesOpen: false,
-    settingsOpen: false,
+    rightRegion: "pings",
     scrollToMessageId: null,
     composerDraft: null,
     composerPrefill: null,
     activeSideChatSc: null,
     pendingSideChatPingId: null,
     protocolError: null,
-    canvasOpen: false,
   };
 }
 
@@ -165,9 +171,11 @@ export function dispatch(action: Action): void {
   });
 }
 
-/** Land on Chat: closes the Processes sheet and collapses the Tray overlay
- * (both would otherwise cover the surface being navigated to), then applies
- * any one-shot scroll/draft/prefill request. */
+/** Land on Chat: returns the right region to its idle `pings` resting state
+ * (so any Processes/Settings/Canvas/Side-Chat pane covering the surface being
+ * navigated to unmounts), collapses the Tray overlay, then applies any one-shot
+ * scroll/draft/prefill request. The current side chat's DATA (`activeSideChatSc`)
+ * is left alive/resumable — only the pane selection changes. */
 export function goToChat(opts?: {
   scrollToMessageId?: number;
   composerDraft?: ComposerDraft;
@@ -175,20 +183,60 @@ export function goToChat(opts?: {
   composerPrefill?: string;
 }): void {
   setState({
-    processesOpen: false,
-    settingsOpen: false,
+    rightRegion: "pings",
     trayExpanded: false,
-    activeSideChatSc: null,
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
     composerPrefill: opts?.composerPrefill ?? null,
   });
 }
 
-/** Open (or leave-alive-close) the one Side Chat sheet on screen. Setting a
- * `sc` here is the ONLY thing that ever shows the sheet — cold reconnect
- * reconciliation seeds `sideChatRefs`/`sideChats` but never touches this, so
- * a live side chat never auto-reopens on launch (critique, binding). */
+/** The single low-level setter for the exclusive right region. Every intent
+ * helper below routes through this so "one pane owns the region" holds by
+ * construction — setting a region is all it takes to unmount whatever held it. */
+export function setRightRegion(region: RightRegion): void {
+  setState("rightRegion", region);
+}
+
+/** Close whatever pane owns the right region, back to the `pings` resting state. */
+export function closeRightRegion(): void {
+  setState("rightRegion", "pings");
+}
+
+/** Select the Pings resting state (the standing rail on desktop / the Tray on
+ * phone). */
+export function openPings(): void {
+  setState("rightRegion", "pings");
+}
+
+/** Dock the Processes inspector into the right region. */
+export function openProcesses(): void {
+  setState("rightRegion", "processes");
+}
+
+/** Dock the Settings inspector into the right region. */
+export function openSettings(): void {
+  setState("rightRegion", "settings");
+}
+
+/** Surface the Canvas view in the right region. Collapses the phone Tray
+ * overlay so the region isn't double-booked there. */
+export function showCanvas(): void {
+  setState({ rightRegion: "canvas", trayExpanded: false });
+}
+
+/** Open the Side Chat pane: records which sc backs it AND selects the region.
+ * Setting the region here is the ONLY thing that ever shows the sheet — cold
+ * reconnect reconciliation seeds `sideChatRefs`/`sideChats` but never touches
+ * this, so a live side chat never auto-reopens on launch (critique, binding). */
+export function openSideChat(sc: string): void {
+  setState({ activeSideChatSc: sc, rightRegion: "sideChat" });
+}
+
+/** Set only the current-side-chat DATA (which sc), without changing the pane
+ * selection. Used by teardown paths that clear the data after a discard/
+ * conclusion. Passing a non-null sc without selecting the region is intentional
+ * only in tests; production opens via `openSideChat`. */
 export function setActiveSideChatSc(sc: string | null): void {
   setState("activeSideChatSc", sc);
 }
@@ -206,14 +254,6 @@ export function clearPendingSideChatOpen(): void {
 
 export function clearLastConclusion(): void {
   dispatch({ type: "clear_last_conclusion" });
-}
-
-export function setProcessesOpen(open: boolean): void {
-  setState("processesOpen", open);
-}
-
-export function setSettingsOpen(open: boolean): void {
-  setState("settingsOpen", open);
 }
 
 export function setTrayExpanded(open: boolean): void {
@@ -244,13 +284,6 @@ export function setProtocolError(detail: string): void {
 
 export function clearProtocolError(): void {
   setState("protocolError", null);
-}
-
-/** Generative-UI tier: show/hide the Canvas surface. Opening it also collapses
- * the tray so the right region isn't double-booked on phone. */
-export function setCanvasOpen(open: boolean): void {
-  setState("canvasOpen", open);
-  if (open) setState("trayExpanded", false);
 }
 
 export function clearComposerPrefill(): void {

@@ -1,10 +1,10 @@
 import { ArrowUp, ChevronDown, ChevronRight, MoreHorizontal, Square, TriangleAlert, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { Ping } from "../../protocol";
-import { createFocusTrap, focusMainComposer } from "../../lib/focus";
+import { createFocusTrap, createMediaFlag, focusMainComposer } from "../../lib/focus";
 import { handleSubmitKeys } from "../../lib/submitKeymap";
 import { toast } from "../../lib/toast";
-import { dispatch, setActiveSideChatSc, state } from "../../store/store";
+import { closeRightRegion, dispatch, setActiveSideChatSc, state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { Markdown } from "../Markdown";
@@ -84,8 +84,14 @@ function titleSnippet(content: string | undefined): string {
 }
 
 export function SideChatSheet() {
+  // Shown only while the side-chat pane owns the right region (v2.3). The sc
+  // (`activeSideChatSc`) stays set when you leave the pane — the side chat is
+  // alive/resumable underneath — so the region gate, not the data, is what
+  // mounts the sheet.
   return (
-    <Show when={state.activeSideChatSc}>{(sc) => <SideChatPanel sc={sc()} />}</Show>
+    <Show when={state.rightRegion === "sideChat" && state.activeSideChatSc}>
+      {(sc) => <SideChatPanel sc={sc()} />}
+    </Show>
   );
 }
 
@@ -104,17 +110,22 @@ function SideChatPanel(props: { sc: string }) {
   );
   let panelRef: HTMLDivElement | undefined;
 
+  // Below `split` the sheet is full-screen (a true modal: Tab is trapped, so
+  // `aria-modal` is honest); at/above it an in-flow rail beside a live chat
+  // (non-modal). Gate the modal semantics to the phone width.
+  const phone = createMediaFlag("(max-width: 899.98px)");
   const offline = () => state.connection !== "connected";
   const thinking = () => sideChat()?.agentActivity.state === "thinking";
   const showingDraft = () => sideChat()?.draft !== null && sideChat()?.draft !== undefined;
   const busy = () => sideChat()?.confirming || sideChat()?.discarding;
 
-  // Leave-alive: close the surface (the side chat persists, resumable) and hand
-  // focus back to the main composer. The single exit used by the header
-  // leave/close control, Esc, the "ended" back button, and post-discard — so
-  // focus handoff is defined in exactly one place.
+  // Leave-alive: return the right region to `pings` (the sheet unmounts) while
+  // keeping the side chat's DATA (`activeSideChatSc`) set, so it stays
+  // alive/resumable underneath. Hands focus back to the main composer. The
+  // single exit used by the header leave/close control, Esc, and the "ended"
+  // back button — so focus handoff is defined in exactly one place.
   function leave() {
-    setActiveSideChatSc(null);
+    closeRightRegion();
     focusMainComposer();
   }
 
@@ -211,6 +222,9 @@ function SideChatPanel(props: { sc: string }) {
       ref={panelRef}
       tabindex={-1}
       data-slot="side-chat-sheet"
+      role="dialog"
+      aria-modal={phone() ? "true" : undefined}
+      aria-label={ping()?.name ? `Side chat with @${ping()?.name}` : "Side chat"}
       class="flex flex-col bg-background outline-none
         fixed inset-0 z-40 pb-[env(safe-area-inset-bottom)]
         motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
@@ -483,6 +497,9 @@ function SideChatPanel(props: { sc: string }) {
           onConfirm={() => {
             getClient()?.discardSideChat(props.sc);
             setDiscardConfirmOpen(false);
+            // Genuine teardown (not a leave-alive): clear the current-side-chat
+            // data too, since this sc is being discarded, then return to Pings.
+            setActiveSideChatSc(null);
             leave();
           }}
         />

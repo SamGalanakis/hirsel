@@ -14,7 +14,7 @@ describe("CommandPalette", () => {
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
     expect(screen.getByText("Focus composer")).toBeInTheDocument();
-    expect(screen.getByText("Open Inbox")).toBeInTheDocument();
+    expect(screen.getByText("Open Pings")).toBeInTheDocument();
     expect(screen.getByText("Open Processes")).toBeInTheDocument();
   });
 

@@ -1,8 +1,8 @@
 import { ChevronLeft, PanelRight, X } from "lucide-solid";
 import { For, onMount, Show } from "solid-js";
-import { createFocusTrap } from "../../lib/focus";
+import { createFocusTrap, createMediaFlag } from "../../lib/focus";
 import { canvasViews } from "../../store/selectors";
-import { setCanvasOpen, state } from "../../store/store";
+import { closeRightRegion, showCanvas, state } from "../../store/store";
 import { ViewRenderer } from "../../views/ViewRenderer";
 
 // Canvas: the shared right-context surface for `canvas`-placed generative
@@ -14,18 +14,12 @@ import { ViewRenderer } from "../../views/ViewRenderer";
 
 const RAIL_MQ = "(min-width: 1100px)";
 
-/** True when the desktop Canvas rail should hold the shared right region: the
- * surface is open, there is at least one canvas view, and no Side Chat is
- * claiming the region (Side Chat keeps precedence). */
-export function canvasDesktopActive(): boolean {
-  return (
-    state.canvasOpen && canvasViews(state.views).length > 0 && state.activeSideChatSc === null
-  );
-}
-
-/** True when the phone Canvas sheet should be up. */
-function canvasPhoneActive(): boolean {
-  return state.canvasOpen && canvasViews(state.views).length > 0;
+/** True when the Canvas holds the exclusive right region and has something to
+ * show. The single-owner enum makes the Side-Chat/Processes/Settings precedence
+ * automatic — Canvas shows only while it owns the region. Same predicate drives
+ * the desktop in-flow rail and the phone full-screen sheet. */
+export function canvasActive(): boolean {
+  return state.rightRegion === "canvas" && canvasViews(state.views).length > 0;
 }
 
 /** Newest-first canvas views. */
@@ -49,7 +43,7 @@ function CanvasBody() {
  * left hairline, h-12 header) so the shared right region reads as one slot. */
 export function CanvasRail() {
   return (
-    <Show when={canvasDesktopActive()}>
+    <Show when={canvasActive()}>
       <aside
         data-slot="canvas-rail"
         class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex"
@@ -62,7 +56,7 @@ export function CanvasRail() {
             type="button"
             class="-mr-1 grid size-8 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
             aria-label="Close Canvas"
-            onClick={() => setCanvasOpen(false)}
+            onClick={closeRightRegion}
           >
             <X class="size-4" aria-hidden="true" />
           </button>
@@ -75,9 +69,13 @@ export function CanvasRail() {
 
 function CanvasPhonePanel() {
   let panelRef: HTMLDivElement | undefined;
+  // Full-screen on phone (a true modal dialog: trap Tab, aria-modal); the
+  // desktop presentation is the in-flow CanvasRail above, so this phone panel is
+  // `rail:hidden`. `phone()` gates the modal semantics to that width.
+  const phone = createMediaFlag("(max-width: 1099.98px)");
   onMount(() => {
     createFocusTrap(() => panelRef, {
-      onEscape: () => setCanvasOpen(false),
+      onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
     });
   });
@@ -86,19 +84,27 @@ function CanvasPhonePanel() {
       ref={panelRef}
       tabindex={-1}
       data-slot="canvas-sheet"
+      role="dialog"
+      aria-modal={phone() ? "true" : undefined}
+      aria-labelledby="canvas-sheet-heading"
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)] rail:hidden"
     >
       <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
         <button
           type="button"
           class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
-          onClick={() => setCanvasOpen(false)}
+          onClick={closeRightRegion}
           aria-label="Close Canvas"
         >
           <ChevronLeft class="size-5" aria-hidden="true" />
           <span>Chat</span>
         </button>
-        <h1 class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em]">Canvas</h1>
+        <h1
+          id="canvas-sheet-heading"
+          class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em]"
+        >
+          Canvas
+        </h1>
         <span class="w-[3.25rem]" aria-hidden="true" />
       </header>
       <CanvasBody />
@@ -109,22 +115,24 @@ function CanvasPhonePanel() {
 /** The phone Canvas sheet (full-screen, `rail:hidden`). */
 export function CanvasSheet() {
   return (
-    <Show when={canvasPhoneActive()}>
+    <Show when={canvasActive()}>
       <CanvasPhonePanel />
     </Show>
   );
 }
 
-/** Reopen affordance: appears whenever canvas views exist but the surface is
- * dismissed, so a closed Canvas stays reachable. Used in both the desktop
- * center-pane header and the phone header. */
+/** Reopen affordance: appears whenever canvas views exist but the Canvas does
+ * NOT own the right region — so a closed Canvas (or one evicted because the user
+ * opened another pane) stays reachable without the auto-surface ever stealing an
+ * occupied slot. Used in both the desktop center-pane header and the phone
+ * overflow. */
 export function CanvasButton() {
   return (
-    <Show when={canvasViews(state.views).length > 0 && !state.canvasOpen}>
+    <Show when={canvasViews(state.views).length > 0 && state.rightRegion !== "canvas"}>
       <button
         type="button"
         class="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-        onClick={() => setCanvasOpen(true)}
+        onClick={showCanvas}
         aria-label="Open Canvas"
       >
         <PanelRight class="size-4" aria-hidden="true" />

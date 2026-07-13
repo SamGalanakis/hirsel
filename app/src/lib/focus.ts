@@ -7,7 +7,26 @@
 // ChatView → SideChatSheet. Deferred a microtask so it runs after the sheet's
 // own teardown has settled.
 
-import { onCleanup } from "solid-js";
+import { createSignal, onCleanup } from "solid-js";
+
+/** A reactive boolean tracking a CSS media query, kept in sync via the
+ * MediaQueryList `change` event. Lets a component read a breakpoint (e.g. "is
+ * this sheet full-screen on phone right now?") as ordinary reactive state — so
+ * `role`/`aria-modal` can be correct on phone (a true modal) yet absent on the
+ * desktop in-flow pane. Call inside a reactive scope; it self-cleans. Guards
+ * `matchMedia` for non-DOM/test environments (defaults to false). */
+export function createMediaFlag(query: string): () => boolean {
+  const mql = typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia(query)
+    : null;
+  const [flag, setFlag] = createSignal(mql?.matches ?? false);
+  if (mql) {
+    const on = () => setFlag(mql.matches);
+    mql.addEventListener?.("change", on);
+    onCleanup(() => mql.removeEventListener?.("change", on));
+  }
+  return flag;
+}
 
 export function focusMainComposer(): void {
   queueMicrotask(() => {

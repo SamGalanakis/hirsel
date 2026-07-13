@@ -86,7 +86,7 @@ async function mount(seed?: { model?: ModelSnapshot; subagent_models?: SubagentM
     type: "hello_ok",
     payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], ...seed },
   });
-  store.setSettingsOpen(true);
+  store.openSettings();
   const { SettingsSheet } = await import("./SettingsSheet");
   return render(() => <SettingsSheet />);
 }

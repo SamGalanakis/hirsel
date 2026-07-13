@@ -3358,7 +3358,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.pings_send",
             "pings_send",
-            "Emit a judgment Event (or an info Event when requires_response is false) anchored to the current Agent turn. For judgments, content_md is optional context that must add information beyond the question in description (state the stakes or constraint; omit it instead of echoing the question), options must contain 2–4 choices with exactly one recommended, and unblocks is an optional count of agents this decision will unblock.",
+            "Emit a judgment Event (or an info Event when requires_response is false) anchored to the current Agent turn. For judgments, content_md is optional context that must add information beyond the question in description (state the stakes or constraint; omit it instead of echoing the question). For example, content_md \"Choose where canvas view state should persist.\" is rejected for the heading \"Where should canvas view state persist?\" because it only paraphrases it. Options must contain 2–4 choices with exactly one recommended, and unblocks is an optional count of agents this decision will unblock.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -5014,7 +5014,7 @@ mod tests {
             .pings_send(&serde_json::json!({
                 "name": "active-turn-result",
                 "description": "Result for the active turn",
-                "content": "A result for the active turn",
+                "content": "The owner needs this result before deployment can continue.",
                 "requires_response": true,
                 "options": [
                     {

@@ -92,6 +92,8 @@ function appSnapshot(): AppState {
     connection: state.connection,
     lastSeenMsgId: state.lastSeenMsgId,
     hostVersion: state.hostVersion,
+    model: state.model,
+    subagentModels: state.subagentModels,
     pendingSends: state.pendingSends,
     uploads: state.uploads,
     processes: state.processes,
@@ -141,6 +143,11 @@ export function dispatch(action: Action): void {
     setState("agentActivity", next.agentActivity);
     setState("connection", next.connection);
     setState("lastSeenMsgId", next.lastSeenMsgId);
+    // Nullable object slices: a plain set (like hostVersion/agentActivity), not
+    // `reconcile`, since reconcile is for arrays/keyed objects and these swap to
+    // a whole new snapshot/catalog (or null) on each change.
+    setState("model", next.model);
+    setState("subagentModels", next.subagentModels);
     setState("sideChatRefs", next.sideChatRefs);
     // `reconcile` (not a plain setState) is load-bearing here too: a plain
     // `setState("sideChats", plainObject)` intermittently landed a stale/empty

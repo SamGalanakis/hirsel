@@ -177,8 +177,9 @@ function StatusNode(node: Node): JSX.Element {
   );
 }
 
-/** One letter-keyed option. Recommended → the one indigo (tint + filled key +
- * "recommends" chip). A tap posts `choose {choice, label}`. */
+/** One letter-keyed option. Recommended reads through exactly TWO cues — the
+ * one-indigo row tint plus a small "Recommended" chip (§6); the key stays neutral
+ * so the accent never triples up. A tap posts `choose {choice, label}`. */
 function OptionListNode(node: Node): JSX.Element {
   const emit = useEventEmit();
   const action = str(node.action, "choose");
@@ -203,14 +204,7 @@ function OptionListNode(node: Node): JSX.Element {
               )}
               onClick={() => emit.emit(action, { choice: key, label: label.replace(/`/g, "") })}
             >
-              <span
-                class={cn(
-                  "grid size-6 shrink-0 place-items-center rounded text-[0.7rem] font-bold",
-                  recommended
-                    ? "border border-primary bg-primary text-primary-foreground"
-                    : "border border-border bg-card text-muted-foreground",
-                )}
-              >
+              <span class="grid size-6 shrink-0 place-items-center rounded border border-border bg-card text-[0.7rem] font-bold text-muted-foreground">
                 {key}
               </span>
               <span class="flex min-w-0 flex-col">
@@ -225,7 +219,7 @@ function OptionListNode(node: Node): JSX.Element {
               </span>
               <Show when={recommended}>
                 <span class="mt-0.5 inline-flex items-center self-center rounded-full bg-primary/[0.12] px-2 py-0.5 text-[0.62rem] font-semibold text-primary">
-                  recommends
+                  Recommended
                 </span>
               </Show>
             </button>
@@ -291,15 +285,13 @@ function SubmitNode(node: Node): JSX.Element {
 }
 
 /** The "accompanying dynamic UI" of a judgment: a mini diff or a small table.
- * A quiet inset framed by a hairline, labelled with a `viewSlot` mono mark. */
+ * A quiet inset framed by a hairline, labelled by its human `title` alone — the
+ * internal `viewSlot` node-type token is never printed as copy (§6). */
 function ViewSlotNode(node: Node): JSX.Element {
   const isDiff = node.variant === "diff";
   return (
     <div class="overflow-hidden rounded-md border border-border bg-muted/40">
-      <div class="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[0.58rem] font-bold uppercase tracking-[0.05em] text-muted-foreground">
-        <span class="rounded-sm bg-primary/[0.12] px-1 font-mono text-[0.56rem] tracking-[-0.02em] text-primary">
-          viewSlot
-        </span>
+      <div class="px-2.5 pb-1 pt-2 text-[0.58rem] font-bold uppercase tracking-[0.05em] text-muted-foreground">
         {str(node.title, "accompanying view")}
       </div>
       <Show

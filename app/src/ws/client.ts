@@ -332,6 +332,18 @@ class HirselWsClient {
     this.enqueue({ type: "discard_side_chat", sc });
   }
 
+  // ---- Generative-UI tier (view templates) ----
+
+  /** Emit an owner-initiated event from an interactive view component
+   * (`action` / `optionSet` / `form`). Enqueued so a tap right as the socket
+   * blips still fires once reconnected (like resolve_ping). The reply returns
+   * through the normal chat/ping flow — there is no direct ack — so callers show
+   * a brief local pending state and let the resulting msg/ping_upsert land
+   * normally. The client never creates Chat messages or resolves Pings itself. */
+  sendViewEvent(instanceId: string, action: string, data: unknown): void {
+    this.enqueue({ type: "view_event", instance_id: instanceId, action, data });
+  }
+
   private armFailTimer(clientId: string): void {
     const existing = this.failTimers.get(clientId);
     if (existing) clearTimeout(existing);
@@ -537,6 +549,14 @@ class HirselWsClient {
       }
       case "side_chat_closed": {
         dispatch({ type: "side_chat_closed", sc: message.sc });
+        break;
+      }
+      case "view_upsert": {
+        dispatch({ type: "view_upsert", payload: message });
+        break;
+      }
+      case "view_removed": {
+        dispatch({ type: "view_removed", payload: message });
         break;
       }
       case "blob_ok": {

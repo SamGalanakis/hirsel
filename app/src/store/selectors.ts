@@ -1,4 +1,4 @@
-import type { Ping, ProcessInfo, ProcessState, SideChatRef } from "../protocol";
+import type { Ping, ProcessInfo, ProcessState, SideChatRef, ViewInstance } from "../protocol";
 import type { DisplayMessage } from "./types";
 
 /** v2.1 (ADR-0009): a Ping is "resolved" (rendered under Done) when its status
@@ -101,6 +101,34 @@ export function runningProcessCount(processes: ProcessInfo[]): number {
  * (possibly never-hydrated) `sideChats` map. */
 export function sideChatForPing(refs: SideChatRef[], pingId: number): SideChatRef | null {
   return refs.find((r) => r.ping_id === pingId) ?? null;
+}
+
+// ---- Generative-UI tier (view templates) ----
+
+/** The numeric Ping id a `ping:<id>` placement targets, or null for any other
+ * placement (`canvas` / `chat`) or a malformed value. One parser so the Ping
+ * card and the placement routing agree on what "belongs to this Ping" means. */
+export function parsePingPlacement(placement: string): number | null {
+  const m = /^ping:(\d+)$/.exec(placement);
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isFinite(id) ? id : null;
+}
+
+/** Views placed on the shared Canvas surface, oldest-first (insertion order).
+ * The Canvas auto-surfaces the newest, i.e. the LAST of this list. */
+export function canvasViews(views: ViewInstance[]): ViewInstance[] {
+  return views.filter((v) => v.placement === "canvas");
+}
+
+/** Views placed inline in the chat transcript, in arrival order. */
+export function chatViews(views: ViewInstance[]): ViewInstance[] {
+  return views.filter((v) => v.placement === "chat");
+}
+
+/** Views that belong inside a given Ping's card (`ping:<id>` placement). */
+export function viewsForPing(views: ViewInstance[], pingId: number): ViewInstance[] {
+  return views.filter((v) => parsePingPlacement(v.placement) === pingId);
 }
 
 /** Group processes into Running / Finished, each newest-activity-first

@@ -55,6 +55,12 @@ interface UiState {
    * dismissed by the Owner. Lives in the UI slice — not the wire-protocol
    * AppState — since it is presentational, not sync state. */
   protocolError: string | null;
+  /** Generative-UI tier: whether the Canvas surface is on screen (the shared
+   * right context pane on desktop, a full-screen sheet on phone). Auto-opened
+   * when a `canvas`-placed view arrives; dismissable to a slim reopen
+   * affordance, and reopened from it. Purely presentational, like the other
+   * sheet-visibility flags here. */
+  canvasOpen: boolean;
 }
 
 type Store = AppState & UiState;
@@ -71,6 +77,7 @@ function initialStore(): Store {
     activeSideChatSc: null,
     pendingSideChatPingId: null,
     protocolError: null,
+    canvasOpen: false,
   };
 }
 
@@ -98,6 +105,7 @@ function appSnapshot(): AppState {
     awaitingConclusions: state.awaitingConclusions,
     conclusionChips: state.conclusionChips,
     lastConclusion: state.lastConclusion,
+    views: state.views,
   };
 }
 
@@ -144,6 +152,9 @@ export function dispatch(action: Action): void {
     setState("awaitingConclusions", next.awaitingConclusions);
     setState("conclusionChips", next.conclusionChips);
     setState("lastConclusion", next.lastConclusion);
+    // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
+    // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
+    setState("views", reconcile(next.views, { key: "instance_id" }));
   });
 }
 
@@ -226,6 +237,13 @@ export function setProtocolError(detail: string): void {
 
 export function clearProtocolError(): void {
   setState("protocolError", null);
+}
+
+/** Generative-UI tier: show/hide the Canvas surface. Opening it also collapses
+ * the tray so the right region isn't double-booked on phone. */
+export function setCanvasOpen(open: boolean): void {
+  setState("canvasOpen", open);
+  if (open) setState("trayExpanded", false);
 }
 
 export function clearComposerPrefill(): void {

@@ -9,7 +9,8 @@ use axum::{
     routing::{get, post},
 };
 use hirsel_proto::{
-    Blob, ChatMessage, HostToClient, ModelSelection, Ping, PushPlatform, SendMode, ViewInstance,
+    Blob, ChatMessage, Event, HostToClient, ModelSelection, Ping, PushPlatform, SendMode,
+    ViewInstance,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -37,6 +38,9 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/read-ping", post(read_ping))
         .route("/debug/resolve-ping", post(resolve_ping))
         .route("/debug/reopen-ping", post(reopen_ping))
+        .route("/debug/event-action", post(event_action))
+        .route("/debug/trigger-digest", post(trigger_digest))
+        .route("/debug/taste", get(taste))
         .route("/debug/register-push-token", post(register_push_token))
         .route("/debug/unregister-push-token", post(unregister_push_token))
         .route("/debug/pushes", get(recorded_pushes))
@@ -54,6 +58,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
         .route("/debug/pings", get(pings))
+        .route("/debug/events", get(events))
         .route("/debug/processes", get(processes))
         .route("/debug/pair", post(pair))
         .route("/debug/devices", get(devices))
@@ -110,6 +115,24 @@ struct UploadBlobRequest {
 #[derive(Debug, Deserialize)]
 struct PingRequest {
     ping_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventActionRequest {
+    event_id: u64,
+    action: String,
+    #[serde(default)]
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct TriggerDigestRequest {
+    #[serde(default = "default_digest_job_id")]
+    job_id: String,
+    #[serde(default = "default_digest_text")]
+    text: String,
+    #[serde(default = "default_digest_status")]
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +250,16 @@ struct ChatResponse {
 #[derive(Debug, Serialize)]
 struct PingsResponse {
     pings: Vec<Ping>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventsResponse {
+    events: Vec<Event>,
+}
+
+#[derive(Debug, Serialize)]
+struct TasteResponse {
+    decisions: Vec<crate::storage::TasteDecision>,
 }
 
 #[derive(Debug, Serialize)]
@@ -476,7 +509,9 @@ async fn read_ping(
         .mark_ping_read(request.ping_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
-    state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+    state.broadcast(HostToClient::EventUpsert {
+        event: ping.clone(),
+    });
     Ok(Json(ping))
 }
 
@@ -489,7 +524,9 @@ async fn resolve_ping(
         .resolve_ping(request.ping_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
-    state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+    state.broadcast(HostToClient::EventUpsert {
+        event: ping.clone(),
+    });
     Ok(Json(ping))
 }
 
@@ -502,8 +539,39 @@ async fn reopen_ping(
         .reopen_ping(request.ping_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
-    state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+    state.broadcast(HostToClient::EventUpsert {
+        event: ping.clone(),
+    });
     Ok(Json(ping))
+}
+
+async fn event_action(
+    State(state): State<AppState>,
+    Json(request): Json<EventActionRequest>,
+) -> Result<Json<Event>, DebugError> {
+    Ok(Json(
+        state
+            .handle_event_action(request.event_id, request.action, request.data)
+            .await?,
+    ))
+}
+
+async fn trigger_digest(
+    State(state): State<AppState>,
+    Json(request): Json<TriggerDigestRequest>,
+) -> Result<Json<Event>, DebugError> {
+    Ok(Json(
+        state
+            .tools
+            .emit_scheduled_digest(request.job_id, request.text, request.status)
+            .await?,
+    ))
+}
+
+async fn taste(State(state): State<AppState>) -> Result<Json<TasteResponse>, DebugError> {
+    Ok(Json(TasteResponse {
+        decisions: state.storage.taste_decisions().await?,
+    }))
 }
 
 async fn register_push_token(
@@ -589,6 +657,24 @@ async fn pings(State(state): State<AppState>) -> Result<Json<PingsResponse>, Deb
     Ok(Json(PingsResponse {
         pings: state.storage.all_pings().await?,
     }))
+}
+
+async fn events(State(state): State<AppState>) -> Result<Json<EventsResponse>, DebugError> {
+    Ok(Json(EventsResponse {
+        events: state.storage.all_pings().await?,
+    }))
+}
+
+fn default_digest_job_id() -> String {
+    "morning-digest".to_string()
+}
+
+fn default_digest_text() -> String {
+    "The scheduled fleet digest completed without blockers.".to_string()
+}
+
+fn default_digest_status() -> String {
+    "fleet digest ready".to_string()
 }
 
 async fn broadcasts(State(state): State<AppState>) -> Json<BroadcastsResponse> {

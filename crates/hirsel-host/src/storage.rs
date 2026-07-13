@@ -9,8 +9,9 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent};
 use hirsel_proto::{
-    Blob, ChatAuthor, ChatMessage, Ping, PingStatus, ProcessInfo, ProcessKind, ProcessState,
-    PushPlatform, QuickReply, ToolCallSummary,
+    Blob, ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, EventStatus,
+    Ping, PingStatus, ProcessInfo, ProcessKind, ProcessState, PushPlatform, QuickReply,
+    ToolCallSummary,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,16 @@ pub struct StoredBlob {
 pub struct HelloSnapshot {
     pub latest_msg_id: u64,
     pub messages: Vec<ChatMessage>,
-    pub pings: Vec<Ping>,
+    pub events: Vec<Event>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TasteDecision {
+    pub id: u64,
+    pub event_id: u64,
+    pub choice: Option<String>,
+    pub rule: String,
+    pub ts: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -205,6 +215,13 @@ impl Storage {
                 created_ts TEXT NOT NULL,
                 last_seen_ts TEXT NOT NULL,
                 revoked_ts TEXT NULL
+            );
+            CREATE TABLE IF NOT EXISTS taste_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                choice TEXT NULL,
+                rule TEXT NOT NULL,
+                ts TEXT NOT NULL
             );
             ",
         )?;
@@ -429,12 +446,12 @@ impl Storage {
         )?;
         let effective_cursor = last_seen_msg_id.filter(|cursor| *cursor <= db_max);
         let messages = replay_messages_from_conn(&tx, effective_cursor)?;
-        let pings = ping_snapshot_from_conn(&tx)?;
+        let events = ping_snapshot_from_conn(&tx)?;
         tx.commit()?;
         Ok(HelloSnapshot {
             latest_msg_id: db_max,
             messages,
-            pings,
+            events,
         })
     }
 
@@ -494,6 +511,75 @@ impl Storage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_event(
+        &self,
+        kind: EventKind,
+        source: EventSource,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        ui: serde_json::Value,
+        anchor: u64,
+        requires_response: bool,
+        quick_replies: Vec<QuickReply>,
+    ) -> anyhow::Result<Event> {
+        let name = name.into();
+        let description = description.into();
+        validate_event_fields(kind, &name, &description, requires_response)?;
+        let ts = Utc::now();
+        let encoded_replies = serde_json::to_string(&quick_replies)?;
+        let encoded_ui = serde_json::to_string(&ui)?;
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "
+            INSERT INTO pings (
+                kind,
+                source_kind,
+                source_ref,
+                name,
+                description,
+                content,
+                ui,
+                anchor,
+                requires_response,
+                quick_replies,
+                status,
+                read,
+                ts
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8, ?9, 'open', 0, ?10)
+            ",
+            params![
+                event_kind_to_str(kind),
+                event_source_kind_to_str(source.kind),
+                source.r#ref,
+                name,
+                description,
+                encoded_ui,
+                anchor,
+                requires_response,
+                encoded_replies,
+                ts.to_rfc3339()
+            ],
+        )?;
+        let id = conn.last_insert_rowid() as u64;
+        Ok(Event {
+            id,
+            kind,
+            source,
+            name,
+            description,
+            ui,
+            anchor,
+            requires_response,
+            quick_replies,
+            status: EventStatus::Open,
+            read: false,
+            ts,
+        })
+    }
+
+    /// Compatibility entry point used by older host tests and the `pings.send` tool alias.
     pub async fn create_ping(
         &self,
         name: impl Into<String>,
@@ -506,48 +592,26 @@ impl Storage {
         let name = name.into();
         let description = description.into();
         let content = content.into();
-        validate_ping_fields(&name, &description)?;
-        let ts = Utc::now();
-        let encoded_replies = serde_json::to_string(&quick_replies)?;
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "
-            INSERT INTO pings (
-                name,
-                description,
-                content,
-                anchor,
-                requires_response,
-                quick_replies,
-                status,
-                read,
-                ts
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', 0, ?7)
-            ",
-            params![
-                name,
-                description,
-                content,
-                anchor,
-                requires_response,
-                encoded_replies,
-                ts.to_rfc3339()
-            ],
-        )?;
-        let id = conn.last_insert_rowid() as u64;
-        Ok(Ping {
-            id,
+        let kind = if requires_response {
+            EventKind::Judgment
+        } else {
+            EventKind::Info
+        };
+        let ui = legacy_event_ui(kind, &description, &content, &quick_replies);
+        self.create_event(
+            kind,
+            EventSource {
+                kind: EventSourceKind::Agent,
+                r#ref: None,
+            },
             name,
             description,
-            content,
+            ui,
             anchor,
             requires_response,
             quick_replies,
-            status: PingStatus::Open,
-            read: false,
-            ts,
-        })
+        )
+        .await
     }
 
     pub async fn resolve_ping(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
@@ -634,13 +698,50 @@ impl Storage {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "
-            SELECT id, name, description, content, anchor, requires_response,
-                   quick_replies, status, read, ts
+            SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
+                   requires_response, quick_replies, status, read, ts
             FROM pings
             ORDER BY id ASC
             ",
         )?;
         let rows = stmt.query_map([], ping_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub async fn record_taste_rule(
+        &self,
+        event_id: u64,
+        choice: Option<&str>,
+        rule: impl Into<String>,
+    ) -> anyhow::Result<TasteDecision> {
+        let rule = rule.into();
+        if rule.trim().is_empty() {
+            anyhow::bail!("taste rule must not be empty");
+        }
+        let conn = self.conn.lock().await;
+        if get_ping_optional(&conn, event_id)?.is_none() {
+            anyhow::bail!("unknown event: {event_id}");
+        }
+        let ts = Utc::now();
+        conn.execute(
+            "INSERT INTO taste_decisions (event_id, choice, rule, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![event_id, choice, rule, ts.to_rfc3339()],
+        )?;
+        Ok(TasteDecision {
+            id: conn.last_insert_rowid() as u64,
+            event_id,
+            choice: choice.map(str::to_string),
+            rule,
+            ts,
+        })
+    }
+
+    pub async fn taste_decisions(&self) -> anyhow::Result<Vec<TasteDecision>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, event_id, choice, rule, ts FROM taste_decisions ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], taste_decision_from_row)?;
         collect_rows(rows)
     }
 
@@ -1270,6 +1371,7 @@ impl Storage {
                 DELETE FROM monitors;
                 DELETE FROM subagent_processes;
                 DELETE FROM push_tokens;
+                DELETE FROM taste_decisions;
                 DELETE FROM chat_messages;
                 DELETE FROM sqlite_sequence
                 WHERE name IN ('chat_messages', 'pings', 'side_chat_messages');
@@ -1337,11 +1439,15 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
     {
         let mut stmt = conn.prepare(
             "
-            SELECT id, name, description, content, anchor, requires_response,
-                   quick_replies, status, read, ts
+            SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
+                   requires_response, quick_replies, status, read, ts
             FROM pings
             WHERE status = 'open'
-            ORDER BY id ASC
+            ORDER BY CASE kind
+                WHEN 'judgment' THEN 0
+                WHEN 'summary' THEN 1
+                ELSE 2
+            END, id ASC
             ",
         )?;
         let rows = stmt.query_map([], ping_from_row)?;
@@ -1350,8 +1456,8 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
     {
         let mut stmt = conn.prepare(
             "
-            SELECT id, name, description, content, anchor, requires_response,
-                   quick_replies, status, read, ts
+            SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
+                   requires_response, quick_replies, status, read, ts
             FROM pings
             WHERE status = 'done'
             ORDER BY id DESC
@@ -1410,9 +1516,13 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
         "
         CREATE TABLE IF NOT EXISTS pings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL DEFAULT 'info',
+            source_kind TEXT NOT NULL DEFAULT 'agent',
+            source_ref TEXT NULL,
             name TEXT NOT NULL,
             description TEXT NOT NULL,
             content TEXT NOT NULL,
+            ui TEXT NOT NULL DEFAULT '{}',
             anchor INTEGER NOT NULL REFERENCES chat_messages(id),
             requires_response INTEGER NOT NULL,
             quick_replies TEXT NOT NULL,
@@ -1440,6 +1550,31 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             [],
         )?;
     }
+    if !table_has_column(conn, "pings", "kind")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN kind TEXT NOT NULL DEFAULT 'info'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE pings SET kind = CASE WHEN requires_response != 0 THEN 'judgment' ELSE 'info' END",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "pings", "source_kind")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent'",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "pings", "source_ref")? {
+        conn.execute("ALTER TABLE pings ADD COLUMN source_ref TEXT NULL", [])?;
+    }
+    if !table_has_column(conn, "pings", "ui")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN ui TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )?;
+    }
     conn.execute(
         "UPDATE pings SET status = 'done' WHERE status = 'archived'",
         [],
@@ -1464,6 +1599,30 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             WHERE id = ?1
             ",
             params![id, name, description],
+        )?;
+    }
+    let missing_ui = {
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, description, content, quick_replies FROM pings WHERE ui = '{}'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, kind, description, content, replies) in missing_ui {
+        let kind = event_kind_from_str(&kind)?;
+        let replies = serde_json::from_str::<Vec<QuickReply>>(&replies)?;
+        let ui = legacy_event_ui(kind, &description, &content, &replies);
+        conn.execute(
+            "UPDATE pings SET ui = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&ui)?],
         )?;
     }
     Ok(())
@@ -1505,20 +1664,78 @@ fn derive_ping_description(content: &str) -> String {
         .to_string()
 }
 
-fn validate_ping_fields(name: &str, description: &str) -> anyhow::Result<()> {
+fn validate_event_fields(
+    kind: EventKind,
+    name: &str,
+    description: &str,
+    requires_response: bool,
+) -> anyhow::Result<()> {
     if name.trim().is_empty() {
-        anyhow::bail!("ping name is required");
+        anyhow::bail!("event name is required");
     }
     if name.chars().count() > 32 {
-        anyhow::bail!("ping name must be at most 32 characters");
+        anyhow::bail!("event name must be at most 32 characters");
     }
     if description.trim().is_empty() {
-        anyhow::bail!("ping description is required");
+        anyhow::bail!("event description is required");
     }
     if description.lines().count() != 1 {
-        anyhow::bail!("ping description must be one line");
+        anyhow::bail!("event description must be one line");
+    }
+    if matches!(kind, EventKind::Judgment) != requires_response {
+        anyhow::bail!("only judgment events may require a response");
     }
     Ok(())
+}
+
+fn legacy_event_ui(
+    kind: EventKind,
+    description: &str,
+    content: &str,
+    quick_replies: &[QuickReply],
+) -> serde_json::Value {
+    if matches!(kind, EventKind::Judgment) {
+        let options = quick_replies
+            .iter()
+            .enumerate()
+            .map(|(index, reply)| {
+                serde_json::json!({
+                    "key": option_key(index),
+                    "label": reply.label,
+                    "detail": reply.value,
+                    "recommended": index == 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "type": "card",
+            "children": [
+                {
+                    "type": "eyebrow",
+                    "text": "Taste boundary — fleet stopped",
+                    "boundary": true
+                },
+                { "type": "heading", "text": description },
+                { "type": "text", "text": content },
+                { "type": "optionList", "options": options }
+            ]
+        })
+    } else {
+        serde_json::json!({
+            "type": "card",
+            "children": [{ "type": "text", "text": content }]
+        })
+    }
+}
+
+fn option_key(index: usize) -> String {
+    u8::try_from(index)
+        .ok()
+        .and_then(|index| b'A'.checked_add(index))
+        .filter(u8::is_ascii_uppercase)
+        .map(char::from)
+        .map(String::from)
+        .unwrap_or_else(|| (index + 1).to_string())
 }
 
 fn ensure_chat_tool_calls_column(conn: &Connection) -> rusqlite::Result<()> {
@@ -1567,8 +1784,8 @@ fn get_ping(conn: &Connection, id: u64) -> rusqlite::Result<Ping> {
 fn get_ping_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<Ping>> {
     conn.query_row(
         "
-        SELECT id, name, description, content, anchor, requires_response,
-               quick_replies, status, read, ts
+        SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
+               requires_response, quick_replies, status, read, ts
         FROM pings
         WHERE id = ?1
         ",
@@ -1695,21 +1912,42 @@ fn side_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatM
 }
 
 fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
-    let replies: String = row.get(6)?;
-    let status: String = row.get(7)?;
-    let ts: String = row.get(9)?;
+    let kind: String = row.get(1)?;
+    let source_kind: String = row.get(2)?;
+    let ui: String = row.get(6)?;
+    let replies: String = row.get(9)?;
+    let status: String = row.get(10)?;
+    let ts: String = row.get(12)?;
     Ok(Ping {
         id: row.get(0)?,
-        name: row.get(1)?,
-        description: row.get(2)?,
-        content: row.get(3)?,
-        anchor: row.get(4)?,
-        requires_response: row.get::<_, i64>(5)? != 0,
-        quick_replies: serde_json::from_str(&replies).map_err(|error| {
+        kind: event_kind_from_str(&kind)?,
+        source: EventSource {
+            kind: event_source_kind_from_str(&source_kind)?,
+            r#ref: row.get(3)?,
+        },
+        name: row.get(4)?,
+        description: row.get(5)?,
+        ui: serde_json::from_str(&ui).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
         })?,
+        anchor: row.get(7)?,
+        requires_response: row.get::<_, i64>(8)? != 0,
+        quick_replies: serde_json::from_str(&replies).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(9, Type::Text, Box::new(error))
+        })?,
         status: status_from_str(&status)?,
-        read: row.get::<_, i64>(8)? != 0,
+        read: row.get::<_, i64>(11)? != 0,
+        ts: parse_ts(&ts)?,
+    })
+}
+
+fn taste_decision_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TasteDecision> {
+    let ts: String = row.get(4)?;
+    Ok(TasteDecision {
+        id: row.get(0)?,
+        event_id: row.get(1)?,
+        choice: row.get(2)?,
+        rule: row.get(3)?,
         ts: parse_ts(&ts)?,
     })
 }
@@ -1787,6 +2025,50 @@ fn status_from_str(value: &str) -> rusqlite::Result<PingStatus> {
         "open" => Ok(PingStatus::Open),
         "done" => Ok(PingStatus::Done),
         _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn event_kind_to_str(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Judgment => "judgment",
+        EventKind::Summary => "summary",
+        EventKind::Info => "info",
+    }
+}
+
+fn event_kind_from_str(value: &str) -> rusqlite::Result<EventKind> {
+    match value {
+        "judgment" => Ok(EventKind::Judgment),
+        "summary" => Ok(EventKind::Summary),
+        "info" => Ok(EventKind::Info),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            1,
+            Type::Text,
+            format!("unknown event kind: {other}").into(),
+        )),
+    }
+}
+
+fn event_source_kind_to_str(kind: EventSourceKind) -> &'static str {
+    match kind {
+        EventSourceKind::Agent => "agent",
+        EventSourceKind::Subagent => "subagent",
+        EventSourceKind::Scheduled => "scheduled",
+        EventSourceKind::Monitor => "monitor",
+    }
+}
+
+fn event_source_kind_from_str(value: &str) -> rusqlite::Result<EventSourceKind> {
+    match value {
+        "agent" => Ok(EventSourceKind::Agent),
+        "subagent" => Ok(EventSourceKind::Subagent),
+        "scheduled" => Ok(EventSourceKind::Scheduled),
+        "monitor" => Ok(EventSourceKind::Monitor),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            2,
+            Type::Text,
+            format!("unknown event source kind: {other}").into(),
+        )),
     }
 }
 

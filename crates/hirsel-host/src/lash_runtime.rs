@@ -60,7 +60,7 @@ use crate::{
     model_selection::{ModelSelectionState, model_spec},
     monitors::{output_tail, run_monitor_tick},
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
-    tools::ToolSuite,
+    tools::{JudgmentOption, ToolSuite},
 };
 
 const AGENT_SESSION_ID: &str = "agent";
@@ -2392,22 +2392,52 @@ impl HirselToolExecutor {
             .transpose()
             .map_err(|error| format!("invalid quick_replies: {error}"))?
             .unwrap_or_default();
+        let options = args
+            .get("options")
+            .cloned()
+            .map(serde_json::from_value::<Vec<JudgmentOption>>)
+            .transpose()
+            .map_err(|error| format!("invalid options: {error}"))?;
+        if options.is_some() && args.get("quick_replies").is_some() {
+            return Err("provide options or quick_replies, not both".to_string());
+        }
+        let view = args.get("view").cloned().filter(|value| !value.is_null());
+        let unblocks = args.get("unblocks").and_then(Value::as_u64);
         let anchor = self
             .current_anchor()
             .await
             .ok_or_else(|| "pings.send requires an active Owner turn anchor".to_string())?;
-        let ping = self
-            .tools
-            .pings_send(
-                name,
-                description,
-                content,
-                anchor,
-                requires_response,
-                quick_replies,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        let ping = match options {
+            Some(options) => {
+                self.tools
+                    .pings_send_with_options(
+                        name,
+                        description,
+                        content,
+                        anchor,
+                        requires_response,
+                        options,
+                        view,
+                        unblocks,
+                    )
+                    .await
+            }
+            None => {
+                self.tools
+                    .pings_send_with_view(
+                        name,
+                        description,
+                        content,
+                        anchor,
+                        requires_response,
+                        quick_replies,
+                        view,
+                        unblocks,
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| error.to_string())?;
         Ok(pings_send_result(&ping))
     }
 
@@ -3307,7 +3337,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.pings_send",
             "pings_send",
-            "Send a Ping anchored to the current Agent turn.",
+            "Emit a judgment Event (or an info Event when requires_response is false) anchored to the current Agent turn.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -3317,6 +3347,8 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                     "description": { "type": "string", "minLength": 1 },
                     "content_md": { "type": "string" },
                     "requires_response": { "type": "boolean", "default": true },
+                    "view": { "type": ["object", "array", "null"] },
+                    "unblocks": { "type": "integer", "minimum": 0 },
                     "quick_replies": {
                         "type": "array",
                         "items": {
@@ -3326,6 +3358,22 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                             "properties": {
                                 "value": { "type": "string" },
                                 "label": { "type": "string" }
+                            }
+                        }
+                    },
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["key", "label", "detail"],
+                            "properties": {
+                                "key": { "type": "string", "pattern": "^[A-Z]$" },
+                                "label": { "type": "string", "minLength": 1 },
+                                "detail": { "type": "string", "minLength": 1 },
+                                "recommended": { "type": "boolean", "default": false }
                             }
                         }
                     }
@@ -3706,9 +3754,11 @@ fn ping_output_schema() -> Value {
         "additionalProperties": false,
         "required": [
             "ping_id",
+            "kind",
+            "source",
             "name",
             "description",
-            "content",
+            "ui",
             "anchor",
             "requires_response",
             "quick_replies",
@@ -3718,9 +3768,19 @@ fn ping_output_schema() -> Value {
         ],
         "properties": {
             "ping_id": { "type": "integer", "minimum": 1 },
+            "kind": { "type": "string", "enum": ["judgment", "summary", "info"] },
+            "source": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "ref"],
+                "properties": {
+                    "kind": { "type": "string", "enum": ["agent", "subagent", "scheduled", "monitor"] },
+                    "ref": { "type": ["string", "null"] }
+                }
+            },
             "name": { "type": "string", "minLength": 1, "maxLength": 32 },
             "description": { "type": "string", "minLength": 1 },
-            "content": { "type": "string" },
+            "ui": {},
             "anchor": { "type": "integer", "minimum": 1 },
             "requires_response": { "type": "boolean" },
             "quick_replies": {
@@ -4787,9 +4847,17 @@ mod tests {
             attachments: Vec::new(),
             mentioned_pings: vec![Ping {
                 id: 7,
+                kind: hirsel_proto::EventKind::Judgment,
+                source: hirsel_proto::EventSource {
+                    kind: hirsel_proto::EventSourceKind::Agent,
+                    r#ref: None,
+                },
                 name: "release-choice".to_string(),
                 description: "Choose the release channel".to_string(),
-                content: "Longer details".to_string(),
+                ui: json!({
+                    "type": "card",
+                    "children": [{ "type": "text", "text": "Longer details" }]
+                }),
                 anchor: 3,
                 requires_response: true,
                 quick_replies: Vec::new(),
@@ -4900,9 +4968,17 @@ mod tests {
         let now = Utc::now();
         let ping = Ping {
             id: 7,
+            kind: hirsel_proto::EventKind::Judgment,
+            source: hirsel_proto::EventSource {
+                kind: hirsel_proto::EventSourceKind::Agent,
+                r#ref: None,
+            },
             name: "choose-release".to_string(),
             description: "Choose a release channel".to_string(),
-            content: "Choose a release".to_string(),
+            ui: json!({
+                "type": "card",
+                "children": [{ "type": "text", "text": "Choose a release" }]
+            }),
             anchor: 3,
             requires_response: true,
             quick_replies: vec![QuickReply {

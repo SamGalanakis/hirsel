@@ -10,7 +10,7 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hirsel_proto::Ping;
+use hirsel_proto::{Event, EventKind};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::Storage;
@@ -29,7 +29,7 @@ pub struct PushPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PushData {
-    pub ping_id: u64,
+    pub event_id: u64,
     pub name: String,
 }
 
@@ -70,7 +70,7 @@ impl PushSender for RecordingPushSender {
     async fn send(&self, tokens: &[String], payload: &PushPayload) -> anyhow::Result<()> {
         tracing::info!(
             token_count = tokens.len(),
-            ping_id = payload.data.ping_id,
+            event_id = payload.data.event_id,
             "FCM not configured — would send push"
         );
         self.pushes
@@ -175,7 +175,7 @@ impl FcmPushSender {
                         "body": payload.body,
                     },
                     "data": {
-                        "ping_id": payload.data.ping_id.to_string(),
+                        "event_id": payload.data.event_id.to_string(),
                         "name": payload.data.name,
                     }
                 }
@@ -301,11 +301,11 @@ impl PushGateway {
         }
     }
 
-    pub(crate) async fn enqueue_ping(&self, ping: &Ping) {
-        if !ping.requires_response {
+    pub(crate) async fn enqueue_event(&self, event: &Event) {
+        if !matches!(event.kind, EventKind::Judgment) {
             return;
         }
-        if !self.claim_delivery(ping.id) {
+        if !self.claim_delivery(event.id) {
             return;
         }
 
@@ -315,43 +315,48 @@ impl PushGateway {
                 .map(|registered| registered.token)
                 .collect::<Vec<_>>(),
             Err(error) => {
-                tracing::warn!(ping_id = ping.id, %error, "failed to load push tokens");
-                self.release_delivery(ping.id);
+                tracing::warn!(event_id = event.id, %error, "failed to load push tokens");
+                self.release_delivery(event.id);
                 return;
             }
         };
         if tokens.is_empty() {
-            self.release_delivery(ping.id);
+            self.release_delivery(event.id);
             return;
         }
 
         let payload = PushPayload {
             title: OWNER_APP_NAME.to_string(),
-            body: if ping.description.trim().is_empty() {
-                ping.name.clone()
+            body: if event.description.trim().is_empty() {
+                event.name.clone()
             } else {
-                ping.description.clone()
+                event.description.clone()
             },
             data: PushData {
-                ping_id: ping.id,
-                name: ping.name.clone(),
+                event_id: event.id,
+                name: event.name.clone(),
             },
         };
         let sender = self.sender.clone();
         let delivery_state = Arc::clone(&self.delivery_state);
-        let ping_id = ping.id;
+        let event_id = event.id;
         tokio::spawn(async move {
             let result = send_with_retry(sender.as_ref(), &tokens, &payload).await;
             let mut state = delivery_state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            state.in_flight.remove(&ping_id);
+            state.in_flight.remove(&event_id);
             if result.is_ok() {
-                state.delivered.insert(ping_id);
+                state.delivered.insert(event_id);
             } else if let Err(error) = result {
-                tracing::warn!(ping_id, %error, "push delivery failed after retries");
+                tracing::warn!(event_id, %error, "push delivery failed after retries");
             }
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn enqueue_ping(&self, event: &Event) {
+        self.enqueue_event(event).await;
     }
 
     fn claim_delivery(&self, ping_id: u64) -> bool {
@@ -507,11 +512,16 @@ mod tests {
             .unwrap();
         let sender = Arc::new(FailOnceSender::default());
         let gateway = PushGateway::new(storage, sender.clone(), None);
-        let ping = Ping {
+        let ping = Event {
             id: 42,
+            kind: EventKind::Judgment,
+            source: hirsel_proto::EventSource {
+                kind: hirsel_proto::EventSourceKind::Agent,
+                r#ref: None,
+            },
             name: "decision".to_string(),
             description: "Choose".to_string(),
-            content: "A or B?".to_string(),
+            ui: serde_json::json!({ "type": "card", "children": [] }),
             anchor: 1,
             requires_response: true,
             quick_replies: Vec::new(),

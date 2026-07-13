@@ -117,7 +117,7 @@ mod tests {
             HostToClient::HelloOk {
                 latest_msg_id,
                 messages,
-                pings,
+                events,
                 processes,
                 side_chats,
                 host_version,
@@ -128,7 +128,7 @@ mod tests {
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].author, ChatAuthor::Agent);
-                assert!(pings.is_empty());
+                assert!(events.is_empty());
                 assert!(processes.is_empty());
                 assert!(side_chats.is_empty());
                 assert!(views.is_empty());
@@ -212,7 +212,7 @@ mod tests {
         .await
         .expect("debug push was recorded");
         assert_eq!(pushes["pushes"][0]["payload"]["body"], "Choose from debug");
-        assert_eq!(pushes["pushes"][0]["payload"]["data"]["ping_id"], ping.id);
+        assert_eq!(pushes["pushes"][0]["payload"]["data"]["event_id"], ping.id);
 
         let removed: serde_json::Value = client
             .post(format!("http://{addr}/debug/unregister-push-token"))
@@ -534,10 +534,10 @@ mod tests {
         let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
         send_hello(&mut ws).await;
         match read_hello_ok(&mut ws).await {
-            HostToClient::HelloOk { pings, .. } => {
-                assert_eq!(pings.len(), 1);
-                assert_eq!(pings[0].id, ping.id);
-                assert!(!pings[0].read);
+            HostToClient::HelloOk { events, .. } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].id, ping.id);
+                assert!(!events[0].read);
             }
             other => panic!("unexpected hello response: {other:?}"),
         }
@@ -552,7 +552,7 @@ mod tests {
         .await
         .unwrap();
         match read_ping_upsert(&mut ws).await {
-            HostToClient::PingUpsert { ping: read_ping } => {
+            HostToClient::EventUpsert { event: read_ping } => {
                 assert_eq!(read_ping.id, ping.id);
                 assert!(read_ping.read);
             }
@@ -787,7 +787,7 @@ mod tests {
         >,
     ) -> HostToClient {
         read_until(ws, |response| {
-            matches!(response, HostToClient::PingUpsert { .. })
+            matches!(response, HostToClient::EventUpsert { .. })
         })
         .await
     }

@@ -1243,6 +1243,7 @@ impl LashAgentRuntime {
         occurrence: TimerOccurrence,
     ) -> anyhow::Result<()> {
         let fired_at = Utc::now();
+        let digest_label = scheduled_digest_label(&occurrence.label).map(str::to_string);
         let payload = json!({
             "label": occurrence.label,
             "fired_at": fired_at.to_rfc3339(),
@@ -1268,6 +1269,18 @@ impl LashAgentRuntime {
             )
             .await?;
         if !report.deliveries.is_empty() {
+            if let Some(label) = digest_label {
+                self.tools
+                    .emit_scheduled_digest(
+                        record.source_key.clone(),
+                        format!(
+                            "Scheduled digest `{label}` fired at {}.",
+                            fired_at.to_rfc3339()
+                        ),
+                        "scheduled lash job completed",
+                    )
+                    .await?;
+            }
             self.notify.notify_one();
         }
         if occurrence.one_shot {
@@ -1277,6 +1290,13 @@ impl LashAgentRuntime {
         }
         Ok(())
     }
+}
+
+fn scheduled_digest_label(label: &str) -> Option<&str> {
+    label
+        .strip_prefix("digest:")
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
 }
 
 struct HirselQueuedWorkNotifier {
@@ -5229,6 +5249,16 @@ mod tests {
 
         let error = TimerSchedule::from_registration(&record).unwrap_err();
         assert!(error.contains("exactly one"));
+    }
+
+    #[test]
+    fn digest_timer_labels_select_the_scheduled_event_producer() {
+        assert_eq!(
+            scheduled_digest_label("digest: Morning fleet"),
+            Some("Morning fleet")
+        );
+        assert_eq!(scheduled_digest_label("digest:   "), None);
+        assert_eq!(scheduled_digest_label("ordinary timer"), None);
     }
 
     fn stored_blob(id: &str, name: &str, mime: &str, size: u64, path: PathBuf) -> StoredBlob {

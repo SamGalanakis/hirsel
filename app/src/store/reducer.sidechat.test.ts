@@ -125,9 +125,13 @@ describe("sc-scoped routing never leaks into (or reads from) main state", () => 
       state: "thinking",
       text: "Working…",
     });
-    expect(withSideTurnEvent.sideChats["side:1"].turnEvents).toEqual([
-      { seq: 1, event: { kind: "prose", text: "hello" } },
-    ]);
+    // (`at` is a client-side arrival timestamp stamped by the reducer for
+    // per-tool durations; assert on the meaningful seq/event, not the clock.)
+    expect(withSideTurnEvent.sideChats["side:1"].turnEvents).toHaveLength(1);
+    expect(withSideTurnEvent.sideChats["side:1"].turnEvents[0]).toMatchObject({
+      seq: 1,
+      event: { kind: "prose", text: "hello" },
+    });
   });
 
   it("an unknown/already-closed sc is a no-op, never touching any other state", () => {

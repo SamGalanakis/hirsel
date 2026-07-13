@@ -1,9 +1,16 @@
-import { Check, Clock, Copy, GitFork, RotateCcw, X } from "lucide-solid";
+import { Clock, Copy, GitFork, ListTree, MoreHorizontal, Reply, RotateCcw, X } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
 import type { DisplayMessage, TimelineEvent } from "../../store/types";
 import { copyWithToast } from "../../lib/clipboard";
 import { Markdown } from "../Markdown";
 import { Bubble, BubbleContent } from "../ui/bubble";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import { Message, MessageContent, MessageFooter } from "../ui/message";
 import { MessageAttachments } from "./MessageAttachments";
 import { QuotedRef } from "./QuotedRef";
@@ -28,13 +35,20 @@ interface Props {
   showQuote: boolean;
   highlighted: boolean;
   queued: boolean;
+  /** v-transcript: false for a message clustered under a same-author neighbour
+   * within a few minutes — suppresses the per-bubble timestamp/meta so a run of
+   * messages carries a single footer at the cluster boundary. Defaults to true
+   * (every bubble shows its own meta) so other importers are unaffected. */
+  showMeta?: boolean;
+  /** v-transcript: "Reply" from the message actions menu quotes this message
+   * into the composer. Omitted by callers with no reply target (the menu item
+   * is then hidden), keeping this additive for the side-chat importer. */
+  onReply?: (id: number) => void;
   onTapQuote: (id: number) => void;
   onOpenImage: (src: string, alt: string) => void;
   onRetry: (clientId: string) => void;
   onCancelQueued: (clientId: string) => void;
 }
-
-const LONG_PRESS_MS = 450;
 
 function formatTime(ts: string): string {
   try {
@@ -46,23 +60,31 @@ function formatTime(ts: string): string {
 
 export function MessageBubble(props: Props) {
   const isOwner = () => props.message.author === "owner";
-  const [copied, setCopied] = createSignal(false);
-  let pressTimer: ReturnType<typeof setTimeout> | undefined;
+  const showMeta = () => props.showMeta ?? true;
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  const [turnOpen, setTurnOpen] = createSignal(false);
+  const hasTurnDetails = () => !!props.turnDetails && props.turnDetails.length > 0;
 
-  async function copyBody() {
-    if (await copyWithToast(props.message.body, "Copied message")) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    }
+  function copyBody() {
+    void copyWithToast(props.message.body, "Copied message");
   }
 
-  function startPress() {
-    pressTimer = setTimeout(() => void copyBody(), LONG_PRESS_MS);
+  function reply() {
+    props.onReply?.(props.message.id);
   }
-  function cancelPress() {
-    if (pressTimer) clearTimeout(pressTimer);
-    pressTimer = undefined;
+
+  function viewTurn() {
+    setTurnOpen(true);
+    // Let the panel mount, then bring it into view.
+    queueMicrotask(() =>
+      document
+        .getElementById(`msg-${props.message.id}`)
+        ?.querySelector('[data-slot="turn-details"]')
+        ?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
+    );
   }
+
+  const canReply = () => !!props.onReply && props.message.id >= 0;
 
   return (
     <Message
@@ -71,14 +93,24 @@ export function MessageBubble(props: Props) {
       class="scroll-mt-4 px-3"
     >
       <MessageContent>
-        <Bubble variant={isOwner() ? "default" : "muted"} align={isOwner() ? "end" : "start"}>
+        <Bubble
+          variant={isOwner() ? "default" : "ghost"}
+          align={isOwner() ? "end" : "start"}
+        >
           <BubbleContent
             class="transition-shadow"
-            classList={{ "ring-2 ring-ring": props.highlighted }}
-            onPointerDown={startPress}
-            onPointerUp={cancelPress}
-            onPointerMove={cancelPress}
-            onPointerCancel={cancelPress}
+            classList={{
+              // Owner chip: a ring hugs the rounded fill. Agent prose has no
+              // fill/padding, so its highlight is a quiet inset wash whose
+              // negative margins cancel the added padding (no layout shift).
+              "ring-2 ring-ring": props.highlighted && isOwner(),
+              "-mx-2 -my-1 rounded-md bg-primary/5 px-2 py-1 ring-1 ring-ring/70":
+                props.highlighted && !isOwner(),
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenuOpen(true);
+            }}
           >
             <Show when={props.showQuote}>
               <QuotedRef
@@ -130,33 +162,53 @@ export function MessageBubble(props: Props) {
           <Show when={props.message.pending && !props.message.failed && !props.queued}>
             <span class="italic">sending…</span>
           </Show>
-          {/* v2.0 provenance: non-interactive, same visual language as the
-              "turn details"/tool-call chips so it reads as system-provenance,
-              never as a link or as content of its own (critique P2). */}
-          <Show when={props.isConclusion}>
-            <span class="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-px text-muted-foreground">
-              <GitFork class="size-3" aria-hidden="true" />
-              worked out in a side chat
-            </span>
-          </Show>
-          <span>{formatTime(props.message.ts)}</span>
-          {/* Copy action: subtle, revealed on hover (desktop); long-press on touch. */}
-          <button
-            type="button"
-            class="ml-auto rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-100"
-            aria-label="Copy message"
-            onClick={() => void copyBody()}
-          >
-            <Show when={copied()} fallback={<Copy class="size-3.5" />}>
-              <Check class="size-3.5 text-status-success" />
+          {/* v2.0 provenance chip + timestamp: the calm "meta" that collapses to
+              one per cluster (only rendered at a cluster boundary). */}
+          <Show when={showMeta()}>
+            <Show when={props.isConclusion}>
+              <span class="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-px text-muted-foreground">
+                <GitFork class="size-3" aria-hidden="true" />
+                worked out in a side chat
+              </span>
             </Show>
-          </button>
+            <span>{formatTime(props.message.ts)}</span>
+          </Show>
+          {/* Per-message actions: an explicit control (touch) that also opens on
+              right-click over the bubble (desktop context menu). Replaces the
+              old hover/long-press-only copy path. */}
+          <DropdownMenu open={menuOpen()} onOpenChange={setMenuOpen}>
+            <DropdownMenuTrigger
+              class="rounded p-0.5 text-muted-foreground opacity-40 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-100 data-[expanded]:opacity-100"
+              aria-label="Message actions"
+            >
+              <MoreHorizontal class="size-3.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent class="min-w-[10rem]">
+              <Show when={canReply()}>
+                <DropdownMenuItem onSelect={reply}>
+                  <Reply class="text-muted-foreground" />
+                  Reply
+                </DropdownMenuItem>
+              </Show>
+              <DropdownMenuItem onSelect={copyBody}>
+                <Copy class="text-muted-foreground" />
+                Copy
+              </DropdownMenuItem>
+              <Show when={hasTurnDetails()}>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={viewTurn}>
+                  <ListTree class="text-muted-foreground" />
+                  View turn details
+                </DropdownMenuItem>
+              </Show>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </MessageFooter>
         {/* Finished-turn affordance under the (agent) bubble. A captured v1.5
             timeline wins (full "turn details" panel); otherwise the v1.4
             "⚙ N tools" chip is the fallback for replayed messages. */}
         <Show
-          when={props.turnDetails && props.turnDetails.length > 0}
+          when={hasTurnDetails()}
           fallback={
             <Show when={props.message.tool_calls && props.message.tool_calls.length > 0}>
               <div class="pt-1">
@@ -166,7 +218,11 @@ export function MessageBubble(props: Props) {
           }
         >
           <div class="pt-1">
-            <TurnDetails events={props.turnDetails ?? []} />
+            <TurnDetails
+              events={props.turnDetails ?? []}
+              expanded={turnOpen()}
+              onExpandedChange={setTurnOpen}
+            />
           </div>
         </Show>
       </MessageContent>

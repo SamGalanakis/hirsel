@@ -50,6 +50,11 @@ interface UiState {
    * which then sets `activeSideChatSc`. Resume already has a live ref, so it
    * resolves on the very next tick. */
   pendingSideChatPingId: number | null;
+  /** A post-auth protocol `error` frame's reason, surfaced as a visible inline
+   * banner in Chat (rather than only `console.error`). Set by the ws client,
+   * dismissed by the Owner. Lives in the UI slice — not the wire-protocol
+   * AppState — since it is presentational, not sync state. */
+  protocolError: string | null;
 }
 
 type Store = AppState & UiState;
@@ -65,6 +70,7 @@ function initialStore(): Store {
     composerPrefill: null,
     activeSideChatSc: null,
     pendingSideChatPingId: null,
+    protocolError: null,
   };
 }
 
@@ -201,6 +207,24 @@ export function clearScrollTarget(): void {
 
 export function clearComposerDraft(): void {
   setState("composerDraft", null);
+}
+
+/** Quote a specific message into the main composer ("Reply" from a message's
+ * actions menu). Self-contained UI-slice write — deliberately NOT routed
+ * through the reducer/hello_ok path — it just seeds the same `composerDraft`
+ * the Ping "Reply" flow uses, which ChatView resolves to the reply target and
+ * the Composer renders as "Replying to…". */
+export function setComposerReplyTarget(ref: number): void {
+  setState("composerDraft", { ref });
+}
+
+/** Surface a post-auth protocol `error` as a visible inline banner. */
+export function setProtocolError(detail: string): void {
+  setState("protocolError", detail);
+}
+
+export function clearProtocolError(): void {
+  setState("protocolError", null);
 }
 
 export function clearComposerPrefill(): void {

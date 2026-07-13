@@ -3,7 +3,7 @@
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
 // upload correlation and the v1.2 send-mode / cancel frames.
 import type { Blob, ClientMessage, SendMode, ServerMessage } from "../protocol";
-import { dispatch, state } from "../store/store";
+import { dispatch, setProtocolError, state } from "../store/store";
 import { jitteredDelayMs } from "./backoff";
 
 const TOKEN_KEY = "hirsel.token";
@@ -584,6 +584,12 @@ class HirselWsClient {
             this.blobUrlReqs.delete(message.client_id);
           }
           dispatch({ type: "upload_error", clientId: message.client_id });
+        } else {
+          // An uncorrelated error that arrives AFTER authentication is a runtime
+          // protocol error (the pre-auth reject path returned above). Surface it
+          // as a visible inline banner in Chat rather than swallowing it into the
+          // console, so a failure the Owner should see isn't invisible.
+          setProtocolError(message.detail);
         }
         // eslint-disable-next-line no-console
         console.error("hirsel protocol error:", message.detail);

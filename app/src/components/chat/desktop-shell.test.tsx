@@ -148,10 +148,12 @@ describe("Desktop shell: right-region precedence", () => {
     await waitFor(() => expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeTruthy());
     expect(screen.queryByRole("complementary", { name: "Pings" })).toBeNull();
 
-    // The desktop restore affordance is the NavRail "Pings" item: selecting it
-    // returns the region to `pings` — the rail comes back and the side chat
-    // stays alive/resumable underneath (its sideChatRefs entry is untouched).
-    await fireEvent.click(screen.getByLabelText("Pings"));
+    // The desktop restore affordance is now the NavRail "Chat" item (§6 — the
+    // separate Pings nav row is retired). `goToChat` returns the region to
+    // `pings`, so the rail comes back and the side chat stays alive/resumable
+    // underneath (its sideChatRefs entry is untouched).
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    await fireEvent.click(within(nav).getByRole("button", { name: "Chat" }));
     await waitFor(() => expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy());
     expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeNull();
   });
@@ -202,75 +204,94 @@ describe("Desktop shell: right-region precedence", () => {
 });
 
 describe("Desktop shell: the nav rail", () => {
-  it("mounts a Primary nav with Pings / Processes / Settings items (no Chat/Inbox/Commands)", async () => {
+  it("mounts a Primary nav with Queue / Chat / Processes / Settings items (no Pings/Inbox/Commands row)", async () => {
     const { screen } = await setupApp();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(nav).toBeTruthy();
-    // v2.3: the rail navigates the ONE right region. Chat is always the center
-    // pane (no nav row); the standing rail IS the Pings surface (one "Pings"
-    // item, no separate "Inbox"); the palette is ⌘K (no "Commands" row).
-    expect(within(nav).getByLabelText("Pings")).toBeTruthy();
+    // ADR-0012 cutover + §6: the Queue is the home AND the pings surface, so the
+    // separate "Pings" nav row is retired. Chat becomes a demoted door/back-way
+    // to the resting rail; Processes/Settings still dock the right region; the
+    // palette is ⌘K (no "Commands" row).
+    expect(within(nav).getByLabelText("Queue")).toBeTruthy();
+    expect(within(nav).getByLabelText("Chat")).toBeTruthy();
     expect(within(nav).getByRole("button", { name: /Processes/ })).toBeTruthy();
     expect(within(nav).getByLabelText("Settings")).toBeTruthy();
-    expect(within(nav).queryByRole("button", { name: "Chat" })).toBeNull();
+    expect(within(nav).queryByRole("button", { name: "Pings" })).toBeNull();
     expect(within(nav).queryByRole("button", { name: "Inbox" })).toBeNull();
     expect(within(nav).queryByRole("button", { name: /Commands/ })).toBeNull();
   });
 
-  it("marks exactly the nav item that owns rightRegion as aria-current", async () => {
+  it("marks exactly one nav item as aria-current across queue/chat/inspector states", async () => {
     const { screen, store } = await setupApp();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     const queue = within(nav).getByLabelText("Queue");
-    const pings = within(nav).getByLabelText("Pings");
+    const chat = within(nav).getByLabelText("Chat");
     const processes = within(nav).getByRole("button", { name: /Processes/ });
     const settings = within(nav).getByLabelText("Settings");
 
     // Default resting state (ADR-0012 cutover): the Queue home is current; no
-    // shell pane owns the region yet.
+    // shell surface owns the region yet.
     expect(queue.getAttribute("aria-current")).toBe("page");
-    expect(pings.getAttribute("aria-current")).toBeNull();
+    expect(chat.getAttribute("aria-current")).toBeNull();
     expect(processes.getAttribute("aria-current")).toBeNull();
     expect(settings.getAttribute("aria-current")).toBeNull();
 
-    // Opening a shell pane drills in and takes the region: exactly that item is
-    // current, and the Queue home no longer is.
+    // Drilling into the resting chat shell makes Chat current (the center pane
+    // with no inspector docked); the Queue home no longer is.
+    store.openPings();
+    await waitFor(() => expect(chat.getAttribute("aria-current")).toBe("page"));
+    expect(queue.getAttribute("aria-current")).toBeNull();
+    expect(processes.getAttribute("aria-current")).toBeNull();
+
+    // Docking an inspector displaces Chat: exactly that item is current.
     store.openProcesses();
     await waitFor(() => expect(processes.getAttribute("aria-current")).toBe("page"));
+    expect(chat.getAttribute("aria-current")).toBeNull();
     expect(queue.getAttribute("aria-current")).toBeNull();
-    expect(pings.getAttribute("aria-current")).toBeNull();
     expect(settings.getAttribute("aria-current")).toBeNull();
   });
 
-  it("hides the redundant nav Pings badge at rest, showing it (muted) only when Pings isn't the shown pane", async () => {
+  it("hides the Queue nav badge on the queue home, showing it muted once drilled away (§2)", async () => {
     const { store } = await setupApp();
-    // Cutover (ADR-0012): the standing Pings rail is a chat-shell surface; drill
-    // in so "at rest" means the shell's resting Pings region.
-    store.openPings();
-    await waitFor(() => expect(document.querySelector('[data-slot="pings-rail-badge"]')).toBeTruthy());
-    // At rest (rightRegion === "pings") the standing rail header already carries
-    // the count, so the nav badge would just duplicate it — hidden (spec item
-    // 4). The rail header / phone shelf still carry the count + the single red.
-    expect(document.querySelector('[data-slot="nav-pings-badge"]')).toBeNull();
-    const railBadge = document.querySelector('[data-slot="pings-rail-badge"]') as HTMLElement;
-    const shelfBadge = document.querySelector('[data-slot="tray-shelf-badge"]') as HTMLElement;
-    expect(railBadge).toBeTruthy();
-    expect(shelfBadge).toBeTruthy();
-    expect(railBadge.textContent).toBe("1");
-    expect(shelfBadge.textContent).toBe("1");
-    expect(railBadge.className).toContain("bg-status-danger");
-    expect(shelfBadge.className).toContain("bg-status-danger");
+    // Seed one open judgment so the Queue has a needs-you count to badge.
+    store.dispatch({
+      type: "event_upsert",
+      payload: {
+        type: "event_upsert",
+        event: {
+          id: 8001,
+          kind: "judgment",
+          source: { kind: "agent", ref: "host" },
+          name: "@decide-this",
+          description: "Needs a decision",
+          requires_response: true,
+          quick_replies: [],
+          status: "open",
+          read: false,
+          anchor: 0,
+          ts: "2026-07-13T09:00:00Z",
+          blocking: true,
+          ui: [{ type: "heading", text: "Needs a decision" }],
+        },
+      },
+    });
+    // On the queue home the badge is hidden — it would only duplicate the pager's
+    // "N need you" pill, the surface's single red (§2).
+    await waitFor(() => expect(store.state.home).toBe("queue"));
+    expect(document.querySelector('[data-slot="nav-queue-badge"]')).toBeNull();
 
-    // Displace the Pings rail (open another pane): the nav badge now earns its
-    // keep for cross-pane awareness — count parity, but ALWAYS muted (the single
-    // red is the rail header / phone shelf, never the nav).
+    // Drill away into the shell: the badge now earns its keep as quiet
+    // cross-surface awareness — count parity, but ALWAYS muted (never the
+    // interrupt red; the one red lives on the queue's pager pill).
     store.openProcesses();
-    const navBadge = await waitFor(
-      () => document.querySelector('[data-slot="nav-pings-badge"]') as HTMLElement,
+    const badge = await waitFor(
+      () => document.querySelector('[data-slot="nav-queue-badge"]') as HTMLElement,
     );
-    expect(navBadge).toBeTruthy();
-    expect(navBadge.textContent).toBe("1");
-    expect(navBadge.className).toContain("bg-muted-foreground");
-    expect(navBadge.className).not.toContain("bg-status-danger");
+    // Count parity (≥ our seeded judgment; DEV also seeds mock events), but the
+    // tone is the invariant: muted, never the interrupt red.
+    expect(Number(badge.textContent)).toBeGreaterThanOrEqual(1);
+    expect(badge.className).toContain("bg-muted-foreground");
+    expect(badge.className).not.toContain("bg-status-danger");
   });
 
   it("opens the Processes inspector from the NavRail Processes item", async () => {

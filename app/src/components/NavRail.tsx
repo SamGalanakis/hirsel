@@ -1,36 +1,41 @@
-import { Activity, Inbox as InboxIcon, Layers, Settings } from "lucide-solid";
+import { Activity, Layers, MessageSquare, Settings } from "lucide-solid";
 import { type JSX, Show } from "solid-js";
 import { setCommandPaletteOpen } from "../lib/keymap";
-import { openJudgmentCount, openUnreadCount, runningProcessCount } from "../store/selectors";
-import { goToQueue, openPings, openProcesses, openSettings, state } from "../store/store";
+import { openJudgmentCount, runningProcessCount } from "../store/selectors";
+import { goToChat, goToQueue, openProcesses, openSettings, state } from "../store/store";
 import { ConnectionPill } from "./ConnectionPill";
 
 // The desktop nav rail (desktop-shell / 3-pane). A persistent vertical rail —
 // calm and dense, Linear/Slack/Superhuman lineage — that owns the brand, the
-// right-region navigation, and the connection pill on desktop. Desktop-only:
+// surface navigation, and the connection pill on desktop. Desktop-only:
 // `hidden … rail:flex`, so below the `rail` breakpoint the phone header carries
 // the brand + agent status + overflow instead and this rail never shows. Flat by
 // design: a single hairline `border-r`, no shadow (the Hairline-First rule).
 //
-// v2.3 (single-owner right region): the rail navigates the ONE exclusive right
-// region — Pings · Processes · Settings — and each item is `aria-current` when
-// it owns `state.rightRegion` (no more "Chat active = !processesOpen &&
-// !settingsOpen" fiction). Chat is always the center pane, so it is no longer a
-// nav destination; the standing right rail IS the Pings surface, so there is no
-// separate "Inbox" row; the command palette is ⌘K (a quiet footer hint, not a
+// ADR-0012 cutover: the home is the event Queue, and the Queue IS the pings
+// surface now — so the separate "Pings" nav destination is retired (§6). The
+// rows are Queue (home) · Chat (the drill-in shell, also the way back to the
+// resting Pings rail) · Processes · Settings; each is `aria-current` for exactly
+// the surface it owns, so at most one is current at a time. The legacy Pings
+// inbox stays reachable as a chat-shell drill-in (Chat rests on it) and via
+// `g i` / the command palette. The palette is ⌘K (a quiet footer hint, not a
 // standing "Commands" row).
 
-function pingsCount(): number {
-  return openUnreadCount(state.pings, state.unreadOverrides, state.resolveOverrides);
-}
-/** The queue's needs-you count = open judgments (the ONE red). */
+/** The queue's needs-you count = open judgments (drives the muted Queue badge). */
 function queueNeedsYou(): number {
   return openJudgmentCount(state.events, state.eventDecideOverrides);
 }
-/** A right-region pane is "current" only while we're actually in the chat shell
- * — on the queue home nothing in the shell owns the region. */
+/** A right-region inspector (Processes/Settings) is "current" only while we're
+ * in the chat shell with that pane docked. */
 function regionActive(region: string): boolean {
   return state.home === "chat" && state.rightRegion === region;
+}
+/** Chat (the center pane) is "current" whenever we're in the shell and no
+ * inspector has taken the right region — the resting Pings rail, an open Side
+ * Chat, or the Canvas all read as "you're looking at Chat." Keeps exactly one
+ * row current: an inspector displaces it, the Queue home is the other pole. */
+function chatActive(): boolean {
+  return state.home === "chat" && state.rightRegion !== "processes" && state.rightRegion !== "settings";
 }
 function processCount(): number {
   return runningProcessCount(state.processes);
@@ -83,8 +88,13 @@ export function NavRail() {
       </button>
 
       <nav aria-label="Primary" class="flex flex-col gap-0.5 px-2 pt-2">
-        {/* Queue — the home (ADR-0012): the vertical event scroller. Current when
-            we're on the queue home; carries the ONE red needs-you count. */}
+        {/* Queue — the home (ADR-0012): the vertical event scroller, and the
+            pings surface itself. Current on the queue home. The needs-you count
+            rides here as a MUTED badge (never the interrupt red — the single red
+            is the pager's "N need you" pill on the home itself), and is HIDDEN
+            entirely while we're on the queue home, where it would only duplicate
+            that pager pill (§2). It earns its keep only once you've drilled away
+            into the shell, as quiet cross-surface awareness. */}
         <NavItem
           icon={<Layers class="size-4 shrink-0" aria-hidden="true" />}
           label="Queue"
@@ -92,10 +102,10 @@ export function NavRail() {
           active={state.home === "queue"}
           onClick={goToQueue}
           badge={
-            <Show when={queueNeedsYou() > 0}>
+            <Show when={queueNeedsYou() > 0 && state.home !== "queue"}>
               <span
                 data-slot="nav-queue-badge"
-                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-status-danger px-1 text-[0.65rem] font-bold text-primary-foreground"
+                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
               >
                 {clamp99(queueNeedsYou())}
               </span>
@@ -103,31 +113,17 @@ export function NavRail() {
           }
         />
 
-        {/* Pings — the resting state of the right region (the standing rail).
-            Active when it owns the region. A MUTED count rides here for
-            cross-pane awareness ONLY when Pings is NOT the shown pane: when
-            `rightRegion === "pings"` (the default), the standing rail header
-            already carries the count, so the nav badge would just duplicate it
-            (spec item 4) — the nav ITEM stays (the way home + `g i` target + the
-            count's home when the rail is displaced), only the redundant badge
-            is hidden. The single red interrupt lives on the rail header
-            (One-Escalation Rule), never on the nav. */}
+        {/* Chat — the drill-in shell (§3): a quiet, demoted door to "talk to the
+            agent," never a promoted destination (no badge, no red). Also the
+            desktop way back to the resting Pings rail — `goToChat` returns the
+            right region to its idle `pings` state, so selecting Chat re-stands
+            the rail after a Side Chat / inspector displaced it. */}
         <NavItem
-          icon={<InboxIcon class="size-4 shrink-0" aria-hidden="true" />}
-          label="Pings"
-          ariaLabel="Pings"
-          active={regionActive("pings")}
-          onClick={openPings}
-          badge={
-            <Show when={pingsCount() > 0 && !regionActive("pings")}>
-              <span
-                data-slot="nav-pings-badge"
-                class="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-muted-foreground px-1 text-[0.65rem] font-bold text-primary-foreground"
-              >
-                {clamp99(pingsCount())}
-              </span>
-            </Show>
-          }
+          icon={<MessageSquare class="size-4 shrink-0" aria-hidden="true" />}
+          label="Chat"
+          ariaLabel="Chat"
+          active={chatActive()}
+          onClick={() => goToChat()}
         />
 
         {/* Processes — docks the Processes inspector; carries the running count

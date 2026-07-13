@@ -27,13 +27,13 @@ const REGISTRY: &[RegistryEntry] = &[
     RegistryEntry {
         id: "gpt-5.6-sol",
         label: "GPT-5.6 Sol",
-        variants: &["low", "medium", "high", "xhigh", "max", "ultra"],
+        variants: &["low", "medium", "high", "xhigh", "max"],
         default_variant: "medium",
     },
     RegistryEntry {
         id: "gpt-5.5",
         label: "GPT-5.5",
-        variants: &["low", "medium", "high", "xhigh"],
+        variants: &["low", "medium", "high"],
         default_variant: "medium",
     },
 ];

@@ -16,8 +16,10 @@ import { ArrowRight, Check, ChevronDown, CircleCheck, List, MessageSquare } from
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
-import { decideEventWithUndo, undoDecide } from "../../lib/event-decide";
+import { DECIDE_UNDO_WINDOW_MS, decideEventWithUndo, undoDecide } from "../../lib/event-decide";
+import { createMediaFlag } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
+import { toast } from "../../lib/toast";
 import {
   eventTitle,
   eventUiNodes,
@@ -25,8 +27,9 @@ import {
   openJudgmentCount,
   orderedQueue,
 } from "../../store/selectors";
-import { dispatch, goToChatDrillIn, state } from "../../store/store";
+import { dispatch, goToChat, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
+import { QueueList, QueueRow } from "./QueueList";
 import { awarenessToAutoRead, nextOpenIndex } from "./queue";
 
 /** How long the decided card lingers (confirmation + Undo reachable) before the
@@ -68,6 +71,13 @@ export function EventScroller() {
   const [peekOpen, setPeekOpen] = createSignal(false);
   const [snoozed, setSnoozed] = createSignal<Set<number>>(new Set());
 
+  // Coarse pointer → the swipe is the primary accelerator (phone); fine pointer
+  // → the keyboard is (desktop), which decides the footer hint (§5).
+  const coarse = createMediaFlag("(pointer: coarse)");
+  // `rail` (desktop) stands the two-column list, so the phone peek overlay is
+  // gated off there — the standing list already IS the whole-queue index.
+  const atRail = createMediaFlag("(min-width: 1100px)");
+
   // DEV: seed the contract-shaped mock events so the home is real before the
   // host cutover. Prod stays empty until the host sends events (inbox-zero).
   onMount(() => {
@@ -79,12 +89,23 @@ export function EventScroller() {
     onCleanup(() => rootRef?.removeEventListener("keydown", onKeyDown));
   });
 
+  // Keyboard alive on load and on return (§5): focus the scroller root whenever
+  // the queue is the home surface, so a keystroke pages immediately without a
+  // hunt-and-click first. Depends only on `home`, so it fires on mount (home is
+  // queue) and again each time a drill-in returns here — never mid-session.
+  createEffect(() => {
+    if (state.home === "queue") rootRef?.focus();
+  });
+
   const ordered = createMemo(() =>
     orderedQueue(state.events, state.eventDecideOverrides, snoozed()),
   );
   const total = () => ordered().length;
   const openCount = () => openJudgmentCount(state.events, state.eventDecideOverrides);
   const onClear = () => current() >= total();
+  // The id of the event currently centred in the reader — highlights its row in
+  // the standing list / peek. Undefined on the clear page.
+  const centeredId = () => ordered()[current()]?.id;
 
   function pageHeight(): number {
     return scrollerRef?.clientHeight || 0;
@@ -130,7 +151,10 @@ export function EventScroller() {
       data && typeof data === "object" && "label" in data && typeof data.label === "string"
         ? (data as { label: string }).label
         : undefined;
-    decideEventWithUndo(ev.id, action, data, label);
+    // Silent decide (§6): the decided card carries its own on-screen "Undo"
+    // strip, so no toast fires while it is on screen — otherwise the two Undos
+    // stack. The toast is handed off below, once the card has scrolled away.
+    decideEventWithUndo(ev.id, action, data, label, { silent: true });
     const from = ordered().findIndex((e) => e.id === ev.id);
     window.setTimeout(() => {
       // Undo (within the window) drops the override, so this re-check cancels a
@@ -138,6 +162,12 @@ export function EventScroller() {
       const live = state.events.find((e) => e.id === ev.id);
       if (live && isEventResolved(live, state.eventDecideOverrides)) {
         goTo(nextOpenIndex(ordered(), from, state.eventDecideOverrides));
+        // The decided card is off screen now; keep recovery reachable for the
+        // rest of the undo window as a toast — exactly one Undo at any moment.
+        toast(label ? `Decided · ${label}` : "Decided", {
+          durationMs: Math.max(0, DECIDE_UNDO_WINDOW_MS - ADVANCE_MS),
+          action: { label: "Undo", onClick: () => undoDecide(ev.id) },
+        });
       }
     }, ADVANCE_MS);
   }
@@ -150,12 +180,41 @@ export function EventScroller() {
   function snooze(ev: EventItem): void {
     if (isEventResolved(ev, state.eventDecideOverrides)) return;
     setSnoozed((prev) => new Set(prev).add(ev.id));
+    // Feedback + the immediate un-snooze path (§6); the standing list / peek row
+    // is the durable one (jumping a snoozed row returns it too).
+    toast("Snoozed to the end", {
+      action: { label: "Undo", onClick: () => unsnooze(ev.id) },
+    });
   }
 
-  function discuss(): void {
-    // Chat is the drill-in (ADR-0012). Host wiring will open the judgment's Side
-    // Chat directly; for now this lands in the chat shell.
-    goToChatDrillIn();
+  function unsnooze(id: number): void {
+    setSnoozed((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  /** Jump the pager to an event by id (the standing list / peek target). A
+   * snoozed row's jump also un-snoozes it — clicking a parked item in the index
+   * means "bring it back" — then lands on it in its restored place. Keyboard
+   * stays alive by returning focus to the reader. */
+  function jumpToEvent(ev: EventItem): void {
+    if (snoozed().has(ev.id)) unsnooze(ev.id);
+    const idx = ordered().findIndex((e) => e.id === ev.id);
+    if (idx >= 0) goTo(idx);
+    rootRef?.focus();
+  }
+
+  function discuss(ev: EventItem): void {
+    // Preserve the judgment across the drill-in (§4): seed the chat composer with
+    // a quoted reference to it — the @name + the fork heading line — so the
+    // context is never dropped on the way to Chat. `>`-quote style matches the
+    // reply-quote vocabulary; the Owner types their message below it.
+    // TODO(host): open scoped side chat seeded with the event card
+    const prefill = `> ${ev.name} — ${eventTitle(ev)}\n\n`;
+    goToChat({ composerPrefill: prefill });
   }
 
   // ---- keyboard mirror (scoped to the scroller; skips typing) ----
@@ -164,6 +223,22 @@ export function EventScroller() {
     if (tag === "INPUT" || tag === "TEXTAREA") {
       if (e.key === "Escape") (e.target as HTMLElement).blur();
       return;
+    }
+    // WAI-ARIA button activation (§5): when focus is on a button / role=button /
+    // link (an option, Discuss, the chevron, a list row), Space and Enter must
+    // ACTIVATE it, not page the scroller — so never intercept them there.
+    if (e.key === " " || e.key === "Enter" || e.key === "Spacebar") {
+      const active = document.activeElement as HTMLElement | null;
+      const role = active?.getAttribute("role");
+      if (
+        active &&
+        (active.tagName === "BUTTON" ||
+          active.tagName === "A" ||
+          role === "button" ||
+          role === "link")
+      ) {
+        return;
+      }
     }
     if (peekOpen() && e.key === "Escape") {
       setPeekOpen(false);
@@ -208,84 +283,120 @@ export function EventScroller() {
   }
 
   return (
-    <div
-      ref={setRootRef}
-      class="relative flex min-h-0 flex-1 flex-col outline-none"
-      tabindex="-1"
-      aria-label="Event queue"
-      data-slot="event-scroller"
-    >
-      {/* Slim top pager — always over the current card. Tap to peek the whole
-          queue. Carries position + the ONE red ("N need you") + a peek hint. */}
-      <button
-        type="button"
-        class="absolute inset-x-0 top-0 z-20 block w-full border-b border-border bg-background/80 text-left backdrop-blur-md"
-        aria-label="Open queue overview"
-        onClick={() => setPeekOpen((v) => !v)}
-      >
-        <div class="flex items-center gap-2.5 px-4 py-2">
-          <span class="text-xs font-semibold tabular-nums text-muted-foreground" data-slot="pager-pos">
-            {onClear() ? "Queue clear" : `${current() + 1} of ${total()}`}
-          </span>
-          <span class="flex-1" />
-          <span
-            data-slot="pager-need"
-            class={cn(
-              "rounded-full px-2 py-0.5 text-[0.68rem] font-bold",
-              openCount() > 0
-                ? "bg-status-danger/12 text-status-danger"
-                : "bg-status-success/12 text-status-success",
-            )}
-          >
-            {openCount() > 0 ? `${openCount()} need you` : "all clear"}
-          </span>
-          <span class="inline-flex items-center gap-1 text-[0.62rem] font-semibold text-muted-foreground">
-            peek
-            <List class="size-3.5" aria-hidden="true" />
-          </span>
-        </div>
-        <div class="h-0.5 bg-border">
-          <div
-            class="h-full rounded-r-sm bg-primary transition-[width] duration-300 ease-out"
-            style={{ width: `${((current() + 1) / (total() + 1)) * 100}%` }}
-          />
-        </div>
-      </button>
+    // The queue home. Phone: a single full-viewport pager column. Desktop
+    // (`rail`): a two-column reader — the standing queue index (left) beside the
+    // reader-measure card column (right), so the width is used by real structure
+    // and the card is never a lonely centred column in a void (§1).
+    <div class="flex min-h-0 flex-1 flex-col rail:flex-row">
+      <QueueList
+        ordered={ordered()}
+        centeredId={centeredId()}
+        snoozed={snoozed()}
+        openCount={openCount()}
+        atClear={onClear()}
+        onJump={jumpToEvent}
+        onJumpClear={() => {
+          goTo(total());
+          rootRef?.focus();
+        }}
+      />
 
-      {/* The scroll-snap pager. */}
+      {/* The reader column. At `rail` it is centred and capped to a reader
+          measure (~688px); the pager and the card both hug that measure, not
+          the full frame. Below `rail` it is the full-width phone column. */}
       <div
-        ref={setScrollerRef}
-        class="absolute inset-0 snap-y snap-mandatory overflow-y-auto overflow-x-hidden scroll-smooth [scrollbar-width:none] motion-reduce:scroll-auto"
-        onScroll={onScroll}
+        ref={setRootRef}
+        class="relative flex min-h-0 flex-1 flex-col outline-none rail:items-center"
+        tabindex="-1"
+        aria-label="Event queue"
+        data-slot="event-scroller"
       >
-        <For each={ordered()}>
-          {(ev) => (
-            <EventPage
-              ev={ev}
-              onDecide={decide}
-              onAccept={acceptRec}
-              onSnooze={snooze}
-              onUndo={(id) => undoDecide(id)}
-              onDiscuss={discuss}
-              onAdvance={() => goTo(current() + 1)}
-            />
-          )}
-        </For>
-        <ClearPage decided={total() - openCount()} awarenessRead={ordered().filter((e) => e.kind !== "judgment" && e.read).length} />
-      </div>
+        <div class="relative flex min-h-0 w-full flex-1 flex-col rail:max-w-[43rem]">
+          {/* Slim top pager — hugs the reader measure. Carries position + the
+              surface's ONE red ("N need you") + (phone) a peek hint. On desktop
+              the standing list is the whole-queue index, so the peek hint is
+              hidden there. */}
+          <button
+            type="button"
+            class="absolute inset-x-0 top-0 z-20 block w-full border-b border-border bg-background/80 text-left backdrop-blur-md rail:cursor-default"
+            aria-label={atRail() ? "Queue position" : "Open queue overview"}
+            tabindex={atRail() ? -1 : undefined}
+            onClick={() => {
+              // Phone only: the pager is the peek trigger. On desktop the standing
+              // list is the always-on index, so the pager is purely informational
+              // (position + the single red) and not an action.
+              if (!atRail()) setPeekOpen((v) => !v);
+            }}
+          >
+            <div class="flex items-center gap-2.5 px-4 py-2">
+              <span class="text-xs font-semibold tabular-nums text-muted-foreground" data-slot="pager-pos">
+                {onClear() ? "Queue clear" : `${current() + 1} of ${total()}`}
+              </span>
+              <span class="flex-1" />
+              <span
+                data-slot="pager-need"
+                class={cn(
+                  "rounded-full px-2 py-0.5 text-[0.68rem] font-bold",
+                  openCount() > 0
+                    ? "bg-status-danger/12 text-status-danger"
+                    : "bg-status-success/12 text-status-success",
+                )}
+              >
+                {openCount() > 0 ? `${openCount()} need you` : "all clear"}
+              </span>
+              <span class="inline-flex items-center gap-1 text-[0.62rem] font-semibold text-muted-foreground rail:hidden">
+                peek
+                <List class="size-3.5" aria-hidden="true" />
+              </span>
+            </div>
+            <div class="h-0.5 bg-border">
+              <div
+                class="h-full rounded-r-sm bg-primary transition-[width] duration-300 ease-out"
+                style={{ width: `${((current() + 1) / (total() + 1)) * 100}%` }}
+              />
+            </div>
+          </button>
 
-      <Show when={peekOpen()}>
-        <PeekOverview
-          ordered={ordered()}
-          current={current()}
-          openCount={openCount()}
-          onJump={(idx) => {
-            setPeekOpen(false);
-            goTo(idx);
-          }}
-          onClose={() => setPeekOpen(false)}
-        />
-      </Show>
+          {/* The scroll-snap pager. */}
+          <div
+            ref={setScrollerRef}
+            class="absolute inset-0 snap-y snap-mandatory overflow-y-auto overflow-x-hidden scroll-smooth [scrollbar-width:none] motion-reduce:scroll-auto"
+            onScroll={onScroll}
+          >
+            <For each={ordered()}>
+              {(ev) => (
+                <EventPage
+                  ev={ev}
+                  coarse={coarse()}
+                  onDecide={decide}
+                  onAccept={acceptRec}
+                  onSnooze={snooze}
+                  onUndo={(id) => undoDecide(id)}
+                  onDiscuss={discuss}
+                  onAdvance={() => goTo(current() + 1)}
+                />
+              )}
+            </For>
+            <ClearPage decided={total() - openCount()} awarenessRead={ordered().filter((e) => e.kind !== "judgment" && e.read).length} />
+          </div>
+
+          {/* The phone peek overlay — the whole-queue index on phone (the
+              desktop standing list replaces it, so it is gated off at `rail`). */}
+          <Show when={peekOpen() && !atRail()}>
+            <PeekOverview
+              ordered={ordered()}
+              centeredId={centeredId()}
+              snoozed={snoozed()}
+              openCount={openCount()}
+              onJump={(ev) => {
+                setPeekOpen(false);
+                jumpToEvent(ev);
+              }}
+              onClose={() => setPeekOpen(false)}
+            />
+          </Show>
+        </div>
+      </div>
     </div>
   );
 }
@@ -294,11 +405,12 @@ export function EventScroller() {
  * down-chevron advance affordance. Judgments accept a horizontal swipe. */
 function EventPage(props: {
   ev: EventItem;
+  coarse: boolean;
   onDecide: (ev: EventItem, action: string, data: unknown) => void;
   onAccept: (ev: EventItem) => void;
   onSnooze: (ev: EventItem) => void;
   onUndo: (id: number) => void;
-  onDiscuss: () => void;
+  onDiscuss: (ev: EventItem) => void;
   onAdvance: () => void;
 }) {
   let cardRef: HTMLDivElement | undefined;
@@ -353,9 +465,12 @@ function EventPage(props: {
 
   return (
     <div class="relative h-full snap-start snap-always">
-      <div class="flex h-full flex-col justify-center overflow-y-auto px-3.5 pb-11 pt-14 [scrollbar-width:none]">
+      {/* Phone: the card is vertically centred in the viewport page. Desktop
+          (`rail`): top-anchored with deliberate rhythm — never floating in the
+          middle of a void — since the standing list beside it fills the frame. */}
+      <div class="flex h-full flex-col justify-center overflow-y-auto px-3.5 pb-11 pt-14 [scrollbar-width:none] rail:justify-start rail:pt-16">
         <div
-          class="relative mx-auto w-full max-w-[460px] touch-pan-y"
+          class="relative mx-auto w-full max-w-[460px] touch-pan-y rail:max-w-[35rem]"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -424,19 +539,35 @@ function EventPage(props: {
             </Show>
             <Show when={isJudgment() && !decided()}>
               <div class="flex items-center gap-2.5 border-t border-border bg-muted/40 px-3.5 py-2.5">
-                <span class="inline-flex items-center gap-1.5 text-[0.62rem] font-medium text-muted-foreground/80">
-                  <span class="inline-flex items-center gap-0.5 text-muted-foreground/60">
-                    <ArrowRight class="size-3" aria-hidden="true" />
-                  </span>
-                  <span>
-                    <b class="font-bold text-muted-foreground">swipe</b> → accept · ← snooze
-                  </span>
+                {/* Honest hint by pointer (§5): a touch device gets the swipe
+                    cue; a mouse/keyboard device gets the real keyboard map,
+                    since swiping a card with a mouse is not the intended path. */}
+                <span class="inline-flex min-w-0 items-center gap-1.5 text-[0.62rem] font-medium text-muted-foreground/80">
+                  <Show
+                    when={props.coarse}
+                    fallback={
+                      <span class="truncate">
+                        <b class="font-bold text-muted-foreground">→</b> accept ·{" "}
+                        <b class="font-bold text-muted-foreground">←</b> snooze ·{" "}
+                        <b class="font-bold text-muted-foreground">A/B</b> choose
+                      </span>
+                    }
+                  >
+                    <span class="inline-flex items-center gap-1.5">
+                      <span class="inline-flex items-center gap-0.5 text-muted-foreground/60">
+                        <ArrowRight class="size-3" aria-hidden="true" />
+                      </span>
+                      <span>
+                        <b class="font-bold text-muted-foreground">swipe</b> → accept · ← snooze
+                      </span>
+                    </span>
+                  </Show>
                 </span>
                 <span class="flex-1" />
                 <button
                   type="button"
-                  class="inline-flex items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80"
-                  onClick={props.onDiscuss}
+                  class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  onClick={() => props.onDiscuss(props.ev)}
                 >
                   <MessageSquare class="size-3.5" aria-hidden="true" /> Discuss
                 </button>
@@ -520,13 +651,16 @@ function ClearPage(props: { decided: number; awarenessRead: number }) {
   );
 }
 
-/** Peek: a top sheet overview of the whole queue; tap a row to jump. Keeps the
- * pager from being a tunnel. */
+/** Peek: the phone's whole-queue index — a top sheet you flick down; tap a row
+ * to jump. Keeps the phone pager from being a tunnel (the desktop standing list
+ * is the always-on equivalent). Rows are the SAME `QueueRow` the standing list
+ * uses, so the two surfaces stay in lockstep. */
 function PeekOverview(props: {
   ordered: EventItem[];
-  current: number;
+  centeredId: number | undefined;
+  snoozed: Set<number>;
   openCount: number;
-  onJump: (idx: number) => void;
+  onJump: (ev: EventItem) => void;
   onClose: () => void;
 }) {
   return (
@@ -556,46 +690,14 @@ function PeekOverview(props: {
         </div>
         <div class="overflow-y-auto p-1.5">
           <For each={props.ordered}>
-            {(ev, i) => {
-              const resolved = isEventResolved(ev, state.eventDecideOverrides);
-              return (
-                <button
-                  type="button"
-                  aria-label={`Jump to ${ev.name}: ${eventTitle(ev)}`}
-                  class={cn(
-                    "grid w-full grid-cols-[1fr_auto] items-center gap-3 rounded-md border border-transparent px-2 py-2 text-left transition-colors hover:bg-muted/60",
-                    i() === props.current ? "border-border bg-muted/60" : "",
-                  )}
-                  onClick={() => props.onJump(i())}
-                >
-                  <span class="min-w-0">
-                    <span class="block font-mono text-[0.68rem] font-medium text-primary">{ev.name}</span>
-                    <span class="block truncate text-xs text-foreground">{eventTitle(ev)}</span>
-                  </span>
-                  <span class="text-[0.62rem] font-bold">
-                    <Show
-                      when={resolved}
-                      fallback={
-                        <Show
-                          when={ev.kind === "judgment"}
-                          fallback={
-                            <span class={ev.read ? "text-muted-foreground/70" : "text-muted-foreground"}>
-                              {ev.read ? "read" : "new"}
-                            </span>
-                          }
-                        >
-                          <span class="text-primary">needs you</span>
-                        </Show>
-                      }
-                    >
-                      <span class="inline-flex items-center gap-1 text-status-success">
-                        <Check class="size-3" aria-hidden="true" /> decided
-                      </span>
-                    </Show>
-                  </span>
-                </button>
-              );
-            }}
+            {(ev) => (
+              <QueueRow
+                ev={ev}
+                active={ev.id === props.centeredId}
+                snoozed={props.snoozed.has(ev.id)}
+                onJump={props.onJump}
+              />
+            )}
           </For>
         </div>
       </div>

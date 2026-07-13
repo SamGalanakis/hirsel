@@ -23,7 +23,7 @@ Living document, updated as design decisions land. v1 = the smallest hirsel that
 
 ## Deferred (explicitly, with reason)
 
-- **UI rendering / templates** — deferred whole; v1 Chat renders markdown + Ping Quick Replies only. Direction when it revives is HTML templates in sandboxed iframes with a JSON-RPC-over-postMessage bridge.
+- **UI rendering / templates** — REVIVED and redirected. See `docs/product-direction.md` + [ADR-0013]: the generative-UI tier is a **constrained JSON UI** catalog (the existing `app/src/views/` tier, extended with interactive nodes + interaction-back), NOT HTML-in-iframes. The event queue ([ADR-0012]) and Canvas both render through it. The Chat-as-home framing is superseded: the home is a vertical typed-event scroller.
 - **Voice / audio** — hold-to-talk, streaming to VM, server-side STT. Deferred whole.
 - **Any memory system** — markdown notebook, lash observational-memory plugin, and the grounded-memory-units design are all deferred. Revisit when in-context + `continue_as` demonstrably hurts.
 - **Web Push (VAPID)** — deferred; requires-response items surface only in-app until push earns its keep.

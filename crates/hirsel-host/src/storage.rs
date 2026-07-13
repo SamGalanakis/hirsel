@@ -562,6 +562,18 @@ impl Storage {
         Ok(Some(get_ping(&conn, ping_id)?))
     }
 
+    pub async fn reopen_ping(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET status = 'open' WHERE id = ?1",
+            params![ping_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, ping_id)?))
+    }
+
     pub async fn resolve_open_pings_for_anchor(&self, anchor: u64) -> anyhow::Result<Vec<Ping>> {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
@@ -2061,6 +2073,36 @@ mod tests {
         let second = storage.resolve_ping(ping.id).await.unwrap().unwrap();
         assert_eq!(first.status, PingStatus::Done);
         assert_eq!(second.status, PingStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn reopening_a_ping_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap();
+        let ping = storage
+            .create_ping(
+                "needs-reply",
+                "Needs reply",
+                "Needs reply",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let done = storage.resolve_ping(ping.id).await.unwrap().unwrap();
+        let open = storage.reopen_ping(ping.id).await.unwrap().unwrap();
+        let open_again = storage.reopen_ping(ping.id).await.unwrap().unwrap();
+
+        assert_eq!(done.status, PingStatus::Done);
+        assert_eq!(open.status, PingStatus::Open);
+        assert_eq!(open_again.status, PingStatus::Open);
+        assert!(storage.reopen_ping(99_999).await.unwrap().is_none());
     }
 
     #[tokio::test]

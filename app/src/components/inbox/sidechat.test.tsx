@@ -257,6 +257,55 @@ describe("Slack-style split: both conversations stay live (fork-ui iteration)", 
   });
 });
 
+describe("Side-chat composer parity (ui/composer pass)", () => {
+  it("shows a thinking-guarded Stop button that cancels the side turn", async () => {
+    const { store, screen, fakeClient } = await setup();
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
+    await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
+
+    // Idle: no Stop button.
+    expect(screen.queryByLabelText("Stop the agent")).toBeNull();
+
+    store.dispatch({
+      type: "side_chat_agent_activity",
+      sc: "side:1",
+      state: "thinking",
+      text: "Working…",
+    });
+
+    const stop = await screen.findByLabelText("Stop the agent");
+    await fireEvent.click(stop);
+    expect(fakeClient.cancelSideTurn).toHaveBeenCalledWith("side:1");
+  });
+
+  it("Cmd/Ctrl+Enter sends the side reply on any device", async () => {
+    const { screen, fakeClient } = await setup();
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
+    await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
+
+    const side = document.querySelector('[data-composer="side"]') as HTMLTextAreaElement;
+    fireEvent.input(side, { target: { value: "looks fine to me" } });
+    fireEvent.keyDown(side, { key: "Enter", ctrlKey: true });
+
+    expect(fakeClient.sendSideMessage).toHaveBeenCalledWith("side:1", "looks fine to me", null);
+  });
+
+  it("toasts (rather than silently swallowing) a pasted file — attachments unsupported here", async () => {
+    const { screen } = await setup();
+    const { toasts } = await import("../../lib/toast");
+    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
+    await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
+
+    const before = toasts().length;
+    const side = document.querySelector('[data-composer="side"]') as HTMLTextAreaElement;
+    fireEvent.paste(side, {
+      clipboardData: { items: [{ kind: "file", getAsFile: () => new File([], "shot.png") }] },
+    });
+    expect(toasts().length).toBe(before + 1);
+    expect(toasts()[toasts().length - 1].message).toMatch(/side chat/i);
+  });
+});
+
 describe("Focus handoff between the two composers (fork-ui iteration)", () => {
   it("lands focus in the side composer on open and returns it to the main composer on leave", async () => {
     const { screen } = await setup();

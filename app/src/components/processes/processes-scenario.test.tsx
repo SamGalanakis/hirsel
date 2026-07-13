@@ -163,7 +163,7 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       // cleanup); the running count rides on the ⋯ trigger for glanceability,
       // and selecting it docks the Processes pane (rightRegion === "processes").
       const user = userEvent.setup();
-      const overflow = screen.getByLabelText("More");
+      const overflow = screen.getByLabelText(/More actions/);
       expect(within(overflow).getByText("1")).toBeTruthy();
       await user.click(overflow);
       // The menu content is portaled to document.body (outside the render
@@ -230,7 +230,7 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       await waitFor(() => expect(runningProcessCount(store.state.processes)).toBe(0), {
         timeout: 10000,
       });
-      const overflow2 = screen.getByLabelText("More");
+      const overflow2 = screen.getByLabelText(/More actions/);
       expect(within(overflow2).queryByText("1")).toBeNull();
       // Re-dock Processes directly (the overflow→Processes path is already
       // proven above; a second userEvent menu cycle on one render is flaky).

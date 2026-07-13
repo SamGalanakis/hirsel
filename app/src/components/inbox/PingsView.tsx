@@ -2,7 +2,8 @@ import { ChevronDown, ChevronRight, Inbox as InboxIcon } from "lucide-solid";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { Ping } from "../../protocol";
 import { dispatch, goToChat, requestSideChatOpen, state } from "../../store/store";
-import { isResolvedStatus } from "../../store/selectors";
+import { isPingResolved } from "../../store/selectors";
+import { markDoneWithUndo } from "../../lib/resolve-undo";
 import { getClient } from "../../ws/client";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { PingCard } from "./PingCard";
@@ -27,7 +28,9 @@ export function PingsView() {
 
   const partitioned = createMemo(() => {
     const sorted = [...state.pings].sort((a, b) => b.id - a.id);
-    const open = sorted.filter((p) => p.status === "open");
+    // Fold in the optimistic Mark-done override so a just-resolved Ping moves to
+    // Done at once (and a mid-window Undo brings it back) — spec item 2.
+    const open = sorted.filter((p) => !isPingResolved(p, state.resolveOverrides));
     // Tray (v1.6): requires_response Pings float to the top as their own
     // "Needs reply" section — a triage affordance a chronological-only feed
     // lacks, per the design critique's [P1] fix. Each bucket stays newest-first
@@ -35,8 +38,11 @@ export function PingsView() {
     return {
       needsReply: open.filter((p) => p.requires_response),
       other: open.filter((p) => !p.requires_response),
-      // ADR-0009: resolved Pings (done, or legacy archived) collect here.
-      done: sorted.filter((p) => isResolvedStatus(p.status)).slice(0, DONE_LIMIT),
+      // ADR-0009: resolved Pings (done, or legacy archived, or optimistically
+      // Marked done) collect here.
+      done: sorted
+        .filter((p) => isPingResolved(p, state.resolveOverrides))
+        .slice(0, DONE_LIMIT),
     };
   });
 
@@ -52,10 +58,13 @@ export function PingsView() {
     goToChat({ scrollToMessageId: ping.anchor });
   }
 
-  // Mark done = the wire `resolve_ping` (ADR-0009: the Ping's terminal state,
-  // presented as "Done"); non-destructive, now a one-tap control on the card.
+  // Mark done (ADR-0009: the Ping's terminal `resolve_ping` state, presented as
+  // "Done"). Routed through the Undo controller (spec item 2): the card flips to
+  // Done at once, but the wire send is debounced behind a 5s "Undo" toast so a
+  // mis-tap/mis-swipe is recoverable before it commits (resolve is terminal on
+  // the host — there is no reopen op).
   function handleResolve(ping: Ping) {
-    getClient()?.resolvePing(ping.id);
+    markDoneWithUndo(ping.id);
   }
 
   // Auto-read / "Mark read": optimistic read flip + read_ping on the wire.
@@ -127,12 +136,19 @@ export function PingsView() {
           </section>
         </Show>
 
-        {/* Everything else rests as dense hairline rows; tap to promote one. */}
+        {/* Everything else rests as dense hairline rows; tap to promote one.
+            The open bucket is ALWAYS labelled whenever another section is
+            visible (spec item 5), so a lone open Ping never floats UNLABELED
+            above a prominent "Done" accordion — the eye lands on open work, not
+            on what's done. Label "Other" when "Needs reply" leads the column,
+            else "Open" (it is the only open bucket). */}
         <Show when={partitioned().other.length > 0}>
           <section class="flex flex-col">
-            <Show when={partitioned().needsReply.length > 0}>
+            <Show
+              when={partitioned().needsReply.length > 0 || partitioned().done.length > 0}
+            >
               <h2 class="mx-3 mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-                Other
+                {partitioned().needsReply.length > 0 ? "Other" : "Open"} ({partitioned().other.length})
               </h2>
             </Show>
             <For each={partitioned().other}>
@@ -147,15 +163,19 @@ export function PingsView() {
           </section>
         </Show>
 
+        {/* Done is demoted and foot-anchored (spec item 5): `mt-auto` pushes it
+            to the bottom of the column so open work leads, and it rests smaller
+            and quieter (text-xs, size-3.5 chevron), collapsed by default. */}
         <Show when={partitioned().done.length > 0}>
-          <div>
+          <div class="mt-auto">
             <button
               type="button"
-              class="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-1 border-t border-border py-3 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+              class="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-1 border-t border-border py-2.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
+              aria-expanded={doneExpanded()}
               onClick={() => setDoneExpanded((v) => !v)}
             >
-              <Show when={doneExpanded()} fallback={<ChevronRight class="size-4" />}>
-                <ChevronDown class="size-4" />
+              <Show when={doneExpanded()} fallback={<ChevronRight class="size-3.5" />}>
+                <ChevronDown class="size-3.5" />
               </Show>
               Done ({partitioned().done.length})
             </button>

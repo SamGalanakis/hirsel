@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hirsel_proto::{Blob, ChatMessage, HostToClient, Ping, PushPlatform, SendMode};
+use hirsel_proto::{Blob, ChatMessage, HostToClient, ModelSelection, Ping, PushPlatform, SendMode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,6 +40,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
         .route("/debug/create-monitor", post(create_monitor))
+        .route("/debug/set-model", post(set_model))
         .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
         .route("/debug/pings", get(pings))
@@ -148,6 +149,12 @@ struct CreateMonitorRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetModelRequest {
+    model_id: String,
+    variant: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PairRequest {
     #[serde(alias = "label")]
     device_label: String,
@@ -225,6 +232,7 @@ struct HealthResponse {
     latest_msg_id: u64,
     debug: bool,
     started_at_unix: u64,
+    model: Option<ModelSelection>,
 }
 
 #[derive(Debug, Serialize)]
@@ -447,6 +455,15 @@ async fn create_monitor(
     Ok(Json(CreateMonitorResponse { monitor }))
 }
 
+async fn set_model(
+    State(state): State<AppState>,
+    Json(request): Json<SetModelRequest>,
+) -> Result<Json<ModelSelection>, DebugError> {
+    Ok(Json(
+        state.set_model(&request.model_id, &request.variant).await?,
+    ))
+}
+
 async fn chat(State(state): State<AppState>) -> Result<Json<ChatResponse>, DebugError> {
     Ok(Json(ChatResponse {
         messages: state.storage.all_chat().await?,
@@ -523,6 +540,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, D
         latest_msg_id: state.storage.latest_msg_id().await?,
         debug: state.debug_enabled,
         started_at_unix,
+        model: state.model_snapshot().map(|snapshot| snapshot.current),
     }))
 }
 

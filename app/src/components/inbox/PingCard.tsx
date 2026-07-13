@@ -1,8 +1,15 @@
 import { Check, Clock, GitFork, MoreHorizontal, RotateCcw } from "lucide-solid";
-import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Ping, QuickReply } from "../../protocol";
 import { state } from "../../store/store";
-import { isPingRead, isResolvedStatus, latestReplyForAnchor, sideChatForPing } from "../../store/selectors";
+import {
+  isPingRead,
+  isResolvedStatus,
+  latestReplyForAnchor,
+  sideChatForPing,
+  viewsForPing,
+} from "../../store/selectors";
+import { ViewRenderer } from "../../views/ViewRenderer";
 import { createSeenTimer } from "../../lib/auto-read";
 import { snippet } from "../../lib/format";
 import { Markdown } from "../Markdown";
@@ -103,6 +110,12 @@ export function PingCard(props: Props) {
   // Replied state, derived from Chat (no persisted reply state): the latest
   // owner message anchored to this Ping, if any.
   const reply = createMemo(() => latestReplyForAnchor(state.messages, props.ping.anchor));
+
+  // Generative-UI tier: host-authored views placed on this Ping (`ping:<id>`).
+  // Rendered inline in the card body; an interactive one emits a `view_event`
+  // that the host turns into the anchor-refed owner reply, auto-resolving the
+  // Ping — the same round-trip a Quick Reply takes.
+  const pingViews = createMemo(() => viewsForPing(state.views, props.ping.id));
 
   // --- Auto-read: email-like "seen" once visible ~1.5s or on interaction. ---
   let cardEl: HTMLElement | undefined;
@@ -362,6 +375,22 @@ export function PingCard(props: Props) {
           }}
         >
           <Markdown>{props.ping.content}</Markdown>
+        </div>
+      </Show>
+
+      {/* Generative-UI tier: any views the agent placed on this Ping, rendered
+          inline beneath the content. */}
+      <Show when={pingViews().length > 0}>
+        <div class="flex flex-col gap-3">
+          <For each={pingViews()}>
+            {(v) => (
+              <ViewRenderer
+                spec={v.spec}
+                instanceId={v.instance_id}
+                placement={v.placement}
+              />
+            )}
+          </For>
         </div>
       </Show>
 

@@ -6,6 +6,7 @@ import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { NavRail } from "./components/NavRail";
 import { ProcessesButton } from "./components/processes/ProcessesButton";
+import { CanvasButton } from "./components/views/CanvasSurface";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
@@ -124,6 +125,7 @@ function App() {
               <AgentStatus />
             </div>
             <div class="flex shrink-0 items-center gap-1.5">
+              <CanvasButton />
               <ProcessesButton />
               {/* Settings is otherwise reachable only from the desktop NavRail
                   gear, which is gone below `rail`; this header entry is the sole

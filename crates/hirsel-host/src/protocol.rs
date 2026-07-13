@@ -234,6 +234,7 @@ async fn build_snapshot(
         side_chats: state.side_chats.summaries().await,
         host_version: host_version(),
         model: state.model_snapshot(),
+        subagent_models: Some(state.subagent_model_snapshot()),
         views,
     };
     Ok((hello, dedupe))
@@ -371,6 +372,16 @@ where
         }
         ClientToHost::SetModel { model_id, variant } => {
             state.set_model(&model_id, &variant).await?;
+        }
+        ClientToHost::SetSubagentModel {
+            provider,
+            model_id,
+            enabled,
+            default_variant,
+        } => {
+            state
+                .set_subagent_model(&provider, &model_id, enabled, &default_variant)
+                .await?;
         }
         ClientToHost::UploadBlob {
             client_id,
@@ -543,6 +554,8 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
@@ -590,6 +603,8 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
@@ -626,6 +641,8 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
@@ -703,6 +720,8 @@ mod tests {
             anthropic_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,

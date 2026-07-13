@@ -1,17 +1,11 @@
-use std::{
-    io::ErrorKind,
-    path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use hirsel_proto::{AvailableModel, ModelSelection, ModelSnapshot};
 use lash::provider::{ModelCapability, ReasoningCapability, ReasoningEncoding, ReasoningSelection};
-use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
-use uuid::Uuid;
 
-const MODEL_SELECTION_FILE: &str = "model-selection.json";
+use crate::host_config::ConfigStore;
+
 const MAIN_MODEL_CONTEXT_TOKENS: usize = 200_000;
 
 struct RegistryEntry {
@@ -34,54 +28,27 @@ const REGISTRY: &[RegistryEntry] = &[RegistryEntry {
 #[derive(Clone)]
 pub struct ModelSelectionState {
     current: Arc<RwLock<ModelSelection>>,
-    path: Arc<PathBuf>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PersistedSelection {
-    model_id: String,
-    variant: String,
+    fallback: ModelSelection,
+    config_store: ConfigStore,
 }
 
 impl ModelSelectionState {
-    pub async fn load(data_dir: &Path, configured_model: &str) -> anyhow::Result<Self> {
-        let path = data_dir.join(MODEL_SELECTION_FILE);
-        let current = match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let persisted: PersistedSelection =
-                    serde_json::from_slice(&bytes).with_context(|| {
-                        format!("parse persisted model selection at {}", path.display())
-                    })?;
-                // A previously-persisted model may have left the registry (e.g. the
-                // main agent was pinned to a single model). Fall back to the
-                // configured model rather than bricking boot on a stale selection.
-                match validate_selection(&persisted.model_id, &persisted.variant) {
-                    Ok(selection) => selection,
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            %error,
-                            "persisted model selection is no longer available; falling back to configured model"
-                        );
-                        selection_for_configured_model(configured_model)?
-                    }
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                selection_for_configured_model(configured_model)?
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read model selection at {}", path.display()));
-            }
-        };
+    pub async fn load(config_store: ConfigStore, configured_model: &str) -> anyhow::Result<Self> {
+        let fallback = selection_for_configured_model(configured_model)?;
+        let current = selection_from_store(&config_store, &fallback);
         Ok(Self {
             current: Arc::new(RwLock::new(current)),
-            path: Arc::new(path),
+            fallback,
+            config_store,
         })
     }
 
     pub fn current(&self) -> ModelSelection {
+        let selection = selection_from_store(&self.config_store, &self.fallback);
+        *self
+            .current
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = selection.clone();
         self.current
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -100,7 +67,9 @@ impl ModelSelectionState {
     }
 
     pub async fn persist_and_select(&self, selection: ModelSelection) -> anyhow::Result<()> {
-        persist_atomic(&self.path, &selection).await?;
+        self.config_store
+            .set_model_selection(&selection.id, &selection.variant)
+            .await?;
         *self
             .current
             .write()
@@ -110,6 +79,27 @@ impl ModelSelectionState {
 
     pub fn model_spec(&self) -> anyhow::Result<lash::ModelSpec> {
         model_spec(&self.current())
+    }
+}
+
+fn selection_from_store(config_store: &ConfigStore, fallback: &ModelSelection) -> ModelSelection {
+    let Some((model_id, variant)) = config_store.model_selection() else {
+        tracing::warn!(
+            path = %config_store.path().display(),
+            "host config [model] section is missing or malformed; falling back to configured model"
+        );
+        return fallback.clone();
+    };
+    match validate_selection(&model_id, &variant) {
+        Ok(selection) => selection,
+        Err(error) => {
+            tracing::warn!(
+                path = %config_store.path().display(),
+                %error,
+                "persisted model selection is no longer available; falling back to configured model"
+            );
+            fallback.clone()
+        }
     }
 }
 
@@ -185,45 +175,19 @@ fn registry_entry(model_id: &str) -> Option<&'static RegistryEntry> {
     REGISTRY.iter().find(|entry| entry.id == model_id)
 }
 
-async fn persist_atomic(path: &Path, selection: &ModelSelection) -> anyhow::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("model selection path has no parent: {}", path.display()))?;
-    tokio::fs::create_dir_all(parent).await?;
-    let persisted = PersistedSelection {
-        model_id: selection.id.clone(),
-        variant: selection.variant.clone(),
-    };
-    let mut bytes = serde_json::to_vec_pretty(&persisted)?;
-    bytes.push(b'\n');
-    let temp_path = parent.join(format!(
-        ".{MODEL_SELECTION_FILE}.{}.tmp",
-        Uuid::new_v4().simple()
-    ));
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)
-            .await?;
-        file.write_all(&bytes).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&temp_path, path).await?;
-        Ok::<_, std::io::Error>(())
-    }
-    .await;
-    if let Err(error) = result {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(error)
-            .with_context(|| format!("atomically persist model selection at {}", path.display()));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn store(dir: &tempfile::TempDir) -> ConfigStore {
+        ConfigStore::load(
+            dir.path().join("hirsel.toml"),
+            dir.path(),
+            std::path::Path::new("/docs/hirsel-config.md"),
+        )
+        .await
+        .unwrap()
+    }
 
     #[test]
     fn registry_validates_models_and_variants() {
@@ -237,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn persistence_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let state = ModelSelectionState::load(dir.path(), "gpt-5.6-sol")
+        let state = ModelSelectionState::load(store(&dir).await, "gpt-5.6-sol")
             .await
             .unwrap();
         state
@@ -248,7 +212,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded = ModelSelectionState::load(dir.path(), "gpt-5.6-sol")
+        let reloaded = ModelSelectionState::load(store(&dir).await, "gpt-5.6-sol")
             .await
             .unwrap();
         assert_eq!(
@@ -256,6 +220,26 @@ mod tests {
             ModelSelection {
                 id: "gpt-5.6-sol".to_string(),
                 variant: "max".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_or_invalid_config_falls_back_without_bricking_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+        store
+            .set_model_selection("retired-model", "impossible")
+            .await
+            .unwrap();
+        let state = ModelSelectionState::load(store, "gpt-5.6-sol")
+            .await
+            .unwrap();
+        assert_eq!(
+            state.current(),
+            ModelSelection {
+                id: "gpt-5.6-sol".to_string(),
+                variant: "medium".to_string(),
             }
         );
     }

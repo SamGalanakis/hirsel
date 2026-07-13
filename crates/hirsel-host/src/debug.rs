@@ -43,6 +43,10 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/cancel-queued", post(cancel_queued))
         .route("/debug/create-monitor", post(create_monitor))
         .route("/debug/set-model", post(set_model))
+        .route(
+            "/debug/subagent-models",
+            get(subagent_models).post(set_subagent_model),
+        )
         .route("/debug/show-view", post(show_view))
         .route("/debug/views", get(views))
         .route("/debug/view-event", post(view_event))
@@ -157,6 +161,14 @@ struct CreateMonitorRequest {
 struct SetModelRequest {
     model_id: String,
     variant: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetSubagentModelRequest {
+    provider: String,
+    model_id: String,
+    enabled: bool,
+    default_variant: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -528,6 +540,28 @@ async fn set_model(
 ) -> Result<Json<ModelSelection>, DebugError> {
     Ok(Json(
         state.set_model(&request.model_id, &request.variant).await?,
+    ))
+}
+
+async fn subagent_models(
+    State(state): State<AppState>,
+) -> Json<hirsel_proto::SubagentModelCatalog> {
+    Json(state.subagent_model_snapshot())
+}
+
+async fn set_subagent_model(
+    State(state): State<AppState>,
+    Json(request): Json<SetSubagentModelRequest>,
+) -> Result<Json<hirsel_proto::SubagentModelCatalog>, DebugError> {
+    Ok(Json(
+        state
+            .set_subagent_model(
+                &request.provider,
+                &request.model_id,
+                request.enabled,
+                &request.default_variant,
+            )
+            .await?,
     ))
 }
 

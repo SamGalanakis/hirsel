@@ -32,6 +32,8 @@ pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub model: String,
     pub data_dir: PathBuf,
+    pub config_path: PathBuf,
+    pub docs_path: PathBuf,
     pub templates_dir: PathBuf,
     pub driver: DriverMode,
     pub fake_fixture: Option<PathBuf>,
@@ -79,6 +81,16 @@ impl Config {
         let data_dir = env::var_os("HIRSEL_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("./data"));
+        let config_path = absolute_path(
+            env::var_os("HIRSEL_CONFIG")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| data_dir.join("hirsel.toml")),
+        )?;
+        let docs_path = absolute_path(
+            env::var_os("HIRSEL_DOCS")
+                .map(PathBuf::from)
+                .unwrap_or_else(crate::templates::bundled_docs_path),
+        )?;
         let templates_dir = env::var_os("HIRSEL_TEMPLATES_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("./templates"));
@@ -110,6 +122,8 @@ impl Config {
             anthropic_api_key,
             model,
             data_dir,
+            config_path,
+            docs_path,
             templates_dir,
             driver,
             fake_fixture,
@@ -118,6 +132,17 @@ impl Config {
             sidechat_ttl_secs,
         })
     }
+}
+
+fn absolute_path(path: PathBuf) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .context("resolve current directory for Hirsel path")?
+            .join(path)
+    };
+    Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
 }
 
 fn validate_owner_token(token: &str) -> anyhow::Result<()> {

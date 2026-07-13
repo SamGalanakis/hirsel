@@ -56,6 +56,8 @@ pub struct SpawnSpec {
     pub agent: AgentKind,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
     pub prompt: String,
     pub cwd: PathBuf,
     #[serde(default)]
@@ -669,6 +671,11 @@ impl SubagentDriver for CodexDriver {
         if let Some(model) = task.model.as_deref() {
             command.arg("-c").arg(format!("model={model}"));
         }
+        if let Some(variant) = task.variant.as_deref() {
+            command
+                .arg("-c")
+                .arg(format!("model_reasoning_effort={variant}"));
+        }
         for (key, value) in codex_mcp_disable_flags() {
             command.arg("-c").arg(format!("{key}={value}"));
         }
@@ -1023,6 +1030,7 @@ mod tests {
             .spawn(SpawnSpec {
                 agent: AgentKind::Claude,
                 model: None,
+                variant: None,
                 prompt: "fix it".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,
@@ -1057,6 +1065,7 @@ mod tests {
             .spawn(SpawnSpec {
                 agent: AgentKind::Codex,
                 model: Some("gpt-test-model".to_string()),
+                variant: Some("high".to_string()),
                 prompt: "fix it".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,
@@ -1067,6 +1076,7 @@ mod tests {
         let specs = driver.spawned_specs().unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].model.as_deref(), Some("gpt-test-model"));
+        assert_eq!(specs[0].variant.as_deref(), Some("high"));
     }
 
     #[tokio::test]
@@ -1088,6 +1098,7 @@ mod tests {
             .spawn(SpawnSpec {
                 agent: AgentKind::Codex,
                 model: None,
+                variant: None,
                 prompt: "wait".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: Some(fixture.path().to_path_buf()),
@@ -1129,6 +1140,7 @@ mod tests {
             .spawn(SpawnSpec {
                 agent: AgentKind::Claude,
                 model: None,
+                variant: None,
                 prompt: "instant".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: Some(fixture.path().to_path_buf()),
@@ -1191,6 +1203,7 @@ mod tests {
             .spawn(SpawnSpec {
                 agent: AgentKind::Claude,
                 model: None,
+                variant: None,
                 prompt: "Reply with exactly: driver-smoke".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,
@@ -1214,6 +1227,7 @@ mod tests {
             .spawn(SpawnSpec {
                 agent: AgentKind::Codex,
                 model: None,
+                variant: None,
                 prompt: "Reply with exactly: driver-smoke".to_string(),
                 cwd: std::env::current_dir().unwrap(),
                 fake_fixture: None,

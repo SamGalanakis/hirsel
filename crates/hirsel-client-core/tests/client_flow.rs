@@ -71,6 +71,7 @@ fn hello_ok(
         side_chats: Vec::new(),
         host_version: "0.1.0 (test)".to_string(),
         model: None,
+        subagent_models: None,
         views: Vec::new(),
     }
 }

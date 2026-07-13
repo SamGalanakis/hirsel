@@ -81,6 +81,8 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,
@@ -120,6 +122,7 @@ mod tests {
                 side_chats,
                 host_version,
                 model,
+                subagent_models,
                 views,
             } => {
                 assert_eq!(latest_msg_id, 1);
@@ -131,6 +134,7 @@ mod tests {
                 assert!(views.is_empty());
                 assert!(!host_version.is_empty());
                 assert!(model.is_none());
+                assert!(subagent_models.is_some());
             }
             other => panic!("unexpected hello response: {other:?}"),
         }
@@ -706,6 +710,8 @@ mod tests {
             anthropic_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: data_dir.to_path_buf(),
+            config_path: data_dir.join("hirsel.toml"),
+            docs_path: crate::templates::bundled_docs_path(),
             templates_dir: crate::templates::bundled_templates_dir(),
             driver: DriverMode::Fake,
             fake_fixture: None,

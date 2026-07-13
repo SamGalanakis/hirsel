@@ -34,19 +34,28 @@ export function decidePayload(eventId: number, action: string, data: unknown): D
 /** Decide a judgment: optimistic decide flip + immediate `event_action`, with a
  * ~5s "Undo" toast whose Undo reopens the event. `label` is a short human string
  * for the toast (e.g. the chosen option's label). Returns the payload sent, so
- * callers (and tests) can assert or surface it. */
+ * callers (and tests) can assert or surface it.
+ *
+ * `silent` suppresses the toast — the scroller passes it because its decided
+ * card carries its own on-screen "Undo" strip, so raising a toast on top would
+ * double the Undo affordance (§6, "one Undo"). The scroller re-raises a toast
+ * itself only once that card scrolls off, keeping recovery reachable without ever
+ * showing two Undos at once. */
 export function decideEventWithUndo(
   eventId: number,
   action: string,
   data: unknown,
   label?: string,
+  opts?: { silent?: boolean },
 ): DecidePayload {
   dispatch({ type: "event_decide_local", eventId });
   getClient()?.sendEventAction(eventId, action, data);
-  const toastId = toast(label ? `Decided · ${label}` : "Decided", {
-    durationMs: DECIDE_UNDO_WINDOW_MS,
-    action: { label: "Undo", onClick: () => undoDecide(eventId, toastId) },
-  });
+  if (!opts?.silent) {
+    const toastId = toast(label ? `Decided · ${label}` : "Decided", {
+      durationMs: DECIDE_UNDO_WINDOW_MS,
+      action: { label: "Undo", onClick: () => undoDecide(eventId, toastId) },
+    });
+  }
   return decidePayload(eventId, action, data);
 }
 

@@ -38,10 +38,12 @@ async function setup(events: EventItem[]) {
   const store = await import("../../store/store");
   const toast = await import("../../lib/toast");
   const sent: { eventId: number; action: string; data: unknown }[] = [];
+  const readSent: number[] = [];
   vi.doMock("../../ws/client", () => ({
     getClient: () => ({
       sendEventAction: (eventId: number, action: string, data: unknown) =>
         sent.push({ eventId, action, data }),
+      readPing: (id: number) => readSent.push(id),
     }),
   }));
   for (const e of events) {
@@ -51,7 +53,7 @@ async function setup(events: EventItem[]) {
   const screen = render(() => <EventScroller />);
   const reader = screen.container.querySelector('[data-slot="event-scroller"]') as HTMLElement;
   const list = screen.container.querySelector('[data-slot="queue-list"]') as HTMLElement;
-  return { store, toast, screen, sent, reader, list };
+  return { store, toast, screen, sent, readSent, reader, list };
 }
 
 describe("EventScroller — the vertical event queue home", () => {
@@ -114,6 +116,11 @@ describe("EventScroller — the vertical event queue home", () => {
     expect(need.textContent).toBe("all clear");
     expect(end.textContent).toContain("1 decided");
     expect(end.textContent).toContain("0 waiting");
+    // The clear branch carries the quiet intent door (§3): Talk to the agent →
+    // the chat drill-in.
+    const store = await import("../../store/store");
+    fireEvent.click(within(end).getByRole("button", { name: /Talk to the agent/ }));
+    expect(store.state.home).toBe("chat");
   });
 
   it("opens the phone peek overview from the pager", async () => {
@@ -193,7 +200,9 @@ describe("EventScroller — hello_ok snapshot replacement (live-stack regression
     // mock seed fires — then the real host's hello_ok replaces the set with one
     // open unread judgment and one open unread summary ~a moment later.
     const store = await import("../../store/store");
-    vi.doMock("../../ws/client", () => ({ getClient: () => ({ sendEventAction: () => {} }) }));
+    vi.doMock("../../ws/client", () => ({
+      getClient: () => ({ sendEventAction: () => {}, readPing: () => {} }),
+    }));
     const { EventScroller } = await import("./EventScroller");
     const screen = render(() => <EventScroller />);
     // The DEV mocks are on screen (the pre-cutover demo pass).
@@ -234,8 +243,8 @@ describe("EventScroller — hello_ok snapshot replacement (live-stack regression
     expect(end.textContent).not.toContain("read");
   });
 
-  it("marks awareness read only when the Owner actually leaves its page", async () => {
-    const { store, reader } = await setup([judgment(1, "One")]);
+  it("marks awareness read only when the Owner actually leaves its page, and round-trips it on the wire", async () => {
+    const { store, reader, readSent } = await setup([judgment(1, "One")]);
     // Append a summary AFTER mount (an event_upsert, not a snapshot swap).
     store.dispatch({
       type: "event_upsert",
@@ -246,8 +255,41 @@ describe("EventScroller — hello_ok snapshot replacement (live-stack regression
     // Page down onto the summary: it is CENTRED, not passed — still unread.
     reader.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true }));
     expect(store.state.events.find((e) => e.id === 2)?.read).toBe(false);
-    // Page past it: the Owner actually viewed it and left — now it reads.
+    // Page past it: the Owner actually viewed it and left — now it reads, and
+    // the read is SENT (read_ping — events share the ping id space), so a
+    // resync or a second device agrees instead of reverting the chip to "new".
     reader.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true }));
     await waitFor(() => expect(store.state.events.find((e) => e.id === 2)?.read).toBe(true));
+    expect(readSent).toEqual([2]);
+  });
+
+  it("streams awareness before a judgment without phantom-reading the summary", async () => {
+    // The event_upsert path never bumps eventsSnapshotSeq: the summary arrives
+    // first (the queue anchors on it as the only page), then a judgment sorts
+    // ABOVE it. The summary was only ever displaced under the cursor — never
+    // viewed-then-left — so it must stay unread with zero interaction.
+    const { store, screen, readSent } = await setup([]);
+    // Clear the DEV mock seed with an authoritative empty snapshot first.
+    store.dispatch({
+      type: "hello_ok",
+      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], events: [] },
+    });
+    store.dispatch({
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: summaryEvent(2, "Digest") },
+    });
+    store.dispatch({
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: judgment(1, "Decide me") },
+    });
+    // The judgment leads; the pager agrees; the summary is untouched.
+    await waitFor(() => {
+      const pos = screen.container.querySelector('[data-slot="pager-pos"]') as HTMLElement;
+      expect(pos.textContent).toBe("1 of 2");
+    });
+    const need = screen.container.querySelector('[data-slot="pager-need"]') as HTMLElement;
+    expect(need.textContent).toBe("1 need you");
+    expect(store.state.events.find((e) => e.id === 2)?.read).toBe(false);
+    expect(readSent).toEqual([]);
   });
 });

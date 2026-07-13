@@ -116,12 +116,12 @@ export function QueueList(props: {
       data-slot="queue-list"
       class="hidden w-[19rem] shrink-0 flex-col border-r border-border bg-background rail:flex"
     >
-      <div class="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
+      {/* Silent header: the pager's "N need you" pill in the reader beside this
+          list is the surface's SINGLE count-bearing element — repeating the
+          number here stated it three ways on one view. The rows' own state
+          labels carry the per-item truth. */}
+      <div class="flex h-12 shrink-0 items-center border-b border-border px-4">
         <h2 class="m-0 text-sm font-semibold tracking-[0.01em] text-foreground">Queue</h2>
-        <span class="flex-1" />
-        <span class="text-[0.68rem] font-medium tabular-nums text-muted-foreground">
-          {props.openCount > 0 ? `${props.openCount} need you` : "all clear"}
-        </span>
       </div>
       <div class="min-h-0 flex-1 overflow-y-auto p-1.5">
         <For each={props.ordered}>

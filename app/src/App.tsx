@@ -1,6 +1,7 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AgentStatus } from "./components/chat/AgentStatus";
 import { ChatView } from "./components/chat/ChatView";
+import { EventScroller } from "./components/eventq/EventScroller";
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { NavRail } from "./components/NavRail";
@@ -132,9 +133,15 @@ function App() {
               <PhoneOverflowMenu />
             </div>
           </header>
-          {/* Chat is the whole app (spec [P1]). */}
+          {/* The home is the event-queue scroller (ADR-0012); Chat is the
+              drill-in shell reached from a judgment's Discuss, the NavRail, or
+              the phone overflow. The scroller is the phone home and the desktop
+              center measure; the chat shell owns the 3-pane layout + the right
+              region when drilled into. */}
           <main class="flex min-h-0 flex-1 flex-col">
-            <ChatView />
+            <Show when={state.home === "chat"} fallback={<EventScroller />}>
+              <ChatView />
+            </Show>
           </main>
         </div>
       </div>

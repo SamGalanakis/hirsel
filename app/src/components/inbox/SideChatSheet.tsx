@@ -239,9 +239,15 @@ function SideChatPanel(props: { sc: string }) {
           a plain close `✕` on the desktop split (Chat is right there on the
           left, so "back" would be a lie). */}
       <header class="flex flex-shrink-0 items-center gap-1.5 border-b border-border px-1.5 py-2 pt-[calc(env(safe-area-inset-top)+0.5rem)] split:pt-2 rail:h-12 rail:py-0">
+        {/* One leave control, repositioned by flex `order` so its close sits in
+            the SAME muscle-memory position as the sibling inspector panes (spec
+            item 1): a leading `‹ Chat` back gesture on phone, a plain trailing ×
+            on the desktop split (`split:order-last` moves it after the title +
+            ⋯; Chat is right there on the left, so "back" would be a lie). Kept a
+            single element so it stays one accessible target. */}
         <button
           type="button"
-          class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
+          class="flex shrink-0 items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 split:order-last split:gap-0"
           onClick={leave}
           aria-label="Leave side chat (stays open — resume any time)"
         >

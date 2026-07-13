@@ -1,9 +1,10 @@
-import { ChevronLeft, PanelRight, X } from "lucide-solid";
+import { ChevronLeft, PanelRight } from "lucide-solid";
 import { For, onMount, Show } from "solid-js";
 import { createFocusTrap, createMediaFlag } from "../../lib/focus";
 import { canvasViews } from "../../store/selectors";
 import { closeRightRegion, showCanvas, state } from "../../store/store";
 import { ViewRenderer } from "../../views/ViewRenderer";
+import { PaneHeader } from "../ui/PaneHeader";
 
 // Canvas: the shared right-context surface for `canvas`-placed generative
 // views. On desktop (`rail`) it is an in-flow right column that takes the slot
@@ -46,21 +47,19 @@ export function CanvasRail() {
     <Show when={canvasActive()}>
       <aside
         data-slot="canvas-rail"
-        class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex"
+        class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex
+          motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-right-2 motion-safe:duration-150"
         aria-label="Canvas"
       >
-        <div class="flex h-12 flex-shrink-0 items-center gap-2 border-b border-border px-3">
-          <PanelRight class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Canvas</span>
-          <button
-            type="button"
-            class="-mr-1 grid size-8 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
-            aria-label="Close Canvas"
-            onClick={closeRightRegion}
-          >
-            <X class="size-4" aria-hidden="true" />
-          </button>
-        </div>
+        {/* Shared PaneHeader (spec item 1) — same datum/close as the other
+            inspectors, so the right slot reads as ONE slot and the close × gets
+            the same focus-visible ring as its siblings (spec item 7). */}
+        <PaneHeader
+          icon={<PanelRight class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+          title="Canvas"
+          onClose={closeRightRegion}
+          closeLabel="Close Canvas"
+        />
         <CanvasBody />
       </aside>
     </Show>
@@ -87,7 +86,8 @@ function CanvasPhonePanel() {
       role="dialog"
       aria-modal={phone() ? "true" : undefined}
       aria-labelledby="canvas-sheet-heading"
-      class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)] rail:hidden"
+      class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)] rail:hidden
+        motion-safe:animate-in motion-safe:slide-in-from-bottom motion-safe:duration-200"
     >
       <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
         <button

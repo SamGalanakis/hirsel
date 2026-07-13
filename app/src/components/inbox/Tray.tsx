@@ -3,11 +3,12 @@ import { onCleanup, onMount, Show } from "solid-js";
 import { snippet } from "../../lib/format";
 import {
   hasOpenRequiresResponse,
-  isResolvedStatus,
+  isPingResolved,
   mostActionablePing,
   openUnreadCount,
 } from "../../store/selectors";
 import { setTrayExpanded, state } from "../../store/store";
+import { PaneHeader } from "../ui/PaneHeader";
 import { PingsView } from "./PingsView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
@@ -23,16 +24,22 @@ import { PingsView } from "./PingsView";
 
 const PREVIEW_MAX = 52;
 
+// All the shelf/rail counts fold in the optimistic Mark-done override
+// (`resolveOverrides`), so a just-Marked-done Ping leaves the open counts / the
+// One-Escalation red the instant it flips — not only once the 5s Undo window
+// commits (spec item 2).
 function openCount(): number {
-  return state.pings.filter((p) => p.status === "open").length;
+  return state.pings.filter(
+    (p) => p.status === "open" && !state.resolveOverrides.includes(p.id),
+  ).length;
 }
 
 function doneCount(): number {
-  return state.pings.filter((p) => isResolvedStatus(p.status)).length;
+  return state.pings.filter((p) => isPingResolved(p, state.resolveOverrides)).length;
 }
 
 function badgeCount(): number {
-  return openUnreadCount(state.pings, state.unreadOverrides);
+  return openUnreadCount(state.pings, state.unreadOverrides, state.resolveOverrides);
 }
 
 function badgeLabel(): string {
@@ -41,12 +48,12 @@ function badgeLabel(): string {
 }
 
 function danger(): boolean {
-  return hasOpenRequiresResponse(state.pings);
+  return hasOpenRequiresResponse(state.pings, state.resolveOverrides);
 }
 
 /** The most-actionable open Ping the collapsed shelf previews, or null. */
 function previewPing() {
-  return mostActionablePing(state.pings, state.unreadOverrides);
+  return mostActionablePing(state.pings, state.unreadOverrides, state.resolveOverrides);
 }
 
 const thinking = () => state.agentActivity.state === "thinking";
@@ -161,19 +168,21 @@ export function PingsRail() {
     <Show when={state.rightRegion === "pings"}>
       <aside
         data-slot="pings-rail"
-        class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex"
+        class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex
+          motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-right-2 motion-safe:duration-150"
         aria-label="Pings"
       >
-        {/* h-12 to match the nav-rail brand block + the center chat header, so
-            one continuous top hairline runs across all three desktop panes.
-            No agent-activity pulse here: the center chat header owns the single
-            "what is my agent doing" indicator (One-Escalation Rule — two live
-            pulses would double the accent). */}
-        <div class="flex h-12 flex-shrink-0 items-center gap-2 border-b border-border px-3">
-          <InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">Pings</span>
-          <PingsBadge slot="pings-rail-badge" />
-        </div>
+        {/* Shared PaneHeader (spec item 1) so the right slot reads as ONE slot —
+            same h-12 datum, icon rhythm, and title token as Canvas / Processes /
+            Settings; the resting Pings home shows no × (it is the default, not a
+            dismissible inspector) and carries its count badge instead. No
+            agent-activity pulse here: the center chat header owns the single
+            "what is my agent doing" indicator (One-Escalation Rule). */}
+        <PaneHeader
+          icon={<InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+          title="Pings"
+          badge={<PingsBadge slot="pings-rail-badge" />}
+        />
         <PingsView />
       </aside>
     </Show>
@@ -211,7 +220,8 @@ function TrayPanel() {
   return (
     <div
       data-slot="tray-panel"
-      class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg rail:hidden"
+      class="absolute inset-x-0 bottom-0 z-30 flex h-[58dvh] max-h-full flex-col overflow-hidden rounded-t-xl border border-b-0 border-border bg-background shadow-lg rail:hidden
+        motion-safe:animate-in motion-safe:slide-in-from-bottom motion-safe:duration-200"
       role="region"
       aria-label="Pings"
     >

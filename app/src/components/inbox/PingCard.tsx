@@ -11,7 +11,7 @@ import {
 } from "../../store/selectors";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { createSeenTimer } from "../../lib/auto-read";
-import { snippet } from "../../lib/format";
+import { relativePingTime, snippet } from "../../lib/format";
 import { Markdown } from "../Markdown";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
@@ -44,6 +44,10 @@ interface Props {
    * chat already exists for this Ping) — the effort ladder's third rung after
    * Quick Reply and Reply. */
   onDiscuss: (ping: Ping) => void;
+  /** v2.2: reopen a resolved Ping (Done card's ⋯ "Reopen"): `reopen_ping` +
+   * optimistic un-flip. Makes a mistakenly-done Ping recoverable at any time,
+   * not only inside the 5s "Marked done" toast window. */
+  onReopen: (ping: Ping) => void;
   /** Render the full card (the promoted state): requires-response, the selected
    * row, or a Done item. When false, the Ping renders as a dense one-line row
    * that expands on tap. Defaults to true so a standalone card renders in full. */
@@ -216,8 +220,13 @@ export function PingCard(props: Props) {
     </span>
   );
 
+  // Resting timestamp (spec item 5): a terse relative label for recent Pings
+  // ("now" / "5m" / "3h"), falling back to the absolute date form past 24h.
+  const timeLabel = () => relativePingTime(props.ping.ts) ?? formatTime(props.ping.ts);
   const Time = () => (
-    <span class="shrink-0 text-[0.7rem] text-muted-foreground">{formatTime(props.ping.ts)}</span>
+    <span class="shrink-0 text-[0.7rem] text-muted-foreground" title={formatTime(props.ping.ts)}>
+      {timeLabel()}
+    </span>
   );
 
   // One-tap Mark done — thumb-grade 44px hit area, glyph stays 16px. Negative
@@ -258,6 +267,12 @@ export function PingCard(props: Props) {
               Mark unread
             </DropdownMenuItem>
           </Show>
+        </Show>
+        {/* Reopen (spec item 3): a Done Ping is recoverable at any time, not
+            only inside the 5s toast window. Calm, on-brand — a plain menu item
+            like the rest, no new accent. */}
+        <Show when={isDone()}>
+          <DropdownMenuItem onSelect={() => props.onReopen(props.ping)}>Reopen</DropdownMenuItem>
         </Show>
         <DropdownMenuItem onSelect={() => props.onJumpToChat(props.ping)}>
           View in chat
@@ -303,11 +318,20 @@ export function PingCard(props: Props) {
           {titleText()}
         </span>
       </button>
+      {/* The @handle chip is dropped from the resting row (spec item 5): the
+          description already names the item, and the mono chip's box competed
+          with the title. It reappears on the promoted card, where acting on /
+          @-mentioning the Ping makes its handle load-bearing again. */}
       <div class="flex shrink-0 items-center gap-1.5">
-        <HandleChip />
         <Time />
-        <MarkDoneButton />
-        <MoreMenu />
+        {/* On dense Done rows the actions rest hidden and reveal on hover /
+            keyboard focus — but only where a fine pointer can hover; on touch
+            (coarse) they stay visible. Open rows keep Mark done always visible
+            (the class is off). See `.done-row-actions` in styles.css. */}
+        <div class="flex shrink-0 items-center gap-1.5" classList={{ "done-row-actions": isDone() }}>
+          <MarkDoneButton />
+          <MoreMenu />
+        </div>
       </div>
     </div>
   );

@@ -27,6 +27,23 @@ export function formatRelativeTime(ts: string, now: number = Date.now()): string
   return `${days}d ago`;
 }
 
+/** Compact resting-row timestamp (spec item 5): a terse relative label for
+ * recent Pings — "now" (<1m), "5m" (<1h), "3h" (<24h) — or null past 24h so
+ * the caller falls back to its absolute date form. Terser than
+ * `formatRelativeTime` (no "ago") because it rests beside a title on a dense
+ * row where quietness matters. `now` is injectable for deterministic tests. */
+export function relativePingTime(ts: string, now: number = Date.now()): string | null {
+  const then = Date.parse(ts);
+  if (!Number.isFinite(then)) return null;
+  const secs = Math.max(0, Math.round((now - then) / 1000));
+  if (secs < 60) return "now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return null;
+}
+
 /** One-line, whitespace-collapsed, ellipsis-truncated preview of a body of
  * text — shared by the Inbox card's reply quote, the Processes "Ask to stop"
  * pre-fill, and the Tray shelf's most-actionable preview. */

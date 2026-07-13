@@ -84,6 +84,41 @@ describe("PingsView: the open bucket is always labelled when another section sho
   });
 });
 
+describe("PingsView: Done is dense history with an honest truncation note", () => {
+  it("renders Done items as dense rows (not full cards) and caps at 20 with a note", async () => {
+    const store = await import("../../store/store");
+    const { PingsView } = await import("./PingsView");
+    const { container, getAllByLabelText, getByRole } = render(() => <PingsView />);
+
+    // 21 resolved Pings — one past the DONE_LIMIT cap of 20.
+    for (let i = 1; i <= 21; i++) {
+      upsert(store, ping({ id: 100 + i, name: `done-${i}`, description: `Done ${i}`, status: "done", read: true }));
+    }
+
+    // Expand the demoted Done accordion.
+    fireEvent.click(getByRole("button", { name: /Done \(21\)/ }));
+
+    // Dense rows expose a per-row "Open Ping <name>" button; a full expanded
+    // card does not. Exactly the capped 20 show, and the cap is surfaced, not
+    // silent (spec item 4).
+    expect(getAllByLabelText(/^Open Ping done-/)).toHaveLength(20);
+    expect(container.textContent).toContain("Showing latest 20");
+  });
+
+  it("shows no truncation note when Done is at or under the cap", async () => {
+    const store = await import("../../store/store");
+    const { PingsView } = await import("./PingsView");
+    const { container, getByRole } = render(() => <PingsView />);
+
+    for (let i = 1; i <= 20; i++) {
+      upsert(store, ping({ id: 200 + i, name: `d-${i}`, description: `D ${i}`, status: "done", read: true }));
+    }
+    fireEvent.click(getByRole("button", { name: /Done \(20\)/ }));
+
+    expect(container.textContent).not.toContain("Showing latest");
+  });
+});
+
 describe("QuickReplyButtons: capped with a keyboard-reachable overflow", () => {
   function replies(n: number): QuickReply[] {
     return Array.from({ length: n }, (_, i) => ({ value: `v${i}`, label: `Reply ${i}` }));

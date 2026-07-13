@@ -271,6 +271,10 @@ impl ToolSuite {
         } else {
             EventKind::Info
         };
+        if matches!(kind, EventKind::Judgment) {
+            validate_judgment_context(&description, &content)?;
+            validate_judgment_option_count(quick_replies.len())?;
+        }
         let ui = if matches!(kind, EventKind::Judgment) {
             blessed_judgment_ui(&description, &content, &quick_replies, view, unblocks)
         } else {
@@ -320,6 +324,9 @@ impl ToolSuite {
         let name = name.into();
         let description = description.into();
         let content = content_md.into();
+        if requires_response {
+            validate_judgment_context(&description, &content)?;
+        }
         let kind = if requires_response {
             EventKind::Judgment
         } else {
@@ -749,9 +756,11 @@ fn blessed_judgment_ui_from_options(
             "boundary": true
         }),
         serde_json::json!({ "type": "heading", "text": heading }),
-        serde_json::json!({ "type": "text", "text": context }),
-        serde_json::json!({ "type": "optionList", "options": options }),
     ];
+    if !context.trim().is_empty() {
+        children.push(serde_json::json!({ "type": "text", "text": context }));
+    }
+    children.push(serde_json::json!({ "type": "optionList", "options": options }));
     if let Some(view) = view {
         children.push(serde_json::json!({ "type": "viewSlot", "view": view }));
     }
@@ -766,9 +775,7 @@ fn blessed_judgment_ui_from_options(
 }
 
 fn validate_judgment_options(options: &[JudgmentOption]) -> anyhow::Result<()> {
-    if !(2..=3).contains(&options.len()) {
-        anyhow::bail!("judgment events require two or three options");
-    }
+    validate_judgment_option_count(options.len())?;
     let mut keys = HashSet::new();
     for option in options {
         if option.key.len() != 1 || !option.key.as_bytes()[0].is_ascii_uppercase() {
@@ -785,6 +792,40 @@ fn validate_judgment_options(options: &[JudgmentOption]) -> anyhow::Result<()> {
         anyhow::bail!("judgment events require exactly one recommended option");
     }
     Ok(())
+}
+
+fn validate_judgment_option_count(count: usize) -> anyhow::Result<()> {
+    if !(2..=4).contains(&count) {
+        anyhow::bail!("judgment events require 2–4 options");
+    }
+    Ok(())
+}
+
+fn validate_judgment_context(heading: &str, context: &str) -> anyhow::Result<()> {
+    let heading = normalize_judgment_text(heading);
+    let context = normalize_judgment_text(context);
+    if !context.is_empty()
+        && (heading == context || heading.starts_with(&context) || context.starts_with(&heading))
+    {
+        anyhow::bail!(
+            "judgment context must add information beyond the question — state the stakes or constraint, or omit it"
+        );
+    }
+    Ok(())
+}
+
+fn normalize_judgment_text(text: &str) -> String {
+    text.trim()
+        .to_lowercase()
+        .trim_end_matches(|character: char| {
+            character.is_whitespace()
+                || character.is_ascii_punctuation()
+                || matches!(
+                    character,
+                    '…' | '—' | '–' | '。' | '！' | '？' | '；' | '：'
+                )
+        })
+        .to_string()
 }
 
 fn info_ui(text: &str) -> serde_json::Value {
@@ -847,6 +888,98 @@ fn truncate_output(output: impl AsRef<str>) -> String {
 mod tests {
     use super::*;
     use crate::processes::ProcessStatus;
+
+    fn judgment_options(count: usize) -> Vec<JudgmentOption> {
+        (0..count)
+            .map(|index| JudgmentOption {
+                key: option_key(index),
+                label: format!("Option {}", index + 1),
+                detail: format!("Choose option {}", index + 1),
+                recommended: index == 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn judgment_context_rejects_exact_and_prefix_echoes() {
+        let error = validate_judgment_context(
+            "Which release channel should we use?",
+            "  WHICH RELEASE CHANNEL SHOULD WE USE. ",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "judgment context must add information beyond the question — state the stakes or constraint, or omit it"
+        );
+
+        for (heading, context) in [
+            (
+                "Which release channel should we use?",
+                "Which release channel",
+            ),
+            (
+                "Choose stable",
+                "Choose stable because it has the smaller blast radius.",
+            ),
+        ] {
+            assert_eq!(
+                validate_judgment_context(heading, context)
+                    .unwrap_err()
+                    .to_string(),
+                "judgment context must add information beyond the question — state the stakes or constraint, or omit it"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_judgment_context_is_allowed_and_omitted_from_ui() {
+        validate_judgment_context("Which release channel?", "  ").unwrap();
+
+        let ui = blessed_judgment_ui_from_options(
+            "Which release channel?",
+            "  ",
+            &judgment_options(2),
+            None,
+            Some(3),
+        );
+        assert_eq!(ui["children"].as_array().unwrap().len(), 4);
+        assert_eq!(ui["children"][0]["type"], "eyebrow");
+        assert_eq!(ui["children"][1]["type"], "heading");
+        assert_eq!(ui["children"][2]["type"], "optionList");
+        assert_eq!(ui["children"][3]["text"], "unblocks: 3 agent(s)");
+    }
+
+    #[test]
+    fn judgment_options_require_two_to_four_choices() {
+        for count in [1, 5] {
+            assert_eq!(
+                validate_judgment_options(&judgment_options(count))
+                    .unwrap_err()
+                    .to_string(),
+                "judgment events require 2–4 options"
+            );
+        }
+        validate_judgment_options(&judgment_options(2)).unwrap();
+        validate_judgment_options(&judgment_options(4)).unwrap();
+    }
+
+    #[test]
+    fn populated_judgment_keeps_the_blessed_layout_and_optional_unblocks() {
+        let ui = blessed_judgment_ui_from_options(
+            "Which release channel?",
+            "Stable reduces rollout risk; edge gets feedback sooner.",
+            &judgment_options(2),
+            Some(serde_json::json!({ "type": "text", "text": "release diff" })),
+            Some(2),
+        );
+        let children = ui["children"].as_array().unwrap();
+        assert_eq!(children[0]["type"], "eyebrow");
+        assert_eq!(children[1]["type"], "heading");
+        assert_eq!(children[2]["type"], "text");
+        assert_eq!(children[3]["type"], "optionList");
+        assert_eq!(children[4]["type"], "viewSlot");
+        assert_eq!(children[5]["text"], "unblocks: 2 agent(s)");
+    }
 
     #[tokio::test]
     async fn terminal_events_are_retained_for_late_subscribers() {
@@ -913,7 +1046,16 @@ mod tests {
                 "Stable or beta?",
                 anchor.id,
                 true,
-                Vec::new(),
+                vec![
+                    QuickReply {
+                        value: "stable".to_string(),
+                        label: "Stable".to_string(),
+                    },
+                    QuickReply {
+                        value: "beta".to_string(),
+                        label: "Beta".to_string(),
+                    },
+                ],
             )
             .await
             .unwrap();
@@ -949,7 +1091,16 @@ mod tests {
                 "A or B?",
                 anchor.id,
                 true,
-                Vec::new(),
+                vec![
+                    QuickReply {
+                        value: "a".to_string(),
+                        label: "A".to_string(),
+                    },
+                    QuickReply {
+                        value: "b".to_string(),
+                        label: "B".to_string(),
+                    },
+                ],
             )
             .await
             .unwrap();

@@ -145,11 +145,20 @@ pub struct Ping {
 
 impl From<core::Ping> for Ping {
     fn from(value: core::Ping) -> Self {
+        let content = value
+            .ui
+            .get("children")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|node| node.get("text").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Self {
             id: value.id,
             name: value.name,
             description: value.description,
-            content: value.content,
+            content,
             anchor: value.anchor,
             requires_response: value.requires_response,
             quick_replies: value.quick_replies.into_iter().map(Into::into).collect(),

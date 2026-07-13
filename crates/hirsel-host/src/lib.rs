@@ -53,6 +53,7 @@ pub struct AppState {
     pub agent: AgentRuntime,
     pub side_chats: Arc<side_chat::SideChatManager>,
     pub processes: ProcessStore,
+    pub tools: ToolSuite,
     pub pushes: push::PushGateway,
     pub views: templates::ViewManager,
     pub subagent_models: subagent_models::SubagentModelState,
@@ -213,8 +214,8 @@ impl AppState {
                 sc: None,
             });
             if let Some(anchor) = message.r#ref {
-                for ping in self.storage.resolve_open_pings_for_anchor(anchor).await? {
-                    self.broadcast(HostToClient::PingUpsert { ping });
+                for event in self.storage.resolve_open_pings_for_anchor(anchor).await? {
+                    self.broadcast(HostToClient::EventUpsert { event });
                 }
             }
         }
@@ -339,6 +340,65 @@ impl AppState {
             process: monitor_process_info(record),
         });
     }
+
+    pub async fn handle_event_action(
+        &self,
+        event_id: u64,
+        action: String,
+        data: serde_json::Value,
+    ) -> anyhow::Result<hirsel_proto::Event> {
+        let current = self
+            .storage
+            .ping(event_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
+        let event = match action.as_str() {
+            "choose" => {
+                if !matches!(current.kind, hirsel_proto::EventKind::Judgment) {
+                    anyhow::bail!("choose is only valid for judgment events");
+                }
+                let choice = data
+                    .get("choice")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("event choose requires data.choice"))?;
+                if !event_has_choice(&current.ui, choice) {
+                    anyhow::bail!("unknown event choice: {choice}");
+                }
+                if let Some(rule) = data.get("record_rule") {
+                    let rule = rule
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("event record_rule must be a string"))?;
+                    self.storage
+                        .record_taste_rule(event_id, Some(choice), rule)
+                        .await?;
+                }
+                self.storage.resolve_ping(event_id).await?
+            }
+            "submit" | "dismiss" => self.storage.resolve_ping(event_id).await?,
+            "snooze" => self.storage.reopen_ping(event_id).await?,
+            other => anyhow::bail!("unsupported event action: {other}"),
+        }
+        .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
+        self.broadcast(HostToClient::EventUpsert {
+            event: event.clone(),
+        });
+        Ok(event)
+    }
+}
+
+fn event_has_choice(ui: &serde_json::Value, choice: &str) -> bool {
+    ui.get("children")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|node| node.get("type").and_then(serde_json::Value::as_str) == Some("optionList"))
+        .and_then(|node| node.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option.get("key").and_then(serde_json::Value::as_str) == Some(choice))
+        })
 }
 
 async fn view_anchor(view: &ViewInstance, storage: &Storage) -> anyhow::Result<Option<u64>> {
@@ -410,7 +470,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             config_store,
             agent_guidance: lash_runtime::agent_guidance(&config),
         },
-        tools,
+        tools.clone(),
         broadcaster.clone(),
         broadcast_log.clone(),
     )
@@ -431,6 +491,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         agent,
         side_chats,
         processes,
+        tools,
         pushes,
         views,
         subagent_models,
@@ -649,7 +710,7 @@ mod tests {
         );
         assert!(state.broadcast_log.recent().iter().any(|event| matches!(
             event,
-            HostToClient::PingUpsert { ping: update }
+            HostToClient::EventUpsert { event: update }
                 if update.id == ping.id && update.status == PingStatus::Done
         )));
     }
@@ -694,7 +755,7 @@ mod tests {
         );
         assert!(state.broadcast_log.recent().iter().all(|event| !matches!(
             event,
-            HostToClient::PingUpsert { ping: update } if update.id == ping.id
+            HostToClient::EventUpsert { event: update } if update.id == ping.id
         )));
     }
 
@@ -849,8 +910,101 @@ mod tests {
         );
         assert!(state.broadcast_log.recent().iter().any(|event| matches!(
             event,
-            HostToClient::PingUpsert { ping: update }
+            HostToClient::EventUpsert { event: update }
                 if update.id == ping.id && update.status == PingStatus::Done
+        )));
+    }
+
+    #[tokio::test]
+    async fn event_action_choose_resolves_judgment_and_records_taste_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Owner, "Choose the release", None)
+            .await
+            .unwrap();
+        let event = state
+            .tools
+            .pings_send_with_view(
+                "release-channel",
+                "Which release channel should we use?",
+                "Stable is slower; `edge` reaches testers now.",
+                anchor.id,
+                true,
+                vec![
+                    hirsel_proto::QuickReply {
+                        value: "Use stable for lower risk".to_string(),
+                        label: "Stable".to_string(),
+                    },
+                    hirsel_proto::QuickReply {
+                        value: "Use edge for faster feedback".to_string(),
+                        label: "Edge".to_string(),
+                    },
+                ],
+                Some(json!({ "type": "text", "text": "release diff" })),
+                Some(2),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(event.kind, hirsel_proto::EventKind::Judgment);
+        assert_eq!(event.ui["type"], "card");
+        assert_eq!(event.ui["children"][0]["type"], "eyebrow");
+        assert_eq!(event.ui["children"][3]["type"], "optionList");
+        assert_eq!(event.ui["children"][3]["options"][0]["key"], "A");
+        assert_eq!(event.ui["children"][4]["type"], "viewSlot");
+        let serialized_ui = event.ui.to_string();
+        assert!(!serialized_ui.contains("wait"));
+        assert!(!serialized_ui.contains("cost"));
+        assert!(!serialized_ui.contains("turns"));
+
+        let resolved = state
+            .handle_event_action(
+                event.id,
+                "choose".to_string(),
+                json!({
+                    "choice": "A",
+                    "record_rule": "Default releases to stable unless feedback speed is critical"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.status, PingStatus::Done);
+        let taste = state.storage.taste_decisions().await.unwrap();
+        assert_eq!(taste.len(), 1);
+        assert_eq!(taste[0].event_id, event.id);
+        assert_eq!(taste[0].choice.as_deref(), Some("A"));
+        assert_eq!(
+            taste[0].rule,
+            "Default releases to stable unless feedback speed is critical"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_digest_emits_summary_event_without_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let event = state
+            .tools
+            .emit_scheduled_digest(
+                "morning-digest",
+                "Overnight work completed cleanly.",
+                "3 repositories checked",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(event.kind, hirsel_proto::EventKind::Summary);
+        assert_eq!(event.source.kind, hirsel_proto::EventSourceKind::Scheduled);
+        assert_eq!(event.source.r#ref.as_deref(), Some("morning-digest"));
+        assert_eq!(event.ui["children"][0]["type"], "text");
+        assert_eq!(event.ui["children"][1]["type"], "status");
+        assert_eq!(event.ui["children"][2]["type"], "keyValue");
+        assert!(state.pushes.recorded_pushes().is_empty());
+        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event: update } if update.id == event.id
         )));
     }
 

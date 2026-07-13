@@ -10,9 +10,10 @@ use hirsel_drivers::{
     SubagentEvent, TerminalOutcome,
 };
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, HostToClient, Ping, ProcessInfo, QuickReply, ToolCallSummary,
+    ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, HostToClient, Ping,
+    ProcessInfo, QuickReply, ToolCallSummary,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, time::Duration};
 
 use crate::storage::{MonitorRecord, MonitorWakeOn, monitor_process_info};
@@ -148,6 +149,15 @@ pub struct ShellRunOutput {
     pub timed_out: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct JudgmentOption {
+    pub key: String,
+    pub label: String,
+    pub detail: String,
+    #[serde(default)]
+    pub recommended: bool,
+}
+
 impl ToolSuite {
     pub fn new(
         config: ToolsConfig,
@@ -228,28 +238,176 @@ impl ToolSuite {
         requires_response: bool,
         quick_replies: Vec<QuickReply>,
     ) -> anyhow::Result<Ping> {
-        let ping = self
+        self.pings_send_with_view(
+            name,
+            description,
+            content_md,
+            anchor,
+            requires_response,
+            quick_replies,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pings_send_with_view(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content_md: impl Into<String>,
+        anchor: u64,
+        requires_response: bool,
+        quick_replies: Vec<QuickReply>,
+        view: Option<serde_json::Value>,
+        unblocks: Option<u64>,
+    ) -> anyhow::Result<Event> {
+        let name = name.into();
+        let description = description.into();
+        let content = content_md.into();
+        let kind = if requires_response {
+            EventKind::Judgment
+        } else {
+            EventKind::Info
+        };
+        let ui = if matches!(kind, EventKind::Judgment) {
+            blessed_judgment_ui(&description, &content, &quick_replies, view, unblocks)
+        } else {
+            info_ui(&content)
+        };
+        let event = self
             .storage
-            .create_ping(
+            .create_event(
+                kind,
+                EventSource {
+                    kind: EventSourceKind::Agent,
+                    r#ref: None,
+                },
                 name,
                 description,
-                content_md,
+                ui,
                 anchor,
                 requires_response,
                 quick_replies,
             )
             .await?;
-        self.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
-        self.pushes.enqueue_ping(&ping).await;
-        Ok(ping)
+        self.broadcast(HostToClient::EventUpsert {
+            event: event.clone(),
+        });
+        self.pushes.enqueue_event(&event).await;
+        Ok(event)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pings_send_with_options(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content_md: impl Into<String>,
+        anchor: u64,
+        requires_response: bool,
+        options: Vec<JudgmentOption>,
+        view: Option<serde_json::Value>,
+        unblocks: Option<u64>,
+    ) -> anyhow::Result<Event> {
+        if !requires_response && !options.is_empty() {
+            anyhow::bail!("info events cannot carry judgment options");
+        }
+        if requires_response {
+            validate_judgment_options(&options)?;
+        }
+        let name = name.into();
+        let description = description.into();
+        let content = content_md.into();
+        let kind = if requires_response {
+            EventKind::Judgment
+        } else {
+            EventKind::Info
+        };
+        let quick_replies = options
+            .iter()
+            .map(|option| QuickReply {
+                value: option.key.clone(),
+                label: option.label.clone(),
+            })
+            .collect::<Vec<_>>();
+        let ui = if matches!(kind, EventKind::Judgment) {
+            blessed_judgment_ui_from_options(&description, &content, &options, view, unblocks)
+        } else {
+            info_ui(&content)
+        };
+        let event = self
+            .storage
+            .create_event(
+                kind,
+                EventSource {
+                    kind: EventSourceKind::Agent,
+                    r#ref: None,
+                },
+                name,
+                description,
+                ui,
+                anchor,
+                requires_response,
+                quick_replies,
+            )
+            .await?;
+        self.broadcast(HostToClient::EventUpsert {
+            event: event.clone(),
+        });
+        self.pushes.enqueue_event(&event).await;
+        Ok(event)
     }
 
     pub async fn pings_resolve(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let ping = self.storage.resolve_ping(ping_id).await?;
         if let Some(ping) = &ping {
-            self.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+            self.broadcast(HostToClient::EventUpsert {
+                event: ping.clone(),
+            });
         }
         Ok(ping)
+    }
+
+    pub async fn emit_scheduled_digest(
+        &self,
+        job_id: impl Into<String>,
+        text: impl Into<String>,
+        status: impl Into<String>,
+    ) -> anyhow::Result<Event> {
+        let job_id = job_id.into();
+        let text = text.into();
+        let status = status.into();
+        let anchor = self
+            .storage
+            .append_chat(
+                ChatAuthor::Agent,
+                format!("Scheduled lash job `{job_id}` emitted a digest."),
+                None,
+            )
+            .await?
+            .id;
+        let event = self
+            .storage
+            .create_event(
+                EventKind::Summary,
+                EventSource {
+                    kind: EventSourceKind::Scheduled,
+                    r#ref: Some(job_id),
+                },
+                "morning-digest",
+                "Scheduled fleet digest",
+                digest_ui(&text, &status),
+                anchor,
+                false,
+                Vec::new(),
+            )
+            .await?;
+        self.broadcast(HostToClient::EventUpsert {
+            event: event.clone(),
+        });
+        Ok(event)
     }
 
     pub async fn views_show(
@@ -546,6 +704,120 @@ impl ToolSuite {
     }
 }
 
+pub(crate) fn blessed_judgment_ui(
+    heading: &str,
+    context: &str,
+    replies: &[QuickReply],
+    view: Option<serde_json::Value>,
+    unblocks: Option<u64>,
+) -> serde_json::Value {
+    let options = replies
+        .iter()
+        .enumerate()
+        .map(|(index, reply)| JudgmentOption {
+            key: option_key(index),
+            label: reply.label.clone(),
+            detail: reply.value.clone(),
+            recommended: index == 0,
+        })
+        .collect::<Vec<_>>();
+    blessed_judgment_ui_from_options(heading, context, &options, view, unblocks)
+}
+
+fn blessed_judgment_ui_from_options(
+    heading: &str,
+    context: &str,
+    options: &[JudgmentOption],
+    view: Option<serde_json::Value>,
+    unblocks: Option<u64>,
+) -> serde_json::Value {
+    let options = options
+        .iter()
+        .map(|option| {
+            serde_json::json!({
+                "key": option.key,
+                "label": option.label,
+                "detail": option.detail,
+                "recommended": option.recommended,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut children = vec![
+        serde_json::json!({
+            "type": "eyebrow",
+            "text": "Taste boundary — fleet stopped",
+            "boundary": true
+        }),
+        serde_json::json!({ "type": "heading", "text": heading }),
+        serde_json::json!({ "type": "text", "text": context }),
+        serde_json::json!({ "type": "optionList", "options": options }),
+    ];
+    if let Some(view) = view {
+        children.push(serde_json::json!({ "type": "viewSlot", "view": view }));
+    }
+    if let Some(unblocks) = unblocks {
+        children.push(serde_json::json!({
+            "type": "text",
+            "tone": "muted",
+            "text": format!("unblocks: {unblocks} agent(s)")
+        }));
+    }
+    serde_json::json!({ "type": "card", "children": children })
+}
+
+fn validate_judgment_options(options: &[JudgmentOption]) -> anyhow::Result<()> {
+    if !(2..=3).contains(&options.len()) {
+        anyhow::bail!("judgment events require two or three options");
+    }
+    let mut keys = HashSet::new();
+    for option in options {
+        if option.key.len() != 1 || !option.key.as_bytes()[0].is_ascii_uppercase() {
+            anyhow::bail!("judgment option keys must be one uppercase ASCII letter");
+        }
+        if !keys.insert(option.key.as_str()) {
+            anyhow::bail!("judgment option keys must be unique");
+        }
+        if option.label.trim().is_empty() || option.detail.trim().is_empty() {
+            anyhow::bail!("judgment option labels and details must not be empty");
+        }
+    }
+    if options.iter().filter(|option| option.recommended).count() != 1 {
+        anyhow::bail!("judgment events require exactly one recommended option");
+    }
+    Ok(())
+}
+
+fn info_ui(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "card",
+        "children": [{ "type": "text", "text": text }]
+    })
+}
+
+fn digest_ui(text: &str, status: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "card",
+        "children": [
+            { "type": "text", "text": text },
+            { "type": "status", "state": "success", "label": status },
+            {
+                "type": "keyValue",
+                "items": [{ "label": "producer", "value": "scheduled lash job" }]
+            }
+        ]
+    })
+}
+
+fn option_key(index: usize) -> String {
+    u8::try_from(index)
+        .ok()
+        .and_then(|index| b'A'.checked_add(index))
+        .filter(u8::is_ascii_uppercase)
+        .map(char::from)
+        .map(String::from)
+        .unwrap_or_else(|| (index + 1).to_string())
+}
+
 fn publish_process_upsert(
     broadcast_log: &BroadcastLog,
     broadcaster: &broadcast::Sender<HostToClient>,
@@ -651,7 +923,7 @@ mod tests {
         assert_eq!(recorded[0].tokens, vec!["token-1"]);
         assert_eq!(recorded[0].payload.title, "Hirsel");
         assert_eq!(recorded[0].payload.body, "Choose the release channel");
-        assert_eq!(recorded[0].payload.data.ping_id, requiring_response.id);
+        assert_eq!(recorded[0].payload.data.event_id, requiring_response.id);
         assert_eq!(recorded[0].payload.data.name, "release-choice");
 
         tools.pushes.enqueue_ping(&requiring_response).await;

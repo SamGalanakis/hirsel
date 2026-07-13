@@ -294,12 +294,12 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
             HostToClient::HelloOk {
                 latest_msg_id,
                 messages,
-                pings,
+                events,
                 processes,
                 host_version,
                 ..
             } => {
-                store.apply_hello_ok(latest_msg_id, messages, pings, processes, host_version);
+                store.apply_hello_ok(latest_msg_id, messages, events, processes, host_version);
                 true
             }
             HostToClient::Msg { message, sc: None } => {
@@ -315,8 +315,8 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 store.agent_activity.text = text;
                 true
             }
-            HostToClient::PingUpsert { ping } => {
-                store.upsert_ping(ping);
+            HostToClient::EventUpsert { event } => {
+                store.upsert_ping(event);
                 true
             }
             HostToClient::ProcessUpsert { process } => {

@@ -2,6 +2,7 @@ import { ArrowUp } from "lucide-solid";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { useTextInput } from "../chat/useTextInput";
+import { handleSubmitKeys } from "../../lib/submitKeymap";
 
 const MAX_HEIGHT_PX = 96;
 
@@ -31,17 +32,10 @@ export function ReplyInput(props: Props) {
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    // Cmd/Ctrl+Enter always sends, on every device.
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      submit();
-      return;
-    }
-    if (input.coarse()) return; // touch: Enter is a newline; the button sends.
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      submit();
-    }
+    // Cmd/Ctrl+Enter always sends; on fine pointers Enter sends and Shift+Enter
+    // is a newline; touch keeps Enter as a newline and submits via the button.
+    // (No ArrowUp recall here — an Inbox reply has no history to walk.)
+    handleSubmitKeys(e, { value: input.value, coarse: input.coarse, onSend: submit });
   }
 
   const canSend = () => input.value().trim().length > 0;

@@ -200,6 +200,9 @@ describe("Headless scenario: email-like read → reply → resolve lifecycle", (
       closeClient = () => getClient()?.close();
 
       const screen = render(() => <App />);
+      // Cutover (ADR-0012): the home is the event scroller; the Pings inbox is a
+      // chat-shell drill-in. This scenario exercises the inbox, so drill in.
+      store.goToChatDrillIn();
 
       await waitFor(() => expect(store.state.pings).toHaveLength(1), { timeout: 10000 });
       // Tap the Tray shelf open (no more Inbox tab) — never auto-expanded.

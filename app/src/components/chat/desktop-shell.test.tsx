@@ -128,9 +128,13 @@ describe("Desktop shell: the standing Pings rail", () => {
 
 describe("Desktop shell: right-region precedence", () => {
   it("yields the rail to an open side chat and restores it from the NavRail Pings item", async () => {
-    const { screen } = await setupApp();
-    // Default: rail present, no side chat surface.
-    expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy();
+    const { screen, store } = await setupApp();
+    // Cutover (ADR-0012): the home is the event scroller; the chat shell (with
+    // the standing Pings rail) is the drill-in. Enter it to exercise right-region
+    // precedence.
+    store.goToChatDrillIn();
+    // In the shell: rail present, no side chat surface.
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Pings" })).toBeTruthy());
     expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeNull();
 
     // Open a side chat from the rail: it takes the right region; the rail
@@ -216,24 +220,33 @@ describe("Desktop shell: the nav rail", () => {
   it("marks exactly the nav item that owns rightRegion as aria-current", async () => {
     const { screen, store } = await setupApp();
     const nav = screen.getByRole("navigation", { name: "Primary" });
+    const queue = within(nav).getByLabelText("Queue");
     const pings = within(nav).getByLabelText("Pings");
     const processes = within(nav).getByRole("button", { name: /Processes/ });
     const settings = within(nav).getByLabelText("Settings");
 
-    // Default resting state: Pings owns the region (no more "Chat active =
-    // !processesOpen && !settingsOpen" fiction).
-    expect(pings.getAttribute("aria-current")).toBe("page");
+    // Default resting state (ADR-0012 cutover): the Queue home is current; no
+    // shell pane owns the region yet.
+    expect(queue.getAttribute("aria-current")).toBe("page");
+    expect(pings.getAttribute("aria-current")).toBeNull();
     expect(processes.getAttribute("aria-current")).toBeNull();
     expect(settings.getAttribute("aria-current")).toBeNull();
 
+    // Opening a shell pane drills in and takes the region: exactly that item is
+    // current, and the Queue home no longer is.
     store.openProcesses();
     await waitFor(() => expect(processes.getAttribute("aria-current")).toBe("page"));
+    expect(queue.getAttribute("aria-current")).toBeNull();
     expect(pings.getAttribute("aria-current")).toBeNull();
     expect(settings.getAttribute("aria-current")).toBeNull();
   });
 
   it("hides the redundant nav Pings badge at rest, showing it (muted) only when Pings isn't the shown pane", async () => {
     const { store } = await setupApp();
+    // Cutover (ADR-0012): the standing Pings rail is a chat-shell surface; drill
+    // in so "at rest" means the shell's resting Pings region.
+    store.openPings();
+    await waitFor(() => expect(document.querySelector('[data-slot="pings-rail-badge"]')).toBeTruthy());
     // At rest (rightRegion === "pings") the standing rail header already carries
     // the count, so the nav badge would just duplicate it — hidden (spec item
     // 4). The rail header / phone shelf still carry the count + the single red.

@@ -132,6 +132,9 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       closeClient = () => getClient()?.close();
 
       const screen = render(() => <App />);
+      // Cutover (ADR-0012): Chat is the drill-in shell off the scroller home;
+      // this scenario drives the chat transcript, so drill in.
+      store.goToChatDrillIn();
       await screen.findByText("Ready.");
 
       // Send the trigger word.

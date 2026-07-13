@@ -1,5 +1,6 @@
-import { Activity, Inbox as InboxIcon, MessagesSquare, Settings } from "lucide-solid";
+import { Activity, Command, Inbox as InboxIcon, MessagesSquare, Settings } from "lucide-solid";
 import { type JSX, Show } from "solid-js";
+import { setCommandPaletteOpen } from "../lib/keymap";
 import {
   hasOpenRequiresResponse,
   openUnreadCount,
@@ -157,6 +158,23 @@ export function NavRail() {
           }}
         />
       </nav>
+
+      {/* Command palette affordance — summons the ⌘K surface (also bound
+          globally in the keymap). Kept quiet: a ghost row with a mono keyhint,
+          not standing chrome. The keyhint is the only mono in the rail. */}
+      <div class="mt-1 px-2">
+        <NavItem
+          icon={<Command class="size-4 shrink-0" aria-hidden="true" />}
+          label="Commands"
+          ariaLabel="Open command palette"
+          onClick={() => setCommandPaletteOpen(true)}
+          badge={
+            <kbd class="ml-auto grid h-5 shrink-0 place-items-center rounded-sm border border-border bg-muted px-1.5 font-mono text-[0.68rem] text-muted-foreground">
+              ⌘K
+            </kbd>
+          }
+        />
+      </div>
 
       {/* Footer — the connection pill pinned to the foot, left-aligned and calm.
           (It also still renders in the phone header below the rail breakpoint.) */}

@@ -36,6 +36,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/side-chats", get(side_chats))
         .route("/debug/read-ping", post(read_ping))
         .route("/debug/resolve-ping", post(resolve_ping))
+        .route("/debug/reopen-ping", post(reopen_ping))
         .route("/debug/register-push-token", post(register_push_token))
         .route("/debug/unregister-push-token", post(unregister_push_token))
         .route("/debug/pushes", get(recorded_pushes))
@@ -486,6 +487,19 @@ async fn resolve_ping(
     let ping = state
         .storage
         .resolve_ping(request.ping_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
+    state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });
+    Ok(Json(ping))
+}
+
+async fn reopen_ping(
+    State(state): State<AppState>,
+    Json(request): Json<PingRequest>,
+) -> Result<Json<Ping>, DebugError> {
+    let ping = state
+        .storage
+        .reopen_ping(request.ping_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
     state.broadcast(HostToClient::PingUpsert { ping: ping.clone() });

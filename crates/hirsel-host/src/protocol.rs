@@ -425,6 +425,11 @@ where
                 state.broadcast(HostToClient::PingUpsert { ping });
             }
         }
+        ClientToHost::ReopenPing { ping_id } => {
+            if let Some(ping) = state.storage.reopen_ping(ping_id).await? {
+                state.broadcast(HostToClient::PingUpsert { ping });
+            }
+        }
         ClientToHost::ReadPing { ping_id } => {
             let ping = state
                 .storage

@@ -264,6 +264,9 @@ pub enum ClientToHost {
     ResolvePing {
         ping_id: u64,
     },
+    ReopenPing {
+        ping_id: u64,
+    },
     ReadPing {
         ping_id: u64,
     },
@@ -676,6 +679,18 @@ mod tests {
 
         let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(parsed, ClientToHost::ReadPing { ping_id: 9 });
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn reopen_ping_round_trips() {
+        let value = json!({
+            "type": "reopen_ping",
+            "ping_id": 1
+        });
+
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed, ClientToHost::ReopenPing { ping_id: 1 });
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
     }
 

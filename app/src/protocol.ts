@@ -199,6 +199,15 @@ export interface ResolvePingMsg {
   ping_id: number;
 }
 
+/** v2.2: reopen a resolved Ping (⋯ "Reopen", or the "Marked done" toast's
+ * Undo). Idempotent; on success the host sets status=open and broadcasts the
+ * same `ping_upsert` a resolve does — there is no bespoke inbound reply. The
+ * recovery peer of `resolve_ping`, so a mis-tapped Done is never terminal. */
+export interface ReopenPingMsg {
+  type: "reopen_ping";
+  ping_id: number;
+}
+
 /** v1.3: mark a Ping read (email-like "seen"). Idempotent; the host sets
  * read=true and broadcasts a ping_upsert. There is no "unread" op — that is a
  * client-only override (see store). (Was `read_item`.) */
@@ -306,6 +315,7 @@ export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
   | ResolvePingMsg
+  | ReopenPingMsg
   | ReadPingMsg
   | UploadBlobMsg
   | GetBlobUrlMsg

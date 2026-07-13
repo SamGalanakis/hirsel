@@ -804,8 +804,16 @@ fn validate_judgment_option_count(count: usize) -> anyhow::Result<()> {
 fn validate_judgment_context(heading: &str, context: &str) -> anyhow::Result<()> {
     let heading = normalize_judgment_text(heading);
     let context = normalize_judgment_text(context);
+    let heading_tokens = heading.split_whitespace().collect::<HashSet<_>>();
+    let context_tokens = context.split_whitespace().collect::<HashSet<_>>();
+    let shared_tokens = context_tokens.intersection(&heading_tokens).count();
+    let context_is_heading_paraphrase =
+        !context_tokens.is_empty() && shared_tokens * 5 >= context_tokens.len() * 4;
     if !context.is_empty()
-        && (heading == context || heading.starts_with(&context) || context.starts_with(&heading))
+        && (heading == context
+            || heading.starts_with(&context)
+            || context.starts_with(&heading)
+            || context_is_heading_paraphrase)
     {
         anyhow::bail!(
             "judgment context must add information beyond the question — state the stakes or constraint, or omit it"
@@ -815,17 +823,19 @@ fn validate_judgment_context(heading: &str, context: &str) -> anyhow::Result<()>
 }
 
 fn normalize_judgment_text(text: &str) -> String {
-    text.trim()
-        .to_lowercase()
-        .trim_end_matches(|character: char| {
-            character.is_whitespace()
-                || character.is_ascii_punctuation()
-                || matches!(
-                    character,
-                    '…' | '—' | '–' | '。' | '！' | '？' | '；' | '：'
-                )
+    text.to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character.is_whitespace() {
+                character
+            } else {
+                ' '
+            }
         })
-        .to_string()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn info_ui(text: &str) -> serde_json::Value {
@@ -929,6 +939,25 @@ mod tests {
                 "judgment context must add information beyond the question — state the stakes or constraint, or omit it"
             );
         }
+    }
+
+    #[test]
+    fn judgment_context_rejects_paraphrases_but_allows_additive_context() {
+        assert_eq!(
+            validate_judgment_context(
+                "Where should canvas view state persist?",
+                "Choose where canvas view state should persist.",
+            )
+            .unwrap_err()
+            .to_string(),
+            "judgment context must add information beyond the question — state the stakes or constraint, or omit it"
+        );
+
+        validate_judgment_context(
+            "Where should canvas view state persist?",
+            "resolve_ping is terminal on the wire; the reopen affordance needs a real op",
+        )
+        .unwrap();
     }
 
     #[test]

@@ -242,8 +242,9 @@ function FieldNode(node: Node): JSX.Element {
   const emit = useEventEmit();
   const name = str(node.name, "value");
   const label = str(node.label);
+  const placeholder = str(node.placeholder);
   return (
-    <label class="flex flex-col gap-1">
+    <div class="flex flex-col gap-1">
       <Show when={label}>
         <span class="text-[0.62rem] font-semibold uppercase tracking-[0.04em] text-muted-foreground">
           {label}
@@ -252,12 +253,13 @@ function FieldNode(node: Node): JSX.Element {
       <input
         type="text"
         class="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
-        placeholder={str(node.placeholder)}
+        placeholder={placeholder}
+        aria-label={label || placeholder || name}
         disabled={emit.disabled}
         value={str(emit.fields()[name])}
         onInput={(e) => emit.setField(name, e.currentTarget.value)}
       />
-    </label>
+    </div>
   );
 }
 

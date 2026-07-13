@@ -13,7 +13,7 @@
 // or the NavRail; nothing here can recolor a card — it only pages, decides, and
 // advances.
 import { ArrowRight, Check, ChevronDown, CircleCheck, List, MessageSquare } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
 import { decideEventWithUndo, undoDecide } from "../../lib/event-decide";
@@ -61,6 +61,9 @@ function recommendedChoice(ev: EventItem): { action: string; choice: string; lab
 
 export function EventScroller() {
   let scrollerRef: HTMLDivElement | undefined;
+  const setScrollerRef = (el: HTMLDivElement) => (scrollerRef = el);
+  let rootRef: HTMLDivElement | undefined;
+  const setRootRef = (el: HTMLDivElement) => (rootRef = el);
   const [current, setCurrent] = createSignal(0);
   const [peekOpen, setPeekOpen] = createSignal(false);
   const [snoozed, setSnoozed] = createSignal<Set<number>>(new Set());
@@ -69,6 +72,11 @@ export function EventScroller() {
   // host cutover. Prod stays empty until the host sends events (inbox-zero).
   onMount(() => {
     if (import.meta.env.DEV && state.events.length === 0) seedMockEvents();
+    // The keyboard mirror is attached imperatively (not as a JSX handler) so the
+    // scroll region stays a plain container for a11y — the keys are an
+    // accelerator over the on-card buttons, which remain the primary controls.
+    rootRef?.addEventListener("keydown", onKeyDown);
+    onCleanup(() => rootRef?.removeEventListener("keydown", onKeyDown));
   });
 
   const ordered = createMemo(() =>
@@ -201,9 +209,10 @@ export function EventScroller() {
 
   return (
     <div
+      ref={setRootRef}
       class="relative flex min-h-0 flex-1 flex-col outline-none"
       tabindex="-1"
-      onKeyDown={onKeyDown}
+      aria-label="Event queue"
       data-slot="event-scroller"
     >
       {/* Slim top pager — always over the current card. Tap to peek the whole
@@ -245,7 +254,7 @@ export function EventScroller() {
 
       {/* The scroll-snap pager. */}
       <div
-        ref={scrollerRef}
+        ref={setScrollerRef}
         class="absolute inset-0 snap-y snap-mandatory overflow-y-auto overflow-x-hidden scroll-smooth [scrollbar-width:none] motion-reduce:scroll-auto"
         onScroll={onScroll}
       >
@@ -293,7 +302,7 @@ function EventPage(props: {
   onAdvance: () => void;
 }) {
   let cardRef: HTMLDivElement | undefined;
-  let wrapRef: HTMLDivElement | undefined;
+  const setCardRef = (el: HTMLDivElement) => (cardRef = el);
   const [dragging, setDragging] = createSignal(false);
   const [acceptHint, setAcceptHint] = createSignal(0);
   const [snoozeHint, setSnoozeHint] = createSignal(0);
@@ -346,7 +355,6 @@ function EventPage(props: {
     <div class="relative h-full snap-start snap-always">
       <div class="flex h-full flex-col justify-center overflow-y-auto px-3.5 pb-11 pt-14 [scrollbar-width:none]">
         <div
-          ref={wrapRef}
           class="relative mx-auto w-full max-w-[460px] touch-pan-y"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -372,16 +380,20 @@ function EventPage(props: {
           </div>
 
           <div
-            ref={cardRef}
+            ref={setCardRef}
             class={cn(
-              "relative z-[1] overflow-hidden rounded-xl border border-l-2 border-border bg-card shadow-sm",
-              isJudgment() && !decided() ? "border-l-primary" : "border-l-transparent",
+              "relative z-[1] overflow-hidden rounded-xl border border-border bg-card shadow-sm",
               props.ev.kind !== "judgment" ? "bg-muted/30 shadow-none" : "",
               decided() ? "opacity-80" : "",
               props.ev.read && props.ev.kind !== "judgment" ? "opacity-60" : "",
               dragging() ? "shadow-lg" : "transition-transform duration-300 motion-reduce:transition-none",
             )}
           >
+            {/* The needs-you accent: a hairline-thin indigo edge (the one accent),
+                as a strip rather than a heavy left border. */}
+            <Show when={isJudgment() && !decided()}>
+              <span class="absolute inset-y-0 left-0 w-0.5 bg-primary" aria-hidden="true" />
+            </Show>
             {/* Header — minimal chrome: handle · source · kind. No wait/cost/turns. */}
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-3.5 pt-3">
               <span class="font-mono text-xs font-medium text-primary">{props.ev.name}</span>
@@ -437,7 +449,7 @@ function EventPage(props: {
       {/* Down-chevron advance affordance. */}
       <button
         type="button"
-        class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full border border-border bg-card/80 text-muted-foreground backdrop-blur-sm transition-colors hover:text-foreground motion-safe:animate-bounce"
+        class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full border border-border bg-card/80 text-muted-foreground backdrop-blur-sm transition-colors hover:text-foreground"
         aria-label="Next event"
         onClick={props.onAdvance}
       >
@@ -549,6 +561,7 @@ function PeekOverview(props: {
               return (
                 <button
                   type="button"
+                  aria-label={`Jump to ${ev.name}: ${eventTitle(ev)}`}
                   class={cn(
                     "grid w-full grid-cols-[1fr_auto] items-center gap-3 rounded-md border border-transparent px-2 py-2 text-left transition-colors hover:bg-muted/60",
                     i() === props.current ? "border-border bg-muted/60" : "",

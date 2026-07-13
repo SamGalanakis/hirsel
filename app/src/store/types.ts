@@ -106,6 +106,12 @@ export interface Upload {
 export interface TimelineEvent {
   seq: number;
   event: TurnEvent;
+  /** Client-side arrival timestamp (`Date.now()` at reduce time), stamped when
+   * the event is first admitted. Lets the timeline show a per-tool duration
+   * (tool_done.at − tool_start.at) and a running-turn elapsed reading without
+   * any wire timing field. Optional so hand-constructed events (tests) and any
+   * pre-existing replayed data render fine with no duration. */
+  at?: number;
 }
 
 export interface AppState {

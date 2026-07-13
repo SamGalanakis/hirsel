@@ -426,6 +426,7 @@ export function reduce(state: AppState, action: Action): AppState {
         turnEvents: upsertTurnEvent(state.turnEvents, {
           seq: action.payload.seq,
           event: action.payload.event,
+          at: Date.now(),
         }),
       };
 
@@ -679,7 +680,11 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         sideChats: setSideChat(state.sideChats, action.sc, {
           ...cloned,
-          turnEvents: upsertTurnEvent(cloned.turnEvents, { seq: action.seq, event: action.event }),
+          turnEvents: upsertTurnEvent(cloned.turnEvents, {
+            seq: action.seq,
+            event: action.event,
+            at: Date.now(),
+          }),
         }),
       };
     }

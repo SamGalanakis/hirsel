@@ -1,17 +1,20 @@
-import { ArrowDown, ChevronUp, MessagesSquare, Upload } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
+import { ArrowDown, ChevronUp, CircleAlert, LoaderCircle, MessagesSquare, Upload, X } from "lucide-solid";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import {
   clearComposerDraft,
   clearComposerPrefill,
   clearLastConclusion,
   clearPendingSideChatOpen,
+  clearProtocolError,
   clearScrollTarget,
   setActiveSideChatSc,
+  setComposerReplyTarget,
   state,
 } from "../../store/store";
 import { sideChatForPing } from "../../store/selectors";
 import { focusMainComposer } from "../../lib/focus";
+import { AgentStatus } from "./AgentStatus";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
 import { PingsRail, TrayOverlay, TrayShelf } from "../inbox/Tray";
@@ -60,9 +63,18 @@ function dayLabel(ts: string): string {
   return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }
 
-type Row =
-  | { kind: "day"; key: string; label: string }
-  | { kind: "msg"; key: string; message: DisplayMessage };
+type MsgRow = {
+  kind: "msg";
+  key: string;
+  message: DisplayMessage;
+  /** This message clusters under a same-author neighbour within CLUSTER_GAP_MS
+   * (tight top gap). */
+  clustered: boolean;
+  /** This message is the last of its cluster, so it carries the shared
+   * timestamp/meta footer. */
+  showMeta: boolean;
+};
+type Row = { kind: "day"; key: string; label: string } | MsgRow;
 
 /** Scroll-to-latest pill with an unseen-below count, rendered inside the
  * scroller so it can read the visibility hook. */
@@ -78,34 +90,17 @@ function JumpToLatest() {
   );
 }
 
-/** The slim desktop-only center-pane header's left datum: a calm agent-status
- * indicator (tint-chip vocabulary — a status dot + label), giving the
- * north-star question "what is my agent doing" a persistent desktop home.
- * Purely presentational; no indigo, 16px-max, quiet when idle. */
-function AgentStatus() {
-  const thinking = () => state.agentActivity.state === "thinking";
-  return (
-    <Show
-      when={thinking()}
-      fallback={
-        <div class="flex min-w-0 items-center gap-2">
-          <span class="size-1.5 shrink-0 rounded-full bg-status-idle" aria-hidden="true" />
-          <span class="truncate text-xs text-muted-foreground">Agent · idle</span>
-        </div>
-      }
-    >
-      <div class="flex min-w-0 items-center gap-2">
-        <span
-          class="size-1.5 shrink-0 rounded-full bg-status-active motion-safe:animate-pulse"
-          aria-hidden="true"
-        />
-        <span class="truncate text-xs text-status-active">
-          {state.agentActivity.text ?? "Thinking…"}
-        </span>
-      </div>
-    </Show>
-  );
+/** Same restraint as the per-tool duration: whole seconds while a turn runs,
+ * rolling to m/s past a minute. Feeds the running-turn elapsed indicator. */
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
 }
+
+/** How close in time two same-author messages must be to cluster (tight gap,
+ * shared footer) rather than stand alone with their own meta. */
+const CLUSTER_GAP_MS = 5 * 60 * 1000;
 
 export function ChatView() {
   const [highlightedId, setHighlightedId] = createSignal<number | null>(null);
@@ -146,18 +141,37 @@ export function ChatView() {
     return map;
   });
 
-  // Interleave day-break markers between messages when the calendar day changes.
-  // Built from the render window, not the full buffer.
+  // Interleave day-break markers between messages when the calendar day changes,
+  // and cluster consecutive same-author messages: a run within CLUSTER_GAP_MS
+  // gets a tight gap and a single timestamp/meta footer at its boundary rather
+  // than one per bubble. Built from the render window, not the full buffer.
   const rows = createMemo<Row[]>(() => {
     const out: Row[] = [];
+    const msgRows: MsgRow[] = [];
     let lastDay: string | null = null;
+    let prev: DisplayMessage | null = null;
     for (const m of windowedMessages()) {
       const key = dayKey(m.ts);
-      if (key !== lastDay) {
+      const dayChanged = key !== lastDay;
+      if (dayChanged) {
         out.push({ kind: "day", key: `day-${key}-${m.id}`, label: dayLabel(m.ts) });
         lastDay = key;
       }
-      out.push({ kind: "msg", key: `msg-${m.id}`, message: m });
+      const clustered =
+        !dayChanged &&
+        prev !== null &&
+        prev.author === m.author &&
+        new Date(m.ts).getTime() - new Date(prev.ts).getTime() < CLUSTER_GAP_MS;
+      const row: MsgRow = { kind: "msg", key: `msg-${m.id}`, message: m, clustered, showMeta: true };
+      out.push(row);
+      msgRows.push(row);
+      prev = m;
+    }
+    // Meta shows only at a cluster boundary: when the next message does not
+    // cluster onto this one (different author, a >gap pause, or a day break).
+    for (let i = 0; i < msgRows.length; i++) {
+      const next = msgRows[i + 1];
+      msgRows[i].showMeta = !next || !next.clustered;
     }
     return out;
   });
@@ -210,6 +224,28 @@ export function ChatView() {
     state.composerDraft ? messagesById().get(state.composerDraft.ref) : null;
 
   const thinking = () => state.agentActivity.state === "thinking";
+
+  // "Reply" from a message's actions menu: quote it into the composer (the same
+  // composerDraft plumbing the Ping "Reply" uses) and hand focus to the input.
+  function handleReply(id: number) {
+    setComposerReplyTarget(id);
+    focusMainComposer();
+  }
+
+  // Running-turn elapsed reading, ticking once a second while the agent is
+  // thinking and reset the moment the turn ends. Self-contained: the effect
+  // re-runs only when thinking() flips, so the interval is armed/cleared cleanly.
+  const [turnElapsed, setTurnElapsed] = createSignal<number | null>(null);
+  createEffect(() => {
+    if (!thinking()) {
+      setTurnElapsed(null);
+      return;
+    }
+    const start = Date.now();
+    setTurnElapsed(0);
+    const iv = setInterval(() => setTurnElapsed(Date.now() - start), 1000);
+    onCleanup(() => clearInterval(iv));
+  });
 
   // Ids of the trailing run of owner messages with no agent reply after them —
   // i.e. still-unanswered sends. A next_turn bubble only shows its cancellable
@@ -334,16 +370,51 @@ export function ChatView() {
         onDragOver={onDragOver}
         onDrop={onDrop}
       >
+        {/* A post-auth protocol error, made visible inline instead of vanishing
+            into the console. Sits above the transcript; dismissed by the Owner. */}
+        <Show when={state.protocolError}>
+          <div class="mx-3 mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[0.8rem] text-destructive">
+            <CircleAlert class="mt-px size-4 shrink-0" aria-hidden="true" />
+            <span class="min-w-0 flex-1 wrap-break-word">{state.protocolError}</span>
+            <button
+              type="button"
+              class="-mr-0.5 shrink-0 rounded p-0.5 transition-colors hover:bg-destructive/20"
+              aria-label="Dismiss error"
+              onClick={clearProtocolError}
+            >
+              <X class="size-3.5" />
+            </button>
+          </div>
+        </Show>
+
+        {/* Empty vs. connecting: the empty state is reserved for a genuinely
+            empty, post-hello thread. Before hello (or while the socket is down)
+            we can't yet know the thread is empty, so we show a quiet restoring
+            marker rather than falsely inviting the Owner to "start". */}
         <Show when={state.messages.length === 0}>
-          <Empty class="flex-1 border-none">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <MessagesSquare />
-              </EmptyMedia>
-              <EmptyTitle>No messages yet</EmptyTitle>
-              <EmptyDescription>Say hello to the Agent to get started.</EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <Show
+            when={state.connection === "connected"}
+            fallback={
+              <div class="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
+                <LoaderCircle class="size-5 animate-spin" aria-hidden="true" />
+                <span class="text-sm">
+                  {state.connection === "reconnecting" ? "Restoring…" : "Connecting…"}
+                </span>
+              </div>
+            }
+          >
+            <Empty class="flex-1 border-none">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <MessagesSquare />
+                </EmptyMedia>
+                <EmptyTitle>Nothing here yet</EmptyTitle>
+                <EmptyDescription>
+                  Messages between you and the agent will appear here.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          </Show>
         </Show>
 
         <Show when={state.messages.length > 0}>
@@ -372,9 +443,13 @@ export function ChatView() {
                       }
                     >
                       {(() => {
-                        const m = (row as { message: DisplayMessage }).message;
+                        const msgRow = row as MsgRow;
+                        const m = msgRow.message;
                         return (
-                          <MessageScrollerItem scrollAnchor={m.author === "owner"}>
+                          <MessageScrollerItem
+                            scrollAnchor={m.author === "owner"}
+                            class={msgRow.clustered ? "-mt-2" : undefined}
+                          >
                             <MessageBubble
                               message={m}
                               refTarget={m.ref !== null ? messagesById().get(m.ref) : undefined}
@@ -382,9 +457,11 @@ export function ChatView() {
                               turnDetails={state.turnDetails[m.id]}
                               isConclusion={state.conclusionChips.includes(m.id)}
                               highlighted={highlightedId() === m.id}
+                              showMeta={msgRow.showMeta}
                               queued={
                                 m.mode === "next_turn" && thinking() && unansweredOwnerIds().has(m.id)
                               }
+                              onReply={handleReply}
                               onTapQuote={scrollToId}
                               onOpenImage={(src, alt) => setLightbox({ src, alt })}
                               onRetry={(cid) => getClient()?.retrySend(cid)}
@@ -403,11 +480,21 @@ export function ChatView() {
                 <Show when={thinking() || state.turnEvents.length > 0}>
                   <MessageScrollerItem class="flex flex-col gap-1.5 px-4 py-1">
                     <Show when={thinking()}>
-                      <Marker>
-                        <MarkerContent class="shimmer text-sm">
-                          {state.agentActivity.text ?? "Thinking…"}
-                        </MarkerContent>
-                      </Marker>
+                      <div class="flex min-w-0 items-center gap-2">
+                        <Marker>
+                          <MarkerContent class="shimmer text-sm">
+                            {state.agentActivity.text ?? "Thinking…"}
+                          </MarkerContent>
+                        </Marker>
+                        <Show when={turnElapsed() !== null}>
+                          <span
+                            class="shrink-0 font-mono text-[0.68rem] tabular-nums text-muted-foreground/60"
+                            aria-label="Elapsed"
+                          >
+                            {formatElapsed(turnElapsed() as number)}
+                          </span>
+                        </Show>
+                      </div>
                     </Show>
                     <Show when={state.turnEvents.length > 0}>
                       <Timeline events={state.turnEvents} />

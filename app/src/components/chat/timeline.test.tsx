@@ -116,4 +116,54 @@ describe("Timeline component", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(getByText("secret chain of thought")).toBeTruthy();
   });
+
+  it("expands a resolved tool row to reveal its full result in a mono well", () => {
+    const { container, queryByText, getByText } = render(() => (
+      <Timeline
+        events={evs(
+          { kind: "tool_start", id: "t1", name: "grep", summary: "TODO" },
+          { kind: "tool_done", id: "t1", name: "grep", ok: true, summary: "line 1\nline 2\nline 3" },
+        )}
+      />
+    ));
+    const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    const toggle = within(row).getByRole("button");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(row.querySelector("pre")).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    // The full untruncated payload is now in a mono <pre> well.
+    const well = row.querySelector("pre") as HTMLElement;
+    expect(well).toBeTruthy();
+    expect(well.textContent).toContain("line 3");
+    expect(getByText("grep")).toBeTruthy();
+    expect(queryByText("secret")).toBeNull();
+  });
+
+  it("shows a per-tool duration from the client arrival timestamps", () => {
+    const withTiming = [
+      { seq: 1, at: 1000, event: { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" } },
+      { seq: 2, at: 3400, event: { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "ok" } },
+    ] as const;
+    const { container } = render(() => <Timeline events={withTiming as never} />);
+    const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    // 2400ms → "2.4s".
+    expect(row.textContent).toContain("2.4s");
+  });
+
+  it("marks a delegation/sub-agent tool row with a distinct glyph", () => {
+    const { container } = render(() => (
+      <Timeline events={evs({ kind: "tool_start", id: "d1", name: "spawn_subagent", summary: "review" })} />
+    ));
+    const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    expect(row.querySelector('[aria-label="delegation"]')).toBeTruthy();
+  });
+
+  it("does not mark a plain read_file as a delegation", () => {
+    const { container } = render(() => (
+      <Timeline events={evs({ kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" })} />
+    ));
+    const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    expect(row.querySelector('[aria-label="delegation"]')).toBeNull();
+  });
 });

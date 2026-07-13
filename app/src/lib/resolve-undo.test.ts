@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Ping } from "../protocol";
 
-// Done is reversible (spec item 2). `resolve_ping` is terminal on the wire —
-// there is no reopen op (protocol.ts) — so Mark done is made recoverable
-// client-side: an optimistic Done flip now, the actual send debounced behind a
-// 5s Undo window, modelled on the read-flip override machinery. Fresh store +
-// module singletons per test (resetModules + dynamic import), like the rest of
-// the suite; fake timers drive the debounce window.
+// Recoverable "Mark done" (spec item 2), now backed by a real `reopen_ping` op.
+// Mark done flips the Ping to Done optimistically AND sends `resolve_ping`
+// immediately (no debounce); the "Undo" toast — and the Done card's ⋯ "Reopen"
+// — recover via `reopen_ping` + an optimistic un-flip. Fresh store + module
+// singletons per test (resetModules + dynamic import), like the rest of the
+// suite.
 beforeEach(() => {
   vi.resetModules();
   vi.useRealTimers();
@@ -27,33 +27,28 @@ function ping(overrides: Partial<Ping> = {}): Ping {
   };
 }
 
-describe("markDoneWithUndo: optimistic flip + debounced resolve_ping", () => {
-  it("flips to Done at once but defers the send, then commits when the window elapses", async () => {
-    vi.useFakeTimers();
+describe("markDoneWithUndo: optimistic flip + immediate resolve_ping", () => {
+  it("flips to Done at once AND sends resolve_ping immediately — no debounce", async () => {
     const resolvePing = vi.fn();
-    vi.doMock("../ws/client", () => ({ getClient: () => ({ resolvePing }) }));
+    const reopenPing = vi.fn();
+    vi.doMock("../ws/client", () => ({ getClient: () => ({ resolvePing, reopenPing }) }));
     const store = await import("../store/store");
     const selectors = await import("../store/selectors");
-    const { markDoneWithUndo, hasPendingResolve } = await import("./resolve-undo");
+    const { markDoneWithUndo } = await import("./resolve-undo");
 
     store.dispatch({ type: "ping_upsert", payload: { type: "ping_upsert", ping: ping() } });
     markDoneWithUndo(1);
 
-    // Optimistic: the Ping reads as resolved immediately, but nothing has hit
-    // the host yet — the send is held.
+    // Optimistic Done flip.
     expect(store.state.resolveOverrides).toContain(1);
     expect(selectors.isPingResolved(store.state.pings[0], store.state.resolveOverrides)).toBe(true);
-    expect(resolvePing).not.toHaveBeenCalled();
-    expect(hasPendingResolve(1)).toBe(true);
-
-    // Window elapses with no Undo -> the resolve commits exactly once.
-    vi.advanceTimersByTime(5000);
+    // The resolve reaches the host NOW (never lost if the app closes mid-window).
     expect(resolvePing).toHaveBeenCalledTimes(1);
     expect(resolvePing).toHaveBeenCalledWith(1);
-    expect(hasPendingResolve(1)).toBe(false);
+    expect(reopenPing).not.toHaveBeenCalled();
 
-    // The override lingers (no flicker) until the host's `done` ping_upsert
-    // lands, then the reducer prunes it.
+    // The override lingers until the host's `done` ping_upsert lands, then the
+    // reducer prunes it (no flicker).
     expect(store.state.resolveOverrides).toContain(1);
     store.dispatch({
       type: "ping_upsert",
@@ -62,24 +57,44 @@ describe("markDoneWithUndo: optimistic flip + debounced resolve_ping", () => {
     expect(store.state.resolveOverrides).not.toContain(1);
   });
 
-  it("Undo inside the window cancels the send and returns the Ping to open", async () => {
-    vi.useFakeTimers();
+  it("Undo reopens the Ping via reopen_ping and optimistically un-flips it", async () => {
     const resolvePing = vi.fn();
-    vi.doMock("../ws/client", () => ({ getClient: () => ({ resolvePing }) }));
+    const reopenPing = vi.fn();
+    vi.doMock("../ws/client", () => ({ getClient: () => ({ resolvePing, reopenPing }) }));
     const store = await import("../store/store");
     const selectors = await import("../store/selectors");
-    const { markDoneWithUndo, undoDone, hasPendingResolve } = await import("./resolve-undo");
+    const { markDoneWithUndo, undoDone } = await import("./resolve-undo");
 
     store.dispatch({ type: "ping_upsert", payload: { type: "ping_upsert", ping: ping() } });
     markDoneWithUndo(1);
     expect(store.state.resolveOverrides).toContain(1);
 
     undoDone(1);
-    // Back to open, no pending send, and the window firing later is a no-op.
+    // Back to open locally, and a real reopen op sent to the host.
     expect(store.state.resolveOverrides).not.toContain(1);
     expect(selectors.isPingResolved(store.state.pings[0], store.state.resolveOverrides)).toBe(false);
-    expect(hasPendingResolve(1)).toBe(false);
-    vi.advanceTimersByTime(6000);
-    expect(resolvePing).not.toHaveBeenCalled();
+    expect(reopenPing).toHaveBeenCalledTimes(1);
+    expect(reopenPing).toHaveBeenCalledWith(1);
+  });
+});
+
+describe("reopenPing: the Done card ⋯ Reopen path", () => {
+  it("sends reopen_ping and drops the optimistic resolve override", async () => {
+    const resolvePing = vi.fn();
+    const reopenSend = vi.fn();
+    vi.doMock("../ws/client", () => ({
+      getClient: () => ({ resolvePing, reopenPing: reopenSend }),
+    }));
+    const store = await import("../store/store");
+    const { reopenPing } = await import("./resolve-undo");
+
+    store.dispatch({ type: "ping_upsert", payload: { type: "ping_upsert", ping: ping() } });
+    store.dispatch({ type: "resolve_local", pingId: 1 });
+    expect(store.state.resolveOverrides).toContain(1);
+
+    reopenPing(1);
+    expect(reopenSend).toHaveBeenCalledTimes(1);
+    expect(reopenSend).toHaveBeenCalledWith(1);
+    expect(store.state.resolveOverrides).not.toContain(1);
   });
 });

@@ -1,64 +1,50 @@
-// Recoverable "Mark done" (spec item 2). `resolve_ping` is terminal on the wire
-// — there is no reopen/unresolve op (see protocol.ts) — so a mis-tap or
-// mis-swipe would be irreversible. Instead of inventing a host op, Mark done is
-// made recoverable client-side, modelled on the existing optimistic read-flip
-// machinery: the Ping flips to Done at once (an optimistic `resolve_local`
-// override), a 5s "Undo" toast debounces the actual `resolve_ping` send, and
-// Undo drops the override before anything reaches the host. Only once the window
-// elapses is the resolve committed; the host's `done` ping_upsert then supersedes
-// the override (the reducer prunes it).
+// Recoverable "Mark done" (spec item 2). Now that the host has a real
+// `reopen_ping` op (see protocol.ts), Mark done sends `resolve_ping`
+// IMMEDIATELY — no deferred/debounced send — and recovery is a true server
+// operation rather than a cancelled timer. The Ping still flips to Done at once
+// via the optimistic `resolve_local` override (reconciled by the host's `done`
+// ping_upsert), and a ~5s "Undo" toast offers `reopen_ping` + an optimistic
+// un-flip. This is strictly better than the old debounce: the resolve is never
+// lost if the app closes mid-window, and Undo works even after the window (via
+// the Done card's ⋯ "Reopen", which shares this reopen path).
 
 import { dispatch } from "../store/store";
 import { getClient } from "../ws/client";
 import { dismissToast, toast } from "./toast";
 
-/** How long the resolve send is held so a mis-tap/mis-swipe is recoverable. */
+/** How long the "Undo" toast lingers after a Mark done. The resolve is already
+ * committed to the host by then; this is only the recovery-affordance window
+ * (Undo stays reachable after it too, via the Done card's ⋯ "Reopen"). */
 export const UNDO_WINDOW_MS = 5000;
 
-interface Pending {
-  timer: ReturnType<typeof setTimeout>;
-  toastId: number;
-}
-
-// One pending resolve per Ping id: the debounce timer plus the toast to dismiss
-// if Undo is taken before it fires.
-const pending = new Map<number, Pending>();
-
-/** Mark a Ping done, recoverably: optimistic Done flip now, `resolve_ping`
- * debounced behind a 5s "Undo" toast. Idempotent while a window is open (a
- * second tap keeps the first timer rather than resetting it). */
+/** Mark a Ping done: optimistic Done flip + immediate `resolve_ping`, with a
+ * ~5s "Undo" toast whose Undo reopens the Ping. The toast auto-dismiss pauses
+ * while it is hovered/focused (see toast.ts + Toaster.tsx), so reaching for
+ * Undo never loses it. */
 export function markDoneWithUndo(pingId: number): void {
-  if (pending.has(pingId)) return;
   dispatch({ type: "resolve_local", pingId });
+  getClient()?.resolvePing(pingId);
+  // `toast()` returns the id synchronously; the Undo action closes over it so a
+  // tap dismisses the toast at once (rather than waiting out the window).
   const toastId = toast("Marked done", {
     durationMs: UNDO_WINDOW_MS,
-    action: { label: "Undo", onClick: () => undoDone(pingId) },
+    action: { label: "Undo", onClick: () => undoDone(pingId, toastId) },
   });
-  const timer = setTimeout(() => commitDone(pingId), UNDO_WINDOW_MS);
-  pending.set(pingId, { timer, toastId });
 }
 
-/** Undo tapped inside the window: cancel the pending send, dismiss the toast,
- * and drop the optimistic override so the Ping returns to open. */
-export function undoDone(pingId: number): void {
-  const entry = pending.get(pingId);
-  if (entry) {
-    clearTimeout(entry.timer);
-    dismissToast(entry.toastId);
-    pending.delete(pingId);
-  }
+/** Undo tapped inside the window: reopen the Ping on the host and optimistically
+ * un-flip it (dropping any still-pending resolve override so a fast undo shows
+ * instantly). The Done card's ⋯ "Reopen" shares this reopen path. */
+export function undoDone(pingId: number, toastId?: number): void {
+  if (toastId !== undefined) dismissToast(toastId);
+  reopenPing(pingId);
+}
+
+/** Reopen a resolved Ping: send `reopen_ping` and optimistically un-flip it.
+ * Shared by the toast's Undo and the Done card's ⋯ "Reopen". The host's
+ * `open` ping_upsert is the source of truth; the un-flip only removes a still
+ * -pending optimistic resolve override so a just-marked Ping snaps back at once. */
+export function reopenPing(pingId: number): void {
+  getClient()?.reopenPing(pingId);
   dispatch({ type: "unresolve_local", pingId });
-}
-
-/** The window elapsed with no Undo: commit the resolve to the host. The override
- * lingers until the host's `done` ping_upsert lands (the reducer prunes it then),
- * so the card never flickers back to open in the gap. */
-function commitDone(pingId: number): void {
-  pending.delete(pingId);
-  getClient()?.resolvePing(pingId);
-}
-
-/** Test seam: are there any un-committed pending resolves? */
-export function hasPendingResolve(pingId: number): boolean {
-  return pending.has(pingId);
 }

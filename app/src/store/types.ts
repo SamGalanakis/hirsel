@@ -3,6 +3,8 @@ import type {
   Blob,
   ChatMessage,
   HelloOkMsg,
+  ModelSelection,
+  ModelSnapshot,
   MsgMsg,
   Ping,
   PingUpsertMsg,
@@ -10,6 +12,7 @@ import type {
   ProcessUpsertMsg,
   SendMode,
   SideChatRef,
+  SubagentModelCatalog,
   TurnEvent,
   TurnEventMsg,
   ViewInstance,
@@ -127,6 +130,15 @@ export interface AppState {
    * shown in Settings → About. `null` until a host that reports it connects
    * (older hosts omit the field; About shows "Not reported"). */
   hostVersion: string | null;
+  /** The main agent's model snapshot (current selection + everything
+   * selectable). Seeded from `hello_ok.model`; `current` is patched by
+   * `model_changed`. `null` until a host that reports it connects (older hosts
+   * omit the field; the Models control hides itself). */
+  model: ModelSnapshot | null;
+  /** The sub-agent model catalog, grouped by provider. Seeded from
+   * `hello_ok.subagent_models` and replaced wholesale by
+   * `subagent_models_changed`. `null` on older hosts (the control hides). */
+  subagentModels: SubagentModelCatalog | null;
   pendingSends: PendingSend[];
   uploads: Upload[];
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
@@ -242,7 +254,10 @@ export type Action =
   | { type: "clear_last_conclusion" }
   // ---- Generative-UI tier (view templates) ----
   | { type: "view_upsert"; payload: ViewUpsertMsg }
-  | { type: "view_removed"; payload: ViewRemovedMsg };
+  | { type: "view_removed"; payload: ViewRemovedMsg }
+  // ---- Model configuration ----
+  | { type: "model_changed"; current: ModelSelection }
+  | { type: "subagent_models_changed"; catalog: SubagentModelCatalog };
 
 export function initialState(): AppState {
   return {
@@ -252,6 +267,8 @@ export function initialState(): AppState {
     connection: "connecting",
     lastSeenMsgId: null,
     hostVersion: null,
+    model: null,
+    subagentModels: null,
     pendingSends: [],
     uploads: [],
     processes: [],

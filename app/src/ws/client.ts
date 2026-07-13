@@ -344,6 +344,33 @@ class HirselWsClient {
     this.enqueue({ type: "view_event", instance_id: instanceId, action, data });
   }
 
+  // ---- Model configuration ----
+
+  /** Select the main agent's model + reasoning variant. Enqueued so a tap right
+   * as the socket blips still lands once reconnected; the UI shows a brief
+   * pending state and settles on the `model_changed` broadcast (no permanent
+   * optimistic divergence — the store is only written by the broadcast). */
+  setModel(modelId: string, variant: string): void {
+    this.enqueue({ type: "set_model", model_id: modelId, variant });
+  }
+
+  /** Update one sub-agent catalog model's full row state (enabled + default
+   * variant). Enqueued like setModel; settles on `subagent_models_changed`. */
+  setSubagentModel(
+    provider: string,
+    modelId: string,
+    enabled: boolean,
+    defaultVariant: string,
+  ): void {
+    this.enqueue({
+      type: "set_subagent_model",
+      provider,
+      model_id: modelId,
+      enabled,
+      default_variant: defaultVariant,
+    });
+  }
+
   private armFailTimer(clientId: string): void {
     const existing = this.failTimers.get(clientId);
     if (existing) clearTimeout(existing);
@@ -557,6 +584,14 @@ class HirselWsClient {
       }
       case "view_removed": {
         dispatch({ type: "view_removed", payload: message });
+        break;
+      }
+      case "model_changed": {
+        dispatch({ type: "model_changed", current: message.current });
+        break;
+      }
+      case "subagent_models_changed": {
+        dispatch({ type: "subagent_models_changed", catalog: message.catalog });
         break;
       }
       case "blob_ok": {

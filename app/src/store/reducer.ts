@@ -338,6 +338,11 @@ export function reduce(state: AppState, action: Action): AppState {
         // Keep the last reported host version if this frame (or an older host)
         // omits it, so a resync never regresses About to "Not reported".
         hostVersion: action.payload.host_version ?? state.hostVersion,
+        // Model configuration is authoritative on (re)connect: seed both from
+        // the frame, defaulting to null when a field is absent (older hosts) so
+        // the Settings/header controls hide rather than render stale data.
+        model: action.payload.model ?? null,
+        subagentModels: action.payload.subagent_models ?? null,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
         // never replayed) does not survive a resync. Retained turn details for
@@ -817,6 +822,21 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         views: state.views.filter((v) => v.instance_id !== action.payload.instance_id),
       };
+
+    case "model_changed": {
+      // Patch only `current`; the `available` list is unchanged. Ignore
+      // gracefully if no snapshot has been seeded yet (a stray broadcast on an
+      // older host that never sent `hello_ok.model` must not synthesize one).
+      if (!state.model) return state;
+      return {
+        ...state,
+        model: { ...state.model, current: action.current },
+      };
+    }
+
+    case "subagent_models_changed":
+      // Replace the catalog wholesale with the new one.
+      return { ...state, subagentModels: action.catalog };
 
     default:
       return state;

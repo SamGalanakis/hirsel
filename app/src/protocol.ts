@@ -113,6 +113,56 @@ export interface ViewInstance {
   spec: ViewSpec;
 }
 
+// ---- Model configuration (main agent + sub-agent catalog) ----
+
+/** The main agent's current model + reasoning variant. `variant` is one of the
+ * chosen model's `variants` (e.g. "low" … "max"). */
+export interface ModelSelection {
+  id: string;
+  variant: string;
+}
+
+/** A model the main agent may run as, plus its selectable reasoning variants and
+ * the variant to fall back to when the model is chosen without one. */
+export interface AvailableModel {
+  id: string;
+  label: string;
+  variants: string[];
+  default_variant: string;
+}
+
+/** The main-agent model snapshot carried on `hello_ok` and kept current by
+ * `model_changed`: what's selected now, and everything selectable. */
+export interface ModelSnapshot {
+  current: ModelSelection;
+  available: AvailableModel[];
+}
+
+/** One model in the sub-agent catalog: like an AvailableModel plus an `enabled`
+ * flag (a disabled model can't be used to spawn a Sub-agent). `default_variant`
+ * is the reasoning variant a spawned Sub-agent runs at. */
+export interface SubagentModel {
+  id: string;
+  label: string;
+  variants: string[];
+  default_variant: string;
+  enabled: boolean;
+}
+
+/** The sub-agent models offered by one provider (e.g. Codex CLI, Claude Code
+ * CLI), grouped under its display `label`. */
+export interface SubagentProviderModels {
+  provider: string;
+  label: string;
+  models: SubagentModel[];
+}
+
+/** The full sub-agent model catalog carried on `hello_ok` and replaced wholesale
+ * by `subagent_models_changed`. */
+export interface SubagentModelCatalog {
+  providers: SubagentProviderModels[];
+}
+
 // ---- Client -> server ----
 
 export interface HelloMsg {
@@ -233,6 +283,25 @@ export interface ViewEventMsg {
   data: unknown;
 }
 
+/** Select the main agent's model + reasoning variant. The host applies it and
+ * broadcasts the truth back as `model_changed`. */
+export interface SetModelMsg {
+  type: "set_model";
+  model_id: string;
+  variant: string;
+}
+
+/** Update one sub-agent catalog model's enabled state and/or default reasoning
+ * variant. Carries the FULL row state (both fields) so it's a complete upsert,
+ * not a diff; the host applies it and broadcasts `subagent_models_changed`. */
+export interface SetSubagentModelMsg {
+  type: "set_subagent_model";
+  provider: string;
+  model_id: string;
+  enabled: boolean;
+  default_variant: string;
+}
+
 export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
@@ -246,7 +315,9 @@ export type ClientMessage =
   | ConcludeSideChatMsg
   | ConfirmConclusionMsg
   | DiscardSideChatMsg
-  | ViewEventMsg;
+  | ViewEventMsg
+  | SetModelMsg
+  | SetSubagentModelMsg;
 
 // ---- Server -> client ----
 
@@ -275,6 +346,12 @@ export interface HelloOkMsg {
   /** Host build identity (crate version + git sha), shown in Settings → About.
    * Optional on the wire; older hosts omit it and About shows "Not reported". */
   host_version?: string;
+  /** The main agent's model snapshot (selection + everything selectable).
+   * Optional on the wire; older hosts omit it and the Models control is hidden. */
+  model?: ModelSnapshot;
+  /** The sub-agent model catalog, grouped by provider. Optional on the wire;
+   * older hosts omit it and the Sub-agent models control is hidden. */
+  subagent_models?: SubagentModelCatalog;
 }
 
 export interface MsgMsg {
@@ -404,6 +481,21 @@ export interface ViewRemovedMsg {
   instance_id: string;
 }
 
+/** The main agent's model selection changed (in response to a `set_model`, or
+ * a host-side change). Carries only the new `current`; the `available` list is
+ * unchanged and stays as last seen in the `ModelSnapshot`. */
+export interface ModelChangedMsg {
+  type: "model_changed";
+  current: ModelSelection;
+}
+
+/** The sub-agent model catalog changed (in response to a `set_subagent_model`,
+ * or a host-side change). Carries the full replacement catalog. */
+export interface SubagentModelsChangedMsg {
+  type: "subagent_models_changed";
+  catalog: SubagentModelCatalog;
+}
+
 export type ServerMessage =
   | HelloOkMsg
   | MsgMsg
@@ -419,4 +511,6 @@ export type ServerMessage =
   | ConclusionDraftMsg
   | SideChatClosedMsg
   | ViewUpsertMsg
-  | ViewRemovedMsg;
+  | ViewRemovedMsg
+  | ModelChangedMsg
+  | SubagentModelsChangedMsg;

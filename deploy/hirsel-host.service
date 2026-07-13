@@ -9,6 +9,7 @@ User=hirsel
 Group=hirsel
 WorkingDirectory=/var/lib/hirsel
 Environment=HIRSEL_DATA_DIR=/var/lib/hirsel
+Environment=HIRSEL_TEMPLATES_DIR=/opt/hirsel/current/templates
 EnvironmentFile=/etc/hirsel/hirsel.env
 ExecStart=/opt/hirsel/current/hirsel-host
 Restart=on-failure

@@ -6,6 +6,7 @@ One-time setup (after the first merge to main):
 
 1. `cargo build --release -p hirsel-host && sudo cp target/release/hirsel-host /usr/local/bin/`
    (build with the PWA first: `cd app && npm ci && npm run build` — the host serves `app/dist`)
+   Copy the matching view catalog with `sudo mkdir -p /opt/hirsel && sudo cp -a templates /opt/hirsel/`.
 2. `sudo mkdir -p /etc/hirsel` and create `/etc/hirsel/env`:
    ```
    HIRSEL_TOKEN=<long random>
@@ -13,6 +14,7 @@ One-time setup (after the first merge to main):
    ANTHROPIC_API_KEY=<key>            # if provider=anthropic
    HIRSEL_MODEL=claude-opus-4-8
    HIRSEL_DATA_DIR=/var/lib/hirsel
+   HIRSEL_TEMPLATES_DIR=/opt/hirsel/templates
    HIRSEL_LISTEN=127.0.0.1:3089
    ```
 3. `sudo cp infra/hirsel.service /etc/systemd/system/ && sudo systemctl enable --now hirsel`

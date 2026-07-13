@@ -73,3 +73,13 @@ export function reopenEvent(eventId: number): void {
   getClient()?.sendEventAction(eventId, "reopen", null);
   dispatch({ type: "event_undecide_local", eventId });
 }
+
+/** Awareness auto-read: flip `read` locally for an instant chip, AND round-trip
+ * it on the wire — events share the ping id space, so `read_ping` is the read
+ * op. Without the wire half the flag lived in client RAM only: every `hello_ok`
+ * full replace reverted the chip to "new" and a second device never learned.
+ * The host broadcasts the updated event back, reconciling the local flip. */
+export function markEventRead(eventId: number): void {
+  dispatch({ type: "event_read_local", eventId });
+  getClient()?.readPing(eventId);
+}

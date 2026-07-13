@@ -16,7 +16,12 @@ import { ArrowRight, ArrowUp, Check, ChevronDown, CircleCheck, List, MessageSqua
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
-import { DECIDE_UNDO_WINDOW_MS, decideEventWithUndo, undoDecide } from "../../lib/event-decide";
+import {
+  DECIDE_UNDO_WINDOW_MS,
+  decideEventWithUndo,
+  markEventRead,
+  undoDecide,
+} from "../../lib/event-decide";
 import { createMediaFlag } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import { toast } from "../../lib/toast";
@@ -27,7 +32,7 @@ import {
   openJudgmentCount,
   orderedQueue,
 } from "../../store/selectors";
-import { dispatch, goToChat, state } from "../../store/store";
+import { goToChat, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { QueueList, QueueRow } from "./QueueList";
 import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
@@ -117,39 +122,102 @@ export function EventScroller() {
     return scrollerRef?.clientHeight || 0;
   }
 
+  /** The scroll offset of page `idx` — read from the page ELEMENTS, not
+   * `idx × viewport`, because at `rail` the pages are card-anchored (variable
+   * height) while phone pages stay full-viewport. One offset source for both. */
+  function pageTop(idx: number): number {
+    const el = scrollerRef?.children[idx] as HTMLElement | undefined;
+    return el?.offsetTop ?? 0;
+  }
+
   function goTo(idx: number, opts?: { instant?: boolean }): void {
     const max = total(); // clear page = total
     const clamped = Math.max(0, Math.min(idx, max));
+    // The destination of an explicit navigation counts as VIEWED on arrival
+    // (see the auto-read gating below) — record it before the scroll settles.
+    navTargetIdx = clamped;
     const h = pageHeight();
     // jsdom has no layout (h === 0): fall back to just tracking the index.
     if (h > 0 && scrollerRef) {
-      // `instant` is the store-driven re-anchor (snapshot swap): it must not
-      // animate through pages the Owner never chose to pass.
-      const behavior = opts?.instant || prefersReduced() ? ("auto" as const) : ("smooth" as const);
-      scrollerRef.scrollTo({ top: clamped * h, behavior });
+      // `instant` (the store-driven re-anchor on a snapshot swap) must be the
+      // literal "instant": "auto" DEFERS to the container's CSS `scroll-smooth`
+      // (CSSOM View), which animated the re-anchor through pages the Owner
+      // never chose to pass — the phantom-read vector.
+      const behavior: ScrollBehavior = opts?.instant
+        ? "instant"
+        : prefersReduced()
+          ? "auto"
+          : "smooth";
+      scrollerRef.scrollTo({ top: pageTop(clamped), behavior });
     }
     setCurrent(clamped);
   }
 
-  // Scroll → active-page tracking + awareness auto-read (scrolled PAST, never
-  // while centred). rAF-throttled so it doesn't thrash on a fling.
+  // Scroll → active-page tracking: the page whose top offset is nearest the
+  // scroll position (exact for uniform phone pages, correct for the
+  // card-anchored variable-height rail pages). rAF-throttled.
   let scrollRAF = 0;
   function onScroll(): void {
     if (scrollRAF) return;
     scrollRAF = requestAnimationFrame(() => {
       scrollRAF = 0;
-      const h = pageHeight();
-      if (!scrollerRef || h === 0) return;
-      const idx = Math.max(0, Math.min(Math.round(scrollerRef.scrollTop / h), total()));
+      if (!scrollerRef || pageHeight() === 0) return;
+      const top = scrollerRef.scrollTop;
+      const n = scrollerRef.children.length;
+      let idx = 0;
+      for (let i = 1; i < n; i++) {
+        if (Math.abs(pageTop(i) - top) < Math.abs(pageTop(idx) - top)) idx = i;
+      }
+      idx = Math.min(idx, total());
       if (idx !== current()) setCurrent(idx);
     });
   }
 
-  // ---- Session bookkeeping vs. snapshot swaps (regression fix) --------------
-  // The id of the page the Owner is ACTUALLY viewing — the only page auto-read
-  // may ever mark. Kept as an id (not an index) so a set replacement can never
-  // silently re-point it at a different event.
-  let viewedId: number | null = null;
+  // ---- Awareness auto-read: dwell-or-destination gating ----------------------
+  // A page converts into a read ONLY if it was genuinely VIEWED and then left.
+  // "Viewed" is armed two ways: the page was the explicit DESTINATION of a
+  // navigation (goTo — keys, swipe-advance, a list/peek jump, the snapshot
+  // re-anchor), or it stayed centred for a dwell. Pass-through frames of a
+  // smooth scroll and re-sorts/replacements under the cursor arm nothing, so
+  // they can never mark (the live-reproduced phantom read).
+  /** How long a page must stay centred, absent an explicit navigation, before
+   * it counts as viewed. Longer than any smooth-scroll pass-through frame. */
+  const VIEW_DWELL_MS = 450;
+
+  let viewedId: number | null = null; // ARMED: this page, once left, may mark
+  let dwellTimer: ReturnType<typeof setTimeout> | undefined;
+  let navTargetIdx: number | null = null; // the pending goTo destination
+  let prevIdx: number | null = null; // last settled page index
+  let prevCenteredId: number | null = null; // id of the last centred page
+
+  function cancelDwell(): void {
+    if (dwellTimer !== undefined) {
+      clearTimeout(dwellTimer);
+      dwellTimer = undefined;
+    }
+  }
+  onCleanup(cancelDwell);
+
+  /** The Owner is now on page `idx` (event `id`). Arm it as viewed immediately
+   * when it is the explicit navigation destination (consumed — a stale target
+   * must never arm a later fly-by), else only after it dwells. */
+  function arriveAt(idx: number, id: number | null): void {
+    cancelDwell();
+    if (navTargetIdx === idx) {
+      navTargetIdx = null;
+      viewedId = id;
+      return;
+    }
+    viewedId = null;
+    if (id === null) return;
+    dwellTimer = setTimeout(() => {
+      dwellTimer = undefined;
+      // Arm only if this page is STILL the centred one when the dwell elapses.
+      const stillIdx = untrack(current);
+      const stillId = untrack(() => ordered()[stillIdx]?.id ?? null);
+      if (stillIdx === idx && stillId === id) viewedId = id;
+    }, VIEW_DWELL_MS);
+  }
 
   // Whether the queue currently has any events — a memo so the reposition
   // effect below re-runs only when this FLIPS (first data arriving), not on
@@ -162,7 +230,7 @@ export function EventScroller() {
   // that surviving clear-page node as real pages are inserted above it — which
   // is how the live stack landed on "Queue clear" with open events. The event
   // set swap makes the old offset meaningless, so position is re-derived
-  // explicitly: follow the viewed card if it survived (a same-set resync keeps
+  // explicitly: follow the CENTRED card if it survived (a same-set resync keeps
   // the Owner's place), else land on the first needs-you card. Session
   // bookkeeping (snoozed ids, view tracking) is pruned to the surviving set so
   // nothing from a previous set (e.g. the DEV mocks) leaks into tallies.
@@ -170,7 +238,9 @@ export function EventScroller() {
     void state.eventsSnapshotSeq; // track: bumps on every hello_ok
     if (!hasEvents()) {
       // No events (pre-data / emptied set): the clear page is the only page.
+      cancelDwell();
       viewedId = null;
+      prevCenteredId = null;
       return;
     }
     untrack(() => {
@@ -179,30 +249,40 @@ export function EventScroller() {
         return surviving.size === prev.size ? prev : surviving;
       });
       const list = ordered();
-      const kept = viewedId !== null ? list.findIndex((e) => e.id === viewedId) : -1;
+      const kept = prevCenteredId !== null ? list.findIndex((e) => e.id === prevCenteredId) : -1;
       const target = kept !== -1 ? kept : firstOpenIndex(list, state.eventDecideOverrides);
-      viewedId = list[target]?.id ?? null;
       goTo(target, { instant: true });
+      // Settle the view bookkeeping HERE: this jump is store-driven, never a
+      // "leave" — the auto-read effect below dedupes against these.
+      prevIdx = target;
+      prevCenteredId = list[target]?.id ?? null;
+      arriveAt(target, prevCenteredId);
     });
   });
 
-  // Awareness auto-read, leave-based: ONLY the page the Owner actually viewed
-  // (it was the current page) is marked read, at the moment they navigate off
-  // it — never pages skipped by a jump, and never pages an event-set swap
-  // shuffled underneath the cursor (the reposition effect above resets
-  // `viewedId` first, so a store-driven index change cannot convert into a
-  // read). Tracks only `current()`.
+  // The one marking site. Tracks the page index AND the id centred under it:
+  //  • index changed → the Owner NAVIGATED: the page being left marks read iff
+  //    it was armed (viewed) and is unread awareness — round-tripped on the
+  //    wire so a resync or a second device agrees (markEventRead);
+  //  • same index, different id → the set SHIFTED under the cursor (an
+  //    event_upsert sorting in above, a snapshot swap): never a leave — the
+  //    view bookkeeping re-seeds to what is actually centred now, and whatever
+  //    was armed before is discarded unmarked.
   createEffect(() => {
     const idx = current();
+    const curId = ordered()[idx]?.id ?? null;
     untrack(() => {
-      const curId = ordered()[idx]?.id ?? null;
-      if (viewedId !== null && viewedId !== curId) {
-        const prev = state.events.find((e) => e.id === viewedId);
-        if (shouldMarkReadOnLeave(prev)) {
-          dispatch({ type: "event_read_local", eventId: prev.id });
+      if (idx === prevIdx && curId === prevCenteredId) return; // already settled
+      if (idx !== prevIdx) {
+        const leaving = viewedId;
+        if (leaving !== null && leaving !== curId) {
+          const prev = state.events.find((e) => e.id === leaving);
+          if (shouldMarkReadOnLeave(prev)) markEventRead(prev.id);
         }
       }
-      viewedId = curId;
+      arriveAt(idx, curId);
+      prevIdx = idx;
+      prevCenteredId = curId;
     });
   });
 
@@ -396,7 +476,7 @@ export function EventScroller() {
                     the end of the queue, never a contradiction. */}
                 {onClear()
                   ? openCount() > 0
-                    ? "End of queue"
+                    ? "End of the queue"
                     : "Queue clear"
                   : `${current() + 1} of ${total()}`}
               </span>
@@ -544,11 +624,14 @@ function EventPage(props: {
   }
 
   return (
-    <div class="relative h-full snap-start snap-always">
-      {/* Phone: the card is vertically centred in the viewport page. Desktop
-          (`rail`): top-anchored with deliberate rhythm — never floating in the
-          middle of a void — since the standing list beside it fills the frame. */}
-      <div class="flex h-full flex-col justify-center overflow-y-auto px-3.5 pb-11 pt-14 [scrollbar-width:none] rail:justify-start rail:pt-16">
+    <div class="relative h-full snap-start snap-always rail:h-auto">
+      {/* Phone: a full-viewport page, card vertically centred. Desktop (`rail`):
+          the page is CARD-ANCHORED — its height is the card plus a comfortable
+          margin, so a short card never strands a viewport of void below it and
+          the next card's top edge peeks in as the forward affordance. The
+          snap math reads real element offsets (pageTop), so both models share
+          one pager. */}
+      <div class="flex h-full flex-col justify-center overflow-y-auto px-3.5 pb-11 pt-14 [scrollbar-width:none] rail:h-auto rail:justify-start rail:overflow-visible rail:pb-14 rail:pt-16">
         <div
           class="relative mx-auto w-full max-w-[460px] touch-pan-y rail:max-w-[35rem]"
           onPointerDown={onPointerDown}
@@ -759,6 +842,15 @@ function ClearPage(props: {
               {props.openCount} waiting
             </span>
           </div>
+          {/* The natural "what next" moment (§3): a quiet door to the agent —
+              demoted (muted, no fill), never a destination-promotion. */}
+          <button
+            type="button"
+            class="mt-6 inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            onClick={() => goToChat()}
+          >
+            Talk to the agent <ArrowRight class="size-3.5" aria-hidden="true" />
+          </button>
         </div>
       </Show>
     </div>

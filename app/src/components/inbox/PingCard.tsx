@@ -12,7 +12,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { QuickReplyButtons } from "./QuickReplyButtons";
@@ -25,8 +24,9 @@ interface Props {
   onSendReply: (ping: Ping, body: string) => void;
   /** Secondary affordance: jump to the Ping's Anchor in Chat. */
   onJumpToChat: (ping: Ping) => void;
-  /** Mark done (wire `resolve_ping`, ADR-0009 terminal state) — ⋯ menu only.
-   * Non-destructive: the Ping stays findable under Done. */
+  /** Mark done (wire `resolve_ping`, ADR-0009 terminal state) — now a one-tap
+   * visible control, not buried in the ⋯ menu. Non-destructive: the Ping stays
+   * findable under Done. */
   onResolve: (ping: Ping) => void;
   /** Mark read (auto-read on view/interaction, or the ⋯ "Mark read"): sends
    * read_ping + optimistic flip. */
@@ -37,6 +37,12 @@ interface Props {
    * chat already exists for this Ping) — the effort ladder's third rung after
    * Quick Reply and Reply. */
   onDiscuss: (ping: Ping) => void;
+  /** Render the full card (the promoted state): requires-response, the selected
+   * row, or a Done item. When false, the Ping renders as a dense one-line row
+   * that expands on tap. Defaults to true so a standalone card renders in full. */
+  expanded?: boolean;
+  /** Dense-row tap: promote this Ping to a card. No-op in card mode. */
+  onSelect?: (ping: Ping) => void;
 }
 
 function formatTime(ts: string): string {
@@ -51,6 +57,11 @@ function formatTime(ts: string): string {
     return "";
   }
 }
+
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 export function PingCard(props: Props) {
   const isOpen = () => props.ping.status === "open";
@@ -67,6 +78,17 @@ export function PingCard(props: Props) {
   // marking unread then leaving the card on screen doesn't instantly re-read.)
   const autoReadCandidate = () =>
     isOpen() && props.ping.read !== true && !state.unreadOverrides.includes(props.ping.id);
+
+  // Card (promoted) vs. dense row. Defaults to a card for standalone use.
+  const asCard = () => props.expanded ?? true;
+  // The human one-liner leads (Inter medium); falls back to the body when a Ping
+  // ships no description. The machine @handle is demoted to a chip.
+  const titleText = () => props.ping.description.trim() || props.ping.content;
+  // Show the content body only when it adds something over the title (i.e. the
+  // Ping has a distinct description) — never echo the same line twice.
+  const showBody = () =>
+    props.ping.description.trim().length > 0 &&
+    props.ping.content.trim() !== props.ping.description.trim();
 
   // Reveal the inline input on non-requires_response cards via "Reply"; on
   // requires_response cards it is expanded by default.
@@ -115,7 +137,166 @@ export function PingCard(props: Props) {
     props.onSendReply(props.ping, body);
   };
 
-  return (
+  // --- Swipe-to-done (phone, touch only). A short left drag past the threshold
+  // resolves the Ping — the gesture peer of the one-tap Mark done control. It
+  // never blocks a tap (only engages once the drag is clearly horizontal) and
+  // yields to vertical scrolling. ---
+  const SWIPE_TRIGGER = 96;
+  const [dragX, setDragX] = createSignal(0);
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  let engaged = false;
+
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.pointerType === "mouse" || !isOpen()) return;
+    // Let interactive controls own their own pointer.
+    if ((e.target as HTMLElement).closest("button, a, textarea, input, [role='menuitem']")) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    tracking = true;
+    engaged = false;
+  };
+  const onPointerMove = (e: PointerEvent) => {
+    if (!tracking) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (!engaged) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      if (Math.abs(dy) >= Math.abs(dx)) {
+        tracking = false; // vertical intent — hand it back to the scroller
+        return;
+      }
+      engaged = true;
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    }
+    setDragX(Math.max(-140, Math.min(0, dx)));
+  };
+  const endSwipe = () => {
+    if (tracking && engaged && dragX() <= -SWIPE_TRIGGER) props.onResolve(props.ping);
+    tracking = false;
+    engaged = false;
+    setDragX(0);
+  };
+  const swipeProps = () => ({
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: endSwipe,
+    onPointerCancel: endSwipe,
+    style: {
+      "touch-action": "pan-y",
+      transform: dragX() ? `translateX(${dragX()}px)` : undefined,
+      transition: dragX() === 0 && !prefersReducedMotion() ? "transform 150ms ease-out" : undefined,
+    } as Record<string, string | undefined>,
+  });
+
+  // The machine @handle, demoted to a mono chip beside the timestamp.
+  const HandleChip = () => (
+    <span
+      class="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[0.68rem] text-muted-foreground"
+      data-slot="ping-name"
+    >
+      @{props.ping.name}
+    </span>
+  );
+
+  const Time = () => (
+    <span class="shrink-0 text-[0.7rem] text-muted-foreground">{formatTime(props.ping.ts)}</span>
+  );
+
+  // One-tap Mark done — thumb-grade 44px hit area, glyph stays 16px. Negative
+  // margins keep the visual density while the target stays touch-legal.
+  const MarkDoneButton = () => (
+    <Show when={isOpen()}>
+      <button
+        type="button"
+        class="-my-2 grid size-11 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-status-success focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        aria-label="Mark done"
+        title="Mark done"
+        onClick={() => props.onResolve(props.ping)}
+      >
+        <Check class="size-4" aria-hidden="true" />
+      </button>
+    </Show>
+  );
+
+  // ⋯ overflow — Mark read/unread + View in chat only (Mark done graduated to a
+  // visible control). 44px trigger, 16px glyph.
+  const MoreMenu = () => (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        class="-my-2 -mr-2 grid size-11 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
+        aria-label="More actions"
+      >
+        <MoreHorizontal class="size-4" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent>
+        <Show when={isOpen()}>
+          <Show
+            when={read()}
+            fallback={
+              <DropdownMenuItem onSelect={() => props.onRead(props.ping)}>Mark read</DropdownMenuItem>
+            }
+          >
+            <DropdownMenuItem onSelect={() => props.onMarkUnread(props.ping)}>
+              Mark unread
+            </DropdownMenuItem>
+          </Show>
+        </Show>
+        <DropdownMenuItem onSelect={() => props.onJumpToChat(props.ping)}>
+          View in chat
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  // --- Dense row: the resting FYI/read state. One glanceable line; tap the
+  // description to promote it to a card. ---
+  const Row = () => (
+    <div
+      ref={(el: HTMLElement) => (cardEl = el)}
+      class="group/pingrow relative flex min-h-11 items-center gap-2 border-b border-border/60 px-3 transition-opacity"
+      classList={{ "opacity-60": isDone() }}
+      data-read={read() ? "true" : "false"}
+      data-status={props.ping.status}
+      data-ping-id={props.ping.id}
+      data-ping-name={props.ping.name}
+      {...swipeProps()}
+    >
+      <button
+        type="button"
+        class="flex min-w-0 flex-1 items-center gap-1.5 py-2.5 text-left"
+        aria-label={`Open Ping ${props.ping.name}`}
+        onClick={() => props.onSelect?.(props.ping)}
+      >
+        <Show when={unread()}>
+          <span
+            class="size-2 shrink-0 rounded-full bg-primary"
+            aria-label="Unread"
+            data-slot="unread-dot"
+          />
+        </Show>
+        <span
+          class="min-w-0 flex-1 truncate text-sm leading-tight"
+          classList={{
+            "font-medium text-foreground": unread(),
+            "text-muted-foreground": !unread(),
+          }}
+          data-slot="ping-title"
+        >
+          {titleText()}
+        </span>
+      </button>
+      <div class="flex shrink-0 items-center gap-1.5">
+        <HandleChip />
+        <Time />
+        <MarkDoneButton />
+        <MoreMenu />
+      </div>
+    </div>
+  );
+
+  const CardView = () => (
     <Card
       ref={(el: HTMLElement) => (cardEl = el)}
       size="sm"
@@ -129,13 +310,13 @@ export function PingCard(props: Props) {
       data-status={props.ping.status}
       data-ping-id={props.ping.id}
       data-ping-name={props.ping.name}
+      {...swipeProps()}
     >
-      {/* Header: the Ping is now an addressable, named thing, so its @handle is
-          the primary label (mono — the Monospace-Earns-It rule covers @name
-          handles) with the one-line description as a quiet subtitle beneath.
-          The unread dot leads; timestamp + Done tag + ⋯ cluster to the right. */}
+      {/* Header: the human description leads as the title (Inter medium); the
+          machine @handle is a mono chip beside the timestamp. The unread dot
+          leads; Done tag + one-tap Mark done + ⋯ cluster to the right. */}
       <div class="flex items-start justify-between gap-2">
-        <div class="flex min-w-0 items-start gap-1.5">
+        <div class="flex min-w-0 flex-1 items-start gap-1.5">
           <Show when={unread()}>
             <span
               class="mt-1 size-2 shrink-0 rounded-full bg-primary"
@@ -143,86 +324,46 @@ export function PingCard(props: Props) {
               data-slot="unread-dot"
             />
           </Show>
-          <div class="min-w-0">
-            <span
-              class="block truncate font-mono text-[0.8rem] leading-tight"
-              classList={{
-                "text-foreground": unread(),
-                "text-muted-foreground": !unread(),
-              }}
-              data-slot="ping-name"
-            >
-              @{props.ping.name}
-            </span>
-            <Show when={props.ping.description.trim().length > 0}>
-              <span
-                class="mt-0.5 block truncate text-xs text-muted-foreground"
-                data-slot="ping-description"
-                title={props.ping.description}
-              >
-                {props.ping.description}
-              </span>
-            </Show>
-          </div>
+          <span
+            class="min-w-0 flex-1 text-sm font-medium leading-snug"
+            classList={{
+              "text-foreground": unread(),
+              "text-muted-foreground": !unread(),
+            }}
+            data-slot="ping-title"
+            title={titleText()}
+          >
+            {titleText()}
+          </span>
         </div>
-        <div class="flex shrink-0 items-center gap-1">
-          <span class="text-[0.7rem] text-muted-foreground">{formatTime(props.ping.ts)}</span>
+        <div class="flex shrink-0 items-center gap-1.5">
+          <HandleChip />
+          <Time />
           <Show when={isDone()}>
             <span class="inline-flex items-center gap-1 text-[0.68rem] uppercase tracking-[0.03em] text-muted-foreground">
               <Check class="size-3 text-status-success" aria-hidden="true" />
               Done
             </span>
           </Show>
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              class="-mr-1 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
-              aria-label="More actions"
-            >
-              <MoreHorizontal class="size-4" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent>
-              <Show when={isOpen()}>
-                <DropdownMenuItem onSelect={reveal}>Reply</DropdownMenuItem>
-                <Show
-                  when={read()}
-                  fallback={
-                    <DropdownMenuItem onSelect={() => props.onRead(props.ping)}>
-                      Mark read
-                    </DropdownMenuItem>
-                  }
-                >
-                  <DropdownMenuItem onSelect={() => props.onMarkUnread(props.ping)}>
-                    Mark unread
-                  </DropdownMenuItem>
-                </Show>
-              </Show>
-              <DropdownMenuItem onSelect={() => props.onJumpToChat(props.ping)}>
-                View in chat
-              </DropdownMenuItem>
-              {/* v2.1 (ADR-0009): "Mark done" (wire resolve_ping) — resolving a
-                  Ping is non-destructive (it stays findable under Done), so no
-                  destructive styling and no confirm. */}
-              <Show when={isOpen()}>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => props.onResolve(props.ping)}>
-                  Mark done
-                </DropdownMenuItem>
-              </Show>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <MarkDoneButton />
+          <MoreMenu />
         </div>
       </div>
 
-      {/* Content body: full-strength when unread (the "bold email" look),
-          dimmed once read/dealt-with. */}
-      <div
-        classList={{
-          "font-medium text-foreground": unread(),
-          "text-muted-foreground": !unread(),
-        }}
-      >
-        <Markdown>{props.ping.content}</Markdown>
-      </div>
+      {/* Body: the Ping content. Full-strength when unread (the "bold email"
+          look), dimmed once read/dealt-with. Suppressed when it would merely
+          echo the title (a description-less Ping already surfaced its body as
+          the title). */}
+      <Show when={showBody()}>
+        <div
+          classList={{
+            "font-medium text-foreground": unread(),
+            "text-muted-foreground": !unread(),
+          }}
+        >
+          <Markdown>{props.ping.content}</Markdown>
+        </div>
+      </Show>
 
       {/* Replied state: small right-aligned quote under the content. */}
       <Show when={reply()}>
@@ -309,5 +450,11 @@ export function PingCard(props: Props) {
         </div>
       </Show>
     </Card>
+  );
+
+  return (
+    <Show when={asCard()} fallback={<Row />}>
+      <CardView />
+    </Show>
   );
 }

@@ -24,7 +24,7 @@ export const MOCK_EVENTS: EventItem[] = [
     ts: "2026-07-13T09:19:00Z",
     blocking: true,
     ui: [
-      { type: "eyebrow", tone: "accent", boundary: true, text: "Taste boundary — fleet stopped" },
+      { type: "eyebrow", tone: "accent", boundary: true, text: "Deciding unblocks 1 agent" },
       { type: "heading", text: "How should “reopen a resolved Ping” be wired?" },
       {
         type: "text",
@@ -67,7 +67,6 @@ export const MOCK_EVENTS: EventItem[] = [
         type: "keyValue",
         items: [
           { label: "matches standing", value: "“wire ops explicit & named, never boolean-flagged”", tone: "muted" },
-          { label: "unblocks", value: "1 agent · `hirsel-ui` dense-done (opus)" },
         ],
       },
     ],
@@ -117,7 +116,7 @@ export const MOCK_EVENTS: EventItem[] = [
     anchor: 0,
     ts: "2026-07-13T09:38:00Z",
     ui: [
-      { type: "eyebrow", tone: "accent", boundary: true, text: "Taste boundary — the app's voice" },
+      { type: "eyebrow", tone: "accent", boundary: true, text: "Deciding unblocks 1 agent" },
       { type: "heading", text: "Which model drafts the first-run onboarding copy?" },
       {
         type: "text",
@@ -137,7 +136,6 @@ export const MOCK_EVENTS: EventItem[] = [
         type: "keyValue",
         items: [
           { label: "matches standing", value: "“anything user-facing needs taste ≥ 7”", tone: "muted" },
-          { label: "unblocks", value: "1 agent · `hirsel-web` onboarding sheet" },
         ],
       },
     ],

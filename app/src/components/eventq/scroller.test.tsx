@@ -86,6 +86,8 @@ describe("EventScroller — the phone vertical event queue home", () => {
     await waitFor(() => expect(within(reader).getByText("decided")).toBeTruthy());
     const need = screen.container.querySelector('[data-slot="pager-need"]') as HTMLElement;
     expect(need.textContent).toBe("all clear");
+    expect(need.className).toContain("bg-status-success/12");
+    expect(need.className).toContain("text-foreground/80");
   });
 
   it("keeps exactly one Undo: the decided strip on-screen, no toast (§6)", async () => {

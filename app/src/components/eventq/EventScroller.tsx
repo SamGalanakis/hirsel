@@ -42,7 +42,10 @@ import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { ArchivedList } from "./ArchivedList";
 import {
   ARCHIVE_EXIT_CLASS,
+  CARD_ENTER_FROM,
+  CARD_ENTER_TRANSITION,
   createArchiveExit,
+  createCardEntrance,
   DecidedStrip,
   EventCardDoor,
   EventCardHeader,
@@ -131,6 +134,25 @@ export function EventScroller() {
   // The id of the event currently centred in the reader — highlights its row in
   // the standing list / peek. Undefined on the clear page.
   const centeredId = () => ordered()[current()]?.id;
+
+  // Queue-clear exhale (craft wave): a one-shot cue that fires only on REACHING
+  // a truly-clear queue (the transition into it), never on a resting clear page
+  // or on load. `exhaleSeq` bumps on each fresh reach; the ClearPage replays the
+  // success-check scale-in off it. Priming on the first run adopts the current
+  // state without firing, so an app that opens already-clear stays quiet.
+  const [exhaleSeq, setExhaleSeq] = createSignal(0);
+  let clearPrimed = false;
+  let wasClear = false;
+  createEffect(() => {
+    const clear = onClear() && openCount() === 0;
+    if (!clearPrimed) {
+      clearPrimed = true;
+      wasClear = clear;
+      return;
+    }
+    if (clear && !wasClear) setExhaleSeq((n) => n + 1);
+    wasClear = clear;
+  });
 
   function pageHeight(): number {
     return scrollerRef?.clientHeight || 0;
@@ -538,6 +560,7 @@ export function EventScroller() {
               decided={decidedJudgmentCount()}
               awarenessRead={ordered().filter((e) => e.kind !== "judgment" && e.read).length}
               openCount={openCount()}
+              exhaleSeq={exhaleSeq()}
               onJumpBack={() => {
                 goTo(firstOpenIndex(ordered(), state.eventDecideOverrides));
                 rootRef?.focus();
@@ -590,6 +613,9 @@ function EventPage(props: {
   // sweep drops its page — the pages below shift up into the slot, which IS the
   // advance (the pager's set-shift tracking re-seeds without a phantom read).
   const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
+  // Motion-safe entrance (genuine arrivals only): a fade + ~6px settle that
+  // rhymes with the archive exit. Initial hydration and re-renders stay still.
+  const { entering, atFrom } = createCardEntrance(props.ev);
 
   // Pointer-driven swipe (the accelerator layer). Vertical intent releases to
   // the pager; horizontal past threshold commits accept/snooze.
@@ -673,7 +699,14 @@ function EventPage(props: {
               props.ev.kind !== "judgment" ? "bg-muted/30 shadow-none" : "",
               decided() ? "opacity-80" : "",
               props.ev.read && props.ev.kind !== "judgment" ? "opacity-60" : "",
-              dragging() ? "shadow-lg" : "transition-transform duration-300 motion-reduce:transition-none",
+              // While a fresh card settles in, the entrance transition owns the
+              // box; otherwise the swipe spring does (they never overlap).
+              dragging()
+                ? "shadow-lg"
+                : entering()
+                  ? CARD_ENTER_TRANSITION
+                  : "transition-transform duration-300 motion-reduce:transition-none",
+              atFrom() ? CARD_ENTER_FROM : "",
               leaving() ? ARCHIVE_EXIT_CLASS : "",
             )}
           >
@@ -708,13 +741,43 @@ function EventPage(props: {
       {/* Down-chevron advance affordance. */}
       <button
         type="button"
-        class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full border border-border bg-card/80 text-muted-foreground backdrop-blur-sm transition-colors hover:text-foreground"
+        class="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full border border-border bg-card/80 text-muted-foreground backdrop-blur-sm transition-colors hover:text-foreground active:translate-y-px"
         aria-label="Next event"
         onClick={props.onAdvance}
       >
         <ChevronDown class="size-4" aria-hidden="true" />
       </button>
     </div>
+  );
+}
+
+/** The clear page's success check. It scales in once (0.8→1, ~200ms) each time
+ * the queue is freshly REACHED clear — the quiet exhale — driven by `seq` bumps
+ * from the scroller. It stays still on a resting clear page and under
+ * reduced motion (and no-ops where the Web Animations API is absent, e.g. jsdom),
+ * so the cue only ever marks the transition, never the state. */
+function ExhaleCheck(props: { seq: number }) {
+  let ref: HTMLSpanElement | undefined;
+  const setRef = (el: HTMLSpanElement) => (ref = el);
+  createEffect(() => {
+    const s = props.seq;
+    if (s <= 0 || !ref || prefersReduced()) return;
+    if (typeof ref.animate !== "function") return;
+    ref.animate(
+      [
+        { transform: "scale(0.8)", opacity: 0.6 },
+        { transform: "scale(1)", opacity: 1 },
+      ],
+      { duration: 200, easing: "ease-out" },
+    );
+  });
+  return (
+    <span
+      ref={setRef}
+      class="mb-4 grid size-14 place-items-center rounded-full border border-status-success/25 bg-status-success/12 text-status-success"
+    >
+      <CircleCheck class="size-7" aria-hidden="true" />
+    </span>
   );
 }
 
@@ -726,6 +789,7 @@ function ClearPage(props: {
   decided: number;
   awarenessRead: number;
   openCount: number;
+  exhaleSeq: number;
   onJumpBack: () => void;
 }) {
   return (
@@ -747,7 +811,7 @@ function ClearPage(props: {
             </p>
             <button
               type="button"
-              class="mt-4 inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3.5 text-xs font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              class="mt-4 inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3.5 text-xs font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px"
               onClick={props.onJumpBack}
             >
               <ArrowUp class="size-3.5" aria-hidden="true" /> Back to the first
@@ -756,9 +820,7 @@ function ClearPage(props: {
         }
       >
         <div class="flex h-full flex-col items-center justify-center px-6 pb-11 pt-14 text-center">
-          <span class="mb-4 grid size-14 place-items-center rounded-full border border-status-success/25 bg-status-success/12 text-status-success">
-            <CircleCheck class="size-7" aria-hidden="true" />
-          </span>
+          <ExhaleCheck seq={props.exhaleSeq} />
           <div class="text-base font-semibold tracking-[-0.005em] text-foreground">Queue clear</div>
           <p class="mx-auto mt-2 max-w-[16rem] text-xs leading-relaxed text-muted-foreground">
             Everything that needed you is decided and posted back. The fleet has what it was waiting on.
@@ -852,7 +914,7 @@ function PeekOverview(props: {
           <span class="flex-1" />
           <button
             type="button"
-            class="rounded-full border border-border bg-muted px-2.5 py-1 text-[0.68rem] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            class="rounded-full border border-border bg-muted px-2.5 py-1 text-[0.68rem] font-semibold text-muted-foreground transition-colors hover:text-foreground active:translate-y-px"
             onClick={props.onClose}
           >
             Close

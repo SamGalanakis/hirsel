@@ -16,18 +16,39 @@ deterministic (gates 1–2), REAL driver for gate 3 (the payload must come from 
 
 ## Shared Helpers
 
-Use the standard `post_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` helpers from
-`e2e/channel-discipline/runbook.md`.
-
-Host env (verified-free port, never 3089):
+Use the authenticated `post_json` / `get_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id`
+helpers from `e2e/lib/runbook-lib.sh`.
 
 ```bash
+# In the controlling shell, after setting REPO, HIRSEL_TOKEN, and BASE:
+source "$REPO/e2e/lib/runbook-lib.sh"
+```
+
+Build once in the checkout, then start the absolute binary from a neutral `/tmp` cwd. For gates
+1–2, create and wire a fixture explicitly; merely creating the JSON file is not enough:
+
+```bash
+export REPO=/absolute/path/to/hirsel
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-e2e
+(cd "$REPO" && cargo build -p hirsel-host)
+export HOST_BIN="$CARGO_TARGET_DIR/debug/hirsel-host"
 export HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_TOKEN=dev-token HIRSEL_DEBUG=1
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-interactive
+export HIRSEL_TEMPLATES_DIR="$REPO/templates"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
-# gates 1-2: HIRSEL_DRIVER=fake ; gate 3: real driver (unset HIRSEL_DRIVER)
-cargo run -p hirsel-host
+export HIRSEL_DRIVER=fake
+export HIRSEL_FAKE_FIXTURE=/tmp/hirsel-e2e-interactive-fixture.json
+cat >"$HIRSEL_FAKE_FIXTURE" <<'JSON'
+{"external_id":"interactive-e2e-long","progress":["fake driver started","fake driver still working"],"delay_ms":20000,"terminal":{"status":"done","summary":"fake driver completed the delegated audit"}}
+JSON
+mkdir -p /tmp/hirsel-e2e-interactive-work
+cd /tmp/hirsel-e2e-interactive-work
+exec "$HOST_BIN"
 ```
+
+For gate 3, stop that host, remove `HIRSEL_FAKE_FIXTURE`, set `HIRSEL_DRIVER=real`, and start a
+fresh host from the same neutral cwd. All debug requests must carry
+`Authorization: Bearer $HIRSEL_TOKEN`.
 
 ## Gate 1: the delegation turn ends while the work is still running
 
@@ -41,7 +62,7 @@ PROC="$(wait_jq debug/processes '.processes[] | select(.kind=="subagent")' 120 |
 # ...and the Agent's turn ENDS while that process is still running: agent_activity goes idle
 # with the process not yet terminal. (The wake-bias mechanical gate.)
 wait_jq debug/broadcasts '[.events[] | select(.type=="agent_activity")] | last | .state == "idle"' 120 >/dev/null
-curl -sS "$BASE/debug/processes" | jq -e '.processes[] | select(.id=="'"$PROC"'" and .state=="running")'
+get_json debug/processes | jq -e '.processes[] | select(.id=="'"$PROC"'" and .state=="running")'
 ```
 
 If the fake driver completes too fast to observe `idle`-while-`running`, configure the fixture with a
@@ -55,11 +76,11 @@ BEFORE="$(max_chat_id)"
 post_json debug/owner-message '{"client_id":"io-warm","body":"Quick one while that runs: in one word, is 23 prime?","ref":null}' >/dev/null
 # The warm answer lands BEFORE the delegated process reaches terminal state.
 wait_jq debug/chat '.messages[] | select(.author=="agent" and .id > '"$BEFORE"')' 60 >/dev/null
-curl -sS "$BASE/debug/processes" | jq -e '.processes[] | select(.id=="'"$PROC"'" and .state=="running")' \
-  || echo "note: process finished first — rerun with a slower fixture; the gate is answer-before-terminal"
+get_json debug/processes | jq -e '.processes[] | select(.id=="'"$PROC"'" and .state=="running")'
 # Then the terminal wake still closes the loop (report lands after done).
+WARM_CHAT_ID="$(max_chat_id)"
 wait_jq debug/processes '.processes[] | select(.id=="'"$PROC"'" and .state=="done")' 180 >/dev/null
-wait_jq debug/chat '.messages[] | select(.author=="agent") | select(.id > '"$BEFORE"')' 120 >/dev/null
+wait_jq debug/chat '.messages[] | select(.author=="agent") | select(.id > '"$WARM_CHAT_ID"')' 120 >/dev/null
 ```
 
 ## Gate 3: long payloads survive the hand-off (REAL driver)
@@ -77,7 +98,7 @@ wait_jq debug/processes '.processes[] | select(.id=="'"$PROC"'" and .state=="don
 # Mechanical: the sentinel from beyond char 240 reached the Agent and its relay.
 wait_jq debug/chat '.messages[] | select(.author=="agent" and (.body | contains("PAYLOAD-INTACT-9471")))' 180 >/dev/null
 # And nothing the Agent consumed shows the old silent-cut ellipsis on the report path.
-curl -sS "$BASE/debug/chat" | jq -e '[.messages[] | select(.author=="agent" and (.body | contains("truncated by hirsel")))] | length == 0'
+get_json debug/chat | jq -e '[.messages[] | select(.author=="agent" and (.body | contains("truncated by hirsel")))] | length == 0'
 ```
 
 ## Success Gates

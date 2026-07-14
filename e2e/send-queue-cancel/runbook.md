@@ -9,11 +9,15 @@ Prove protocol v1.2 send modes and cancellation semantics through the debug HTTP
 Use these shell helpers in each scenario:
 
 ```bash
-BASE=http://127.0.0.1:3089
+BASE=http://127.0.0.1:<verified-free-port> # never 3089
+HIRSEL_TOKEN=dev-token
 
 post_json() {
-  curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"
+  curl -fsS -X POST "$BASE/$1" -H "authorization: Bearer $HIRSEL_TOKEN" \
+    -H 'content-type: application/json' -d "$2"
 }
+
+get_json() { curl -fsS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$1"; }
 
 wait_jq() {
   path="$1"
@@ -21,7 +25,7 @@ wait_jq() {
   timeout="${3:-60}"
   end=$((SECONDS + timeout))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(get_json "$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf '%s\n' "$json"
       return 0
@@ -29,7 +33,7 @@ wait_jq() {
     sleep 0.25
   done
   printf 'Timed out waiting for %s filter %s\n' "$path" "$filter" >&2
-  curl -sS "$BASE/$path" >&2 || true
+  get_json "$path" >&2 || true
   return 1
 }
 
@@ -39,7 +43,7 @@ assert_no_jq_for() {
   seconds="$3"
   end=$((SECONDS + seconds))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(get_json "$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf 'Unexpected match for %s filter %s\n%s\n' "$path" "$filter" "$json" >&2
       return 1
@@ -51,17 +55,25 @@ assert_no_jq_for() {
 
 ## Scenario A: Scripted Deterministic
 
-Start the host:
+Build once in the checkout, then start the absolute binary from a neutral `/tmp` cwd on a
+verified-free port. Never send a preflight Owner message to this host: `/debug/reset` clears
+persisted debug state but is not a substitute for cancelling an already active turn.
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
+export REPO=/absolute/path/to/hirsel
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-e2e
+(cd "$REPO" && cargo build -p hirsel-host)
+export HOST_BIN="$CARGO_TARGET_DIR/debug/hirsel-host"
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-send-queue-cancel-scripted
-export HIRSEL_LISTEN=127.0.0.1:3089
-cargo run -p hirsel-host
+export HIRSEL_TEMPLATES_DIR="$REPO/templates"
+export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
+mkdir -p /tmp/hirsel-e2e-send-queue-cancel-scripted-work
+cd /tmp/hirsel-e2e-send-queue-cancel-scripted-work
+exec "$HOST_BIN"
 ```
 
 Reset:
@@ -92,9 +104,13 @@ assert_no_jq_for debug/chat '.messages[] | select(.author == "agent" and .body =
 Gate after the slow turn finishes:
 
 ```bash
-wait_jq debug/chat '.messages[] | select(.author == "agent" and .ref == ('$ACTIVE_ID'))' 30 >/dev/null
+wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > ('$NEXT_ID') and .ref == ('$ACTIVE_ID'))' 30 >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .body == "pong")' 10 >/dev/null
 ```
+
+The active `slow:20` turn intentionally ends with the scripted double's generic reply; that does
+not mean the real Agent ran. Requiring its Agent row to be newer than `NEXT_ID` prevents an old
+in-flight/preflight reply with a reused Chat id/ref from satisfying the active-turn gate.
 
 ### Gate 2: `cancel_queued` deletes row and emits `msg_removed`
 
@@ -140,18 +156,21 @@ assert_no_jq_for debug/chat '.messages[] | select(.author == "agent" and .ref ==
 
 Use this mode to prove the real lash facade integration. It requires valid Codex OAuth credentials in `~/.codex/auth.json`. Prompt behavior is part of the finding: if the model misses an instruction even though the debug state shows the transport behavior, report it honestly.
 
-Start the host:
+Stop the scripted host, choose another verified-free non-3089 port, and start the same absolute
+binary from a fresh neutral cwd:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-send-queue-cancel-codex
-export HIRSEL_LISTEN=127.0.0.1:3089
-cargo run -p hirsel-host
+export HIRSEL_TEMPLATES_DIR="$REPO/templates"
+export HIRSEL_LISTEN=127.0.0.1:<another-verified-free-port>
+mkdir -p /tmp/hirsel-e2e-send-queue-cancel-codex-work
+cd /tmp/hirsel-e2e-send-queue-cancel-codex-work
+exec "$HOST_BIN"
 ```
 
 Reset:
@@ -204,18 +223,35 @@ wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | contain
 Start a slow real turn and interrupt it:
 
 ```bash
-CANCEL_REAL_JSON="$(post_json debug/owner-message '{"client_id":"lash-cancel-active","body":"Use shell_run to run exactly `sleep 25`, then reply exactly `SHOULD_NOT_APPEAR`.","ref":null}')"
+SHELL_STARTS_BEFORE="$(get_json debug/broadcasts | jq '[.events[] | select(.type=="turn_event" and .event.kind=="tool_start" and .event.name=="shell_run")] | length')"
+SHELL_DONES_BEFORE="$(get_json debug/broadcasts | jq '[.events[] | select(.type=="turn_event" and .event.kind=="tool_done" and .event.name=="shell_run" and .event.ok==true)] | length')"
+CANCEL_REAL_JSON="$(post_json debug/owner-message '{"client_id":"lash-cancel-active","body":"Use shell_run first to run exactly `true`. After it completes, use shell_run again to run exactly `sleep 25`. Then reply exactly `SHOULD_NOT_APPEAR`.","ref":null}')"
 CANCEL_REAL_ID="$(printf '%s' "$CANCEL_REAL_JSON" | jq -r '.message.id')"
-wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "thinking")' 15 >/dev/null
+wait_jq debug/broadcasts '[.events[] | select(.type=="turn_event" and .event.kind=="tool_done" and .event.name=="shell_run" and .event.ok==true)] | length > '"$SHELL_DONES_BEFORE" 30 >/dev/null
+wait_jq debug/broadcasts '[.events[] | select(.type=="turn_event" and .event.kind=="tool_start" and .event.name=="shell_run")] | length > ('"$SHELL_STARTS_BEFORE"' + 1)' 15 >/dev/null
 post_json debug/cancel-turn '{}'
 ```
 
 Gates:
 
 ```bash
-wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "idle")' 10 >/dev/null
-wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | endswith("— interrupted")))' 10 >/dev/null
-assert_no_jq_for debug/chat '.messages[] | select(.author == "agent" and ((.body | contains("SHOULD_NOT_APPEAR")) or .ref == ('$CANCEL_REAL_ID')))' 5
+wait_jq debug/broadcasts '[.events[] | select(.type == "agent_activity")] | last | .state == "idle"' 10 >/dev/null
+# Cooperative cancellation may keep a tool that completes while cancellation is propagating. At
+# every poll, persisted ok:true shell summaries must be backed by already-observed successful
+# tool_done broadcasts; no unfinished/fabricated result may appear as successful.
+end=$((SECONDS + 40))
+while [ "$SECONDS" -lt "$end" ]; do
+  BROADCASTS="$(get_json debug/broadcasts)"
+  CHAT="$(get_json debug/chat)"
+  DONE_COUNT="$(printf '%s' "$BROADCASTS" | jq '[.events[] | select(.type=="turn_event" and .event.kind=="tool_done" and .event.name=="shell_run" and .event.ok==true)] | length - '"$SHELL_DONES_BEFORE"')"
+  KEPT_COUNT="$(printf '%s' "$CHAT" | jq '[.messages[] | select(.author=="agent" and (.body | endswith("— interrupted"))) | .tool_calls[]? | select(.name=="shell_run" and .ok==true)] | length')"
+  test "$KEPT_COUNT" -le "$DONE_COUNT" || { echo "fabricated successful tool result" >&2; exit 1; }
+  printf '%s' "$CHAT" | jq -e '.messages[] | select(.author=="agent" and (.body | endswith("— interrupted")))' >/dev/null && break
+  sleep 0.25
+done
+printf '%s' "$CHAT" | jq -e '.messages[] | select(.author=="agent" and (.body | endswith("— interrupted")))' >/dev/null
+test "$KEPT_COUNT" -eq "$DONE_COUNT" # every completed shell call was preserved
+assert_no_jq_for debug/chat '.messages[] | select(.author == "agent" and (.body | contains("SHOULD_NOT_APPEAR")))' 5
 ```
 
 ## Report

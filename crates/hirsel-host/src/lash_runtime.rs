@@ -1959,8 +1959,9 @@ fn turn_chat_payload(output: &lash::TurnOutput) -> Option<(String, Vec<ToolCallS
             let text = output
                 .assistant_message()
                 .map(str::to_owned)
-                .or_else(|| output.final_value().map(render_final_value))?;
-            (!text.trim().is_empty()).then_some((text, tool_calls))
+                .or_else(|| output.final_value().map(render_final_value))
+                .unwrap_or_default();
+            (!text.trim().is_empty() || !tool_calls.is_empty()).then_some((text, tool_calls))
         }
         lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => {
             // Lash recovers checkpointed assistant prose here; raw provider
@@ -3794,7 +3795,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.subagents_spawn",
             "subagents_spawn",
-            "Start a Claude or Codex Sub-agent as a Lash Runtime Process. Spawn, note the hand-off in Chat, and END YOUR TURN — the terminal event wakes you; never wait in-turn for completion.",
+            "Start a Claude or Codex Sub-agent as a Lash Runtime Process. Call this after any required subagents.list check, then make the turn's Chat output a concise hand-off note. Do not wait or poll for completion in the same turn; the terminal event will wake you later.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -5312,6 +5313,44 @@ mod tests {
         assert_eq!(body, "Completed normally.");
         assert!(tool_calls.is_empty());
         assert!(!body.contains("interrupted"));
+    }
+
+    #[tokio::test]
+    async fn finished_tool_only_turn_persists_completed_tools() {
+        let (executor, storage, _broadcast_log, _dir) = test_event_executor().await;
+        let output = test_turn_output(
+            lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+                text: String::new(),
+            }),
+            "",
+            vec![lash_core::ToolCallRecord {
+                call_id: Some("completed".to_string()),
+                tool: "events_judgment".to_string(),
+                args: serde_json::json!({ "question": "Which release path?" }),
+                output: lash_core::ToolCallOutput::success(serde_json::json!({
+                    "event_id": 1
+                })),
+                duration_ms: 1,
+            }],
+        );
+
+        assert!(
+            materialize_turn_chat(&executor.tools, &output)
+                .await
+                .unwrap()
+        );
+
+        let messages = storage.all_chat().await.unwrap();
+        let persisted = messages.last().expect("tool-only Agent Chat row");
+        assert_eq!(persisted.author, ChatAuthor::Agent);
+        assert!(persisted.body.is_empty());
+        assert_eq!(
+            persisted.tool_calls,
+            vec![ToolCallSummary {
+                name: "events_judgment".to_string(),
+                ok: true,
+            }]
+        );
     }
 
     #[test]

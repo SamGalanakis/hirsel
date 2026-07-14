@@ -1,6 +1,5 @@
 import {
   Activity,
-  MessageSquare,
   MoreHorizontal,
   PanelRight,
   Settings as SettingsIcon,
@@ -8,7 +7,7 @@ import {
 } from "lucide-solid";
 import { Show } from "solid-js";
 import { canvasViews, runningProcessCount } from "../store/selectors";
-import { goToChat, openProcesses, openSettings, showCanvas, state } from "../store/store";
+import { openProcesses, openSettings, showCanvas, state } from "../store/store";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,14 +52,9 @@ export function PhoneOverflowMenu() {
         </Show>
       </DropdownMenuTrigger>
       <DropdownMenuContent class="min-w-[11rem]">
-        {/* Chat (§3): the phone's first-class "talk to the agent" door out of the
-            queue home — a quiet drill-in, no badge, matching the desktop nav's
-            demoted Chat row. */}
-        <DropdownMenuItem onSelect={() => goToChat()}>
-          <MessageSquare aria-hidden="true" />
-          Chat
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
+        {/* No Chat row here: Chat lives on the phone bottom nav bar (Feed / Chat),
+            so duplicating it in the overflow would put "bottom bar stuff at the
+            top as well." Nothing the nav bar carries also lives here. */}
         {/* "Model settings" (spec item 6): the honest label + destination — it
             opens Settings scrolled to the Models section, not Appearance, so the
             row's affordance matches where it lands. */}

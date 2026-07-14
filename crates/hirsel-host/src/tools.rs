@@ -970,16 +970,14 @@ fn blessed_judgment_ui_from_options(
     // Eyebrow: the boundary accent stripe stays, but the fixed "fleet stopped"
     // copy becomes the human unblocks fact — what deciding actually frees. When a
     // decision unblocks no one, no eyebrow is emitted at all (the heading leads).
-    if let Some(unblocks) = unblocks {
-        if unblocks > 0 {
-            let agents = if unblocks == 1 { "agent" } else { "agents" };
-            children.push(serde_json::json!({
-                "type": "eyebrow",
-                "tone": "accent",
-                "boundary": true,
-                "text": format!("Deciding unblocks {unblocks} {agents}")
-            }));
-        }
+    if let Some(unblocks) = unblocks.filter(|&u| u > 0) {
+        let agents = if unblocks == 1 { "agent" } else { "agents" };
+        children.push(serde_json::json!({
+            "type": "eyebrow",
+            "tone": "accent",
+            "boundary": true,
+            "text": format!("Deciding unblocks {unblocks} {agents}")
+        }));
     }
     children.push(serde_json::json!({ "type": "heading", "text": heading }));
     if !context.trim().is_empty() {

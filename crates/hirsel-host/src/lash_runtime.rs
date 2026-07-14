@@ -3855,7 +3855,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.subagents_wait",
             "subagents_wait",
-            "Wait for a Sub-agent process to reach a terminal outcome.",
+            "Wait for a Sub-agent process to reach a terminal outcome — for short waits only; for anything longer, end your turn and let the terminal event wake you.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -5077,6 +5077,25 @@ mod tests {
         ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
         TriggerInputBinding, TriggerSubscriptionRecord,
     };
+
+    #[test]
+    fn terminal_payload_keeps_full_text_for_wake_and_wait() {
+        let full_summary = format!("{}the actual ending", "research findings ".repeat(20));
+        let (_, payload) = terminal_event_payload(&TerminalOutcome::Done {
+            summary: full_summary.clone(),
+        });
+
+        assert_eq!(
+            payload["text"],
+            format!("Sub-agent completed: {full_summary}")
+        );
+        assert_eq!(payload["await_output"]["value"]["summary"], full_summary);
+
+        let outcome: ProcessAwaitOutput =
+            serde_json::from_value(payload["await_output"].clone()).unwrap();
+        let wait_payload = subagents_wait_result("proc-1", &outcome).unwrap();
+        assert_eq!(wait_payload["outcome"]["value"]["summary"], full_summary);
+    }
 
     use super::*;
 

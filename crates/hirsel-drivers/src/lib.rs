@@ -157,6 +157,21 @@ fn short_line(text: impl AsRef<str>) -> String {
     }
 }
 
+const TERMINAL_MESSAGE_MAX_CHARS: usize = 24_000;
+const TERMINAL_MESSAGE_TRUNCATION_MARKER: &str = "…[truncated by hirsel at 24k chars]";
+
+fn terminal_message(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if text.chars().count() <= TERMINAL_MESSAGE_MAX_CHARS {
+        return text.to_string();
+    }
+    let content_chars = TERMINAL_MESSAGE_MAX_CHARS
+        .saturating_sub(TERMINAL_MESSAGE_TRUNCATION_MARKER.chars().count());
+    let mut truncated = text.chars().take(content_chars).collect::<String>();
+    truncated.push_str(TERMINAL_MESSAGE_TRUNCATION_MARKER);
+    truncated
+}
+
 async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> DriverResult<()> {
     let mut line = serde_json::to_vec(value)?;
     line.push(b'\n');
@@ -615,14 +630,16 @@ fn claude_terminal_outcome(value: &Value) -> TerminalOutcome {
     let summary = value
         .get("result")
         .and_then(Value::as_str)
-        .map(short_line)
+        .map(str::to_string)
         .unwrap_or_else(|| "claude turn completed".to_string());
     let is_error = value
         .get("is_error")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if !is_error {
-        TerminalOutcome::Done { summary }
+        TerminalOutcome::Done {
+            summary: terminal_message(summary),
+        }
     } else if value.get("terminal_reason").and_then(Value::as_str) == Some("aborted_streaming") {
         TerminalOutcome::Interrupted
     } else {
@@ -632,7 +649,9 @@ fn claude_terminal_outcome(value: &Value) -> TerminalOutcome {
             .or_else(|| value.get("stop_reason").and_then(Value::as_str))
             .map(|reason| format!("{reason}: {summary}"))
             .unwrap_or(summary);
-        TerminalOutcome::Failed { reason }
+        TerminalOutcome::Failed {
+            reason: terminal_message(reason),
+        }
     }
 }
 
@@ -904,10 +923,14 @@ async fn read_codex_stdout(
     session: Arc<CodexSession>,
 ) {
     let mut terminal_sent = false;
+    let mut last_agent_message = None;
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => match serde_json::from_str::<Value>(&line) {
                 Ok(value) => {
+                    if let Some(message) = codex_agent_message(&value) {
+                        last_agent_message = Some(message.to_string());
+                    }
                     if let Some(turn_id) = value.pointer("/result/turn/id").and_then(Value::as_str)
                         && let Ok(mut active_turn_id) = lock(&session.active_turn_id)
                     {
@@ -916,14 +939,19 @@ async fn read_codex_stdout(
                     if value.get("method").and_then(Value::as_str) == Some("turn/started")
                         && let Some(turn_id) =
                             value.pointer("/params/turn/id").and_then(Value::as_str)
-                        && let Ok(mut active_turn_id) = lock(&session.active_turn_id)
                     {
-                        *active_turn_id = Some(turn_id.to_string());
+                        terminal_sent = false;
+                        last_agent_message = None;
+                        if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
+                            *active_turn_id = Some(turn_id.to_string());
+                        }
                     }
                     if let Some(summary) = codex_progress(&value) {
                         let _ = session.events.emit(SubagentEvent::Progress { summary });
                     }
-                    if let Some(outcome) = codex_terminal_outcome(&value) {
+                    if let Some(outcome) =
+                        codex_terminal_outcome(&value, last_agent_message.as_deref())
+                    {
                         terminal_sent = true;
                         if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
                             *active_turn_id = None;
@@ -994,7 +1022,24 @@ fn codex_progress(value: &Value) -> Option<String> {
     Some(short_line(format!("{item_type} {status}")))
 }
 
-fn codex_terminal_outcome(value: &Value) -> Option<TerminalOutcome> {
+fn codex_agent_message(value: &Value) -> Option<&str> {
+    if value.get("method").and_then(Value::as_str) != Some("item/completed") {
+        return None;
+    }
+    let item = value.pointer("/params/item")?;
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("agentMessage" | "agent_message")
+    ) {
+        return None;
+    }
+    item.get("text").and_then(Value::as_str)
+}
+
+fn codex_terminal_outcome(
+    value: &Value,
+    last_agent_message: Option<&str>,
+) -> Option<TerminalOutcome> {
     if value.get("method").and_then(Value::as_str) != Some("turn/completed") {
         return None;
     }
@@ -1006,13 +1051,14 @@ fn codex_terminal_outcome(value: &Value) -> Option<TerminalOutcome> {
     match status {
         "interrupted" => Some(TerminalOutcome::Interrupted),
         "failed" => Some(TerminalOutcome::Failed {
-            reason: turn
-                .get("error")
-                .map(Value::to_string)
-                .unwrap_or_else(|| "codex turn failed".to_string()),
+            reason: terminal_message(
+                turn.get("error")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "codex turn failed".to_string()),
+            ),
         }),
         _ => Some(TerminalOutcome::Done {
-            summary: "codex turn completed".to_string(),
+            summary: terminal_message(last_agent_message.unwrap_or("codex turn completed")),
         }),
     }
 }
@@ -1022,6 +1068,87 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use tokio::time::Duration;
+
+    #[test]
+    fn claude_terminal_preserves_long_final_message() {
+        let final_message = format!("{}the actual ending", "research findings ".repeat(20));
+
+        let outcome = claude_terminal_outcome(&json!({
+            "type": "result",
+            "is_error": false,
+            "result": final_message,
+        }));
+
+        assert_eq!(
+            outcome,
+            TerminalOutcome::Done {
+                summary: final_message,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_failure_preserves_long_final_message() {
+        let final_message = format!("{}the actual ending", "failure details ".repeat(20));
+
+        let outcome = claude_terminal_outcome(&json!({
+            "type": "result",
+            "is_error": true,
+            "terminal_reason": "failed",
+            "result": final_message,
+        }));
+
+        assert_eq!(
+            outcome,
+            TerminalOutcome::Failed {
+                reason: format!("failed: {final_message}"),
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_message_cap_is_explicit_and_character_safe() {
+        let final_message = "é".repeat(24_001);
+
+        let outcome = claude_terminal_outcome(&json!({
+            "type": "result",
+            "is_error": false,
+            "result": final_message,
+        }));
+        let TerminalOutcome::Done { summary } = outcome else {
+            panic!("expected done outcome");
+        };
+
+        assert_eq!(summary.chars().count(), 24_000);
+        assert!(summary.ends_with("…[truncated by hirsel at 24k chars]"));
+    }
+
+    #[test]
+    fn codex_terminal_uses_last_completed_agent_message() {
+        let final_message = format!("{}the actual ending", "codex report ".repeat(30));
+        let item = json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "id": "item-1",
+                    "type": "agentMessage",
+                    "text": final_message,
+                }
+            }
+        });
+        let terminal = json!({
+            "method": "turn/completed",
+            "params": { "turn": { "status": "completed" } }
+        });
+        let last_agent_message = codex_agent_message(&item).map(str::to_string);
+
+        assert_eq!(
+            codex_terminal_outcome(&terminal, last_agent_message.as_deref()),
+            Some(TerminalOutcome::Done {
+                summary: final_message,
+            })
+        );
+    }
 
     #[tokio::test]
     async fn fake_driver_emits_started_progress_and_done() {

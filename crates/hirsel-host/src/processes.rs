@@ -317,3 +317,39 @@ fn short_label(text: &str) -> String {
         truncated
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_info_keeps_terminal_summary_short() {
+        let now = Utc::now();
+        let full_summary = format!("{}the actual ending", "research findings ".repeat(20));
+        let record = ProcessRecord::restored(
+            "proc-1".to_string(),
+            AgentKind::Claude,
+            None,
+            SessionHandle {
+                id: "session-1".to_string(),
+                agent: AgentKind::Claude,
+            },
+            "Research the codebase".to_string(),
+            "/tmp/repo".to_string(),
+            Some("external-1".to_string()),
+            ProcessStatus::Done,
+            vec![SubagentEvent::Terminal {
+                outcome: TerminalOutcome::Done {
+                    summary: full_summary,
+                },
+            }],
+            now,
+            now,
+        );
+
+        let summary = process_info(&record).summary.unwrap();
+
+        assert_eq!(summary.chars().count(), 80);
+        assert!(summary.ends_with("..."));
+    }
+}

@@ -38,12 +38,65 @@ describe("CommandPalette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("shows a fallback when nothing matches", async () => {
+  it("offers a 'Search events' escape hatch for an otherwise-unmatched query (Wave-3 ⌘K depth)", async () => {
     const user = userEvent.setup();
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     const input = await screen.findByRole("combobox");
     await user.type(input, "zzzznope");
-    await waitFor(() => expect(screen.getByText("No matching commands")).toBeInTheDocument());
+    // Nothing else matches, but the query is always searchable against the queue.
+    await waitFor(() => expect(screen.getByText(/Search events: zzzznope/)).toBeInTheDocument());
+  });
+});
+
+describe("CommandPalette — contextual queue actions (Wave-3 ⌘K depth)", () => {
+  it("surfaces Decide / Snooze / Clear-finished for the current queue", async () => {
+    const store = await import("../store/store");
+    const judgment = {
+      id: 4242,
+      kind: "judgment" as const,
+      source: { kind: "agent" as const, ref: "host" },
+      name: "@ctx",
+      description: "context judgment",
+      requires_response: true,
+      quick_replies: [],
+      status: "open" as const,
+      read: false,
+      anchor: 0,
+      ts: "2026-07-14T09:00:00Z",
+      ui: [
+        { type: "heading", text: "Ctx" },
+        {
+          type: "optionList",
+          action: "choose",
+          options: [{ key: "A", label: "Alpha" }, { key: "B", label: "Bravo" }],
+        },
+      ],
+    };
+    const readInfo = {
+      ...judgment,
+      id: 4243,
+      kind: "info" as const,
+      requires_response: false,
+      read: true,
+      ui: [{ type: "status", label: "done" }],
+    };
+    store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: judgment } });
+    store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: readInfo } });
+
+    render(() => <CommandPalette open onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getByText(/Decide A — Alpha/)).toBeInTheDocument());
+    expect(screen.getByText(/Decide B — Bravo/)).toBeInTheDocument();
+    expect(screen.getByText(/Snooze current · This evening/)).toBeInTheDocument();
+    expect(screen.getByText("Archive current")).toBeInTheDocument();
+    // The read info card is finished → the sweep offers it (count 1).
+    expect(screen.getByText(/Clear finished \(1\)/)).toBeInTheDocument();
+
+    // Clean the store so the earlier assertions in this file's other suites are
+    // unaffected by ordering (the singleton persists across tests).
+    store.dispatch({
+      type: "hello_ok",
+      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], events: [] },
+    });
   });
 });
 

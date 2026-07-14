@@ -1,7 +1,8 @@
 import { ArrowDown, ChevronUp, CircleAlert, LoaderCircle, MessagesSquare, Upload, X } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import {
+  clearComposerAutofocus,
   clearComposerDraft,
   clearComposerPrefill,
   clearLastConclusion,
@@ -115,6 +116,17 @@ export function ChatView() {
   let dragDepth = 0;
 
   const attachments = createComposerAttachments();
+
+  // Consume the one-shot composer-focus intent (the phone queue-home chat bar's
+  // dormant pill drills in with `focusComposer`): land with the main composer
+  // focused and the keyboard up. On mount, since this component remounts on each
+  // queue→chat drill-in and the flag is set synchronously before we mount.
+  onMount(() => {
+    if (untrack(() => state.composerAutofocus)) {
+      focusMainComposer();
+      clearComposerAutofocus();
+    }
+  });
 
   // How many of the tail to render. Grows via "load older"; the window always
   // slices from the end so newly-arrived messages stay visible at the bottom.

@@ -85,6 +85,11 @@ interface UiState {
    * scrolled to Models, an honest affordance instead of landing on Appearance).
    * Consumed once by SettingsPanel then cleared. `null` = open at the top. */
   settingsScrollTarget: SettingsSection | null;
+  /** One-shot: a drill-in that should land with the main composer focused (the
+   * phone queue-home chat bar's dormant pill — tap it to open Chat with the real
+   * composer focused and the keyboard up). Set by `goToChat({ focusComposer })`,
+   * consumed once by ChatView on mount then cleared. */
+  composerAutofocus: boolean;
 }
 
 /** A jump-to target within the Settings pane, used by callers that open
@@ -106,6 +111,7 @@ function initialStore(): Store {
     pendingSideChatPingId: null,
     protocolError: null,
     settingsScrollTarget: null,
+    composerAutofocus: false,
   };
 }
 
@@ -213,6 +219,9 @@ export function goToChat(opts?: {
   composerDraft?: ComposerDraft;
   /** Pre-fill the composer with this body (v1.4 "Ask to stop"). */
   composerPrefill?: string;
+  /** Land with the main composer focused + keyboard up (the phone chat bar's
+   * dormant pill). One-shot, consumed by ChatView on mount. */
+  focusComposer?: boolean;
 }): void {
   setState({
     home: "chat",
@@ -221,6 +230,7 @@ export function goToChat(opts?: {
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
     composerPrefill: opts?.composerPrefill ?? null,
+    composerAutofocus: opts?.focusComposer ?? false,
   });
 }
 
@@ -344,6 +354,10 @@ export function clearProtocolError(): void {
 
 export function clearComposerPrefill(): void {
   setState("composerPrefill", null);
+}
+
+export function clearComposerAutofocus(): void {
+  setState("composerAutofocus", false);
 }
 
 /** The reactive store proxy: components read `state.messages`, `state.connection`,

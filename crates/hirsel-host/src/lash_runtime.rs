@@ -821,13 +821,9 @@ impl LashAgentRuntime {
                     match result {
                         Ok(Some(output)) => {
                             runtime.drain_retry_attempts.store(0, Ordering::Release);
-                            let tool_calls = tool_call_summaries(&output);
-                            let text = output
-                                .assistant_message()
-                                .map(str::to_owned)
-                                .or_else(|| output.final_value().map(render_final_value));
-                            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                                runtime.deliver_turn_chat(text, tool_calls).await;
+                            if let Err(error) = materialize_turn_chat(&runtime.tools, &output).await
+                            {
+                                tracing::warn!(%error, "failed to deliver Agent turn output to Chat");
                             }
                             continue;
                         }
@@ -982,19 +978,6 @@ impl LashAgentRuntime {
             .await?;
         self.notify.notify_one();
         Ok(())
-    }
-
-    async fn deliver_turn_chat(&self, text: String, tool_calls: Vec<ToolCallSummary>) {
-        match self
-            .tools
-            .chat_send_with_tool_calls(text, None, tool_calls)
-            .await
-        {
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, "failed to deliver Agent turn output to Chat");
-            }
-        }
     }
 
     async fn handle_turn_error(&self, error: lash::EmbedError) {
@@ -1943,6 +1926,7 @@ fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
         .result
         .tool_calls
         .iter()
+        .filter(|call| call.output.status() != lash_core::ToolCallStatus::Cancelled)
         .map(|call| ToolCallSummary {
             name: call.tool.clone(),
             ok: call.output.is_success(),
@@ -1955,13 +1939,56 @@ fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
         .activities
         .iter()
         .filter_map(|activity| match &activity.event {
-            lash::TurnEvent::ToolCallCompleted { name, output, .. } => Some(ToolCallSummary {
-                name: name.clone(),
-                ok: output.is_success(),
-            }),
+            lash::TurnEvent::ToolCallCompleted { name, output, .. }
+                if output.status() != lash_core::ToolCallStatus::Cancelled =>
+            {
+                Some(ToolCallSummary {
+                    name: name.clone(),
+                    ok: output.is_success(),
+                })
+            }
             _ => None,
         })
         .collect()
+}
+
+fn turn_chat_payload(output: &lash::TurnOutput) -> Option<(String, Vec<ToolCallSummary>)> {
+    let tool_calls = tool_call_summaries(output);
+    match &output.result.outcome {
+        lash::TurnOutcome::Finished(_) => {
+            let text = output
+                .assistant_message()
+                .map(str::to_owned)
+                .or_else(|| output.final_value().map(render_final_value))?;
+            (!text.trim().is_empty()).then_some((text, tool_calls))
+        }
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => {
+            // Lash recovers checkpointed assistant prose here; raw provider
+            // deltas remain activity-only and are intentionally not materialized.
+            let text = output.result.assistant_output.safe_text.trim_end();
+            if text.trim().is_empty() && tool_calls.is_empty() {
+                None
+            } else if text.trim().is_empty() {
+                Some(("— interrupted".to_string(), tool_calls))
+            } else {
+                Some((format!("{text}\n\n— interrupted"), tool_calls))
+            }
+        }
+        lash::TurnOutcome::AgentFrameSwitch { .. } | lash::TurnOutcome::Stopped(_) => None,
+    }
+}
+
+async fn materialize_turn_chat(
+    tools: &ToolSuite,
+    output: &lash::TurnOutput,
+) -> anyhow::Result<bool> {
+    let Some((text, tool_calls)) = turn_chat_payload(output) else {
+        return Ok(false);
+    };
+    tools
+        .chat_send_with_tool_calls(text, None, tool_calls)
+        .await?;
+    Ok(true)
 }
 
 fn condense_args(name: &str, payload: &Value) -> Option<String> {
@@ -5089,6 +5116,35 @@ mod tests {
         assert_eq!(backoff.next_delay(), first);
     }
 
+    fn test_turn_output(
+        outcome: lash::TurnOutcome,
+        safe_text: &str,
+        tool_calls: Vec<lash_core::ToolCallRecord>,
+    ) -> lash::TurnOutput {
+        lash::TurnOutput {
+            result: lash::TurnResult {
+                state: lash_core::SessionSnapshot::default(),
+                outcome,
+                assistant_output: lash_core::AssistantOutput {
+                    safe_text: safe_text.to_string(),
+                    raw_text: safe_text.to_string(),
+                    state: if safe_text.is_empty() {
+                        lash_core::OutputState::EmptyOutput
+                    } else {
+                        lash_core::OutputState::Usable
+                    },
+                },
+                usage: lash_core::TokenUsage::default(),
+                children_usage: Vec::new(),
+                llm_calls: Vec::new(),
+                tool_calls,
+                execution: lash_core::ExecutionSummary::default(),
+                errors: Vec::new(),
+            },
+            activities: Vec::new(),
+        }
+    }
+
     #[test]
     fn timeline_flushes_prose_before_tool_events() {
         let broadcast_log = BroadcastLog::default();
@@ -5181,6 +5237,62 @@ mod tests {
                 summary: Some("ok status 0".to_string())
             }
         );
+    }
+
+    #[test]
+    fn cancelled_turn_materializes_checkpointed_chat_and_completed_tools() {
+        let output = test_turn_output(
+            lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled),
+            "I checked the durable state.",
+            vec![
+                lash_core::ToolCallRecord {
+                    call_id: Some("completed".to_string()),
+                    tool: "shell_run".to_string(),
+                    args: serde_json::json!({ "cmd": "true" }),
+                    output: lash_core::ToolCallOutput::success(serde_json::json!({
+                        "status": 0
+                    })),
+                    duration_ms: 1,
+                },
+                lash_core::ToolCallRecord {
+                    call_id: Some("in-flight".to_string()),
+                    tool: "shell_run".to_string(),
+                    args: serde_json::json!({ "cmd": "sleep 30" }),
+                    output: lash_core::ToolCallOutput::cancelled(
+                        lash_core::ToolCancellation::runtime("turn cancelled"),
+                    ),
+                    duration_ms: 2,
+                },
+            ],
+        );
+
+        let (body, tool_calls) =
+            turn_chat_payload(&output).expect("cancelled checkpoint should become Chat");
+        assert_eq!(body, "I checked the durable state.\n\n— interrupted");
+        assert_eq!(
+            tool_calls,
+            vec![ToolCallSummary {
+                name: "shell_run".to_string(),
+                ok: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn completion_winning_cancel_race_keeps_one_normal_terminal_payload() {
+        let output = test_turn_output(
+            lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+                text: "Completed normally.".to_string(),
+            }),
+            "Completed normally.",
+            Vec::new(),
+        );
+
+        let (body, tool_calls) =
+            turn_chat_payload(&output).expect("finished turn should become one Chat payload");
+        assert_eq!(body, "Completed normally.");
+        assert!(tool_calls.is_empty());
+        assert!(!body.contains("interrupted"));
     }
 
     #[test]
@@ -5623,7 +5735,58 @@ mod tests {
         );
     }
 
-    async fn test_event_executor() -> (HirselToolExecutor, Storage, tempfile::TempDir) {
+    #[tokio::test]
+    async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
+        let (executor, storage, broadcast_log, _dir) = test_event_executor().await;
+        broadcast_log.clear();
+        let output = test_turn_output(
+            lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled),
+            "The completed check passed.",
+            vec![lash_core::ToolCallRecord {
+                call_id: Some("completed".to_string()),
+                tool: "shell_run".to_string(),
+                args: serde_json::json!({ "cmd": "true" }),
+                output: lash_core::ToolCallOutput::success(serde_json::json!({ "status": 0 })),
+                duration_ms: 1,
+            }],
+        );
+
+        assert!(
+            materialize_turn_chat(&executor.tools, &output)
+                .await
+                .unwrap()
+        );
+
+        let messages = storage.all_chat().await.unwrap();
+        let persisted = messages.last().expect("persisted partial Agent message");
+        assert_eq!(persisted.author, ChatAuthor::Agent);
+        assert_eq!(
+            persisted.body,
+            "The completed check passed.\n\n— interrupted"
+        );
+        assert_eq!(
+            persisted.tool_calls,
+            vec![ToolCallSummary {
+                name: "shell_run".to_string(),
+                ok: true,
+            }]
+        );
+        let broadcasts = broadcast_log.recent();
+        assert_eq!(
+            broadcasts
+                .iter()
+                .filter(|frame| matches!(frame, HostToClient::Msg { .. }))
+                .count(),
+            1
+        );
+        assert!(broadcasts.iter().any(|frame| matches!(
+            frame,
+            HostToClient::Msg { message, sc: None } if message == persisted
+        )));
+    }
+
+    async fn test_event_executor() -> (HirselToolExecutor, Storage, BroadcastLog, tempfile::TempDir)
+    {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let storage = Storage::open(&path).await.unwrap();
@@ -5658,7 +5821,7 @@ mod tests {
             },
             storage.clone(),
             broadcaster,
-            broadcast_log,
+            broadcast_log.clone(),
             ProcessStore::default(),
             pushes,
             views,
@@ -5669,12 +5832,17 @@ mod tests {
             }),
             ..TurnAnchorState::default()
         }));
-        (HirselToolExecutor { tools, anchors }, storage, dir)
+        (
+            HirselToolExecutor { tools, anchors },
+            storage,
+            broadcast_log,
+            dir,
+        )
     }
 
     #[tokio::test]
     async fn event_tools_emit_typed_events_and_deprecated_alias_still_works() {
-        let (executor, storage, _dir) = test_event_executor().await;
+        let (executor, storage, _broadcast_log, _dir) = test_event_executor().await;
         let judgment_args = json!({
             "question": "Which release path?",
             "context": "Stable limits the blast radius; edge reaches testers sooner.",

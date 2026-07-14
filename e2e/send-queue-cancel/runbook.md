@@ -214,6 +214,7 @@ Gates:
 
 ```bash
 wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "idle")' 10 >/dev/null
+wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | endswith("— interrupted")))' 10 >/dev/null
 assert_no_jq_for debug/chat '.messages[] | select(.author == "agent" and ((.body | contains("SHOULD_NOT_APPEAR")) or .ref == ('$CANCEL_REAL_ID')))' 5
 ```
 

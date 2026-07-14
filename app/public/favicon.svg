@@ -1,8 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="18 8 64 64">
+  <style>
+    .cube-top { fill: #3a3d52; }
+    .cube-right { fill: #2b2d3e; }
+    .cube-left { fill: #1d1f2b; }
+    .cube-facet { fill: #5b5f78; }
+    @media (prefers-color-scheme: dark) {
+      .cube-top { fill: #ffffff; }
+      .cube-right { fill: #f8fafc; }
+      .cube-left { fill: #0f172a; }
+      .cube-facet { fill: #94a3b8; }
+    }
+  </style>
   <g transform="translate(50, 70)">
-    <polygon points="0,0 30,-15 30,-45 0,-30" fill="#f8fafc"/>
-    <polygon points="0,0 -30,-15 -30,-45 0,-30" fill="#0f172a"/>
-    <polygon points="0,-30 30,-45 0,-60 -30,-45" fill="#ffffff"/>
-    <polygon points="-10,-10 -5,-15 -5,-25 -10,-20" fill="#94a3b8"/>
+    <polygon class="cube-right" points="0,0 30,-15 30,-45 0,-30"/>
+    <polygon class="cube-left" points="0,0 -30,-15 -30,-45 0,-30"/>
+    <polygon class="cube-top" points="0,-30 30,-45 0,-60 -30,-45"/>
+    <polygon class="cube-facet" points="-10,-10 -5,-15 -5,-25 -10,-20"/>
   </g>
 </svg>

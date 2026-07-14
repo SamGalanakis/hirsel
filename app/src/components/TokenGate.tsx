@@ -28,7 +28,7 @@ export function TokenGate(props: Props) {
   return (
     <div class="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
       <div class="flex items-center gap-2">
-        <BrandMark size={24} ring />
+        <BrandMark size={24} />
         <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
       </div>
       <p class="m-0 max-w-[32ch] text-sm text-muted-foreground">

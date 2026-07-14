@@ -207,7 +207,7 @@ function App() {
                   overflow (Model · Canvas · Processes · Settings). */}
               <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
                 <div class="flex shrink-0 items-center gap-2">
-                  <BrandMark size={22} ring />
+                  <BrandMark size={22} />
                   <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
                 </div>
                 <div class="flex shrink-0 items-center gap-0.5">

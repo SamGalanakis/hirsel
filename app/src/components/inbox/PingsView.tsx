@@ -132,7 +132,7 @@ export function PingsView() {
         </div>
       }
     >
-      <div class="thin-scrollbar flex flex-1 flex-col gap-4 overflow-y-auto py-3 pb-6">
+      <div class="flex flex-1 flex-col gap-4 overflow-y-auto py-3 pb-6">
         {/* Needs reply: the active requires_response items, expanded as cards. */}
         <Show when={partitioned().needsReply.length > 0}>
           <section class="flex flex-col gap-3">

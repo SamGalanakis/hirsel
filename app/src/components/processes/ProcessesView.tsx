@@ -35,7 +35,7 @@ export function ProcessesView() {
         </div>
       }
     >
-      <div class="thin-scrollbar flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
+      <div class="flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
         <Show when={groups().running.length > 0}>
           <section class="flex flex-col gap-3">
             <h2 class="mx-3 text-[0.68rem] font-semibold uppercase tracking-[0.06em] text-muted-foreground">

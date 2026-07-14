@@ -30,7 +30,7 @@ function orderedCanvasViews() {
 
 function CanvasBody() {
   return (
-    <div class="thin-scrollbar flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
+    <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
       <For each={orderedCanvasViews()}>
         {(v) => (
           <ViewRenderer spec={v.spec} instanceId={v.instance_id} placement={v.placement} />

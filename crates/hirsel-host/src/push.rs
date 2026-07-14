@@ -10,7 +10,8 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hirsel_proto::{Event, EventKind};
+use chrono::Utc;
+use hirsel_proto::{Event, EventKind, EventStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::Storage;
@@ -302,7 +303,13 @@ impl PushGateway {
     }
 
     pub(crate) async fn enqueue_event(&self, event: &Event) {
-        if !matches!(event.kind, EventKind::Judgment) {
+        if !matches!(event.kind, EventKind::Judgment)
+            || event.status != EventStatus::Open
+            || event.archived
+            || event
+                .snoozed_until
+                .is_some_and(|snoozed_until| snoozed_until > Utc::now())
+        {
             return;
         }
         if !self.claim_delivery(event.id) {
@@ -356,6 +363,15 @@ impl PushGateway {
 
     #[cfg(test)]
     pub(crate) async fn enqueue_ping(&self, event: &Event) {
+        self.enqueue_event(event).await;
+    }
+
+    pub(crate) async fn reenqueue_event(&self, event: &Event) {
+        self.delivery_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .delivered
+            .remove(&event.id);
         self.enqueue_event(event).await;
     }
 
@@ -528,6 +544,8 @@ mod tests {
             status: PingStatus::Open,
             read: false,
             archived: false,
+            snoozed_until: None,
+            archived_at: None,
             fork_sc: None,
             ts: Utc::now(),
         };

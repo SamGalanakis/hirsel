@@ -175,6 +175,10 @@ pub struct Event {
     pub read: bool,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default)]
+    pub snoozed_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
     /// Process-local side-chat scope currently discussing this event.
     #[serde(default)]
     pub fork_sc: Option<String>,
@@ -311,6 +315,7 @@ pub enum ClientToHost {
         #[serde(default)]
         data: serde_json::Value,
     },
+    ClearFinishedEvents {},
     RegisterPushToken {
         platform: PushPlatform,
         token: String,
@@ -785,6 +790,8 @@ mod tests {
             status: EventStatus::Open,
             read: false,
             archived: true,
+            snoozed_until: Some(Utc.with_ymd_and_hms(2026, 7, 13, 8, 0, 0).unwrap()),
+            archived_at: Some(Utc.with_ymd_and_hms(2026, 7, 13, 9, 0, 0).unwrap()),
             fork_sc: Some("side:abc".to_string()),
             anchor: 1,
             ts: Utc.with_ymd_and_hms(2026, 7, 13, 7, 0, 0).unwrap(),
@@ -798,6 +805,8 @@ mod tests {
         assert_eq!(encoded["event"]["source"]["kind"], "scheduled");
         assert_eq!(encoded["event"]["ui"], event.ui);
         assert_eq!(encoded["event"]["archived"], true);
+        assert_eq!(encoded["event"]["snoozed_until"], "2026-07-13T08:00:00Z");
+        assert_eq!(encoded["event"]["archived_at"], "2026-07-13T09:00:00Z");
         assert_eq!(encoded["event"]["fork_sc"], "side:abc");
         assert_eq!(
             serde_json::from_value::<HostToClient>(encoded).unwrap(),
@@ -806,7 +815,20 @@ mod tests {
 
         let mut legacy = serde_json::to_value(event).unwrap();
         legacy.as_object_mut().unwrap().remove("archived");
-        assert!(!serde_json::from_value::<Event>(legacy).unwrap().archived);
+        legacy.as_object_mut().unwrap().remove("snoozed_until");
+        legacy.as_object_mut().unwrap().remove("archived_at");
+        let legacy = serde_json::from_value::<Event>(legacy).unwrap();
+        assert!(!legacy.archived);
+        assert_eq!(legacy.snoozed_until, None);
+        assert_eq!(legacy.archived_at, None);
+    }
+
+    #[test]
+    fn clear_finished_events_round_trips_with_authoritative_wire_tag() {
+        let value = json!({ "type": "clear_finished_events" });
+        let parsed: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed, ClientToHost::ClearFinishedEvents {});
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
     }
 
     #[test]
@@ -934,6 +956,8 @@ mod tests {
             status: PingStatus::Open,
             read: true,
             archived: false,
+            snoozed_until: None,
+            archived_at: None,
             fork_sc: None,
             ts,
         };
@@ -1185,6 +1209,8 @@ mod tests {
             status: EventStatus::Open,
             read: false,
             archived: false,
+            snoozed_until: None,
+            archived_at: None,
             fork_sc: Some("side:abc".to_string()),
             ts: Utc.with_ymd_and_hms(2026, 7, 14, 9, 0, 0).unwrap(),
         };

@@ -48,6 +48,8 @@ fn ping(id: u64, read: bool, status: PingStatus) -> Ping {
         status,
         read,
         archived: false,
+        snoozed_until: None,
+        archived_at: None,
         fork_sc: None,
         ts: Utc.timestamp_opt(id as i64, 0).unwrap(),
     }

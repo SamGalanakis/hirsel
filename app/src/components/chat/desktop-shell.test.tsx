@@ -120,6 +120,9 @@ describe("Desktop-unified shell: Feed and Chat stand together", () => {
     expect(screen.getByPlaceholderText("Message the Agent…")).toBeTruthy();
     // The Feed shows the seeded judgment's card content beside Chat.
     expect(screen.getByText("Persist the canvas?")).toBeTruthy();
+    expect(document.querySelectorAll("main")).toHaveLength(1);
+    const feed = document.querySelector('[data-slot="feed-column"]');
+    expect(document.querySelector("main")?.contains(feed)).toBe(true);
   });
 
   it("carries the surface's ONE red on the Feed header", async () => {
@@ -150,10 +153,10 @@ describe("Desktop-unified shell: the icon rail", () => {
     expect(within(nav).queryByRole("button", { name: /Pings|Inbox/ })).toBeNull();
     // The brand folds to a monogram tile; the Settings gear + ⌘K live in the
     // footer strip, OUTSIDE the Primary nav.
-    expect(screen.getByTitle("hirsel")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "hirsel" })).toBeTruthy();
     expect(within(nav).queryByLabelText("Settings")).toBeNull();
     expect(screen.getByLabelText("Settings")).toBeTruthy();
-    expect(screen.getByLabelText("Open command palette")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "⌘K — Open command palette" })).toBeTruthy();
   });
 
   it("docks Processes / Settings into the shared right region, marking exactly that launcher aria-current", async () => {

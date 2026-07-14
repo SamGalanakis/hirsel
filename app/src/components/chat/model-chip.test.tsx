@@ -42,9 +42,12 @@ async function mount(seedModel?: ModelSnapshot) {
 
 describe("ModelChip (chat header)", () => {
   it("renders the current model + variant", async () => {
-    const { getByText } = await mount(MODEL);
+    const { getByRole, getByText } = await mount(MODEL);
     expect(getByText("GPT-5.6 Sol")).toBeTruthy();
     expect(getByText("medium")).toBeTruthy();
+    expect(
+      getByRole("button", { name: "GPT-5.6 Sol · medium — Change variant" }),
+    ).toBeTruthy();
   });
 
   it("renders nothing when no model snapshot is present (older host)", async () => {

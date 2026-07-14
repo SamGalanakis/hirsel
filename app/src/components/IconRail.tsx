@@ -65,6 +65,7 @@ export function IconRail() {
           both stand), so it is identity, not a control. */}
       <div
         class="flex h-12 w-full flex-shrink-0 items-center justify-center border-b border-border"
+        role="img"
         aria-label="hirsel"
         title="hirsel"
       >
@@ -108,7 +109,7 @@ export function IconRail() {
         <button
           type="button"
           class="flex items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-          aria-label="Open command palette"
+          aria-label="⌘K — Open command palette"
           title="Command palette"
           onClick={() => setCommandPaletteOpen(true)}
         >

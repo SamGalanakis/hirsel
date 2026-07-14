@@ -12,7 +12,7 @@
 // reader). Chat + the inspectors are drill-ins reached from a judgment's Discuss
 // or the NavRail; nothing here can recolor a card — it only pages, decides, and
 // advances.
-import { ArrowRight, ArrowUp, ChevronDown, CircleCheck, List, MessageSquare } from "lucide-solid";
+import { ArrowRight, ArrowUp, ChevronDown, CircleCheck, List } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
@@ -23,12 +23,12 @@ import {
   markEventRead,
   undoDecide,
 } from "../../lib/event-decide";
+import { openEventFork } from "../../lib/event-fork";
 import { createMediaFlag } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import { toast } from "../../lib/toast";
 import {
   archivedEvents,
-  eventTitle,
   eventUiNodes,
   isEventArchived,
   isEventResolved,
@@ -44,6 +44,7 @@ import {
   ARCHIVE_EXIT_CLASS,
   createArchiveExit,
   DecidedStrip,
+  EventCardDoor,
   EventCardHeader,
 } from "./EventCard";
 import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
@@ -368,14 +369,13 @@ export function EventScroller() {
     rootRef?.focus();
   }
 
-  function discuss(ev: EventItem): void {
-    // Preserve the judgment across the drill-in (§4): seed the chat composer with
-    // a quoted reference to it — the @name + the fork heading line — so the
-    // context is never dropped on the way to Chat. `>`-quote style matches the
-    // reply-quote vocabulary; the Owner types their message below it.
-    // TODO(host): open scoped side chat seeded with the event card
-    const prefill = `> ${ev.name} — ${eventTitle(ev)}\n\n`;
-    goToChat({ composerPrefill: prefill });
+  function open(ev: EventItem): void {
+    // Open (or resume) the event fork (§4): a full-screen sheet scoped to THIS
+    // card, with the card pinned and still decidable at the top. Supersedes the
+    // composer-prefill drill-in (a quoted reference seeded into Chat's composer):
+    // the fork keeps the judgment framed and closes the loop — deciding from the
+    // pinned card resolves the event and dismisses the sheet.
+    openEventFork(ev);
   }
 
   // ---- keyboard mirror (scoped to the scroller; skips typing) ----
@@ -529,7 +529,7 @@ export function EventScroller() {
                   onAccept={acceptRec}
                   onSnooze={snooze}
                   onUndo={(id) => undoDecide(id)}
-                  onDiscuss={discuss}
+                  onOpen={open}
                   onAdvance={() => goTo(current() + 1)}
                 />
               )}
@@ -575,7 +575,7 @@ function EventPage(props: {
   onAccept: (ev: EventItem) => void;
   onSnooze: (ev: EventItem) => void;
   onUndo: (id: number) => void;
-  onDiscuss: (ev: EventItem) => void;
+  onOpen: (ev: EventItem) => void;
   onAdvance: () => void;
 }) {
   let cardRef: HTMLDivElement | undefined;
@@ -692,20 +692,14 @@ function EventPage(props: {
             <Show when={decided()}>
               <DecidedStrip ev={props.ev} onUndo={props.onUndo} onArchive={archive} />
             </Show>
-            <Show when={isJudgment() && !decided()}>
-              {/* No resting gesture/keys hint — the swipe reveals its own
-                  "Accept pick"/"Snooze" panels while dragging, and the keys live
-                  in the `?` sheet (→ accept · ← snooze · A–Z choose). Just the
-                  low-commitment Discuss escape hatch, right-aligned. */}
-              <div class="flex items-center justify-end border-t border-border bg-muted/40 px-3.5 py-2.5">
-                <button
-                  type="button"
-                  class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                  onClick={() => props.onDiscuss(props.ev)}
-                >
-                  <MessageSquare class="size-3.5" aria-hidden="true" /> Discuss
-                </button>
-              </div>
+            {/* The door slot (shared with the Feed column): shown for every card
+                except a decided judgment. No resting gesture/keys hint — the
+                swipe reveals its own "Accept pick"/"Snooze" panels while dragging,
+                and the keys live in the `?` sheet. A judgment gets Discuss, a
+                summary/info card gets Ask, and a live fork collapses to the
+                "discussion open · resume" chip. */}
+            <Show when={!(isJudgment() && decided())}>
+              <EventCardDoor ev={props.ev} onOpen={props.onOpen} />
             </Show>
           </div>
         </div>

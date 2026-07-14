@@ -24,7 +24,7 @@ import { AgentStatus } from "./AgentStatus";
 import { ModelChip } from "./ModelChip";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
-import { SideChatSheet } from "../inbox/SideChatSheet";
+import { EventForkPanel } from "../inbox/EventForkPanel";
 import { ProcessesSheet } from "../processes/ProcessesSheet";
 import { SettingsSheet } from "../settings/SettingsSheet";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
@@ -618,13 +618,13 @@ export function ChatView() {
           each is a full-screen sheet. Each self-gates on the region, so source
           order no longer encodes precedence — the enum does. Chat (the center
           pane) is always live to the left.
-            • Side Chat  — `rightRegion === "sideChat"` (backed by activeSideChatSc)
+            • Event Fork — `rightRegion === "sideChat"` (backed by activeSideChatSc)
             • Canvas     — `rightRegion === "canvas"`   (CanvasRail / CanvasSheet)
             • Processes  — `rightRegion === "processes"`
             • Settings   — `rightRegion === "settings"`
           The idle `none` state renders nothing. Closing any pane returns the
           region to `none`. */}
-      <SideChatSheet />
+      <EventForkPanel />
       <CanvasRail />
       <CanvasSheet />
       <ProcessesSheet />

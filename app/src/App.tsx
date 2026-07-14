@@ -19,7 +19,12 @@ import {
   shortcutHelpOpen,
 } from "./lib/keymap";
 import { titleBadgeEnabled } from "./lib/prefs";
-import { openUnreadCount } from "./store/selectors";
+import {
+  eventTitle,
+  isOpenJudgment,
+  openJudgmentCount,
+  visibleEvents,
+} from "./store/selectors";
 import { state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
@@ -75,13 +80,78 @@ function App() {
     onCleanup(() => client.close());
   });
 
-  // Reflect the Inbox's email-like unread count (open + unread) in
-  // document.title, so it's visible from a backgrounded tab without push
-  // notifications. (Replaces the React useTitleBadge hook with a plain effect.)
+  // The "needs you" count is the SINGLE truth the attention layer reads: open,
+  // undecided judgments over the resting (non-archived) queue — the same count
+  // the Feed header shows as its one red. Wave 1 rewires the title badge, the
+  // favicon dot, and desktop notifications onto THIS (they read the
+  // never-populated `state.pings` before — a live bug).
+  const needsYouCount = () =>
+    openJudgmentCount(
+      visibleEvents(state.events, state.eventArchiveOverrides),
+      state.eventDecideOverrides,
+    );
+
+  // Reflect the needs-you count in document.title, so it's visible from a
+  // backgrounded tab without push. (Replaces the React useTitleBadge hook.)
   createEffect(() => {
-    const count = openUnreadCount(state.pings, state.unreadOverrides, state.resolveOverrides);
+    const count = needsYouCount();
     document.title =
       titleBadgeEnabled() && count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
+  });
+
+  // Swap the tab favicon to the dotted variant while anything needs you, so a
+  // backgrounded tab reads "attend to this" at a glance — one calm indigo dot on
+  // the cube mark, never a red count. Reverts to the plain mark at zero.
+  createEffect(() => {
+    const dotted = needsYouCount() > 0;
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link) link.href = dotted ? "/favicon-dot.svg" : "/favicon.svg";
+  });
+
+  // Optional desktop notification for a NEW blocking judgment while the tab is
+  // hidden — but ONLY when the Owner has already granted permission from the
+  // quiet Settings row (never a permission prompt on load, per the "no
+  // notification slot machine" rule). Primed on first run so the initial
+  // snapshot never notifies for pre-existing work; one silent notification per
+  // freshly-arrived blocking judgment.
+  let knownBlockingIds: Set<number> | null = null;
+  createEffect(() => {
+    const blocking = visibleEvents(state.events, state.eventArchiveOverrides).filter(
+      (e) => isOpenJudgment(e, state.eventDecideOverrides) && e.blocking,
+    );
+    const ids = new Set(blocking.map((e) => e.id));
+    if (knownBlockingIds === null) {
+      knownBlockingIds = ids;
+      return;
+    }
+    const fresh = blocking.filter((e) => !knownBlockingIds!.has(e.id));
+    knownBlockingIds = ids;
+    if (
+      fresh.length === 0 ||
+      typeof Notification === "undefined" ||
+      Notification.permission !== "granted" ||
+      document.visibilityState !== "hidden"
+    ) {
+      return;
+    }
+    const newest = fresh[fresh.length - 1];
+    try {
+      const note = new Notification("hirsel — needs you", {
+        body: eventTitle(newest),
+        tag: `hirsel-judgment-${newest.id}`,
+        silent: true,
+      });
+      // Clicking the notification brings the tab forward — the one useful action.
+      note.onclick = () => {
+        try {
+          window.focus();
+        } catch {
+          /* best-effort */
+        }
+      };
+    } catch {
+      /* best-effort; a denied/unsupported environment just stays quiet */
+    }
   });
 
   return (

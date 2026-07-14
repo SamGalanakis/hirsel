@@ -491,6 +491,23 @@ function SettingsPanel() {
   const [fingerprint, setFingerprint] = createSignal("…");
   const [confirmForget, setConfirmForget] = createSignal(false);
 
+  // Desktop notifications: permission is requested ONLY from the quiet row below
+  // (never on load, per the "no notification slot machine" rule). App.tsx fires a
+  // silent notification for a NEW blocking judgment while the tab is hidden, but
+  // only once this reads "granted".
+  const notificationsSupported = typeof Notification !== "undefined";
+  const [notifPermission, setNotifPermission] = createSignal<NotificationPermission>(
+    notificationsSupported ? Notification.permission : "denied",
+  );
+  async function requestNotifications() {
+    if (!notificationsSupported) return;
+    try {
+      setNotifPermission(await Notification.requestPermission());
+    } catch {
+      /* best-effort; a browser that rejects the request just stays off */
+    }
+  }
+
   let panelRef: HTMLDivElement | undefined;
   const phone = createMediaFlag("(max-width: 1099.98px)");
 
@@ -701,7 +718,7 @@ function SettingsPanel() {
           <div class="flex items-center gap-3 px-3.5 py-3">
             <Field
               title="Tab title badge"
-              subtitle="Unread Pings show as “(3) hirsel” in this browser tab."
+              subtitle="Open judgments that need you show as “(3) hirsel” in this browser tab."
             />
             <Toggle
               ariaLabel="Tab title badge"
@@ -709,11 +726,37 @@ function SettingsPanel() {
               onChange={setTitleBadgeEnabled}
             />
           </div>
-          <div class="px-3.5 py-3">
+          <div class="flex items-center gap-3 px-3.5 py-3">
             <Field
-              title="Web push"
-              subtitle="Not available in this build — the web client has no push. Keep the tab open or install the PWA to catch the title badge."
+              title="Desktop notifications"
+              subtitle={
+                !notificationsSupported
+                  ? "Not supported in this browser."
+                  : notifPermission() === "granted"
+                    ? "On — a new blocking judgment notifies you while this tab is in the background."
+                    : notifPermission() === "denied"
+                      ? "Blocked. Re-allow notifications for this site in your browser to turn them on."
+                      : "Off — get one quiet notification for a new blocking judgment while the tab is backgrounded."
+              }
             />
+            <Show
+              when={notificationsSupported && notifPermission() === "default"}
+              fallback={
+                <span
+                  class="shrink-0 text-xs font-medium"
+                  classList={{
+                    "text-status-success": notifPermission() === "granted",
+                    "text-muted-foreground": notifPermission() !== "granted",
+                  }}
+                >
+                  {notifPermission() === "granted" ? "Enabled" : "Off"}
+                </span>
+              }
+            >
+              <Button size="sm" variant="outline" class="shrink-0" onClick={requestNotifications}>
+                Enable
+              </Button>
+            </Show>
           </div>
         </Card>
 

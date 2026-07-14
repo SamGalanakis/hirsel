@@ -126,6 +126,39 @@ export function isEventResolved(event: EventItem, decideOverrides: number[]): bo
   return event.status !== "open" || decideOverrides.includes(event.id);
 }
 
+/** Effective "archived" state for an Event (archive contract v1), folding in
+ * the optimistic archive override (`eventArchiveOverrides`) — the archive twin
+ * of `isEventResolved`: archived when the wire flag is set OR the Owner has
+ * just archived it and the host echo has not yet landed. One place so the
+ * default filter, the Archived(n) count, and the archived view all agree. */
+export function isEventArchived(event: EventItem, archiveOverrides: number[]): boolean {
+  return event.archived === true || archiveOverrides.includes(event.id);
+}
+
+/** The resting queue: every event that is not archived. THE default filter —
+ * every surface that renders or counts the queue (phone scroller pages + pager
+ * counts, the desktop Feed column, the peek/queue list, the phone nav badge)
+ * reads through this, so archived events vanish everywhere at once and counts
+ * stay honest against the filtered set. */
+export function visibleEvents(events: EventItem[], archiveOverrides: number[]): EventItem[] {
+  return events.filter((e) => !isEventArchived(e, archiveOverrides));
+}
+
+/** The quiet Archived(n) view's data: archived events, newest-first (highest id
+ * — most recently produced — first; ts is a display detail, id is the stable
+ * monotonic order used elsewhere). */
+export function archivedEvents(events: EventItem[], archiveOverrides: number[]): EventItem[] {
+  return events.filter((e) => isEventArchived(e, archiveOverrides)).sort((a, b) => b.id - a.id);
+}
+
+/** "Finished" per the archive contract: done, OR read awareness that never
+ * needed a response — exactly the set `events.clear` sweeps, and the gate for
+ * the card overflow's Archive action (an open judgment is archived only by the
+ * host/agent, never offered the affordance here). */
+export function isEventFinished(event: EventItem, decideOverrides: number[]): boolean {
+  return isEventResolved(event, decideOverrides) || (event.read && !event.requires_response);
+}
+
 /** A judgment still needing the Owner: kind judgment, open, not optimistically
  * decided. The queue's hero rank. */
 export function isOpenJudgment(event: EventItem, decideOverrides: number[]): boolean {

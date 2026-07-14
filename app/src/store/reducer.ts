@@ -349,6 +349,12 @@ export function reduce(state: AppState, action: Action): AppState {
         eventDecideOverrides: state.eventDecideOverrides.filter((id) =>
           (action.payload.events ?? []).some((e) => e.id === id),
         ),
+        // Same recompute for the optimistic archive layer: an id the snapshot
+        // no longer carries (or already carries as archived — the committed
+        // truth) leaves no stale override residue behind.
+        eventArchiveOverrides: state.eventArchiveOverrides.filter((id) =>
+          (action.payload.events ?? []).some((e) => e.id === id && e.archived !== true),
+        ),
         // Signal the wholesale event-set swap to the queue scroller so it
         // re-anchors its viewport and drops per-session bookkeeping (see
         // AppState.eventsSnapshotSeq).
@@ -576,6 +582,15 @@ export function reduce(state: AppState, action: Action): AppState {
           event.status !== "open"
             ? state.eventDecideOverrides.filter((id) => id !== event.id)
             : state.eventDecideOverrides,
+        // The archive twin: a committed archived event_upsert supersedes any
+        // pending optimistic archive override for this id. Only the COMMITTED
+        // archived truth prunes — an unrelated interleaved upsert (still
+        // archived=false) must not drop the override and flicker the card back
+        // before the archive echo lands (same guard as the decide prune above).
+        eventArchiveOverrides:
+          event.archived === true
+            ? state.eventArchiveOverrides.filter((id) => id !== event.id)
+            : state.eventArchiveOverrides,
       };
     }
 
@@ -605,6 +620,31 @@ export function reduce(state: AppState, action: Action): AppState {
         e.id === action.eventId ? { ...e, read: true } : e,
       );
       return { ...state, events };
+    }
+
+    case "event_archive_local": {
+      // Optimistic archive flip (mirrors `event_decide_local`): record the id so
+      // the event leaves the resting queue at once, while `event_action{archive}`
+      // is sent to the host; the committed archived event_upsert reconciles.
+      const eventArchiveOverrides = state.eventArchiveOverrides.includes(action.eventId)
+        ? state.eventArchiveOverrides
+        : [...state.eventArchiveOverrides, action.eventId].slice(-200);
+      return { ...state, eventArchiveOverrides };
+    }
+
+    case "event_unarchive_local": {
+      // Optimistic unarchive: drop any pending archive override AND flip a
+      // wire-archived event's local flag (the `event_read_local` pattern), so
+      // the row returns to the resting queue at once whichever layer archived
+      // it. The host's event_upsert echo reconciles the truth.
+      const events = state.events.map((e) =>
+        e.id === action.eventId && e.archived === true ? { ...e, archived: false } : e,
+      );
+      return {
+        ...state,
+        events,
+        eventArchiveOverrides: state.eventArchiveOverrides.filter((id) => id !== action.eventId),
+      };
     }
 
     case "send_local": {

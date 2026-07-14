@@ -527,6 +527,7 @@ mod tests {
             quick_replies: Vec::new(),
             status: PingStatus::Open,
             read: false,
+            archived: false,
             ts: Utc::now(),
         };
 

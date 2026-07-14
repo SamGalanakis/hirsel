@@ -1950,6 +1950,8 @@ fn condense_args(name: &str, payload: &Value) -> Option<String> {
         "events_notify" | "events_summary" => {
             labeled_first_scalar(payload, &["description", "name"], "event")
         }
+        "events_archive" => scalar_field(payload, "event_id").map(|id| format!("event {id}")),
+        "events_clear" => None,
         "pings_send" => {
             labeled_first_scalar(payload, &["content_md", "content", "body"], "content")
         }
@@ -1986,9 +1988,10 @@ fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
     let payload = tool_output_payload(output).unwrap_or(output);
     let detail = match name {
         "shell_run" => shell_result_summary(payload),
-        "events_judgment" | "events_notify" | "events_summary" => {
+        "events_judgment" | "events_notify" | "events_summary" | "events_archive" => {
             scalar_field(payload, "event_id").map(|id| format!("event {id}"))
         }
+        "events_clear" => scalar_field(payload, "count").map(|count| format!("{count} archived")),
         "pings_send" => scalar_field(payload, "ping_id").map(|id| format!("ping {id}")),
         "pings_resolve" => payload
             .get("ping")
@@ -2387,6 +2390,8 @@ impl HirselToolExecutor {
             "events_judgment" => self.events_judgment(call.args).await,
             "events_notify" => self.events_notify(call.args).await,
             "events_summary" => self.events_summary(call.args).await,
+            "events_archive" => self.events_archive(call.args).await,
+            "events_clear" => self.events_clear().await,
             "pings_send" => self.pings_send(call.args).await,
             "pings_resolve" => self.pings_resolve(call.args).await,
             "views_show" => self.views_show(call.args).await,
@@ -2454,6 +2459,26 @@ impl HirselToolExecutor {
             .await
             .map_err(|error| error.to_string())?;
         Ok(event_send_result(&event))
+    }
+
+    async fn events_archive(&self, args: &Value) -> Result<Value, String> {
+        let event_id = required_u64_any(args, &["event_id"])?;
+        let event = self
+            .tools
+            .events_archive(event_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("event not found: {event_id}"))?;
+        Ok(event_archive_result(&event))
+    }
+
+    async fn events_clear(&self) -> Result<Value, String> {
+        let count = self
+            .tools
+            .events_clear()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(events_clear_result(count))
     }
 
     async fn pings_send(&self, args: &Value) -> Result<Value, String> {
@@ -2785,6 +2810,18 @@ fn event_send_result(event: &hirsel_proto::Event) -> Value {
         "anchor": event.anchor,
         "kind": event.kind,
     })
+}
+
+fn event_archive_result(event: &hirsel_proto::Event) -> Value {
+    json!({
+        "event_id": event.id,
+        "status": event.status,
+        "archived": event.archived,
+    })
+}
+
+fn events_clear_result(count: usize) -> Value {
+    json!({ "count": count })
 }
 
 fn pings_send_result(ping: &hirsel_proto::Ping) -> Value {
@@ -3459,6 +3496,26 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
             ToolScheduling::Serial,
         ),
         tool_definition(
+            "hirsel.events_archive",
+            "events_archive",
+            "Archive one finished Event so Sam's feed hides it. Archiving an open Event also resolves it as dismissed.",
+            event_archive_input_schema(),
+            event_archive_output_schema(),
+            ["events"],
+            "archive",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.events_clear",
+            "events_clear",
+            "Clear Sam's feed by archiving every finished Event. Use events.clear when Sam asks to clear out or clear my feed; open judgments that still need a response are kept.",
+            empty_object_input_schema(),
+            events_clear_output_schema(),
+            ["events"],
+            "clear",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
             "hirsel.pings_send",
             "pings_send",
             "deprecated: use events.judgment / events.notify. Compatibility alias for emitting a judgment or info Event from the current Agent turn.",
@@ -3874,6 +3931,24 @@ fn events_judgment_input_schema() -> Value {
     })
 }
 
+fn empty_object_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn event_archive_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id"],
+        "properties": {
+            "event_id": { "type": "integer", "minimum": 1 }
+        }
+    })
+}
+
 fn events_notify_input_schema() -> Value {
     json!({
         "type": "object",
@@ -3932,6 +4007,30 @@ fn event_send_output_schema(kind: &str) -> Value {
             "event_id": { "type": "integer", "minimum": 1 },
             "anchor": { "type": "integer", "minimum": 1 },
             "kind": { "const": kind }
+        }
+    })
+}
+
+fn event_archive_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id", "status", "archived"],
+        "properties": {
+            "event_id": { "type": "integer", "minimum": 1 },
+            "status": { "const": "done" },
+            "archived": { "const": true }
+        }
+    })
+}
+
+fn events_clear_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["count"],
+        "properties": {
+            "count": { "type": "integer", "minimum": 0 }
         }
     })
 }
@@ -4019,6 +4118,7 @@ fn ping_output_schema() -> Value {
             "quick_replies",
             "status",
             "read",
+            "archived",
             "ts"
         ],
         "properties": {
@@ -4044,6 +4144,7 @@ fn ping_output_schema() -> Value {
             },
             "status": { "type": "string", "enum": ["open", "done"] },
             "read": { "type": "boolean" },
+            "archived": { "type": "boolean" },
             "ts": timestamp_output_schema()
         }
     })
@@ -5138,6 +5239,7 @@ mod tests {
                 quick_replies: Vec::new(),
                 status: PingStatus::Done,
                 read: true,
+                archived: false,
                 ts: Utc::now(),
             }],
             mode: SendMode::Send,
@@ -5200,6 +5302,21 @@ mod tests {
         assert!(judgment.description().contains("events.judgment({"));
         assert!(judgment.description().contains("Supply 2–4 options"));
         assert!(judgment.description().contains("only paraphrases it"));
+
+        let archive = definitions
+            .iter()
+            .find(|definition| definition.name() == "events_archive")
+            .unwrap();
+        assert!(archive.description().contains("Sam's feed hides it"));
+        let clear = definitions
+            .iter()
+            .find(|definition| definition.name() == "events_clear")
+            .unwrap();
+        assert!(clear.description().contains("clear my feed"));
+        let clear_validator =
+            jsonschema::JSONSchema::compile(clear.contract.input_schema.canonical()).unwrap();
+        assert!(clear_validator.validate(&json!({})).is_ok());
+        assert!(clear_validator.validate(&json!({ "all": true })).is_err());
 
         let alias = definitions
             .iter()
@@ -5346,6 +5463,23 @@ mod tests {
             .unwrap();
         assert_eq!(alias_event.kind, hirsel_proto::EventKind::Judgment);
 
+        let judgment_id = judgment["event_id"].as_u64().unwrap();
+        let archived = executor
+            .events_archive(&json!({ "event_id": judgment_id }))
+            .await
+            .unwrap();
+        assert_eq!(archived["event_id"], judgment_id);
+        assert_eq!(archived["status"], "done");
+        assert_eq!(archived["archived"], true);
+
+        let info_id = info["event_id"].as_u64().unwrap();
+        storage.mark_ping_read(info_id).await.unwrap();
+        assert_eq!(executor.events_clear().await.unwrap()["count"], 1);
+        assert_eq!(executor.events_clear().await.unwrap()["count"], 0);
+        let cleared = storage.ping(info_id).await.unwrap().unwrap();
+        assert!(cleared.archived);
+        assert_eq!(cleared.status, PingStatus::Done);
+
         for count in [1, 5] {
             let mut invalid = judgment_args.clone();
             invalid["options"] = Value::Array(
@@ -5481,6 +5615,7 @@ mod tests {
             }],
             status: PingStatus::Done,
             read: true,
+            archived: true,
             ts: now,
         };
         let events = vec![
@@ -5563,6 +5698,8 @@ mod tests {
         results.insert("events_judgment", vec![event_send_result(&ping)]);
         results.insert("events_notify", vec![event_send_result(&info)]);
         results.insert("events_summary", vec![event_send_result(&summary)]);
+        results.insert("events_archive", vec![event_archive_result(&ping)]);
+        results.insert("events_clear", vec![events_clear_result(3)]);
         results.insert("pings_send", vec![pings_send_result(&ping)]);
         results.insert(
             "pings_resolve",

@@ -10,8 +10,8 @@ use hirsel_drivers::{
     SubagentEvent, TerminalOutcome,
 };
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, HostToClient, Ping,
-    ProcessInfo, QuickReply, ToolCallSummary,
+    ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, EventStatus,
+    HostToClient, Ping, ProcessInfo, QuickReply, ToolCallSummary,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, time::Duration};
@@ -466,6 +466,38 @@ impl ToolSuite {
             });
         }
         Ok(ping)
+    }
+
+    pub async fn events_archive(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
+        let event = self.storage.archive_event(event_id).await?;
+        if let Some(event) = &event {
+            self.broadcast(HostToClient::EventUpsert {
+                event: event.clone(),
+            });
+        }
+        Ok(event)
+    }
+
+    pub async fn events_clear(&self) -> anyhow::Result<usize> {
+        let event_ids = self
+            .storage
+            .all_pings()
+            .await?
+            .into_iter()
+            .filter(|event| {
+                !event.archived
+                    && (event.status == EventStatus::Done
+                        || (event.read && !event.requires_response))
+            })
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        let count = self.storage.archive_finished_events().await?;
+        for event_id in event_ids {
+            if let Some(event) = self.storage.ping(event_id).await? {
+                self.broadcast(HostToClient::EventUpsert { event });
+            }
+        }
+        Ok(count)
     }
 
     pub async fn emit_scheduled_digest(

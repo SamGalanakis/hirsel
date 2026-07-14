@@ -173,6 +173,8 @@ pub struct Event {
     pub status: EventStatus,
     #[serde(default)]
     pub read: bool,
+    #[serde(default)]
+    pub archived: bool,
     pub ts: DateTime<Utc>,
 }
 
@@ -773,6 +775,7 @@ mod tests {
             quick_replies: Vec::new(),
             status: EventStatus::Open,
             read: false,
+            archived: true,
             anchor: 1,
             ts: Utc.with_ymd_and_hms(2026, 7, 13, 7, 0, 0).unwrap(),
         };
@@ -784,10 +787,15 @@ mod tests {
         assert_eq!(encoded["event"]["kind"], "summary");
         assert_eq!(encoded["event"]["source"]["kind"], "scheduled");
         assert_eq!(encoded["event"]["ui"], event.ui);
+        assert_eq!(encoded["event"]["archived"], true);
         assert_eq!(
             serde_json::from_value::<HostToClient>(encoded).unwrap(),
             frame
         );
+
+        let mut legacy = serde_json::to_value(event).unwrap();
+        legacy.as_object_mut().unwrap().remove("archived");
+        assert!(!serde_json::from_value::<Event>(legacy).unwrap().archived);
     }
 
     #[test]
@@ -914,6 +922,7 @@ mod tests {
             }],
             status: PingStatus::Open,
             read: true,
+            archived: false,
             ts,
         };
         let process = ProcessInfo {

@@ -545,9 +545,10 @@ impl Storage {
                 quick_replies,
                 status,
                 read,
+                archived,
                 ts
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8, ?9, 'open', 0, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8, ?9, 'open', 0, 0, ?10)
             ",
             params![
                 event_kind_to_str(kind),
@@ -575,6 +576,7 @@ impl Storage {
             quick_replies,
             status: EventStatus::Open,
             read: false,
+            archived: false,
             ts,
         })
     }
@@ -638,6 +640,43 @@ impl Storage {
         Ok(Some(get_ping(&conn, ping_id)?))
     }
 
+    pub async fn archive_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET archived = 1, status = 'done' WHERE id = ?1",
+            params![event_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, event_id)?))
+    }
+
+    pub async fn unarchive_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET archived = 0 WHERE id = ?1",
+            params![event_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, event_id)?))
+    }
+
+    pub async fn archive_finished_events(&self) -> anyhow::Result<usize> {
+        let conn = self.conn.lock().await;
+        Ok(conn.execute(
+            "
+            UPDATE pings
+            SET archived = 1, status = 'done'
+            WHERE archived = 0
+              AND (status = 'done' OR (read != 0 AND requires_response = 0))
+            ",
+            [],
+        )?)
+    }
+
     pub async fn resolve_open_pings_for_anchor(&self, anchor: u64) -> anyhow::Result<Vec<Ping>> {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
@@ -699,7 +738,7 @@ impl Storage {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, ts
+                   requires_response, quick_replies, status, read, archived, ts
             FROM pings
             ORDER BY id ASC
             ",
@@ -1440,7 +1479,7 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, ts
+                   requires_response, quick_replies, status, read, archived, ts
             FROM pings
             WHERE status = 'open'
             ORDER BY CASE kind
@@ -1457,11 +1496,10 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, ts
+                   requires_response, quick_replies, status, read, archived, ts
             FROM pings
             WHERE status = 'done'
             ORDER BY id DESC
-            LIMIT 20
             ",
         )?;
         let rows = stmt.query_map([], ping_from_row)?;
@@ -1528,6 +1566,7 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             quick_replies TEXT NOT NULL,
             status TEXT NOT NULL,
             read INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
             ts TEXT NOT NULL
         );
         ",
@@ -1535,6 +1574,12 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
     if !table_has_column(conn, "pings", "read")? {
         conn.execute(
             "ALTER TABLE pings ADD COLUMN read INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "pings", "archived")? {
+        conn.execute(
+            "ALTER TABLE pings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -1576,7 +1621,7 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
     conn.execute(
-        "UPDATE pings SET status = 'done' WHERE status = 'archived'",
+        "UPDATE pings SET status = 'done', archived = 1 WHERE status = 'archived'",
         [],
     )?;
 
@@ -1785,7 +1830,7 @@ fn get_ping_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<Ping
     conn.query_row(
         "
         SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-               requires_response, quick_replies, status, read, ts
+               requires_response, quick_replies, status, read, archived, ts
         FROM pings
         WHERE id = ?1
         ",
@@ -1917,7 +1962,7 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
     let ui: String = row.get(6)?;
     let replies: String = row.get(9)?;
     let status: String = row.get(10)?;
-    let ts: String = row.get(12)?;
+    let ts: String = row.get(13)?;
     Ok(Ping {
         id: row.get(0)?,
         kind: event_kind_from_str(&kind)?,
@@ -1937,6 +1982,7 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
         })?,
         status: status_from_str(&status)?,
         read: row.get::<_, i64>(11)? != 0,
+        archived: row.get::<_, i64>(12)? != 0,
         ts: parse_ts(&ts)?,
     })
 }
@@ -2388,6 +2434,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archiving_an_open_event_is_idempotent_and_unarchive_does_not_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap();
+        let event = storage
+            .create_ping(
+                "needs-reply",
+                "Needs reply",
+                "Needs reply",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let archived = storage.archive_event(event.id).await.unwrap().unwrap();
+        let archived_again = storage.archive_event(event.id).await.unwrap().unwrap();
+        let unarchived = storage.unarchive_event(event.id).await.unwrap().unwrap();
+
+        assert_eq!(archived.status, EventStatus::Done);
+        assert!(archived.archived);
+        assert_eq!(archived_again, archived);
+        assert_eq!(unarchived.status, EventStatus::Done);
+        assert!(!unarchived.archived);
+        assert!(storage.archive_event(99_999).await.unwrap().is_none());
+        assert!(storage.unarchive_event(99_999).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn bulk_archive_counts_only_newly_finished_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap()
+            .id;
+        let done = storage
+            .create_ping("done", "Done", "Done", anchor, true, Vec::new())
+            .await
+            .unwrap();
+        storage.resolve_ping(done.id).await.unwrap();
+        let read_info = storage
+            .create_ping(
+                "read-info",
+                "Read info",
+                "Read info",
+                anchor,
+                false,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        storage.mark_ping_read(read_info.id).await.unwrap();
+        let open_judgment = storage
+            .create_ping(
+                "open-judgment",
+                "Open judgment",
+                "Open judgment",
+                anchor,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        storage.mark_ping_read(open_judgment.id).await.unwrap();
+        let unread_info = storage
+            .create_ping(
+                "unread-info",
+                "Unread info",
+                "Unread info",
+                anchor,
+                false,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let already_archived = storage
+            .create_ping(
+                "already-archived",
+                "Already archived",
+                "Already archived",
+                anchor,
+                false,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        storage.archive_event(already_archived.id).await.unwrap();
+
+        assert_eq!(storage.archive_finished_events().await.unwrap(), 2);
+        assert_eq!(storage.archive_finished_events().await.unwrap(), 0);
+
+        for event_id in [done.id, read_info.id, already_archived.id] {
+            let event = storage.ping(event_id).await.unwrap().unwrap();
+            assert!(event.archived);
+            assert_eq!(event.status, EventStatus::Done);
+        }
+        for event_id in [open_judgment.id, unread_info.id] {
+            assert!(!storage.ping(event_id).await.unwrap().unwrap().archived);
+        }
+    }
+
+    #[tokio::test]
     async fn owner_reply_resolves_every_open_ping_for_its_anchor_idempotently() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
@@ -2491,6 +2645,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["one", "two"]
         );
+    }
+
+    #[tokio::test]
+    async fn hello_snapshot_includes_all_archived_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap()
+            .id;
+        for index in 0..25 {
+            let event = storage
+                .create_ping(
+                    format!("event-{index}"),
+                    format!("Event {index}"),
+                    format!("Event {index}"),
+                    anchor,
+                    false,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            storage.archive_event(event.id).await.unwrap();
+        }
+
+        let snapshot = storage.hello_snapshot(None).await.unwrap();
+        assert_eq!(snapshot.events.len(), 25);
+        assert!(snapshot.events.iter().all(|event| event.archived));
     }
 
     #[tokio::test]
@@ -2856,6 +3039,15 @@ mod tests {
                     ts
                 )
                 VALUES ('legacy question', 1, 1, '[]', 'open', '2026-07-08T12:00:00Z');
+                INSERT INTO inbox_items (
+                    content,
+                    anchor,
+                    requires_response,
+                    quick_replies,
+                    status,
+                    ts
+                )
+                VALUES ('legacy archived', 1, 0, '[]', 'archived', '2026-07-08T12:01:00Z');
                 ",
             )
             .unwrap();
@@ -2867,10 +3059,13 @@ mod tests {
         assert!(legacy_chat[0].tool_calls.is_empty());
 
         let legacy = storage.all_pings().await.unwrap();
-        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy.len(), 2);
         assert!(!legacy[0].read);
+        assert!(!legacy[0].archived);
         assert_eq!(legacy[0].name, "legacy-question");
         assert_eq!(legacy[0].description, "legacy question");
+        assert_eq!(legacy[1].status, EventStatus::Done);
+        assert!(legacy[1].archived);
 
         let read = storage.mark_ping_read(legacy[0].id).await.unwrap().unwrap();
         assert!(read.read);
@@ -2878,8 +3073,9 @@ mod tests {
 
         let reopened = Storage::open(dir.path()).await.unwrap();
         let persisted = reopened.all_pings().await.unwrap();
-        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted.len(), 2);
         assert!(persisted[0].read);
+        assert!(persisted[1].archived);
     }
 
     #[tokio::test]

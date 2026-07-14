@@ -528,6 +528,7 @@ mod tests {
             status: PingStatus::Open,
             read: false,
             archived: false,
+            fork_sc: None,
             ts: Utc::now(),
         };
 

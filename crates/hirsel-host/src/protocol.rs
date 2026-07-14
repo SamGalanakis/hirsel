@@ -453,13 +453,27 @@ where
         }
         ClientToHost::OpenSideChat {
             client_id: _,
+            event_id,
             ping_id,
         } => {
-            let (sc, messages, _) = state.side_chats.open(ping_id).await?;
+            let (event_id, legacy_ping) = match (event_id, ping_id) {
+                (Some(event_id), None) => (event_id, false),
+                (None, Some(ping_id)) => (ping_id, true),
+                (Some(event_id), Some(ping_id)) if event_id == ping_id => (event_id, false),
+                (Some(_), Some(_)) => anyhow::bail!("event_id and ping_id must match"),
+                (None, None) => anyhow::bail!("event_id or ping_id is required"),
+            };
+            let opened = if legacy_ping {
+                state.side_chats.open_legacy_ping(event_id).await?
+            } else {
+                state.side_chats.open(event_id).await?
+            };
             state.broadcast(HostToClient::SideChatOpen {
-                sc,
-                ping_id,
-                messages,
+                sc: opened.sc,
+                event_id,
+                ping_id: event_id,
+                event: opened.event,
+                messages: opened.messages,
             });
         }
         ClientToHost::ConcludeSideChat { sc } => {

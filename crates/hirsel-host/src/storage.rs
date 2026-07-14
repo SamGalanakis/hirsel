@@ -664,6 +664,7 @@ impl Storage {
             status: EventStatus::Open,
             read: false,
             archived: false,
+            fork_sc: None,
             ts,
         })
     }
@@ -809,6 +810,34 @@ impl Storage {
         get_ping_optional(&conn, ping_id).map_err(Into::into)
     }
 
+    pub async fn set_event_fork(
+        &self,
+        event_id: u64,
+        fork_sc: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET fork_sc = ?2 WHERE id = ?1",
+            params![event_id, fork_sc],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, event_id)?))
+    }
+
+    pub async fn resolve_event_fork(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET status = 'done', fork_sc = NULL WHERE id = ?1",
+            params![event_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, event_id)?))
+    }
+
     pub async fn mentioned_pings(&self, ping_ids: &[u64]) -> anyhow::Result<Vec<Ping>> {
         let conn = self.conn.lock().await;
         ping_ids
@@ -825,7 +854,7 @@ impl Storage {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, archived, ts
+                   requires_response, quick_replies, status, read, archived, fork_sc, ts
             FROM pings
             ORDER BY id ASC
             ",
@@ -1586,7 +1615,7 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, archived, ts
+                   requires_response, quick_replies, status, read, archived, fork_sc, ts
             FROM pings
             WHERE status = 'open'
             ORDER BY CASE kind
@@ -1603,7 +1632,7 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, archived, ts
+                   requires_response, quick_replies, status, read, archived, fork_sc, ts
             FROM pings
             WHERE status = 'done'
             ORDER BY id DESC
@@ -1674,6 +1703,7 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             status TEXT NOT NULL,
             read INTEGER NOT NULL DEFAULT 0,
             archived INTEGER NOT NULL DEFAULT 0,
+            fork_sc TEXT NULL,
             ts TEXT NOT NULL
         );
         ",
@@ -1690,6 +1720,11 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             [],
         )?;
     }
+    if !table_has_column(conn, "pings", "fork_sc")? {
+        conn.execute("ALTER TABLE pings ADD COLUMN fork_sc TEXT NULL", [])?;
+    }
+    // Fork sessions are process-local and never survive a host restart.
+    conn.execute("UPDATE pings SET fork_sc = NULL", [])?;
     if !table_has_column(conn, "pings", "name")? {
         conn.execute(
             "ALTER TABLE pings ADD COLUMN name TEXT NOT NULL DEFAULT ''",
@@ -1937,7 +1972,7 @@ fn get_ping_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<Ping
     conn.query_row(
         "
         SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-               requires_response, quick_replies, status, read, archived, ts
+               requires_response, quick_replies, status, read, archived, fork_sc, ts
         FROM pings
         WHERE id = ?1
         ",
@@ -2069,7 +2104,7 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
     let ui: String = row.get(6)?;
     let replies: String = row.get(9)?;
     let status: String = row.get(10)?;
-    let ts: String = row.get(13)?;
+    let ts: String = row.get(14)?;
     Ok(Ping {
         id: row.get(0)?,
         kind: event_kind_from_str(&kind)?,
@@ -2090,6 +2125,7 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
         status: status_from_str(&status)?,
         read: row.get::<_, i64>(11)? != 0,
         archived: row.get::<_, i64>(12)? != 0,
+        fork_sc: row.get(13)?,
         ts: parse_ts(&ts)?,
     })
 }

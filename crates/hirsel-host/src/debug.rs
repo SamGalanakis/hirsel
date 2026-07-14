@@ -148,7 +148,10 @@ struct UnregisterPushTokenRequest {
 
 #[derive(Debug, Deserialize)]
 struct OpenSideChatRequest {
-    ping_id: u64,
+    #[serde(default)]
+    event_id: Option<u64>,
+    #[serde(default)]
+    ping_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,7 +278,9 @@ struct CreateMonitorResponse {
 #[derive(Debug, Serialize)]
 struct OpenSideChatResponse {
     sc: String,
+    event_id: u64,
     ping_id: u64,
+    event: Event,
     messages: Vec<ChatMessage>,
     resumed: bool,
 }
@@ -393,17 +398,32 @@ async fn open_side_chat(
     State(state): State<AppState>,
     Json(request): Json<OpenSideChatRequest>,
 ) -> Result<Json<OpenSideChatResponse>, DebugError> {
-    let (sc, messages, resumed) = state.side_chats.open(request.ping_id).await?;
+    let (event_id, legacy_ping) = match (request.event_id, request.ping_id) {
+        (Some(event_id), None) => (event_id, false),
+        (None, Some(ping_id)) => (ping_id, true),
+        (Some(event_id), Some(ping_id)) if event_id == ping_id => (event_id, false),
+        (Some(_), Some(_)) => return Err(anyhow::anyhow!("event_id and ping_id must match").into()),
+        (None, None) => return Err(anyhow::anyhow!("event_id or ping_id is required").into()),
+    };
+    let opened = if legacy_ping {
+        state.side_chats.open_legacy_ping(event_id).await?
+    } else {
+        state.side_chats.open(event_id).await?
+    };
     state.broadcast(HostToClient::SideChatOpen {
-        sc: sc.clone(),
-        ping_id: request.ping_id,
-        messages: messages.clone(),
+        sc: opened.sc.clone(),
+        event_id,
+        ping_id: event_id,
+        event: opened.event.clone(),
+        messages: opened.messages.clone(),
     });
     Ok(Json(OpenSideChatResponse {
-        sc,
-        ping_id: request.ping_id,
-        messages,
-        resumed,
+        sc: opened.sc,
+        event_id,
+        ping_id: event_id,
+        event: opened.event,
+        messages: opened.messages,
+        resumed: opened.resumed,
     }))
 }
 

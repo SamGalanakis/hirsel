@@ -7,7 +7,7 @@ import { toast } from "../../lib/toast";
 import { closeRightRegion, dispatch, setActiveSideChatSc, state } from "../../store/store";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
-import { Markdown } from "../Markdown";
+import { Markdown, stripInlineMarkdown } from "../Markdown";
 import { MessageBubble } from "../chat/MessageBubble";
 import { Timeline } from "../chat/Timeline";
 import { useTextInput } from "../chat/useTextInput";
@@ -394,7 +394,7 @@ function SideChatPanel(props: { sc: string }) {
                     <Show when={thinking()}>
                       <Marker>
                         <MarkerContent class="shimmer text-sm">
-                          {sideChat()?.agentActivity.text ?? "Thinking…"}
+                          {stripInlineMarkdown(sideChat()?.agentActivity.text ?? "Thinking…")}
                         </MarkerContent>
                       </Marker>
                     </Show>

@@ -29,6 +29,7 @@ import { SideChatSheet } from "../inbox/SideChatSheet";
 import { ProcessesSheet } from "../processes/ProcessesSheet";
 import { SettingsSheet } from "../settings/SettingsSheet";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
+import { stripInlineMarkdown } from "../Markdown";
 import { Marker, MarkerContent } from "../ui/marker";
 import {
   MessageScroller,
@@ -554,7 +555,7 @@ export function ChatView() {
                       <div class="flex min-w-0 items-center gap-2">
                         <Marker>
                           <MarkerContent class="shimmer text-sm">
-                            {state.agentActivity.text ?? "Thinking…"}
+                            {stripInlineMarkdown(state.agentActivity.text ?? "Thinking…")}
                           </MarkerContent>
                         </Marker>
                         <Show when={turnElapsed() !== null}>

@@ -3,6 +3,7 @@ import { type JSX, Show } from "solid-js";
 import { setCommandPaletteOpen } from "../lib/keymap";
 import { runningProcessCount } from "../store/selectors";
 import { openProcesses, openSettings, state } from "../store/store";
+import { BrandMark } from "./BrandMark";
 import { ConnectionPill } from "./ConnectionPill";
 
 // The desktop icon rail (desktop-unified shell). The pre-unified desktop made
@@ -67,7 +68,7 @@ export function IconRail() {
         aria-label="hirsel"
         title="hirsel"
       >
-        <span class="text-base font-semibold tracking-[0.01em] text-foreground">h</span>
+        <BrandMark size={24} ring />
       </div>
 
       <nav aria-label="Primary" class="flex flex-col items-center gap-1 pt-2">

@@ -14,9 +14,12 @@ import { ConnectionPill } from "./ConnectionPill";
 //
 // ADR-0012 cutover: the home is the event Queue, and the Queue IS the pings
 // surface now — so the separate "Pings" nav destination is retired (§6). The
-// rows are Queue (home) · Chat (the drill-in shell, also the way back to the
-// resting Pings rail) · Processes · Settings; each is `aria-current` for exactly
-// the surface it owns, so at most one is current at a time. The legacy Pings
+// main rows are Queue (home) · Chat (the drill-in shell, also the way back to
+// the resting Pings rail) · Processes; each is `aria-current` for exactly the
+// surface it owns, so at most one is current at a time. Settings is not a main
+// row — it drops to the footer strip as a quiet gear beside the connection pill
+// and the ⌘K keycap (a settings pane is chrome you reach for, not a standing
+// destination), still `aria-current` while it owns the region. The legacy Pings
 // inbox stays reachable as a chat-shell drill-in (Chat rests on it) and via
 // `g i` / the command palette. The palette is ⌘K (a quiet footer hint, not a
 // standing "Commands" row).
@@ -151,33 +154,42 @@ export function NavRail() {
             </Show>
           }
         />
-
-        {/* Settings — docks the Settings inspector (also reachable from the phone
-            header overflow). */}
-        <NavItem
-          icon={<Settings class="size-4 shrink-0" aria-hidden="true" />}
-          label="Settings"
-          ariaLabel="Settings"
-          active={regionActive("settings")}
-          onClick={openSettings}
-        />
       </nav>
 
-      {/* Footer — the connection pill pinned to the foot, with a quiet ⌘K
-          command-palette hint beside it. The hint is a keycap affordance, not a
-          standing nav row (the palette is summoned, never chrome). */}
-      <div class="mt-auto flex items-center justify-between gap-2 border-t border-border px-3 py-3">
+      {/* Footer — one calm strip: the connection pill pinned left, then the quiet
+          Settings gear and the ⌘K command-palette keycap grouped at the right.
+          Settings lives here (not as a main nav row) because a settings pane is
+          chrome you reach for; the gear stays a ghost affordance — hairline hover,
+          muted (never indigo) active fill while it owns the region — so it reads
+          as calm chrome, not a fourth destination. The ⌘K keycap is a summoning
+          hint beside it, never a standing nav row. */}
+      <div class="mt-auto flex items-center gap-2 border-t border-border px-3 py-3">
         <ConnectionPill />
-        <button
-          type="button"
-          class="flex shrink-0 items-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label="Open command palette"
-          onClick={() => setCommandPaletteOpen(true)}
-        >
-          <kbd class="grid h-5 place-items-center rounded-sm border border-border bg-muted px-1.5 font-mono text-[0.68rem] text-muted-foreground">
-            ⌘K
-          </kbd>
-        </button>
+        <div class="ml-auto flex shrink-0 items-center gap-1">
+          {/* Settings — docks the Settings inspector; muted-fill active (never
+              indigo) exactly while the Settings pane owns the right region. Also
+              reachable from the phone header overflow and the command palette. */}
+          <button
+            type="button"
+            class="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            classList={{ "bg-muted text-foreground": regionActive("settings") }}
+            aria-current={regionActive("settings") ? "page" : undefined}
+            aria-label="Settings"
+            onClick={() => openSettings()}
+          >
+            <Settings class="size-4 shrink-0" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="flex shrink-0 items-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Open command palette"
+            onClick={() => setCommandPaletteOpen(true)}
+          >
+            <kbd class="grid h-5 place-items-center rounded-sm border border-border bg-muted px-1.5 font-mono text-[0.68rem] text-muted-foreground">
+              ⌘K
+            </kbd>
+          </button>
+        </div>
       </div>
     </div>
   );

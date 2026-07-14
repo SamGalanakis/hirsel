@@ -156,7 +156,7 @@ export function EventCardHeader(props: {
         <Show when={age()}>
           <span
             data-slot="event-age"
-            class="text-[0.68rem] tabular-nums text-muted-foreground/80"
+            class="text-[0.68rem] tabular-nums text-foreground/80"
             title={props.ev.ts}
           >
             {age()}
@@ -214,7 +214,7 @@ export function EventCardDoor(props: { ev: EventItem; onOpen: (ev: EventItem) =>
     <div class="flex items-center justify-end border-t border-border bg-muted/40 px-3.5 py-2.5">
       <button
         type="button"
-        class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-foreground/80 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         onClick={() => props.onOpen(props.ev)}
       >
         <Show
@@ -256,7 +256,7 @@ export function DecidedStrip(props: {
           {props.ev.name} → <span class="text-status-success">decided</span>
         </span>
       </div>
-      <div class="mt-2 flex items-center gap-3 text-[0.68rem] text-muted-foreground">
+      <div class="mt-2 flex items-center gap-3 text-[0.68rem] text-foreground/80">
         <span class="inline-flex min-w-0 items-center gap-2">
           <ArrowRight class="size-3 shrink-0 text-primary" aria-hidden="true" />
           <span class="truncate">posted to {props.ev.source.ref ?? props.ev.source.kind}</span>
@@ -265,7 +265,7 @@ export function DecidedStrip(props: {
         <Show when={props.onArchive}>
           <button
             type="button"
-            class="font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            class="font-semibold text-foreground/80 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             onClick={() => props.onArchive?.(props.ev)}
           >
             Archive
@@ -273,7 +273,7 @@ export function DecidedStrip(props: {
         </Show>
         <button
           type="button"
-          class="font-bold text-primary transition-colors hover:text-primary/80"
+          class="font-bold text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           onClick={() => props.onUndo(props.ev.id)}
         >
           Undo

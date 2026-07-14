@@ -38,6 +38,7 @@ describe("PhoneHome — one surface mounted, sliding on home change", () => {
     expect(feed).not.toBeNull();
     expect(screen.container.querySelector('[data-surface="chat"]')).toBeNull();
     expect(screen.getByTestId("feed")).toBeTruthy();
+    expect(screen.container.querySelectorAll("main")).toHaveLength(1);
 
     // Navigate to Chat: the Chat surface takes the column and enters from the right.
     store.goToChat();

@@ -101,6 +101,8 @@ describe("FeedColumn — the desktop card column", () => {
     // The count clears to all-clear once nothing is owed.
     const need = column.querySelector('[data-slot="feed-need"]') as HTMLElement;
     expect(need.textContent).toBe("all clear");
+    expect(need.className).toContain("bg-status-success/12");
+    expect(need.className).toContain("text-foreground/80");
   });
 
   it("Discuss opens the event fork (fires open_side_chat by event id, no prefill hack)", async () => {

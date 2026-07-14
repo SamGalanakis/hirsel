@@ -60,6 +60,13 @@ describe("EventCardHeader — card-face diet", () => {
     const { container } = render(() => <EventCardHeader ev={ev()} />);
     expect(container.querySelector(".bg-primary")).not.toBeNull();
   });
+
+  it("keeps the small event age at a contrast-safe foreground step", () => {
+    const { container } = render(() => <EventCardHeader ev={ev()} />);
+    expect(container.querySelector('[data-slot="event-age"]')?.className).toContain(
+      "text-foreground/80",
+    );
+  });
 });
 
 describe("EventCardRenderer — eyebrow speaks the unblocks fact", () => {

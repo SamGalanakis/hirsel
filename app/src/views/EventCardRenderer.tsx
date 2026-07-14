@@ -233,7 +233,7 @@ function OptionListNode(node: Node): JSX.Element {
                 </Show>
               </span>
               <Show when={recommended}>
-                <span class="mt-0.5 inline-flex items-center self-center rounded-full bg-primary/[0.12] px-2 py-0.5 text-[0.62rem] font-semibold text-primary">
+                <span class="mt-0.5 inline-flex items-center self-center rounded-full bg-primary/[0.12] px-2 py-0.5 text-[0.62rem] font-semibold text-foreground">
                   Recommended
                 </span>
               </Show>

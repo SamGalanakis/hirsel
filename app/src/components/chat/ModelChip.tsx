@@ -47,7 +47,7 @@ export function ModelChip() {
             tap target and menu, just far less weight than the rest of the header. */}
         <PopoverTrigger
           class="flex min-w-0 shrink items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[expanded]:bg-muted data-[expanded]:text-foreground"
-          aria-label={`Model: ${modelLabel()} · ${shownVariant()}. Change variant`}
+          aria-label={`${modelLabel()} · ${shownVariant()} — Change variant`}
         >
           {/* Model name is the first thing dropped when the header is tight
               (phone); the variant — the thing this chip switches — always stays. */}

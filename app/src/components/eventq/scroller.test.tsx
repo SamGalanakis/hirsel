@@ -39,10 +39,12 @@ async function setup(events: EventItem[]) {
   const toast = await import("../../lib/toast");
   const sent: { eventId: number; action: string; data: unknown }[] = [];
   const readSent: number[] = [];
+  const opened: number[] = [];
   vi.doMock("../../ws/client", () => ({
     getClient: () => ({
       sendEventAction: (eventId: number, action: string, data: unknown) =>
         sent.push({ eventId, action, data }),
+      openSideChat: (eventId: number) => opened.push(eventId),
       readEvent: (id: number) => readSent.push(id),
     }),
   }));
@@ -52,7 +54,7 @@ async function setup(events: EventItem[]) {
   const { EventScroller } = await import("./EventScroller");
   const screen = render(() => <EventScroller />);
   const reader = screen.container.querySelector('[data-slot="event-scroller"]') as HTMLElement;
-  return { store, toast, screen, sent, readSent, reader };
+  return { store, toast, screen, sent, readSent, opened, reader };
 }
 
 describe("EventScroller — the phone vertical event queue home", () => {
@@ -216,15 +218,16 @@ describe("EventScroller — the phone vertical event queue home", () => {
     expect(onRoot.defaultPrevented).toBe(true);
   });
 
-  it("carries the judgment into Chat as a quoted prefill on Discuss (§4)", async () => {
-    const { store, screen } = await setup([judgment(7, "Wire the reopen op")]);
+  it("opens the event fork on Discuss — drills into the chat shell and registers the pending fork (§4)", async () => {
+    const { store, screen, opened } = await setup([judgment(7, "Wire the reopen op")]);
     fireEvent.click(screen.getAllByRole("button", { name: /Discuss/ })[0]);
-    // Drilled into Chat with the composer pre-seeded — the judgment is never lost.
+    // Supersedes the composer-prefill drill-in: a fresh open fires open_side_chat
+    // by event id and drills into the chat shell (phone) so the fork panel mounts;
+    // the pending fork opens the pane once side_chat_open lands the sc.
+    expect(opened).toEqual([7]);
     expect(store.state.home).toBe("chat");
-    const prefill = store.state.composerPrefill ?? "";
-    expect(prefill.startsWith(">")).toBe(true);
-    expect(prefill).toContain("@j7");
-    expect(prefill).toContain("Wire the reopen op");
+    expect(store.state.pendingSideChatPingId).toBe(7);
+    expect(store.state.composerPrefill).toBeNull();
   });
 
   it("snoozes to the end with an Undo toast (§6)", async () => {

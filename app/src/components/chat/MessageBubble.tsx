@@ -173,12 +173,14 @@ export function MessageBubble(props: Props) {
             </Show>
             <span>{formatTime(props.message.ts)}</span>
           </Show>
-          {/* Per-message actions: an explicit control (touch) that also opens on
-              right-click over the bubble (desktop context menu). Replaces the
-              old hover/long-press-only copy path. */}
+          {/* Per-message actions. On a fine pointer the ⋯ is hover-revealed
+              (hidden at rest, appears on message hover or keyboard focus) so it
+              is not standing meta-row noise; right-clicking the bubble opens the
+              same menu. On touch (no hover) it stays quietly visible and is also
+              reachable by long-press (the bubble context menu). */}
           <DropdownMenu open={menuOpen()} onOpenChange={setMenuOpen}>
             <DropdownMenuTrigger
-              class="rounded p-0.5 text-muted-foreground opacity-40 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-100 data-[expanded]:opacity-100"
+              class="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-100 data-[expanded]:opacity-100 pointer-coarse:opacity-60"
               aria-label="Message actions"
             >
               <MoreHorizontal class="size-3.5" />

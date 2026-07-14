@@ -75,9 +75,6 @@ export function EventScroller() {
   const [peekOpen, setPeekOpen] = createSignal(false);
   const [snoozed, setSnoozed] = createSignal<Set<number>>(new Set());
 
-  // Coarse pointer → the swipe is the primary accelerator (phone); fine pointer
-  // → the keyboard is (desktop), which decides the footer hint (§5).
-  const coarse = createMediaFlag("(pointer: coarse)");
   // `rail` (desktop) stands the two-column list, so the phone peek overlay is
   // gated off there — the standing list already IS the whole-queue index.
   const atRail = createMediaFlag("(min-width: 1100px)");
@@ -478,10 +475,9 @@ export function EventScroller() {
               >
                 {openCount() > 0 ? `${openCount()} need you` : "all clear"}
               </span>
-              <span class="inline-flex items-center gap-1 text-[0.62rem] font-semibold text-muted-foreground rail:hidden">
-                peek
-                <List class="size-3.5" aria-hidden="true" />
-              </span>
+              {/* Phone: a lone list glyph is the peek affordance — the bar's
+                  aria-label ("Open queue overview") names it; no "peek" word. */}
+              <List class="size-3.5 text-muted-foreground rail:hidden" aria-hidden="true" />
             </div>
             <div class="h-0.5 bg-border">
               <div
@@ -505,7 +501,6 @@ export function EventScroller() {
               {(ev) => (
                 <EventPage
                   ev={ev}
-                  coarse={coarse()}
                   onDecide={decide}
                   onAccept={acceptRec}
                   onSnooze={snooze}
@@ -551,7 +546,6 @@ export function EventScroller() {
  * down-chevron advance affordance. Judgments accept a horizontal swipe. */
 function EventPage(props: {
   ev: EventItem;
-  coarse: boolean;
   onDecide: (ev: EventItem, action: string, data: unknown) => void;
   onAccept: (ev: EventItem) => void;
   onSnooze: (ev: EventItem) => void;
@@ -669,32 +663,11 @@ function EventPage(props: {
               <DecidedStrip ev={props.ev} onUndo={props.onUndo} />
             </Show>
             <Show when={isJudgment() && !decided()}>
-              <div class="flex items-center gap-2.5 border-t border-border bg-muted/40 px-3.5 py-2.5">
-                {/* Honest hint by pointer (§5): a touch device gets the swipe
-                    cue; a mouse/keyboard device gets the real keyboard map,
-                    since swiping a card with a mouse is not the intended path. */}
-                <span class="inline-flex min-w-0 items-center gap-1.5 text-[0.62rem] font-medium text-muted-foreground/80">
-                  <Show
-                    when={props.coarse}
-                    fallback={
-                      <span class="truncate">
-                        <b class="font-bold text-muted-foreground">→</b> accept ·{" "}
-                        <b class="font-bold text-muted-foreground">←</b> snooze ·{" "}
-                        <b class="font-bold text-muted-foreground">A/B</b> choose
-                      </span>
-                    }
-                  >
-                    <span class="inline-flex items-center gap-1.5">
-                      <span class="inline-flex items-center gap-0.5 text-muted-foreground/60">
-                        <ArrowRight class="size-3" aria-hidden="true" />
-                      </span>
-                      <span>
-                        <b class="font-bold text-muted-foreground">swipe</b> → accept · ← snooze
-                      </span>
-                    </span>
-                  </Show>
-                </span>
-                <span class="flex-1" />
+              {/* No resting gesture/keys hint — the swipe reveals its own
+                  "Accept pick"/"Snooze" panels while dragging, and the keys live
+                  in the `?` sheet (→ accept · ← snooze · A–Z choose). Just the
+                  low-commitment Discuss escape hatch, right-aligned. */}
+              <div class="flex items-center justify-end border-t border-border bg-muted/40 px-3.5 py-2.5">
                 <button
                   type="button"
                   class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -821,7 +794,7 @@ function PeekOverview(props: {
           <div>
             <h3 class="text-sm font-semibold text-foreground">Queue</h3>
             <div class="text-[0.68rem] text-muted-foreground">
-              {props.openCount > 0 ? `${props.openCount} still need you · tap to jump` : "all decided · tap to revisit"}
+              {props.openCount > 0 ? `${props.openCount} still need you` : "all decided"}
             </div>
           </div>
           <span class="flex-1" />

@@ -1,5 +1,4 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
-import { AgentStatus } from "./components/chat/AgentStatus";
 import { ChatView } from "./components/chat/ChatView";
 import { DesktopShell } from "./components/DesktopShell";
 import { EventScroller } from "./components/eventq/EventScroller";
@@ -128,18 +127,15 @@ function App() {
             // phone header (brand + full agent status + overflow) and the bottom
             // two-way Feed/Chat nav bar.
             <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-              {/* Phone header (§4 IA cleanup). The north-star — brand + FULL
-                  agent status — gets priority width (the left group is `flex-1
-                  min-w-0`, AgentStatus never truncates to "Agen…"); the right
-                  group is a bare connection dot (expands to the full pill only
-                  when reconnecting/offline) plus ONE overflow (Model · Canvas ·
-                  Processes · Settings), so the header holds ≤4 chunks. */}
+              {/* Phone header (§4 IA cleanup). Just the wordmark and the right
+                  controls now: the agent's live work is announced once, by the
+                  inline transcript marker on the Chat surface — never as standing
+                  header furniture, and idle is never announced at all. The right
+                  group is a bare connection dot (the ONE exception surface here —
+                  it expands to the full pill when reconnecting/offline) plus ONE
+                  overflow (Model · Canvas · Processes · Settings). */}
               <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
-                <div class="flex min-w-0 flex-1 items-center gap-2.5">
-                  <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-                  <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
-                  <AgentStatus />
-                </div>
+                <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
                 <div class="flex shrink-0 items-center gap-0.5">
                   <ConnectionPill compact />
                   <PhoneOverflowMenu />

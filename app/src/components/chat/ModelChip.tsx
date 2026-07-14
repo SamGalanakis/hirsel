@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Sparkles } from "lucide-solid";
+import { Check, ChevronDown } from "lucide-solid";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { AvailableModel } from "../../protocol";
 import { state } from "../../store/store";
@@ -42,21 +42,21 @@ export function ModelChip() {
   return (
     <Show when={current()}>
       <Popover placement="bottom-end" gutter={6}>
+        {/* Configuration, not status: a quiet ghost control — no fill, no border,
+            no indigo glyph — that brightens on hover/focus. It carries the same
+            tap target and menu, just far less weight than the rest of the header. */}
         <PopoverTrigger
-          class="flex min-w-0 shrink items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-muted-foreground outline-none transition-colors hover:border-input hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[expanded]:border-input data-[expanded]:text-foreground"
+          class="flex min-w-0 shrink items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[expanded]:bg-muted data-[expanded]:text-foreground"
           aria-label={`Model: ${modelLabel()} · ${shownVariant()}. Change variant`}
         >
-          <Sparkles class="size-3.5 shrink-0 text-primary" aria-hidden="true" />
           {/* Model name is the first thing dropped when the header is tight
               (phone); the variant — the thing this chip switches — always stays. */}
-          <span class="hidden min-w-0 truncate font-medium text-foreground min-[400px]:inline">
-            {modelLabel()}
-          </span>
-          <span class="hidden text-muted-foreground/60 min-[400px]:inline" aria-hidden="true">
+          <span class="hidden min-w-0 truncate min-[400px]:inline">{modelLabel()}</span>
+          <span class="hidden text-muted-foreground/50 min-[400px]:inline" aria-hidden="true">
             ·
           </span>
           <span class="shrink-0 tabular-nums">{shownVariant()}</span>
-          <ChevronDown class="size-3 shrink-0 opacity-60" aria-hidden="true" />
+          <ChevronDown class="size-3 shrink-0 opacity-50" aria-hidden="true" />
         </PopoverTrigger>
         <PopoverContent class="min-w-[11rem]">
           <div class="px-2 pt-1.5 pb-1 text-[0.68rem] font-medium uppercase tracking-[0.06em] text-muted-foreground">

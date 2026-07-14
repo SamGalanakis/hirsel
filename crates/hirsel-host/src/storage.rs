@@ -29,6 +29,16 @@ pub struct Storage {
 
 const MAX_PAIRING_CODES: usize = 1_024;
 const MAX_PAIRING_REDEMPTIONS_PER_MINUTE: usize = 256;
+pub(crate) const TOOL_SURFACE_FINGERPRINT_META_KEY: &str = "agent_tool_surface_fingerprint";
+pub(crate) const TOOL_SURFACE_NAMES_META_KEY: &str = "agent_tool_surface_names";
+pub(crate) const AGENT_SESSION_GENERATION_META_KEY: &str = "agent_session_generation";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentSessionState {
+    pub session_id: String,
+    pub rotated: bool,
+    pub added_tools: Vec<String>,
+}
 
 #[derive(Default)]
 struct PairingCodes {
@@ -223,6 +233,10 @@ impl Storage {
                 rule TEXT NOT NULL,
                 ts TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
         // Side-chat sessions are process-local and deliberately do not survive
@@ -238,6 +252,79 @@ impl Storage {
             tracing::error!(?integrity, "SQLite integrity check failed");
         }
         Ok(())
+    }
+
+    pub(crate) async fn reconcile_agent_tool_surface(
+        &self,
+        fingerprint: &str,
+        tool_names: &[String],
+    ) -> anyhow::Result<AgentSessionState> {
+        let mut normalized_names = tool_names.to_vec();
+        normalized_names.sort();
+        normalized_names.dedup();
+        let encoded_names = serde_json::to_string(&normalized_names)?;
+
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let previous_fingerprint = meta_value_from_conn(&tx, TOOL_SURFACE_FINGERPRINT_META_KEY)?;
+        let previous_names = meta_value_from_conn(&tx, TOOL_SURFACE_NAMES_META_KEY)?
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .context("decode stored Agent tool surface names")?
+            .unwrap_or_default();
+        let generation = meta_value_from_conn(&tx, AGENT_SESSION_GENERATION_META_KEY)?
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .context("decode stored Agent session generation")?;
+
+        let rotated = previous_fingerprint
+            .as_deref()
+            .is_some_and(|previous| previous != fingerprint);
+        let next_generation = if rotated {
+            Some(
+                generation
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .context("Agent session generation overflow")?,
+            )
+        } else {
+            generation
+        };
+        let added_tools = if rotated {
+            let previous_names = previous_names.into_iter().collect::<HashSet<_>>();
+            normalized_names
+                .iter()
+                .filter(|name| !previous_names.contains(*name))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        set_meta_value(&tx, TOOL_SURFACE_FINGERPRINT_META_KEY, fingerprint)?;
+        set_meta_value(&tx, TOOL_SURFACE_NAMES_META_KEY, &encoded_names)?;
+        if let Some(generation) = next_generation {
+            set_meta_value(
+                &tx,
+                AGENT_SESSION_GENERATION_META_KEY,
+                &generation.to_string(),
+            )?;
+        }
+        tx.commit()?;
+
+        Ok(AgentSessionState {
+            session_id: next_generation
+                .map(|generation| format!("agent-g{generation}"))
+                .unwrap_or_else(|| "agent".to_string()),
+            rotated,
+            added_tools,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn meta_value(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock().await;
+        meta_value_from_conn(&conn, key).map_err(Into::into)
     }
 
     pub async fn append_chat(
@@ -1431,6 +1518,26 @@ impl Storage {
 pub struct SubagentRestore {
     pub records: Vec<ProcessRecord>,
     pub abandoned: Vec<String>,
+}
+
+fn meta_value_from_conn(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn set_meta_value(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "
+        INSERT INTO meta (key, value) VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> anyhow::Result<Vec<T>> {

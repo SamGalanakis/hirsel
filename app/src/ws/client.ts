@@ -269,11 +269,11 @@ class HirselWsClient {
 
   // ---- v2.0 side chats (ADR-0008) ----
 
-  /** "Discuss" (fresh) or "Resume" (in-progress) — idempotent per Ping on the
-   * host, so this is the single entry point for both. Enqueued so a tap right
-   * as the socket drops still fires once reconnected. */
-  openSideChat(pingId: number): void {
-    this.enqueue({ type: "open_side_chat", client_id: makeClientId(), ping_id: pingId });
+  /** "Discuss"/"Ask" (fresh) or "Resume" (fork open) — idempotent per Event on
+   * the host (v2.4), so this is the single entry point for both. Enqueued so a
+   * tap right as the socket drops still fires once reconnected. */
+  openSideChat(eventId: number): void {
+    this.enqueue({ type: "open_side_chat", client_id: makeClientId(), event_id: eventId });
   }
 
   /** Send within a side chat's scope. Mirrors sendMessage's optimistic +
@@ -570,10 +570,14 @@ class HirselWsClient {
         break;
       }
       case "side_chat_open": {
+        // v2.4: event forks address by `event_id`; the legacy `ping_id` alias is
+        // accepted (events share the id space). The `event` snapshot rides the
+        // Event set via a separate `event_upsert`, so the store derives the
+        // pinned card from `state.events` and this frame only seeds the scope.
         dispatch({
           type: "side_chat_open",
           sc: message.sc,
-          pingId: message.ping_id,
+          pingId: message.event_id ?? message.ping_id ?? 0,
           messages: message.messages,
         });
         break;

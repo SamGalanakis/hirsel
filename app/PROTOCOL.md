@@ -335,3 +335,37 @@ that device token.
 The native UniFFI client exposes the token as nullable `Client.issuedDeviceToken()`. Kotlin reads it
 after the pairing client reaches `Online`, persists it, and supplies it to `Client.newIroh(...)` on
 later connections.
+
+## v2.4 — event forks: forks address Events, deciding closes the loop (ADR-0008 + ADR-0012) (2026-07-14)
+
+Generalizes v2.0 side chats from Pings to typed Events (ADR-0012): a fork is a seeded scope for
+discussing one Event card, and — for a `judgment` — DECIDING is the closure, replacing the v2.0
+owner-reply drafting (`conclude_side_chat`/`confirm_conclusion`, still accepted for any legacy Ping
+fork). Every frame stays backward compatible: `open_side_chat` still accepts `ping_id`, and
+`side_chat_open` still carries it (events share the id space, so `event_id == ping_id`).
+
+`EventItem` gains `fork_sc: string | null` (default absent = no fork): the `sc` of the live fork
+discussing this Event. The host sets it when a fork opens, clears it when the fork closes or the
+Event is decided, and broadcasts every transition via `event_upsert`. The client's "discussion open ·
+resume" chip is driven purely by this field.
+
+Client → server:
+```
+{ "type": "open_side_chat", "client_id": string, "event_id": u64 }   // ping_id accepted as a legacy alias
+  → { "type": "side_chat_open", "sc": string, "event_id": u64, "ping_id": u64,
+      "event": EventItem, "resumed": bool, "messages": [ChatMessage] }
+  // idempotent per Event: a live fork answers with the SAME sc, the current Event snapshot, its
+  // transcript so far, and resumed:true; otherwise a fresh scope with messages:[] and resumed:false.
+  // The host also broadcasts an event_upsert carrying fork_sc == sc for the opened Event.
+```
+
+Deciding while a fork is open resolves the loop, two ways:
+- the normal `event_action { action: "choose", data: { choice } }` from the pinned card (v2.3);
+- the side agent's scoped `fork.decide({ choice })` tool (judgment forks only; non-judgment forks do
+  not receive it).
+
+Either path: the host resolves the Event (`done`, `fork_sc` cleared, authoritative `event_upsert`),
+posts ONE anchor-refed owner line `Discussed @<event name> → <chosen label>` in MAIN chat (normal
+`msg` flow), closes the fork (`side_chat_closed`), and discards the session. Info/summary forks have
+no decision: `discard_side_chat` clears `fork_sc`, closes the fork, and adds NO main-chat message
+(silent). The v2.0 conclude/confirm frames are not used for event forks.

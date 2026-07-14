@@ -163,7 +163,9 @@ function finishSideTurn(sideChat) {
  * seed (item + anchor + recent chat) lives in the side session's prompt
  * layer, never as fake transcript rows. */
 function handleOpenSideChat(ws, frame) {
-  const pingId = frame.ping_id;
+  // v2.4: event forks address by `event_id`; `ping_id` stays a legacy alias
+  // (events share the id space).
+  const pingId = frame.event_id ?? frame.ping_id;
   const existingSc = sideChatByItem.get(pingId);
   if (existingSc) {
     const sideChat = sideChats.get(existingSc);
@@ -171,7 +173,9 @@ function handleOpenSideChat(ws, frame) {
       JSON.stringify({
         type: "side_chat_open",
         sc: sideChat.sc,
+        event_id: sideChat.itemId,
         ping_id: sideChat.itemId,
+        resumed: true,
         messages: sideChat.messages,
       }),
     );
@@ -191,7 +195,16 @@ function handleOpenSideChat(ws, frame) {
   sideChats.set(sc, sideChat);
   sideChatByItem.set(pingId, sc);
   armSideTtl(sc);
-  ws.send(JSON.stringify({ type: "side_chat_open", sc, ping_id: pingId, messages: [] }));
+  ws.send(
+    JSON.stringify({
+      type: "side_chat_open",
+      sc,
+      event_id: pingId,
+      ping_id: pingId,
+      resumed: false,
+      messages: [],
+    }),
+  );
   log("side chat opened", sc, "for ping", pingId);
 }
 

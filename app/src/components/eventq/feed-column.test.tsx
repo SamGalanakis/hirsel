@@ -75,6 +75,10 @@ describe("FeedColumn — the desktop card column", () => {
     // The blocking judgment sorts above the other (rank 0 before rank 1).
     const cards = within(column).getAllByText(/judgment$/);
     expect(cards[0].textContent).toContain("Blocking judgment");
+    // Decruft: no "Choose an option to decide" filler — the options ARE the
+    // affordance; only the Discuss escape hatch remains in the footer.
+    expect(within(column).queryByText(/Choose an option/i)).toBeNull();
+    expect(within(column).getAllByRole("button", { name: /Discuss/ }).length).toBeGreaterThan(0);
   });
 
   it("decides inline: taps an option, posts the event_action, flips to the decided strip", async () => {

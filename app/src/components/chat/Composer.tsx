@@ -64,7 +64,6 @@ export function Composer(props: Props) {
   // with the Inbox inline ReplyInput.
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, "main");
   const [sending, setSending] = createSignal(false);
-  const [focused, setFocused] = createSignal(false);
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
   let textareaRef: HTMLTextAreaElement | undefined;
@@ -419,11 +418,7 @@ export function Composer(props: Props) {
             }
           }}
           onClick={() => mentions.sync()}
-          onFocus={() => setFocused(true)}
-          onBlur={() => {
-            setFocused(false);
-            mentions.close();
-          }}
+          onBlur={() => mentions.close()}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
         />
@@ -481,30 +476,18 @@ export function Composer(props: Props) {
         </div>
       </div>
 
-      {/* Bottom hint row: the keyboard hint surfaces only while the composer is
-          focused (not standing chrome), and the offline cue mirrors the Side
-          Chat wrap-up bar's "reconnect" pattern. The row only takes vertical
-          space when it has something to say. */}
-      <Show when={(focused() && !coarse()) || offline()}>
-        <div class="mt-1 flex items-center gap-2 px-1">
-          <Show when={focused() && !coarse()}>
-            <div class="min-w-0 flex-1 truncate text-[0.66rem] text-muted-foreground/70">
-              <span class="font-medium">Enter</span> send ·{" "}
-              <span class="font-medium">Shift+Enter</span> newline ·{" "}
-              <span class="font-medium">Tab</span> queue ·{" "}
-              <span class="font-medium">Esc</span> stop ·{" "}
-              <span class="font-medium">@</span> mention
-            </div>
-          </Show>
-          <Show when={offline()}>
-            <span class="ml-auto flex shrink-0 items-center gap-1 text-[0.66rem] text-status-attention">
-              <span
-                class="size-1.5 animate-pulse rounded-full bg-status-attention"
-                aria-hidden="true"
-              />
-              offline · will queue
-            </span>
-          </Show>
+      {/* Bottom cue row: no standing keyboard-hint teaching (those keys live in
+          the `?` shortcut sheet). Only the exceptional offline cue takes space,
+          mirroring the Side Chat wrap-up bar's "reconnect" pattern. */}
+      <Show when={offline()}>
+        <div class="mt-1 flex items-center px-1">
+          <span class="ml-auto flex shrink-0 items-center gap-1 text-[0.66rem] text-status-attention">
+            <span
+              class="size-1.5 animate-pulse rounded-full bg-status-attention"
+              aria-hidden="true"
+            />
+            offline · will queue
+          </span>
         </div>
       </Show>
       </div>

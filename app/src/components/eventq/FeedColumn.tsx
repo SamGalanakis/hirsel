@@ -145,11 +145,9 @@ function FeedCard(props: {
         <DecidedStrip ev={props.ev} onUndo={(id) => undoDecide(id)} />
       </Show>
       <Show when={isJudgment() && !decided()}>
-        <div class="flex items-center gap-2.5 border-t border-border bg-muted/40 px-3.5 py-2.5">
-          <span class="min-w-0 truncate text-[0.62rem] font-medium text-muted-foreground/70">
-            Choose an option to decide
-          </span>
-          <span class="flex-1" />
+        {/* The options above ARE the affordance — no "choose an option" restatement.
+            Just the low-commitment Discuss escape hatch, right-aligned. */}
+        <div class="flex items-center justify-end border-t border-border bg-muted/40 px-3.5 py-2.5">
           <button
             type="button"
             class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"

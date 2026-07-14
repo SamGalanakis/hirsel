@@ -132,6 +132,13 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: ["?"], label: "Keyboard shortcuts", group: "General" },
   { keys: ["/"], label: "Focus composer", group: "Chat" },
   { keys: ["G"], label: "Jump to latest", group: "Chat" },
+  // Composer keys (fine pointer). Formerly a standing hint row under the input;
+  // that teaching chrome is gone, so the `?` sheet is now their only home.
+  { keys: ["Enter"], label: "Send message", group: "Chat" },
+  { keys: ["⇧", "Enter"], label: "New line", group: "Chat" },
+  { keys: ["Tab"], label: "Queue for next turn", group: "Chat" },
+  { keys: ["Esc"], label: "Stop the active turn", group: "Chat" },
+  { keys: ["@"], label: "Mention a Ping", group: "Chat" },
   // Focus — desktop shows Feed + Chat at once, so `g` chords move focus between
   // the standing panes (below the rail they navigate home instead).
   { keys: ["g", "f"], label: "Focus Feed", group: "Focus" },

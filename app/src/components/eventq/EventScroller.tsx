@@ -12,7 +12,7 @@
 // reader). Chat + the inspectors are drill-ins reached from a judgment's Discuss
 // or the NavRail; nothing here can recolor a card — it only pages, decides, and
 // advances.
-import { ArrowRight, ArrowUp, Check, ChevronDown, CircleCheck, List, MessageSquare } from "lucide-solid";
+import { ArrowRight, ArrowUp, ChevronDown, CircleCheck, List, MessageSquare } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
@@ -34,7 +34,8 @@ import {
 } from "../../store/selectors";
 import { goToChat, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
-import { QueueList, QueueRow } from "./QueueList";
+import { DecidedStrip, EventCardHeader } from "./EventCard";
+import { QueueRow } from "./QueueRow";
 import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 
 /** How long the decided card lingers (confirmation + Undo reachable) before the
@@ -45,8 +46,6 @@ const ADVANCE_MS = 1150;
 /** Horizontal drag past this (px) commits the swipe: → accepts the pick, ←
  * snoozes to the tail. Below it the card springs back. */
 const SWIPE_THRESHOLD = 82;
-
-const KIND_LABEL: Record<string, string> = { judgment: "Judgment", summary: "Summary", info: "Info" };
 
 function prefersReduced(): boolean {
   return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
@@ -429,19 +428,6 @@ export function EventScroller() {
     // reader-measure card column (right), so the width is used by real structure
     // and the card is never a lonely centred column in a void (§1).
     <div class="flex min-h-0 flex-1 flex-col rail:flex-row">
-      <QueueList
-        ordered={ordered()}
-        centeredId={centeredId()}
-        snoozed={snoozed()}
-        openCount={openCount()}
-        atClear={onClear()}
-        onJump={jumpToEvent}
-        onJumpClear={() => {
-          goTo(total());
-          rootRef?.focus();
-        }}
-      />
-
       {/* The reader column. At `rail` it is centred and capped to a reader
           measure (~688px); the pager and the card both hug that measure, not
           the full frame. Below `rail` it is the full-width phone column. */}
@@ -667,27 +653,9 @@ function EventPage(props: {
               dragging() ? "shadow-lg" : "transition-transform duration-300 motion-reduce:transition-none",
             )}
           >
-            {/* The needs-you accent: a hairline-thin indigo edge (the one accent),
-                as a strip rather than a heavy left border. */}
-            <Show when={isJudgment() && !decided()}>
-              <span class="absolute inset-y-0 left-0 w-0.5 bg-primary" aria-hidden="true" />
-            </Show>
-            {/* Header — minimal chrome: handle · source · kind. No wait/cost/turns. */}
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-3.5 pt-3">
-              <span class="font-mono text-xs font-medium text-primary">{props.ev.name}</span>
-              <span class="text-[0.68rem] font-medium text-muted-foreground/80">
-                · <span class="font-semibold text-muted-foreground">{props.ev.source.ref ?? props.ev.source.kind}</span>
-              </span>
-              <span class="text-[0.56rem] font-bold uppercase tracking-[0.05em] text-muted-foreground/70">
-                {KIND_LABEL[props.ev.kind] ?? props.ev.kind}
-              </span>
-              <span class="flex-1" />
-              <Show when={props.ev.read && props.ev.kind !== "judgment" && !decided()}>
-                <span class="inline-flex items-center gap-1 text-[0.56rem] font-bold uppercase tracking-[0.04em] text-status-success">
-                  <Check class="size-3" aria-hidden="true" /> read
-                </span>
-              </Show>
-            </div>
+            {/* The needs-you accent + minimal-chrome header (handle · source ·
+                kind), shared verbatim with the desktop Feed card. */}
+            <EventCardHeader ev={props.ev} />
 
             <div class="px-3.5 pb-3.5 pt-2">
               <EventCardRenderer
@@ -749,35 +717,6 @@ function EventPage(props: {
       >
         <ChevronDown class="size-4" aria-hidden="true" />
       </button>
-    </div>
-  );
-}
-
-/** The interaction-back confirmation: a green check + the posted payload + a
- * brief Undo, replacing the card body once decided. */
-function DecidedStrip(props: { ev: EventItem; onUndo: (id: number) => void }) {
-  return (
-    <div class="border-t border-border bg-muted/40 px-3.5 py-3">
-      <div class="flex items-center gap-2">
-        <span class="grid size-[18px] shrink-0 place-items-center rounded-full bg-status-success/15 text-status-success">
-          <Check class="size-3" aria-hidden="true" />
-        </span>
-        <span class="text-xs font-semibold text-foreground">
-          {props.ev.name} → <span class="text-status-success">decided</span>
-        </span>
-      </div>
-      <div class="mt-2 flex items-center gap-2 text-[0.68rem] text-muted-foreground">
-        <ArrowRight class="size-3 text-primary" aria-hidden="true" />
-        posted to {props.ev.source.ref ?? props.ev.source.kind}
-        <span class="flex-1" />
-        <button
-          type="button"
-          class="font-bold text-primary transition-colors hover:text-primary/80"
-          onClick={() => props.onUndo(props.ev.id)}
-        >
-          Undo
-        </button>
-      </div>
     </div>
   );
 }

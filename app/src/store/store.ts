@@ -356,6 +356,23 @@ export function clearComposerPrefill(): void {
   setState("composerPrefill", null);
 }
 
+/** Seed the always-mounted main composer with body text WITHOUT navigating or
+ * disturbing the right region — the desktop-unified path for a judgment's
+ * "Discuss". On desktop both Feed and Chat are visible at once, so Discuss is no
+ * longer a drill-in (the phone `goToChat({composerPrefill})`): it just drops the
+ * quoted reference into the standing composer, which the mounted Composer's
+ * prefill effect picks up (fills + focuses) on the next tick. */
+export function prefillComposer(text: string): void {
+  setState("composerPrefill", text);
+}
+
+/** Ask Chat to scroll to + highlight a message without changing home/region —
+ * the desktop-unified `jumpToLatest`, where Chat is always on screen so there is
+ * nothing to navigate to. Consumed once by ChatView's scroll effect. */
+export function setScrollTarget(id: number): void {
+  setState("scrollToMessageId", id);
+}
+
 export function clearComposerAutofocus(): void {
   setState("composerAutofocus", false);
 }

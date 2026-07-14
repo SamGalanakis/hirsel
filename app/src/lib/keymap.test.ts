@@ -52,6 +52,10 @@ describe("keymap", () => {
     press("g");
     press("c");
     expect(handlers.goPane).toHaveBeenCalledWith("chat");
+    // `g f` focuses the Feed pane (desktop) / navigates to the Feed home (phone).
+    press("g");
+    press("f");
+    expect(handlers.goPane).toHaveBeenCalledWith("feed");
     // `c` alone (no leader) is still focus-composer, not a pane switch.
     expect(handlers.focusComposer).toHaveBeenCalledTimes(0);
   });

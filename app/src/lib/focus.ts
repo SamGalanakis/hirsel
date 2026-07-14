@@ -34,6 +34,17 @@ export function focusMainComposer(): void {
   });
 }
 
+/** Move focus into the desktop Feed column so its keyboard map (J/K, options,
+ * Discuss) is live — the desktop-unified peer of `focusMainComposer` for the
+ * `g f` / `g i` chords. The column root carries `tabindex=-1` + the data attr so
+ * it can hold focus. No-op below the rail breakpoint (the column isn't mounted;
+ * the phone chord navigates home instead). */
+export function focusFeedColumn(): void {
+  queueMicrotask(() => {
+    document.querySelector<HTMLElement>("[data-feed-column]")?.focus();
+  });
+}
+
 const FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",

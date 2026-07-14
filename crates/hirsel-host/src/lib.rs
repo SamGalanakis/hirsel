@@ -352,6 +352,11 @@ impl AppState {
             .ping(event_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
+        if action == "choose"
+            && let Some(event) = self.side_chats.decide_event(event_id, &data).await?
+        {
+            return Ok(event);
+        }
         let event = match action.as_str() {
             "choose" => {
                 if !matches!(current.kind, hirsel_proto::EventKind::Judgment) {

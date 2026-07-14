@@ -4211,6 +4211,7 @@ fn ping_output_schema() -> Value {
             "status",
             "read",
             "archived",
+            "fork_sc",
             "ts"
         ],
         "properties": {
@@ -4237,6 +4238,7 @@ fn ping_output_schema() -> Value {
             "status": { "type": "string", "enum": ["open", "done"] },
             "read": { "type": "boolean" },
             "archived": { "type": "boolean" },
+            "fork_sc": { "type": ["string", "null"] },
             "ts": timestamp_output_schema()
         }
     })
@@ -5477,6 +5479,7 @@ mod tests {
                 status: PingStatus::Done,
                 read: true,
                 archived: false,
+                fork_sc: None,
                 ts: Utc::now(),
             }],
             mode: SendMode::Send,
@@ -6136,6 +6139,7 @@ mod tests {
             status: PingStatus::Done,
             read: true,
             archived: true,
+            fork_sc: None,
             ts: now,
         };
         let events = vec![

@@ -1,5 +1,10 @@
 # Side Chats Runbook
 
+> Compatibility runbook: this exercises the legacy `ping_id` + conclude/confirm flow retained for
+> older clients. New clients open with `event_id`; event forks receive the exact event snapshot
+> (`event_id`, `kind`, `name`, `description`, and blessed `ui` JSON) in their Lash seed and use the
+> automatic decision flow in `e2e/event-fork/runbook.md`.
+
 ## Purpose
 
 Prove the complete side-chat loop (ADR-0008/0009): open from a Ping into a seeded side session, converse on a distinct `sc` scope while main Chat stays untouched, resume the same live session, draft a conclusion, confirm it into main Chat as the Owner's anchor-refed reply, auto-resolve the Ping through the shared reply path, delete the ephemeral transcript, and see the main Agent react.

@@ -175,6 +175,9 @@ pub struct Event {
     pub read: bool,
     #[serde(default)]
     pub archived: bool,
+    /// Process-local side-chat scope currently discussing this event.
+    #[serde(default)]
+    pub fork_sc: Option<String>,
     pub ts: DateTime<Utc>,
 }
 
@@ -317,7 +320,10 @@ pub enum ClientToHost {
     },
     OpenSideChat {
         client_id: String,
-        ping_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ping_id: Option<u64>,
     },
     ConcludeSideChat {
         sc: String,
@@ -452,7 +458,10 @@ pub enum HostToClient {
     },
     SideChatOpen {
         sc: String,
+        event_id: u64,
+        /// Compatibility mirror for clients that still address side chats as Pings.
         ping_id: u64,
+        event: Event,
         messages: Vec<ChatMessage>,
     },
     ConclusionDraft {
@@ -776,6 +785,7 @@ mod tests {
             status: EventStatus::Open,
             read: false,
             archived: true,
+            fork_sc: Some("side:abc".to_string()),
             anchor: 1,
             ts: Utc.with_ymd_and_hms(2026, 7, 13, 7, 0, 0).unwrap(),
         };
@@ -788,6 +798,7 @@ mod tests {
         assert_eq!(encoded["event"]["source"]["kind"], "scheduled");
         assert_eq!(encoded["event"]["ui"], event.ui);
         assert_eq!(encoded["event"]["archived"], true);
+        assert_eq!(encoded["event"]["fork_sc"], "side:abc");
         assert_eq!(
             serde_json::from_value::<HostToClient>(encoded).unwrap(),
             frame
@@ -923,6 +934,7 @@ mod tests {
             status: PingStatus::Open,
             read: true,
             archived: false,
+            fork_sc: None,
             ts,
         };
         let process = ProcessInfo {
@@ -1115,7 +1127,8 @@ mod tests {
         let frames = [
             ClientToHost::OpenSideChat {
                 client_id: "open-1".to_string(),
-                ping_id: 9,
+                event_id: Some(9),
+                ping_id: None,
             },
             ClientToHost::ConcludeSideChat {
                 sc: "side:abc".to_string(),
@@ -1137,14 +1150,50 @@ mod tests {
             let decoded: ClientToHost = serde_json::from_value(encoded).unwrap();
             assert_eq!(decoded, frame);
         }
+
+        let legacy: ClientToHost = serde_json::from_value(json!({
+            "type": "open_side_chat",
+            "client_id": "legacy-open",
+            "ping_id": 9
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            ClientToHost::OpenSideChat {
+                client_id: "legacy-open".to_string(),
+                event_id: None,
+                ping_id: Some(9),
+            }
+        );
     }
 
     #[test]
     fn side_chat_host_frames_round_trip() {
+        let event = Event {
+            id: 9,
+            kind: EventKind::Info,
+            source: EventSource {
+                kind: EventSourceKind::Agent,
+                r#ref: None,
+            },
+            name: "build-ready".to_string(),
+            description: "Build completed".to_string(),
+            ui: json!({ "type": "card", "children": [] }),
+            anchor: 1,
+            requires_response: false,
+            quick_replies: Vec::new(),
+            status: EventStatus::Open,
+            read: false,
+            archived: false,
+            fork_sc: Some("side:abc".to_string()),
+            ts: Utc.with_ymd_and_hms(2026, 7, 14, 9, 0, 0).unwrap(),
+        };
         let frames = [
             HostToClient::SideChatOpen {
                 sc: "side:abc".to_string(),
+                event_id: 9,
                 ping_id: 9,
+                event,
                 messages: Vec::new(),
             },
             HostToClient::ConclusionDraft {

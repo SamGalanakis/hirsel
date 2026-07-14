@@ -16,6 +16,7 @@ import { ArrowRight, ArrowUp, ChevronDown, CircleCheck, List, MessageSquare } fr
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
+import { archiveEventWithUndo, unarchiveEvent } from "../../lib/event-archive";
 import {
   DECIDE_UNDO_WINDOW_MS,
   decideEventWithUndo,
@@ -26,15 +27,26 @@ import { createMediaFlag } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import { toast } from "../../lib/toast";
 import {
+  archivedEvents,
   eventTitle,
   eventUiNodes,
+  isEventArchived,
   isEventResolved,
+  isOpenJudgment,
   openJudgmentCount,
   orderedQueue,
+  visibleEvents,
 } from "../../store/selectors";
 import { goToChat, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
-import { DecidedStrip, EventCardHeader } from "./EventCard";
+import { ArchivedList } from "./ArchivedList";
+import {
+  ARCHIVE_EXIT_CLASS,
+  createArchiveExit,
+  DecidedStrip,
+  EventCardHeader,
+} from "./EventCard";
+import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
 import { QueueRow } from "./QueueRow";
 import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 
@@ -98,11 +110,16 @@ export function EventScroller() {
     if (state.home === "queue") rootRef?.focus();
   });
 
+  // THE default filter (archive contract v1): the pager's pages and every count
+  // it shows read the archived-free set, so an archived event leaves the pages,
+  // the "N of M" position, and the needs-you pill in the same reactive beat.
+  const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
   const ordered = createMemo(() =>
-    orderedQueue(state.events, state.eventDecideOverrides, snoozed()),
+    orderedQueue(visible(), state.eventDecideOverrides, snoozed()),
   );
   const total = () => ordered().length;
-  const openCount = () => openJudgmentCount(state.events, state.eventDecideOverrides);
+  const openCount = () => openJudgmentCount(visible(), state.eventDecideOverrides);
+  const archived = createMemo(() => archivedEvents(state.events, state.eventArchiveOverrides));
   // The end-page "decided" tally: DECIDED JUDGMENTS only — the exact complement
   // of `openCount` over the judgment set, so the two can never disagree (the
   // old `total - openCount` counted open awareness as "decided"). */
@@ -295,9 +312,16 @@ export function EventScroller() {
     const from = ordered().findIndex((e) => e.id === ev.id);
     window.setTimeout(() => {
       // Undo (within the window) drops the override, so this re-check cancels a
-      // still-owed advance for a card the Owner reclaimed.
+      // still-owed advance for a card the Owner reclaimed. An archive within the
+      // window also stands the advance down — the archived card's page is
+      // already gone (that re-flow IS the advance) and the Archived toast owns
+      // recovery, so firing here would double both the jump and the Undo.
       const live = state.events.find((e) => e.id === ev.id);
-      if (live && isEventResolved(live, state.eventDecideOverrides)) {
+      if (
+        live &&
+        isEventResolved(live, state.eventDecideOverrides) &&
+        !isEventArchived(live, state.eventArchiveOverrides)
+      ) {
         goTo(nextOpenIndex(ordered(), from, state.eventDecideOverrides));
         // The decided card is off screen now; keep recovery reachable for the
         // rest of the undo window as a toast — exactly one Undo at any moment.
@@ -526,6 +550,7 @@ export function EventScroller() {
           <Show when={peekOpen() && !atRail()}>
             <PeekOverview
               ordered={ordered()}
+              archived={archived()}
               centeredId={centeredId()}
               snoozed={snoozed()}
               openCount={openCount()}
@@ -561,6 +586,10 @@ function EventPage(props: {
 
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  // Motion-safe archive exit: the card fades/settles out, then the optimistic
+  // sweep drops its page — the pages below shift up into the slot, which IS the
+  // advance (the pager's set-shift tracking re-seeds without a phantom read).
+  const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
 
   // Pointer-driven swipe (the accelerator layer). Vertical intent releases to
   // the pager; horizontal past threshold commits accept/snooze.
@@ -645,11 +674,12 @@ function EventPage(props: {
               decided() ? "opacity-80" : "",
               props.ev.read && props.ev.kind !== "judgment" ? "opacity-60" : "",
               dragging() ? "shadow-lg" : "transition-transform duration-300 motion-reduce:transition-none",
+              leaving() ? ARCHIVE_EXIT_CLASS : "",
             )}
           >
             {/* The needs-you accent + minimal-chrome header (handle · source ·
                 kind), shared verbatim with the desktop Feed card. */}
-            <EventCardHeader ev={props.ev} />
+            <EventCardHeader ev={props.ev} onArchive={archive} />
 
             <div class="px-3.5 pb-3.5 pt-2">
               <EventCardRenderer
@@ -660,7 +690,7 @@ function EventPage(props: {
             </div>
 
             <Show when={decided()}>
-              <DecidedStrip ev={props.ev} onUndo={props.onUndo} />
+              <DecidedStrip ev={props.ev} onUndo={props.onUndo} onArchive={archive} />
             </Show>
             <Show when={isJudgment() && !decided()}>
               {/* No resting gesture/keys hint — the swipe reveals its own
@@ -771,16 +801,44 @@ function ClearPage(props: {
 
 /** Peek: the phone's whole-queue index — a top sheet you flick down; tap a row
  * to jump. Keeps the phone pager from being a tunnel (the desktop standing list
- * is the always-on equivalent). Rows are the SAME `QueueRow` the standing list
- * uses, so the two surfaces stay in lockstep. */
+ * is the always-on equivalent). It also hosts the queue's filter surface on
+ * phone (owner addendum): a calm search + Active · Needs you · Archived(n)
+ * control, so the pager itself stays a minimal decide flow and the browse /
+ * filter / search lives here. Rows are the SAME `QueueRow` the standing list
+ * uses; the archived filter swaps them for dense Unarchive rows. */
 function PeekOverview(props: {
   ordered: EventItem[];
+  archived: EventItem[];
   centeredId: number | undefined;
   snoozed: Set<number>;
   openCount: number;
   onJump: (ev: EventItem) => void;
   onClose: () => void;
 }) {
+  // Filter state — default `active` on every open (the sheet unmounts on close,
+  // so this resets by construction; never persisted). Search narrows live.
+  const [query, setQuery] = createSignal("");
+  const [mode, setMode] = createSignal<QueueFilterMode>("active");
+
+  // The rows the current live filter shows, search-narrowed (`needs-you` keeps
+  // only open judgments; `active` keeps the whole visible queue).
+  const rows = createMemo(() => {
+    const base =
+      mode() === "needs-you"
+        ? props.ordered.filter((e) => isOpenJudgment(e, state.eventDecideOverrides))
+        : props.ordered;
+    return base.filter((e) => matchesQuery(e, query()));
+  });
+  const filteredArchived = createMemo(() =>
+    props.archived.filter((e) => matchesQuery(e, query())),
+  );
+
+  // The Archived filter can't stand once nothing is archived — fall back so the
+  // sheet never strands on an empty archived view.
+  createEffect(() => {
+    if (mode() === "archived" && props.archived.length === 0) setMode("active");
+  });
+
   return (
     <div class="absolute inset-0 z-40" data-slot="event-peek">
       <button
@@ -789,7 +847,7 @@ function PeekOverview(props: {
         aria-label="Close overview"
         onClick={props.onClose}
       />
-      <div class="absolute inset-x-0 top-0 flex max-h-[78%] flex-col overflow-hidden rounded-b-xl border-b border-border bg-card shadow-xl">
+      <div class="absolute inset-x-0 top-0 flex max-h-[82%] flex-col overflow-hidden rounded-b-xl border-b border-border bg-card shadow-xl">
         <div class="flex items-center gap-2 border-b border-border px-4 py-3">
           <div>
             <h3 class="text-sm font-semibold text-foreground">Queue</h3>
@@ -806,19 +864,72 @@ function PeekOverview(props: {
             Close
           </button>
         </div>
+        {/* The filter row — the phone's home for search + Active/Needs you/
+            Archived; the pager below the peek stays a minimal decide flow. */}
+        <div class="border-b border-border px-3 py-2">
+          <QueueFilterBar
+            query={query()}
+            onQueryChange={setQuery}
+            mode={mode()}
+            onModeChange={setMode}
+            archivedCount={props.archived.length}
+          />
+        </div>
         <div class="overflow-y-auto p-1.5">
-          <For each={props.ordered}>
-            {(ev) => (
-              <QueueRow
-                ev={ev}
-                active={ev.id === props.centeredId}
-                snoozed={props.snoozed.has(ev.id)}
-                onJump={props.onJump}
-              />
-            )}
-          </For>
+          <Show
+            when={mode() === "archived"}
+            fallback={
+              <Show
+                when={rows().length > 0}
+                fallback={<PeekEmptyLine mode={mode()} query={query()} />}
+              >
+                <For each={rows()}>
+                  {(ev) => (
+                    <QueueRow
+                      ev={ev}
+                      active={ev.id === props.centeredId}
+                      snoozed={props.snoozed.has(ev.id)}
+                      onJump={props.onJump}
+                    />
+                  )}
+                </For>
+              </Show>
+            }
+          >
+            <div data-slot="peek-archived">
+              <Show
+                when={filteredArchived().length > 0}
+                fallback={
+                  <div class="px-2 py-6 text-center text-xs text-muted-foreground/70">
+                    {query().trim().length > 0
+                      ? `No archived events match “${query().trim()}”.`
+                      : "Nothing archived."}
+                  </div>
+                }
+              >
+                <ArchivedList
+                  events={filteredArchived()}
+                  onUnarchive={(ev) => unarchiveEvent(ev.id)}
+                />
+              </Show>
+            </div>
+          </Show>
         </div>
       </div>
     </div>
+  );
+}
+
+/** One quiet line for an empty live filter in the peek (search miss / nothing
+ * owed). */
+function PeekEmptyLine(props: { mode: QueueFilterMode; query: string }) {
+  const line = () =>
+    props.query.trim().length > 0
+      ? `No events match “${props.query.trim()}”.`
+      : props.mode === "needs-you"
+        ? "Nothing needs you right now."
+        : "The queue is empty.";
+  return (
+    <div class="px-2 py-6 text-center text-xs text-muted-foreground/70">{line()}</div>
   );
 }

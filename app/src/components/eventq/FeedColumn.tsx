@@ -15,22 +15,39 @@
 // header (the phone pager's red pill, promoted to the column header). Deciding is
 // inline (tap an option); "Discuss" drops a quoted reference into the standing
 // composer beside it — no navigation at all.
+//
+// Archive (contract v1): the resting column default-hides archived events —
+// counts run on the same filtered set, so nothing ever disagrees. A calm filter
+// row on top of the column (owner addendum) carries a search box + a segmented
+// Active · Needs you · Archived(n) control (default Active every session);
+// switching to Archived discloses the dense archived rows, each with Unarchive.
 import { ArrowRight, CircleCheck, MessageSquare } from "lucide-solid";
-import { createMemo, For, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
+import { archiveEventWithUndo, unarchiveEvent } from "../../lib/event-archive";
 import { decideEventWithUndo, undoDecide } from "../../lib/event-decide";
 import { focusMainComposer } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import {
+  archivedEvents,
   eventTitle,
   isEventResolved,
+  isOpenJudgment,
   openJudgmentCount,
   orderedQueue,
+  visibleEvents,
 } from "../../store/selectors";
 import { prefillComposer, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
-import { DecidedStrip, EventCardHeader } from "./EventCard";
+import { ArchivedList } from "./ArchivedList";
+import {
+  ARCHIVE_EXIT_CLASS,
+  createArchiveExit,
+  DecidedStrip,
+  EventCardHeader,
+} from "./EventCard";
+import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
 
 export function FeedColumn() {
   // DEV: seed the contract-shaped mock events so the Feed is real before the
@@ -40,8 +57,51 @@ export function FeedColumn() {
     if (import.meta.env.DEV && state.events.length === 0) seedMockEvents();
   });
 
-  const ordered = createMemo(() => orderedQueue(state.events, state.eventDecideOverrides));
-  const openCount = () => openJudgmentCount(state.events, state.eventDecideOverrides);
+  // THE default filter: the resting column and its counts both read the
+  // archived-free set, so an archived event vanishes from the cards and the
+  // needs-you pill in the same reactive beat.
+  const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
+  const ordered = createMemo(() => orderedQueue(visible(), state.eventDecideOverrides));
+  const openCount = () => openJudgmentCount(visible(), state.eventDecideOverrides);
+  const archived = createMemo(() => archivedEvents(state.events, state.eventArchiveOverrides));
+
+  // The filter bar state (owner addendum). Session-local, default `active`
+  // (never persisted) — archive is storage, not a standing second queue. A
+  // live search string narrows whichever filter is showing.
+  const [query, setQuery] = createSignal("");
+  const [mode, setMode] = createSignal<QueueFilterMode>("active");
+
+  // Any events at all (live or archived): drives the resting FeedEmpty vs. a
+  // quiet in-filter empty line, and gates the filter bar (no bar over nothing).
+  const hasAnyEvents = () => visible().length > 0 || archived().length > 0;
+
+  // The cards the current filter shows, narrowed by the search: `needs-you`
+  // keeps only open judgments, `active` keeps the whole resting queue.
+  const filteredCards = createMemo(() => {
+    const base =
+      mode() === "needs-you"
+        ? ordered().filter((e) => isOpenJudgment(e, state.eventDecideOverrides))
+        : ordered();
+    return base.filter((e) => matchesQuery(e, query()));
+  });
+  const filteredArchived = createMemo(() =>
+    archived().filter((e) => matchesQuery(e, query())),
+  );
+
+  // The Archived filter can't stand once nothing is archived (the last Unarchive
+  // emptied it): fall back to the resting Active filter so the column never
+  // strands on an empty archived view.
+  createEffect(() => {
+    if (mode() === "archived" && archived().length === 0) setMode("active");
+  });
+
+  // The one quiet line for an empty live filter (search miss / nothing owed).
+  const emptyCardsLine = () =>
+    query().trim().length > 0
+      ? `No events match “${query().trim()}”.`
+      : mode() === "needs-you"
+        ? "Nothing needs you right now."
+        : "Nothing in the active queue.";
 
   function decide(ev: EventItem, action: string, data: unknown): void {
     if (isEventResolved(ev, state.eventDecideOverrides)) return;
@@ -93,21 +153,66 @@ export function FeedColumn() {
         </span>
       </div>
 
+      {/* The filter row — a hairline strip below the datum. Search narrows the
+          list live; the segmented control switches Active · Needs you ·
+          Archived(n). Deliberately quieter than the cards (no red, 13px). */}
+      <Show when={hasAnyEvents()}>
+        <div class="shrink-0 border-b border-border px-3 py-2">
+          <QueueFilterBar
+            query={query()}
+            onQueryChange={setQuery}
+            mode={mode()}
+            onModeChange={setMode}
+            archivedCount={archived().length}
+          />
+        </div>
+      </Show>
+
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        <Show when={ordered().length > 0} fallback={<FeedEmpty />}>
-          <div class="flex flex-col gap-3">
-            <For each={ordered()}>
-              {(ev) => <FeedCard ev={ev} onDecide={decide} onDiscuss={discuss} />}
-            </For>
-            {/* An inbox-zero footer once nothing is owed — the peak-end reward,
-                calm and inline (no confetti), mirroring the phone clear page. */}
-            <Show when={openCount() === 0}>
-              <div class="flex items-center gap-2 rounded-xl border border-status-success/20 bg-status-success/[0.06] px-3.5 py-3 text-xs text-muted-foreground">
-                <CircleCheck class="size-4 shrink-0 text-status-success" aria-hidden="true" />
-                Queue clear — everything that needed you is decided.
-              </div>
-            </Show>
-          </div>
+        <Show when={hasAnyEvents()} fallback={<FeedEmpty />}>
+          <Show
+            when={mode() === "archived"}
+            fallback={
+              <Show
+                when={filteredCards().length > 0}
+                fallback={<QueueEmptyLine>{emptyCardsLine()}</QueueEmptyLine>}
+              >
+                <div class="flex flex-col gap-3">
+                  <For each={filteredCards()}>
+                    {(ev) => <FeedCard ev={ev} onDecide={decide} onDiscuss={discuss} />}
+                  </For>
+                  {/* An inbox-zero footer once nothing is owed (only in the
+                      resting Active filter, no search) — the peak-end reward,
+                      calm and inline, mirroring the phone clear page. */}
+                  <Show when={mode() === "active" && query().trim().length === 0 && openCount() === 0}>
+                    <div class="flex items-center gap-2 rounded-xl border border-status-success/20 bg-status-success/[0.06] px-3.5 py-3 text-xs text-muted-foreground">
+                      <CircleCheck class="size-4 shrink-0 text-status-success" aria-hidden="true" />
+                      Queue clear — everything that needed you is decided.
+                    </div>
+                  </Show>
+                </div>
+              </Show>
+            }
+          >
+            {/* Archived filter: dense rows, each with Unarchive (never full cards). */}
+            <div data-slot="feed-archived">
+              <Show
+                when={filteredArchived().length > 0}
+                fallback={
+                  <QueueEmptyLine>
+                    {query().trim().length > 0
+                      ? `No archived events match “${query().trim()}”.`
+                      : "Nothing archived."}
+                  </QueueEmptyLine>
+                }
+              >
+                <ArchivedList
+                  events={filteredArchived()}
+                  onUnarchive={(ev) => unarchiveEvent(ev.id)}
+                />
+              </Show>
+            </div>
+          </Show>
         </Show>
       </div>
     </aside>
@@ -124,6 +229,9 @@ function FeedCard(props: {
 }) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  // Motion-safe exit: the card fades/settles out, then the optimistic sweep
+  // re-flows the column (the toast's Undo brings it straight back).
+  const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
   return (
     <div
       class={cn(
@@ -131,9 +239,10 @@ function FeedCard(props: {
         !isJudgment() ? "bg-muted/30 shadow-none" : "",
         decided() ? "opacity-80" : "",
         props.ev.read && !isJudgment() ? "opacity-60" : "",
+        leaving() ? ARCHIVE_EXIT_CLASS : "",
       )}
     >
-      <EventCardHeader ev={props.ev} />
+      <EventCardHeader ev={props.ev} onArchive={archive} />
       <div class="px-3.5 pb-3.5 pt-2">
         <EventCardRenderer
           ui={props.ev.ui}
@@ -142,7 +251,7 @@ function FeedCard(props: {
         />
       </div>
       <Show when={decided()}>
-        <DecidedStrip ev={props.ev} onUndo={(id) => undoDecide(id)} />
+        <DecidedStrip ev={props.ev} onUndo={(id) => undoDecide(id)} onArchive={archive} />
       </Show>
       <Show when={isJudgment() && !decided()}>
         {/* The options above ARE the affordance — no "choose an option" restatement.
@@ -157,6 +266,17 @@ function FeedCard(props: {
           </button>
         </div>
       </Show>
+    </div>
+  );
+}
+
+/** One quiet line for an empty filter/search result (a search miss, a
+ * needs-you filter with nothing owed, an empty archive). Not the big FeedEmpty
+ * peak-end state — just a muted sentence so the column is never blank. */
+function QueueEmptyLine(props: { children: string }) {
+  return (
+    <div class="px-2 py-6 text-center text-xs text-muted-foreground/70" data-slot="queue-empty">
+      {props.children}
     </div>
   );
 }

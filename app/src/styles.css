@@ -195,9 +195,52 @@ textarea {
   font: inherit;
 }
 
-.thin-scrollbar {
-  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 50%, transparent) transparent;
+/* --- Quiet scrollbars, app-wide. The default chunky track is visually loud —
+   it reads as chrome competing with the hairline vocabulary, worst along the
+   feed column edge in dark mode. Every scroll container (feed column, chat
+   transcript, peek/queue list, canvas, settings, code blocks) gets the same
+   slim, implicit treatment: a thin bar, an always-transparent track, and a
+   muted token-driven thumb (so light and dark both inherit the right ink)
+   that strengthens slightly while the container is hovered. This is the ONE
+   scrollbar voice — it retires the per-container `.thin-scrollbar` class.
+
+   Engine split: the standard properties (Firefox, Chromium 121+) are the
+   primary path. The `::-webkit-scrollbar` fallback is gated to engines WITHOUT
+   `scrollbar-width` support (old Chromium/WebKit — exactly the ones drawing
+   the chunky bars), so browsers with native overlay scrollbars that also
+   support the standard property (e.g. Safari 18.2+ on macOS) are never forced
+   out of their implicit overlay bars by custom webkit pseudo styling. */
+* {
   scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 30%, transparent) transparent;
+}
+
+*:hover {
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent) transparent;
+}
+
+@supports not (scrollbar-width: thin) {
+  ::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
+  }
 }
 
 /* Used by the ported AttachmentGroup's horizontal snap row. */

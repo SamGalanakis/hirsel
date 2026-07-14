@@ -568,7 +568,7 @@ function ConcludeConfirmSheet(props: {
         <header class="flex-shrink-0 border-b border-border px-4 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] split:pt-3">
           <h2 class="m-0 text-base font-semibold">Send this reply?</h2>
         </header>
-        <div class="thin-scrollbar flex-1 overflow-y-auto p-4">
+        <div class="flex-1 overflow-y-auto p-4">
           <Show when={props.ping?.requires_response}>
             <div class="mb-3 rounded-md border-l-2 border-border bg-muted/40 p-2.5">
               <div class="mb-1 text-[0.68rem] uppercase tracking-wide text-muted-foreground">

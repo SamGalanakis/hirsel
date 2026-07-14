@@ -104,3 +104,73 @@ describe("optimistic decide / undecide / read", () => {
     expect(s.events[0].read).toBe(true);
   });
 });
+
+describe("optimistic archive / unarchive (archive contract v1)", () => {
+  it("archive_local records once (idempotent); unarchive_local drops it", () => {
+    let s = reduce(initialState(), { type: "event_archive_local", eventId: 4 });
+    s = reduce(s, { type: "event_archive_local", eventId: 4 });
+    expect(s.eventArchiveOverrides).toEqual([4]);
+    s = reduce(s, { type: "event_unarchive_local", eventId: 4 });
+    expect(s.eventArchiveOverrides).toEqual([]);
+  });
+
+  it("unarchive_local also flips a wire-archived event's local flag (host echo reconciles)", () => {
+    let s = reduce(initialState(), {
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: ev({ id: 6, status: "done", archived: true }) },
+    });
+    s = reduce(s, { type: "event_unarchive_local", eventId: 6 });
+    expect(s.events[0].archived).toBe(false);
+  });
+
+  it("a committed archived event_upsert prunes the optimistic override; an unrelated upsert never does", () => {
+    let s = reduce(initialState(), {
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: ev({ id: 8, status: "done" }) },
+    });
+    s = reduce(s, { type: "event_archive_local", eventId: 8 });
+    // An interleaved upsert that still carries archived=false (e.g. a read-flip
+    // broadcast racing the archive echo) must NOT flicker the card back.
+    s = reduce(s, {
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: ev({ id: 8, status: "done", read: true }) },
+    });
+    expect(s.eventArchiveOverrides).toEqual([8]);
+    // The committed archived truth supersedes the optimistic layer.
+    s = reduce(s, {
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: ev({ id: 8, status: "done", archived: true }) },
+    });
+    expect(s.eventArchiveOverrides).toEqual([]);
+    expect(s.events[0].archived).toBe(true);
+  });
+
+  it("hello_ok prunes archive overrides for vanished or already-archived events", () => {
+    let s = reduce(initialState(), {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 0,
+        messages: [],
+        pings: [],
+        events: [ev({ id: 1 }), ev({ id: 2 }), ev({ id: 3 })],
+      },
+    });
+    s = reduce(s, { type: "event_archive_local", eventId: 1 });
+    s = reduce(s, { type: "event_archive_local", eventId: 2 });
+    s = reduce(s, { type: "event_archive_local", eventId: 3 });
+    // Resync: 1 vanished, 2 now committed archived, 3 still live un-archived
+    // (the host never saw the action — the override keeps it swept client-side).
+    s = reduce(s, {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 0,
+        messages: [],
+        pings: [],
+        events: [ev({ id: 2, status: "done", archived: true }), ev({ id: 3 })],
+      },
+    });
+    expect(s.eventArchiveOverrides).toEqual([3]);
+  });
+});

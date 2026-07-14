@@ -294,7 +294,7 @@ const MessageScrollerViewport = (props: MessageScrollerViewportProps) => {
         if (typeof local.ref === "function") (local.ref as (e: HTMLDivElement) => void)(el);
       }}
       class={cn(
-        "thin-scrollbar size-full min-h-0 min-w-0 scroll-fade-b overflow-y-auto overscroll-contain",
+        "size-full min-h-0 min-w-0 scroll-fade-b overflow-y-auto overscroll-contain",
         local.class,
       )}
       {...others}

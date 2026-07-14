@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  archivedEvents,
   eventTitle,
   eventUiNodes,
+  isEventArchived,
+  isEventFinished,
   isEventResolved,
   openJudgmentCount,
   orderedQueue,
+  visibleEvents,
 } from "./selectors";
 import type { EventItem, ViewSpec } from "../protocol";
 
@@ -60,6 +64,42 @@ describe("orderedQueue priority (ADR-0012 interrupt-vs-accrue)", () => {
     const ordered = orderedQueue([decided, open, snoozedEv, summary], [1], new Set([3]));
     // open (2) first, snoozed (3), decided judgment (1), awareness (4).
     expect(ordered.map((e) => e.id)).toEqual([2, 3, 1, 4]);
+  });
+});
+
+describe("archive filter (contract v1): default-hides everywhere, counts stay honest", () => {
+  it("isEventArchived folds the wire flag and the optimistic override together", () => {
+    expect(isEventArchived(ev({ id: 1 }), [])).toBe(false);
+    expect(isEventArchived(ev({ id: 1, archived: true }), [])).toBe(true);
+    expect(isEventArchived(ev({ id: 1 }), [1])).toBe(true);
+  });
+
+  it("visibleEvents/archivedEvents partition the set; archived view is newest-first", () => {
+    const live = ev({ id: 1 });
+    const wireArchived = ev({ id: 2, status: "done", archived: true });
+    const optimistic = ev({ id: 3, status: "done" });
+    expect(visibleEvents([live, wireArchived, optimistic], [3]).map((e) => e.id)).toEqual([1]);
+    expect(archivedEvents([live, wireArchived, optimistic], [3]).map((e) => e.id)).toEqual([3, 2]);
+  });
+
+  it("an archived OPEN judgment leaves the needs-you count (counts run on the filtered set)", () => {
+    const a = ev({ id: 1 });
+    const b = ev({ id: 2 });
+    expect(openJudgmentCount(visibleEvents([a, b], []), [])).toBe(2);
+    // The host archives an open judgment (agent `events.archive`): even before
+    // its auto-dismiss lands, the filtered count no longer claims it needs you.
+    expect(openJudgmentCount(visibleEvents([ev({ id: 1, archived: true }), b], []), [])).toBe(1);
+    // Same via the optimistic layer.
+    expect(openJudgmentCount(visibleEvents([a, b], [2]), [])).toBe(1);
+  });
+
+  it("isEventFinished matches the events.clear sweep: done OR (read AND not requires_response)", () => {
+    expect(isEventFinished(ev({ id: 1 }), [])).toBe(false); // open judgment
+    expect(isEventFinished(ev({ id: 1, status: "done" }), [])).toBe(true);
+    expect(isEventFinished(ev({ id: 1 }), [1])).toBe(true); // optimistically decided
+    const info = ev({ id: 2, kind: "info", requires_response: false });
+    expect(isEventFinished(info, [])).toBe(false); // unread awareness
+    expect(isEventFinished({ ...info, read: true }, [])).toBe(true);
   });
 });
 

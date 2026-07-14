@@ -1,4 +1,5 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventItem } from "../../protocol";
 
@@ -104,6 +105,117 @@ describe("FeedColumn — the desktop card column", () => {
     expect(prefill.startsWith(">")).toBe(true);
     expect(prefill).toContain("@j7");
     expect(prefill).toContain("Wire the reopen op");
+  });
+
+  it("default-hides archived events: cards and the needs-you count both read the filtered set", async () => {
+    const archivedJudgment: EventItem = {
+      ...judgment(3, "Already archived"),
+      status: "done",
+      archived: true,
+    };
+    const { column } = await setup([judgment(1, "Live judgment"), archivedJudgment]);
+    // The archived card never renders in the resting column…
+    expect(within(column).queryByText("Already archived")).toBeNull();
+    expect(within(column).getByText("Live judgment")).toBeTruthy();
+    // …and the count is honest against the filtered set.
+    const need = column.querySelector('[data-slot="feed-need"]') as HTMLElement;
+    expect(need.textContent).toBe("1 need you");
+  });
+
+  it("a host-archived OPEN judgment leaves the needs-you count (agent events.archive)", async () => {
+    const { store, column } = await setup([judgment(1, "First"), judgment(2, "Second")]);
+    const need = column.querySelector('[data-slot="feed-need"]') as HTMLElement;
+    expect(need.textContent).toBe("2 need you");
+    // The host archives an open judgment out from under the client (the agent
+    // tool path) — still status open on this frame; archived alone must sweep it.
+    store.dispatch({
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: { ...judgment(2, "Second"), archived: true } },
+    });
+    await waitFor(() => expect(within(column).queryByText("Second")).toBeNull());
+    expect(need.textContent).toBe("1 need you");
+  });
+
+  it("Archive on the decided strip posts the contract envelope and animates the card out", async () => {
+    const { screen, sent, column } = await setup([judgment(5, "Only judgment")]);
+    fireEvent.click(screen.getByRole("button", { name: /Pick A for 5/ }));
+    // The decided strip carries the natural "done with this" exit next to Undo.
+    const archive = await waitFor(
+      () => within(column).getByRole("button", { name: "Archive" }),
+    );
+    fireEvent.click(archive);
+    // The exact contract envelope: action archive, data {} (not null).
+    await waitFor(() =>
+      expect(sent).toContainEqual({ eventId: 5, action: "archive", data: {} }),
+    );
+    // The card leaves the resting column (after the motion-safe exit).
+    await waitFor(() => expect(within(column).queryByText("Only judgment")).toBeNull());
+  });
+
+  it("a finished awareness card carries the ⋯ overflow Archive; an open judgment never does", async () => {
+    const readSummary: EventItem = {
+      ...judgment(6, "Read digest"),
+      kind: "summary",
+      requires_response: false,
+      read: true,
+    };
+    const { sent, column } = await setup([judgment(1, "Open judgment"), readSummary]);
+    // The open judgment offers no overflow — deciding is how it leaves the queue.
+    expect(within(column).queryByLabelText("More actions for @j1")).toBeNull();
+    const user = userEvent.setup();
+    await user.click(within(column).getByLabelText("More actions for @j6"));
+    await user.click(await within(document.body).findByRole("menuitem", { name: "Archive" }));
+    await waitFor(() =>
+      expect(sent).toContainEqual({ eventId: 6, action: "archive", data: {} }),
+    );
+    await waitFor(() => expect(within(column).queryByText("Read digest")).toBeNull());
+  });
+
+  it("Archived filter discloses dense rows; Unarchive returns the event to the feed", async () => {
+    const archivedSummary: EventItem = {
+      ...judgment(4, "Quarterly digest"),
+      kind: "summary",
+      requires_response: false,
+      status: "done",
+      read: true,
+      archived: true,
+    };
+    const { sent, column } = await setup([judgment(1, "Live judgment"), archivedSummary]);
+    // Default Active every session: no archived rows standing.
+    expect(column.querySelector('[data-slot="feed-archived"]')).toBeNull();
+    // The segmented control's Archived chip carries the honest count.
+    const chip = within(column).getByRole("button", { name: /Archived/ });
+    expect(chip.getAttribute("aria-pressed")).toBe("false");
+    expect(chip.textContent).toContain("1");
+    fireEvent.click(chip);
+    // Dense rows — @name + title + Unarchive — never full cards.
+    const section = column.querySelector('[data-slot="feed-archived"]') as HTMLElement;
+    expect(within(section).getByText("@j4")).toBeTruthy();
+    expect(within(section).queryByRole("button", { name: /Pick A/ })).toBeNull();
+    const unarchive = within(section).getByRole("button", { name: /Unarchive @j4/ });
+    fireEvent.click(unarchive);
+    // The exact contract envelope, and — the archive now empty — the column
+    // falls back to Active, where the returned event stands as a card again.
+    expect(sent).toContainEqual({ eventId: 4, action: "unarchive", data: {} });
+    await waitFor(() => expect(within(column).getByText("Quarterly digest")).toBeTruthy());
+    expect(column.querySelector('[data-slot="feed-archived"]')).toBeNull();
+  });
+
+  it("search narrows the cards live; Needs you keeps only open judgments", async () => {
+    const { screen, column } = await setup([judgment(1, "Wire the reopen op"), judgment(2, "Ship the digest")]);
+    // Live search across handle/description/title.
+    const search = within(column).getByLabelText("Search the queue") as HTMLInputElement;
+    fireEvent.input(search, { target: { value: "reopen" } });
+    expect(within(column).getByText("Wire the reopen op")).toBeTruthy();
+    expect(within(column).queryByText("Ship the digest")).toBeNull();
+    fireEvent.click(within(column).getByLabelText("Clear search"));
+    expect(within(column).getByText("Ship the digest")).toBeTruthy();
+    // Needs you: a decided judgment drops out of the narrowed set (it is no
+    // longer owed) while the open one stays.
+    fireEvent.click(screen.getByRole("button", { name: /Pick A for 2/ }));
+    fireEvent.click(within(column).getByRole("button", { name: "Needs you" }));
+    await waitFor(() => expect(within(column).queryByText("Ship the digest")).toBeNull());
+    expect(within(column).getByText("Wire the reopen op")).toBeTruthy();
   });
 
   it("shows the inbox-zero empty state when the queue is genuinely clear", async () => {

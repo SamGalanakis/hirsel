@@ -136,6 +136,14 @@ export interface AppState {
    * host's done `event_upsert` supersedes it (the reducer prunes the id). Undo
    * drops the id back off. Bounded. */
   eventDecideOverrides: number[];
+  /** Event ids optimistically archived (the decided strip's / overflow's
+   * Archive) but not yet committed by the host — the archive twin of
+   * `eventDecideOverrides`. An event is effectively archived if its wire
+   * `archived` flag is true OR its id is here; on commit the host's
+   * archived `event_upsert` supersedes it (the reducer prunes the id).
+   * Unarchive drops the id back off (and flips a wire-archived event's local
+   * flag until the host echo reconciles). Bounded. */
+  eventArchiveOverrides: number[];
   /** Bumped every time `hello_ok` replaces the event set wholesale (connect and
    * every resync). The queue scroller keys its session bookkeeping on this: a
    * snapshot swap must re-anchor the viewport (the browser-preserved scroll
@@ -243,6 +251,8 @@ export type Action =
   | { type: "event_decide_local"; eventId: number }
   | { type: "event_undecide_local"; eventId: number }
   | { type: "event_read_local"; eventId: number }
+  | { type: "event_archive_local"; eventId: number }
+  | { type: "event_unarchive_local"; eventId: number }
   | { type: "read_local"; pingId: number }
   | { type: "mark_unread_local"; pingId: number }
   | { type: "resolve_local"; pingId: number }
@@ -301,6 +311,7 @@ export function initialState(): AppState {
     pings: [],
     events: [],
     eventDecideOverrides: [],
+    eventArchiveOverrides: [],
     eventsSnapshotSeq: 0,
     agentActivity: { state: "idle", text: null },
     connection: "connecting",

@@ -124,6 +124,7 @@ function appSnapshot(): AppState {
     pings: state.pings,
     events: state.events,
     eventDecideOverrides: state.eventDecideOverrides,
+    eventArchiveOverrides: state.eventArchiveOverrides,
     eventsSnapshotSeq: state.eventsSnapshotSeq,
     agentActivity: state.agentActivity,
     connection: state.connection,
@@ -168,6 +169,7 @@ export function dispatch(action: Action): void {
     // genuinely-changed event (a re-upsert / decide flip) re-renders.
     setState("events", reconcile(next.events, { key: "id" }));
     setState("eventDecideOverrides", next.eventDecideOverrides);
+    setState("eventArchiveOverrides", next.eventArchiveOverrides);
     setState("eventsSnapshotSeq", next.eventsSnapshotSeq);
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);

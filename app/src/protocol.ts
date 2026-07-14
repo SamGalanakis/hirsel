@@ -168,6 +168,13 @@ export interface EventItem {
    * "blocking judgments first"). Optional on the wire; absent is treated as
    * false. Ordering is otherwise derived (kind + wait time). */
   blocking?: boolean;
+  /** Archive contract v1: the Owner has swept this event out of the resting
+   * queue. Orthogonal to `status` (the host auto-resolves an open judgment as
+   * dismissed at archive time; unarchive does NOT reopen it). Optional on the
+   * wire (`#[serde(default)]` host-side); absent is treated as false, so old
+   * data and old hosts stay valid. Toggled by `event_action`
+   * archive/unarchive; the client filters (hello_ok carries archived events). */
+  archived?: boolean;
 }
 
 // ---- Model configuration (main agent + sub-agent catalog) ----

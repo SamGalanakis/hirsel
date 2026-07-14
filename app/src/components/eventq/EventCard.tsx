@@ -13,6 +13,7 @@
 import { ArrowRight, Check, MessageSquare, MoreHorizontal } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
+import { consumeArrival } from "../../lib/event-entrance";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,6 +55,52 @@ export function createArchiveExit(commit: () => void): {
  * compositions animate identically. */
 export const ARCHIVE_EXIT_CLASS =
   "pointer-events-none scale-[0.98] opacity-0 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none";
+
+/** How long the entrance settle runs — the same 200ms as the exit, so entrance
+ * and exit rhyme. */
+export const CARD_ENTER_MS = ARCHIVE_EXIT_MS;
+
+/** The transition the entrance rides. Mirrors the exit's `transition-[opacity,
+ * transform] duration-200 ease-out` so a card arrives with the same calm cadence
+ * it leaves by — a fade plus a small settle, never a bounce. */
+export const CARD_ENTER_TRANSITION =
+  "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none";
+
+/** The entrance FROM-state — faded and nudged ~6px down; released to base on the
+ * next frame so the card settles up into place. The exit shrinks+fades away; the
+ * entrance fades+settles in — the two rhyme without being a literal reverse. */
+export const CARD_ENTER_FROM = "opacity-0 translate-y-[6px]";
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false)
+  );
+}
+
+/** Shared motion-safe entrance for both card compositions. A card animates in
+ * ONLY when it is a genuine live arrival (`consumeArrival`) and motion is allowed
+ * — so the initial `hello_ok` hydration and every re-render stay still. Returns
+ * `entering()` (the transition is live, for the 200ms window) and `atFrom()` (the
+ * one-frame FROM offset). Under reduced motion both stay false: the card is just
+ * there, instantly. */
+export function createCardEntrance(ev: EventItem): {
+  entering: () => boolean;
+  atFrom: () => boolean;
+} {
+  const active = consumeArrival(ev.id) && !prefersReducedMotion();
+  const [atFrom, setAtFrom] = createSignal(active);
+  const [entering, setEntering] = createSignal(active);
+  if (active) {
+    // Paint the FROM-state once, then release to base next frame so the settle
+    // actually animates (a transition never runs on the very first paint).
+    requestAnimationFrame(() => requestAnimationFrame(() => setAtFrom(false)));
+    // Drop the entrance transition after the settle so it never shadows the
+    // card's own transforms (the phone swipe spring) afterwards.
+    setTimeout(() => setEntering(false), CARD_ENTER_MS);
+  }
+  return { entering, atFrom };
+}
 
 /** The card's top matter: the one-accent needs-you edge (a hairline indigo strip
  * — the surface's single accent, never red) plus a MINIMAL header row. The mono
@@ -164,9 +211,12 @@ export function DecidedStrip(props: {
   onArchive?: (ev: EventItem) => void;
 }) {
   return (
-    <div class="border-t border-border bg-muted/40 px-3.5 py-3">
+    <div class="border-t border-border bg-muted/40 px-3.5 py-3 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150">
       <div class="flex items-center gap-2">
-        <span class="grid size-[18px] shrink-0 place-items-center rounded-full bg-status-success/15 text-status-success">
+        {/* The interaction-back confirmation: the strip crossfades in over the
+            options (~150ms) and the green check scales in once (0.8→1) — the small
+            "it's done" exhale, calm and single-shot. */}
+        <span class="grid size-[18px] shrink-0 place-items-center rounded-full bg-status-success/15 text-status-success motion-safe:animate-in motion-safe:zoom-in-80 motion-safe:duration-200 motion-safe:ease-out">
           <Check class="size-3" aria-hidden="true" />
         </span>
         <span class="text-xs font-semibold text-foreground">

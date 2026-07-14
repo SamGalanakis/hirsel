@@ -42,7 +42,10 @@ import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { ArchivedList } from "./ArchivedList";
 import {
   ARCHIVE_EXIT_CLASS,
+  CARD_ENTER_FROM,
+  CARD_ENTER_TRANSITION,
   createArchiveExit,
+  createCardEntrance,
   DecidedStrip,
   EventCardDoor,
   EventCardHeader,
@@ -234,6 +237,9 @@ function FeedCard(props: {
   // Motion-safe exit: the card fades/settles out, then the optimistic sweep
   // re-flows the column (the toast's Undo brings it straight back).
   const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
+  // Motion-safe entrance (genuine arrivals only): the fade + ~6px settle that
+  // mirrors the exit. Initial hydration and re-renders stay still.
+  const { entering, atFrom } = createCardEntrance(props.ev);
   return (
     <div
       class={cn(
@@ -241,6 +247,8 @@ function FeedCard(props: {
         !isJudgment() ? "bg-muted/30 shadow-none" : "",
         decided() ? "opacity-80" : "",
         props.ev.read && !isJudgment() ? "opacity-60" : "",
+        entering() ? CARD_ENTER_TRANSITION : "",
+        atFrom() ? CARD_ENTER_FROM : "",
         leaving() ? ARCHIVE_EXIT_CLASS : "",
       )}
     >

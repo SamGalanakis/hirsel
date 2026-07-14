@@ -5,6 +5,7 @@ import { EventScroller } from "./components/eventq/EventScroller";
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
 import { NavRail } from "./components/NavRail";
+import { PhoneChatBar } from "./components/PhoneChatBar";
 import { PhoneOverflowMenu } from "./components/PhoneOverflowMenu";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
@@ -143,6 +144,15 @@ function App() {
               <ChatView />
             </Show>
           </main>
+          {/* Phone queue-home standing chat bar: the always-reachable door to
+              Chat so composing intent never hides behind the ⋯ overflow. Phone
+              only (`rail:hidden` — desktop has the NavRail Chat row) and only on
+              the queue home (Chat has its own composer). It is an in-flow sibling
+              below the scroller, so the scroller's snap/height math already
+              accounts for it. */}
+          <Show when={state.home === "queue"}>
+            <PhoneChatBar />
+          </Show>
         </div>
       </div>
       <Toaster />

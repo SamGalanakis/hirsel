@@ -16,6 +16,7 @@ import { ArrowRight, ArrowUp, ChevronDown, CircleCheck, List, MessageSquare } fr
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
+import { archiveEventWithUndo, unarchiveEvent } from "../../lib/event-archive";
 import {
   DECIDE_UNDO_WINDOW_MS,
   decideEventWithUndo,
@@ -26,15 +27,24 @@ import { createMediaFlag } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import { toast } from "../../lib/toast";
 import {
+  archivedEvents,
   eventTitle,
   eventUiNodes,
+  isEventArchived,
   isEventResolved,
   openJudgmentCount,
   orderedQueue,
+  visibleEvents,
 } from "../../store/selectors";
 import { goToChat, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
-import { DecidedStrip, EventCardHeader } from "./EventCard";
+import { ArchivedList } from "./ArchivedList";
+import {
+  ARCHIVE_EXIT_CLASS,
+  createArchiveExit,
+  DecidedStrip,
+  EventCardHeader,
+} from "./EventCard";
 import { QueueRow } from "./QueueRow";
 import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 
@@ -98,11 +108,16 @@ export function EventScroller() {
     if (state.home === "queue") rootRef?.focus();
   });
 
+  // THE default filter (archive contract v1): the pager's pages and every count
+  // it shows read the archived-free set, so an archived event leaves the pages,
+  // the "N of M" position, and the needs-you pill in the same reactive beat.
+  const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
   const ordered = createMemo(() =>
-    orderedQueue(state.events, state.eventDecideOverrides, snoozed()),
+    orderedQueue(visible(), state.eventDecideOverrides, snoozed()),
   );
   const total = () => ordered().length;
-  const openCount = () => openJudgmentCount(state.events, state.eventDecideOverrides);
+  const openCount = () => openJudgmentCount(visible(), state.eventDecideOverrides);
+  const archived = createMemo(() => archivedEvents(state.events, state.eventArchiveOverrides));
   // The end-page "decided" tally: DECIDED JUDGMENTS only — the exact complement
   // of `openCount` over the judgment set, so the two can never disagree (the
   // old `total - openCount` counted open awareness as "decided"). */
@@ -295,9 +310,16 @@ export function EventScroller() {
     const from = ordered().findIndex((e) => e.id === ev.id);
     window.setTimeout(() => {
       // Undo (within the window) drops the override, so this re-check cancels a
-      // still-owed advance for a card the Owner reclaimed.
+      // still-owed advance for a card the Owner reclaimed. An archive within the
+      // window also stands the advance down — the archived card's page is
+      // already gone (that re-flow IS the advance) and the Archived toast owns
+      // recovery, so firing here would double both the jump and the Undo.
       const live = state.events.find((e) => e.id === ev.id);
-      if (live && isEventResolved(live, state.eventDecideOverrides)) {
+      if (
+        live &&
+        isEventResolved(live, state.eventDecideOverrides) &&
+        !isEventArchived(live, state.eventArchiveOverrides)
+      ) {
         goTo(nextOpenIndex(ordered(), from, state.eventDecideOverrides));
         // The decided card is off screen now; keep recovery reachable for the
         // rest of the undo window as a toast — exactly one Undo at any moment.
@@ -526,6 +548,7 @@ export function EventScroller() {
           <Show when={peekOpen() && !atRail()}>
             <PeekOverview
               ordered={ordered()}
+              archived={archived()}
               centeredId={centeredId()}
               snoozed={snoozed()}
               openCount={openCount()}
@@ -561,6 +584,10 @@ function EventPage(props: {
 
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  // Motion-safe archive exit: the card fades/settles out, then the optimistic
+  // sweep drops its page — the pages below shift up into the slot, which IS the
+  // advance (the pager's set-shift tracking re-seeds without a phantom read).
+  const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
 
   // Pointer-driven swipe (the accelerator layer). Vertical intent releases to
   // the pager; horizontal past threshold commits accept/snooze.
@@ -645,11 +672,12 @@ function EventPage(props: {
               decided() ? "opacity-80" : "",
               props.ev.read && props.ev.kind !== "judgment" ? "opacity-60" : "",
               dragging() ? "shadow-lg" : "transition-transform duration-300 motion-reduce:transition-none",
+              leaving() ? ARCHIVE_EXIT_CLASS : "",
             )}
           >
             {/* The needs-you accent + minimal-chrome header (handle · source ·
                 kind), shared verbatim with the desktop Feed card. */}
-            <EventCardHeader ev={props.ev} />
+            <EventCardHeader ev={props.ev} onArchive={archive} />
 
             <div class="px-3.5 pb-3.5 pt-2">
               <EventCardRenderer
@@ -660,7 +688,7 @@ function EventPage(props: {
             </div>
 
             <Show when={decided()}>
-              <DecidedStrip ev={props.ev} onUndo={props.onUndo} />
+              <DecidedStrip ev={props.ev} onUndo={props.onUndo} onArchive={archive} />
             </Show>
             <Show when={isJudgment() && !decided()}>
               {/* No resting gesture/keys hint — the swipe reveals its own
@@ -775,12 +803,16 @@ function ClearPage(props: {
  * uses, so the two surfaces stay in lockstep. */
 function PeekOverview(props: {
   ordered: EventItem[];
+  archived: EventItem[];
   centeredId: number | undefined;
   snoozed: Set<number>;
   openCount: number;
   onJump: (ev: EventItem) => void;
   onClose: () => void;
 }) {
+  // The quiet Archived(n) disclosure — default OFF on every open (the sheet
+  // unmounts on close, so the signal resets by construction; never persisted).
+  const [showArchived, setShowArchived] = createSignal(false);
   return (
     <div class="absolute inset-0 z-40" data-slot="event-peek">
       <button
@@ -798,6 +830,22 @@ function PeekOverview(props: {
             </div>
           </div>
           <span class="flex-1" />
+          <Show when={props.archived.length > 0 || showArchived()}>
+            <button
+              type="button"
+              data-slot="peek-archived-toggle"
+              aria-pressed={showArchived()}
+              class={cn(
+                "rounded-sm text-[0.68rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                showArchived()
+                  ? "text-foreground"
+                  : "text-muted-foreground/80 hover:text-foreground",
+              )}
+              onClick={() => setShowArchived((v) => !v)}
+            >
+              Archived ({props.archived.length})
+            </button>
+          </Show>
           <button
             type="button"
             class="rounded-full border border-border bg-muted px-2.5 py-1 text-[0.68rem] font-semibold text-muted-foreground transition-colors hover:text-foreground"
@@ -817,6 +865,19 @@ function PeekOverview(props: {
               />
             )}
           </For>
+          {/* The archived section: the same dense rows the desktop Feed
+              discloses — below the queue rows, never mixed into them. */}
+          <Show when={showArchived()}>
+            <div data-slot="peek-archived" class="mt-2 border-t border-border pt-2">
+              <div class="px-2 pb-1 text-[0.62rem] font-semibold uppercase tracking-[0.04em] text-muted-foreground/70">
+                Archived
+              </div>
+              <ArchivedList
+                events={props.archived}
+                onUnarchive={(ev) => unarchiveEvent(ev.id)}
+              />
+            </div>
+          </Show>
         </div>
       </div>
     </div>

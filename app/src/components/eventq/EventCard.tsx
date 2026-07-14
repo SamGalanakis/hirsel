@@ -9,10 +9,16 @@
 // path is `lib/event-decide` — both already shared. This module adds the last
 // shared visual atoms so "desktop is a composition change, not a re-render of
 // cards" holds literally.
-import { ArrowRight, Check } from "lucide-solid";
-import { Show } from "solid-js";
+import { ArrowRight, Check, MoreHorizontal } from "lucide-solid";
+import { createSignal, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
-import { isEventResolved } from "../../store/selectors";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { isEventFinished, isEventResolved } from "../../store/selectors";
 import { state } from "../../store/store";
 
 export const KIND_LABEL: Record<string, string> = {
@@ -21,13 +27,53 @@ export const KIND_LABEL: Record<string, string> = {
   info: "Info",
 };
 
+/** How long the archive exit animation runs before the card actually leaves the
+ * set (the optimistic sweep dispatch). Short and calm — a settle, not a flourish. */
+export const ARCHIVE_EXIT_MS = 200;
+
+/** Shared motion-safe archive exit for both card compositions: `archive()` runs
+ * the brief fade/settle (skipped under prefers-reduced-motion) and then fires
+ * `commit` (the real archive), so the card animates out before the re-flow.
+ * `leaving()` drives the exit classes on the card box. */
+export function createArchiveExit(commit: () => void): {
+  leaving: () => boolean;
+  archive: () => void;
+} {
+  const [leaving, setLeaving] = createSignal(false);
+  const archive = () => {
+    if (leaving()) return;
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) {
+      commit();
+      return;
+    }
+    setLeaving(true);
+    setTimeout(commit, ARCHIVE_EXIT_MS);
+  };
+  return { leaving, archive };
+}
+
+/** The exit classes `leaving()` applies to the card box — one string so the two
+ * compositions animate identically. */
+export const ARCHIVE_EXIT_CLASS =
+  "pointer-events-none scale-[0.98] opacity-0 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none";
+
 /** The card's top matter: the one-accent needs-you edge (a hairline indigo strip
  * — the surface's single accent, never red) plus the minimal-chrome header row
  * (@name · source · kind, no wait/cost/turns). Placed as the first children of a
- * `relative overflow-hidden` card box in each composition. */
-export function EventCardHeader(props: { ev: EventItem }) {
+ * `relative overflow-hidden` card box in each composition.
+ *
+ * A FINISHED event (decided, or read awareness — the exact `events.clear` set)
+ * also carries the quiet ⋯ overflow with the Archive action: reversible (the
+ * Archived view's Unarchive), so no confirmation and nothing red. An open
+ * judgment never offers it — deciding is how a judgment leaves the queue. */
+export function EventCardHeader(props: { ev: EventItem; onArchive?: (ev: EventItem) => void }) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  const archivable = () =>
+    props.onArchive !== undefined && isEventFinished(props.ev, state.eventDecideOverrides);
   return (
     <>
       <Show when={isJudgment() && !decided()}>
@@ -50,15 +96,35 @@ export function EventCardHeader(props: { ev: EventItem }) {
             <Check class="size-3" aria-hidden="true" /> read
           </span>
         </Show>
+        <Show when={archivable()}>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              class="-my-1 grid size-6 place-items-center rounded-md text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              aria-label={`More actions for ${props.ev.name}`}
+            >
+              <MoreHorizontal class="size-4" aria-hidden="true" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem onSelect={() => props.onArchive?.(props.ev)}>
+                Archive
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </Show>
       </div>
     </>
   );
 }
 
 /** The interaction-back confirmation that replaces the card's action row once
- * decided: a green check + the posted payload + a brief Undo. Shared verbatim by
- * the phone pager and the desktop Feed column. */
-export function DecidedStrip(props: { ev: EventItem; onUndo: (id: number) => void }) {
+ * decided: a green check + the posted payload + a brief Undo — and Archive, the
+ * natural "done with this" exit now that the decision is posted. Shared verbatim
+ * by the phone pager and the desktop Feed column. */
+export function DecidedStrip(props: {
+  ev: EventItem;
+  onUndo: (id: number) => void;
+  onArchive?: (ev: EventItem) => void;
+}) {
   return (
     <div class="border-t border-border bg-muted/40 px-3.5 py-3">
       <div class="flex items-center gap-2">
@@ -69,10 +135,21 @@ export function DecidedStrip(props: { ev: EventItem; onUndo: (id: number) => voi
           {props.ev.name} → <span class="text-status-success">decided</span>
         </span>
       </div>
-      <div class="mt-2 flex items-center gap-2 text-[0.68rem] text-muted-foreground">
-        <ArrowRight class="size-3 text-primary" aria-hidden="true" />
-        posted to {props.ev.source.ref ?? props.ev.source.kind}
+      <div class="mt-2 flex items-center gap-3 text-[0.68rem] text-muted-foreground">
+        <span class="inline-flex min-w-0 items-center gap-2">
+          <ArrowRight class="size-3 shrink-0 text-primary" aria-hidden="true" />
+          <span class="truncate">posted to {props.ev.source.ref ?? props.ev.source.kind}</span>
+        </span>
         <span class="flex-1" />
+        <Show when={props.onArchive}>
+          <button
+            type="button"
+            class="font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            onClick={() => props.onArchive?.(props.ev)}
+          >
+            Archive
+          </button>
+        </Show>
         <button
           type="button"
           class="font-bold text-primary transition-colors hover:text-primary/80"

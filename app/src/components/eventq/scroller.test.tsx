@@ -132,6 +132,66 @@ describe("EventScroller — the phone vertical event queue home", () => {
     expect(within(peek).getByText("A judgment")).toBeTruthy();
   });
 
+  it("default-hides archived events from the pages, the pager count, and the position", async () => {
+    const archivedJudgment: EventItem = {
+      ...judgment(2, "Archived judgment"),
+      status: "done",
+      archived: true,
+    };
+    const { screen, reader } = await setup([judgment(1, "Live judgment"), archivedJudgment]);
+    // Only the live judgment pages; the archived one is filtered out everywhere.
+    expect(within(reader).queryByText("Archived judgment")).toBeNull();
+    const need = screen.container.querySelector('[data-slot="pager-need"]') as HTMLElement;
+    expect(need.textContent).toBe("1 need you");
+    const pos = screen.container.querySelector('[data-slot="pager-pos"]') as HTMLElement;
+    expect(pos.textContent).toBe("1 of 1");
+  });
+
+  it("archives from the decided strip: envelope sent, page re-flows out, counts honest", async () => {
+    const { screen, sent, reader } = await setup([judgment(3, "Ship it"), judgment(4, "Later one")]);
+    fireEvent.click(screen.getByRole("button", { name: /Pick A for 3/ }));
+    const archive = await waitFor(() =>
+      within(reader).getByRole("button", { name: "Archive" }),
+    );
+    fireEvent.click(archive);
+    await waitFor(() =>
+      expect(sent).toContainEqual({ eventId: 3, action: "archive", data: {} }),
+    );
+    // The archived page leaves the pager: one page (the other judgment) remains.
+    await waitFor(() => expect(within(reader).queryByText("Ship it")).toBeNull());
+    const pos = screen.container.querySelector('[data-slot="pager-pos"]') as HTMLElement;
+    expect(pos.textContent).toBe("1 of 1");
+  });
+
+  it("peek carries the quiet Archived (n) toggle: default OFF, dense rows, Unarchive returns it", async () => {
+    const archivedSummary: EventItem = {
+      ...judgment(5, "Old digest"),
+      kind: "summary",
+      requires_response: false,
+      status: "done",
+      read: true,
+      archived: true,
+    };
+    const { screen, sent } = await setup([judgment(1, "Live judgment"), archivedSummary]);
+    fireEvent.click(screen.getByLabelText("Open queue overview"));
+    const peek = await waitFor(
+      () => screen.container.querySelector('[data-slot="event-peek"]') as HTMLElement,
+    );
+    // Default OFF every session: no archived rows standing, only the quiet toggle.
+    expect(peek.querySelector('[data-slot="peek-archived"]')).toBeNull();
+    expect(within(peek).queryByText("@j5")).toBeNull();
+    fireEvent.click(within(peek).getByRole("button", { name: "Archived (1)" }));
+    const section = peek.querySelector('[data-slot="peek-archived"]') as HTMLElement;
+    expect(within(section).getByText("@j5")).toBeTruthy();
+    // Unarchive posts the contract envelope and the row rejoins the queue rows.
+    fireEvent.click(within(section).getByRole("button", { name: /Unarchive @j5/ }));
+    expect(sent).toContainEqual({ eventId: 5, action: "unarchive", data: {} });
+    await waitFor(() => {
+      const pos = screen.container.querySelector('[data-slot="pager-pos"]') as HTMLElement;
+      expect(pos.textContent).toBe("1 of 2");
+    });
+  });
+
   it("focuses the scroller root so the keyboard is alive on load (§5)", async () => {
     const { reader } = await setup([judgment(1, "One")]);
     await waitFor(() => expect(document.activeElement).toBe(reader));

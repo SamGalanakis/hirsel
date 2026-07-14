@@ -15,22 +15,36 @@
 // header (the phone pager's red pill, promoted to the column header). Deciding is
 // inline (tap an option); "Discuss" drops a quoted reference into the standing
 // composer beside it — no navigation at all.
+//
+// Archive (contract v1): the resting column default-hides archived events —
+// counts run on the same filtered set, so nothing ever disagrees. The header
+// carries the quiet "Archived (n)" toggle (default OFF every session) that
+// discloses the dense archived rows below the cards, each with Unarchive.
 import { ArrowRight, CircleCheck, MessageSquare } from "lucide-solid";
-import { createMemo, For, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
+import { archiveEventWithUndo, unarchiveEvent } from "../../lib/event-archive";
 import { decideEventWithUndo, undoDecide } from "../../lib/event-decide";
 import { focusMainComposer } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import {
+  archivedEvents,
   eventTitle,
   isEventResolved,
   openJudgmentCount,
   orderedQueue,
+  visibleEvents,
 } from "../../store/selectors";
 import { prefillComposer, state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
-import { DecidedStrip, EventCardHeader } from "./EventCard";
+import { ArchivedList } from "./ArchivedList";
+import {
+  ARCHIVE_EXIT_CLASS,
+  createArchiveExit,
+  DecidedStrip,
+  EventCardHeader,
+} from "./EventCard";
 
 export function FeedColumn() {
   // DEV: seed the contract-shaped mock events so the Feed is real before the
@@ -40,8 +54,17 @@ export function FeedColumn() {
     if (import.meta.env.DEV && state.events.length === 0) seedMockEvents();
   });
 
-  const ordered = createMemo(() => orderedQueue(state.events, state.eventDecideOverrides));
-  const openCount = () => openJudgmentCount(state.events, state.eventDecideOverrides);
+  // THE default filter: the resting column and its counts both read the
+  // archived-free set, so an archived event vanishes from the cards and the
+  // needs-you pill in the same reactive beat.
+  const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
+  const ordered = createMemo(() => orderedQueue(visible(), state.eventDecideOverrides));
+  const openCount = () => openJudgmentCount(visible(), state.eventDecideOverrides);
+  const archived = createMemo(() => archivedEvents(state.events, state.eventArchiveOverrides));
+
+  // The quiet Archived(n) disclosure. Session-local, default OFF (never
+  // persisted) — archive is storage, not a standing second queue.
+  const [showArchived, setShowArchived] = createSignal(false);
 
   function decide(ev: EventItem, action: string, data: unknown): void {
     if (isEventResolved(ev, state.eventDecideOverrides)) return;
@@ -76,10 +99,27 @@ export function FeedColumn() {
           icon rail brand, this header, and the chat header). Carries the
           surface's ONE red — the needs-you count — as the calm pill vocabulary
           the phone pager uses (danger tint when something is owed, success tint
-          when clear). Nothing else on this surface is ever red. */}
+          when clear). Nothing else on this surface is ever red — the Archived
+          toggle beside it is deliberately the quietest thing in the row. */}
       <div class="flex h-12 shrink-0 items-center gap-2.5 border-b border-border px-4">
         <h2 class="m-0 text-sm font-semibold tracking-[0.01em] text-foreground">Feed</h2>
         <span class="flex-1" />
+        <Show when={archived().length > 0 || showArchived()}>
+          <button
+            type="button"
+            data-slot="feed-archived-toggle"
+            aria-pressed={showArchived()}
+            class={cn(
+              "rounded-sm text-[0.68rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+              showArchived()
+                ? "text-foreground"
+                : "text-muted-foreground/80 hover:text-foreground",
+            )}
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            Archived ({archived().length})
+          </button>
+        </Show>
         <span
           data-slot="feed-need"
           class={cn(
@@ -109,6 +149,16 @@ export function FeedColumn() {
             </Show>
           </div>
         </Show>
+        {/* The archived section: dense rows below the live cards (the Feed stays
+            the needs-you surface; archive is a disclosure, not a mode swap). */}
+        <Show when={showArchived()}>
+          <div data-slot="feed-archived" class="mt-4 border-t border-border pt-2.5">
+            <div class="px-2 pb-1 text-[0.62rem] font-semibold uppercase tracking-[0.04em] text-muted-foreground/70">
+              Archived
+            </div>
+            <ArchivedList events={archived()} onUnarchive={(ev) => unarchiveEvent(ev.id)} />
+          </div>
+        </Show>
       </div>
     </aside>
   );
@@ -124,6 +174,9 @@ function FeedCard(props: {
 }) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  // Motion-safe exit: the card fades/settles out, then the optimistic sweep
+  // re-flows the column (the toast's Undo brings it straight back).
+  const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
   return (
     <div
       class={cn(
@@ -131,9 +184,10 @@ function FeedCard(props: {
         !isJudgment() ? "bg-muted/30 shadow-none" : "",
         decided() ? "opacity-80" : "",
         props.ev.read && !isJudgment() ? "opacity-60" : "",
+        leaving() ? ARCHIVE_EXIT_CLASS : "",
       )}
     >
-      <EventCardHeader ev={props.ev} />
+      <EventCardHeader ev={props.ev} onArchive={archive} />
       <div class="px-3.5 pb-3.5 pt-2">
         <EventCardRenderer
           ui={props.ev.ui}
@@ -142,7 +196,7 @@ function FeedCard(props: {
         />
       </div>
       <Show when={decided()}>
-        <DecidedStrip ev={props.ev} onUndo={(id) => undoDecide(id)} />
+        <DecidedStrip ev={props.ev} onUndo={(id) => undoDecide(id)} onArchive={archive} />
       </Show>
       <Show when={isJudgment() && !decided()}>
         {/* The options above ARE the affordance — no "choose an option" restatement.

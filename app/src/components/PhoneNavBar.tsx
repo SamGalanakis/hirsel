@@ -1,6 +1,6 @@
 import { Layers, MessageSquare } from "lucide-solid";
 import { Show } from "solid-js";
-import { openJudgmentCount } from "../store/selectors";
+import { openJudgmentCount, visibleEvents } from "../store/selectors";
 import { goToChat, goToQueue, state } from "../store/store";
 
 // The phone bottom navigation bar (two-way nav). A slim phone-only tab bar
@@ -40,7 +40,13 @@ function clamp99(n: number): string {
 export function PhoneNavBar() {
   const onQueue = () => state.home === "queue";
   const onChat = () => state.home === "chat";
-  const feedNeedsYou = () => openJudgmentCount(state.events, state.eventDecideOverrides);
+  // Counts run on the archive-filtered set (contract v1), matching every other
+  // queue surface — an archived event never contributes to the badge.
+  const feedNeedsYou = () =>
+    openJudgmentCount(
+      visibleEvents(state.events, state.eventArchiveOverrides),
+      state.eventDecideOverrides,
+    );
 
   return (
     <nav

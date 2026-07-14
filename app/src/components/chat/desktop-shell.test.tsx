@@ -204,21 +204,24 @@ describe("Desktop shell: right-region precedence", () => {
 });
 
 describe("Desktop shell: the nav rail", () => {
-  it("mounts a Primary nav with Queue / Chat / Processes / Settings items (no Pings/Inbox/Commands row)", async () => {
+  it("mounts a Primary nav with Queue / Chat / Processes items (Settings drops to the footer; no Pings/Inbox/Commands row)", async () => {
     const { screen } = await setupApp();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(nav).toBeTruthy();
     // ADR-0012 cutover + §6: the Queue is the home AND the pings surface, so the
     // separate "Pings" nav row is retired. Chat becomes a demoted door/back-way
-    // to the resting rail; Processes/Settings still dock the right region; the
-    // palette is ⌘K (no "Commands" row).
+    // to the resting rail; Processes still docks the right region; the palette is
+    // ⌘K (no "Commands" row). Settings is no longer a main nav row — it lives in
+    // the footer strip as a quiet gear beside the connection pill and ⌘K.
     expect(within(nav).getByLabelText("Queue")).toBeTruthy();
     expect(within(nav).getByLabelText("Chat")).toBeTruthy();
     expect(within(nav).getByRole("button", { name: /Processes/ })).toBeTruthy();
-    expect(within(nav).getByLabelText("Settings")).toBeTruthy();
+    expect(within(nav).queryByLabelText("Settings")).toBeNull();
     expect(within(nav).queryByRole("button", { name: "Pings" })).toBeNull();
     expect(within(nav).queryByRole("button", { name: "Inbox" })).toBeNull();
     expect(within(nav).queryByRole("button", { name: /Commands/ })).toBeNull();
+    // The Settings gear is present, but in the footer — outside the Primary nav.
+    expect(screen.getByLabelText("Settings")).toBeTruthy();
   });
 
   it("marks exactly one nav item as aria-current across queue/chat/inspector states", async () => {
@@ -227,7 +230,8 @@ describe("Desktop shell: the nav rail", () => {
     const queue = within(nav).getByLabelText("Queue");
     const chat = within(nav).getByLabelText("Chat");
     const processes = within(nav).getByRole("button", { name: /Processes/ });
-    const settings = within(nav).getByLabelText("Settings");
+    // Settings now lives in the footer strip, outside the Primary nav.
+    const settings = screen.getByLabelText("Settings");
 
     // Default resting state (ADR-0012 cutover): the Queue home is current; no
     // shell surface owns the region yet.
@@ -249,6 +253,14 @@ describe("Desktop shell: the nav rail", () => {
     expect(chat.getAttribute("aria-current")).toBeNull();
     expect(queue.getAttribute("aria-current")).toBeNull();
     expect(settings.getAttribute("aria-current")).toBeNull();
+
+    // The footer Settings gear tells the truth too: it is current only while the
+    // Settings pane owns the right region, and nothing else is then.
+    store.openSettings();
+    await waitFor(() => expect(settings.getAttribute("aria-current")).toBe("page"));
+    expect(processes.getAttribute("aria-current")).toBeNull();
+    expect(chat.getAttribute("aria-current")).toBeNull();
+    expect(queue.getAttribute("aria-current")).toBeNull();
   });
 
   it("hides the Queue nav badge on the queue home, showing it muted once drilled away (§2)", async () => {
@@ -304,11 +316,13 @@ describe("Desktop shell: the nav rail", () => {
     );
   });
 
-  it("opens the Settings inspector from the NavRail gear", async () => {
+  it("opens the Settings inspector from the footer gear", async () => {
     const { screen } = await setupApp();
     const nav = screen.getByRole("navigation", { name: "Primary" });
+    // The gear is footer chrome, not a Primary-nav row.
+    expect(within(nav).queryByLabelText("Settings")).toBeNull();
     expect(document.querySelector('[data-slot="settings-panel"]')).toBeNull();
-    await fireEvent.click(within(nav).getByLabelText("Settings"));
+    await fireEvent.click(screen.getByLabelText("Settings"));
     await waitFor(() =>
       expect(document.querySelector('[data-slot="settings-panel"]')).toBeTruthy(),
     );

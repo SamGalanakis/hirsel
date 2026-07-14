@@ -150,12 +150,21 @@ pub struct ShellRunOutput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct JudgmentOption {
-    pub key: String,
+pub struct JudgmentOptionInput {
+    #[serde(default)]
+    pub key: Option<String>,
     pub label: String,
     pub detail: String,
     #[serde(default)]
     pub recommended: bool,
+}
+
+#[derive(Debug, Clone)]
+struct JudgmentOption {
+    key: String,
+    label: String,
+    detail: String,
+    recommended: bool,
 }
 
 impl ToolSuite {
@@ -251,35 +260,116 @@ impl ToolSuite {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn pings_send_with_view(
+    pub async fn events_judgment(
         &self,
-        name: impl Into<String>,
-        description: impl Into<String>,
-        content_md: impl Into<String>,
+        question: impl Into<String>,
+        context: impl Into<String>,
         anchor: u64,
-        requires_response: bool,
-        quick_replies: Vec<QuickReply>,
+        options: Vec<JudgmentOptionInput>,
         view: Option<serde_json::Value>,
         unblocks: Option<u64>,
     ) -> anyhow::Result<Event> {
-        let name = name.into();
+        let question = question.into();
+        let name = judgment_event_name(&question);
+        self.events_judgment_named(name, question, context, anchor, options, view, unblocks)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn events_judgment_named(
+        &self,
+        name: impl Into<String>,
+        question: impl Into<String>,
+        context: impl Into<String>,
+        anchor: u64,
+        options: Vec<JudgmentOptionInput>,
+        view: Option<serde_json::Value>,
+        unblocks: Option<u64>,
+    ) -> anyhow::Result<Event> {
+        let question = question.into();
+        let context = context.into();
+        validate_judgment_context(&question, &context)?;
+        let options = normalize_judgment_options(options)?;
+        let quick_replies = options
+            .iter()
+            .map(|option| QuickReply {
+                value: option.key.clone(),
+                label: option.label.clone(),
+            })
+            .collect();
+        let ui = blessed_judgment_ui_from_options(&question, &context, &options, view, unblocks);
+        self.create_agent_event(
+            EventKind::Judgment,
+            name,
+            question,
+            ui,
+            anchor,
+            true,
+            quick_replies,
+        )
+        .await
+    }
+
+    pub async fn events_notify(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content_md: Option<String>,
+        anchor: u64,
+    ) -> anyhow::Result<Event> {
         let description = description.into();
-        let content = content_md.into();
-        let kind = if requires_response {
-            EventKind::Judgment
-        } else {
-            EventKind::Info
+        let content = content_md.unwrap_or_else(|| description.clone());
+        self.create_agent_event(
+            EventKind::Info,
+            name,
+            description,
+            info_ui(&content),
+            anchor,
+            false,
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn events_summary(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content_md: Option<String>,
+        ui: Option<serde_json::Value>,
+        anchor: u64,
+    ) -> anyhow::Result<Event> {
+        let ui = match (content_md, ui) {
+            (Some(content), None) => summary_ui(&content),
+            (None, Some(ui)) => {
+                crate::templates::validate(&ui)?;
+                ui
+            }
+            _ => anyhow::bail!("provide exactly one of `content_md` or `ui`"),
         };
-        if matches!(kind, EventKind::Judgment) {
-            validate_judgment_context(&description, &content)?;
-            validate_judgment_option_count(quick_replies.len())?;
-        }
-        let ui = if matches!(kind, EventKind::Judgment) {
-            blessed_judgment_ui(&description, &content, &quick_replies, view, unblocks)
-        } else {
-            info_ui(&content)
-        };
+        self.create_agent_event(
+            EventKind::Summary,
+            name,
+            description,
+            ui,
+            anchor,
+            false,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_agent_event(
+        &self,
+        kind: EventKind,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        ui: serde_json::Value,
+        anchor: u64,
+        requires_response: bool,
+        quick_replies: Vec<QuickReply>,
+    ) -> anyhow::Result<Event> {
         let event = self
             .storage
             .create_event(
@@ -304,6 +394,39 @@ impl ToolSuite {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn pings_send_with_view(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content_md: impl Into<String>,
+        anchor: u64,
+        requires_response: bool,
+        quick_replies: Vec<QuickReply>,
+        view: Option<serde_json::Value>,
+        unblocks: Option<u64>,
+    ) -> anyhow::Result<Event> {
+        let name = name.into();
+        let description = description.into();
+        let content = content_md.into();
+        if requires_response {
+            let options = quick_replies
+                .into_iter()
+                .map(|reply| JudgmentOptionInput {
+                    key: None,
+                    label: reply.label,
+                    detail: reply.value,
+                    recommended: false,
+                })
+                .collect();
+            self.events_judgment_named(name, description, content, anchor, options, view, unblocks)
+                .await
+        } else {
+            self.events_notify(name, description, Some(content), anchor)
+                .await
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn pings_send_with_options(
         &self,
         name: impl Into<String>,
@@ -311,7 +434,7 @@ impl ToolSuite {
         content_md: impl Into<String>,
         anchor: u64,
         requires_response: bool,
-        options: Vec<JudgmentOption>,
+        options: Vec<JudgmentOptionInput>,
         view: Option<serde_json::Value>,
         unblocks: Option<u64>,
     ) -> anyhow::Result<Event> {
@@ -319,52 +442,20 @@ impl ToolSuite {
             anyhow::bail!("info events cannot carry judgment options");
         }
         if requires_response {
-            validate_judgment_options(&options)?;
-        }
-        let name = name.into();
-        let description = description.into();
-        let content = content_md.into();
-        if requires_response {
-            validate_judgment_context(&description, &content)?;
-        }
-        let kind = if requires_response {
-            EventKind::Judgment
-        } else {
-            EventKind::Info
-        };
-        let quick_replies = options
-            .iter()
-            .map(|option| QuickReply {
-                value: option.key.clone(),
-                label: option.label.clone(),
-            })
-            .collect::<Vec<_>>();
-        let ui = if matches!(kind, EventKind::Judgment) {
-            blessed_judgment_ui_from_options(&description, &content, &options, view, unblocks)
-        } else {
-            info_ui(&content)
-        };
-        let event = self
-            .storage
-            .create_event(
-                kind,
-                EventSource {
-                    kind: EventSourceKind::Agent,
-                    r#ref: None,
-                },
+            self.events_judgment_named(
                 name,
                 description,
-                ui,
+                content_md,
                 anchor,
-                requires_response,
-                quick_replies,
+                options,
+                view,
+                unblocks,
             )
-            .await?;
-        self.broadcast(HostToClient::EventUpsert {
-            event: event.clone(),
-        });
-        self.pushes.enqueue_event(&event).await;
-        Ok(event)
+            .await
+        } else {
+            self.events_notify(name, description, Some(content_md.into()), anchor)
+                .await
+        }
     }
 
     pub async fn pings_resolve(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
@@ -711,26 +802,6 @@ impl ToolSuite {
     }
 }
 
-pub(crate) fn blessed_judgment_ui(
-    heading: &str,
-    context: &str,
-    replies: &[QuickReply],
-    view: Option<serde_json::Value>,
-    unblocks: Option<u64>,
-) -> serde_json::Value {
-    let options = replies
-        .iter()
-        .enumerate()
-        .map(|(index, reply)| JudgmentOption {
-            key: option_key(index),
-            label: reply.label.clone(),
-            detail: reply.value.clone(),
-            recommended: index == 0,
-        })
-        .collect::<Vec<_>>();
-    blessed_judgment_ui_from_options(heading, context, &options, view, unblocks)
-}
-
 fn blessed_judgment_ui_from_options(
     heading: &str,
     context: &str,
@@ -774,24 +845,36 @@ fn blessed_judgment_ui_from_options(
     serde_json::json!({ "type": "card", "children": children })
 }
 
-fn validate_judgment_options(options: &[JudgmentOption]) -> anyhow::Result<()> {
+fn normalize_judgment_options(
+    options: Vec<JudgmentOptionInput>,
+) -> anyhow::Result<Vec<JudgmentOption>> {
     validate_judgment_option_count(options.len())?;
+    let recommended_count = options.iter().filter(|option| option.recommended).count();
+    if recommended_count > 1 {
+        anyhow::bail!("judgment events require exactly one recommended option");
+    }
+
     let mut keys = HashSet::new();
-    for option in options {
-        if option.key.len() != 1 || !option.key.as_bytes()[0].is_ascii_uppercase() {
+    let mut normalized = Vec::with_capacity(options.len());
+    for (index, option) in options.into_iter().enumerate() {
+        let key = option.key.unwrap_or_else(|| option_key(index));
+        if key.len() != 1 || !key.as_bytes()[0].is_ascii_uppercase() {
             anyhow::bail!("judgment option keys must be one uppercase ASCII letter");
         }
-        if !keys.insert(option.key.as_str()) {
+        if !keys.insert(key.clone()) {
             anyhow::bail!("judgment option keys must be unique");
         }
         if option.label.trim().is_empty() || option.detail.trim().is_empty() {
             anyhow::bail!("judgment option labels and details must not be empty");
         }
+        normalized.push(JudgmentOption {
+            key,
+            label: option.label,
+            detail: option.detail,
+            recommended: option.recommended || (recommended_count == 0 && index == 0),
+        });
     }
-    if options.iter().filter(|option| option.recommended).count() != 1 {
-        anyhow::bail!("judgment events require exactly one recommended option");
-    }
-    Ok(())
+    Ok(normalized)
 }
 
 fn validate_judgment_option_count(count: usize) -> anyhow::Result<()> {
@@ -845,6 +928,13 @@ fn info_ui(text: &str) -> serde_json::Value {
     })
 }
 
+fn summary_ui(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "card",
+        "children": [{ "type": "text", "text": text }]
+    })
+}
+
 fn digest_ui(text: &str, status: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "card",
@@ -867,6 +957,34 @@ fn option_key(index: usize) -> String {
         .map(char::from)
         .map(String::from)
         .unwrap_or_else(|| (index + 1).to_string())
+}
+
+fn judgment_event_name(question: &str) -> String {
+    let mut name = String::new();
+    let mut previous_was_separator = false;
+    for character in question.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            if name.chars().count() == 32 {
+                break;
+            }
+            name.push(character);
+            previous_was_separator = false;
+        } else if !name.is_empty() && !previous_was_separator {
+            if name.chars().count() == 32 {
+                break;
+            }
+            name.push('-');
+            previous_was_separator = true;
+        }
+    }
+    while name.ends_with('-') {
+        name.pop();
+    }
+    if name.is_empty() {
+        "judgment".to_string()
+    } else {
+        name
+    }
 }
 
 fn publish_process_upsert(
@@ -899,10 +1017,10 @@ mod tests {
     use super::*;
     use crate::processes::ProcessStatus;
 
-    fn judgment_options(count: usize) -> Vec<JudgmentOption> {
+    fn judgment_options(count: usize) -> Vec<JudgmentOptionInput> {
         (0..count)
-            .map(|index| JudgmentOption {
-                key: option_key(index),
+            .map(|index| JudgmentOptionInput {
+                key: Some(option_key(index)),
                 label: format!("Option {}", index + 1),
                 detail: format!("Choose option {}", index + 1),
                 recommended: index == 0,
@@ -967,7 +1085,7 @@ mod tests {
         let ui = blessed_judgment_ui_from_options(
             "Which release channel?",
             "  ",
-            &judgment_options(2),
+            &normalize_judgment_options(judgment_options(2)).unwrap(),
             None,
             Some(3),
         );
@@ -982,14 +1100,80 @@ mod tests {
     fn judgment_options_require_two_to_four_choices() {
         for count in [1, 5] {
             assert_eq!(
-                validate_judgment_options(&judgment_options(count))
+                normalize_judgment_options(judgment_options(count))
                     .unwrap_err()
                     .to_string(),
                 "judgment events require 2–4 options"
             );
         }
-        validate_judgment_options(&judgment_options(2)).unwrap();
-        validate_judgment_options(&judgment_options(4)).unwrap();
+        normalize_judgment_options(judgment_options(2)).unwrap();
+        normalize_judgment_options(judgment_options(4)).unwrap();
+    }
+
+    #[test]
+    fn keyless_options_get_ordered_keys_and_first_recommendation() {
+        let options = (0..3)
+            .map(|index| JudgmentOptionInput {
+                key: None,
+                label: format!("Option {}", index + 1),
+                detail: format!("Tradeoff {}", index + 1),
+                recommended: false,
+            })
+            .collect();
+
+        let normalized = normalize_judgment_options(options).unwrap();
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|option| option.key.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C"]
+        );
+        assert!(normalized[0].recommended);
+        assert!(!normalized[1].recommended);
+        assert!(!normalized[2].recommended);
+    }
+
+    #[test]
+    fn supplied_keys_and_recommendations_keep_existing_validation() {
+        let invalid_key = vec![
+            JudgmentOptionInput {
+                key: Some("a".to_string()),
+                label: "Alpha".to_string(),
+                detail: "First tradeoff".to_string(),
+                recommended: true,
+            },
+            JudgmentOptionInput {
+                key: Some("B".to_string()),
+                label: "Beta".to_string(),
+                detail: "Second tradeoff".to_string(),
+                recommended: false,
+            },
+        ];
+        assert_eq!(
+            normalize_judgment_options(invalid_key)
+                .unwrap_err()
+                .to_string(),
+            "judgment option keys must be one uppercase ASCII letter"
+        );
+
+        let mut duplicate_key = judgment_options(2);
+        duplicate_key[1].key = Some("A".to_string());
+        assert_eq!(
+            normalize_judgment_options(duplicate_key)
+                .unwrap_err()
+                .to_string(),
+            "judgment option keys must be unique"
+        );
+
+        let mut duplicate_recommendation = judgment_options(2);
+        duplicate_recommendation[1].recommended = true;
+        assert_eq!(
+            normalize_judgment_options(duplicate_recommendation)
+                .unwrap_err()
+                .to_string(),
+            "judgment events require exactly one recommended option"
+        );
     }
 
     #[test]
@@ -997,7 +1181,7 @@ mod tests {
         let ui = blessed_judgment_ui_from_options(
             "Which release channel?",
             "Stable reduces rollout risk; edge gets feedback sooner.",
-            &judgment_options(2),
+            &normalize_judgment_options(judgment_options(2)).unwrap(),
             Some(serde_json::json!({ "type": "text", "text": "release diff" })),
             Some(2),
         );

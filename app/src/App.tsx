@@ -1,4 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { BrandMark } from "./components/BrandMark";
 import { ChatView } from "./components/chat/ChatView";
 import { DesktopShell } from "./components/DesktopShell";
 import { EventScroller } from "./components/eventq/EventScroller";
@@ -135,7 +136,10 @@ function App() {
                   it expands to the full pill when reconnecting/offline) plus ONE
                   overflow (Model · Canvas · Processes · Settings). */}
               <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
-                <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
+                <div class="flex shrink-0 items-center gap-2">
+                  <BrandMark size={22} ring />
+                  <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
+                </div>
                 <div class="flex shrink-0 items-center gap-0.5">
                   <ConnectionPill compact />
                   <PhoneOverflowMenu />

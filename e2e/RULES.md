@@ -30,10 +30,13 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `get_blob_url` returns a short-lived, blob-scoped signed URL for `GET /blob/{id}`. `Authorization: Bearer ...` remains a migration path, but owner tokens are never accepted in query strings. Images are served inline; other MIME types are served as attachments.
 
-Agent Ping tools are `pings.send { name, description, content_md, requires_response, quick_replies? }`
-and `pings.resolve { ping_id }`. Tool summaries use the internal names `pings_send` and
-`pings_resolve`. A scripted or real Agent must supply a non-empty name (at most 32 characters) and
-description; runbooks must never synthesize these fields outside the Agent tool path.
+Agent event tools are `events.judgment { question, context?, options, unblocks?, view? }`,
+`events.notify { name, description, content_md? }`, and
+`events.summary { name, description, content_md | ui }`; tool summaries use the internal names
+`events_judgment`, `events_notify`, and `events_summary`. `pings.send` remains a deprecated alias for
+judgment/info events, with tool-summary name `pings_send`; `pings.resolve { ping_id }` remains the
+compatibility lifecycle tool with summary name `pings_resolve`. A scripted or real Agent must supply
+the required non-empty event fields; runbooks must never synthesize them outside the Agent tool path.
 
 ## Scenario Index
 

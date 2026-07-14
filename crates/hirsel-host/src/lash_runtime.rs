@@ -60,7 +60,7 @@ use crate::{
     model_selection::{ModelSelectionState, model_spec},
     monitors::{output_tail, run_monitor_tick},
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
-    tools::{JudgmentOption, ToolSuite},
+    tools::{JudgmentOptionInput, ToolSuite},
 };
 
 const AGENT_SESSION_ID: &str = "agent";
@@ -1946,6 +1946,10 @@ fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSummary> {
 fn condense_args(name: &str, payload: &Value) -> Option<String> {
     let summary = match name {
         "shell_run" => labeled_scalar(payload, "cmd", "cmd"),
+        "events_judgment" => labeled_scalar(payload, "question", "question"),
+        "events_notify" | "events_summary" => {
+            labeled_first_scalar(payload, &["description", "name"], "event")
+        }
         "pings_send" => {
             labeled_first_scalar(payload, &["content_md", "content", "body"], "content")
         }
@@ -1982,6 +1986,9 @@ fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
     let payload = tool_output_payload(output).unwrap_or(output);
     let detail = match name {
         "shell_run" => shell_result_summary(payload),
+        "events_judgment" | "events_notify" | "events_summary" => {
+            scalar_field(payload, "event_id").map(|id| format!("event {id}"))
+        }
         "pings_send" => scalar_field(payload, "ping_id").map(|id| format!("ping {id}")),
         "pings_resolve" => payload
             .get("ping")
@@ -2377,6 +2384,9 @@ impl StaticToolExecute for HirselToolExecutor {
 impl HirselToolExecutor {
     async fn execute_inner(&self, call: ToolCall<'_>) -> Result<Value, String> {
         match call.name {
+            "events_judgment" => self.events_judgment(call.args).await,
+            "events_notify" => self.events_notify(call.args).await,
+            "events_summary" => self.events_summary(call.args).await,
             "pings_send" => self.pings_send(call.args).await,
             "pings_resolve" => self.pings_resolve(call.args).await,
             "views_show" => self.views_show(call.args).await,
@@ -2395,6 +2405,55 @@ impl HirselToolExecutor {
             "shell_run" => self.shell_run(call.args).await,
             other => Err(format!("Unknown tool: {other}")),
         }
+    }
+
+    async fn events_judgment(&self, args: &Value) -> Result<Value, String> {
+        let question = required_string(args, "question")?;
+        let context = optional_string_any_allow_empty(args, &["context"])?.unwrap_or_default();
+        let options = args
+            .get("options")
+            .cloned()
+            .ok_or_else(|| "missing required field `options`".to_string())
+            .and_then(|options| {
+                serde_json::from_value::<Vec<JudgmentOptionInput>>(options)
+                    .map_err(|error| format!("invalid options: {error}"))
+            })?;
+        let view = args.get("view").cloned().filter(|value| !value.is_null());
+        let unblocks = args.get("unblocks").and_then(Value::as_u64);
+        let anchor = self.require_current_event_anchor().await?;
+        let event = self
+            .tools
+            .events_judgment(question, context, anchor, options, view, unblocks)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(event_send_result(&event))
+    }
+
+    async fn events_notify(&self, args: &Value) -> Result<Value, String> {
+        let name = required_string(args, "name")?;
+        let description = required_string(args, "description")?;
+        let content_md = optional_string_any_allow_empty(args, &["content_md"])?;
+        let anchor = self.require_current_event_anchor().await?;
+        let event = self
+            .tools
+            .events_notify(name, description, content_md, anchor)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(event_send_result(&event))
+    }
+
+    async fn events_summary(&self, args: &Value) -> Result<Value, String> {
+        let name = required_string(args, "name")?;
+        let description = required_string(args, "description")?;
+        let content_md = optional_string_any_allow_empty(args, &["content_md"])?;
+        let ui = args.get("ui").cloned().filter(|value| !value.is_null());
+        let anchor = self.require_current_event_anchor().await?;
+        let event = self
+            .tools
+            .events_summary(name, description, content_md, ui, anchor)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(event_send_result(&event))
     }
 
     async fn pings_send(&self, args: &Value) -> Result<Value, String> {
@@ -2416,7 +2475,7 @@ impl HirselToolExecutor {
         let options = args
             .get("options")
             .cloned()
-            .map(serde_json::from_value::<Vec<JudgmentOption>>)
+            .map(serde_json::from_value::<Vec<JudgmentOptionInput>>)
             .transpose()
             .map_err(|error| format!("invalid options: {error}"))?;
         if options.is_some() && args.get("quick_replies").is_some() {
@@ -2712,6 +2771,20 @@ impl HirselToolExecutor {
             .as_ref()
             .map(|anchors| anchors.owner_message_id)
     }
+
+    async fn require_current_event_anchor(&self) -> Result<u64, String> {
+        self.current_anchor()
+            .await
+            .ok_or_else(|| "event tools require an active Owner turn anchor".to_string())
+    }
+}
+
+fn event_send_result(event: &hirsel_proto::Event) -> Value {
+    json!({
+        "event_id": event.id,
+        "anchor": event.anchor,
+        "kind": event.kind,
+    })
 }
 
 fn pings_send_result(ping: &hirsel_proto::Ping) -> Value {
@@ -3356,9 +3429,39 @@ fn subagent_abandoned_output() -> ProcessAwaitOutput {
 fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         tool_definition(
+            "hirsel.events_judgment",
+            "events_judgment",
+            "Emit a judgment Event when work reaches a taste boundary and needs Sam's decision. Valid example: events.judgment({ question: \"Where should canvas view state persist?\", context: \"Local persistence keeps the reopen path available after a host restart.\", options: [{ label: \"SQLite\", detail: \"Durable with the existing host store.\", recommended: true }, { label: \"Memory\", detail: \"Simpler, but state disappears on restart.\" }], unblocks: 2 }). Rules: context must add information beyond the question or be omitted; context \"Choose where canvas view state should persist.\" is rejected for question \"Where should canvas view state persist?\" because it only paraphrases it. Supply 2–4 options. Keys are optional and become A, B, C… in order; mark one recommendation explicitly, or the host recommends the first option.",
+            events_judgment_input_schema(),
+            event_send_output_schema("judgment"),
+            ["events"],
+            "judgment",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.events_notify",
+            "events_notify",
+            "Emit a quiet info Event for an FYI that belongs outside a warm Chat exchange.",
+            events_notify_input_schema(),
+            event_send_output_schema("info"),
+            ["events"],
+            "notify",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
+            "hirsel.events_summary",
+            "events_summary",
+            "Emit a summary Event for a digest, using either markdown content or a validated constrained-JSON UI tree.",
+            events_summary_input_schema(),
+            event_send_output_schema("summary"),
+            ["events"],
+            "summary",
+            ToolScheduling::Serial,
+        ),
+        tool_definition(
             "hirsel.pings_send",
             "pings_send",
-            "Emit a judgment Event (or an info Event when requires_response is false) anchored to the current Agent turn. For judgments, content_md is optional context that must add information beyond the question in description (state the stakes or constraint; omit it instead of echoing the question). For example, content_md \"Choose where canvas view state should persist.\" is rejected for the heading \"Where should canvas view state persist?\" because it only paraphrases it. Options must contain 2–4 choices with exactly one recommended, and unblocks is an optional count of agents this decision will unblock.",
+            "deprecated: use events.judgment / events.notify. Compatibility alias for emitting a judgment or info Event from the current Agent turn.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -3405,11 +3508,11 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "minItems": 2,
                         "maxItems": 4,
-                        "description": "Judgment choices. Exactly one option must set recommended to true.",
+                        "description": "Judgment choices. Keys are optional; when no recommendation is marked, the first option is recommended.",
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
-                            "required": ["key", "label", "detail"],
+                            "required": ["label", "detail"],
                             "properties": {
                                 "key": { "type": "string", "pattern": "^[A-Z]$" },
                                 "label": { "type": "string", "minLength": 1 },
@@ -3720,6 +3823,117 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
             ToolScheduling::Serial,
         ),
     ]
+}
+
+fn events_judgment_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question", "options"],
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The one-line decision question shown as the judgment heading."
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional stakes or constraints that add information beyond the question. Omit it instead of paraphrasing the question."
+            },
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "description": "Two to four real choices with tradeoff details. Mark one recommended; if none is marked, the first is recommended.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["label", "detail"],
+                    "properties": {
+                        "label": { "type": "string", "minLength": 1 },
+                        "detail": { "type": "string", "minLength": 1 },
+                        "recommended": { "type": "boolean", "default": false },
+                        "key": {
+                            "type": "string",
+                            "pattern": "^[A-Z]$",
+                            "description": "Optional presentation key. Omitted keys are assigned A, B, C… by position."
+                        }
+                    }
+                }
+            },
+            "unblocks": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional count of agents this decision unblocks."
+            },
+            "view": {
+                "type": ["object", "array", "null"],
+                "description": "Optional accompanying constrained view embedded in the blessed card."
+            }
+        }
+    })
+}
+
+fn events_notify_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description"],
+        "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "description": "One-line notification text."
+            },
+            "content_md": {
+                "type": "string",
+                "description": "Optional supporting markdown; the description is used when omitted."
+            }
+        }
+    })
+}
+
+fn events_summary_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description"],
+        "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "description": "One-line digest outcome."
+            },
+            "content_md": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Digest markdown used to build the standard summary card."
+            },
+            "ui": {
+                "type": "object",
+                "description": "A constrained-JSON UI component tree validated by the host."
+            }
+        },
+        "oneOf": [
+            { "required": ["content_md"], "not": { "required": ["ui"] } },
+            { "required": ["ui"], "not": { "required": ["content_md"] } }
+        ]
+    })
+}
+
+fn event_send_output_schema(kind: &str) -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id", "anchor", "kind"],
+        "properties": {
+            "event_id": { "type": "integer", "minimum": 1 },
+            "anchor": { "type": "integer", "minimum": 1 },
+            "kind": { "const": kind }
+        }
+    })
 }
 
 fn pings_send_output_schema() -> Value {
@@ -4945,6 +5159,212 @@ mod tests {
         assert!(guidance.contains("## Host configuration"));
     }
 
+    #[test]
+    fn event_tool_schemas_teach_keyless_judgments_and_bound_option_count() {
+        let definitions = hirsel_tool_definitions();
+        let judgment = definitions
+            .iter()
+            .find(|definition| definition.name() == "events_judgment")
+            .unwrap();
+        let validator =
+            jsonschema::JSONSchema::compile(judgment.contract.input_schema.canonical()).unwrap();
+        let options = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    json!({
+                        "label": format!("Option {}", index + 1),
+                        "detail": format!("Tradeoff {}", index + 1)
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            validator
+                .validate(&json!({
+                    "question": "Which release path?",
+                    "options": options(2)
+                }))
+                .is_ok()
+        );
+        for count in [1, 5] {
+            assert!(
+                validator
+                    .validate(&json!({
+                        "question": "Which release path?",
+                        "options": options(count)
+                    }))
+                    .is_err()
+            );
+        }
+        assert!(judgment.description().contains("events.judgment({"));
+        assert!(judgment.description().contains("Supply 2–4 options"));
+        assert!(judgment.description().contains("only paraphrases it"));
+
+        let alias = definitions
+            .iter()
+            .find(|definition| definition.name() == "pings_send")
+            .unwrap();
+        assert!(
+            alias
+                .description()
+                .contains("deprecated: use events.judgment / events.notify")
+        );
+    }
+
+    async fn test_event_executor() -> (HirselToolExecutor, Storage, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let storage = Storage::open(&path).await.unwrap();
+        let owner = storage
+            .append_chat(ChatAuthor::Owner, "owner turn", None)
+            .await
+            .unwrap();
+        let (broadcaster, _) = broadcast::channel(16);
+        let (pushes, _) = crate::push::PushGateway::recording(storage.clone());
+        let broadcast_log = BroadcastLog::default();
+        let templates =
+            crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
+                .await
+                .unwrap();
+        let views = crate::templates::ViewManager::new(
+            templates,
+            broadcaster.clone(),
+            broadcast_log.clone(),
+        );
+        let config_store = crate::host_config::ConfigStore::load(
+            path.join("hirsel.toml"),
+            &path,
+            std::path::Path::new("/docs/hirsel-config.md"),
+        )
+        .await
+        .unwrap();
+        let tools = ToolSuite::new(
+            ToolsConfig {
+                driver_mode: DriverMode::Fake,
+                fake_fixture: None,
+                subagent_models: crate::subagent_models::SubagentModelState::load(config_store),
+            },
+            storage.clone(),
+            broadcaster,
+            broadcast_log,
+            ProcessStore::default(),
+            pushes,
+            views,
+        );
+        let anchors = Arc::new(Mutex::new(TurnAnchorState {
+            active: Some(TurnAnchors {
+                owner_message_id: owner.id,
+            }),
+            ..TurnAnchorState::default()
+        }));
+        (HirselToolExecutor { tools, anchors }, storage, dir)
+    }
+
+    #[tokio::test]
+    async fn event_tools_emit_typed_events_and_deprecated_alias_still_works() {
+        let (executor, storage, _dir) = test_event_executor().await;
+        let judgment_args = json!({
+            "question": "Which release path?",
+            "context": "Stable limits the blast radius; edge reaches testers sooner.",
+            "options": [
+                { "label": "Stable", "detail": "Lower rollout risk." },
+                { "label": "Edge", "detail": "Faster feedback." },
+                { "label": "Hold", "detail": "More validation time." }
+            ]
+        });
+        let judgment = executor.events_judgment(&judgment_args).await.unwrap();
+        let info = executor
+            .events_notify(&json!({
+                "name": "tests-green",
+                "description": "The release suite passed"
+            }))
+            .await
+            .unwrap();
+        let summary = executor
+            .events_summary(&json!({
+                "name": "daily-digest",
+                "description": "Fleet digest ready",
+                "content_md": "Three branches landed; one judgment remains."
+            }))
+            .await
+            .unwrap();
+        let alias = executor
+            .pings_send(&json!({
+                "name": "alias-choice",
+                "description": "Which alias path?",
+                "content_md": "One path preserves compatibility; the other removes old callers.",
+                "requires_response": true,
+                "options": [
+                    { "label": "Preserve", "detail": "Keeps old callers working." },
+                    { "label": "Remove", "detail": "Shrinks the surface." }
+                ]
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(judgment["kind"], "judgment");
+        assert_eq!(info["kind"], "info");
+        assert_eq!(summary["kind"], "summary");
+        for (result, kind) in [
+            (&info, hirsel_proto::EventKind::Info),
+            (&summary, hirsel_proto::EventKind::Summary),
+        ] {
+            assert_eq!(
+                storage
+                    .ping(result["event_id"].as_u64().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .kind,
+                kind
+            );
+        }
+        let event = storage
+            .ping(judgment["event_id"].as_u64().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let options = event.ui["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|child| child["type"] == "optionList")
+            .unwrap()["options"]
+            .as_array()
+            .unwrap();
+        assert_eq!(options[0]["key"], "A");
+        assert_eq!(options[1]["key"], "B");
+        assert_eq!(options[2]["key"], "C");
+        assert_eq!(options[0]["recommended"], true);
+        assert_eq!(options[1]["recommended"], false);
+
+        let alias_event = storage
+            .ping(alias["ping_id"].as_u64().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alias_event.kind, hirsel_proto::EventKind::Judgment);
+
+        for count in [1, 5] {
+            let mut invalid = judgment_args.clone();
+            invalid["options"] = Value::Array(
+                (0..count)
+                    .map(|index| {
+                        json!({
+                            "label": format!("Option {index}"),
+                            "detail": format!("Tradeoff {index}")
+                        })
+                    })
+                    .collect(),
+            );
+            assert_eq!(
+                executor.events_judgment(&invalid).await.unwrap_err(),
+                "judgment events require 2–4 options"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn pings_send_uses_active_turn_anchor_when_later_owner_message_is_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -5134,6 +5554,15 @@ mod tests {
         ];
 
         let mut results = BTreeMap::<&str, Vec<Value>>::new();
+        let mut info = ping.clone();
+        info.kind = hirsel_proto::EventKind::Info;
+        info.requires_response = false;
+        let mut summary = ping.clone();
+        summary.kind = hirsel_proto::EventKind::Summary;
+        summary.requires_response = false;
+        results.insert("events_judgment", vec![event_send_result(&ping)]);
+        results.insert("events_notify", vec![event_send_result(&info)]);
+        results.insert("events_summary", vec![event_send_result(&summary)]);
         results.insert("pings_send", vec![pings_send_result(&ping)]);
         results.insert(
             "pings_resolve",

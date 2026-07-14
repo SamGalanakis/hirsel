@@ -3,7 +3,7 @@
 ## Purpose
 
 Prove the ADR-0012/0013 typed event queue end to end on the debug surface: a real Agent files a
-**judgment** through the generalized `pings.send` (options → blessed constrained-JSON `ui`), the
+**judgment** through `events.judgment` or the deprecated `pings.send` alias (options → blessed constrained-JSON `ui`), the
 Owner decides via `event_action` and the decision **reaches the Agent as an anchor-refed reply**, a
 standing rule lands in the taste store, a scheduled producer emits a **summary**, and push
 discipline holds (judgments push; awareness does not).
@@ -35,10 +35,12 @@ cargo run -p hirsel-host
 
 ```bash
 post_json debug/reset '{}'
-post_json debug/owner-message '{"client_id":"eq-judg","body":"Use pings.send ONCE to ask me a judgment question named @pick-a-path, description of your choice, requires_response true, with two options where exactly one is recommended. Nothing else — no shell, no subagents.","ref":null}' >/dev/null
+post_json debug/owner-message '{"client_id":"eq-judg","body":"Use events.judgment ONCE to ask me which release path to take, with two real options and exactly one recommendation. Nothing else — no shell, no subagents.","ref":null}' >/dev/null
 
 wait_jq debug/events '.events[] | select(.kind=="judgment" and .status=="open")' 120 >/dev/null
 EV=$(events | jq -r '[.events[] | select(.kind=="judgment")] | last | .id')
+# During the alias migration, either tool-summary name proves the Agent used the owner-facing tool path.
+wait_jq debug/chat '[.messages[] | select(.author=="agent") | .tool_calls[]? | select(.ok==true) | .name] | any(. == "events_judgment" or . == "pings_send")' 120 >/dev/null
 # Blessed template: card root; has heading + optionList; exactly one recommended; NO telemetry nodes.
 event_field "$EV" '.ui.type' | grep -qx card
 events | jq -e '.events[] | select(.id=='"$EV"') | [.ui.children[].type] | (index("heading") != null and index("optionList") != null)'
@@ -96,8 +98,8 @@ post_json debug/resolve-ping '{"ping_id":'"$EV"'}' >/dev/null   # tidy back to d
 
 ## Success Gates
 
-- Gate 1: a real-Agent judgment event with the blessed card `ui` (heading + optionList, exactly one
-  recommended, no telemetry nodes).
+- Gate 1: a real-Agent judgment event filed by `events_judgment` or deprecated alias `pings_send`,
+  with the blessed card `ui` (heading + optionList, exactly one recommended, no telemetry nodes).
 - Gate 2: `choose` → event done + an anchor-refed Owner reply carrying the chosen label + an Agent
   acknowledgement turn. **A resolve without the reply is a mechanical FAIL.**
 - Gate 3: `record_rule` visible in `/debug/taste`.

@@ -175,7 +175,7 @@ export function FeedColumn() {
             "rounded-full px-2 py-0.5 text-[0.68rem] font-bold",
             openCount() > 0
               ? "bg-status-danger/12 text-status-danger"
-              : "bg-status-success/12 text-status-success",
+              : "bg-status-success/12 text-foreground/80",
           )}
         >
           {openCount() > 0 ? `${openCount()} need you` : "all clear"}

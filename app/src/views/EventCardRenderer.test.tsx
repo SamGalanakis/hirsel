@@ -50,6 +50,9 @@ describe("EventCardRenderer — constrained vocabulary", () => {
     const screen = renderCard(ui);
     expect(screen.getByText(/Taste boundary/)).toBeTruthy();
     expect(screen.getByText("Option A")).toBeTruthy();
+    const recommended = screen.getByText("Recommended");
+    expect(recommended.className).toContain("text-foreground");
+    expect(recommended.className).not.toContain("text-primary");
     // `backtick` → a mono span (Monospace-Earns-It), and the prose around it stays text.
     expect(screen.getByText("reopen").tagName).toBe("SPAN");
     expect(screen.getByText("reopen").className).toContain("font-mono");

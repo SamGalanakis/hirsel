@@ -103,4 +103,17 @@ describe("DecidedStrip — the decided state crossfades in", () => {
     const check = container.querySelector(".rounded-full") as HTMLElement;
     expect(check.className).toContain("motion-safe:zoom-in-80");
   });
+
+  it("keeps decided metadata and actions legible through the card dimming", () => {
+    const { getByRole, getByText } = render(() => (
+      <DecidedStrip ev={ev()} onUndo={() => {}} onArchive={() => {}} />
+    ));
+    expect(getByText(/posted to/).parentElement?.parentElement?.className).toContain(
+      "text-foreground/80",
+    );
+    expect(getByRole("button", { name: "Archive" }).className).toContain(
+      "text-foreground/80",
+    );
+    expect(getByRole("button", { name: "Undo" }).className).toContain("text-foreground");
+  });
 });

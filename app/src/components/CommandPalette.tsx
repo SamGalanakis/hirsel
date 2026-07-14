@@ -9,9 +9,7 @@ import * as Dialog from "@kobalte/core/dialog";
 import {
   Activity,
   ArrowDownToLine,
-  AtSign,
   CircleStop,
-  Inbox as InboxIcon,
   Layers,
   MessageSquareReply,
   MessagesSquare,
@@ -19,7 +17,7 @@ import {
   Settings,
 } from "lucide-solid";
 import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
-import { goToChat, openSideChat, state } from "../store/store";
+import { openSideChat, state } from "../store/store";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS, stopActiveTurn } from "../lib/keymap";
 import { cn } from "@/lib/utils";
 
@@ -45,8 +43,8 @@ export const CommandPalette: Component<{
   const thinking = () => state.agentActivity.state === "thinking";
   const iconClass = "size-4 shrink-0 text-muted-foreground";
 
-  // The full command set, rebuilt reactively so the dynamic entries (open Pings,
-  // live Side Chats, the stop-turn action) track store state.
+  // The full command set, rebuilt reactively so the dynamic entries (live Side
+  // Chats and the stop-turn action) track store state.
   const commands = createMemo<Command[]>(() => {
     const out: Command[] = [
       {
@@ -71,14 +69,6 @@ export const CommandPalette: Component<{
         hint: ["g", "c"],
         icon: <MessagesSquare class={iconClass} aria-hidden="true" />,
         run: () => goPane("chat"),
-      },
-      {
-        id: "go-pings",
-        label: "Open Pings",
-        hint: ["g", "i"],
-        keywords: "pings inbox tray",
-        icon: <InboxIcon class={iconClass} aria-hidden="true" />,
-        run: () => goPane("pings"),
       },
       {
         id: "go-processes",
@@ -116,26 +106,12 @@ export const CommandPalette: Component<{
       });
     }
 
-    // Jump to an @ping — every open Ping, addressed by its handle.
-    for (const ping of state.pings) {
-      if (ping.status !== "open") continue;
-      out.push({
-        id: `ping-${ping.id}`,
-        label: `Jump to @${ping.name}`,
-        keywords: `ping ${ping.name} ${ping.description}`,
-        icon: <AtSign class={iconClass} aria-hidden="true" />,
-        run: () => goToChat({ scrollToMessageId: ping.anchor }),
-      });
-    }
-
-    // Resume a live Side Chat, labelled by its originating Ping's handle.
+    // Resume a live Side Chat.
     for (const ref of state.sideChatRefs) {
-      const ping = state.pings.find((p) => p.id === ref.ping_id);
-      const name = ping ? `@${ping.name}` : "side chat";
       out.push({
         id: `sc-${ref.sc}`,
-        label: `Resume ${name}`,
-        keywords: `side chat resume ${ping?.name ?? ""}`,
+        label: "Resume side chat",
+        keywords: "side chat resume",
         icon: <MessageSquareReply class={iconClass} aria-hidden="true" />,
         run: () => openSideChat(ref.sc),
       });

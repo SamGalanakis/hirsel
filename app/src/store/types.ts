@@ -8,7 +8,6 @@ import type {
   ModelSelection,
   ModelSnapshot,
   MsgMsg,
-  Ping,
   PingUpsertMsg,
   ProcessInfo,
   ProcessUpsertMsg,
@@ -124,14 +123,13 @@ export interface TimelineEvent {
 
 export interface AppState {
   messages: DisplayMessage[];
-  pings: Ping[];
   /** Typed event queue (ADR-0012): the home scroller's data, generalizing
-   * `pings`. Seeded from `hello_ok.events` (authoritative on reconnect) and kept
+   * Pings. Seeded from `hello_ok.events` (authoritative on reconnect) and kept
    * current by `event_upsert`. Held as an ordered array so the store can
-   * `reconcile` it keyed by `id` like messages/pings. */
+   * `reconcile` it keyed by `id` like messages. */
   events: EventItem[];
   /** Event ids optimistically decided ("Marked done" / chosen) but not yet
-   * committed by the host — the event twin of `resolveOverrides`. An event is
+   * committed by the host. An event is
    * effectively resolved if its status is done OR its id is here; on commit the
    * host's done `event_upsert` supersedes it (the reducer prunes the id). Undo
    * drops the id back off. Bounded. */
@@ -185,20 +183,6 @@ export interface AppState {
    * its removal race its own echo; keeping the id here means a late echo is
    * dropped instead of re-materializing the bubble. Bounded. */
   removedIds: number[];
-  /** v1.3: Ping ids the Owner has manually "Marked unread". There is no wire
-   * unread op, so this is a purely client-side override layered on top of the
-   * wire `read` flag: a Ping is effectively unread if `!read` OR its id is
-   * here. Auto-read/"Mark read" removes the id (and sends read_ping). Bounded. */
-  unreadOverrides: number[];
-  /** Ping ids optimistically "Marked done" but not yet committed to the host.
-   * `resolve_ping` is terminal on the wire (there is no reopen op), so Mark
-   * done is made recoverable client-side: the id lands here on tap (the card
-   * flips to Done at once, modelled on the `unreadOverrides` optimistic flip),
-   * a 5s "Undo" window debounces the actual `resolve_ping` send, and Undo drops
-   * the id back off. On commit the host's `done` ping_upsert supersedes it (the
-   * reducer prunes the id). A Ping is effectively resolved if its status is
-   * resolved OR its id is here. Bounded. */
-  resolveOverrides: number[];
   /** v2.0: live side chats, keyed by `sc` — mirrors `hello_ok.side_chats`
    * (seeded there, kept in sync by side_chat_open/side_chat_closed) so a Ping
    * card can derive "in progress · resume" for its Ping without ever hydrating
@@ -235,7 +219,7 @@ export interface AppState {
    * `view_upsert` (an update in place re-sends the same id), dropped by
    * `view_removed`. `spec` is always the resolved concrete catalog tree; the
    * client never resolves templates/bindings. Held as an ordered array so the
-   * store can `reconcile` it keyed by `instance_id` like messages/pings. */
+   * store can `reconcile` it keyed by `instance_id` like messages. */
   views: ViewInstance[];
 }
 
@@ -253,10 +237,6 @@ export type Action =
   | { type: "event_read_local"; eventId: number }
   | { type: "event_archive_local"; eventId: number }
   | { type: "event_unarchive_local"; eventId: number }
-  | { type: "read_local"; pingId: number }
-  | { type: "mark_unread_local"; pingId: number }
-  | { type: "resolve_local"; pingId: number }
-  | { type: "unresolve_local"; pingId: number }
   | {
       type: "send_local";
       localId: number;
@@ -308,7 +288,6 @@ export type Action =
 export function initialState(): AppState {
   return {
     messages: [],
-    pings: [],
     events: [],
     eventDecideOverrides: [],
     eventArchiveOverrides: [],
@@ -325,8 +304,6 @@ export function initialState(): AppState {
     turnEvents: [],
     turnDetails: {},
     removedIds: [],
-    unreadOverrides: [],
-    resolveOverrides: [],
     sideChatRefs: [],
     sideChats: {},
     pendingSideSends: [],

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // The single-owner right-region state machine (§1 keystone). One exclusive
 // `rightRegion` enum owns the desktop right pane / phone secondary sheet:
-// mutual exclusivity, close-returns-to-pings, side-chat DATA outliving its pane,
+// mutual exclusivity, close-returns-to-idle, side-chat DATA outliving its pane,
 // and the canvas auto-surface that must NOT steal an occupied slot. Fresh store
 // singleton per test (resetModules + dynamic import), the pattern used across
 // this suite.
@@ -15,7 +15,7 @@ describe("rightRegion: mutual exclusivity + close", () => {
   it("holds exactly one region; the last explicit intent wins", async () => {
     const store = await import("../../store/store");
     // Default resting state.
-    expect(store.state.rightRegion).toBe("pings");
+    expect(store.state.rightRegion).toBe("none");
 
     store.openProcesses();
     expect(store.state.rightRegion).toBe("processes");
@@ -27,9 +27,9 @@ describe("rightRegion: mutual exclusivity + close", () => {
     store.showCanvas();
     expect(store.state.rightRegion).toBe("canvas");
 
-    // Closing any pane returns to the idle Pings resting state.
+    // Closing any pane returns to the idle resting state.
     store.closeRightRegion();
-    expect(store.state.rightRegion).toBe("pings");
+    expect(store.state.rightRegion).toBe("none");
   });
 
   it("keeps the side-chat DATA alive when its pane is left (resumable)", async () => {
@@ -39,19 +39,18 @@ describe("rightRegion: mutual exclusivity + close", () => {
     expect(store.state.rightRegion).toBe("sideChat");
     expect(store.state.activeSideChatSc).toBe("side:1");
 
-    // Leaving the pane returns the region to pings but the sc stays set — the
+    // Leaving the pane returns the region to idle but the sc stays set — the
     // side chat is alive/resumable underneath, just not rendered.
     store.closeRightRegion();
-    expect(store.state.rightRegion).toBe("pings");
+    expect(store.state.rightRegion).toBe("none");
     expect(store.state.activeSideChatSc).toBe("side:1");
   });
 
-  it("goToChat returns the region to pings without discarding the side-chat data", async () => {
+  it("goToChat returns the region to idle without discarding the side-chat data", async () => {
     const store = await import("../../store/store");
     store.openSideChat("side:7");
     store.goToChat();
-    expect(store.state.rightRegion).toBe("pings");
-    expect(store.state.trayExpanded).toBe(false);
+    expect(store.state.rightRegion).toBe("none");
     expect(store.state.activeSideChatSc).toBe("side:7");
   });
 });
@@ -84,7 +83,7 @@ function canvasView(id: string) {
 }
 
 describe("rightRegion: the canvas auto-surface never steals an occupied slot", () => {
-  it("auto-surfaces a new canvas view only from the idle Pings state", async () => {
+  it("auto-surfaces a new canvas view only from the idle state", async () => {
     const { store } = await setupChatView();
 
     // Occupy the region with Settings, THEN a canvas view arrives.
@@ -96,8 +95,8 @@ describe("rightRegion: the canvas auto-surface never steals an occupied slot", (
     expect(store.state.rightRegion).toBe("settings");
     expect(document.querySelector('[data-slot="canvas-rail"]')).toBeNull();
 
-    // Back to the idle Pings state; a genuinely NEW canvas view auto-surfaces.
-    store.openPings();
+    // Back to the idle state; a genuinely NEW canvas view auto-surfaces.
+    store.closeRightRegion();
     store.dispatch(canvasView("v2"));
     await waitFor(() => expect(store.state.rightRegion).toBe("canvas"));
   });

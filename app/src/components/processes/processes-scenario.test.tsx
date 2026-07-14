@@ -5,7 +5,7 @@ import { resolve as pathResolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
- * Headless scenario (spec v1.4 gate; adapted v1.6 for the Tray/header-icon
+ * Headless scenario (spec v1.4 gate; adapted for the header-icon
  * layout): the Processes header icon + tool-call visibility driven through
  * the REAL App over a REAL WebSocket against an in-process scripted host that
  * PUSHES server frames on command. The bottom TabBar and Processes tab are
@@ -182,7 +182,7 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       // --- 2. Expand → Ask to stop → sheet closes back to Chat, pre-filled composer ---
       fireEvent.click(within(row).getByText("Review the auth refactor").closest("button")!);
       fireEvent.click(await within(row).findByText("Ask to stop"));
-      await waitFor(() => expect(store.state.rightRegion).toBe("pings"));
+      await waitFor(() => expect(store.state.rightRegion).toBe("none"));
       const composer = (await screen.findByPlaceholderText(
         "Message the Agent…",
       )) as HTMLTextAreaElement;

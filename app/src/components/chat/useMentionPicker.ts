@@ -1,6 +1,5 @@
 import { createMemo, createSignal } from "solid-js";
 import type { Ping } from "../../protocol";
-import { state } from "../../store/store";
 import {
   detectMentionQuery,
   filterMentionCandidates,
@@ -24,10 +23,11 @@ export function useMentionPicker(opts: {
   const [query, setQuery] = createSignal<MentionQuery | null>(null);
   const [activeIndex, setActiveIndex] = createSignal(0);
 
+  // Mentions are sourceless until the event-seeded rewire (Ping slice retired, Wave 1); the picker never opens meanwhile.
   const candidates = createMemo<Ping[]>(() => {
     const q = query();
     if (!open() || q === null) return [];
-    return filterMentionCandidates(state.pings, q.query);
+    return filterMentionCandidates([], q.query);
   });
 
   /** Clamp the active row to the current candidate list. */
@@ -54,7 +54,7 @@ export function useMentionPicker(opts: {
     }
     const caret = el.selectionStart ?? opts.value().length;
     const q = detectMentionQuery(opts.value(), caret);
-    if (q === null || state.pings.every((p) => p.status !== "open")) {
+    if (q === null) {
       close();
       return;
     }

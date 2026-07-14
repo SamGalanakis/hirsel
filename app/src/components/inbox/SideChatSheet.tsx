@@ -1,6 +1,6 @@
 import { ArrowUp, ChevronDown, ChevronRight, MoreHorizontal, Square, TriangleAlert, X } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
-import type { Ping } from "../../protocol";
+import type { EventItem } from "../../protocol";
 import { createFocusTrap, createMediaFlag, focusMainComposer } from "../../lib/focus";
 import { handleSubmitKeys } from "../../lib/submitKeymap";
 import { toast } from "../../lib/toast";
@@ -97,8 +97,8 @@ export function SideChatSheet() {
 
 function SideChatPanel(props: { sc: string }) {
   const sideChat = () => state.sideChats[props.sc];
-  const ping = (): Ping | undefined =>
-    state.pings.find((p) => p.id === sideChat()?.pingId);
+  const event = (): EventItem | undefined =>
+    state.events.find((candidate) => candidate.id === sideChat()?.pingId);
 
   const [highlightedId, setHighlightedId] = createSignal<number | null>(null);
   const [seedExpanded, setSeedExpanded] = createSignal(true);
@@ -119,7 +119,7 @@ function SideChatPanel(props: { sc: string }) {
   const showingDraft = () => sideChat()?.draft !== null && sideChat()?.draft !== undefined;
   const busy = () => sideChat()?.confirming || sideChat()?.discarding;
 
-  // Leave-alive: return the right region to `pings` (the sheet unmounts) while
+  // Leave-alive: return the right region to `none` (the sheet unmounts) while
   // keeping the side chat's DATA (`activeSideChatSc`) set, so it stays
   // alive/resumable underneath. Hands focus back to the main composer. The
   // single exit used by the header leave/close control, Esc, and the "ended"
@@ -224,7 +224,7 @@ function SideChatPanel(props: { sc: string }) {
       data-slot="side-chat-sheet"
       role="dialog"
       aria-modal={phone() ? "true" : undefined}
-      aria-label={ping()?.name ? `Side chat with @${ping()?.name}` : "Side chat"}
+      aria-label={event()?.name ? `Side chat with @${event()?.name}` : "Side chat"}
       class="flex flex-col bg-background outline-none
         fixed inset-0 z-40 pb-[env(safe-area-inset-bottom)]
         motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
@@ -257,8 +257,8 @@ function SideChatPanel(props: { sc: string }) {
         </button>
         <div class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           Side chat ·{" "}
-          <Show when={ping()?.name} fallback={titleSnippet(ping()?.content)}>
-            <span class="font-mono text-foreground/90">@{ping()?.name}</span>
+          <Show when={event()?.name} fallback={titleSnippet(event()?.description)}>
+            <span class="font-mono text-foreground/90">@{event()?.name}</span>
           </Show>
         </div>
         <Show when={offline()}>
@@ -340,7 +340,7 @@ function SideChatPanel(props: { sc: string }) {
                     </button>
                     <Show when={seedExpanded()}>
                       <div class="mt-2 border-l-2 border-border pl-2 text-sm text-muted-foreground">
-                        <Markdown>{ping()?.content ?? ""}</Markdown>
+                        <Markdown>{event()?.description ?? ""}</Markdown>
                       </div>
                     </Show>
                   </div>
@@ -487,10 +487,10 @@ function SideChatPanel(props: { sc: string }) {
         <ConcludeConfirmSheet
           sc={props.sc}
           draft={sideChat()?.draft ?? ""}
-          ping={ping()}
+          event={event()}
           onKeepEditing={() => dispatch({ type: "side_chat_keep_editing", sc: props.sc })}
           onSend={(text) => {
-            const anchor = ping()?.anchor;
+            const anchor = event()?.anchor;
             if (anchor === undefined) return;
             getClient()?.confirmConclusion(props.sc, text, anchor);
           }}
@@ -504,7 +504,7 @@ function SideChatPanel(props: { sc: string }) {
             getClient()?.discardSideChat(props.sc);
             setDiscardConfirmOpen(false);
             // Genuine teardown (not a leave-alive): clear the current-side-chat
-            // data too, since this sc is being discarded, then return to Pings.
+            // data too, since this sc is being discarded, then return to idle.
             setActiveSideChatSc(null);
             leave();
           }}
@@ -523,7 +523,7 @@ function SideChatPanel(props: { sc: string }) {
 function ConcludeConfirmSheet(props: {
   sc: string;
   draft: string;
-  ping: Ping | undefined;
+  event: EventItem | undefined;
   onKeepEditing: () => void;
   onSend: (text: string) => void;
 }) {
@@ -569,13 +569,13 @@ function ConcludeConfirmSheet(props: {
           <h2 class="m-0 text-base font-semibold">Send this reply?</h2>
         </header>
         <div class="flex-1 overflow-y-auto p-4">
-          <Show when={props.ping?.requires_response}>
+          <Show when={props.event?.requires_response}>
             <div class="mb-3 rounded-md border-l-2 border-border bg-muted/40 p-2.5">
               <div class="mb-1 text-[0.68rem] uppercase tracking-wide text-muted-foreground">
                 Original question
               </div>
               <div class="text-sm text-muted-foreground">
-                <Markdown>{props.ping?.content ?? ""}</Markdown>
+                <Markdown>{props.event?.description ?? ""}</Markdown>
               </div>
             </div>
           </Show>

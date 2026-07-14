@@ -24,7 +24,6 @@ import { AgentStatus } from "./AgentStatus";
 import { ModelChip } from "./ModelChip";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
-import { TrayOverlay, TrayShelf } from "../inbox/Tray";
 import { SideChatSheet } from "../inbox/SideChatSheet";
 import { ProcessesSheet } from "../processes/ProcessesSheet";
 import { SettingsSheet } from "../settings/SettingsSheet";
@@ -212,8 +211,8 @@ export function ChatView() {
     clearScrollTarget();
   });
 
-  // v2.0 (ADR-0008): Discuss/Resume was tapped (see PingsView.handleDiscuss)
-  // but the sheet couldn't open yet because the sc wasn't known. The moment a
+  // v2.0 (ADR-0008): a side-chat open was requested but the sheet couldn't
+  // open yet because the sc wasn't known. The moment a
   // sideChatRefs entry for that Ping appears — immediately for Resume (it
   // already existed), or once open_side_chat's response lands for a fresh
   // Discuss — open the sheet and consume the request.
@@ -236,7 +235,7 @@ export function ChatView() {
     // Only tear the sheet down if it's the one currently on screen for this sc:
     // the region owns the pane, `activeSideChatSc` is the backing data.
     if (state.rightRegion === "sideChat" && state.activeSideChatSc === lastConclusion.sc) {
-      // Genuine teardown — the sc concluded; clear the data and return to Pings.
+      // Genuine teardown — the sc concluded; clear the data and return to idle.
       setActiveSideChatSc(null);
       closeRightRegion();
       // The side composer is gone; hand focus back to the main composer.
@@ -250,7 +249,7 @@ export function ChatView() {
   // occupied right region. Tracks the newest canvas instance id; when it changes
   // to a fresh id (a genuinely new view, not an in-place content update to a
   // dismissed one) the Canvas surfaces ONLY if the region is idle
-  // (`rightRegion === "pings"`). If the user is in Settings/Processes/Side Chat,
+  // (`rightRegion === "none"`). If the user is in Settings/Processes/Side Chat,
   // the arrival is recorded (so it won't ambush them later) and the availability
   // affordance — the CanvasButton — appears instead. An in-place update to an
   // already-seen view does NOT re-nag.
@@ -264,7 +263,7 @@ export function ChatView() {
     }
     if (newest === lastCanvasId) return;
     lastCanvasId = newest;
-    if (untrack(() => state.rightRegion) === "pings") showCanvas();
+    if (untrack(() => state.rightRegion) === "none") showCanvas();
   });
 
   const replyingTo = () =>
@@ -273,7 +272,7 @@ export function ChatView() {
   const thinking = () => state.agentActivity.state === "thinking";
 
   // "Reply" from a message's actions menu: quote it into the composer (the same
-  // composerDraft plumbing the Ping "Reply" uses) and hand focus to the input.
+  // composerDraft plumbing) and hand focus to the input.
   function handleReply(id: number) {
     setComposerReplyTarget(id);
     focusMainComposer();
@@ -414,7 +413,7 @@ export function ChatView() {
           and centred in the pane (`rail:mx-auto`), so bubbles never stretch to
           hostile line lengths. The gutters here are now real structure — the pane
           sits between the nav rail and the context pane — not a lonely centered
-          column beside a void. This wraps ONLY the transcript + tray shelf; the
+          column beside a void. This wraps ONLY the transcript; the
           Composer bar bleeds full-width below and re-centers its own input at the
           same measure. Below `rail` this is a no-op and the phone/split widths
           are unchanged. */}
@@ -586,15 +585,7 @@ export function ChatView() {
             <span class="text-sm font-medium text-foreground">Drop files to attach</span>
           </div>
         </Show>
-
-        {/* Tray, expanded: an overlay over this message area, never a push —
-            it must live inside this `relative` container so its absolute
-            positioning resolves against the scroller, not the whole view. */}
-        <TrayOverlay />
       </div>
-
-      {/* Tray, collapsed: the shelf, pinned directly above the Composer. */}
-      <TrayShelf />
       </div>
 
       {/* Composer bar bleeds full-width across the center pane (rail hairline →
@@ -631,10 +622,8 @@ export function ChatView() {
             • Canvas     — `rightRegion === "canvas"`   (CanvasRail / CanvasSheet)
             • Processes  — `rightRegion === "processes"`
             • Settings   — `rightRegion === "settings"`
-          The idle `pings` state renders NOTHING on desktop (the Feed column is the
-          needs-you surface now, so a standing Pings rail beside it would just be
-          the redundancy the unification removed); on phone `pings` is the Tray
-          shelf/overlay below. Closing any pane returns the region to `pings`. */}
+          The idle `none` state renders nothing. Closing any pane returns the
+          region to `none`. */}
       <SideChatSheet />
       <CanvasRail />
       <CanvasSheet />

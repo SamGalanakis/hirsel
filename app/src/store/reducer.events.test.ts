@@ -95,7 +95,7 @@ describe("optimistic decide / undecide / read", () => {
     expect(s.eventDecideOverrides).toEqual([]);
   });
 
-  it("read_local flips read=true on the matching event only", () => {
+  it("event_read_local flips read=true on the matching event only", () => {
     let s = reduce(initialState(), {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 9, kind: "summary", read: false }) },

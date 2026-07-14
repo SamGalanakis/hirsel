@@ -60,7 +60,8 @@ the required non-empty event fields; runbooks must never synthesize them outside
 - `interruption-and-reporting` - blocked work sends exactly one `requires_response` Ping then moves on without nagging, and a decision-carrying completion is a single outcome-phrased Ping (never split report + question).
 - `recovery-judgment` - ADR-0004 judgment layer over `abandoned-recovery`: no mechanical respawn after reboot, a nudge re-spawns only what the Agent still wants, and Owner-cancelled work stays dead.
 - `daily-driver` - the whole SCOPE Slice-1 loop (warm Chat exchange → delegation + note → progress → one `requires_response` Ping with Quick Replies → auto-resolving tap → acknowledgement) chained end-to-end in one continuous session with a single reset.
-- `event-queue` - the ADR-0012/0013 typed event lifecycle: a real-Agent judgment with the blessed card `ui`, choose delivering an anchor-refed reply, taste-store `record_rule`, the scheduled digest summary, judgment-only push, and snooze reopening.
+- `event-queue` - the ADR-0012/0013 typed event lifecycle: a real-Agent judgment with the blessed card `ui`, choose delivering an anchor-refed reply, taste-store `record_rule`, the scheduled digest summary, judgment-only push, and the Done-toggle reopen (plus the no-`until` snooze rejection).
+- `event-snooze-sweep` - the wave-3 lifecycle additions, fully mechanical: durable snooze validation (`until` required, presets named on error), host-timer returns with judgment re-push, restart-surviving returns, unsnooze, and the `clear_finished_events` sweep over the real `/ws` wire stamping `archived_at` while open judgments survive.
 - `interactive-orchestration` - the keep-chat-interactive guarantees: a delegation turn ends while the Sub-agent still runs, a warm question is answered mid-flight, and a long Sub-agent report reaches the Agent untruncated.
 
 ## Neutral Working Directories

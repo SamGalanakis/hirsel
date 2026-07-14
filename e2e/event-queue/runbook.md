@@ -98,10 +98,18 @@ get_json debug/pushes | jq -e '[.pushes[] | select(.payload.data.event_id=='"$EV
 get_json debug/pushes | jq -e '[.pushes[] | select(.payload.data.event_id=='"$SUMMARY"')] | length == 0'
 ```
 
-## Gate 5: snooze reopens (Done stays a toggle)
+## Gate 5: Done stays a toggle; the old no-data snooze is a preset-naming error
+
+Wave-3 made snooze durable: `event_action snooze` now REQUIRES `data.until` (RFC3339, future) —
+the old `data:{}` shape must fail with a retryable error naming the presets, never silently reopen.
+`debug/reopen-ping` is the Done-toggle recovery path. (The full durable-snooze lifecycle — park,
+host-timer return, restart survival, unsnooze, the sweep — is `e2e/event-snooze-sweep`.)
 
 ```bash
-post_json debug/event-action '{"event_id":'"$EV"',"action":"snooze","data":{}}' >/dev/null
+BODY=$(curl -sS -X POST "$BASE/debug/event-action" -H "authorization: Bearer $HIRSEL_TOKEN" \
+  -H 'content-type: application/json' -d '{"event_id":'"$EV"',"action":"snooze","data":{}}')
+printf '%s' "$BODY" | jq -e '.error | test("preset") and test("This evening")'
+post_json debug/reopen-ping '{"ping_id":'"$EV"'}' >/dev/null
 wait_jq debug/events '.events[] | select(.id=='"$EV"' and .status=="open")' 15 >/dev/null
 post_json debug/resolve-ping '{"ping_id":'"$EV"'}' >/dev/null   # tidy back to done
 ```
@@ -115,7 +123,8 @@ post_json debug/resolve-ping '{"ping_id":'"$EV"'}' >/dev/null   # tidy back to d
 - Gate 3: `record_rule` visible in `/debug/taste`.
 - Gate 4: `trigger-digest` → an open `summary` (`requires_response:false`); push fired for the
   judgment, not the summary.
-- Gate 5: `snooze` reopens the event.
+- Gate 5: the no-`until` snooze is rejected with the preset-naming error; `reopen-ping` reopens the
+  event (Done stays a toggle).
 
 ## Report
 

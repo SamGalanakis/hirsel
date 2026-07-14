@@ -12,6 +12,7 @@ import {
   AtSign,
   CircleStop,
   Inbox as InboxIcon,
+  Layers,
   MessageSquareReply,
   MessagesSquare,
   Search,
@@ -57,8 +58,16 @@ export const CommandPalette: Component<{
         run: focusComposer,
       },
       {
+        id: "go-feed",
+        label: "Focus Feed",
+        hint: ["g", "f"],
+        keywords: "queue events judgments needs you",
+        icon: <Layers class={iconClass} aria-hidden="true" />,
+        run: () => goPane("feed"),
+      },
+      {
         id: "go-chat",
-        label: "Go to Chat",
+        label: "Focus Chat",
         hint: ["g", "c"],
         icon: <MessagesSquare class={iconClass} aria-hidden="true" />,
         run: () => goPane("chat"),
@@ -261,7 +270,7 @@ export const CommandPalette: Component<{
 
 // ---- Shortcut cheat-sheet (`?`) --------------------------------------------
 
-const GROUP_ORDER = ["Queue", "General", "Navigate", "Chat"] as const;
+const GROUP_ORDER = ["Feed", "General", "Focus", "Chat"] as const;
 
 export const ShortcutHelp: Component<{
   open: boolean;

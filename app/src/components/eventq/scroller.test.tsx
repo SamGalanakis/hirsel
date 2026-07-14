@@ -52,13 +52,12 @@ async function setup(events: EventItem[]) {
   const { EventScroller } = await import("./EventScroller");
   const screen = render(() => <EventScroller />);
   const reader = screen.container.querySelector('[data-slot="event-scroller"]') as HTMLElement;
-  const list = screen.container.querySelector('[data-slot="queue-list"]') as HTMLElement;
-  return { store, toast, screen, sent, readSent, reader, list };
+  return { store, toast, screen, sent, readSent, reader };
 }
 
-describe("EventScroller — the vertical event queue home", () => {
-  it("shows the ONE red needs-you count, leads with the blocking judgment, and stands the two-column index", async () => {
-    const { screen, reader, list } = await setup([
+describe("EventScroller — the phone vertical event queue home", () => {
+  it("shows the ONE red needs-you count and leads with the blocking judgment", async () => {
+    const { screen, reader } = await setup([
       judgment(1, "Second judgment"),
       judgment(2, "Blocking judgment", true),
     ]);
@@ -66,15 +65,12 @@ describe("EventScroller — the vertical event queue home", () => {
     const need = screen.container.querySelector('[data-slot="pager-need"]') as HTMLElement;
     expect(need.textContent).toBe("2 need you");
     expect(need.className).toContain("status-danger");
-    // The reader card column renders the cards; the blocking one leads.
+    // The reader card column renders the cards; the blocking one leads. (The
+    // desktop two-column index is retired — desktop uses the Feed column now, so
+    // the phone scroller no longer stands a standing list beside its reader.)
     expect(within(reader).getByText("Blocking judgment")).toBeTruthy();
     expect(within(reader).getByText("Second judgment")).toBeTruthy();
-    // §1: the standing queue index stands beside it, CSS-gated to `rail` (hidden
-    // below, an in-flow column at/above it), and indexes the same events.
-    expect(list).toBeTruthy();
-    expect(list.className).toContain("hidden");
-    expect(list.className).toContain("rail:flex");
-    expect(within(list).getAllByText("Blocking judgment").length).toBe(1);
+    expect(screen.container.querySelector('[data-slot="queue-list"]')).toBeNull();
   });
 
   it("posts an event_action, flips the card to decided, and drops the needs-you count", async () => {

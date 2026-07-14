@@ -13,28 +13,41 @@ sub-agents are needed. The digest gate is mechanical.
 
 ## Shared Helpers
 
-Use the standard `post_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` helpers from
-`e2e/channel-discipline/runbook.md`, plus:
+Use the standard `post_json` / `get_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` helpers
+from `e2e/lib/runbook-lib.sh`. All debug requests must carry
+`Authorization: Bearer $HIRSEL_TOKEN`. Add:
 
 ```bash
-events() { curl -sS "$BASE/debug/events"; }
+# In the controlling shell, after setting REPO, HIRSEL_TOKEN, and BASE:
+source "$REPO/e2e/lib/runbook-lib.sh"
+events() { get_json debug/events; }
 event_field() { events | jq -r '.events[] | select(.id=='"$1"') | '"$2"''; }
 ```
 
-Host env (verified-free port, never 3089):
+Build once in the checkout, then start the absolute binary from a neutral `/tmp` cwd. Set
+`HIRSEL_TEMPLATES_DIR` because relative runtime assets must not force the host into the checkout.
+Use a verified-free port, never 3089:
 
 ```bash
+export REPO=/absolute/path/to/hirsel
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-e2e
+(cd "$REPO" && cargo build -p hirsel-host)
+export HOST_BIN="$CARGO_TARGET_DIR/debug/hirsel-host"
 export HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_DRIVER=fake
 export HIRSEL_TOKEN=dev-token HIRSEL_DEBUG=1
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-event-queue
+export HIRSEL_TEMPLATES_DIR="$REPO/templates"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
-cargo run -p hirsel-host
+mkdir -p /tmp/hirsel-e2e-event-queue-work
+cd /tmp/hirsel-e2e-event-queue-work
+exec "$HOST_BIN"
 ```
 
 ## Gate 1: a real judgment with a blessed `ui`
 
 ```bash
 post_json debug/reset '{}'
+post_json debug/register-push-token '{"platform":"android","token":"e2e-push-probe"}' >/dev/null
 post_json debug/owner-message '{"client_id":"eq-judg","body":"Use events.judgment ONCE to ask me which release path to take, with two real options and exactly one recommendation. Nothing else — no shell, no subagents.","ref":null}' >/dev/null
 
 wait_jq debug/events '.events[] | select(.kind=="judgment" and .status=="open")' 120 >/dev/null
@@ -71,22 +84,19 @@ wait_jq debug/chat '.messages[] | select(.author=="agent" and .id > '"$BEFORE"')
 ## Gate 3: the standing rule landed in the taste store
 
 ```bash
-curl -sS "$BASE/debug/taste" | jq -e '.rules[] | select(.rule | contains("always pick the first path"))'
+get_json debug/taste | jq -e '.decisions[] | select(.event_id=='"$EV"' and (.rule | contains("always pick the first path")))'
 ```
 
 ## Gate 4: scheduled producer emits a summary; push discipline holds
 
 ```bash
-post_json debug/register-push-token '{"platform":"android","token":"e2e-push-probe"}' >/dev/null
 post_json debug/trigger-digest '{}' >/dev/null
 wait_jq debug/events '.events[] | select(.kind=="summary" and .requires_response==false)' 30 >/dev/null
-# The summary did NOT push; the earlier judgment DID (log-only sender records pushes).
-curl -sS "$BASE/debug/pushes" | jq -e '[.pushes[] | select(.kind=="summary" or (.event_kind // "")=="summary")] | length == 0' \
-  || echo "note: inspect /debug/pushes shape and gate on the judgment/summary split it exposes"
+# The summary did NOT push; the earlier judgment DID (log-only sender records event ids).
+SUMMARY=$(events | jq -r '[.events[] | select(.kind=="summary")] | last | .id')
+get_json debug/pushes | jq -e '[.pushes[] | select(.payload.data.event_id=='"$EV"')] | length >= 1'
+get_json debug/pushes | jq -e '[.pushes[] | select(.payload.data.event_id=='"$SUMMARY"')] | length == 0'
 ```
-
-If `/debug/pushes` predates event kinds, gate instead on: a push exists for the judgment event id and
-none for the summary event id.
 
 ## Gate 5: snooze reopens (Done stays a toggle)
 

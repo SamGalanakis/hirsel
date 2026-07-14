@@ -21,30 +21,30 @@
 // row on top of the column (owner addendum) carries a search box + a segmented
 // Active · Needs you · Archived(n) control (default Active every session);
 // switching to Archived discloses the dense archived rows, each with Unarchive.
-import { ArrowRight, CircleCheck, MessageSquare } from "lucide-solid";
+import { ArrowRight, CircleCheck } from "lucide-solid";
 import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
 import { archiveEventWithUndo, unarchiveEvent } from "../../lib/event-archive";
 import { decideEventWithUndo, undoDecide } from "../../lib/event-decide";
-import { focusMainComposer } from "../../lib/focus";
+import { openEventFork } from "../../lib/event-fork";
 import { seedMockEvents } from "../../lib/mock-events";
 import {
   archivedEvents,
-  eventTitle,
   isEventResolved,
   isOpenJudgment,
   openJudgmentCount,
   orderedQueue,
   visibleEvents,
 } from "../../store/selectors";
-import { prefillComposer, state } from "../../store/store";
+import { state } from "../../store/store";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { ArchivedList } from "./ArchivedList";
 import {
   ARCHIVE_EXIT_CLASS,
   createArchiveExit,
   DecidedStrip,
+  EventCardDoor,
   EventCardHeader,
 } from "./EventCard";
 import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
@@ -115,13 +115,14 @@ export function FeedColumn() {
     decideEventWithUndo(ev.id, action, data, label, { silent: true });
   }
 
-  function discuss(ev: EventItem): void {
-    // No navigation: Chat is already on screen. Drop a quoted reference to the
-    // judgment into the standing composer (the `>`-quote vocabulary) and land the
-    // caret there — the demand for "a standing place to type on desktop", finally
-    // paid off (the composer is always mounted beside the Feed).
-    prefillComposer(`> ${ev.name} — ${eventTitle(ev)}\n\n`);
-    focusMainComposer();
+  function open(ev: EventItem): void {
+    // Open (or resume) the event fork — a focused thread scoped to THIS card,
+    // with the card itself pinned and still decidable at the top. Supersedes the
+    // composer-prefill hack (a quoted reference dropped into the standing
+    // composer): a fork keeps the decision framed and closes the loop, where a
+    // prefilled quote just seeded a message. On desktop the fork docks the right
+    // region beside Feed + Chat; on phone it is a full-screen sheet.
+    openEventFork(ev);
   }
 
   return (
@@ -179,7 +180,7 @@ export function FeedColumn() {
               >
                 <div class="flex flex-col gap-3">
                   <For each={filteredCards()}>
-                    {(ev) => <FeedCard ev={ev} onDecide={decide} onDiscuss={discuss} />}
+                    {(ev) => <FeedCard ev={ev} onDecide={decide} onOpen={open} />}
                   </For>
                   {/* An inbox-zero footer once nothing is owed (only in the
                       resting Active filter, no search) — the peak-end reward,
@@ -220,12 +221,13 @@ export function FeedColumn() {
 }
 
 /** One decidable card in the Feed column. The card visual (accent, header, JSON
- * body, decided strip) is the shared vocabulary; the footer is the desktop's —
- * a quiet Discuss link, no swipe hint (there is no swiping in a column). */
+ * body, decided strip) is the shared vocabulary; the footer is the shared
+ * `EventCardDoor` — Discuss / Ask / "discussion open · resume" — with no swipe
+ * hint (there is no swiping in a column). */
 function FeedCard(props: {
   ev: EventItem;
   onDecide: (ev: EventItem, action: string, data: unknown) => void;
-  onDiscuss: (ev: EventItem) => void;
+  onOpen: (ev: EventItem) => void;
 }) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
@@ -253,18 +255,12 @@ function FeedCard(props: {
       <Show when={decided()}>
         <DecidedStrip ev={props.ev} onUndo={(id) => undoDecide(id)} onArchive={archive} />
       </Show>
-      <Show when={isJudgment() && !decided()}>
-        {/* The options above ARE the affordance — no "choose an option" restatement.
-            Just the low-commitment Discuss escape hatch, right-aligned. */}
-        <div class="flex items-center justify-end border-t border-border bg-muted/40 px-3.5 py-2.5">
-          <button
-            type="button"
-            class="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-            onClick={() => props.onDiscuss(props.ev)}
-          >
-            <MessageSquare class="size-3.5" aria-hidden="true" /> Discuss
-          </button>
-        </div>
+      {/* The door slot: shown for every card except a decided judgment (which is
+          leaving the queue). A judgment gets Discuss, a summary/info card gets
+          Ask, and a live fork collapses either to the "discussion open · resume"
+          chip — all `openEventFork`. */}
+      <Show when={!(isJudgment() && decided())}>
+        <EventCardDoor ev={props.ev} onOpen={props.onOpen} />
       </Show>
     </div>
   );

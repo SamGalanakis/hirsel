@@ -175,6 +175,14 @@ export interface EventItem {
    * data and old hosts stay valid. Toggled by `event_action`
    * archive/unarchive; the client filters (hello_ok carries archived events). */
   archived?: boolean;
+  /** v2.4 (event forks): the `sc` of the live fork discussing this Event, or
+   * `null`/absent when none is open. Set host-side when a fork opens
+   * (`open_side_chat`), cleared when it closes or the Event is decided; every
+   * transition is broadcast via `event_upsert`. Drives the calm "discussion open
+   * · resume" chip on the card and the resume path — wire-authoritative, so the
+   * chip appears and clears purely from upserts. Optional on the wire; absent is
+   * treated as no fork. */
+  fork_sc?: string | null;
 }
 
 // ---- Model configuration (main agent + sub-agent catalog) ----
@@ -313,13 +321,18 @@ export interface CancelQueuedMsg {
   client_id: string;
 }
 
-/** v2.0 (ADR-0008): open (or resume) the side chat for a Ping. Idempotent per
- * Ping — if it already has a live side chat the host answers with the SAME sc
- * and its transcript so far; otherwise a fresh scope. */
+/** v2.0 (ADR-0008) / v2.4 (event forks): open (or resume) the fork for an Event.
+ * Idempotent per Event — if it already has a live fork the host answers with the
+ * SAME sc, the current Event snapshot, and its transcript so far; otherwise a
+ * fresh scope. Events share the ping id space, so the host still accepts the
+ * legacy `ping_id`; new clients send `event_id`. */
 export interface OpenSideChatMsg {
   type: "open_side_chat";
   client_id: string;
-  ping_id: number;
+  /** v2.4: the Event to fork. */
+  event_id: number;
+  /** Legacy alias (== event_id); accepted by the host but no longer sent. */
+  ping_id?: number;
 }
 
 /** v2.0: side agent drafts the Owner's reply (a real side turn). */
@@ -542,13 +555,24 @@ export interface ErrorMsg {
   client_id?: string;
 }
 
-/** v2.0: answers `open_side_chat`. Idempotent per Ping: a fresh side chat
- * carries `messages: []` (the seed lives in the side session's prompt layer,
- * not as transcript rows); resuming a live one carries its transcript so far. */
+/** v2.0 / v2.4: answers `open_side_chat`. Idempotent per Event: a fresh fork
+ * carries `messages: []` (the seed lives in the side session's prompt layer, not
+ * as transcript rows); resuming a live one carries its transcript so far and
+ * `resumed: true`. v2.4 adds the full `event` snapshot the fork was seeded with
+ * (host-built prompt context — the blessed `ui` + current `fork_sc`), so the
+ * pinned card renders THE card, not a reconstruction. */
 export interface SideChatOpenMsg {
   type: "side_chat_open";
   sc: string;
-  ping_id: number;
+  /** v2.4: the forked Event's id (== ping_id; events share the id space). */
+  event_id?: number;
+  /** Legacy alias (== event_id). */
+  ping_id?: number;
+  /** v2.4: the Event snapshot this fork is scoped to (its blessed `ui`,
+   * `fork_sc`, kind, name). Absent on a legacy Ping fork. */
+  event?: EventItem;
+  /** v2.4: true when this answered a resume of an already-live fork. */
+  resumed?: boolean;
   messages: ChatMessage[];
 }
 

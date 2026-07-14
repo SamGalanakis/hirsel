@@ -43,10 +43,12 @@ function judgment(id: number, heading: string, blocking = false): EventItem {
 async function setup(events: EventItem[]) {
   const store = await import("../../store/store");
   const sent: { eventId: number; action: string; data: unknown }[] = [];
+  const opened: number[] = [];
   vi.doMock("../../ws/client", () => ({
     getClient: () => ({
       sendEventAction: (eventId: number, action: string, data: unknown) =>
         sent.push({ eventId, action, data }),
+      openSideChat: (eventId: number) => opened.push(eventId),
       readEvent: () => {},
     }),
   }));
@@ -57,7 +59,7 @@ async function setup(events: EventItem[]) {
   const { FeedColumn } = await import("./FeedColumn");
   const screen = render(() => <FeedColumn />);
   const column = screen.container.querySelector('[data-slot="feed-column"]') as HTMLElement;
-  return { store, screen, sent, column };
+  return { store, screen, sent, opened, column };
 }
 
 describe("FeedColumn — the desktop card column", () => {
@@ -95,16 +97,34 @@ describe("FeedColumn — the desktop card column", () => {
     expect(need.textContent).toBe("all clear");
   });
 
-  it("Discuss prefills the STANDING composer without navigating (Chat is already on screen)", async () => {
-    const { store, screen } = await setup([judgment(7, "Wire the reopen op")]);
-    fireEvent.click(screen.getByRole("button", { name: /Discuss/ }));
-    // No navigation: home stays on the queue root — Discuss is not a drill-in on
-    // desktop, it just seeds the always-mounted composer with a quoted reference.
-    expect(store.state.home).toBe("queue");
-    const prefill = store.state.composerPrefill ?? "";
-    expect(prefill.startsWith(">")).toBe(true);
-    expect(prefill).toContain("@j7");
-    expect(prefill).toContain("Wire the reopen op");
+  it("Discuss opens the event fork (fires open_side_chat by event id, no prefill hack)", async () => {
+    const { store, opened } = await setup([judgment(7, "Wire the reopen op")]);
+    fireEvent.click(within(document.body).getByRole("button", { name: /Discuss/ }));
+    // Supersedes the composer-prefill hack: a fresh open fires open_side_chat by
+    // event id and registers the pending fork; no quoted reference is seeded.
+    expect(opened).toEqual([7]);
+    expect(store.state.pendingSideChatPingId).toBe(7);
+    expect(store.state.composerPrefill).toBeNull();
+  });
+
+  it("shows the 'discussion open · resume' chip when fork_sc is set, and clears it from an upsert", async () => {
+    const forked: EventItem = { ...judgment(8, "Discuss the schema"), fork_sc: "side:8" };
+    const { store, opened, column } = await setup([forked]);
+    // The door collapses to the calm resume chip — no plain "Discuss".
+    expect(within(column).getByRole("button", { name: /discussion open · resume/ })).toBeTruthy();
+    expect(within(column).queryByRole("button", { name: /^Discuss$/ })).toBeNull();
+    // Tapping it resumes the fork (open_side_chat by event id).
+    fireEvent.click(within(column).getByRole("button", { name: /discussion open · resume/ }));
+    expect(opened).toContain(8);
+    // The chip is wire-driven: an upsert clearing fork_sc retires it back to Discuss.
+    store.dispatch({
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: { ...forked, fork_sc: null } },
+    });
+    await waitFor(() =>
+      expect(within(column).queryByRole("button", { name: /discussion open · resume/ })).toBeNull(),
+    );
+    expect(within(column).getByRole("button", { name: /Discuss/ })).toBeTruthy();
   });
 
   it("default-hides archived events: cards and the needs-you count both read the filtered set", async () => {

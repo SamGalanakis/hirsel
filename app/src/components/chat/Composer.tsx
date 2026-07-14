@@ -55,7 +55,7 @@ interface Props {
   getLastOwnerBody: () => string | null;
 }
 
-/** Composer anchored at the bottom of Chat, below the Tray shelf. CLI-grade keyboard map on fine-pointer
+/** Composer anchored at the bottom of Chat. CLI-grade keyboard map on fine-pointer
  * devices (Enter send · Shift+Enter newline · Tab queue next-turn · Esc cancel
  * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
  * (long-press = queue). Handles attachment staging (paperclip + paste). */
@@ -120,7 +120,7 @@ export function Composer(props: Props) {
     }
 
     // Re-parse the composed text into open-Ping ids for send_message.mentions.
-    const mentionIds = resolveMentionIds(body, state.pings);
+    const mentionIds = resolveMentionIds(body, []);
     props.onSend(body, props.replyingTo?.id ?? null, mode, blobs, mentionIds);
     props.attachments.clear();
     setValue("");

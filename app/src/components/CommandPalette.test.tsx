@@ -14,7 +14,6 @@ describe("CommandPalette", () => {
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
     expect(screen.getByText("Focus composer")).toBeInTheDocument();
-    expect(screen.getByText("Open Pings")).toBeInTheDocument();
     expect(screen.getByText("Open Processes")).toBeInTheDocument();
   });
 
@@ -34,7 +33,7 @@ describe("CommandPalette", () => {
     const onOpenChange = vi.fn();
     render(() => <CommandPalette open onOpenChange={onOpenChange} />);
     const input = await screen.findByRole("combobox");
-    await user.type(input, "inbox");
+    await user.type(input, "process");
     await user.keyboard("{Enter}");
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });

@@ -2,8 +2,9 @@
 // wherever a card is shown: the phone scroller's full-viewport pager (EventPage)
 // and the desktop Feed column (FeedCard). Only the COMPOSITION around the card
 // differs (a swipe wrapper + flick affordances on phone, a static scroll item on
-// desktop); the card's own chrome — the needs-you accent, the @name·source·kind
-// header, and the decided/undo strip — lives here so the two never drift.
+// desktop); the card's own chrome — the needs-you accent, the minimal header
+// (source, read, archive — the question leads from the body, not the header),
+// and the decided/undo strip — lives here so the two never drift.
 //
 // The card BODY is the constrained JSON UI (`EventCardRenderer`) and the decide
 // path is `lib/event-decide` — both already shared. This module adds the last
@@ -20,12 +21,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { isEventFinished, isEventResolved } from "../../store/selectors";
 import { state } from "../../store/store";
-
-export const KIND_LABEL: Record<string, string> = {
-  judgment: "Judgment",
-  summary: "Summary",
-  info: "Info",
-};
 
 /** How long the archive exit animation runs before the card actually leaves the
  * set (the optimistic sweep dispatch). Short and calm — a settle, not a flourish. */
@@ -61,9 +56,13 @@ export const ARCHIVE_EXIT_CLASS =
   "pointer-events-none scale-[0.98] opacity-0 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none";
 
 /** The card's top matter: the one-accent needs-you edge (a hairline indigo strip
- * — the surface's single accent, never red) plus the minimal-chrome header row
- * (@name · source · kind, no wait/cost/turns). Placed as the first children of a
- * `relative overflow-hidden` card box in each composition.
+ * — the surface's single accent, never red) plus a MINIMAL header row. The mono
+ * `@name` slug has left the card FACE (it still lives in search, the archive
+ * aria-label, @-mentions, the DecidedStrip and the archived rows) and the kind
+ * micro-label is gone — the card SHAPE says the kind, and the heading (the
+ * question, drawn by the body below) leads. The header now carries only the
+ * source (when it isn't the resident agent), the read tag, and the archive
+ * overflow. Placed as the first children of a `relative overflow-hidden` card box.
  *
  * A FINISHED event (decided, or read awareness — the exact `events.clear` set)
  * also carries the quiet ⋯ overflow with the Archive action: reversible (the
@@ -74,25 +73,24 @@ export function EventCardHeader(props: { ev: EventItem; onArchive?: (ev: EventIt
   const isJudgment = () => props.ev.kind === "judgment";
   const archivable = () =>
     props.onArchive !== undefined && isEventFinished(props.ev, state.eventDecideOverrides);
+  // Source earns a line only when it isn't the resident agent — a subagent,
+  // scheduled job, or monitor is worth naming; "agent" is the default voice and
+  // saying so is noise.
+  const showSource = () => props.ev.source.kind !== "agent";
   return (
     <>
       <Show when={isJudgment() && !decided()}>
         <span class="absolute inset-y-0 left-0 w-0.5 bg-primary" aria-hidden="true" />
       </Show>
       <div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-3.5 pt-3">
-        <span class="font-mono text-xs font-medium text-primary">{props.ev.name}</span>
-        <span class="text-[0.68rem] font-medium text-muted-foreground/80">
-          ·{" "}
-          <span class="font-semibold text-muted-foreground">
+        <Show when={showSource()}>
+          <span class="text-[0.68rem] font-semibold text-muted-foreground">
             {props.ev.source.ref ?? props.ev.source.kind}
           </span>
-        </span>
-        <span class="text-[0.56rem] font-bold uppercase tracking-[0.05em] text-muted-foreground/70">
-          {KIND_LABEL[props.ev.kind] ?? props.ev.kind}
-        </span>
+        </Show>
         <span class="flex-1" />
         <Show when={props.ev.read && props.ev.kind !== "judgment" && !decided()}>
-          <span class="inline-flex items-center gap-1 text-[0.56rem] font-bold uppercase tracking-[0.04em] text-status-success">
+          <span class="inline-flex items-center gap-1 text-[0.62rem] font-bold uppercase tracking-[0.04em] text-status-success">
             <Check class="size-3" aria-hidden="true" /> read
           </span>
         </Show>

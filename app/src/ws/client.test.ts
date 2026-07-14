@@ -295,35 +295,3 @@ describe("HirselWsClient auth rejection (C5)", () => {
     expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(3);
   });
 });
-
-describe("HirselWsClient Ping ops (resolve / reopen)", () => {
-  function connected(client: Awaited<ReturnType<typeof load>>["client"]) {
-    const c = client.startClient("wss://host/ws", "good");
-    const ws = FakeWebSocket.instances[0];
-    ws.serverOpen();
-    ws.serverSend(HELLO_OK);
-    return { c, ws };
-  }
-
-  it("reopenPing emits exactly {type:'reopen_ping', ping_id}", async () => {
-    const { client } = await load();
-    const { c, ws } = connected(client);
-
-    c.reopenPing(42);
-
-    const frame = ws.sent.map((s) => JSON.parse(s)).find((f) => f.type === "reopen_ping");
-    expect(frame).toEqual({ type: "reopen_ping", ping_id: 42 });
-  });
-
-  it("resolvePing and reopenPing are peers on the wire (resolve_ping / reopen_ping)", async () => {
-    const { client } = await load();
-    const { c, ws } = connected(client);
-
-    c.resolvePing(7);
-    c.reopenPing(7);
-
-    const types = ws.sentTypes();
-    expect(types).toContain("resolve_ping");
-    expect(types).toContain("reopen_ping");
-  });
-});

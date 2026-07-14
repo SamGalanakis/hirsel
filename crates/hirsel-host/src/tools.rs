@@ -966,27 +966,28 @@ fn blessed_judgment_ui_from_options(
             })
         })
         .collect::<Vec<_>>();
-    let mut children = vec![
-        serde_json::json!({
-            "type": "eyebrow",
-            "text": "Taste boundary — fleet stopped",
-            "boundary": true
-        }),
-        serde_json::json!({ "type": "heading", "text": heading }),
-    ];
+    let mut children = Vec::new();
+    // Eyebrow: the boundary accent stripe stays, but the fixed "fleet stopped"
+    // copy becomes the human unblocks fact — what deciding actually frees. When a
+    // decision unblocks no one, no eyebrow is emitted at all (the heading leads).
+    if let Some(unblocks) = unblocks {
+        if unblocks > 0 {
+            let agents = if unblocks == 1 { "agent" } else { "agents" };
+            children.push(serde_json::json!({
+                "type": "eyebrow",
+                "tone": "accent",
+                "boundary": true,
+                "text": format!("Deciding unblocks {unblocks} {agents}")
+            }));
+        }
+    }
+    children.push(serde_json::json!({ "type": "heading", "text": heading }));
     if !context.trim().is_empty() {
         children.push(serde_json::json!({ "type": "text", "text": context }));
     }
     children.push(serde_json::json!({ "type": "optionList", "options": options }));
     if let Some(view) = view {
         children.push(serde_json::json!({ "type": "viewSlot", "view": view }));
-    }
-    if let Some(unblocks) = unblocks {
-        children.push(serde_json::json!({
-            "type": "text",
-            "tone": "muted",
-            "text": format!("unblocks: {unblocks} agent(s)")
-        }));
     }
     serde_json::json!({ "type": "card", "children": children })
 }
@@ -1126,25 +1127,33 @@ fn option_key(index: usize) -> String {
 }
 
 fn judgment_event_name(question: &str) -> String {
+    const MAX_LEN: usize = 32;
+    // A lowercase, hyphen-joined slug of the question's words, truncated on a
+    // WORD boundary so the name never ends mid-word: a trailing word that would
+    // overflow the cap is dropped whole rather than sliced (the live bug sliced
+    // it, producing `…-digestincl`). A single word longer than the cap is
+    // hard-clipped so the slug still stays bounded.
     let mut name = String::new();
-    let mut previous_was_separator = false;
-    for character in question.chars().flat_map(char::to_lowercase) {
-        if character.is_ascii_alphanumeric() {
-            if name.chars().count() == 32 {
-                break;
+    for word in question
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+    {
+        let projected = if name.is_empty() {
+            word.chars().count()
+        } else {
+            name.chars().count() + 1 + word.chars().count()
+        };
+        if projected > MAX_LEN {
+            if name.is_empty() {
+                name = word.chars().take(MAX_LEN).collect();
             }
-            name.push(character);
-            previous_was_separator = false;
-        } else if !name.is_empty() && !previous_was_separator {
-            if name.chars().count() == 32 {
-                break;
-            }
-            name.push('-');
-            previous_was_separator = true;
+            break;
         }
-    }
-    while name.ends_with('-') {
-        name.pop();
+        if !name.is_empty() {
+            name.push('-');
+        }
+        name.push_str(&word);
     }
     if name.is_empty() {
         "judgment".to_string()
@@ -1255,11 +1264,27 @@ mod tests {
             None,
             Some(3),
         );
-        assert_eq!(ui["children"].as_array().unwrap().len(), 4);
+        assert_eq!(ui["children"].as_array().unwrap().len(), 3);
         assert_eq!(ui["children"][0]["type"], "eyebrow");
+        assert_eq!(ui["children"][0]["text"], "Deciding unblocks 3 agents");
+        assert_eq!(ui["children"][0]["boundary"], true);
         assert_eq!(ui["children"][1]["type"], "heading");
         assert_eq!(ui["children"][2]["type"], "optionList");
-        assert_eq!(ui["children"][3]["text"], "unblocks: 3 agent(s)");
+    }
+
+    #[test]
+    fn judgment_without_unblocks_omits_the_eyebrow_and_leads_with_the_heading() {
+        let ui = blessed_judgment_ui_from_options(
+            "Which release channel?",
+            "  ",
+            &normalize_judgment_options(judgment_options(2)).unwrap(),
+            None,
+            None,
+        );
+        let children = ui["children"].as_array().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0]["type"], "heading");
+        assert_eq!(children[1]["type"], "optionList");
     }
 
     #[test]
@@ -1353,11 +1378,35 @@ mod tests {
         );
         let children = ui["children"].as_array().unwrap();
         assert_eq!(children[0]["type"], "eyebrow");
+        assert_eq!(children[0]["text"], "Deciding unblocks 2 agents");
         assert_eq!(children[1]["type"], "heading");
         assert_eq!(children[2]["type"], "text");
         assert_eq!(children[3]["type"], "optionList");
         assert_eq!(children[4]["type"], "viewSlot");
-        assert_eq!(children[5]["text"], "unblocks: 2 agent(s)");
+        assert_eq!(children.len(), 5);
+    }
+
+    #[test]
+    fn judgment_event_name_truncates_on_a_word_boundary() {
+        // The live bug sliced mid-word at 32 chars ("…-digestincl"); the name must
+        // instead drop the overflowing trailing word whole.
+        let name = judgment_event_name("Should the morning digest include overnight fleet output?");
+        assert_eq!(name, "should-the-morning-digest");
+        assert!(name.chars().count() <= 32);
+        assert!(!name.ends_with('-'));
+
+        // Punctuation collapses to single hyphens and never leaves a trailing one.
+        assert_eq!(
+            judgment_event_name("Reopen a resolved Ping — how?"),
+            "reopen-a-resolved-ping-how"
+        );
+
+        // A single word longer than the cap is hard-clipped, still bounded.
+        let long = judgment_event_name("supercalifragilisticexpialidocioussummary");
+        assert_eq!(long.chars().count(), 32);
+
+        // No alphanumerics at all falls back to a stable default.
+        assert_eq!(judgment_event_name("—!?"), "judgment");
     }
 
     #[tokio::test]

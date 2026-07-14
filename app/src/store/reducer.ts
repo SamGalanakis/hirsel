@@ -1,7 +1,7 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { ChatMessage, EventItem, Ping, ProcessInfo, ViewInstance } from "../protocol";
+import type { ChatMessage, EventItem, ProcessInfo, ViewInstance } from "../protocol";
 import type {
   Action,
   AppState,
@@ -32,36 +32,13 @@ function capMessages(messages: DisplayMessage[]): DisplayMessage[] {
   return messages.length > MESSAGES_CAP ? messages.slice(messages.length - MESSAGES_CAP) : messages;
 }
 
-function upsertPing(pings: Ping[], ping: Ping): Ping[] {
-  const idx = pings.findIndex((existing) => existing.id === ping.id);
-  if (idx === -1) return [...pings, ping];
-  const next = pings.slice();
-  next[idx] = ping;
-  return next;
-}
-
 /** Upsert an Event by id, preserving list position for a known id (the queue
- * ordering is applied by the selector, not stored) — same shape as upsertPing. */
+ * ordering is applied by the selector, not stored). */
 function upsertEvent(events: EventItem[], event: EventItem): EventItem[] {
   const idx = events.findIndex((e) => e.id === event.id);
   if (idx === -1) return [...events, event];
   const next = events.slice();
   next[idx] = event;
-  return next;
-}
-
-/** v2.1 (ADR-0009): the Owner replying to a Ping's Anchor resolves it to
- * `done`. The host does this authoritatively (and broadcasts a ping_upsert),
- * but the client flips optimistically the moment the reply is sent — exactly
- * like read-state — so a replied Ping leaves the open list immediately instead
- * of lingering until the echo. Idempotent and a no-op when `ref` matches no
- * open Ping; the host upsert reconciles the truth. */
-function resolveOpenPingByAnchor(pings: Ping[], ref: number | null): Ping[] {
-  if (ref === null) return pings;
-  const idx = pings.findIndex((p) => p.status === "open" && p.anchor === ref);
-  if (idx === -1) return pings;
-  const next = pings.slice();
-  next[idx] = { ...next[idx], status: "done" };
   return next;
 }
 
@@ -266,7 +243,7 @@ function freshSideChat(sc: string, pingId: number, messages: ChatMessage[]): Sid
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
-      const { latest_msg_id, pings } = action.payload;
+      const { latest_msg_id } = action.payload;
       // Never re-admit a tombstoned (cancelled) id from replay.
       const snapshot = action.payload.messages.filter((m) => !state.removedIds.includes(m.id));
       // The snapshot is AUTHORITATIVE for the id range it covers (>= its minimum
@@ -335,17 +312,13 @@ export function reduce(state: AppState, action: Action): AppState {
       return {
         ...state,
         messages: capMessages([...merged, ...pending]),
-        // Defensive, matching processes/side_chats below: a malformed frame
-        // that omits `pings` must not white-screen the whole app.
-        pings: pings ?? [],
         // Typed event queue (ADR-0012): the snapshot's event set is
         // authoritative on reconnect — a full replace (an event resolved while
-        // offline is reflected). Defensive default like pings so a malformed
+        // offline is reflected). Defensive default so a malformed
         // frame can't white-screen the app.
         events: action.payload.events ?? [],
         // Drop optimistic decide overrides for events the snapshot no longer
-        // carries, so a resync leaves no stale override residue (mirrors the
-        // unreadOverrides recompute).
+        // carries, so a resync leaves no stale override residue.
         eventDecideOverrides: state.eventDecideOverrides.filter((id) =>
           (action.payload.events ?? []).some((e) => e.id === id),
         ),
@@ -359,12 +332,6 @@ export function reduce(state: AppState, action: Action): AppState {
         // re-anchors its viewport and drops per-session bookkeeping (see
         // AppState.eventsSnapshotSeq).
         eventsSnapshotSeq: state.eventsSnapshotSeq + 1,
-        // Recompute unread against the authoritative ping set: drop client-only
-        // "mark unread" overrides for pings the snapshot no longer contains, so a
-        // resync leaves no stale unread residue.
-        unreadOverrides: state.unreadOverrides.filter((id) =>
-          (pings ?? []).some((p) => p.id === id),
-        ),
         lastSeenMsgId: latest_msg_id,
         // Keep the last reported host version if this frame (or an older host)
         // omits it, so a resync never regresses About to "Not reported".
@@ -384,7 +351,7 @@ export function reduce(state: AppState, action: Action): AppState {
         sideChats,
         // Generative-UI tier: the snapshot's view set is authoritative on
         // reconnect — a full replace (a view cleared while offline is gone).
-        // Defensive default like pings/processes so a malformed frame can't
+        // Defensive default like processes so a malformed frame can't
         // white-screen the app.
         views: action.payload.views ?? [],
       };
@@ -513,61 +480,11 @@ export function reduce(state: AppState, action: Action): AppState {
       }
       return {
         ...state,
-        pings: upsertPing(state.pings, ping),
-        // A committed resolve (host `done` ping_upsert) supersedes any pending
-        // optimistic Mark-done override for this id — prune it so the wire truth
-        // and the optimistic layer never disagree once the send has landed.
-        resolveOverrides:
-          ping.status !== "open"
-            ? state.resolveOverrides.filter((id) => id !== ping.id)
-            : state.resolveOverrides,
         sideChats,
       };
     }
 
-    case "read_local": {
-      // Optimistic email-like "seen" flip: set read=true locally (the host's
-      // ping_upsert reconciles it) and drop any manual unread override, since
-      // reading always wins over a prior "Mark unread".
-      const pings = state.pings.map((p) =>
-        p.id === action.pingId ? { ...p, read: true } : p,
-      );
-      return {
-        ...state,
-        pings,
-        unreadOverrides: state.unreadOverrides.filter((id) => id !== action.pingId),
-      };
-    }
-
-    case "mark_unread_local": {
-      // Client-only override (no wire unread op): record the id so the Ping is
-      // rendered/counted as unread even though the wire `read` flag stays true.
-      const unreadOverrides = state.unreadOverrides.includes(action.pingId)
-        ? state.unreadOverrides
-        : [...state.unreadOverrides, action.pingId].slice(-200);
-      return { ...state, unreadOverrides };
-    }
-
-    case "resolve_local": {
-      // Optimistic "Marked done" flip (mirrors `mark_unread_local`): record the
-      // id so the Ping renders/counts as resolved at once, while a 5s Undo
-      // window (lib/resolve-undo) debounces the actual `resolve_ping` send.
-      const resolveOverrides = state.resolveOverrides.includes(action.pingId)
-        ? state.resolveOverrides
-        : [...state.resolveOverrides, action.pingId].slice(-200);
-      return { ...state, resolveOverrides };
-    }
-
-    case "unresolve_local": {
-      // Undo tapped inside the window (or the send superseded): drop the
-      // optimistic override so the Ping returns to its wire status.
-      return {
-        ...state,
-        resolveOverrides: state.resolveOverrides.filter((id) => id !== action.pingId),
-      };
-    }
-
-    // ---- Typed event queue (ADR-0012), generalizing the ping slice above ----
+    // ---- Typed event queue (ADR-0012) ----
 
     case "event_upsert": {
       const event = action.payload.event;
@@ -576,8 +493,7 @@ export function reduce(state: AppState, action: Action): AppState {
         events: upsertEvent(state.events, event),
         // A committed resolve (host `done` event_upsert) supersedes any pending
         // optimistic decide override for this id — prune it so the wire truth and
-        // the optimistic layer never disagree once the action has landed (twin of
-        // the ping_upsert resolveOverrides prune).
+        // the optimistic layer never disagree once the action has landed.
         eventDecideOverrides:
           event.status !== "open"
             ? state.eventDecideOverrides.filter((id) => id !== event.id)
@@ -595,7 +511,7 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case "event_decide_local": {
-      // Optimistic decide flip (mirrors `resolve_local`): record the id so the
+      // Optimistic decide flip: record the id so the
       // event renders/counts as decided at once, while `event_action` is sent to
       // the host and a ~5s Undo window offers recovery.
       const eventDecideOverrides = state.eventDecideOverrides.includes(action.eventId)
@@ -605,7 +521,7 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case "event_undecide_local": {
-      // Undo (mirrors `unresolve_local`): drop the optimistic override so the
+      // Undo: drop the optimistic override so the
       // event returns to its wire status.
       return {
         ...state,
@@ -614,7 +530,7 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case "event_read_local": {
-      // Awareness auto-read as the scroller passes it (mirrors `read_local`):
+      // Awareness auto-read as the scroller passes it:
       // flip read=true locally; the host's event_upsert reconciles the truth.
       const events = state.events.map((e) =>
         e.id === action.eventId ? { ...e, read: true } : e,
@@ -676,8 +592,6 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         messages: capMessages([...state.messages, localMessage]),
         pendingSends: [...state.pendingSends, pendingSend],
-        // v2.1 (ADR-0009): an anchored reply optimistically resolves its Ping.
-        pings: resolveOpenPingByAnchor(state.pings, ref),
       };
     }
 
@@ -897,10 +811,6 @@ export function reduce(state: AppState, action: Action): AppState {
           confirming: true,
         }),
         awaitingConclusions: { ...state.awaitingConclusions, [action.anchor]: action.sc },
-        // v2.1 (ADR-0009): a Side Chat Conclusion is an anchored reply too, so
-        // it resolves its Ping optimistically on confirm (the confirm has no
-        // send_local of its own — the owner reply lands later as a `msg`).
-        pings: resolveOpenPingByAnchor(state.pings, action.anchor),
       };
     }
 

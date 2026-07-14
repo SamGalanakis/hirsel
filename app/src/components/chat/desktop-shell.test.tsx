@@ -1,7 +1,7 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EventItem, Ping } from "../../protocol";
+import type { EventItem } from "../../protocol";
 
 // Desktop-unified shell (desktop-unified pass). Desktop is now an EXPANDED view
 // of mobile: Feed AND Chat stand side by side, decided and typed into without
@@ -48,22 +48,6 @@ beforeEach(() => {
 });
 afterEach(() => usePhone());
 
-function inboxItem(overrides: Partial<Ping> = {}): Ping {
-  return {
-    id: 1,
-    name: "deploy-approval",
-    description: "Approve the production deployment",
-    content: "Approve the deploy to prod?",
-    anchor: 5,
-    requires_response: true,
-    read: false,
-    quick_replies: [],
-    status: "open",
-    ts: "2026-07-08T00:00:00Z",
-    ...overrides,
-  };
-}
-
 function judgment(id: number, heading: string): EventItem {
   return {
     id,
@@ -95,7 +79,7 @@ function makeClient(store: typeof import("../../store/store")) {
     confirmConclusion: vi.fn(),
     discardSideChat: vi.fn(),
     resolvePing: vi.fn(),
-    readPing: vi.fn(),
+    readEvent: vi.fn(),
     sendMessage: vi.fn(() => -1),
     sendEventAction: vi.fn(),
     retrySend: vi.fn(),
@@ -138,25 +122,14 @@ describe("Desktop-unified shell: Feed and Chat stand together", () => {
     expect(screen.getByText("Persist the canvas?")).toBeTruthy();
   });
 
-  it("carries the surface's ONE red on the Feed header and nowhere else (no standing Pings rail)", async () => {
-    // An open requires-response Ping (would have driven the OLD desktop red on
-    // the standing Pings rail header) plus an open judgment in the Feed.
+  it("carries the surface's ONE red on the Feed header", async () => {
     const { screen } = await setupApp([judgment(1, "Decide the schema")]);
-    const store = await import("../../store/store");
-    store.dispatch({
-      type: "ping_upsert",
-      payload: { type: "ping_upsert", ping: inboxItem() },
-    });
 
     // The Feed header pill is the one red — a needs-you count in danger tone.
     const need = document.querySelector('[data-slot="feed-need"]') as HTMLElement;
     expect(need.textContent).toContain("need you");
     expect(need.className).toContain("status-danger");
 
-    // The standing Pings rail is retired: no second desktop red competes with the
-    // Feed's count (the owner's redundant-surface complaint, removed).
-    expect(document.querySelector('[data-slot="pings-rail"]')).toBeNull();
-    expect(document.querySelector('[data-slot="pings-rail-badge"]')).toBeNull();
     await waitFor(() => expect(screen.getByText("Decide the schema")).toBeTruthy());
   });
 });
@@ -189,7 +162,7 @@ describe("Desktop-unified shell: the icon rail", () => {
     const processes = within(nav).getByRole("button", { name: /Processes/ });
     const settings = screen.getByLabelText("Settings");
 
-    // Resting: the right region is idle (pings) — nothing renders there, and no
+    // Resting: the right region is idle — nothing renders there, and no
     // launcher is current.
     expect(processes.getAttribute("aria-current")).toBeNull();
     expect(settings.getAttribute("aria-current")).toBeNull();
@@ -231,14 +204,13 @@ describe("Desktop-unified shell: right-region precedence", () => {
     );
     expect(screen.getByPlaceholderText("Message the Agent…")).toBeTruthy();
 
-    // Closing returns the region to the idle pings state — which renders NOTHING
-    // on desktop now (the Feed is the needs-you surface) — while the side chat
+    // Closing returns the region to the idle state — which renders nothing — while the side chat
     // stays alive/resumable underneath.
     store.closeRightRegion();
     await waitFor(() =>
       expect(document.querySelector('[data-slot="side-chat-sheet"]')).toBeNull(),
     );
-    expect(store.state.rightRegion).toBe("pings");
+    expect(store.state.rightRegion).toBe("none");
     expect(store.state.activeSideChatSc).toBe("side:1");
     expect(document.querySelector('[data-slot="feed-column"]')).toBeTruthy();
   });

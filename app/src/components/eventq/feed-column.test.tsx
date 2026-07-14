@@ -47,7 +47,7 @@ async function setup(events: EventItem[]) {
     getClient: () => ({
       sendEventAction: (eventId: number, action: string, data: unknown) =>
         sent.push({ eventId, action, data }),
-      readPing: () => {},
+      readEvent: () => {},
     }),
   }));
   // Seed BEFORE render so the DEV mock-seed (empty-set only) never interferes.

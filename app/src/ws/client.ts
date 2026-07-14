@@ -261,26 +261,10 @@ class HirselWsClient {
     this.sendFrame({ type: "cancel_queued", client_id: clientId });
   }
 
-  /** v2.1: resolve a Ping to Done (⋯ "Mark done"). Enqueued so it survives an
-   * offline window. (Was `archiveItem`.) */
-  resolvePing(pingId: number): void {
-    this.enqueue({ type: "resolve_ping", ping_id: pingId });
-  }
-
-  /** v2.2: reopen a resolved Ping (the "Marked done" toast's Undo, or the Done
-   * card's ⋯ "Reopen"). Enqueued like resolvePing so it survives an offline
-   * window; on success the host broadcasts a `ping_upsert` with status=open,
-   * which the reducer reconciles — no bespoke inbound reply to parse. */
-  reopenPing(pingId: number): void {
-    this.enqueue({ type: "reopen_ping", ping_id: pingId });
-  }
-
-  /** Mark a Ping read (v1.3). Optimistically flips read=true locally
-   * (reconciled by the host's ping_upsert) and sends the idempotent read_ping
-   * frame. Enqueued so it survives an offline window like resolve_ping. */
-  readPing(pingId: number): void {
-    dispatch({ type: "read_local", pingId });
-    this.enqueue({ type: "read_ping", ping_id: pingId });
+  /** Mark an Event read. Events share the legacy Ping id space and wire op,
+   * while the event reducer owns the local optimistic flip. */
+  readEvent(eventId: number): void {
+    this.enqueue({ type: "read_ping", ping_id: eventId });
   }
 
   // ---- v2.0 side chats (ADR-0008) ----

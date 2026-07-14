@@ -10,26 +10,19 @@ export interface ComposerDraft {
 }
 
 /** The one exclusive owner of the desktop right region / phone secondary sheet.
- * Exactly one of these is showing at a time (the single-slot model): `pings` is
- * the idle resting state (the standing Pings rail on desktop, the Tray shelf on
- * phone), and everything else takes the slot until dismissed — closing any of
- * them returns to `pings`. This replaces the four independent flags
+ * Exactly one of these is showing at a time (the single-slot model): `none` is
+ * the idle resting state, and everything else takes the slot until dismissed —
+ * closing any of them returns to `none`. This replaces the four independent flags
  * (processesOpen/settingsOpen/canvasOpen + `activeSideChatSc !== null`) that
  * used to fight over the region: with one enum, inactive panes UNMOUNT (no
  * hidden-focus leak, nothing to clip) and "last explicit user action wins." */
-export type RightRegion = "pings" | "sideChat" | "canvas" | "processes" | "settings";
+export type RightRegion = "none" | "sideChat" | "canvas" | "processes" | "settings";
 
 /** Cross-view navigation/UI state layered on top of the protocol AppState.
  * This is still "one store": the protocol side is kept in a pure,
  * independently-tested reducer (see reducer.ts) while this thin UI slice
  * (sheet/overlay visibility, one-shot scroll/prefill requests) is plain
  * setters, since it has no wire-protocol semantics to unit test.
- *
- * v1.6 (Tray): Chat is the whole app now, so there is no more tab-switching
- * plumbing. Inbox lives in the Tray (an overlay local to ChatView, expanded
- * state kept here so `goToChat` can centrally collapse it — e.g. "View in
- * chat" from inside the expanded tray).
- *
  * v2.3 (single-owner right region): the right region is owned by one exclusive
  * `rightRegion` enum rather than a set of independent booleans. */
 /** The root surface of the app (ADR-0012 cutover). `queue` is the home — the
@@ -44,14 +37,9 @@ interface UiState {
   /** The root surface: the queue scroller (home) or the chat drill-in shell.
    * Default `queue` (ADR-0012). */
   home: Home;
-  /** Tray overlay expanded/collapsed. Only ever set true by an explicit tap on
-   * the shelf (or the equivalent test action) — never auto-expanded. Orthogonal
-   * to `rightRegion`: it is the phone Pings overlay's expand state within the
-   * `pings` region (the desktop rail ignores it). */
-  trayExpanded: boolean;
   /** The single owner of the right region (desktop) / secondary full-screen
-   * sheet (phone). Default `pings`. Every pane switch sets exactly this — so
-   * nothing lingers behind — and closing any pane returns it to `pings`. */
+   * sheet (phone). Default `none`. Every pane switch sets exactly this — so
+   * nothing lingers behind — and closing any pane returns it to `none`. */
   rightRegion: RightRegion;
   /** Set when something (a quoted ref, a quick reply) wants Chat to scroll to
    * and highlight a message; consumed once then cleared. */
@@ -102,8 +90,7 @@ function initialStore(): Store {
   return {
     ...initialState(),
     home: "queue",
-    trayExpanded: false,
-    rightRegion: "pings",
+    rightRegion: "none",
     scrollToMessageId: null,
     composerDraft: null,
     composerPrefill: null,
@@ -121,7 +108,6 @@ const [state, setState] = createStore<Store>(initialStore());
 function appSnapshot(): AppState {
   return {
     messages: state.messages,
-    pings: state.pings,
     events: state.events,
     eventDecideOverrides: state.eventDecideOverrides,
     eventArchiveOverrides: state.eventArchiveOverrides,
@@ -138,8 +124,6 @@ function appSnapshot(): AppState {
     turnEvents: state.turnEvents,
     turnDetails: state.turnDetails,
     removedIds: state.removedIds,
-    unreadOverrides: state.unreadOverrides,
-    resolveOverrides: state.resolveOverrides,
     sideChatRefs: state.sideChatRefs,
     sideChats: state.sideChats,
     pendingSideSends: state.pendingSideSends,
@@ -151,9 +135,9 @@ function appSnapshot(): AppState {
 }
 
 /** Apply the same pure `reduce` used by the tests, then push the result into
- * the fine-grained store. The two rendered arrays (messages, inbox) go through
+ * the fine-grained store. The rendered arrays go through
  * `reconcile` keyed by `id` so only the DOM bound to genuinely-changed rows
- * re-renders (messages + pings); the small scalar/never-rendered fields are set directly.
+ * re-renders; the small scalar/never-rendered fields are set directly.
  *
  * The whole body is `untrack`ed: dispatch is an imperative command, and it is
  * sometimes invoked synchronously from inside a reactive scope (e.g. the App
@@ -164,7 +148,6 @@ export function dispatch(action: Action): void {
   untrack(() => {
     const next = reduce(appSnapshot(), action);
     setState("messages", reconcile(next.messages, { key: "id" }));
-    setState("pings", reconcile(next.pings, { key: "id" }));
     // Typed event queue: reconcile keyed by id so only the DOM bound to a
     // genuinely-changed event (a re-upsert / decide flip) re-renders.
     setState("events", reconcile(next.events, { key: "id" }));
@@ -173,8 +156,6 @@ export function dispatch(action: Action): void {
     setState("eventsSnapshotSeq", next.eventsSnapshotSeq);
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
-    setState("unreadOverrides", next.unreadOverrides);
-    setState("resolveOverrides", next.resolveOverrides);
     setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("processes", reconcile(next.processes, { key: "id" }));
     setState("turnEvents", next.turnEvents);
@@ -211,9 +192,9 @@ export function dispatch(action: Action): void {
   });
 }
 
-/** Land on Chat: returns the right region to its idle `pings` resting state
+/** Land on Chat: returns the right region to its idle `none` resting state
  * (so any Processes/Settings/Canvas/Side-Chat pane covering the surface being
- * navigated to unmounts), collapses the Tray overlay, then applies any one-shot
+ * navigated to unmounts), then applies any one-shot
  * scroll/draft/prefill request. The current side chat's DATA (`activeSideChatSc`)
  * is left alive/resumable — only the pane selection changes. */
 export function goToChat(opts?: {
@@ -227,8 +208,7 @@ export function goToChat(opts?: {
 }): void {
   setState({
     home: "chat",
-    rightRegion: "pings",
-    trayExpanded: false,
+    rightRegion: "none",
     scrollToMessageId: opts?.scrollToMessageId ?? null,
     composerDraft: opts?.composerDraft ?? null,
     composerPrefill: opts?.composerPrefill ?? null,
@@ -245,7 +225,7 @@ export function goToQueue(): void {
 
 /** Drill into the chat shell from the queue (a judgment's Discuss, or any nav
  * that needs the shell). Does not change the right region — the caller sets the
- * pane it wants (or leaves the resting Pings rail). */
+ * pane it wants (or leaves the region idle). */
 export function goToChatDrillIn(): void {
   setState("home", "chat");
 }
@@ -257,16 +237,9 @@ export function setRightRegion(region: RightRegion): void {
   setState("rightRegion", region);
 }
 
-/** Close whatever pane owns the right region, back to the `pings` resting state. */
+/** Close whatever pane owns the right region, back to the `none` resting state. */
 export function closeRightRegion(): void {
-  setState("rightRegion", "pings");
-}
-
-/** Select the Pings resting state (the standing rail on desktop / the Tray on
- * phone). Drills into the chat shell if we were on the queue home, since every
- * right-region pane lives there. */
-export function openPings(): void {
-  setState({ home: "chat", rightRegion: "pings" });
+  setState("rightRegion", "none");
 }
 
 /** Dock the Processes inspector into the right region (chat shell). */
@@ -287,10 +260,9 @@ export function clearSettingsScrollTarget(): void {
   setState("settingsScrollTarget", null);
 }
 
-/** Surface the Canvas view in the right region. Collapses the phone Tray
- * overlay so the region isn't double-booked there. */
+/** Surface the Canvas view in the right region. */
 export function showCanvas(): void {
-  setState({ home: "chat", rightRegion: "canvas", trayExpanded: false });
+  setState({ home: "chat", rightRegion: "canvas" });
 }
 
 /** Open the Side Chat pane: records which sc backs it AND selects the region.
@@ -324,10 +296,6 @@ export function clearLastConclusion(): void {
   dispatch({ type: "clear_last_conclusion" });
 }
 
-export function setTrayExpanded(open: boolean): void {
-  setState("trayExpanded", open);
-}
-
 export function clearScrollTarget(): void {
   setState("scrollToMessageId", null);
 }
@@ -339,7 +307,7 @@ export function clearComposerDraft(): void {
 /** Quote a specific message into the main composer ("Reply" from a message's
  * actions menu). Self-contained UI-slice write — deliberately NOT routed
  * through the reducer/hello_ok path — it just seeds the same `composerDraft`
- * the Ping "Reply" flow uses, which ChatView resolves to the reply target and
+   * ChatView resolves to the reply target and
  * the Composer renders as "Replying to…". */
 export function setComposerReplyTarget(ref: number): void {
   setState("composerDraft", { ref });

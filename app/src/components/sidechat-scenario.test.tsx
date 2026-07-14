@@ -1,11 +1,10 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatMessage, Ping } from "../protocol";
+import type { ChatMessage, EventItem, Ping } from "../protocol";
 
 // Headless full-loop scenario for the Side Chat sheet (ADR-0008 / the opus
 // design critique), driven the same way as the rest of this suite's scenario
-// tests (flows.test.tsx, inbox/inbox-reply-scenario.test.tsx,
-// processes/processes-scenario.test.tsx): a pristine store per test
+// tests (flows.test.tsx, processes/processes-scenario.test.tsx): a pristine store per test
 // (resetModules + dynamic import) and a fake ws client that reproduces the
 // mock server's v2.0 behavior via direct `dispatch` calls instead of a live
 // socket — the actual tools/mock-server.mjs is exercised separately (see the
@@ -15,7 +14,25 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function inboxItem(overrides: Partial<Ping> = {}): Ping {
+function eventItem(overrides: Partial<EventItem> = {}): EventItem {
+  return {
+    id: 1,
+    kind: "judgment",
+    source: { kind: "agent", ref: null },
+    name: "deploy-approval",
+    description: "Approve the deploy to prod?",
+    ui: { type: "text", text: "Approve the deploy to prod?" },
+    anchor: 5,
+    requires_response: true,
+    quick_replies: [],
+    status: "open",
+    read: false,
+    ts: "2026-07-08T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function pingForBanner(status: Ping["status"] = "done"): Ping {
   return {
     id: 1,
     name: "deploy-approval",
@@ -24,9 +41,8 @@ function inboxItem(overrides: Partial<Ping> = {}): Ping {
     anchor: 5,
     requires_response: true,
     quick_replies: [],
-    status: "open",
+    status,
     ts: "2026-07-08T00:00:00Z",
-    ...overrides,
   };
 }
 
@@ -43,13 +59,13 @@ function anchorMessage(): ChatMessage {
 /** A fake host reproducing the v2.0 side-chat surface closely enough to drive
  * the full loop: idempotent open/resume (remembers transcripts across a
  * leave+resume so "resume" actually restores history), scoped send/reply,
- * conclude -> draft, confirm -> main owner msg + archive + closed, and
+ * conclude -> draft, confirm -> main owner msg + event update + closed, and
  * discard. */
 function makeFakeHost(store: typeof import("../store/store")) {
-  let scCounter = 0;
+  let scCounter = 1;
   let sideMsgId = 100;
-  const byItem = new Map<number, string>();
-  const transcripts = new Map<string, ChatMessage[]>();
+  const byItem = new Map<number, string>([[1, "side:1"]]);
+  const transcripts = new Map<string, ChatMessage[]>([["side:1", []]]);
 
   return {
     openSideChat: vi.fn((pingId: number) => {
@@ -122,27 +138,23 @@ function makeFakeHost(store: typeof import("../store/store")) {
           message: { id: 900, author: "owner", body: text, ref: anchor, ts: "2026-07-08T00:02:00Z" },
         },
       });
-      const pingId = byItem.entries().next().value?.[0];
-      const item = store.state.pings.find((i) => i.anchor === anchor);
-      if (item) {
+      const event = store.state.events.find((candidate) => candidate.anchor === anchor);
+      if (event) {
         store.dispatch({
-          type: "ping_upsert",
-          payload: { type: "ping_upsert", ping: { ...item, status: "done" } },
+          type: "event_upsert",
+          payload: { type: "event_upsert", event: { ...event, status: "done" } },
         });
       }
-      void pingId;
       store.dispatch({ type: "side_chat_closed", sc });
     }),
     discardSideChat: vi.fn((sc: string) => {
       store.dispatch({ type: "side_chat_closed", sc });
     }),
-    resolvePing: vi.fn(),
-    readPing: vi.fn(),
     sendMessage: vi.fn(() => -1),
   };
 }
 
-async function setup(itemOverrides: Partial<Ping> = {}) {
+async function setup(itemOverrides: Partial<EventItem> = {}) {
   const store = await import("../store/store");
   const fakeClient = makeFakeHost(store);
   vi.doMock("../ws/client", () => ({ getClient: () => fakeClient }));
@@ -150,10 +162,9 @@ async function setup(itemOverrides: Partial<Ping> = {}) {
   const { ChatView } = await import("./chat/ChatView");
   store.dispatch({ type: "connection_status", status: "connected" });
   store.dispatch({ type: "msg", payload: { type: "msg", message: anchorMessage() } });
-  store.dispatch({
-    type: "ping_upsert",
-    payload: { type: "ping_upsert", ping: inboxItem(itemOverrides) },
-  });
+  store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: eventItem(itemOverrides) } });
+  store.dispatch({ type: "side_chat_open", sc: "side:1", pingId: 1, messages: [] });
+  store.openSideChat("side:1");
   const screen = render(() => <ChatView />);
   return { store, screen, fakeClient };
 }
@@ -167,34 +178,17 @@ function sideSheet() {
   return within(el as HTMLElement);
 }
 
-/** Scope inbox queries to the Tray overlay: the desktop Pings rail is a second,
- * always-mounted PingsView (CSS-hidden below the rail breakpoint but present in
- * the jsdom tree), so an unscoped Discuss/resume query would match twice. */
-function pings() {
-  const el = document.querySelector('[data-slot="tray-panel"]');
-  if (!el) throw new Error("tray is not expanded");
-  return within(el as HTMLElement);
-}
-
-describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send reply -> landed in main", () => {
-  it("keeps main chat untouched during the side conversation, then lands the edited conclusion with its provenance chip and archives the item", async () => {
+describe("Full loop: host-opened side conversation -> Conclude -> Send reply -> landed in main", () => {
+  it("keeps main chat untouched during the side conversation, then lands the edited conclusion with its provenance chip and resolves the event", async () => {
     const { store, screen, fakeClient } = await setup();
 
     // Main chat starts with just the anchor message.
     expect(store.state.messages).toHaveLength(1);
 
-    // --- Discuss ---
-    await fireEvent.click(screen.getByLabelText("Open Pings"));
-    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
-    expect(fakeClient.openSideChat).toHaveBeenCalledWith(1);
-
     // --- Seed card visible ---
     await waitFor(() => expect(screen.getByText(/Forked from chat/)).toBeTruthy());
     expect(screen.getByText(/Side chat ·/)).toBeTruthy();
-    // the seeded item content, rendered in both the title band and the seed
-    // card body (plus behind, in the still-expanded Tray card — hence scoping
-    // to the sheet itself, and getAllByText since it legitimately appears
-    // twice within the sheet).
+    // The seeded item content is rendered in the sheet.
     expect(sideSheet().getAllByText(/Approve the deploy to prod\?/).length).toBeGreaterThan(0);
 
     // --- Side conversation: sc-scoped timeline visible, main chat untouched ---
@@ -231,7 +225,7 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
       5,
     );
 
-    // --- Sheet closes, land-and-highlight, provenance chip, item archived ---
+    // --- Sheet closes, land-and-highlight, provenance chip, event resolved ---
     await waitFor(() => expect(screen.queryByText(/Side chat ·/)).toBeNull());
     expect(store.state.messages).toHaveLength(2);
     const owner = store.state.messages.find((m) => m.id === 900);
@@ -245,15 +239,13 @@ describe("Full loop: item -> Discuss -> side conversation -> Conclude -> Send re
     const ownerBubbleContent = document.getElementById("msg-900")?.querySelector('[data-slot="bubble-content"]');
     expect(ownerBubbleContent?.className).toContain("ring-2");
 
-    expect(store.state.pings.find((i) => i.id === 1)?.status).toBe("done");
+    expect(store.state.events.find((event) => event.id === 1)?.status).toBe("done");
   });
 });
 
 describe("Resume after reconnect", () => {
-  it("shows 'in progress · resume' (never auto-opens), and resuming restores the prior transcript", async () => {
-    const { store, screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByLabelText("Open Pings"));
-    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
+  it("never auto-opens after reconnect, and the store resume path restores the prior transcript", async () => {
+    const { store, screen } = await setup();
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     const composer = sideSheet().getByPlaceholderText("Reply in this side chat…") as HTMLTextAreaElement;
@@ -266,23 +258,21 @@ describe("Resume after reconnect", () => {
     expect(screen.queryByText(/Side chat ·/)).toBeNull();
 
     // A reconnect happens; the host still lists this side chat as live. The
-    // sheet must NOT auto-reopen — only the tray card's affordance changes.
+    // sheet must NOT auto-reopen.
     store.dispatch({
       type: "hello_ok",
       payload: {
         type: "hello_ok",
         latest_msg_id: store.state.lastSeenMsgId ?? 0,
         messages: [],
-        pings: store.state.pings,
+        pings: [],
         side_chats: [{ sc: "side:1", ping_id: 1 }],
       },
     });
     expect(screen.queryByText(/Side chat ·/)).toBeNull(); // still not auto-opened
-    expect(pings().getByRole("button", { name: /in progress · resume/ })).toBeTruthy();
 
-    // Resume is a deliberate tap: it re-opens (idempotent) and restores history.
-    await fireEvent.click(pings().getByRole("button", { name: /in progress · resume/ }));
-    expect(fakeClient.openSideChat).toHaveBeenCalledTimes(2);
+    // Resume is a deliberate CommandPalette/store action and restores history.
+    store.openSideChat("side:1");
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
     // Appears twice, legitimately: the owner bubble itself, and the agent
     // reply's QuotedRef snippet quoting it back.
@@ -294,18 +284,15 @@ describe("Resume after reconnect", () => {
 describe("Item archived mid-side-chat", () => {
   it("shows a non-blocking banner and Conclude still works", async () => {
     const { screen, fakeClient } = await setup();
-    await fireEvent.click(screen.getByLabelText("Open Pings"));
-    await fireEvent.click(pings().getByRole("button", { name: /Discuss/ }));
     await waitFor(() => expect(screen.getByText(/Side chat ·/)).toBeTruthy());
 
     expect(screen.queryByText(/The Agent closed this Ping\./)).toBeNull();
 
     // The Agent archives the item while the side chat is still open.
     const store = await import("../store/store");
-    const item = store.state.pings.find((i) => i.id === 1);
     store.dispatch({
       type: "ping_upsert",
-      payload: { type: "ping_upsert", ping: { ...item!, status: "done" } },
+      payload: { type: "ping_upsert", ping: pingForBanner("done") },
     });
 
     expect(screen.getByText(/The Agent closed this Ping\./)).toBeTruthy();
@@ -313,5 +300,14 @@ describe("Item archived mid-side-chat", () => {
     expect(screen.getByText(/Side chat ·/)).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "Wrap up" }));
     expect(fakeClient.concludeSideChat).toHaveBeenCalledWith("side:1");
+  });
+});
+
+describe("Host-initiated side-chat close", () => {
+  it("keeps the sheet mounted in its ended state", async () => {
+    const { store, screen } = await setup();
+    store.dispatch({ type: "side_chat_closed", sc: "side:1" });
+    expect(await screen.findByText("This side chat ended.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to item" })).toBeTruthy();
   });
 });

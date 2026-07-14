@@ -272,7 +272,7 @@ textarea {
 }
 
 /* Durable reduced-motion guard (C32): a global reset so animation call sites
-   (ConnectionPill/Tray/ProcessRow pulses, spinners, sheet slide-ins) don't each
+   (ConnectionPill/ProcessRow pulses, spinners, sheet slide-ins) don't each
    have to remember `motion-safe:`. Near-instant rather than 0s so
    animation/transition `end` events still fire and stateful transitions settle. */
 @media (prefers-reduced-motion: reduce) {

@@ -1,5 +1,5 @@
 // Optimistic decide→resolve with undo for the typed event queue (ADR-0012),
-// the event twin of lib/resolve-undo.ts. Deciding a judgment (choosing an
+// Deciding a judgment (choosing an
 // option, submitting fields, or accepting the recommendation) posts an
 // `event_action` to the host IMMEDIATELY and flips the card to decided at once
 // via the optimistic `event_decide_local` override (reconciled by the host's
@@ -81,5 +81,5 @@ export function reopenEvent(eventId: number): void {
  * The host broadcasts the updated event back, reconciling the local flip. */
 export function markEventRead(eventId: number): void {
   dispatch({ type: "event_read_local", eventId });
-  getClient()?.readPing(eventId);
+  getClient()?.readEvent(eventId);
 }

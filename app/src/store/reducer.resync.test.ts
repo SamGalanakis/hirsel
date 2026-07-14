@@ -1,24 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { reduce } from "./reducer";
 import { initialState } from "./types";
-import type { ChatMessage, Ping, ProcessInfo } from "../protocol";
+import type { ChatMessage, ProcessInfo } from "../protocol";
 
 function msg(id: number, author: "owner" | "agent", body: string): ChatMessage {
   return { id, author, body, ref: null, ts: "2026-07-08T00:00:00Z" };
-}
-
-function ping(id: number): Ping {
-  return {
-    id,
-    name: `p${id}`,
-    description: "d",
-    content: "c",
-    anchor: id,
-    requires_response: true,
-    quick_replies: [],
-    status: "open",
-    ts: "2026-07-08T00:00:00Z",
-  };
 }
 
 function proc(id: string): ProcessInfo {
@@ -43,36 +29,29 @@ describe("C7: idempotent resync on a second hello_ok", () => {
         type: "hello_ok",
         latest_msg_id: 3,
         messages: [msg(1, "owner", "a"), msg(2, "agent", "b"), msg(3, "owner", "c")],
-        pings: [ping(10), ping(11)],
+        pings: [],
         processes: [proc("p1")],
       },
     });
-    // A client-only "mark unread" override on a ping that will vanish in the resync.
-    const withOverride = reduce(first, { type: "mark_unread_local", pingId: 11 });
-    expect(withOverride.unreadOverrides).toContain(11);
-
     // A full resync (host build_snapshot with no cursor → starts at id 1): during
-    // the lag gap msg 2 was removed, ping 11 resolved, and msg 4 + ping 12 arrived.
-    const second = reduce(withOverride, {
+    // the lag gap msg 2 was removed and msg 4 arrived.
+    const second = reduce(first, {
       type: "hello_ok",
       payload: {
         type: "hello_ok",
         latest_msg_id: 4,
         messages: [msg(1, "owner", "a"), msg(3, "owner", "c"), msg(4, "agent", "d")],
-        pings: [ping(10), ping(12)],
+        pings: [],
         processes: [proc("p2")],
       },
     });
 
     // messages: exactly the second snapshot — msg 2 dropped, msg 4 added, no dups.
     expect(second.messages.map((m) => m.id)).toEqual([1, 3, 4]);
-    // pings + processes: clean replace, nothing stale lingers.
-    expect(second.pings.map((p) => p.id)).toEqual([10, 12]);
+    // Processes are a clean replace; nothing stale lingers.
     expect(second.processes.map((p) => p.id)).toEqual(["p2"]);
     // cursor recomputed from the new snapshot.
     expect(second.lastSeenMsgId).toBe(4);
-    // unread override for the now-absent ping 11 is pruned (recomputed).
-    expect(second.unreadOverrides).not.toContain(11);
     // ephemeral live timeline never survives a resync.
     expect(second.turnEvents).toEqual([]);
   });
@@ -82,13 +61,12 @@ describe("C7: idempotent resync on a second hello_ok", () => {
       type: "hello_ok" as const,
       latest_msg_id: 2,
       messages: [msg(1, "owner", "a"), msg(2, "agent", "b")],
-      pings: [ping(10)],
+      pings: [],
       processes: [proc("p1")],
     };
     const once = reduce(initialState(), { type: "hello_ok", payload });
     const twice = reduce(once, { type: "hello_ok", payload });
     expect(twice.messages.map((m) => m.id)).toEqual([1, 2]);
-    expect(twice.pings.map((p) => p.id)).toEqual([10]);
   });
 
   it("still preserves older local history on a cursor-based handshake replay", () => {

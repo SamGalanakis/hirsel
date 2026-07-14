@@ -11,11 +11,9 @@ import { createSignal } from "solid-js";
 import {
   goToChat,
   goToQueue,
-  openPings,
   openProcesses,
   openSettings,
   setScrollTarget,
-  setTrayExpanded,
   state,
 } from "../store/store";
 import { getClient } from "../ws/client";
@@ -27,7 +25,7 @@ import { anyOverlayOpen, focusFeedColumn, focusMainComposer } from "./focus";
 /** Max gap (ms) between the `g` leader and its second key for a chord to count. */
 const CHORD_MS = 900;
 
-export type PaneTarget = "chat" | "feed" | "pings" | "processes" | "settings";
+export type PaneTarget = "chat" | "feed" | "processes" | "settings";
 
 /** Desktop-unified (`rail`, ≥1100px): Feed and Chat are visible AT ONCE, so the
  * old "home switch" chords (`g c`, `g f`/`g i`) become FOCUS moves between the
@@ -58,7 +56,7 @@ export function focusComposer(): void {
 
 /** Switch/focus the primary surface. On the phone every case is a navigation
  * (home switch or a docked right-region pane). On desktop (unified shell) Feed
- * and Chat are standing panes, so `chat`/`feed`/`pings` FOCUS the visible pane
+ * and Chat are standing panes, so `chat`/`feed` FOCUS the visible pane
  * instead of navigating; `processes`/`settings` still dock the shared right
  * region either way. Routing through these intents keeps the keyboard and the
  * command palette in agreement about what each target means. */
@@ -72,15 +70,6 @@ export function goPane(target: PaneTarget): void {
     case "feed":
       if (rail) focusFeedColumn();
       else goToQueue();
-      break;
-    case "pings":
-      // The Feed IS the needs-you / pings surface on desktop, so `g i` focuses
-      // it there; on phone it summons the Tray overlay.
-      if (rail) focusFeedColumn();
-      else {
-        openPings();
-        setTrayExpanded(true);
-      }
       break;
     case "processes":
       openProcesses();
@@ -180,7 +169,6 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 const CHORD_PANES: Record<string, PaneTarget> = {
   c: "chat",
   f: "feed",
-  i: "pings",
   p: "processes",
   s: "settings",
 };

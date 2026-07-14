@@ -291,7 +291,7 @@ function ViewSlotNode(node: Node): JSX.Element {
   const isDiff = node.variant === "diff";
   return (
     <div class="overflow-hidden rounded-md border border-border bg-muted/40">
-      <div class="px-2.5 pb-1 pt-2 text-[0.58rem] font-bold uppercase tracking-[0.05em] text-muted-foreground">
+      <div class="px-2.5 pb-1 pt-2 text-[0.62rem] font-bold uppercase tracking-[0.05em] text-muted-foreground">
         {str(node.title, "accompanying view")}
       </div>
       <Show

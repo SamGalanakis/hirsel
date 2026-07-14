@@ -43,7 +43,7 @@ async function setup(events: EventItem[]) {
     getClient: () => ({
       sendEventAction: (eventId: number, action: string, data: unknown) =>
         sent.push({ eventId, action, data }),
-      readPing: (id: number) => readSent.push(id),
+      readEvent: (id: number) => readSent.push(id),
     }),
   }));
   for (const e of events) {
@@ -260,7 +260,7 @@ describe("EventScroller — hello_ok snapshot replacement (live-stack regression
     // open unread judgment and one open unread summary ~a moment later.
     const store = await import("../../store/store");
     vi.doMock("../../ws/client", () => ({
-      getClient: () => ({ sendEventAction: () => {}, readPing: () => {} }),
+      getClient: () => ({ sendEventAction: () => {}, readEvent: () => {} }),
     }));
     const { EventScroller } = await import("./EventScroller");
     const screen = render(() => <EventScroller />);

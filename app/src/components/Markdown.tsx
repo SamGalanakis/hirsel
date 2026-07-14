@@ -58,8 +58,21 @@ function parseBlocks(source: string): Block[] {
   return blocks;
 }
 
+// Reduce inline markdown to its plain text (drop the `**`, `*`, backtick, and
+// link syntax, keeping the content). For single-line contexts that can't host
+// rich inline nodes — notably the shimmer status marker, whose
+// `background-clip:text` treatment breaks on nested styled/backgrounded spans —
+// so the live line never shows literal `**asterisks**` yet keeps shimmering.
+export function stripInlineMarkdown(text: string): string {
+  return text
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
+}
+
 // Inline: `code`, **bold**, *italic*, [text](http url). Returns JSX nodes.
-function renderInline(text: string): JSX.Element[] {
+export function renderInline(text: string): JSX.Element[] {
   const nodes: JSX.Element[] = [];
   const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\((https?:\/\/[^\s)]+)\))/g;
   let last = 0;

@@ -117,6 +117,19 @@ describe("Timeline component", () => {
     expect(getByText("secret chain of thought")).toBeTruthy();
   });
 
+  it("renders inline markdown in expanded reasoning without literal asterisks", () => {
+    const { container } = render(() => (
+      <Timeline events={evs({ kind: "reasoning", text: "**Inspecting** the resolve path" })} />
+    ));
+    const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
+    fireEvent.click(within(row).getByRole("button"));
+    expect(row.querySelector("strong")?.textContent).toBe("Inspecting");
+    // The dim italic block carries the full prose but never the raw `**` markers.
+    const block = row.querySelector("p") as HTMLElement;
+    expect(block.textContent).toBe("Inspecting the resolve path");
+    expect(block.textContent).not.toContain("*");
+  });
+
   it("expands a resolved tool row to reveal its full result in a mono well", () => {
     const { container, queryByText, getByText } = render(() => (
       <Timeline

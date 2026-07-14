@@ -1,7 +1,7 @@
 import { Bot, Brain, Check, ChevronRight, ListTree, LoaderCircle, X } from "lucide-solid";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import type { TimelineEvent } from "../../store/types";
-import { Markdown } from "../Markdown";
+import { Markdown, renderInline } from "../Markdown";
 import { buildTimeline, type TimelineItem } from "./timeline";
 
 /** A tool whose job is to hand real work to a sub-agent reads differently from a
@@ -48,7 +48,7 @@ function ReasoningRow(props: { text: string }) {
       </button>
       <Show when={open()}>
         <p class="whitespace-pre-wrap pl-4 text-[0.72rem] italic leading-relaxed text-muted-foreground/60">
-          {props.text}
+          {renderInline(props.text)}
         </p>
       </Show>
     </li>

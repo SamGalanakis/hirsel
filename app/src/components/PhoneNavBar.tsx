@@ -61,7 +61,7 @@ export function PhoneNavBar() {
       <button
         type="button"
         data-slot="phone-nav-feed"
-        class="flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md py-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md py-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px"
         classList={{ "bg-muted text-foreground": onQueue() }}
         aria-label="Feed"
         aria-current={onQueue() ? "page" : undefined}
@@ -87,7 +87,7 @@ export function PhoneNavBar() {
       <button
         type="button"
         data-slot="phone-nav-chat"
-        class="flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md py-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md py-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px"
         classList={{ "bg-muted text-foreground": onChat() }}
         aria-label="Chat"
         aria-current={onChat() ? "page" : undefined}

@@ -74,6 +74,10 @@ const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;
+#[cfg(not(test))]
+const SNOOZE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const SNOOZE_TICK_INTERVAL: Duration = Duration::from_millis(25);
 pub(crate) const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 
 #[derive(Clone)]
@@ -1192,10 +1196,13 @@ impl LashAgentRuntime {
     fn spawn_timer_trigger_source(self: &Arc<Self>, trigger_store: Arc<dyn TriggerStore>) {
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut interval = tokio::time::interval(SNOOZE_TICK_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
+                if let Err(error) = runtime.tools.return_expired_snoozes().await {
+                    tracing::warn!(%error, "snoozed event return poll failed");
+                }
                 if let Err(error) = runtime.fire_due_timers(Arc::clone(&trigger_store)).await {
                     tracing::warn!(%error, "timer trigger source poll failed");
                 }
@@ -3590,7 +3597,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.events_archive",
             "events_archive",
-            "Archive one finished Event so Sam's feed hides it. Archiving an open Event also resolves it as dismissed.",
+            "Archive one finished Event so Sam's feed hides it. Archiving an open or snoozed Event also resolves it as dismissed.",
             event_archive_input_schema(),
             event_archive_output_schema(),
             ["events"],
@@ -3600,7 +3607,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.events_clear",
             "events_clear",
-            "Clear Sam's feed by archiving every finished Event. Use events.clear when Sam asks to clear out or clear my feed; open judgments that still need a response are kept.",
+            "Clear Sam's feed by archiving every finished Event. Use events.clear when Sam asks to clear out or clear my feed; open judgments, including snoozed judgments, are kept until they receive a response.",
             empty_object_input_schema(),
             events_clear_output_schema(),
             ["events"],
@@ -4211,6 +4218,8 @@ fn ping_output_schema() -> Value {
             "status",
             "read",
             "archived",
+            "snoozed_until",
+            "archived_at",
             "fork_sc",
             "ts"
         ],
@@ -4238,6 +4247,8 @@ fn ping_output_schema() -> Value {
             "status": { "type": "string", "enum": ["open", "done"] },
             "read": { "type": "boolean" },
             "archived": { "type": "boolean" },
+            "snoozed_until": { "oneOf": [timestamp_output_schema(), { "type": "null" }] },
+            "archived_at": { "oneOf": [timestamp_output_schema(), { "type": "null" }] },
             "fork_sc": { "type": ["string", "null"] },
             "ts": timestamp_output_schema()
         }
@@ -4855,12 +4866,21 @@ impl ScriptedAgentRuntime {
             data_dir = %self.config.data_dir.display(),
             "Scripted Agent test double opened session agent"
         );
+        let mut snooze_tick = tokio::time::interval(SNOOZE_TICK_INTERVAL);
+        snooze_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let (turn, cancel) = loop {
                 if let Some(next) = self.claim_next_turn().await {
                     break next;
                 }
-                self.notify.notified().await;
+                tokio::select! {
+                    _ = self.notify.notified() => {}
+                    _ = snooze_tick.tick() => {
+                        if let Err(error) = self.tools.return_expired_snoozes().await {
+                            tracing::warn!(%error, "scripted snoozed event return poll failed");
+                        }
+                    }
+                }
             };
             if let Err(error) = self.handle_turn(turn, cancel.clone()).await {
                 tracing::error!(%error, "scripted Agent turn failed");
@@ -5479,6 +5499,8 @@ mod tests {
                 status: PingStatus::Done,
                 read: true,
                 archived: false,
+                snoozed_until: None,
+                archived_at: None,
                 fork_sc: None,
                 ts: Utc::now(),
             }],
@@ -5775,11 +5797,13 @@ mod tests {
             .find(|definition| definition.name() == "events_archive")
             .unwrap();
         assert!(archive.description().contains("Sam's feed hides it"));
+        assert!(archive.description().contains("snoozed Event"));
         let clear = definitions
             .iter()
             .find(|definition| definition.name() == "events_clear")
             .unwrap();
         assert!(clear.description().contains("clear my feed"));
+        assert!(clear.description().contains("snoozed judgments"));
         let clear_validator =
             jsonschema::JSONSchema::compile(clear.contract.input_schema.canonical()).unwrap();
         assert!(clear_validator.validate(&json!({})).is_ok());
@@ -6139,6 +6163,8 @@ mod tests {
             status: PingStatus::Done,
             read: true,
             archived: true,
+            snoozed_until: None,
+            archived_at: Some(now),
             fork_sc: None,
             ts: now,
         };

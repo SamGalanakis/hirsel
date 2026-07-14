@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chrono::Utc;
 use futures_util::StreamExt;
 use hirsel_drivers::{
     AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SessionHandle, SpawnSpec, SubagentDriver,
@@ -236,7 +237,13 @@ impl ToolSuite {
             .all_pings()
             .await?
             .into_iter()
-            .filter(|event| event.status == EventStatus::Open && !event.archived)
+            .filter(|event| {
+                event.status == EventStatus::Open
+                    && !event.archived
+                    && event
+                        .snoozed_until
+                        .is_none_or(|snoozed_until| snoozed_until <= Utc::now())
+            })
             .collect::<Vec<_>>();
         let added_tools = display_added_tools(added_tools);
         let mut seed = format!(
@@ -612,6 +619,17 @@ impl ToolSuite {
             }
         }
         Ok(count)
+    }
+
+    pub(crate) async fn return_expired_snoozes(&self) -> anyhow::Result<Vec<Event>> {
+        let events = self.storage.clear_expired_snoozes(Utc::now()).await?;
+        for event in &events {
+            self.broadcast(HostToClient::EventUpsert {
+                event: event.clone(),
+            });
+            self.pushes.reenqueue_event(event).await;
+        }
+        Ok(events)
     }
 
     pub async fn emit_scheduled_digest(

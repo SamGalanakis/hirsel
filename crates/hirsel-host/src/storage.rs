@@ -664,6 +664,8 @@ impl Storage {
             status: EventStatus::Open,
             read: false,
             archived: false,
+            snoozed_until: None,
+            archived_at: None,
             fork_sc: None,
             ts,
         })
@@ -730,9 +732,10 @@ impl Storage {
 
     pub async fn archive_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
         let conn = self.conn.lock().await;
+        let archived_at = Utc::now().to_rfc3339();
         let changed = conn.execute(
-            "UPDATE pings SET archived = 1, status = 'done' WHERE id = ?1",
-            params![event_id],
+            "UPDATE pings SET archived = 1, status = 'done', archived_at = COALESCE(archived_at, ?2) WHERE id = ?1",
+            params![event_id, archived_at],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -743,7 +746,7 @@ impl Storage {
     pub async fn unarchive_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
         let conn = self.conn.lock().await;
         let changed = conn.execute(
-            "UPDATE pings SET archived = 0 WHERE id = ?1",
+            "UPDATE pings SET archived = 0, archived_at = NULL WHERE id = ?1",
             params![event_id],
         )?;
         if changed == 0 {
@@ -754,15 +757,70 @@ impl Storage {
 
     pub async fn archive_finished_events(&self) -> anyhow::Result<usize> {
         let conn = self.conn.lock().await;
+        let archived_at = Utc::now().to_rfc3339();
         Ok(conn.execute(
             "
             UPDATE pings
-            SET archived = 1, status = 'done'
+            SET archived = 1, status = 'done', archived_at = ?1
             WHERE archived = 0
               AND (status = 'done' OR (read != 0 AND requires_response = 0))
             ",
-            [],
+            params![archived_at],
         )?)
+    }
+
+    pub async fn snooze_event(
+        &self,
+        event_id: u64,
+        until: DateTime<Utc>,
+    ) -> anyhow::Result<Option<Event>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET snoozed_until = ?2 WHERE id = ?1",
+            params![event_id, until.to_rfc3339()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, event_id)?))
+    }
+
+    pub async fn unsnooze_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE pings SET snoozed_until = NULL WHERE id = ?1",
+            params![event_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(get_ping(&conn, event_id)?))
+    }
+
+    pub async fn clear_expired_snoozes(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<Event>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let event_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM pings WHERE snoozed_until IS NOT NULL AND snoozed_until <= ?1 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![now.to_rfc3339()], |row| row.get::<_, u64>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if event_ids.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        tx.execute(
+            "UPDATE pings SET snoozed_until = NULL WHERE snoozed_until IS NOT NULL AND snoozed_until <= ?1",
+            params![now.to_rfc3339()],
+        )?;
+        let events = event_ids
+            .into_iter()
+            .map(|event_id| get_ping(&tx, event_id))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(events)
     }
 
     pub async fn resolve_open_pings_for_anchor(&self, anchor: u64) -> anyhow::Result<Vec<Ping>> {
@@ -854,7 +912,8 @@ impl Storage {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, archived, fork_sc, ts
+                   requires_response, quick_replies, status, read, archived, snoozed_until,
+                   archived_at, fork_sc, ts
             FROM pings
             ORDER BY id ASC
             ",
@@ -1615,7 +1674,8 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, archived, fork_sc, ts
+                   requires_response, quick_replies, status, read, archived, snoozed_until,
+                   archived_at, fork_sc, ts
             FROM pings
             WHERE status = 'open'
             ORDER BY CASE kind
@@ -1632,7 +1692,8 @@ fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {
         let mut stmt = conn.prepare(
             "
             SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-                   requires_response, quick_replies, status, read, archived, fork_sc, ts
+                   requires_response, quick_replies, status, read, archived, snoozed_until,
+                   archived_at, fork_sc, ts
             FROM pings
             WHERE status = 'done'
             ORDER BY id DESC
@@ -1703,6 +1764,8 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             status TEXT NOT NULL,
             read INTEGER NOT NULL DEFAULT 0,
             archived INTEGER NOT NULL DEFAULT 0,
+            snoozed_until TEXT NULL,
+            archived_at TEXT NULL,
             fork_sc TEXT NULL,
             ts TEXT NOT NULL
         );
@@ -1719,6 +1782,12 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             "ALTER TABLE pings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+    }
+    if !table_has_column(conn, "pings", "snoozed_until")? {
+        conn.execute("ALTER TABLE pings ADD COLUMN snoozed_until TEXT NULL", [])?;
+    }
+    if !table_has_column(conn, "pings", "archived_at")? {
+        conn.execute("ALTER TABLE pings ADD COLUMN archived_at TEXT NULL", [])?;
     }
     if !table_has_column(conn, "pings", "fork_sc")? {
         conn.execute("ALTER TABLE pings ADD COLUMN fork_sc TEXT NULL", [])?;
@@ -1763,7 +1832,11 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
     conn.execute(
-        "UPDATE pings SET status = 'done', archived = 1 WHERE status = 'archived'",
+        "UPDATE pings SET status = 'done', archived = 1, archived_at = COALESCE(archived_at, ts) WHERE status = 'archived'",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE pings SET archived_at = COALESCE(archived_at, ts) WHERE archived != 0",
         [],
     )?;
 
@@ -1972,7 +2045,8 @@ fn get_ping_optional(conn: &Connection, id: u64) -> rusqlite::Result<Option<Ping
     conn.query_row(
         "
         SELECT id, kind, source_kind, source_ref, name, description, ui, anchor,
-               requires_response, quick_replies, status, read, archived, fork_sc, ts
+               requires_response, quick_replies, status, read, archived, snoozed_until,
+               archived_at, fork_sc, ts
         FROM pings
         WHERE id = ?1
         ",
@@ -2104,7 +2178,9 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
     let ui: String = row.get(6)?;
     let replies: String = row.get(9)?;
     let status: String = row.get(10)?;
-    let ts: String = row.get(14)?;
+    let snoozed_until = row.get::<_, Option<String>>(13)?;
+    let archived_at = row.get::<_, Option<String>>(14)?;
+    let ts: String = row.get(16)?;
     Ok(Ping {
         id: row.get(0)?,
         kind: event_kind_from_str(&kind)?,
@@ -2125,7 +2201,9 @@ fn ping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ping> {
         status: status_from_str(&status)?,
         read: row.get::<_, i64>(11)? != 0,
         archived: row.get::<_, i64>(12)? != 0,
-        fork_sc: row.get(13)?,
+        snoozed_until: snoozed_until.as_deref().map(parse_ts).transpose()?,
+        archived_at: archived_at.as_deref().map(parse_ts).transpose()?,
+        fork_sc: row.get(15)?,
         ts: parse_ts(&ts)?,
     })
 }
@@ -2602,9 +2680,11 @@ mod tests {
 
         assert_eq!(archived.status, EventStatus::Done);
         assert!(archived.archived);
+        assert!(archived.archived_at.is_some());
         assert_eq!(archived_again, archived);
         assert_eq!(unarchived.status, EventStatus::Done);
         assert!(!unarchived.archived);
+        assert_eq!(unarchived.archived_at, None);
         assert!(storage.archive_event(99_999).await.unwrap().is_none());
         assert!(storage.unarchive_event(99_999).await.unwrap().is_none());
     }
@@ -2678,10 +2758,71 @@ mod tests {
             let event = storage.ping(event_id).await.unwrap().unwrap();
             assert!(event.archived);
             assert_eq!(event.status, EventStatus::Done);
+            assert!(event.archived_at.is_some());
         }
         for event_id in [open_judgment.id, unread_info.id] {
             assert!(!storage.ping(event_id).await.unwrap().unwrap().archived);
         }
+    }
+
+    #[tokio::test]
+    async fn snooze_round_trips_and_only_expired_snoozes_are_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "anchor", None)
+            .await
+            .unwrap();
+        let expired = storage
+            .create_ping("expired", "Expired", "Expired", anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+        let future = storage
+            .create_ping("future", "Future", "Future", anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        storage
+            .snooze_event(expired.id, now - chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+        let future_until = now + chrono::Duration::hours(1);
+        storage.snooze_event(future.id, future_until).await.unwrap();
+
+        drop(storage);
+        let storage = Storage::open(dir.path()).await.unwrap();
+        assert!(
+            storage
+                .ping(expired.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_some()
+        );
+        assert_eq!(
+            storage
+                .ping(future.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until,
+            Some(future_until)
+        );
+
+        let returned = storage.clear_expired_snoozes(now).await.unwrap();
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0].id, expired.id);
+        assert_eq!(returned[0].snoozed_until, None);
+        assert_eq!(
+            storage
+                .ping(future.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until,
+            Some(future_until)
+        );
     }
 
     #[tokio::test]

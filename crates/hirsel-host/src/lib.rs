@@ -29,6 +29,7 @@ use std::{
 
 use anyhow::Context;
 use axum::Router;
+use chrono::{DateTime, Utc};
 use hirsel_proto::{
     AgentActivityState, ChatMessage, HostToClient, ModelSelection, ModelSnapshot, ProcessInfo,
     SendMode, SubagentModelCatalog, ViewInstance,
@@ -43,6 +44,8 @@ use crate::{
     storage::{MonitorRecord, MonitorWakeOn, Storage, monitor_process_info},
     tools::{ToolSuite, ToolsConfig},
 };
+
+const INVALID_SNOOZE_UNTIL: &str = "snooze requires data.until as a future RFC3339 timestamp; choose a snooze preset: This evening, Tomorrow morning, Next week, or Pick time";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -396,7 +399,20 @@ impl AppState {
                 self.storage.ping(event_id).await?
             }
             "submit" | "dismiss" => self.storage.resolve_ping(event_id).await?,
-            "snooze" => self.storage.reopen_ping(event_id).await?,
+            "snooze" => {
+                let until = data
+                    .get("until")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?;
+                let until = DateTime::parse_from_rfc3339(until)
+                    .map_err(|_| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?
+                    .with_timezone(&Utc);
+                if until <= Utc::now() {
+                    anyhow::bail!(INVALID_SNOOZE_UNTIL);
+                }
+                self.storage.snooze_event(event_id, until).await?
+            }
+            "unsnooze" => self.storage.unsnooze_event(event_id).await?,
             "archive" => self.storage.archive_event(event_id).await?,
             "unarchive" => self.storage.unarchive_event(event_id).await?,
             other => anyhow::bail!("unsupported event action: {other}"),
@@ -484,6 +500,10 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         pushes.clone(),
         views.clone(),
     );
+    tools
+        .return_expired_snoozes()
+        .await
+        .context("return expired snoozed events at startup")?;
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
             agent_mode: config.agent,
@@ -1115,6 +1135,7 @@ mod tests {
             .unwrap();
         assert!(archived.archived);
         assert_eq!(archived.status, PingStatus::Done);
+        assert!(archived.archived_at.is_some());
 
         let unarchived = state
             .handle_event_action(event_id, "unarchive".to_string(), json!({}))
@@ -1122,6 +1143,7 @@ mod tests {
             .unwrap();
         assert!(!unarchived.archived);
         assert_eq!(unarchived.status, PingStatus::Done);
+        assert_eq!(unarchived.archived_at, None);
 
         let updates = state
             .broadcast_log
@@ -1135,6 +1157,147 @@ mod tests {
         assert_eq!(updates.len(), 3);
         assert!(updates[1].archived);
         assert!(!updates[2].archived);
+    }
+
+    #[tokio::test]
+    async fn event_action_snooze_validates_persists_and_excludes_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        state
+            .storage
+            .register_push_token(hirsel_proto::PushPlatform::Android, "device-token")
+            .await
+            .unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Choose", None)
+            .await
+            .unwrap();
+        let event = state
+            .storage
+            .create_ping(
+                "release-choice",
+                "Choose the release channel",
+                "Stable or beta?",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        for data in [
+            json!({}),
+            json!({ "until": "tomorrow" }),
+            json!({ "until": (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339() }),
+        ] {
+            let error = state
+                .handle_event_action(event.id, "snooze".to_string(), data)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("snooze preset"));
+        }
+
+        let until = Utc::now() + chrono::Duration::minutes(30);
+        let snoozed = state
+            .handle_event_action(
+                event.id,
+                "snooze".to_string(),
+                json!({ "until": until.to_rfc3339() }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snoozed.snoozed_until, Some(until));
+        assert_eq!(
+            state
+                .storage
+                .ping(event.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until,
+            Some(until)
+        );
+
+        state.pushes.reenqueue_event(&snoozed).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(state.pushes.recorded_pushes().is_empty());
+
+        let unsnoozed = state
+            .handle_event_action(event.id, "unsnooze".to_string(), json!({}))
+            .await
+            .unwrap();
+        assert_eq!(unsnoozed.snoozed_until, None);
+    }
+
+    #[tokio::test]
+    async fn snooze_return_survives_restart_and_repushed_open_judgment() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(hirsel_proto::PushPlatform::Android, "device-token")
+            .await
+            .unwrap();
+        let anchor = storage
+            .append_chat(ChatAuthor::Agent, "Choose", None)
+            .await
+            .unwrap();
+        let event = storage
+            .create_ping(
+                "release-choice",
+                "Choose the release channel",
+                "Stable or beta?",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        storage
+            .snooze_event(event.id, Utc::now() + chrono::Duration::milliseconds(500))
+            .await
+            .unwrap();
+        drop(storage);
+
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        assert!(
+            state
+                .storage
+                .ping(event.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_some()
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let returned = state
+                    .storage
+                    .ping(event.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .snoozed_until
+                    .is_none();
+                if returned && !state.pushes.recorded_pushes().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("snoozed event returned and pushed");
+
+        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event: update }
+                if update.id == event.id && update.snoozed_until.is_none()
+        )));
+        assert_eq!(
+            state.pushes.recorded_pushes()[0].payload.data.event_id,
+            event.id
+        );
     }
 
     #[tokio::test]

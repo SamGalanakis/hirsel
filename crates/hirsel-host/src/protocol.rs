@@ -445,6 +445,9 @@ where
         } => {
             state.handle_event_action(event_id, action, data).await?;
         }
+        ClientToHost::ClearFinishedEvents {} => {
+            state.tools.events_clear().await?;
+        }
         ClientToHost::RegisterPushToken { platform, token } => {
             state.storage.register_push_token(platform, token).await?;
         }
@@ -558,12 +561,12 @@ mod tests {
     use std::{collections::VecDeque, time::Duration};
 
     use async_trait::async_trait;
-    use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
+    use hirsel_proto::{ChatAuthor, ClientToHost, EventStatus, HelloAuth, HostToClient};
     use serde_json::json;
 
     use super::{
         IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
-        authenticate, build_snapshot, run_protocol,
+        authenticate, build_snapshot, handle_client_frame, run_protocol,
     };
     use crate::{
         build_state,
@@ -734,6 +737,56 @@ mod tests {
             self.sent.push(frame.clone());
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn clear_finished_events_archives_with_timestamp_and_broadcasts_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(crate::tests::test_config(dir.path()))
+            .await
+            .unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Finished", None)
+            .await
+            .unwrap();
+        let finished = state
+            .storage
+            .create_ping(
+                "finished",
+                "Finished",
+                "Finished",
+                anchor.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        state.storage.resolve_ping(finished.id).await.unwrap();
+        let open = state
+            .storage
+            .create_ping("open", "Open", "Open", anchor.id, true, Vec::new())
+            .await
+            .unwrap();
+        let mut channel = TestChannel {
+            incoming: VecDeque::new(),
+            sent: Vec::new(),
+        };
+
+        handle_client_frame(&state, &mut channel, ClientToHost::ClearFinishedEvents {})
+            .await
+            .unwrap();
+
+        let finished = state.storage.ping(finished.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, EventStatus::Done);
+        assert!(finished.archived);
+        assert!(finished.archived_at.is_some());
+        assert!(!state.storage.ping(open.id).await.unwrap().unwrap().archived);
+        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event }
+                if event.id == finished.id && event.archived_at.is_some()
+        )));
     }
 
     #[tokio::test]

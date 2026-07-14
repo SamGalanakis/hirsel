@@ -1,15 +1,16 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AgentStatus } from "./components/chat/AgentStatus";
 import { ChatView } from "./components/chat/ChatView";
+import { DesktopShell } from "./components/DesktopShell";
 import { EventScroller } from "./components/eventq/EventScroller";
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
-import { NavRail } from "./components/NavRail";
 import { PhoneNavBar } from "./components/PhoneNavBar";
 import { PhoneOverflowMenu } from "./components/PhoneOverflowMenu";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
+import { createMediaFlag } from "./lib/focus";
 import {
   commandPaletteOpen,
   installGlobalKeymap,
@@ -38,6 +39,15 @@ function App() {
   // `activeSideChatSc` (the data), so leaving the side chat narrows the shell
   // back even though the side chat stays alive/resumable underneath.
   const splitActive = () => state.rightRegion === "sideChat";
+
+  // The desktop-unified breakpoint. Below it, the phone shell (a single column
+  // that switches home between Feed and Chat) is byte-identical to what shipped;
+  // at/above it, the whole surface becomes the DesktopShell — Feed + Chat side by
+  // side, `state.home` unused. A JS flag (not a pure-CSS reflow) because the two
+  // shells are structurally different trees, and only one may mount at a time so
+  // Chat/Feed never double-mount their state. `createMediaFlag` reads matchMedia
+  // synchronously, so first paint is already correct in this client-rendered PWA.
+  const atRail = createMediaFlag("(min-width: 1100px)");
 
   // The global keyboard layer (focus composer, `g`-chord pane switches, jump to
   // latest, ⌘K palette, `?` cheat-sheet). Window-level; it suppresses itself
@@ -90,17 +100,18 @@ function App() {
         </div>
       }
     >
-      {/* The desktop shell frame (desktop-shell pass). Mobile-first: a
-          phone-width single column by default; at `rail` it becomes the
-          persistent 3-pane row (nav rail ∣ chat ∣ context). Two width overrides
-          layer on top, both pure CSS so first paint is correct and no width
-          signal threads through the store:
-            • `rail` (≥1100px): the frame becomes a row and fills to a cap
-              (~1600px), centered — the width is used by real structure (nav +
-              chat + context), never stretched to glass.
+      {/* The app frame. Mobile-first: a phone-width single column by default; at
+          `rail` it becomes the desktop-unified row (icon rail ∣ Feed ∣ Chat ∣
+          right region) and fills to a ~1600px cap, centred. The max-width classes
+          stay pure CSS so first paint is correct:
+            • `rail` (≥1100px): the frame is a row filled to a cap — the width is
+              used by real structure (Feed + Chat + inspectors), never stretched.
             • `split` (≥900px) while a Side Chat is open: the fork-ui two-pane
-              width (~980px), for the 900–1099 band where the rail has no room.
-          Below `split` nothing changes — the phone column is the fallback. */}
+              width (~980px) for the 900–1099 band, where the phone shell still
+              rules but Chat's own split opens.
+          Below `split` nothing changes — the phone column is the base. The tree
+          INSIDE the frame is chosen by `atRail()`: the desktop shell mounts BOTH
+          Feed and Chat; the phone shell mounts one home at a time. */}
       <div
         data-slot="app-frame"
         class="relative mx-auto flex w-full min-h-0 flex-1 flex-col rail:flex-row duration-200 ease-out motion-safe:transition-[max-width]"
@@ -109,50 +120,49 @@ function App() {
           "max-w-[560px] split:max-w-[980px] rail:max-w-[1600px]": splitActive(),
         }}
       >
-        {/* Desktop nav rail — hidden below `rail`, a flex column at/above it. */}
-        <NavRail />
-        {/* Main column: the phone header (desktop moves brand + nav +
-            connection into the NavRail, so the header is `rail:hidden`) above
-            ChatView, which owns the chat measure + the shared right context
-            region (Pings rail / Side Chat / Processes + Settings inspectors). */}
-        <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-          {/* Phone header (§4 IA cleanup). The north-star — brand + FULL agent
-              status — gets priority width (the left group is `flex-1 min-w-0`,
-              AgentStatus never truncates to "Agen…"); the right group is a bare
-              connection dot (expands to the full pill only when reconnecting/
-              offline) plus ONE overflow (Model · Canvas · Processes · Settings),
-              so the header holds ≤4 chunks. The whole header is `rail:hidden`, so
-              it doesn't double up with the NavRail at desktop widths. */}
-          <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
-            <div class="flex min-w-0 flex-1 items-center gap-2.5">
-              <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
-              <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
-              <AgentStatus />
+        <Show
+          when={atRail()}
+          fallback={
+            // The phone shell — byte-identical to what shipped: a single column
+            // that switches home between the Feed scroller and Chat, with the
+            // phone header (brand + full agent status + overflow) and the bottom
+            // two-way Feed/Chat nav bar.
+            <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+              {/* Phone header (§4 IA cleanup). The north-star — brand + FULL
+                  agent status — gets priority width (the left group is `flex-1
+                  min-w-0`, AgentStatus never truncates to "Agen…"); the right
+                  group is a bare connection dot (expands to the full pill only
+                  when reconnecting/offline) plus ONE overflow (Model · Canvas ·
+                  Processes · Settings), so the header holds ≤4 chunks. */}
+              <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
+                <div class="flex min-w-0 flex-1 items-center gap-2.5">
+                  <h1 class="m-0 shrink-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
+                  <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
+                  <AgentStatus />
+                </div>
+                <div class="flex shrink-0 items-center gap-0.5">
+                  <ConnectionPill compact />
+                  <PhoneOverflowMenu />
+                </div>
+              </header>
+              {/* The phone home is the event-queue scroller (ADR-0012); Chat is
+                  the drill-in reached from a judgment's Discuss, the bottom nav,
+                  or the overflow. */}
+              <main class="flex min-h-0 flex-1 flex-col">
+                <Show when={state.home === "chat"} fallback={<EventScroller />}>
+                  <ChatView />
+                </Show>
+              </main>
+              {/* Phone bottom navigation bar: two icon buttons (Feed / Chat) that
+                  move the Owner BOTH ways, so he can always get back. Shown on
+                  BOTH homes; on chat it sits below the composer. */}
+              <PhoneNavBar />
             </div>
-            <div class="flex shrink-0 items-center gap-0.5">
-              <ConnectionPill compact />
-              <PhoneOverflowMenu />
-            </div>
-          </header>
-          {/* The home is the event-queue scroller (ADR-0012); Chat is the
-              drill-in shell reached from a judgment's Discuss, the NavRail, or
-              the phone overflow. The scroller is the phone home and the desktop
-              center measure; the chat shell owns the 3-pane layout + the right
-              region when drilled into. */}
-          <main class="flex min-h-0 flex-1 flex-col">
-            <Show when={state.home === "chat"} fallback={<EventScroller />}>
-              <ChatView />
-            </Show>
-          </main>
-          {/* Phone bottom navigation bar: two icon buttons (Feed / Chat) that
-              move the Owner BOTH ways between the queue and Chat, so he can
-              always get back. Phone only (`rail:hidden` — desktop has the
-              NavRail) and shown on BOTH homes; on chat it sits below the
-              composer (standard tab-bar placement). It is an in-flow sibling
-              below the surface, so the scroller/chat height math already
-              accounts for it. */}
-          <PhoneNavBar />
-        </div>
+          }
+        >
+          {/* Desktop-unified: Feed + Chat side by side, one workspace. */}
+          <DesktopShell />
+        </Show>
       </div>
       <Toaster />
       {/* Summoned surfaces — no standing chrome. Opened from the keymap (⌘K /

@@ -8,7 +8,6 @@ import {
   openUnreadCount,
 } from "../../store/selectors";
 import { setTrayExpanded, state } from "../../store/store";
-import { PaneHeader } from "../ui/PaneHeader";
 import { PingsView } from "./PingsView";
 
 // Tray (ADR-0008 / design critique [P1]): the Inbox tab is gone. Collapsed, it
@@ -131,60 +130,6 @@ export function TrayShelf() {
           />
         </Show>
       </button>
-    </Show>
-  );
-}
-
-/** The standing Pings rail's header count. Same count selector as the phone
- * shelf, so the number holds parity — and now the desktop home of the ONE
- * sanctioned interrupt red (v2.3): with the nav "Inbox" badge gone, the rail
- * header carries the `status-danger` accent when an open requires-response Ping
- * exists (muted otherwise), so there is exactly one red source per surface —
- * the rail header on desktop, the shelf badge on phone. */
-function PingsBadge(props: { slot?: string }) {
-  return (
-    <Show when={badgeCount() > 0}>
-      <span
-        data-slot={props.slot}
-        class="grid h-4 min-w-4 shrink-0 place-items-center rounded-full px-1 text-[0.65rem] font-bold text-primary-foreground"
-        classList={{ "bg-status-danger": danger(), "bg-muted-foreground": !danger() }}
-      >
-        {badgeLabel()}
-      </span>
-    </Show>
-  );
-}
-
-/** The standing Pings rail (desktop-shell): the Tray promoted from a bottom
- * shelf to a persistent right column at `rail` width. Same `PingsView` body the
- * phone overlay uses (one component, two mount points), under a slim header that
- * mirrors the shelf's count/danger badge. It is the idle resting state of the
- * exclusive right region (v2.3) — rendered only while `rightRegion === "pings"`,
- * so opening any other pane UNMOUNTS it (nothing to clip, no hidden focus) — and
- * `hidden` below the rail breakpoint so the phone shelf/overlay stay the sole
- * Pings surface there. */
-export function PingsRail() {
-  return (
-    <Show when={state.rightRegion === "pings"}>
-      <aside
-        data-slot="pings-rail"
-        class="hidden min-h-0 w-[clamp(340px,38vw,440px)] shrink-0 flex-col border-l border-border bg-background rail:flex
-          motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-right-2 motion-safe:duration-150"
-        aria-label="Pings"
-      >
-        {/* Shared PaneHeader (spec item 1) so the right slot reads as ONE slot —
-            same h-12 datum, icon rhythm, and title token as Canvas / Processes /
-            Settings; the resting Pings home shows no × (it is the default, not a
-            dismissible inspector) and carries its count badge instead. No
-            agent-activity pulse here: the center chat header owns the single
-            "what is my agent doing" indicator (One-Escalation Rule). */}
-        <PaneHeader
-          icon={<InboxIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
-          title="Pings"
-          badge={<PingsBadge slot="pings-rail-badge" />}
-        />
-        <PingsView />
-      </aside>
     </Show>
   );
 }

@@ -24,7 +24,7 @@ import { AgentStatus } from "./AgentStatus";
 import { ModelChip } from "./ModelChip";
 import type { DisplayMessage } from "../../store/types";
 import { getClient } from "../../ws/client";
-import { PingsRail, TrayOverlay, TrayShelf } from "../inbox/Tray";
+import { TrayOverlay, TrayShelf } from "../inbox/Tray";
 import { SideChatSheet } from "../inbox/SideChatSheet";
 import { ProcessesSheet } from "../processes/ProcessesSheet";
 import { SettingsSheet } from "../settings/SettingsSheet";
@@ -614,19 +614,20 @@ export function ChatView() {
       {/* Right region — ONE exclusive owner (v2.3): `state.rightRegion` picks
           exactly one of these to render; the others UNMOUNT (no hidden-focus
           leak, nothing to clip). Each desktop presentation is a single in-flow
-          `<aside>` at the shared width token (Pings `clamp(340px,38vw,440px)`);
-          on phone each is a full-screen sheet. Each self-gates on the region, so
-          source order no longer encodes precedence — the enum does. Chat (the
-          center pane) is always live to the left; closing any pane returns the
-          region to `pings`.
+          `<aside>` at the shared width token (`clamp(340px,38vw,440px)`); on phone
+          each is a full-screen sheet. Each self-gates on the region, so source
+          order no longer encodes precedence — the enum does. Chat (the center
+          pane) is always live to the left.
             • Side Chat  — `rightRegion === "sideChat"` (backed by activeSideChatSc)
             • Canvas     — `rightRegion === "canvas"`   (CanvasRail / CanvasSheet)
             • Processes  — `rightRegion === "processes"`
             • Settings   — `rightRegion === "settings"`
-            • Pings      — `rightRegion === "pings"` (idle resting state) */}
+          The idle `pings` state renders NOTHING on desktop (the Feed column is the
+          needs-you surface now, so a standing Pings rail beside it would just be
+          the redundancy the unification removed); on phone `pings` is the Tray
+          shelf/overlay below. Closing any pane returns the region to `pings`. */}
       <SideChatSheet />
       <CanvasRail />
-      <PingsRail />
       <CanvasSheet />
       <ProcessesSheet />
       <SettingsSheet />

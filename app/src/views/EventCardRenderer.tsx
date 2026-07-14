@@ -59,6 +59,14 @@ const EventEmitContext = createContext<EventEmit>({
 });
 const useEventEmit = () => useContext(EventEmitContext);
 
+// ---- Card meta context (Wave-3 time axis) ----
+// The blocking-judgment eyebrow ("Deciding unblocks N agents") gains the event's
+// age ("· 6h"). The age lives on the EventItem, not in the `ui` tree, so it is
+// threaded through a context the caller fills and the boundary eyebrow reads —
+// keeping the renderer's inputs otherwise the pure `ui` vocabulary.
+const CardMetaContext = createContext<{ eyebrowAge?: string }>({});
+const useCardMeta = () => useContext(CardMetaContext);
+
 // ---- `rich`: the ONE text transform. `backtick` segments → mono spans. ----
 // Still text nodes only — prose can never *choose* mono, it only *marks* machine
 // tokens; the renderer decides the font.
@@ -80,6 +88,10 @@ function Rich(props: { text: unknown }): JSX.Element {
 // ---- Node renderers (semantic tokens → DESIGN tokens) ----
 
 function EyebrowNode(node: Node): JSX.Element {
+  const meta = useCardMeta();
+  // The blocking-judgment boundary eyebrow gains the event age ("· 6h") — quiet,
+  // tabular-nums, only when the caller supplies it (blocking judgments only).
+  const age = () => (node.boundary === true ? meta.eyebrowAge : undefined);
   return (
     <div
       class={cn(
@@ -92,6 +104,9 @@ function EyebrowNode(node: Node): JSX.Element {
       </Show>
       <span>
         <Rich text={node.text} />
+        <Show when={age()}>
+          <span class="tabular-nums text-muted-foreground"> · {age()}</span>
+        </Show>
       </span>
     </div>
   );
@@ -448,6 +463,9 @@ export interface EventCardRendererProps {
   onAction?: (action: string, data: unknown) => void;
   /** Disable interactive controls (e.g. the event is already decided). */
   disabled?: boolean;
+  /** Wave-3 time axis: the relative age appended to a blocking judgment's
+   * boundary eyebrow ("Deciding unblocks 2 agents · 6h"). Omitted → no age. */
+  eyebrowAge?: string;
 }
 
 /** Render one event card's `ui` tree. The whole tree is wrapped in an
@@ -472,7 +490,9 @@ export function EventCardRenderer(props: EventCardRendererProps): JSX.Element {
       }
     >
       <EventEmitContext.Provider value={emit}>
-        <NodeList nodes={eventUiNodes(props.ui)} rhythm />
+        <CardMetaContext.Provider value={{ get eyebrowAge() { return props.eyebrowAge; } }}>
+          <NodeList nodes={eventUiNodes(props.ui)} rhythm />
+        </CardMetaContext.Provider>
       </EventEmitContext.Provider>
     </ErrorBoundary>
   );

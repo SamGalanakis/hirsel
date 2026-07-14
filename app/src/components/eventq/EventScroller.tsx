@@ -23,18 +23,23 @@ import {
   markEventRead,
   undoDecide,
 } from "../../lib/event-decide";
+import { snoozeEventWithUndo, unsnoozeEvent } from "../../lib/event-snooze";
+import { clearFinishedEventsWithUndo } from "../../lib/event-sweep";
 import { openEventFork } from "../../lib/event-fork";
+import { formatEventAge } from "../../lib/format";
 import { createMediaFlag } from "../../lib/focus";
 import { seedMockEvents } from "../../lib/mock-events";
 import { toast } from "../../lib/toast";
 import {
   archivedEvents,
   eventUiNodes,
+  finishedEvents,
   isEventArchived,
   isEventResolved,
   isOpenJudgment,
   openJudgmentCount,
   orderedQueue,
+  snoozedEvents,
   visibleEvents,
 } from "../../store/selectors";
 import { goToChat, state } from "../../store/store";
@@ -50,8 +55,18 @@ import {
   EventCardDoor,
   EventCardHeader,
 } from "./EventCard";
-import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
+import {
+  matchesQuery,
+  type QueueFilterMode,
+  QueueFilterBar,
+  queueFilterMode,
+  queueSearch,
+  setQueueFilterMode,
+  setQueueSearch,
+} from "./QueueFilter";
 import { QueueRow } from "./QueueRow";
+import { SnoozeChooser } from "./SnoozeChooser";
+import { SnoozedList } from "./SnoozedList";
 import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 
 /** How long the decided card lingers (confirmation + Undo reachable) before the
@@ -89,7 +104,10 @@ export function EventScroller() {
   const setRootRef = (el: HTMLDivElement) => (rootRef = el);
   const [current, setCurrent] = createSignal(0);
   const [peekOpen, setPeekOpen] = createSignal(false);
-  const [snoozed, setSnoozed] = createSignal<Set<number>>(new Set());
+  // Wave-3 durable snooze: the id whose preset chooser is open (swipe-left,
+  // ArrowLeft, or the card ⋯). One scroller-level signal keys every page's
+  // chooser, so only the current card's chooser is ever open.
+  const [snoozeForId, setSnoozeForId] = createSignal<number | null>(null);
 
   // `rail` (desktop) stands the two-column list, so the phone peek overlay is
   // gated off there — the standing list already IS the whole-queue index.
@@ -118,12 +136,18 @@ export function EventScroller() {
   // it shows read the archived-free set, so an archived event leaves the pages,
   // the "N of M" position, and the needs-you pill in the same reactive beat.
   const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
-  const ordered = createMemo(() =>
-    orderedQueue(visible(), state.eventDecideOverrides, snoozed()),
-  );
+  const ordered = createMemo(() => orderedQueue(visible(), state.eventDecideOverrides));
   const total = () => ordered().length;
   const openCount = () => openJudgmentCount(visible(), state.eventDecideOverrides);
   const archived = createMemo(() => archivedEvents(state.events, state.eventArchiveOverrides));
+  // Wave-3: the parked (snoozed) set and the finished set the sweep would clear.
+  const snoozedList = createMemo(() =>
+    snoozedEvents(state.events, state.eventArchiveOverrides),
+  );
+  const finished = createMemo(() =>
+    finishedEvents(state.events, state.eventArchiveOverrides, state.eventDecideOverrides),
+  );
+  const sweep = () => clearFinishedEventsWithUndo(finished().map((e) => e.id));
   // The end-page "decided" tally: DECIDED JUDGMENTS only — the exact complement
   // of `openCount` over the judgment set, so the two can never disagree (the
   // old `total - openCount` counted open awareness as "decided"). */
@@ -280,10 +304,6 @@ export function EventScroller() {
       return;
     }
     untrack(() => {
-      setSnoozed((prev) => {
-        const surviving = new Set([...prev].filter((id) => state.events.some((e) => e.id === id)));
-        return surviving.size === prev.size ? prev : surviving;
-      });
       const list = ordered();
       const kept = prevCenteredId !== null ? list.findIndex((e) => e.id === prevCenteredId) : -1;
       const target = kept !== -1 ? kept : firstOpenIndex(list, state.eventDecideOverrides);
@@ -361,31 +381,25 @@ export function EventScroller() {
     if (pick) decide(ev, pick.action, { choice: pick.choice, label: pick.label });
   }
 
-  function snooze(ev: EventItem): void {
+  /** Open the durable-snooze preset chooser for a still-open judgment (Wave-3);
+   * the chooser posts the actual `event_action{snooze}` once a preset is picked. */
+  function requestSnooze(ev: EventItem): void {
     if (isEventResolved(ev, state.eventDecideOverrides)) return;
-    setSnoozed((prev) => new Set(prev).add(ev.id));
-    // Feedback + the immediate un-snooze path (§6); the standing list / peek row
-    // is the durable one (jumping a snoozed row returns it too).
-    toast("Snoozed to the end", {
-      action: { label: "Undo", onClick: () => unsnooze(ev.id) },
-    });
+    setSnoozeForId(ev.id);
   }
 
-  function unsnooze(id: number): void {
-    setSnoozed((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
+  /** A preset was picked: post the durable snooze (with an Undo toast). The event
+   * leaves the visible set at once (optimistic `snoozed_until`), so the pages
+   * re-flow — that re-flow IS the advance — and keyboard stays alive. */
+  function doSnooze(ev: EventItem, until: string, label: string): void {
+    setSnoozeForId(null);
+    snoozeEventWithUndo(ev.id, until, label);
+    rootRef?.focus();
   }
 
-  /** Jump the pager to an event by id (the standing list / peek target). A
-   * snoozed row's jump also un-snoozes it — clicking a parked item in the index
-   * means "bring it back" — then lands on it in its restored place. Keyboard
-   * stays alive by returning focus to the reader. */
+  /** Jump the pager to an event by id (the peek target). Keyboard stays alive by
+   * returning focus to the reader. */
   function jumpToEvent(ev: EventItem): void {
-    if (snoozed().has(ev.id)) unsnooze(ev.id);
     const idx = ordered().findIndex((e) => e.id === ev.id);
     if (idx >= 0) goTo(idx);
     rootRef?.focus();
@@ -450,7 +464,7 @@ export function EventScroller() {
     }
     if (e.key === "ArrowLeft") {
       e.preventDefault();
-      snooze(ev);
+      requestSnooze(ev);
       return;
     }
     const list = eventUiNodes(ev.ui).find((n) => n.type === "optionList");
@@ -549,7 +563,10 @@ export function EventScroller() {
                   ev={ev}
                   onDecide={decide}
                   onAccept={acceptRec}
-                  onSnooze={snooze}
+                  onRequestSnooze={() => requestSnooze(ev)}
+                  snoozeOpen={snoozeForId() === ev.id}
+                  onSnoozeOpenChange={(o) => setSnoozeForId(o ? ev.id : null)}
+                  onSnooze={(until, label) => doSnooze(ev, until, label)}
                   onUndo={(id) => undoDecide(id)}
                   onOpen={open}
                   onAdvance={() => goTo(current() + 1)}
@@ -560,6 +577,8 @@ export function EventScroller() {
               decided={decidedJudgmentCount()}
               awarenessRead={ordered().filter((e) => e.kind !== "judgment" && e.read).length}
               openCount={openCount()}
+              finishedCount={finished().length}
+              onClearFinished={sweep}
               exhaleSeq={exhaleSeq()}
               onJumpBack={() => {
                 goTo(firstOpenIndex(ordered(), state.eventDecideOverrides));
@@ -574,8 +593,10 @@ export function EventScroller() {
             <PeekOverview
               ordered={ordered()}
               archived={archived()}
+              snoozed={snoozedList()}
+              finishedCount={finished().length}
+              onClearFinished={sweep}
               centeredId={centeredId()}
-              snoozed={snoozed()}
               openCount={openCount()}
               onJump={(ev) => {
                 setPeekOpen(false);
@@ -596,7 +617,13 @@ function EventPage(props: {
   ev: EventItem;
   onDecide: (ev: EventItem, action: string, data: unknown) => void;
   onAccept: (ev: EventItem) => void;
-  onSnooze: (ev: EventItem) => void;
+  /** Open the durable-snooze preset chooser for this card (swipe-left / ⋯). */
+  onRequestSnooze: () => void;
+  /** Whether this card's chooser is the one open. */
+  snoozeOpen: boolean;
+  onSnoozeOpenChange: (open: boolean) => void;
+  /** A preset was picked — post the durable snooze. */
+  onSnooze: (until: string, label: string) => void;
   onUndo: (id: number) => void;
   onOpen: (ev: EventItem) => void;
   onAdvance: () => void;
@@ -655,7 +682,7 @@ function EventPage(props: {
     setSnoozeHint(0);
     if (!d.active) return;
     if (d.dx > SWIPE_THRESHOLD) props.onAccept(props.ev);
-    else if (d.dx < -SWIPE_THRESHOLD) props.onSnooze(props.ev);
+    else if (d.dx < -SWIPE_THRESHOLD) props.onRequestSnooze();
   }
 
   return (
@@ -710,14 +737,23 @@ function EventPage(props: {
               leaving() ? ARCHIVE_EXIT_CLASS : "",
             )}
           >
-            {/* The needs-you accent + minimal-chrome header (handle · source ·
-                kind), shared verbatim with the desktop Feed card. */}
-            <EventCardHeader ev={props.ev} onArchive={archive} />
+            {/* The needs-you accent + minimal-chrome header (source · age ·
+                overflow), shared verbatim with the desktop Feed card. */}
+            <EventCardHeader
+              ev={props.ev}
+              onArchive={archive}
+              onRequestSnooze={props.onRequestSnooze}
+            />
 
             <div class="px-3.5 pb-3.5 pt-2">
               <EventCardRenderer
                 ui={props.ev.ui}
                 disabled={decided()}
+                eyebrowAge={
+                  props.ev.blocking && props.ev.kind === "judgment"
+                    ? formatEventAge(props.ev.ts)
+                    : undefined
+                }
                 onAction={(action, data) => props.onDecide(props.ev, action, data)}
               />
             </div>
@@ -735,6 +771,13 @@ function EventPage(props: {
               <EventCardDoor ev={props.ev} onOpen={props.onOpen} />
             </Show>
           </div>
+          {/* The durable-snooze preset chooser (Wave-3): opened by swipe-left,
+              ArrowLeft, or the card ⋯ "Snooze…". */}
+          <SnoozeChooser
+            open={props.snoozeOpen}
+            onOpenChange={props.onSnoozeOpenChange}
+            onPick={(until, label) => props.onSnooze(until, label)}
+          />
         </div>
       </div>
 
@@ -789,6 +832,8 @@ function ClearPage(props: {
   decided: number;
   awarenessRead: number;
   openCount: number;
+  finishedCount: number;
+  onClearFinished: () => void;
   exhaleSeq: number;
   onJumpBack: () => void;
 }) {
@@ -840,6 +885,18 @@ function ClearPage(props: {
               {props.openCount} waiting
             </span>
           </div>
+          {/* The sweep (Wave-3): a quiet "Clear finished (n)" that archives the
+              finished cards still resting in the queue — no red, batch-undoable. */}
+          <Show when={props.finishedCount > 0}>
+            <button
+              type="button"
+              data-slot="clear-finished"
+              class="mt-4 inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3.5 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px"
+              onClick={() => props.onClearFinished()}
+            >
+              Clear finished <span class="tabular-nums">{props.finishedCount}</span>
+            </button>
+          </Show>
           {/* The natural "what next" moment (§3): a quiet door to the agent —
               demoted (muted, no fill), never a destination-promotion. */}
           <button
@@ -865,16 +922,23 @@ function ClearPage(props: {
 function PeekOverview(props: {
   ordered: EventItem[];
   archived: EventItem[];
+  snoozed: EventItem[];
+  finishedCount: number;
+  onClearFinished: () => void;
   centeredId: number | undefined;
-  snoozed: Set<number>;
   openCount: number;
   onJump: (ev: EventItem) => void;
   onClose: () => void;
 }) {
-  // Filter state — default `active` on every open (the sheet unmounts on close,
-  // so this resets by construction; never persisted). Search narrows live.
-  const [query, setQuery] = createSignal("");
-  const [mode, setMode] = createSignal<QueueFilterMode>("active");
+  // Filter state lives in the shared signals (so ⌘K can drive it), but the peek
+  // is a fresh-open surface — reset to Active + empty search on mount so archived
+  // /snoozed events stay hidden until asked for (the sheet unmounts on close).
+  onMount(() => {
+    setQueueFilterMode("active");
+    setQueueSearch("");
+  });
+  const mode = queueFilterMode;
+  const query = queueSearch;
 
   // The rows the current live filter shows, search-narrowed (`needs-you` keeps
   // only open judgments; `active` keeps the whole visible queue).
@@ -888,11 +952,15 @@ function PeekOverview(props: {
   const filteredArchived = createMemo(() =>
     props.archived.filter((e) => matchesQuery(e, query())),
   );
+  const filteredSnoozed = createMemo(() =>
+    props.snoozed.filter((e) => matchesQuery(e, query())),
+  );
 
-  // The Archived filter can't stand once nothing is archived — fall back so the
-  // sheet never strands on an empty archived view.
+  // A disclosure filter can't stand once its set empties — fall back so the sheet
+  // never strands on an empty archived / snoozed view.
   createEffect(() => {
-    if (mode() === "archived" && props.archived.length === 0) setMode("active");
+    if (mode() === "archived" && props.archived.length === 0) setQueueFilterMode("active");
+    if (mode() === "snoozed" && props.snoozed.length === 0) setQueueFilterMode("active");
   });
 
   return (
@@ -921,37 +989,22 @@ function PeekOverview(props: {
           </button>
         </div>
         {/* The filter row — the phone's home for search + Active/Needs you/
-            Archived; the pager below the peek stays a minimal decide flow. */}
+            Snoozed/Archived + the Clear-finished sweep; the pager below the peek
+            stays a minimal decide flow. */}
         <div class="border-b border-border px-3 py-2">
           <QueueFilterBar
             query={query()}
-            onQueryChange={setQuery}
+            onQueryChange={setQueueSearch}
             mode={mode()}
-            onModeChange={setMode}
+            onModeChange={setQueueFilterMode}
             archivedCount={props.archived.length}
+            snoozedCount={props.snoozed.length}
+            finishedCount={props.finishedCount}
+            onClearFinished={props.onClearFinished}
           />
         </div>
         <div class="overflow-y-auto p-1.5">
-          <Show
-            when={mode() === "archived"}
-            fallback={
-              <Show
-                when={rows().length > 0}
-                fallback={<PeekEmptyLine mode={mode()} query={query()} />}
-              >
-                <For each={rows()}>
-                  {(ev) => (
-                    <QueueRow
-                      ev={ev}
-                      active={ev.id === props.centeredId}
-                      snoozed={props.snoozed.has(ev.id)}
-                      onJump={props.onJump}
-                    />
-                  )}
-                </For>
-              </Show>
-            }
-          >
+          <Show when={mode() === "archived"}>
             <div data-slot="peek-archived">
               <Show
                 when={filteredArchived().length > 0}
@@ -969,6 +1022,37 @@ function PeekOverview(props: {
                 />
               </Show>
             </div>
+          </Show>
+          <Show when={mode() === "snoozed"}>
+            <div data-slot="peek-snoozed">
+              <Show
+                when={filteredSnoozed().length > 0}
+                fallback={
+                  <div class="px-2 py-6 text-center text-xs text-muted-foreground/70">
+                    {query().trim().length > 0
+                      ? `No snoozed events match “${query().trim()}”.`
+                      : "Nothing snoozed."}
+                  </div>
+                }
+              >
+                <SnoozedList
+                  events={filteredSnoozed()}
+                  onUnsnooze={(ev) => unsnoozeEvent(ev.id)}
+                />
+              </Show>
+            </div>
+          </Show>
+          <Show when={mode() === "active" || mode() === "needs-you"}>
+            <Show
+              when={rows().length > 0}
+              fallback={<PeekEmptyLine mode={mode()} query={query()} />}
+            >
+              <For each={rows()}>
+                {(ev) => (
+                  <QueueRow ev={ev} active={ev.id === props.centeredId} onJump={props.onJump} />
+                )}
+              </For>
+            </Show>
           </Show>
         </div>
       </div>

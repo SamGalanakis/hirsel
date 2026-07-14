@@ -3,11 +3,14 @@ import {
   archivedEvents,
   eventTitle,
   eventUiNodes,
+  finishedEvents,
   isEventArchived,
   isEventFinished,
   isEventResolved,
+  isEventSnoozed,
   openJudgmentCount,
   orderedQueue,
+  snoozedEvents,
   visibleEvents,
 } from "./selectors";
 import type { EventItem, ViewSpec } from "../protocol";
@@ -56,13 +59,13 @@ describe("orderedQueue priority (ADR-0012 interrupt-vs-accrue)", () => {
     expect(ordered.map((e) => e.id)).toEqual([10, 11, 12, 13, 14]);
   });
 
-  it("sinks a decided judgment below open ones and a snoozed one to the tail band", () => {
+  it("sinks a decided judgment below open ones, awareness last (Wave-3: no session-snooze band)", () => {
     const decided = ev({ id: 1 });
     const open = ev({ id: 2 });
-    const snoozedEv = ev({ id: 3 });
+    const other = ev({ id: 3 });
     const summary = ev({ id: 4, kind: "summary", requires_response: false });
-    const ordered = orderedQueue([decided, open, snoozedEv, summary], [1], new Set([3]));
-    // open (2) first, snoozed (3), decided judgment (1), awareness (4).
+    const ordered = orderedQueue([decided, open, other, summary], [1]);
+    // open (2, 3) first oldest-waited, decided judgment (1), awareness (4).
     expect(ordered.map((e) => e.id)).toEqual([2, 3, 1, 4]);
   });
 });
@@ -100,6 +103,52 @@ describe("archive filter (contract v1): default-hides everywhere, counts stay ho
     const info = ev({ id: 2, kind: "info", requires_response: false });
     expect(isEventFinished(info, [])).toBe(false); // unread awareness
     expect(isEventFinished({ ...info, read: true }, [])).toBe(true);
+  });
+});
+
+describe("durable snooze (Wave-3): leaves Active everywhere, counts stay honest", () => {
+  const NOW = Date.parse("2026-07-14T12:00:00Z");
+  const future = "2026-07-14T18:00:00Z";
+  const past = "2026-07-14T06:00:00Z";
+
+  it("isEventSnoozed is true only while snoozed_until is in the future", () => {
+    expect(isEventSnoozed(ev({ snoozed_until: future }), NOW)).toBe(true);
+    expect(isEventSnoozed(ev({ snoozed_until: past }), NOW)).toBe(false);
+    expect(isEventSnoozed(ev({ snoozed_until: null }), NOW)).toBe(false);
+    expect(isEventSnoozed(ev({}), NOW)).toBe(false);
+  });
+
+  it("visibleEvents excludes snoozed; snoozedEvents lists them soonest-return-first", () => {
+    const live = ev({ id: 1 });
+    const soon = ev({ id: 2, snoozed_until: "2026-07-14T14:00:00Z" });
+    const later = ev({ id: 3, snoozed_until: "2026-07-14T20:00:00Z" });
+    expect(visibleEvents([live, soon, later], [], NOW).map((e) => e.id)).toEqual([1]);
+    expect(snoozedEvents([live, soon, later], [], NOW).map((e) => e.id)).toEqual([2, 3]);
+  });
+
+  it("a snoozed OPEN judgment leaves the needs-you count", () => {
+    const a = ev({ id: 1 });
+    const b = ev({ id: 2, snoozed_until: future });
+    expect(openJudgmentCount(visibleEvents([a, b], [], NOW), [])).toBe(1);
+  });
+
+  it("finishedEvents is the sweep set: finished, not archived, not snoozed", () => {
+    const openJudgment = ev({ id: 1 });
+    const decided = ev({ id: 2, status: "done" });
+    const readInfo = ev({ id: 3, kind: "info", requires_response: false, read: true });
+    const snoozedDone = ev({ id: 4, status: "done", snoozed_until: future });
+    const archivedDone = ev({ id: 5, status: "done", archived: true });
+    const ids = finishedEvents([openJudgment, decided, readInfo, snoozedDone, archivedDone], [], [], NOW).map(
+      (e) => e.id,
+    );
+    expect(ids.sort()).toEqual([2, 3]);
+  });
+
+  it("archivedEvents orders the day-log newest-first by archived_at (id fallback)", () => {
+    const older = ev({ id: 1, archived: true, archived_at: "2026-07-12T09:00:00Z" });
+    const newer = ev({ id: 2, archived: true, archived_at: "2026-07-13T09:00:00Z" });
+    const noStamp = ev({ id: 3, archived: true }); // just-swept optimistic → top
+    expect(archivedEvents([older, newer, noStamp], []).map((e) => e.id)).toEqual([3, 2, 1]);
   });
 });
 

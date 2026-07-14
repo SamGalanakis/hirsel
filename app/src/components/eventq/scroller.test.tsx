@@ -230,12 +230,25 @@ describe("EventScroller — the phone vertical event queue home", () => {
     expect(store.state.composerPrefill).toBeNull();
   });
 
-  it("snoozes to the end with an Undo toast (§6)", async () => {
-    const { toast, reader } = await setup([judgment(1, "One"), judgment(2, "Two")]);
+  it("a durable-snoozed event leaves Active and returns via Unsnooze in the peek (Wave-3)", async () => {
+    const { store, screen, reader } = await setup([judgment(1, "One"), judgment(2, "Two")]);
+    const future = new Date(Date.now() + 6 * 3600_000).toISOString();
+    // Snoozing (what the chooser's onPick does) sets snoozed_until: the event
+    // leaves the pager entirely — counts stay honest.
+    store.dispatch({ type: "event_snooze_local", eventId: 1, until: future });
+    await waitFor(() => expect(within(reader).queryByText("One")).toBeNull());
+    expect(within(reader).queryByText("Two")).toBeTruthy();
+    // The peek discloses a Snoozed(1) filter; its row carries a durable Unsnooze.
     reader.focus();
-    reader.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
-    expect(toast.toasts().some((t) => /Snoozed/.test(t.message))).toBe(true);
-    expect(toast.toasts().some((t) => t.action?.label === "Undo")).toBe(true);
+    reader.dispatchEvent(new KeyboardEvent("keydown", { key: "p", bubbles: true }));
+    const peek = await waitFor(() => {
+      const el = screen.container.querySelector('[data-slot="event-peek"]') as HTMLElement | null;
+      if (!el) throw new Error("peek not open");
+      return el;
+    });
+    fireEvent.click(within(peek).getByRole("button", { name: /Snoozed/ }));
+    const section = peek.querySelector('[data-slot="peek-snoozed"]') as HTMLElement;
+    expect(within(section).getByRole("button", { name: /Unsnooze @j1/ })).toBeTruthy();
   });
 });
 

@@ -14,13 +14,14 @@ import { ArrowRight, Check, MessageSquare, MoreHorizontal } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { consumeArrival } from "../../lib/event-entrance";
+import { formatEventAge } from "../../lib/format";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { isEventFinished, isEventResolved } from "../../store/selectors";
+import { isEventArchived, isEventFinished, isEventResolved } from "../../store/selectors";
 import { state } from "../../store/store";
 
 /** How long the archive exit animation runs before the card actually leaves the
@@ -112,18 +113,33 @@ export function createCardEntrance(ev: EventItem): {
  * overflow. Placed as the first children of a `relative overflow-hidden` card box.
  *
  * A FINISHED event (decided, or read awareness — the exact `events.clear` set)
- * also carries the quiet ⋯ overflow with the Archive action: reversible (the
- * Archived view's Unarchive), so no confirmation and nothing red. An open
- * judgment never offers it — deciding is how a judgment leaves the queue. */
-export function EventCardHeader(props: { ev: EventItem; onArchive?: (ev: EventItem) => void }) {
+ * carries the quiet ⋯ overflow's Archive action; a still-live event (open, not
+ * archived) carries its Snooze… — both reversible (the Archived / Snoozed views
+ * plus a toast Undo), so no confirmation and nothing red. The header also carries
+ * the quiet relative age (Wave-3 time axis) as tabular-nums meta. */
+export function EventCardHeader(props: {
+  ev: EventItem;
+  onArchive?: (ev: EventItem) => void;
+  /** Open the durable-snooze preset chooser for this card (Wave-3). */
+  onRequestSnooze?: () => void;
+}) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
   const archivable = () =>
     props.onArchive !== undefined && isEventFinished(props.ev, state.eventDecideOverrides);
+  // Snooze offers on a still-live event only: NOT finished (a finished card is
+  // Archive's job, not snooze's) and not already archived — so the ⋯ menu shows
+  // exactly one of Snooze… / Archive, never both.
+  const snoozable = () =>
+    props.onRequestSnooze !== undefined &&
+    !isEventFinished(props.ev, state.eventDecideOverrides) &&
+    !isEventArchived(props.ev, state.eventArchiveOverrides);
+  const hasMenu = () => archivable() || snoozable();
   // Source earns a line only when it isn't the resident agent — a subagent,
   // scheduled job, or monitor is worth naming; "agent" is the default voice and
   // saying so is noise.
   const showSource = () => props.ev.source.kind !== "agent";
+  const age = () => formatEventAge(props.ev.ts);
   return (
     <>
       <Show when={isJudgment() && !decided()}>
@@ -136,12 +152,22 @@ export function EventCardHeader(props: { ev: EventItem; onArchive?: (ev: EventIt
           </span>
         </Show>
         <span class="flex-1" />
+        {/* The quiet relative age — meta, tabular-nums so digits don't jitter. */}
+        <Show when={age()}>
+          <span
+            data-slot="event-age"
+            class="text-[0.68rem] tabular-nums text-muted-foreground/80"
+            title={props.ev.ts}
+          >
+            {age()}
+          </span>
+        </Show>
         <Show when={props.ev.read && props.ev.kind !== "judgment" && !decided()}>
           <span class="inline-flex items-center gap-1 text-[0.62rem] font-bold uppercase tracking-[0.04em] text-status-success">
             <Check class="size-3" aria-hidden="true" /> read
           </span>
         </Show>
-        <Show when={archivable()}>
+        <Show when={hasMenu()}>
           <DropdownMenu>
             <DropdownMenuTrigger
               class="-my-1 grid size-6 place-items-center rounded-md text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -150,9 +176,16 @@ export function EventCardHeader(props: { ev: EventItem; onArchive?: (ev: EventIt
               <MoreHorizontal class="size-4" aria-hidden="true" />
             </DropdownMenuTrigger>
             <DropdownMenuContent>
-              <DropdownMenuItem onSelect={() => props.onArchive?.(props.ev)}>
-                Archive
-              </DropdownMenuItem>
+              <Show when={snoozable()}>
+                <DropdownMenuItem onSelect={() => props.onRequestSnooze?.()}>
+                  Snooze…
+                </DropdownMenuItem>
+              </Show>
+              <Show when={archivable()}>
+                <DropdownMenuItem onSelect={() => props.onArchive?.(props.ev)}>
+                  Archive
+                </DropdownMenuItem>
+              </Show>
             </DropdownMenuContent>
           </DropdownMenu>
         </Show>

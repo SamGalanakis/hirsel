@@ -183,6 +183,22 @@ export interface EventItem {
    * chip appears and clears purely from upserts. Optional on the wire; absent is
    * treated as no fork. */
   fork_sc?: string | null;
+  /** Wave-3 (durable snooze): the instant this Event returns to the resting
+   * queue, or `null`/absent when it is not snoozed. Set host-side by an
+   * `event_action{snooze,{until}}` and cleared by `unsnooze` — or, when the
+   * instant passes, by the host's own timer, which sets it back to `null`,
+   * re-broadcasts `event_upsert`, and re-pushes an open judgment (the return IS a
+   * new interrupt). While `snoozed_until > now` the client hides the Event from
+   * Active everywhere and excludes it from the needs-you count; it surfaces only
+   * under the quiet "Snoozed (n)" filter. Optional on the wire; absent/null is
+   * treated as not snoozed. */
+  snoozed_until?: string | null;
+  /** Archive contract v1 (time axis): the instant the Owner swept this Event out
+   * of the resting queue, set host-side when `archived` flips true. Orders the
+   * quiet Archived day-log (newest-first) and drives its "Today"/"Yesterday" day
+   * groupings. Optional on the wire (older data/hosts omit it); absent falls back
+   * to `id` order and a "Today" grouping for a just-archived row. */
+  archived_at?: string | null;
 }
 
 // ---- Model configuration (main agent + sub-agent catalog) ----
@@ -373,15 +389,28 @@ export interface ViewEventMsg {
  * card's constrained UI. Generalizes the quick-reply resolution + `view_event`.
  * `action` is `choose` (data.choice = option key; resolves a judgment; optional
  * `data.record_rule` seeds the taste store), `submit` (data = field values),
- * `snooze`, `dismiss`, or `reopen` (Done-as-toggle recovery — the peer of a
- * choose, per the reopen machinery on main). The host looks the event up and
- * routes it through the normal owner-submission path; the client never resolves
- * the event itself, it only emits this frame. */
+ * `snooze` (Wave-3 durable snooze; `data.{until}` an RFC3339 instant — a snooze
+ * with no `until` is invalid, a retryable error naming the presets), `unsnooze`
+ * (clears `snoozed_until`, returning the Event to Active now), `archive` /
+ * `unarchive` (data `{}`), `dismiss`, or `reopen` (Done-as-toggle recovery — the
+ * peer of a choose, per the reopen machinery on main). The host looks the event
+ * up and routes it through the normal owner-submission path; the client never
+ * resolves the event itself, it only emits this frame. */
 export interface EventActionMsg {
   type: "event_action";
   event_id: number;
   action: string;
   data: unknown;
+}
+
+/** Wave-3 (sweep): clear every FINISHED event (decided, or read awareness that
+ * never needed a response) out of the resting queue in one op — the "Clear
+ * finished (n)" sweep, mirroring the `events.clear` tool. The host archives the
+ * matching set and broadcasts an `event_upsert` (archived=true) for each, so the
+ * client's optimistic batch-archive reconciles the same way a single archive
+ * does. Reversible: the sweep's Undo unarchives that batch one by one. */
+export interface ClearFinishedEventsMsg {
+  type: "clear_finished_events";
 }
 
 /** Select the main agent's model + reasoning variant. The host applies it and
@@ -419,6 +448,7 @@ export type ClientMessage =
   | DiscardSideChatMsg
   | ViewEventMsg
   | EventActionMsg
+  | ClearFinishedEventsMsg
   | SetModelMsg
   | SetSubagentModelMsg;
 

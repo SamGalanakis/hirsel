@@ -3767,7 +3767,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.subagents_spawn",
             "subagents_spawn",
-            "Start a Claude or Codex Sub-agent as a Lash Runtime Process.",
+            "Start a Claude or Codex Sub-agent as a Lash Runtime Process. Spawn, note the hand-off in Chat, and END YOUR TURN — the terminal event wakes you; never wait in-turn for completion.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -3872,7 +3872,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.monitors_create",
             "monitors_create",
-            "Create a persisted host monitor that wakes the Agent when its condition fires.",
+            "Create a persisted host monitor that wakes the Agent when its condition fires. Monitors and timers are the way to watch for a condition instead of polling in-turn.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -3927,7 +3927,7 @@ fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
         tool_definition(
             "hirsel.shell_run",
             "shell_run",
-            "Run a bounded shell command and return stdout, stderr, status, and timeout state.",
+            "Run a bounded shell command and return stdout, stderr, status, and timeout state. For quick commands only (seconds); anything slow or watch-like goes to a Sub-agent or monitor with a wake — do not wait in-turn.",
             json!({
                 "type": "object",
                 "additionalProperties": false,

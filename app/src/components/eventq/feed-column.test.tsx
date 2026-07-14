@@ -171,7 +171,7 @@ describe("FeedColumn — the desktop card column", () => {
     await waitFor(() => expect(within(column).queryByText("Read digest")).toBeNull());
   });
 
-  it("Archived (n) toggle discloses dense rows; Unarchive returns the event to the feed", async () => {
+  it("Archived filter discloses dense rows; Unarchive returns the event to the feed", async () => {
     const archivedSummary: EventItem = {
       ...judgment(4, "Quarterly digest"),
       kind: "summary",
@@ -181,21 +181,41 @@ describe("FeedColumn — the desktop card column", () => {
       archived: true,
     };
     const { sent, column } = await setup([judgment(1, "Live judgment"), archivedSummary]);
-    // Default OFF: no archived rows standing.
+    // Default Active every session: no archived rows standing.
     expect(column.querySelector('[data-slot="feed-archived"]')).toBeNull();
-    // The quiet toggle carries the honest count.
-    const toggle = within(column).getByRole("button", { name: "Archived (1)" });
-    expect(toggle.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(toggle);
+    // The segmented control's Archived chip carries the honest count.
+    const chip = within(column).getByRole("button", { name: /Archived/ });
+    expect(chip.getAttribute("aria-pressed")).toBe("false");
+    expect(chip.textContent).toContain("1");
+    fireEvent.click(chip);
     // Dense rows — @name + title + Unarchive — never full cards.
     const section = column.querySelector('[data-slot="feed-archived"]') as HTMLElement;
     expect(within(section).getByText("@j4")).toBeTruthy();
+    expect(within(section).queryByRole("button", { name: /Pick A/ })).toBeNull();
     const unarchive = within(section).getByRole("button", { name: /Unarchive @j4/ });
     fireEvent.click(unarchive);
-    // The exact contract envelope, and the event returns to the resting feed.
+    // The exact contract envelope, and — the archive now empty — the column
+    // falls back to Active, where the returned event stands as a card again.
     expect(sent).toContainEqual({ eventId: 4, action: "unarchive", data: {} });
     await waitFor(() => expect(within(column).getByText("Quarterly digest")).toBeTruthy());
-    expect(within(section).getByText("Nothing archived.")).toBeTruthy();
+    expect(column.querySelector('[data-slot="feed-archived"]')).toBeNull();
+  });
+
+  it("search narrows the cards live; Needs you keeps only open judgments", async () => {
+    const { screen, column } = await setup([judgment(1, "Wire the reopen op"), judgment(2, "Ship the digest")]);
+    // Live search across handle/description/title.
+    const search = within(column).getByLabelText("Search the queue") as HTMLInputElement;
+    fireEvent.input(search, { target: { value: "reopen" } });
+    expect(within(column).getByText("Wire the reopen op")).toBeTruthy();
+    expect(within(column).queryByText("Ship the digest")).toBeNull();
+    fireEvent.click(within(column).getByLabelText("Clear search"));
+    expect(within(column).getByText("Ship the digest")).toBeTruthy();
+    // Needs you: a decided judgment drops out of the narrowed set (it is no
+    // longer owed) while the open one stays.
+    fireEvent.click(screen.getByRole("button", { name: /Pick A for 2/ }));
+    fireEvent.click(within(column).getByRole("button", { name: "Needs you" }));
+    await waitFor(() => expect(within(column).queryByText("Ship the digest")).toBeNull());
+    expect(within(column).getByText("Wire the reopen op")).toBeTruthy();
   });
 
   it("shows the inbox-zero empty state when the queue is genuinely clear", async () => {

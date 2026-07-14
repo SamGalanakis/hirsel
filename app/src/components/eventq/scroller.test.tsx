@@ -163,7 +163,7 @@ describe("EventScroller — the phone vertical event queue home", () => {
     expect(pos.textContent).toBe("1 of 1");
   });
 
-  it("peek carries the quiet Archived (n) toggle: default OFF, dense rows, Unarchive returns it", async () => {
+  it("peek carries the Archived filter: default Active, dense rows, Unarchive returns it", async () => {
     const archivedSummary: EventItem = {
       ...judgment(5, "Old digest"),
       kind: "summary",
@@ -177,15 +177,18 @@ describe("EventScroller — the phone vertical event queue home", () => {
     const peek = await waitFor(
       () => screen.container.querySelector('[data-slot="event-peek"]') as HTMLElement,
     );
-    // Default OFF every session: no archived rows standing, only the quiet toggle.
+    // Default Active on every open: no archived rows standing.
     expect(peek.querySelector('[data-slot="peek-archived"]')).toBeNull();
     expect(within(peek).queryByText("@j5")).toBeNull();
-    fireEvent.click(within(peek).getByRole("button", { name: "Archived (1)" }));
+    fireEvent.click(within(peek).getByRole("button", { name: /Archived/ }));
     const section = peek.querySelector('[data-slot="peek-archived"]') as HTMLElement;
     expect(within(section).getByText("@j5")).toBeTruthy();
-    // Unarchive posts the contract envelope and the row rejoins the queue rows.
+    // Unarchive posts the contract envelope; the archive empties, the peek falls
+    // back to Active, and the pager behind gains the returned page.
     fireEvent.click(within(section).getByRole("button", { name: /Unarchive @j5/ }));
     expect(sent).toContainEqual({ eventId: 5, action: "unarchive", data: {} });
+    await waitFor(() => expect(within(peek).getByText("@j5")).toBeTruthy());
+    expect(peek.querySelector('[data-slot="peek-archived"]')).toBeNull();
     await waitFor(() => {
       const pos = screen.container.querySelector('[data-slot="pager-pos"]') as HTMLElement;
       expect(pos.textContent).toBe("1 of 2");

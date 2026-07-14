@@ -32,6 +32,7 @@ import {
   eventUiNodes,
   isEventArchived,
   isEventResolved,
+  isOpenJudgment,
   openJudgmentCount,
   orderedQueue,
   visibleEvents,
@@ -45,6 +46,7 @@ import {
   DecidedStrip,
   EventCardHeader,
 } from "./EventCard";
+import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
 import { QueueRow } from "./QueueRow";
 import { firstOpenIndex, nextOpenIndex, shouldMarkReadOnLeave } from "./queue";
 
@@ -799,8 +801,11 @@ function ClearPage(props: {
 
 /** Peek: the phone's whole-queue index — a top sheet you flick down; tap a row
  * to jump. Keeps the phone pager from being a tunnel (the desktop standing list
- * is the always-on equivalent). Rows are the SAME `QueueRow` the standing list
- * uses, so the two surfaces stay in lockstep. */
+ * is the always-on equivalent). It also hosts the queue's filter surface on
+ * phone (owner addendum): a calm search + Active · Needs you · Archived(n)
+ * control, so the pager itself stays a minimal decide flow and the browse /
+ * filter / search lives here. Rows are the SAME `QueueRow` the standing list
+ * uses; the archived filter swaps them for dense Unarchive rows. */
 function PeekOverview(props: {
   ordered: EventItem[];
   archived: EventItem[];
@@ -810,9 +815,30 @@ function PeekOverview(props: {
   onJump: (ev: EventItem) => void;
   onClose: () => void;
 }) {
-  // The quiet Archived(n) disclosure — default OFF on every open (the sheet
-  // unmounts on close, so the signal resets by construction; never persisted).
-  const [showArchived, setShowArchived] = createSignal(false);
+  // Filter state — default `active` on every open (the sheet unmounts on close,
+  // so this resets by construction; never persisted). Search narrows live.
+  const [query, setQuery] = createSignal("");
+  const [mode, setMode] = createSignal<QueueFilterMode>("active");
+
+  // The rows the current live filter shows, search-narrowed (`needs-you` keeps
+  // only open judgments; `active` keeps the whole visible queue).
+  const rows = createMemo(() => {
+    const base =
+      mode() === "needs-you"
+        ? props.ordered.filter((e) => isOpenJudgment(e, state.eventDecideOverrides))
+        : props.ordered;
+    return base.filter((e) => matchesQuery(e, query()));
+  });
+  const filteredArchived = createMemo(() =>
+    props.archived.filter((e) => matchesQuery(e, query())),
+  );
+
+  // The Archived filter can't stand once nothing is archived — fall back so the
+  // sheet never strands on an empty archived view.
+  createEffect(() => {
+    if (mode() === "archived" && props.archived.length === 0) setMode("active");
+  });
+
   return (
     <div class="absolute inset-0 z-40" data-slot="event-peek">
       <button
@@ -821,7 +847,7 @@ function PeekOverview(props: {
         aria-label="Close overview"
         onClick={props.onClose}
       />
-      <div class="absolute inset-x-0 top-0 flex max-h-[78%] flex-col overflow-hidden rounded-b-xl border-b border-border bg-card shadow-xl">
+      <div class="absolute inset-x-0 top-0 flex max-h-[82%] flex-col overflow-hidden rounded-b-xl border-b border-border bg-card shadow-xl">
         <div class="flex items-center gap-2 border-b border-border px-4 py-3">
           <div>
             <h3 class="text-sm font-semibold text-foreground">Queue</h3>
@@ -830,22 +856,6 @@ function PeekOverview(props: {
             </div>
           </div>
           <span class="flex-1" />
-          <Show when={props.archived.length > 0 || showArchived()}>
-            <button
-              type="button"
-              data-slot="peek-archived-toggle"
-              aria-pressed={showArchived()}
-              class={cn(
-                "rounded-sm text-[0.68rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                showArchived()
-                  ? "text-foreground"
-                  : "text-muted-foreground/80 hover:text-foreground",
-              )}
-              onClick={() => setShowArchived((v) => !v)}
-            >
-              Archived ({props.archived.length})
-            </button>
-          </Show>
           <button
             type="button"
             class="rounded-full border border-border bg-muted px-2.5 py-1 text-[0.68rem] font-semibold text-muted-foreground transition-colors hover:text-foreground"
@@ -854,32 +864,72 @@ function PeekOverview(props: {
             Close
           </button>
         </div>
+        {/* The filter row — the phone's home for search + Active/Needs you/
+            Archived; the pager below the peek stays a minimal decide flow. */}
+        <div class="border-b border-border px-3 py-2">
+          <QueueFilterBar
+            query={query()}
+            onQueryChange={setQuery}
+            mode={mode()}
+            onModeChange={setMode}
+            archivedCount={props.archived.length}
+          />
+        </div>
         <div class="overflow-y-auto p-1.5">
-          <For each={props.ordered}>
-            {(ev) => (
-              <QueueRow
-                ev={ev}
-                active={ev.id === props.centeredId}
-                snoozed={props.snoozed.has(ev.id)}
-                onJump={props.onJump}
-              />
-            )}
-          </For>
-          {/* The archived section: the same dense rows the desktop Feed
-              discloses — below the queue rows, never mixed into them. */}
-          <Show when={showArchived()}>
-            <div data-slot="peek-archived" class="mt-2 border-t border-border pt-2">
-              <div class="px-2 pb-1 text-[0.62rem] font-semibold uppercase tracking-[0.04em] text-muted-foreground/70">
-                Archived
-              </div>
-              <ArchivedList
-                events={props.archived}
-                onUnarchive={(ev) => unarchiveEvent(ev.id)}
-              />
+          <Show
+            when={mode() === "archived"}
+            fallback={
+              <Show
+                when={rows().length > 0}
+                fallback={<PeekEmptyLine mode={mode()} query={query()} />}
+              >
+                <For each={rows()}>
+                  {(ev) => (
+                    <QueueRow
+                      ev={ev}
+                      active={ev.id === props.centeredId}
+                      snoozed={props.snoozed.has(ev.id)}
+                      onJump={props.onJump}
+                    />
+                  )}
+                </For>
+              </Show>
+            }
+          >
+            <div data-slot="peek-archived">
+              <Show
+                when={filteredArchived().length > 0}
+                fallback={
+                  <div class="px-2 py-6 text-center text-xs text-muted-foreground/70">
+                    {query().trim().length > 0
+                      ? `No archived events match “${query().trim()}”.`
+                      : "Nothing archived."}
+                  </div>
+                }
+              >
+                <ArchivedList
+                  events={filteredArchived()}
+                  onUnarchive={(ev) => unarchiveEvent(ev.id)}
+                />
+              </Show>
             </div>
           </Show>
         </div>
       </div>
     </div>
+  );
+}
+
+/** One quiet line for an empty live filter in the peek (search miss / nothing
+ * owed). */
+function PeekEmptyLine(props: { mode: QueueFilterMode; query: string }) {
+  const line = () =>
+    props.query.trim().length > 0
+      ? `No events match “${props.query.trim()}”.`
+      : props.mode === "needs-you"
+        ? "Nothing needs you right now."
+        : "The queue is empty.";
+  return (
+    <div class="px-2 py-6 text-center text-xs text-muted-foreground/70">{line()}</div>
   );
 }

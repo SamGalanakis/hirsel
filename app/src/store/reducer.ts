@@ -563,6 +563,28 @@ export function reduce(state: AppState, action: Action): AppState {
       };
     }
 
+    case "event_snooze_local": {
+      // Optimistic durable snooze (Wave-3): patch `snoozed_until` on the event
+      // itself (the `event_read_local` pattern), so it leaves Active everywhere
+      // at once while `event_action{snooze,{until}}` is sent to the host; the
+      // host's event_upsert echo (carrying the field, and later clearing it at
+      // the return instant) reconciles the truth.
+      const events = state.events.map((e) =>
+        e.id === action.eventId ? { ...e, snoozed_until: action.until } : e,
+      );
+      return { ...state, events };
+    }
+
+    case "event_unsnooze_local": {
+      // Optimistic un-snooze: clear `snoozed_until` locally so the event returns
+      // to Active at once while `event_action{unsnooze}` is sent; the host echo
+      // reconciles.
+      const events = state.events.map((e) =>
+        e.id === action.eventId ? { ...e, snoozed_until: null } : e,
+      );
+      return { ...state, events };
+    }
+
     case "send_local": {
       const { localId, clientId, body, ref, ts, attachments, mode, mentions } = action;
       const blobs = attachments ?? [];

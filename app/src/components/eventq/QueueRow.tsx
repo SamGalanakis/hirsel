@@ -23,22 +23,19 @@ const KIND_GLYPH: Record<string, Component<LucideProps>> = {
   info: Info,
 };
 
-/** One queue index row (phone peek). Click jumps the pager to the event; a
- * snoozed row's jump also returns it to its natural place (un-snooze), the
- * standing "bring it back" path (§6). */
+/** One queue index row (phone peek). Click jumps the pager to the event.
+ * (Wave-3: durable snooze removes a parked event from the active queue entirely,
+ * so a resting row is never "snoozed" — the parked set lives in the Snoozed
+ * filter's dense rows instead.) */
 export function QueueRow(props: {
   ev: EventItem;
   active: boolean;
-  snoozed: boolean;
   onJump: (ev: EventItem) => void;
 }) {
   const resolved = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
-  const needsYou = () => isJudgment() && !resolved() && !props.snoozed;
-  const label = () =>
-    props.snoozed && !resolved()
-      ? `Return ${props.ev.name} to the queue: ${eventTitle(props.ev)}`
-      : `Jump to ${props.ev.name}: ${eventTitle(props.ev)}`;
+  const needsYou = () => isJudgment() && !resolved();
+  const label = () => `Jump to ${props.ev.name}: ${eventTitle(props.ev)}`;
   return (
     <button
       type="button"
@@ -81,9 +78,7 @@ export function QueueRow(props: {
                 </span>
               }
             >
-              <Show when={props.snoozed} fallback={<span class="text-primary">needs you</span>}>
-                <span class="text-muted-foreground/70">snoozed</span>
-              </Show>
+              <span class="text-primary">needs you</span>
             </Show>
           }
         >

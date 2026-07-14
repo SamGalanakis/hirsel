@@ -27,14 +27,19 @@ import type { EventItem } from "../../protocol";
 import { cn } from "@/lib/utils";
 import { archiveEventWithUndo, unarchiveEvent } from "../../lib/event-archive";
 import { decideEventWithUndo, undoDecide } from "../../lib/event-decide";
+import { snoozeEventWithUndo, unsnoozeEvent } from "../../lib/event-snooze";
+import { clearFinishedEventsWithUndo } from "../../lib/event-sweep";
 import { openEventFork } from "../../lib/event-fork";
+import { formatEventAge } from "../../lib/format";
 import { seedMockEvents } from "../../lib/mock-events";
 import {
   archivedEvents,
+  finishedEvents,
   isEventResolved,
   isOpenJudgment,
   openJudgmentCount,
   orderedQueue,
+  snoozedEvents,
   visibleEvents,
 } from "../../store/selectors";
 import { state } from "../../store/store";
@@ -50,7 +55,16 @@ import {
   EventCardDoor,
   EventCardHeader,
 } from "./EventCard";
-import { matchesQuery, type QueueFilterMode, QueueFilterBar } from "./QueueFilter";
+import {
+  matchesQuery,
+  QueueFilterBar,
+  queueFilterMode,
+  queueSearch,
+  setQueueFilterMode,
+  setQueueSearch,
+} from "./QueueFilter";
+import { SnoozeChooser } from "./SnoozeChooser";
+import { SnoozedList } from "./SnoozedList";
 
 export function FeedColumn() {
   // DEV: seed the contract-shaped mock events so the Feed is real before the
@@ -67,16 +81,23 @@ export function FeedColumn() {
   const ordered = createMemo(() => orderedQueue(visible(), state.eventDecideOverrides));
   const openCount = () => openJudgmentCount(visible(), state.eventDecideOverrides);
   const archived = createMemo(() => archivedEvents(state.events, state.eventArchiveOverrides));
+  // Wave-3: the parked (snoozed) set and the finished set the sweep would clear.
+  const snoozed = createMemo(() => snoozedEvents(state.events, state.eventArchiveOverrides));
+  const finished = createMemo(() =>
+    finishedEvents(state.events, state.eventArchiveOverrides, state.eventDecideOverrides),
+  );
+  const sweep = () => clearFinishedEventsWithUndo(finished().map((e) => e.id));
 
-  // The filter bar state (owner addendum). Session-local, default `active`
-  // (never persisted) — archive is storage, not a standing second queue. A
-  // live search string narrows whichever filter is showing.
-  const [query, setQuery] = createSignal("");
-  const [mode, setMode] = createSignal<QueueFilterMode>("active");
+  // The filter bar state lives in the shared signals (so ⌘K can drive it); the
+  // standing desktop column reads them directly. Default `active` — archive /
+  // snooze are storage, not standing second queues. A live search string narrows
+  // whichever filter is showing.
+  const mode = queueFilterMode;
+  const query = queueSearch;
 
-  // Any events at all (live or archived): drives the resting FeedEmpty vs. a
-  // quiet in-filter empty line, and gates the filter bar (no bar over nothing).
-  const hasAnyEvents = () => visible().length > 0 || archived().length > 0;
+  // Any events at all (live, snoozed, or archived): drives the resting FeedEmpty
+  // vs. a quiet in-filter empty line, and gates the filter bar.
+  const hasAnyEvents = () => visible().length > 0 || snoozed().length > 0 || archived().length > 0;
 
   // The cards the current filter shows, narrowed by the search: `needs-you`
   // keeps only open judgments, `active` keeps the whole resting queue.
@@ -90,12 +111,16 @@ export function FeedColumn() {
   const filteredArchived = createMemo(() =>
     archived().filter((e) => matchesQuery(e, query())),
   );
+  const filteredSnoozed = createMemo(() =>
+    snoozed().filter((e) => matchesQuery(e, query())),
+  );
 
-  // The Archived filter can't stand once nothing is archived (the last Unarchive
-  // emptied it): fall back to the resting Active filter so the column never
-  // strands on an empty archived view.
+  // A disclosure filter can't stand once its set empties (the last Unarchive /
+  // Unsnooze / return emptied it): fall back to the resting Active filter so the
+  // column never strands on an empty view.
   createEffect(() => {
-    if (mode() === "archived" && archived().length === 0) setMode("active");
+    if (mode() === "archived" && archived().length === 0) setQueueFilterMode("active");
+    if (mode() === "snoozed" && snoozed().length === 0) setQueueFilterMode("active");
   });
 
   // The one quiet line for an empty live filter (search miss / nothing owed).
@@ -164,41 +189,22 @@ export function FeedColumn() {
         <div class="shrink-0 border-b border-border px-3 py-2">
           <QueueFilterBar
             query={query()}
-            onQueryChange={setQuery}
+            onQueryChange={setQueueSearch}
             mode={mode()}
-            onModeChange={setMode}
+            onModeChange={setQueueFilterMode}
             archivedCount={archived().length}
+            snoozedCount={snoozed().length}
+            finishedCount={finished().length}
+            onClearFinished={sweep}
           />
         </div>
       </Show>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         <Show when={hasAnyEvents()} fallback={<FeedEmpty />}>
-          <Show
-            when={mode() === "archived"}
-            fallback={
-              <Show
-                when={filteredCards().length > 0}
-                fallback={<QueueEmptyLine>{emptyCardsLine()}</QueueEmptyLine>}
-              >
-                <div class="flex flex-col gap-3">
-                  <For each={filteredCards()}>
-                    {(ev) => <FeedCard ev={ev} onDecide={decide} onOpen={open} />}
-                  </For>
-                  {/* An inbox-zero footer once nothing is owed (only in the
-                      resting Active filter, no search) — the peak-end reward,
-                      calm and inline, mirroring the phone clear page. */}
-                  <Show when={mode() === "active" && query().trim().length === 0 && openCount() === 0}>
-                    <div class="flex items-center gap-2 rounded-xl border border-status-success/20 bg-status-success/[0.06] px-3.5 py-3 text-xs text-muted-foreground">
-                      <CircleCheck class="size-4 shrink-0 text-status-success" aria-hidden="true" />
-                      Queue clear — everything that needed you is decided.
-                    </div>
-                  </Show>
-                </div>
-              </Show>
-            }
-          >
-            {/* Archived filter: dense rows, each with Unarchive (never full cards). */}
+          {/* Archived filter: the day-log — dense rows grouped by day, each with
+              Unarchive (never full cards). */}
+          <Show when={mode() === "archived"}>
             <div data-slot="feed-archived">
               <Show
                 when={filteredArchived().length > 0}
@@ -217,6 +223,48 @@ export function FeedColumn() {
               </Show>
             </div>
           </Show>
+          {/* Snoozed filter (Wave-3): dense rows with the return time + Unsnooze. */}
+          <Show when={mode() === "snoozed"}>
+            <div data-slot="feed-snoozed">
+              <Show
+                when={filteredSnoozed().length > 0}
+                fallback={
+                  <QueueEmptyLine>
+                    {query().trim().length > 0
+                      ? `No snoozed events match “${query().trim()}”.`
+                      : "Nothing snoozed."}
+                  </QueueEmptyLine>
+                }
+              >
+                <SnoozedList
+                  events={filteredSnoozed()}
+                  onUnsnooze={(ev) => unsnoozeEvent(ev.id)}
+                />
+              </Show>
+            </div>
+          </Show>
+          {/* Active / Needs you: the decidable cards. */}
+          <Show when={mode() === "active" || mode() === "needs-you"}>
+            <Show
+              when={filteredCards().length > 0}
+              fallback={<QueueEmptyLine>{emptyCardsLine()}</QueueEmptyLine>}
+            >
+              <div class="flex flex-col gap-3">
+                <For each={filteredCards()}>
+                  {(ev) => <FeedCard ev={ev} onDecide={decide} onOpen={open} />}
+                </For>
+                {/* An inbox-zero footer once nothing is owed (only in the
+                    resting Active filter, no search) — the peak-end reward,
+                    calm and inline, mirroring the phone clear page. */}
+                <Show when={mode() === "active" && query().trim().length === 0 && openCount() === 0}>
+                  <div class="flex items-center gap-2 rounded-xl border border-status-success/20 bg-status-success/[0.06] px-3.5 py-3 text-xs text-muted-foreground">
+                    <CircleCheck class="size-4 shrink-0 text-status-success" aria-hidden="true" />
+                    Queue clear — everything that needed you is decided.
+                  </div>
+                </Show>
+              </div>
+            </Show>
+          </Show>
         </Show>
       </div>
     </aside>
@@ -234,6 +282,7 @@ function FeedCard(props: {
 }) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  const [snoozeOpen, setSnoozeOpen] = createSignal(false);
   // Motion-safe exit: the card fades/settles out, then the optimistic sweep
   // re-flows the column (the toast's Undo brings it straight back).
   const { leaving, archive } = createArchiveExit(() => archiveEventWithUndo(props.ev.id));
@@ -252,11 +301,18 @@ function FeedCard(props: {
         leaving() ? ARCHIVE_EXIT_CLASS : "",
       )}
     >
-      <EventCardHeader ev={props.ev} onArchive={archive} />
+      <EventCardHeader
+        ev={props.ev}
+        onArchive={archive}
+        onRequestSnooze={() => setSnoozeOpen(true)}
+      />
       <div class="px-3.5 pb-3.5 pt-2">
         <EventCardRenderer
           ui={props.ev.ui}
           disabled={decided()}
+          eyebrowAge={
+            props.ev.blocking && isJudgment() ? formatEventAge(props.ev.ts) : undefined
+          }
           onAction={(action, data) => props.onDecide(props.ev, action, data)}
         />
       </div>
@@ -270,6 +326,12 @@ function FeedCard(props: {
       <Show when={!(isJudgment() && decided())}>
         <EventCardDoor ev={props.ev} onOpen={props.onOpen} />
       </Show>
+      {/* The durable-snooze preset chooser (Wave-3). */}
+      <SnoozeChooser
+        open={snoozeOpen()}
+        onOpenChange={setSnoozeOpen}
+        onPick={(until, label) => snoozeEventWithUndo(props.ev.id, until, label)}
+      />
     </div>
   );
 }

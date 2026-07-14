@@ -348,6 +348,15 @@ class HirselWsClient {
     this.enqueue({ type: "event_action", event_id: eventId, action, data });
   }
 
+  /** Sweep every finished event out of the resting queue in one op (Wave-3 "Clear
+   * finished"). Enqueued like `sendEventAction` so a tap right as the socket
+   * blips still lands once reconnected; the host archives the finished set and
+   * echoes an `archived` `event_upsert` per event, reconciling the client's
+   * optimistic batch archive. No direct ack. */
+  clearFinishedEvents(): void {
+    this.enqueue({ type: "clear_finished_events" });
+  }
+
   // ---- Model configuration ----
 
   /** Select the main agent's model + reasoning variant. Enqueued so a tap right

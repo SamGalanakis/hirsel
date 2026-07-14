@@ -237,6 +237,8 @@ export type Action =
   | { type: "event_read_local"; eventId: number }
   | { type: "event_archive_local"; eventId: number }
   | { type: "event_unarchive_local"; eventId: number }
+  | { type: "event_snooze_local"; eventId: number; until: string }
+  | { type: "event_unsnooze_local"; eventId: number }
   | {
       type: "send_local";
       localId: number;

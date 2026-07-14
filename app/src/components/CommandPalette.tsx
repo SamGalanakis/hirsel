@@ -8,17 +8,42 @@
 import * as Dialog from "@kobalte/core/dialog";
 import {
   Activity,
+  Archive,
   ArrowDownToLine,
   CircleStop,
+  Clock,
   Layers,
+  ListFilter,
   MessageSquareReply,
   MessagesSquare,
+  Scale,
   Search,
   Settings,
+  Trash2,
 } from "lucide-solid";
 import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
+import type { EventItem } from "../protocol";
 import { openSideChat, state } from "../store/store";
+import { archiveEventWithUndo } from "../lib/event-archive";
+import { decideEventWithUndo } from "../lib/event-decide";
+import { snoozeEventWithUndo } from "../lib/event-snooze";
+import { clearFinishedEventsWithUndo } from "../lib/event-sweep";
+import { snoozePresets } from "../lib/snooze-presets";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS, stopActiveTurn } from "../lib/keymap";
+import {
+  type QueueFilterMode,
+  setQueueFilterMode,
+  setQueueSearch,
+} from "./eventq/QueueFilter";
+import {
+  archivedEvents,
+  eventUiNodes,
+  finishedEvents,
+  isOpenJudgment,
+  orderedQueue,
+  snoozedEvents,
+  visibleEvents,
+} from "../store/selectors";
 import { cn } from "@/lib/utils";
 
 interface Command {
@@ -29,6 +54,46 @@ interface Command {
   keywords?: string;
   icon: JSX.Element;
   run: () => void;
+}
+
+/** Lightweight fuzzy match (no dep): case-insensitive subsequence — the query's
+ * characters appear in order somewhere in the text (so "clrf" finds "Clear
+ * finished"). Substring is the trivial subsequence case, so exact typing still
+ * matches first. */
+function fuzzyMatch(query: string, text: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q.length === 0) return true;
+  const t = text.toLowerCase();
+  let i = 0;
+  for (let j = 0; j < t.length && i < q.length; j++) {
+    if (t[j] === q[i]) i++;
+  }
+  return i === q.length;
+}
+
+/** The judgment the contextual actions ("Decide …", "Snooze current", "Archive
+ * current") target: the first open judgment in the resting queue's priority
+ * order (blocking first) — the one that most needs the Owner. */
+function currentJudgment(): EventItem | null {
+  const ordered = orderedQueue(
+    visibleEvents(state.events, state.eventArchiveOverrides),
+    state.eventDecideOverrides,
+  );
+  return ordered.find((e) => isOpenJudgment(e, state.eventDecideOverrides)) ?? null;
+}
+
+/** The letter-keyed options of a judgment's optionList, for the "Decide <key>"
+ * entries. */
+function judgmentOptions(ev: EventItem): { action: string; key: string; label: string }[] {
+  const list = eventUiNodes(ev.ui).find((n) => n.type === "optionList");
+  if (!list) return [];
+  const action = typeof list.action === "string" ? list.action : "choose";
+  const options = (Array.isArray(list.options) ? list.options : []) as Record<string, unknown>[];
+  return options.map((o) => ({
+    action,
+    key: String(o.key ?? ""),
+    label: String(o.label ?? "").replace(/`/g, ""),
+  }));
 }
 
 // ---- Palette ----------------------------------------------------------------
@@ -117,13 +182,108 @@ export const CommandPalette: Component<{
       });
     }
 
+    // ---- Contextual queue actions (Wave-3 ⌘K depth) ----
+    // Everything below acts on the current queue: the first open judgment for
+    // Decide/Snooze/Archive, the finished set for the sweep, plus the filter
+    // switches and a live "Search events" command. Kept flat (no submenu) so the
+    // fuzzy list stays fast — the snooze presets are individual sub-entries.
+    const ev = currentJudgment();
+    if (ev) {
+      for (const opt of judgmentOptions(ev)) {
+        out.push({
+          id: `decide-${ev.id}-${opt.key}`,
+          label: `Decide ${opt.key} — ${opt.label}`,
+          keywords: `choose answer ${ev.name} ${ev.description}`,
+          icon: <Scale class={iconClass} aria-hidden="true" />,
+          run: () => decideEventWithUndo(ev.id, opt.action, { choice: opt.key, label: opt.label }, opt.label),
+        });
+      }
+      for (const preset of snoozePresets()) {
+        out.push({
+          id: `snooze-${ev.id}-${preset.key}`,
+          label: `Snooze current · ${preset.label}`,
+          keywords: `defer later ${ev.name}`,
+          icon: <Clock class={iconClass} aria-hidden="true" />,
+          run: () => snoozeEventWithUndo(ev.id, preset.until, preset.label),
+        });
+      }
+      out.push({
+        id: `archive-${ev.id}`,
+        label: "Archive current",
+        keywords: `dismiss ${ev.name}`,
+        icon: <Archive class={iconClass} aria-hidden="true" />,
+        run: () => archiveEventWithUndo(ev.id),
+      });
+    }
+
+    const finishedIds = finishedEvents(
+      state.events,
+      state.eventArchiveOverrides,
+      state.eventDecideOverrides,
+    ).map((e) => e.id);
+    if (finishedIds.length > 0) {
+      out.push({
+        id: "clear-finished",
+        label: `Clear finished (${finishedIds.length})`,
+        keywords: "sweep archive done",
+        icon: <Trash2 class={iconClass} aria-hidden="true" />,
+        run: () => clearFinishedEventsWithUndo(finishedIds),
+      });
+    }
+
+    // Filter switches — Active / Needs you always; Snoozed / Archived only when
+    // they hold something.
+    const switches: { mode: QueueFilterMode; label: string; on: boolean }[] = [
+      { mode: "active", label: "Show active queue", on: true },
+      { mode: "needs-you", label: "Show needs-you", on: true },
+      {
+        mode: "snoozed",
+        label: "Show snoozed",
+        on: snoozedEvents(state.events, state.eventArchiveOverrides).length > 0,
+      },
+      {
+        mode: "archived",
+        label: "Show archived",
+        on: archivedEvents(state.events, state.eventArchiveOverrides).length > 0,
+      },
+    ];
+    for (const s of switches) {
+      if (!s.on) continue;
+      out.push({
+        id: `filter-${s.mode}`,
+        label: s.label,
+        keywords: "filter queue view",
+        icon: <ListFilter class={iconClass} aria-hidden="true" />,
+        run: () => {
+          setQueueFilterMode(s.mode);
+          goPane("feed");
+        },
+      });
+    }
+
+    // Live "Search events: <query>" — seeds the queue search and shows Active.
+    const q = query().trim();
+    if (q.length > 0) {
+      out.push({
+        id: "search-events",
+        label: `Search events: ${q}`,
+        keywords: "find filter",
+        icon: <Search class={iconClass} aria-hidden="true" />,
+        run: () => {
+          setQueueSearch(q);
+          setQueueFilterMode("active");
+          goPane("feed");
+        },
+      });
+    }
+
     return out;
   });
 
   const filtered = createMemo<Command[]>(() => {
-    const q = query().trim().toLowerCase();
+    const q = query().trim();
     if (!q) return commands();
-    return commands().filter((c) => `${c.label} ${c.keywords ?? ""}`.toLowerCase().includes(q));
+    return commands().filter((c) => fuzzyMatch(q, `${c.label} ${c.keywords ?? ""}`));
   });
 
   // Reset the surface each time it is summoned, and keep the active row in range

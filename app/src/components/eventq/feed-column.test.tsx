@@ -42,13 +42,19 @@ function judgment(id: number, heading: string, blocking = false): EventItem {
 
 async function setup(events: EventItem[]) {
   const store = await import("../../store/store");
+  // A fresh shared filter each test (it is module-level session state).
+  const qf = await import("./QueueFilter");
+  qf.setQueueFilterMode("active");
+  qf.setQueueSearch("");
   const sent: { eventId: number; action: string; data: unknown }[] = [];
   const opened: number[] = [];
+  let cleared = 0;
   vi.doMock("../../ws/client", () => ({
     getClient: () => ({
       sendEventAction: (eventId: number, action: string, data: unknown) =>
         sent.push({ eventId, action, data }),
       openSideChat: (eventId: number) => opened.push(eventId),
+      clearFinishedEvents: () => (cleared += 1),
       readEvent: () => {},
     }),
   }));
@@ -59,7 +65,7 @@ async function setup(events: EventItem[]) {
   const { FeedColumn } = await import("./FeedColumn");
   const screen = render(() => <FeedColumn />);
   const column = screen.container.querySelector('[data-slot="feed-column"]') as HTMLElement;
-  return { store, screen, sent, opened, column };
+  return { store, screen, sent, opened, column, clearedCount: () => cleared };
 }
 
 describe("FeedColumn — the desktop card column", () => {
@@ -172,18 +178,27 @@ describe("FeedColumn — the desktop card column", () => {
     await waitFor(() => expect(within(column).queryByText("Only judgment")).toBeNull());
   });
 
-  it("a finished awareness card carries the ⋯ overflow Archive; an open judgment never does", async () => {
+  it("a live judgment's ⋯ overflow offers Snooze…, never Archive (Wave-3)", async () => {
+    const { column } = await setup([judgment(1, "Open judgment")]);
+    const user = userEvent.setup();
+    // Deciding, not archiving, is how a judgment leaves the queue — so its ⋯
+    // offers the durable Snooze… instead.
+    await user.click(within(column).getByLabelText("More actions for @j1"));
+    expect(await within(document.body).findByRole("menuitem", { name: "Snooze…" })).toBeTruthy();
+    expect(within(document.body).queryByRole("menuitem", { name: "Archive" })).toBeNull();
+  });
+
+  it("a finished awareness card's ⋯ overflow offers Archive (never Snooze), posting the envelope", async () => {
     const readSummary: EventItem = {
       ...judgment(6, "Read digest"),
       kind: "summary",
       requires_response: false,
       read: true,
     };
-    const { sent, column } = await setup([judgment(1, "Open judgment"), readSummary]);
-    // The open judgment offers no overflow — deciding is how it leaves the queue.
-    expect(within(column).queryByLabelText("More actions for @j1")).toBeNull();
+    const { sent, column } = await setup([readSummary]);
     const user = userEvent.setup();
     await user.click(within(column).getByLabelText("More actions for @j6"));
+    expect(within(document.body).queryByRole("menuitem", { name: "Snooze…" })).toBeNull();
     await user.click(await within(document.body).findByRole("menuitem", { name: "Archive" }));
     await waitFor(() =>
       expect(sent).toContainEqual({ eventId: 6, action: "archive", data: {} }),
@@ -236,6 +251,61 @@ describe("FeedColumn — the desktop card column", () => {
     fireEvent.click(within(column).getByRole("button", { name: "Needs you" }));
     await waitFor(() => expect(within(column).queryByText("Ship the digest")).toBeNull());
     expect(within(column).getByText("Wire the reopen op")).toBeTruthy();
+  });
+
+  it("Clear finished (n) sweeps the finished cards in one op, batch-undoable (Wave-3)", async () => {
+    const toast = await import("../../lib/toast");
+    const readSummary: EventItem = {
+      ...judgment(5, "Read digest"),
+      kind: "summary",
+      requires_response: false,
+      read: true,
+    };
+    const { store, column, sent, clearedCount } = await setup([
+      judgment(1, "Live judgment"),
+      readSummary,
+    ]);
+    // The quiet sweep names the finished count (the read summary; not the open
+    // judgment) and lives at the trailing end of the filter row.
+    const sweep = await waitFor(() => {
+      const el = column.querySelector('[data-slot="clear-finished"]') as HTMLElement | null;
+      if (!el) throw new Error("no sweep");
+      return el;
+    });
+    expect(sweep.textContent).toContain("1");
+    fireEvent.click(sweep);
+    // One wire op (not per-card archives) + the whole finished batch optimistically
+    // archived; the finished card leaves the column.
+    expect(clearedCount()).toBe(1);
+    expect(store.state.eventArchiveOverrides).toContain(5);
+    await waitFor(() => expect(within(column).queryByText("Read digest")).toBeNull());
+    // The toast offers a batch Undo that unarchives the swept set.
+    const t = toast.toasts().find((x) => /Cleared 1/.test(x.message));
+    expect(t?.action?.label).toBe("Undo");
+    t!.action!.onClick();
+    expect(sent).toContainEqual({ eventId: 5, action: "unarchive", data: {} });
+    expect(store.state.eventArchiveOverrides).not.toContain(5);
+  });
+
+  it("Snoozed(n) filter discloses parked rows with the return time + Unsnooze (Wave-3)", async () => {
+    const future = new Date(Date.now() + 6 * 3600_000).toISOString();
+    const parked: EventItem = { ...judgment(3, "Parked judgment"), snoozed_until: future };
+    const { column, sent } = await setup([judgment(1, "Live judgment"), parked]);
+    // The parked event is out of Active — only the live judgment stands as a card.
+    expect(within(column).queryByText("Parked judgment")).toBeNull();
+    expect(within(column).getByText("Live judgment")).toBeTruthy();
+    // The Snoozed chip carries the count; switching to it shows the dense row.
+    const chip = within(column).getByRole("button", { name: /Snoozed/ });
+    expect(chip.textContent).toContain("1");
+    fireEvent.click(chip);
+    const section = column.querySelector('[data-slot="feed-snoozed"]') as HTMLElement;
+    expect(within(section).getByText("@j3")).toBeTruthy();
+    const unsnooze = within(section).getByRole("button", { name: /Unsnooze @j3/ });
+    fireEvent.click(unsnooze);
+    // The contract envelope, and — the parking lot now empty — the column falls
+    // back to Active where the returned event stands as a card again.
+    expect(sent).toContainEqual({ eventId: 3, action: "unsnooze", data: {} });
+    await waitFor(() => expect(within(column).getByText("Parked judgment")).toBeTruthy());
   });
 
   it("shows the inbox-zero empty state when the queue is genuinely clear", async () => {

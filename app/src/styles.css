@@ -58,6 +58,15 @@
   --status-danger: var(--destructive);
   --status-attention: oklch(0.56 0.15 73);
 
+  /* Brand cube faces — theme-aware so the isometric mark's silhouette holds on
+     BOTH canvases without a defensive contrast chip. LIGHT: ink-ish faces (a lit
+     top, a mid side, a shadowed left, a slate facet) read solid on the off-white
+     canvas. */
+  --brand-cube-top: oklch(0.42 0.03 264);
+  --brand-cube-right: oklch(0.3 0.025 264);
+  --brand-cube-left: oklch(0.22 0.02 264);
+  --brand-cube-facet: oklch(0.56 0.02 264);
+
   color-scheme: light;
   font-feature-settings:
     "cv02" 1,
@@ -95,6 +104,14 @@
   --status-success: oklch(0.72 0.185 150);
   --status-danger: var(--destructive);
   --status-attention: oklch(0.79 0.16 82);
+
+  /* Brand cube faces — DARK keeps the brand's resting near-whites (the mark's
+     original fills, verbatim): a white top, an off-white right, the near-black
+     left that recedes into the canvas, a slate facet. */
+  --brand-cube-top: #ffffff;
+  --brand-cube-right: #f8fafc;
+  --brand-cube-left: #0f172a;
+  --brand-cube-facet: #94a3b8;
 
   color-scheme: dark;
 }

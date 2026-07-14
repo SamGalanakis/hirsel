@@ -196,8 +196,8 @@ function OptionListNode(node: Node): JSX.Element {
               type="button"
               disabled={emit.disabled}
               class={cn(
-                "grid w-full grid-cols-[24px_1fr_auto] items-start gap-2.5 rounded-md border p-2.5 text-left transition-colors",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60",
+                "grid w-full grid-cols-[24px_1fr_auto] items-start gap-2.5 rounded-md border p-2.5 text-left transition-colors active:translate-y-px",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 disabled:active:translate-y-0",
                 recommended
                   ? "border-primary/40 bg-primary/[0.07]"
                   : "border-border bg-muted/40 hover:border-border/80",
@@ -268,8 +268,8 @@ function SubmitNode(node: Node): JSX.Element {
       type="button"
       disabled={emit.disabled}
       class={cn(
-        "inline-flex h-8 w-fit select-none items-center gap-1.5 rounded-md px-3.5 text-xs font-semibold outline-none transition-colors",
-        "focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60",
+        "inline-flex h-8 w-fit select-none items-center gap-1.5 rounded-md px-3.5 text-xs font-semibold outline-none transition-colors active:translate-y-px",
+        "focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 disabled:active:translate-y-0",
         ghost
           ? "border border-border bg-card text-muted-foreground hover:bg-muted"
           : "bg-primary text-primary-foreground hover:bg-primary/90",
@@ -399,11 +399,45 @@ function EventNode(props: { node: unknown }): JSX.Element {
   );
 }
 
-function NodeList(props: { nodes: Node[] }): JSX.Element {
+/** Grouped vertical rhythm for the card body (craft wave). A uniform gap makes
+ * the eyebrow, the question, the context and the choices read as one flat list;
+ * grouped spacing lets the QUESTION cluster (eyebrow→heading tight) and sets the
+ * CHOICES deliberately apart (context→options open). Everything else keeps the
+ * calm default step. Returned as the top-margin for a node given its predecessor;
+ * the first node gets none. */
+function rhythmMargin(prevType: string | null, type: string): string {
+  if (prevType === null) return "";
+  // Eyebrow → heading: pull the question up under its own eyebrow.
+  if (type === "heading" && prevType === "eyebrow") return "mt-1.5";
+  // Anything → the choices: open the gap so the options sit apart from the ask.
+  if (type === "optionList") return "mt-3";
+  // The calm default step (the old uniform gap).
+  return "mt-2.5";
+}
+
+/** The card body list. `rhythm` (the root card) groups the spacing per the rule
+ * above; nested lists (an `inset`'s field+submit) keep their own tight uniform
+ * gap so only the top-level question/choices rhythm is shaped. */
+function NodeList(props: { nodes: Node[]; rhythm?: boolean }): JSX.Element {
   return (
-    <div class="flex flex-col gap-2.5">
-      <For each={props.nodes}>{(n) => <EventNode node={n} />}</For>
-    </div>
+    <Show
+      when={props.rhythm}
+      fallback={
+        <div class="flex flex-col gap-2.5">
+          <For each={props.nodes}>{(n) => <EventNode node={n} />}</For>
+        </div>
+      }
+    >
+      <div class="flex flex-col">
+        <For each={props.nodes}>
+          {(n, i) => (
+            <div class={rhythmMargin(i() > 0 ? (props.nodes[i() - 1]?.type ?? null) : null, n.type)}>
+              <EventNode node={n} />
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
   );
 }
 
@@ -438,7 +472,7 @@ export function EventCardRenderer(props: EventCardRendererProps): JSX.Element {
       }
     >
       <EventEmitContext.Provider value={emit}>
-        <NodeList nodes={eventUiNodes(props.ui)} />
+        <NodeList nodes={eventUiNodes(props.ui)} rhythm />
       </EventEmitContext.Provider>
     </ErrorBoundary>
   );

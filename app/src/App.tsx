@@ -5,6 +5,7 @@ import { DesktopShell } from "./components/DesktopShell";
 import { EventScroller } from "./components/eventq/EventScroller";
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
 import { ConnectionPill } from "./components/ConnectionPill";
+import { PhoneHome } from "./components/PhoneHome";
 import { PhoneNavBar } from "./components/PhoneNavBar";
 import { PhoneOverflowMenu } from "./components/PhoneOverflowMenu";
 import { Toaster } from "./components/Toaster";
@@ -207,7 +208,7 @@ function App() {
                   overflow (Model · Canvas · Processes · Settings). */}
               <header class="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3 rail:hidden">
                 <div class="flex shrink-0 items-center gap-2">
-                  <BrandMark size={22} ring />
+                  <BrandMark size={22} />
                   <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
                 </div>
                 <div class="flex shrink-0 items-center gap-0.5">
@@ -217,12 +218,9 @@ function App() {
               </header>
               {/* The phone home is the event-queue scroller (ADR-0012); Chat is
                   the drill-in reached from a judgment's Discuss, the bottom nav,
-                  or the overflow. */}
-              <main class="flex min-h-0 flex-1 flex-col">
-                <Show when={state.home === "chat"} fallback={<EventScroller />}>
-                  <ChatView />
-                </Show>
-              </main>
+                  or the overflow. PhoneHome cross-slides between the two on a
+                  `state.home` change (Feed↔Chat), mounting only one at a time. */}
+              <PhoneHome feed={() => <EventScroller />} chat={() => <ChatView />} />
               {/* Phone bottom navigation bar: two icon buttons (Feed / Chat) that
                   move the Owner BOTH ways, so he can always get back. Shown on
                   BOTH homes; on chat it sits below the composer. */}

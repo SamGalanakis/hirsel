@@ -1,5 +1,6 @@
 import { untrack } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import { markArrival } from "../lib/event-entrance";
 import { reduce } from "./reducer";
 import { type Action, type AppState, initialState } from "./types";
 
@@ -146,6 +147,14 @@ function appSnapshot(): AppState {
  * or the subsequent writes here would re-trigger it in an infinite loop. */
 export function dispatch(action: Action): void {
   untrack(() => {
+    // Card entrance (craft wave): a live `event_upsert` that introduces an id we
+    // have never seen is a genuine ARRIVAL — flag it so its card fades+settles in
+    // exactly once. `hello_ok` hydration (the whole-snapshot swap) is deliberately
+    // NOT flagged, so the initial queue never flashes every card in on load.
+    if (action.type === "event_upsert") {
+      const id = action.payload.event.id;
+      if (!state.events.some((e) => e.id === id)) markArrival(id);
+    }
     const next = reduce(appSnapshot(), action);
     setState("messages", reconcile(next.messages, { key: "id" }));
     // Typed event queue: reconcile keyed by id so only the DOM bound to a

@@ -68,7 +68,7 @@ export function IconRail() {
         aria-label="hirsel"
         title="hirsel"
       >
-        <BrandMark size={24} ring />
+        <BrandMark size={24} />
       </div>
 
       <nav aria-label="Primary" class="flex flex-col items-center gap-1 pt-2">

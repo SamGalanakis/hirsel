@@ -59,7 +59,7 @@ export function QueueFilterBar(props: {
           <button
             type="button"
             aria-label="Clear search"
-            class="absolute right-1.5 grid size-5 place-items-center rounded text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            class="absolute right-1.5 grid size-5 place-items-center rounded text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px"
             onClick={() => props.onQueryChange("")}
           >
             <X class="size-3.5" aria-hidden="true" />
@@ -79,7 +79,7 @@ export function QueueFilterBar(props: {
               data-mode={m.value}
               aria-pressed={props.mode === m.value}
               class={cn(
-                "inline-flex items-center rounded-[5px] px-2 py-1 text-[0.75rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                "inline-flex items-center rounded-[5px] px-2 py-1 text-[0.75rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px",
                 props.mode === m.value
                   ? "bg-card text-foreground shadow-xs"
                   : "text-muted-foreground hover:text-foreground",

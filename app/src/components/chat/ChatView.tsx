@@ -106,8 +106,11 @@ function formatElapsed(ms: number): string {
 }
 
 /** How close in time two same-author messages must be to cluster (tight gap,
- * shared footer) rather than stand alone with their own meta. */
-const CLUSTER_GAP_MS = 5 * 60 * 1000;
+ * shared footer) rather than stand alone with their own meta. Widened to 10 min
+ * so a run of messages collapses to a single timestamp/meta footer at the run
+ * boundary — the per-bubble "01:39 PM · ⋯" noise the tighter window barely
+ * touched. Timestamps stay honest, just grouped and quieter. */
+const CLUSTER_GAP_MS = 10 * 60 * 1000;
 
 export function ChatView() {
   const [highlightedId, setHighlightedId] = createSignal<number | null>(null);
@@ -390,12 +393,17 @@ export function ChatView() {
       {/* Desktop-only slim center-pane header (`hidden rail:flex`). Shares the
           h-12 top-bar height + border-b with the nav-rail brand block and the
           Pings/inspector pane headers, so one continuous hairline runs across
-          all three panes and the "what is my agent doing" datum has a persistent
-          home. Right side carries the ModelChip + Canvas reopen affordance.
-          Phone is untouched. */}
-      <header class="hidden h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-border px-4 rail:flex">
+          all three panes. The left datum (AgentStatus) is now exception-only —
+          it stays empty while connected (the live turn is announced once, by the
+          transcript marker below) and speaks only when the socket is down. Right
+          side carries the quiet ModelChip + Canvas reopen affordance. Phone is
+          untouched. */}
+      <header class="hidden h-12 flex-shrink-0 items-center gap-2 border-b border-border px-4 rail:flex">
         <AgentStatus />
-        <div class="flex min-w-0 shrink items-center gap-2">
+        {/* `ml-auto` keeps the quiet ModelChip + Canvas affordances pinned right
+            even in the common case where the exception-only AgentStatus renders
+            nothing on its left. */}
+        <div class="ml-auto flex min-w-0 shrink items-center gap-2">
           <ModelChip />
           <CanvasButton />
         </div>

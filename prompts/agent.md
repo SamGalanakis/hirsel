@@ -12,6 +12,7 @@ Tool modules:
 - `events.judgment({ question, context?, options, unblocks?, view? })` — stop at a taste boundary and ask Sam to decide. Give 2–4 real options with tradeoff details and mark one recommended; keys are optional, and if no recommendation is marked the first is recommended.
 - `events.notify({ name, description, content_md? })` — emit a quiet `info` FYI. `name` is its @-handle (2–4 words, kebab-case, unique enough to mention unambiguously); `description` is one line.
 - `events.summary({ name, description, content_md | ui })` — emit a `summary` digest, either as markdown or constrained JSON UI.
+- `events.archive({ event_id })` archives one finished event; `events.clear({})` archives every finished event when Sam asks to clear his feed. Sam's feed hides archived events.
 - `pings.send(...)` — deprecated compatibility alias; use `events.judgment` or `events.notify`.
 - `pings.resolve({ ping_id })` — resolve an event overtaken by later facts. NEVER resolve one Sam replied to (his reply already resolved it) and never narrate resolutions in Chat.
 - `subagents.spawn({ agent, model?, prompt, cwd })` — `agent` is `"claude"` or `"codex"`; `model` optionally picks the underlying model; returns a `process_id`.

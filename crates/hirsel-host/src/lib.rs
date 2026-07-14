@@ -392,6 +392,8 @@ impl AppState {
             }
             "submit" | "dismiss" => self.storage.resolve_ping(event_id).await?,
             "snooze" => self.storage.reopen_ping(event_id).await?,
+            "archive" => self.storage.archive_event(event_id).await?,
+            "unarchive" => self.storage.unarchive_event(event_id).await?,
             other => anyhow::bail!("unsupported event action: {other}"),
         }
         .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
@@ -1068,6 +1070,66 @@ mod tests {
             owner_reply.body,
             "sqlite views table\nKeep the schema queryable for debugging."
         );
+    }
+
+    #[tokio::test]
+    async fn event_action_archive_and_unarchive_broadcast_full_upserts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let anchor = state
+            .storage
+            .append_chat(ChatAuthor::Agent, "Review the release", None)
+            .await
+            .unwrap();
+        let event = state
+            .tools
+            .pings_send(
+                "release-review",
+                "Review the release",
+                "Choose whether to release.",
+                anchor.id,
+                true,
+                vec![
+                    hirsel_proto::QuickReply {
+                        value: "release".to_string(),
+                        label: "Release".to_string(),
+                    },
+                    hirsel_proto::QuickReply {
+                        value: "hold".to_string(),
+                        label: "Hold".to_string(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let event_id = event.id;
+
+        let archived = state
+            .handle_event_action(event_id, "archive".to_string(), json!({}))
+            .await
+            .unwrap();
+        assert!(archived.archived);
+        assert_eq!(archived.status, PingStatus::Done);
+
+        let unarchived = state
+            .handle_event_action(event_id, "unarchive".to_string(), json!({}))
+            .await
+            .unwrap();
+        assert!(!unarchived.archived);
+        assert_eq!(unarchived.status, PingStatus::Done);
+
+        let updates = state
+            .broadcast_log
+            .recent()
+            .into_iter()
+            .filter_map(|frame| match frame {
+                HostToClient::EventUpsert { event } if event.id == event_id => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(updates.len(), 3);
+        assert!(updates[1].archived);
+        assert!(!updates[2].archived);
     }
 
     #[tokio::test]

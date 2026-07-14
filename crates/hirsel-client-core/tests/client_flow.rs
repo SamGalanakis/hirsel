@@ -47,6 +47,7 @@ fn ping(id: u64, read: bool, status: PingStatus) -> Ping {
         quick_replies: Vec::new(),
         status,
         read,
+        archived: false,
         ts: Utc.timestamp_opt(id as i64, 0).unwrap(),
     }
 }

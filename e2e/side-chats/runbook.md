@@ -126,7 +126,8 @@ CONFIRM_BEFORE="$(max_chat_id)"
 post_json debug/confirm-conclusion '{"sc":"'"$SC"'","text":"Ship it after the final check."}' >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "owner" and .body == "Ship it after the final check." and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
 wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
-wait_jq debug/broadcasts '.events[] | select(.type == "ping_upsert" and .ping.id == '"$PING_ID"' and .ping.status == "done")' 10 >/dev/null
+# Post-cutover the host broadcasts event_upsert (events generalize pings; same id space).
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
 wait_jq debug/side-chats 'all(.side_chats[]; .sc != "'"$SC"'")' 10 >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "side_chat_closed" and .sc == "'"$SC"'")' 10 >/dev/null
 ```

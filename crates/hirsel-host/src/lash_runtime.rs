@@ -50,6 +50,7 @@ use lash_core::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify, broadcast};
 use uuid::Uuid;
 
@@ -63,7 +64,6 @@ use crate::{
     tools::{JudgmentOptionInput, ToolSuite},
 };
 
-const AGENT_SESSION_ID: &str = "agent";
 const HIRSEL_SUBAGENT_ENGINE: &str = "hirsel_subagent";
 const HIRSEL_MONITOR_ENGINE: &str = "hirsel_monitor";
 const SUBAGENT_COMPLETED: &str = "subagent.completed";
@@ -94,6 +94,14 @@ pub(crate) fn agent_guidance(config: &Config) -> String {
         config.config_path.display(),
         config.docs_path.display()
     )
+}
+
+fn agent_guidance_with_handoff(mut guidance: String, handoff_seed: Option<&str>) -> String {
+    if let Some(handoff_seed) = handoff_seed {
+        guidance.push_str("\n\n## Session handoff\n\n");
+        guidance.push_str(handoff_seed);
+    }
+    guidance
 }
 
 #[derive(Clone)]
@@ -314,6 +322,7 @@ enum LashStartup {
 struct LashAgentRuntime {
     core: lash::LashCore,
     session: lash::LashSession,
+    session_id: String,
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
@@ -401,8 +410,18 @@ impl LashAgentRuntime {
             );
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
+        let tool_definitions = hirsel_tool_definitions();
+        let tool_surface = agent_tool_surface(&tool_definitions)?;
+        let session_bootstrap = tools
+            .prepare_agent_session(&tool_surface.fingerprint, &tool_surface.tool_names)
+            .await
+            .context("prepare main-agent session generation")?;
+        let session_guidance = agent_guidance_with_handoff(
+            config.agent_guidance.clone(),
+            session_bootstrap.handoff_seed.as_deref(),
+        );
         let tool_provider = Arc::new(StaticToolProvider::new(
-            hirsel_tool_definitions(),
+            tool_definitions,
             HirselToolExecutor {
                 tools: tools.clone(),
                 anchors: Arc::new(Mutex::new(TurnAnchorState::default())),
@@ -435,7 +454,7 @@ impl LashAgentRuntime {
             .process_registry()
             .ok_or_else(|| anyhow::anyhow!("Lash process registry was not configured"))?;
         let session = core
-            .session(AGENT_SESSION_ID)
+            .session(&session_bootstrap.session_id)
             // A liveness-aware lease identity lets a rebooted host reclaim the
             // session execution lease immediately when the previous holder was
             // a now-dead process on this same host+boot (e.g. after SIGKILL),
@@ -447,7 +466,7 @@ impl LashAgentRuntime {
             ))
             .prompt_contribution(lash::prompt::PromptContribution::guidance(
                 "Hirsel Agent",
-                config.agent_guidance.clone(),
+                session_guidance,
             ))
             .open()
             .await?;
@@ -455,6 +474,7 @@ impl LashAgentRuntime {
         let runtime = Arc::new(Self {
             core: core.clone(),
             session,
+            session_id: session_bootstrap.session_id,
             tools: tools.clone(),
             broadcaster: broadcaster.clone(),
             broadcast_log,
@@ -493,7 +513,8 @@ impl LashAgentRuntime {
             variant = ?runtime.session.policy_snapshot().model.variant,
             provider = ?config.provider_mode,
             data_dir = %config.data_dir.display(),
-            "Lash Agent runtime opened session agent"
+            session_id = %runtime.session_id,
+            "Lash Agent runtime opened session"
         );
         Ok(LashStartup::Ready(runtime))
     }
@@ -752,7 +773,7 @@ impl LashAgentRuntime {
             if let Err(error) = self
                 .core
                 .processes()
-                .start(monitor_start_request(&monitor, AGENT_SESSION_ID), scope)
+                .start(monitor_start_request(&monitor, &self.session_id), scope)
                 .await
             {
                 tracing::warn!(%error, monitor_id = %monitor.id, "failed to resume monitor process");
@@ -926,7 +947,7 @@ impl LashAgentRuntime {
         self.core
             .processes()
             .start(
-                monitor_start_request(record, AGENT_SESSION_ID),
+                monitor_start_request(record, &self.session_id),
                 inline_trigger_scope(format!("monitor-debug-create:{}", record.id)),
             )
             .await?;
@@ -1200,7 +1221,7 @@ impl LashAgentRuntime {
     }
 
     async fn fire_due_timers(&self, trigger_store: Arc<dyn TriggerStore>) -> anyhow::Result<()> {
-        let mut filter = TriggerSubscriptionFilter::for_session(AGENT_SESSION_ID);
+        let mut filter = TriggerSubscriptionFilter::for_session(&self.session_id);
         filter.source_type = Some(TIMER_SOURCE_TYPE.to_string());
         filter.enabled = Some(true);
         let records = trigger_store.list_subscriptions(filter).await?;
@@ -2630,7 +2651,7 @@ impl HirselToolExecutor {
                 "cwd": cwd,
             }),
         )
-        .with_wake_target(Some(SessionScope::new(AGENT_SESSION_ID)))
+        .with_wake_target(Some(SessionScope::new(context.session_id())))
         .with_event_types(subagent_event_types());
         let handle = context
             .processes()
@@ -3310,7 +3331,7 @@ fn monitor_start_request(record: &MonitorRecord, session_id: &str) -> ProcessSta
         RecoveryDisposition::Rerunnable,
         ProcessOriginator::session(SessionScope::new(session_id)),
     )
-    .with_wake_target(Some(SessionScope::new(AGENT_SESSION_ID)))
+    .with_wake_target(Some(SessionScope::new(session_id)))
     .with_event_types(monitor_event_types())
 }
 
@@ -3461,6 +3482,49 @@ fn subagent_abandoned_output() -> ProcessAwaitOutput {
         }),
         control: None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentToolSurface {
+    fingerprint: String,
+    tool_names: Vec<String>,
+}
+
+fn agent_tool_surface(definitions: &[ToolDefinition]) -> anyhow::Result<AgentToolSurface> {
+    let mut named_bindings = definitions
+        .iter()
+        .map(|definition| {
+            let binding = LashlangToolBinding::required_for_remote(&definition.manifest)
+                .map_err(anyhow::Error::msg)?;
+            Ok((
+                format!(
+                    "{}|{}|{}",
+                    binding.authority_type,
+                    binding.call_path(),
+                    definition.manifest.name
+                ),
+                binding.call_path(),
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    named_bindings.sort();
+    named_bindings.dedup();
+    let fingerprint_material = named_bindings
+        .iter()
+        .map(|(identity, _)| identity.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fingerprint = format!("{:x}", Sha256::digest(fingerprint_material.as_bytes()));
+    let mut tool_names = named_bindings
+        .into_iter()
+        .map(|(_, tool_name)| tool_name)
+        .collect::<Vec<_>>();
+    tool_names.sort();
+    tool_names.dedup();
+    Ok(AgentToolSurface {
+        fingerprint,
+        tool_names,
+    })
 }
 
 fn hirsel_tool_definitions() -> Vec<ToolDefinition> {
@@ -5000,7 +5064,10 @@ mod tests {
 
     use crate::{
         processes::{ProcessRecord, ProcessStatus, ProcessStore},
-        storage::Storage,
+        storage::{
+            AGENT_SESSION_GENERATION_META_KEY, Storage, TOOL_SURFACE_FINGERPRINT_META_KEY,
+            TOOL_SURFACE_NAMES_META_KEY,
+        },
         tools::{ShellRunOutput, ToolsConfig},
     };
     use chrono::Utc;
@@ -5259,6 +5326,233 @@ mod tests {
         assert!(guidance.contains(config.config_path.to_str().unwrap()));
         assert!(guidance.contains(config.docs_path.to_str().unwrap()));
         assert!(guidance.contains("## Host configuration"));
+    }
+
+    #[test]
+    fn tool_surface_fingerprint_uses_names_not_argument_schemas() {
+        let first = vec![tool_definition(
+            "test.events_notify",
+            "events_notify",
+            "Notify",
+            json!({
+                "type": "object",
+                "required": ["message"],
+                "properties": { "message": { "type": "string" } }
+            }),
+            json!({ "type": "object" }),
+            ["events"],
+            "notify",
+            ToolScheduling::Serial,
+        )];
+        let argument_only_change = vec![tool_definition(
+            "test.events_notify",
+            "events_notify",
+            "Notify with an evolved schema",
+            json!({
+                "type": "object",
+                "required": ["message"],
+                "properties": {
+                    "message": { "type": "string" },
+                    "quiet": { "type": "boolean" }
+                }
+            }),
+            json!({ "type": "object" }),
+            ["events"],
+            "notify",
+            ToolScheduling::Serial,
+        )];
+        let mut name_set_change = argument_only_change.clone();
+        name_set_change.push(tool_definition(
+            "test.events_archive",
+            "events_archive",
+            "Archive",
+            json!({ "type": "object" }),
+            json!({ "type": "object" }),
+            ["events"],
+            "archive",
+            ToolScheduling::Serial,
+        ));
+
+        let first = agent_tool_surface(&first).unwrap();
+        let argument_only_change = agent_tool_surface(&argument_only_change).unwrap();
+        let name_set_change = agent_tool_surface(&name_set_change).unwrap();
+
+        assert_eq!(first.fingerprint, argument_only_change.fingerprint);
+        assert_eq!(first.tool_names, vec!["events.notify"]);
+        assert_ne!(first.fingerprint, name_set_change.fingerprint);
+        assert_eq!(
+            name_set_change.tool_names,
+            vec!["events.archive", "events.notify"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::build_state(crate::tests::test_config(dir.path()))
+            .await
+            .unwrap();
+        let storage = state.storage.clone();
+        let initial_definitions = vec![tool_definition(
+            "test.events_notify",
+            "events_notify",
+            "Notify",
+            json!({ "type": "object" }),
+            json!({ "type": "object" }),
+            ["events"],
+            "notify",
+            ToolScheduling::Serial,
+        )];
+        let initial_surface = agent_tool_surface(&initial_definitions).unwrap();
+
+        let first_boot = state
+            .tools
+            .prepare_agent_session(&initial_surface.fingerprint, &initial_surface.tool_names)
+            .await
+            .unwrap();
+        assert_eq!(first_boot.session_id, "agent");
+        assert_eq!(first_boot.handoff_seed, None);
+        assert_eq!(
+            storage
+                .meta_value(TOOL_SURFACE_FINGERPRINT_META_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(initial_surface.fingerprint.as_str())
+        );
+        assert_eq!(
+            storage
+                .meta_value(TOOL_SURFACE_NAMES_META_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("[\"events.notify\"]")
+        );
+        assert_eq!(
+            storage
+                .meta_value(AGENT_SESSION_GENERATION_META_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(!state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event } if event.name == "session-rotated"
+        )));
+
+        let reopened_storage = Storage::open(dir.path()).await.unwrap();
+        let persisted_boot = reopened_storage
+            .reconcile_agent_tool_surface(&initial_surface.fingerprint, &initial_surface.tool_names)
+            .await
+            .unwrap();
+        assert_eq!(persisted_boot.session_id, "agent");
+        assert!(!persisted_boot.rotated);
+        assert!(persisted_boot.added_tools.is_empty());
+
+        let stable_boot = state
+            .tools
+            .prepare_agent_session(&initial_surface.fingerprint, &initial_surface.tool_names)
+            .await
+            .unwrap();
+        assert_eq!(stable_boot, first_boot);
+        assert!(!state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event } if event.name == "session-rotated"
+        )));
+
+        let owner = storage
+            .append_chat(ChatAuthor::Owner, "owner turn", None)
+            .await
+            .unwrap();
+        storage
+            .append_chat(ChatAuthor::Agent, "The release is ready.", None)
+            .await
+            .unwrap();
+        storage
+            .create_event(
+                hirsel_proto::EventKind::Judgment,
+                hirsel_proto::EventSource {
+                    kind: hirsel_proto::EventSourceKind::Agent,
+                    r#ref: None,
+                },
+                "release-channel",
+                "Choose stable or beta",
+                json!({ "type": "text", "text": "Choose stable or beta" }),
+                owner.id,
+                true,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let mut changed_definitions = initial_definitions;
+        changed_definitions.push(tool_definition(
+            "test.events_archive",
+            "events_archive",
+            "Archive",
+            json!({ "type": "object" }),
+            json!({ "type": "object" }),
+            ["events"],
+            "archive",
+            ToolScheduling::Serial,
+        ));
+        let changed_surface = agent_tool_surface(&changed_definitions).unwrap();
+        let rotated = state
+            .tools
+            .prepare_agent_session(&changed_surface.fingerprint, &changed_surface.tool_names)
+            .await
+            .unwrap();
+
+        assert_eq!(rotated.session_id, "agent-g1");
+        let seed = rotated.handoff_seed.unwrap();
+        assert!(seed.starts_with(
+            "Session rotated by the host to pick up new tools: events.archive. Prior conversation summary follows."
+        ));
+        assert!(seed.contains("- owner: owner turn"));
+        assert!(seed.contains("- agent: The release is ready."));
+        assert!(seed.contains("- [judgment] release-channel: Choose stable or beta"));
+        let guidance = agent_guidance_with_handoff("base guidance".to_string(), Some(&seed));
+        assert!(guidance.starts_with("base guidance\n\n## Session handoff\n\n"));
+        assert!(guidance.ends_with(&seed));
+        assert_eq!(
+            storage
+                .meta_value(AGENT_SESSION_GENERATION_META_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        let emitted = storage
+            .all_pings()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.name == "session-rotated")
+            .unwrap();
+        assert_eq!(emitted.name, "session-rotated");
+        assert_eq!(emitted.kind, hirsel_proto::EventKind::Info);
+        assert_eq!(
+            emitted.source.kind,
+            hirsel_proto::EventSourceKind::Scheduled
+        );
+        assert_eq!(emitted.source.r#ref.as_deref(), Some("agent-g1"));
+        assert!(emitted.description.contains("events.archive"));
+        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event } if event.id == emitted.id
+        )));
+
+        state.broadcast_log.clear();
+        let stable_generation = state
+            .tools
+            .prepare_agent_session(&changed_surface.fingerprint, &changed_surface.tool_names)
+            .await
+            .unwrap();
+        assert_eq!(stable_generation.session_id, "agent-g1");
+        assert_eq!(stable_generation.handoff_seed, None);
+        assert!(!state.broadcast_log.recent().iter().any(|frame| matches!(
+            frame,
+            HostToClient::EventUpsert { event } if event.name == "session-rotated"
+        )));
     }
 
     #[test]
@@ -5897,9 +6191,9 @@ mod tests {
     fn timer_registration(value: Value, created_at_ms: u64) -> TriggerSubscriptionRecord {
         TriggerSubscriptionRecord {
             subscription_id: "subscription-id".to_string(),
-            registrant: ProcessOriginator::session(SessionScope::new(AGENT_SESSION_ID)),
+            registrant: ProcessOriginator::session(SessionScope::new("agent")),
             env_ref: ProcessExecutionEnvRef::new("process-env:test"),
-            wake_target: Some(SessionScope::new(AGENT_SESSION_ID)),
+            wake_target: Some(SessionScope::new("agent")),
             handle: "handle-id".to_string(),
             name: None,
             source_type: TIMER_SOURCE_TYPE.to_string(),

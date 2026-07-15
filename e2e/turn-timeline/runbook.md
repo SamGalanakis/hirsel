@@ -46,6 +46,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-turn-timeline-scripted
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
@@ -81,6 +82,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-turn-timeline-real
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```

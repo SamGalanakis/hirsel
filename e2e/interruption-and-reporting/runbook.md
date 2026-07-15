@@ -31,6 +31,7 @@ export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_DRIVER=fake
 export HIRSEL_TOKEN=dev-token HIRSEL_DEBUG=1
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-interruption
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 cargo run -p hirsel-host
 ```

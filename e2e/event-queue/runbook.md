@@ -36,6 +36,7 @@ export HOST_BIN="$CARGO_TARGET_DIR/debug/hirsel-host"
 export HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_DRIVER=fake
 export HIRSEL_TOKEN=dev-token HIRSEL_DEBUG=1
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-event-queue
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_TEMPLATES_DIR="$REPO/templates"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 mkdir -p /tmp/hirsel-e2e-event-queue-work

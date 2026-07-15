@@ -69,6 +69,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-send-queue-cancel-scripted
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_TEMPLATES_DIR="$REPO/templates"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 mkdir -p /tmp/hirsel-e2e-send-queue-cancel-scripted-work
@@ -166,6 +167,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-send-queue-cancel-codex
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_TEMPLATES_DIR="$REPO/templates"
 export HIRSEL_LISTEN=127.0.0.1:<another-verified-free-port>
 mkdir -p /tmp/hirsel-e2e-send-queue-cancel-codex-work

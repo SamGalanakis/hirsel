@@ -91,6 +91,7 @@ Never let anything under test touch or inherit from the hirsel checkout:
 
 - Host instances under test run with their working directory in the scenario's `/tmp` workdir (invoke the prebuilt binary by absolute path; the repo is reference material, not a runtime location).
 - Every delegation instruction in an owner message MUST name an explicit throwaway workdir (e.g. "in /tmp/hirsel-e2e-<scenario>-work, which you may create") — an unguided Agent defaults its Sub-agent `cwd` into the host's cwd, and a full-auto CLI running inside the hirsel repo inherits the Owner's personal CLAUDE.md and can write into the checkout.
+- "Create it" means a plain directory (or a fresh `git init` repo when the task needs one) — NEVER a `git worktree add` against an existing checkout. A live run has already produced a sub-agent registering a worktree+branch on the real hirsel repo from exactly this phrasing; after any real-agent scenario, `git worktree list` in the hirsel checkout must show no scenario residue, and any found is cleaned as part of the run's teardown.
 - Runbook executors likewise run from a neutral directory and reference the repo read-only by absolute path.
 
 ## Poll, Don't Sleep

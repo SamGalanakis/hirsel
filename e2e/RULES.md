@@ -19,14 +19,30 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `POST /debug/confirm-conclusion { "sc": "side:...", "text": "..." }` posts the anchor-refed Owner conclusion to main Chat, auto-resolves the Ping, and closes the side chat.
 - `POST /debug/read-ping { "ping_id": ... }` marks a Ping read and broadcasts `ping_upsert`.
 - `POST /debug/resolve-ping { "ping_id": ... }` explicitly moves a Ping to done and broadcasts `ping_upsert`.
+- `POST /debug/reopen-ping { "ping_id": ... }` moves a done Ping/Event back to open and broadcasts `event_upsert`.
+- `POST /debug/event-action { "event_id": ..., "action": "choose" | "submit" | "dismiss" | "snooze" | "unsnooze" | "archive" | "unarchive", "data": {...} }` applies the owner-facing Event action and returns the authoritative Event.
+- `POST /debug/trigger-digest { "job_id": "optional", "text": "optional", "status": "optional" }` runs the scheduled-digest producer and returns its summary Event.
+- `GET /debug/taste` returns recorded standing-decision rows.
+- `POST /debug/register-push-token { "platform": "android" | "web" | "ios", "token": "..." }` idempotently upserts a push token and returns its timestamps.
+- `POST /debug/unregister-push-token { "token": "..." }` removes a push token and returns whether a row was removed.
+- `GET /debug/pushes` returns pushes captured by the debug recording sender, including recipient tokens and Event payloads.
 - `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
 - `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
 - `POST /debug/create-monitor { "cmd": "...", "every_secs": 30, "wake_on": "changed" | "exit_zero" | "exit_nonzero" | "regex", "pattern": "...", "label": "..." }` creates a persisted monitor for deterministic monitor runbooks.
+- `POST /debug/set-model { "model_id": "...", "variant": "..." }` validates, persists, and selects the main-Agent model.
+- `GET /debug/subagent-models` returns the Sub-agent model catalog; `POST` with `{ "provider": "...", "model_id": "...", "enabled": bool, "default_variant": "..." }` updates one catalog row.
+- `POST /debug/show-view { "template_id": "..." | null, "spec": {...} | null, "params": {...} | null, "placement": "canvas" | "chat" | "ping:<id>" }` creates an active View and returns its resolved instance.
+- `GET /debug/views` returns active View instances.
+- `POST /debug/view-event { "instance_id": "...", "action": "...", "data": {...} }` routes a View interaction through normal Owner-message ingress.
 - `GET /debug/chat` returns persisted Chat messages.
 - `GET /debug/pings` returns persisted Pings, including required `name` and `description` fields.
+- `GET /debug/events` returns all persisted typed Events, including archived rows.
 - `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, `turn_event`, `process_upsert`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
 - `GET /debug/processes` returns v1.4 `ProcessInfo` rows for Sub-agents and monitors: `id`, `kind`, `label`, `agent`, `model`, `state`, timestamps, and `summary`.
 - `GET /debug/side-chats` returns only live side chats with their scoped transcripts.
+- `POST /debug/pair { "device_label": "..." }` mints a five-minute pairing code and returns it with the current iroh ticket.
+- `GET /debug/devices` returns paired-device labels, Node-id prefixes, timestamps, and revocation state.
+- `POST /debug/revoke-device` with exactly one of `{ "token": "..." }` or `{ "label": "..." }` revokes matching live devices.
 - `GET /debug/health` returns basic host health and the latest Chat message id.
 - `get_blob_url` returns a short-lived, blob-scoped signed URL for `GET /blob/{id}`. `Authorization: Bearer ...` remains a migration path, but owner tokens are never accepted in query strings. Images are served inline; other MIME types are served as attachments.
 
@@ -62,6 +78,11 @@ the required non-empty event fields; runbooks must never synthesize them outside
 - `daily-driver` - the whole SCOPE Slice-1 loop (warm Chat exchange → delegation + note → progress → one `requires_response` Ping with Quick Replies → auto-resolving tap → acknowledgement) chained end-to-end in one continuous session with a single reset.
 - `event-queue` - the ADR-0012/0013 typed event lifecycle: a real-Agent judgment with the blessed card `ui`, choose delivering an anchor-refed reply, taste-store `record_rule`, the scheduled digest summary, judgment-only push, and the Done-toggle reopen (plus the no-`until` snooze rejection).
 - `event-snooze-sweep` - the wave-3 lifecycle additions, fully mechanical: durable snooze validation (`until` required, presets named on error), host-timer returns with judgment re-push, restart-surviving returns, unsnooze, and the `clear_finished_events` sweep over the real `/ws` wire stamping `archived_at` while open judgments survive.
+- `event-fork` - event-scoped side chat: open a judgment by Event id, preserve its snapshot, decide while the fork is live, conclude quietly, and tear the fork down.
+- `event-archive-undo` - manual archive of an open judgment, auto-dismiss and feed removal, honest `unarchive` + `reopen` undo, and restart persistence.
+- `views-lifecycle` - standalone View show/update/interaction/clear lifecycle, Ping anchoring, broadcasts, and reconnect replay.
+- `push-discipline` - idempotent token registration/unregistration and the judgment-only push invariant with negative cases.
+- `model-selection` - main- and Sub-agent model broadcasts, fresh-hello reflection, invalid selection, and restart persistence.
 - `interactive-orchestration` - the keep-chat-interactive guarantees: a delegation turn ends while the Sub-agent still runs, a warm question is answered mid-flight, and a long Sub-agent report reaches the Agent untruncated.
 
 ## Neutral Working Directories

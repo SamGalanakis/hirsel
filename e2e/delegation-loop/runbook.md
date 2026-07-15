@@ -11,20 +11,24 @@ Use this deterministic mode when no LLM credentials are available. It exercises 
 Execute the scripted scenario directly with:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-scaffold
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 e2e/delegation-loop/run.sh
 ```
 
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
+ROOT=/workspace/code/hirsel-rbcov
+source "$ROOT/e2e/lib/runbook-lib.sh"
+PORT="$(choose_port 3260)"
+BASE="http://127.0.0.1:$PORT"
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-scripted
-export HIRSEL_LISTEN=127.0.0.1:3095
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 
@@ -33,13 +37,13 @@ Run the gates:
 1. Reset:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:3095/debug/reset
+curl -sS -X POST "$BASE/debug/reset"
 ```
 
 2. Inject the Owner delegation request:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:3095/debug/owner-message \
+curl -sS -X POST "$BASE/debug/owner-message" \
   -H 'content-type: application/json' \
   -d '{"body":"Please delegate a trivial task to a Sub-agent working in /tmp/hirsel-e2e-delegation-work (create the directory if needed), then ask me before applying the result.","ref":null}'
 ```
@@ -53,7 +57,7 @@ curl -sS -X POST http://127.0.0.1:3095/debug/owner-message \
 6. Send the Quick Reply as an Anchor-refed Owner message:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:3095/debug/owner-message \
+curl -sS -X POST "$BASE/debug/owner-message" \
   -H 'content-type: application/json' \
   -d '{"body":"ship it","ref":ANCHOR_ID}'
 ```
@@ -71,22 +75,26 @@ Use this mode to prove a real Lash RLM turn, real provider call, Lashlang-bound 
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
+ROOT=/workspace/code/hirsel-rbcov
+source "$ROOT/e2e/lib/runbook-lib.sh"
+PORT="$(choose_port 3260)"
+BASE="http://127.0.0.1:$PORT"
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-codex
-export HIRSEL_LISTEN=127.0.0.1:3095
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 
 First prove the tool-call smoke:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:3095/debug/reset
-curl -sS -X POST http://127.0.0.1:3095/debug/owner-message \
+curl -sS -X POST "$BASE/debug/reset"
+curl -sS -X POST "$BASE/debug/owner-message" \
   -H 'content-type: application/json' \
   -d '{"body":"reply with exactly the word pong","ref":null}'
 ```
@@ -98,8 +106,8 @@ Then run the same delegation gates from Scenario A. If the Agent does not send a
 After the real delegation turn uses tools, also prove tool-call visibility:
 
 ```bash
-curl -sS http://127.0.0.1:3095/debug/chat | jq '.messages[] | select(.author == "agent" and (.tool_calls | length > 0))'
-curl -sS http://127.0.0.1:3095/debug/broadcasts | jq '.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done"))'
+curl -sS "$BASE/debug/chat" | jq '.messages[] | select(.author == "agent" and (.tool_calls | length > 0))'
+curl -sS "$BASE/debug/broadcasts" | jq '.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done"))'
 ```
 
 Both commands must match at least one row/event from the real turn.

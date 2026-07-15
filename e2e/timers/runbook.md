@@ -7,7 +7,10 @@ Prove the host-owned `timer.Schedule` trigger source: the Lash Agent registers a
 ## Shared Helpers
 
 ```bash
-BASE=http://127.0.0.1:3089
+ROOT=/workspace/code/hirsel-rbcov
+source "$ROOT/e2e/lib/runbook-lib.sh"
+PORT="$(choose_port 3220)"
+BASE="http://127.0.0.1:$PORT"
 
 post_json() {
   curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"
@@ -52,14 +55,14 @@ assert_no_jq_for() {
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-timers-codex
-export HIRSEL_LISTEN=127.0.0.1:3089
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 

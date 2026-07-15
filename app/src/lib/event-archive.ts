@@ -1,14 +1,17 @@
 // Optimistic archive/unarchive for the typed event queue (archive contract v1),
-// the archive twin of lib/event-decide.ts. Archiving a finished event posts
-// `event_action{action:"archive",data:{}}` to the host IMMEDIATELY and sweeps
-// the card out of the resting queue at once via the optimistic
-// `event_archive_local` override (reconciled by the host's archived
-// event_upsert — both actions are idempotent on the host). Archiving is
+// the archive twin of lib/event-decide.ts. Archiving ANY non-archived event
+// (finished or still-open) posts `event_action{action:"archive",data:{}}` to the
+// host IMMEDIATELY and sweeps the card out of the resting queue at once via the
+// optimistic `event_archive_local` override (reconciled by the host's archived
+// event_upsert — both actions are idempotent on the host). Archiving an open
+// event auto-resolves it host-side (`archived=1, status='done'`). Archiving is
 // reversible two ways, so there is no confirmation dialog and nothing red: a
 // quiet "Archived" toast offers the immediate Undo, and the Archived(n) view's
 // Unarchive is the durable path.
 
-import { dispatch } from "../store/store";
+import { reopenEvent } from "./event-decide";
+import { isEventResolved } from "../store/selectors";
+import { dispatch, state } from "../store/store";
 import { getClient } from "../ws/client";
 import { dismissToast, toast } from "./toast";
 
@@ -26,12 +29,24 @@ export function archivePayload(eventId: number, action: "archive" | "unarchive")
 }
 
 /** Archive an event: optimistic sweep + immediate `event_action{archive}`, with
- * a quiet "Archived" toast whose Undo unarchives. Returns the payload sent, so
- * callers (and tests) can assert or surface it. */
+ * a quiet "Archived" toast whose Undo restores the event honestly. Returns the
+ * payload sent, so callers (and tests) can assert or surface it.
+ *
+ * Honest Undo (archive contract): archiving an event that is STILL OPEN
+ * auto-dismisses it host-side (`archived=1, status='done'`), and unarchiving does
+ * NOT reopen what the archive auto-dismissed. So the Undo for a card that was
+ * open at archive time must restore it fully — unarchive AND reopen (drop the
+ * decide override too, which `reopenEvent` already does). A finished card (decided
+ * or read awareness) was never auto-dismissed, so its Undo unarchives only. We
+ * read the open/finished state from the store at call time (before the optimistic
+ * sweep, which never touches status or the decide overrides) so callers stay
+ * unchanged. Both host ops are idempotent. */
 export function archiveEventWithUndo(
   eventId: number,
   opts?: { silent?: boolean },
 ): ArchivePayload {
+  const event = state.events.find((e) => e.id === eventId);
+  const wasOpen = event ? !isEventResolved(event, state.eventDecideOverrides) : false;
   dispatch({ type: "event_archive_local", eventId });
   getClient()?.sendEventAction(eventId, "archive", {});
   if (!opts?.silent) {
@@ -41,6 +56,7 @@ export function archiveEventWithUndo(
         onClick: () => {
           dismissToast(toastId);
           unarchiveEvent(eventId);
+          if (wasOpen) reopenEvent(eventId);
         },
       },
     });

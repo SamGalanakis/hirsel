@@ -1,4 +1,5 @@
-import { render } from "@solidjs/testing-library";
+import { render, within } from "@solidjs/testing-library";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { EventItem } from "../../protocol";
 import { EventCardRenderer } from "../../views/EventCardRenderer";
@@ -66,6 +67,47 @@ describe("EventCardHeader — card-face diet", () => {
     expect(container.querySelector('[data-slot="event-age"]')?.className).toContain(
       "text-foreground/80",
     );
+  });
+});
+
+describe("EventCardHeader — the ⋯ overflow verb matrix", () => {
+  // The overflow only wires up when its handlers are passed (the queue always
+  // passes both); a bare header stays chromeless.
+  const withMenu = (overrides: Partial<EventItem> = {}) =>
+    render(() => (
+      <EventCardHeader ev={ev(overrides)} onArchive={() => {}} onRequestSnooze={() => {}} />
+    ));
+  const openMenu = async (r: ReturnType<typeof withMenu>) => {
+    const user = userEvent.setup();
+    await user.click(r.getByLabelText("More actions for @reopen-op-shape"));
+    return within(document.body);
+  };
+
+  it("an OPEN judgment offers BOTH Snooze… and Archive", async () => {
+    const menu = await openMenu(withMenu({ kind: "judgment", status: "open" }));
+    expect(await menu.findByRole("menuitem", { name: "Snooze…" })).toBeTruthy();
+    expect(menu.getByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  });
+
+  it("an UNREAD summary offers BOTH Snooze… and Archive", async () => {
+    const menu = await openMenu(
+      withMenu({ kind: "summary", requires_response: false, read: false }),
+    );
+    expect(await menu.findByRole("menuitem", { name: "Snooze…" })).toBeTruthy();
+    expect(menu.getByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  });
+
+  it("a READ summary offers Archive only (finished — no Snooze…)", async () => {
+    const menu = await openMenu(
+      withMenu({ kind: "summary", requires_response: false, read: true }),
+    );
+    expect(await menu.findByRole("menuitem", { name: "Archive" })).toBeTruthy();
+    expect(menu.queryByRole("menuitem", { name: "Snooze…" })).toBeNull();
+  });
+
+  it("an ARCHIVED card offers neither verb (no ⋯ at all)", () => {
+    const { queryByLabelText } = withMenu({ archived: true });
+    expect(queryByLabelText("More actions for @reopen-op-shape")).toBeNull();
   });
 });
 

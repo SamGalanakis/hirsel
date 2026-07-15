@@ -180,14 +180,23 @@ describe("FeedColumn — the desktop card column", () => {
     await waitFor(() => expect(within(column).queryByText("Only judgment")).toBeNull());
   });
 
-  it("a live judgment's ⋯ overflow offers Snooze…, never Archive (Wave-3)", async () => {
+  it("a live judgment's ⋯ overflow offers BOTH Snooze… and Archive", async () => {
     const { column } = await setup([judgment(1, "Open judgment")]);
     const user = userEvent.setup();
-    // Deciding, not archiving, is how a judgment leaves the queue — so its ⋯
-    // offers the durable Snooze… instead.
+    // The Owner gets a manual archive on every card: an open judgment's ⋯ carries
+    // the durable Snooze… AND Archive (archiving auto-resolves it host-side).
     await user.click(within(column).getByLabelText("More actions for @j1"));
     expect(await within(document.body).findByRole("menuitem", { name: "Snooze…" })).toBeTruthy();
-    expect(within(document.body).queryByRole("menuitem", { name: "Archive" })).toBeNull();
+    expect(within(document.body).getByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  });
+
+  it("archiving an OPEN judgment from the ⋯ posts the envelope and sweeps the card out", async () => {
+    const { sent, column } = await setup([judgment(1, "Open judgment")]);
+    const user = userEvent.setup();
+    await user.click(within(column).getByLabelText("More actions for @j1"));
+    await user.click(await within(document.body).findByRole("menuitem", { name: "Archive" }));
+    await waitFor(() => expect(sent).toContainEqual({ eventId: 1, action: "archive", data: {} }));
+    await waitFor(() => expect(within(column).queryByText("Open judgment")).toBeNull());
   });
 
   it("a finished awareness card's ⋯ overflow offers Archive (never Snooze), posting the envelope", async () => {

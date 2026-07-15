@@ -112,11 +112,15 @@ export function createCardEntrance(ev: EventItem): {
  * source (when it isn't the resident agent), the read tag, and the archive
  * overflow. Placed as the first children of a `relative overflow-hidden` card box.
  *
- * A FINISHED event (decided, or read awareness — the exact `events.clear` set)
- * carries the quiet ⋯ overflow's Archive action; a still-live event (open, not
- * archived) carries its Snooze… — both reversible (the Archived / Snoozed views
- * plus a toast Undo), so no confirmation and nothing red. The header also carries
- * the quiet relative age (Wave-3 time axis) as tabular-nums meta. */
+ * The quiet ⋯ overflow carries the lifecycle verbs. Archive is offered on EVERY
+ * non-archived card — the manual "done with this" exit; archiving a still-open
+ * judgment auto-resolves it host-side as dismissed (`archived=1, status='done'`),
+ * and a card that is still live (not finished, not archived) also gets Snooze…
+ * above it (menu order: Snooze… then Archive). Everything here is reversible (the
+ * Archived / Snoozed views plus a toast Undo — and the Undo of an archived-open
+ * card restores it fully, reopening what the archive dismissed), so no
+ * confirmation and nothing red. The header also carries the quiet relative age
+ * (Wave-3 time axis) as tabular-nums meta. */
 export function EventCardHeader(props: {
   ev: EventItem;
   onArchive?: (ev: EventItem) => void;
@@ -125,11 +129,14 @@ export function EventCardHeader(props: {
 }) {
   const decided = () => isEventResolved(props.ev, state.eventDecideOverrides);
   const isJudgment = () => props.ev.kind === "judgment";
+  // Archive offers on EVERY non-archived card — the manual "done with this" exit
+  // the Owner asked for. On a still-open card the host auto-resolves it as
+  // dismissed (`archived=1, status='done'`); a finished card is just filed away.
   const archivable = () =>
-    props.onArchive !== undefined && isEventFinished(props.ev, state.eventDecideOverrides);
-  // Snooze offers on a still-live event only: NOT finished (a finished card is
-  // Archive's job, not snooze's) and not already archived — so the ⋯ menu shows
-  // exactly one of Snooze… / Archive, never both.
+    props.onArchive !== undefined && !isEventArchived(props.ev, state.eventArchiveOverrides);
+  // Snooze offers on a still-live event only: NOT finished (a durable "later" is
+  // only meaningful while the card is still waiting on you) and not already
+  // archived — so a finished or archived card never sees it.
   const snoozable = () =>
     props.onRequestSnooze !== undefined &&
     !isEventFinished(props.ev, state.eventDecideOverrides) &&

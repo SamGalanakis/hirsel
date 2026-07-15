@@ -18,9 +18,9 @@ Scenario A uses `HIRSEL_AGENT=scripted HIRSEL_DRIVER=fake` for deterministic del
 Scenario A:
 
 - Scripted delegation sends an open `requires_response: true` Ping with a Quick Reply, non-empty `name`, and non-empty `description`.
-- An Owner message whose `ref` equals the Ping Anchor changes it to `status: "done"` and broadcasts `ping_upsert`; no Agent resolve call is needed.
+- An Owner message whose `ref` equals the Ping Anchor changes it to `status: "done"` and broadcasts `event_upsert`; no Agent resolve call is needed.
 - A second Owner message carries the Ping id in `mentions` with no `ref`; the mentioned Ping remains open.
-- `POST /debug/resolve-ping` changes the second Ping to done and broadcasts `ping_upsert`.
+- `POST /debug/resolve-ping` changes the second Ping to done and broadcasts `event_upsert`.
 
 Scenario B:
 

@@ -23,6 +23,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-channel-discipline
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 cargo run -p hirsel-host
 ```
@@ -32,12 +33,12 @@ In another shell (`BASE` = the same host):
 ```bash
 BASE=http://127.0.0.1:<verified-free-port>
 
-post_json() { curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"; }
+post_json() { curl -sS -X POST "$BASE/$1" -H "authorization: Bearer $HIRSEL_TOKEN" -H 'content-type: application/json' -d "$2"; }
 
 wait_jq() {  # path filter [timeout]
   end=$((SECONDS + ${3:-60}))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$1")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$1")" || return 1
     printf '%s' "$json" | jq -e "$2" >/dev/null && { printf '%s\n' "$json"; return 0; }
     sleep 0.5
   done
@@ -47,15 +48,15 @@ wait_jq() {  # path filter [timeout]
 assert_no_jq_for() {  # path filter seconds
   end=$((SECONDS + $3))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$1")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$1")" || return 1
     printf '%s' "$json" | jq -e "$2" >/dev/null && {
       printf 'Unexpected match for %s filter %s\n%s\n' "$1" "$2" "$json" >&2; return 1; }
     sleep 0.5
   done
 }
 
-max_chat_id() { curl -sS "$BASE/debug/chat" | jq '[.messages[].id] | max // 0'; }
-open_ping_count() { curl -sS "$BASE/debug/pings" | jq '[.pings[] | select(.status=="open")] | length'; }
+max_chat_id() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq '[.messages[].id] | max // 0'; }
+open_ping_count() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq '[.pings[] | select(.status=="open")] | length'; }
 ```
 
 ## Gate 1: warm exchange → answered in Chat, no Ping
@@ -120,11 +121,11 @@ the outcome text the Agent chose for its Ping and prove that same outcome did no
 as an Agent Chat message.
 
 ```bash
-PING_DESC="$(curl -sS "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open")] | last | .description')"
+PING_DESC="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open")] | last | .description')"
 # The description's distinctive words must not also appear verbatim in any Agent Chat message.
 KEY="$(printf '%s' "$PING_DESC" | tr 'A-Z' 'a-z' | grep -oE '[a-z]{5,}' | head -1)"
 test -n "$KEY"
-curl -sS "$BASE/debug/chat" \
+curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" \
   | jq -e --arg k "$KEY" 'all(.messages[]; (.author=="agent" and (.body|ascii_downcase|contains($k))) | not)'
 ```
 

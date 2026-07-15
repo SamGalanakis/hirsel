@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CARGO_TARGET_DIR=/workspace/.cargo-target-scaffold
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 
-ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../lib/runbook-lib.sh
 source "$ROOT/e2e/lib/runbook-lib.sh"
 
@@ -12,7 +13,7 @@ HOST_LOG="/tmp/hirsel-e2e-pings-lifecycle-scripted-host.log"
 HIRSEL_AGENT=scripted
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=fake
-HIRSEL_MODEL=gpt-5.5
+HIRSEL_MODEL=gpt-5.6-sol
 trap 'stop_hirsel_host TERM' EXIT
 
 start_hirsel_host fresh
@@ -31,7 +32,7 @@ REPLY_ID="$(printf '%s' "$REPLY_JSON" | jq -r '.message.id')"
 wait_jq debug/chat '.messages[] | select(.id == '"$REPLY_ID"' and .author == "owner" and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
 pass_gate "Owner reply is anchor-refed to $ANCHOR_ID"
 wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
-wait_jq debug/broadcasts '.events[] | select(.type == "ping_upsert" and .ping.id == '"$PING_ID"' and .ping.status == "done")' 10 >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
 pass_gate "anchor-refed Owner reply auto-resolved Ping $PING_ID without an Agent resolve call"
 wait_agent_message_after "$REPLY_ID" '(.body | contains("Acknowledged"))' 30
 pass_gate "Agent acknowledged anchor-refed Ping reply"
@@ -45,7 +46,7 @@ wait_jq debug/pings '.pings[] | select(.id == '"$PING2_ID"' and .status == "open
 pass_gate "mention in Owner message $MENTION_REPLY_ID left Ping $PING2_ID open"
 
 post_json debug/resolve-ping "$(jq -nc --argjson ping_id "$PING2_ID" '{ping_id:$ping_id}')" | jq -e '.status == "done"' >/dev/null
-wait_jq debug/broadcasts '.events[] | select(.type == "ping_upsert" and .ping.id == '"$PING2_ID"' and .ping.status == "done")' 10 >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING2_ID"' and .event.status == "done")' 10 >/dev/null
 pass_gate "Owner resolve route moved Ping $PING2_ID to done"
 
 debug_snapshot /tmp/hirsel-e2e-pings-lifecycle-scripted-final
@@ -57,7 +58,7 @@ HOST_LOG="/tmp/hirsel-e2e-pings-lifecycle-real-host.log"
 HIRSEL_AGENT=lash
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=fake
-HIRSEL_MODEL=gpt-5.5
+HIRSEL_MODEL=gpt-5.6-sol
 start_hirsel_host fresh
 post_json debug/reset '{}' >/dev/null
 pass_gate "real Agent debug reset"

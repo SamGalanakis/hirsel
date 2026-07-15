@@ -7,11 +7,14 @@ Prove v1.4 host monitors: persisted specs, `ProcessInfo` visibility, `process_up
 ## Shared Helpers
 
 ```bash
-BASE=http://127.0.0.1:3089
+ROOT=/workspace/code/hirsel-rbcov
+source "$ROOT/e2e/lib/runbook-lib.sh"
+PORT="$(choose_port 3230)"
+BASE="http://127.0.0.1:$PORT"
 WATCH=/tmp/hirsel-monitor-watch.txt
 
 post_json() {
-  curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"
+  curl -sS -X POST "$BASE/$1" -H "authorization: Bearer $HIRSEL_TOKEN" -H 'content-type: application/json' -d "$2"
 }
 
 wait_jq() {
@@ -20,7 +23,7 @@ wait_jq() {
   timeout="${3:-60}"
   end=$((SECONDS + timeout))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf '%s\n' "$json"
       return 0
@@ -28,7 +31,7 @@ wait_jq() {
     sleep 0.5
   done
   printf 'Timed out waiting for %s filter %s\n' "$path" "$filter" >&2
-  curl -sS "$BASE/$path" >&2 || true
+  curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path" >&2 || true
   return 1
 }
 
@@ -38,7 +41,7 @@ assert_no_jq_for() {
   seconds="$3"
   end=$((SECONDS + seconds))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf 'Unexpected match for %s filter %s\n%s\n' "$path" "$filter" "$json" >&2
       return 1
@@ -53,13 +56,14 @@ assert_no_jq_for() {
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-procs
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-monitors-scripted
-export HIRSEL_LISTEN=127.0.0.1:3089
+rm -rf "$HIRSEL_DATA_DIR"
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 
@@ -81,7 +85,7 @@ Restart the host with the same env and data dir, then run:
 
 ```bash
 wait_jq debug/processes '.processes[] | select(.id == "'$MONITOR_ID'" and .kind == "monitor" and .state == "running")' 10 >/dev/null
-LATEST="$(curl -sS "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
+LATEST="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
 touch "$WATCH"
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > ('$LATEST') and (.body | contains("watch test file")))' 45 >/dev/null
 ```
@@ -91,14 +95,15 @@ wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > ('$LATEST'
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-procs
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-monitors-codex
-export HIRSEL_LISTEN=127.0.0.1:3089
+rm -rf "$HIRSEL_DATA_DIR"
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 
@@ -112,7 +117,7 @@ MONITOR_ID="$(wait_jq debug/processes '.processes[] | select(.kind == "monitor" 
 wait_jq debug/broadcasts '.events[] | select(.type == "turn_event" and .event.kind == "tool_start" and .event.name == "monitors_create")' 15 >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "process_upsert" and .process.id == "'$MONITOR_ID'")' 15 >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .body == "monitor armed")' 30 >/dev/null
-LATEST="$(curl -sS "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
+LATEST="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
 assert_no_jq_for debug/chat '.messages[] | select(.author == "agent" and .id > ('$LATEST'))' 35
 touch "$WATCH"
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > ('$LATEST'))' 90 >/dev/null
@@ -122,7 +127,7 @@ Restart the host with the same env and data dir, then run:
 
 ```bash
 wait_jq debug/processes '.processes[] | select(.id == "'$MONITOR_ID'" and .kind == "monitor" and .state == "running")' 20 >/dev/null
-LATEST="$(curl -sS "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
+LATEST="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq '[.messages[].id] | max // 0')"
 touch "$WATCH"
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > ('$LATEST'))' 90 >/dev/null
 ```

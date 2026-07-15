@@ -7,10 +7,13 @@ Prove protocol v1.5 live turn timeline broadcasts through `/debug/broadcasts`: `
 ## Shared Helpers
 
 ```bash
-BASE=http://127.0.0.1:3091
+ROOT=/workspace/code/hirsel-rbcov
+source "$ROOT/e2e/lib/runbook-lib.sh"
+PORT="$(choose_port 3250)"
+BASE="http://127.0.0.1:$PORT"
 
 post_json() {
-  curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"
+  curl -sS -X POST "$BASE/$1" -H "authorization: Bearer $HIRSEL_TOKEN" -H 'content-type: application/json' -d "$2"
 }
 
 wait_jq() {
@@ -19,7 +22,7 @@ wait_jq() {
   timeout="${3:-60}"
   end=$((SECONDS + timeout))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf '%s\n' "$json"
       return 0
@@ -27,7 +30,7 @@ wait_jq() {
     sleep 0.25
   done
   printf 'Timed out waiting for %s filter %s\n' "$path" "$filter" >&2
-  curl -sS "$BASE/$path" >&2 || true
+  curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path" >&2 || true
   return 1
 }
 ```
@@ -37,13 +40,14 @@ wait_jq() {
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-timeline
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 export HIRSEL_AGENT=scripted
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-turn-timeline-scripted
-export HIRSEL_LISTEN=127.0.0.1:3091
+rm -rf "$HIRSEL_DATA_DIR"
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 
@@ -71,14 +75,15 @@ Use this mode to prove the real lash observation bridge. It requires a working p
 Start the host:
 
 ```bash
-export CARGO_TARGET_DIR=/workspace/.cargo-target-timeline
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 export HIRSEL_AGENT=lash
 export HIRSEL_PROVIDER=codex
 export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-turn-timeline-real
-export HIRSEL_LISTEN=127.0.0.1:3091
+rm -rf "$HIRSEL_DATA_DIR"
+export HIRSEL_LISTEN="127.0.0.1:$PORT"
 cargo run -p hirsel-host
 ```
 

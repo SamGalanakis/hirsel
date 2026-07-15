@@ -22,8 +22,8 @@ Use the standard `post_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` / 
 helpers from `e2e/channel-discipline/runbook.md`, plus:
 
 ```bash
-rr_count() { curl -sS "$BASE/debug/pings" | jq '[.pings[] | select(.status=="open" and .requires_response==true)] | length'; }
-agent_since() { curl -sS "$BASE/debug/chat" | jq --argjson b "$1" '[.messages[] | select(.author=="agent" and .id > $b)] | length'; }
+rr_count() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq '[.pings[] | select(.status=="open" and .requires_response==true)] | length'; }
+agent_since() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq --argjson b "$1" '[.messages[] | select(.author=="agent" and .id > $b)] | length'; }
 ```
 
 Host env (pick a verified-free port with `ss -tlnp`; never 3089 — that is the live instance):
@@ -33,6 +33,7 @@ export CARGO_TARGET_DIR=/workspace/.cargo-target-chat-native
 export HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_DRIVER=fake
 export HIRSEL_TOKEN=dev-token HIRSEL_DEBUG=1
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-daily-driver
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 cargo run -p hirsel-host
 ```
@@ -91,7 +92,7 @@ ship/no-ship question on the same Ping (never a report Ping plus a separate ques
 PING_ID="$(wait_jq debug/pings '.pings[] | select(.status=="open" and .requires_response==true and (.name|length>0) and (.description|length>0) and (.quick_replies|length>=1))' 120 | jq -r '[.pings[] | select(.status=="open" and .requires_response==true)] | last | .id')"
 sleep 3
 test "$(rr_count)" = "1"
-ANCHOR="$(curl -sS "$BASE/debug/pings" | jq -r '.pings[] | select(.id=='"$PING_ID"') | .anchor')"
+ANCHOR="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '.pings[] | select(.id=='"$PING_ID"') | .anchor')"
 test "$ANCHOR" != "null"
 ```
 
@@ -99,7 +100,7 @@ test "$ANCHOR" != "null"
 
 ```bash
 BEFORE="$(max_chat_id)"
-QR="$(curl -sS "$BASE/debug/pings" | jq -r '.pings[] | select(.id=='"$PING_ID"') | .quick_replies[0].value')"
+QR="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '.pings[] | select(.id=='"$PING_ID"') | .quick_replies[0].value')"
 post_json debug/owner-message "$(jq -nc --arg b "$QR" --argjson r "$ANCHOR" '{client_id:"dd-answer",body:$b,ref:$r}')" >/dev/null
 
 # Anchor-refed Owner reply moves the Ping to done via ping_upsert.
@@ -116,10 +117,10 @@ whole session).
 ```bash
 wait_jq debug/chat '.messages[] | select(.author=="agent" and .id > '"$BEFORE"')' 120 >/dev/null
 # The Ping description's distinctive word must not also appear in any Agent Chat message.
-PING_DESC="$(curl -sS "$BASE/debug/pings" | jq -r '.pings[] | select(.id=='"$PING_ID"') | .description')"
+PING_DESC="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '.pings[] | select(.id=='"$PING_ID"') | .description')"
 KEY="$(printf '%s' "$PING_DESC" | tr 'A-Z' 'a-z' | grep -oE '[a-z]{5,}' | head -1)"
 test -n "$KEY"
-curl -sS "$BASE/debug/chat" \
+curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" \
   | jq -e --arg k "$KEY" 'all(.messages[]; (.author=="agent" and (.body|ascii_downcase|contains($k))) | not)'
 ```
 

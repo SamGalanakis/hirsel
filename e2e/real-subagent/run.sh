@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CARGO_TARGET_DIR=/workspace/.cargo-target-scaffold
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 
-ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../lib/runbook-lib.sh
 source "$ROOT/e2e/lib/runbook-lib.sh"
 
@@ -12,7 +13,7 @@ HOST_LOG="/tmp/hirsel-e2e-real-subagent-host.log"
 HIRSEL_AGENT=lash
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=real
-HIRSEL_MODEL=gpt-5.5
+HIRSEL_MODEL=gpt-5.6-sol
 trap 'stop_hirsel_host TERM' EXIT
 
 FIX_REPO="/tmp/hirsel-e2e-real-subagent-fix-repo"

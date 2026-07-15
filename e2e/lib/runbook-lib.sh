@@ -9,7 +9,9 @@ HOST_LOG="${HOST_LOG:-/tmp/hirsel-e2e-host.log}"
 BASE=""
 
 repo_root() {
-  git rev-parse --show-toplevel
+  local lib_dir
+  lib_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  cd -- "$lib_dir/../.." && pwd
 }
 
 build_host() {

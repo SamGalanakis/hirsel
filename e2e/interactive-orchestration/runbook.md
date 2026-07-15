@@ -34,6 +34,7 @@ export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-e2e
 export HOST_BIN="$CARGO_TARGET_DIR/debug/hirsel-host"
 export HIRSEL_AGENT=lash HIRSEL_PROVIDER=codex HIRSEL_TOKEN=dev-token HIRSEL_DEBUG=1
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-interactive
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_TEMPLATES_DIR="$REPO/templates"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 export HIRSEL_DRIVER=fake

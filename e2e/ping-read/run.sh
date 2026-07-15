@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CARGO_TARGET_DIR=/workspace/.cargo-target-scaffold
+export CARGO_TARGET_DIR=/workspace/.cargo-target-hirsel-rbcov
 
-ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../lib/runbook-lib.sh
 source "$ROOT/e2e/lib/runbook-lib.sh"
 
@@ -23,8 +24,8 @@ PING_ID="$(printf '%s' "$PING_JSON" | jq -r '.pings[] | select(.status == "open"
 pass_gate "Ping $PING_ID arrived unread with name and description"
 
 post_json debug/read-ping "$(jq -nc --argjson ping_id "$PING_ID" '{ping_id:$ping_id}')" | jq -e '.read == true' >/dev/null
-wait_jq debug/broadcasts '.events[] | select(.type == "ping_upsert" and .ping.id == '"$PING_ID"' and .ping.read == true)' 10 >/dev/null
-pass_gate "read-ping marked Ping $PING_ID read and broadcast ping_upsert"
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.read == true)' 10 >/dev/null
+pass_gate "read-ping marked Ping $PING_ID read and broadcast event_upsert"
 
 restart_hirsel_host
 wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .read == true)' 10 >/dev/null

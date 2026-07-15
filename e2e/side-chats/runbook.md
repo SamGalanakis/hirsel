@@ -20,6 +20,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-side-chats
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 cargo run -p hirsel-host
 ```
@@ -30,7 +31,7 @@ In another shell (`PORT` = the same port):
 BASE=http://127.0.0.1:$PORT
 
 post_json() {
-  curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"
+  curl -sS -X POST "$BASE/$1" -H "authorization: Bearer $HIRSEL_TOKEN" -H 'content-type: application/json' -d "$2"
 }
 
 wait_jq() {
@@ -39,7 +40,7 @@ wait_jq() {
   timeout="${3:-30}"
   end=$((SECONDS + timeout))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf '%s\n' "$json"
       return 0
@@ -47,12 +48,12 @@ wait_jq() {
     sleep 0.25
   done
   printf 'Timed out waiting for %s filter %s\n' "$path" "$filter" >&2
-  curl -sS "$BASE/$path" >&2 || true
+  curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path" >&2 || true
   return 1
 }
 
 max_chat_id() {
-  curl -sS "$BASE/debug/chat" | jq '[.messages[].id] | max // 0'
+  curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq '[.messages[].id] | max // 0'
 }
 ```
 
@@ -98,7 +99,7 @@ Main Chat must be byte-for-byte untouched by the side conversation:
 
 ```bash
 test "$(max_chat_id)" = "$MAIN_BEFORE"
-curl -sS "$BASE/debug/chat" | jq -e 'all(.messages[]; .body != "Ship after the final check." and .body != "(side chat) noted: Ship after the final check.")'
+curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq -e 'all(.messages[]; .body != "Ship after the final check." and .body != "(side chat) noted: Ship after the final check.")'
 ```
 
 ### Gate 3: reopening resumes the live transcript
@@ -111,10 +112,10 @@ printf '%s' "$RESUME_JSON" | jq -e '.resumed == true and .sc == "'"$SC"'" and (.
 ### Gate 4: conclude drafts but does not persist the draft
 
 ```bash
-BEFORE_COUNT="$(curl -sS "$BASE/debug/side-chats" | jq '.side_chats[] | select(.sc == "'"$SC"'") | .messages | length')"
+BEFORE_COUNT="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/side-chats" | jq '.side_chats[] | select(.sc == "'"$SC"'") | .messages | length')"
 DRAFT_JSON="$(post_json debug/conclude '{"sc":"'"$SC"'"}')"
 printf '%s' "$DRAFT_JSON" | jq -e '.sc == "'"$SC"'" and (.text | contains("Draft reply regarding")) and (.text | contains("Ship after the final check."))'
-curl -sS "$BASE/debug/side-chats" | jq -e '(.side_chats[] | select(.sc == "'"$SC"'") | .messages | length) == '"$BEFORE_COUNT"
+curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/side-chats" | jq -e '(.side_chats[] | select(.sc == "'"$SC"'") | .messages | length) == '"$BEFORE_COUNT"
 ```
 
 ### Gate 5: confirm posts edited text, auto-resolves, and tears down
@@ -176,6 +177,7 @@ export HIRSEL_TOKEN=dev-token
 export HIRSEL_DEBUG=1
 export HIRSEL_DRIVER=fake
 export HIRSEL_DATA_DIR=/tmp/hirsel-e2e-side-chats-codex
+rm -rf "$HIRSEL_DATA_DIR"
 export HIRSEL_LISTEN=127.0.0.1:<verified-free-port>
 cargo run -p hirsel-host
 ```

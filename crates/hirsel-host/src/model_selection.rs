@@ -135,6 +135,7 @@ pub fn model_spec(selection: &ModelSelection) -> anyhow::Result<lash::ModelSpec>
             disable: None,
             mandatory: true,
         }),
+        ..Default::default()
     };
     lash::ModelSpec::from_token_limits(
         selection.id.clone(),

@@ -49,6 +49,9 @@ class FakeWebSocket {
   serverSend(obj: unknown) {
     this.emit("message", { data: JSON.stringify(obj) });
   }
+  serverError() {
+    this.emit("error", {});
+  }
   serverClose(code: number) {
     this.readyState = FakeWebSocket.CLOSED;
     this.emit("close", { code });
@@ -200,6 +203,25 @@ describe("HirselWsClient signed blob URLs (D9)", () => {
 });
 
 describe("HirselWsClient auth rejection (C5)", () => {
+  it("keeps reconnecting when refused connections never reach open", async () => {
+    vi.useFakeTimers();
+    const { store, client } = await load();
+    localStorage.setItem("hirsel.token", "good");
+    const onAuthReject = vi.fn();
+    client.startClient("wss://host/ws", "good", { onAuthReject });
+
+    // A refused connection emits error then close without ever reaching open.
+    FakeWebSocket.instances[0].serverError();
+    vi.advanceTimersByTime(2000);
+    FakeWebSocket.instances[1].serverError();
+    vi.advanceTimersByTime(4000);
+
+    expect(onAuthReject).not.toHaveBeenCalled();
+    expect(client.getStoredToken()).toBe("good");
+    expect(store.state.connection).toBe("reconnecting");
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(3);
+  });
+
   it("clears the token and routes to the gate on an auth-reject close code", async () => {
     const { client } = await load();
     localStorage.setItem("hirsel.token", "bad");

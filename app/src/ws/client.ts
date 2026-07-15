@@ -28,12 +28,12 @@ const BLOB_URL_TIMEOUT_MS = 20_000;
  * reconnect. */
 const AUTH_REJECT_CODES = new Set([1008, 4001, 4401, 4403]);
 
-/** Heuristic fallback for hosts that just drop the socket on a bad token with a
- * generic 1006/1000: if the VERY FIRST connection(s) close before we ever see a
- * `hello_ok`, that's a rejected token, not a flaky network (a token that ever
- * authenticated sets `everAuthed`, which permanently disables this path so a
- * real mid-session drop keeps reconnecting forever). Two strikes before we give
- * up, to ride out a one-off cold-start race. */
+/** Heuristic fallback for hosts that accept a socket, then drop it on a bad
+ * token with a generic 1006/1000 before `hello_ok`. Only sockets that reached
+ * OPEN count: a connection refused before OPEN means the host is absent, so it
+ * keeps reconnecting without striking. A token that ever authenticated sets
+ * `everAuthed`, permanently disabling this path so real mid-session drops keep
+ * reconnecting forever. Two accepted-then-dropped strikes before we give up. */
 const MAX_CONNECTS_WITHOUT_HELLO = 2;
 
 /** Signalled to the app when the token is rejected: the client has already
@@ -117,7 +117,7 @@ class HirselWsClient {
   /** True once any `hello_ok` has arrived on this client — permanently disables
    * the "closed before hello ⇒ bad token" heuristic (see MAX_CONNECTS...). */
   private everAuthed = false;
-  /** Consecutive connections that closed before a `hello_ok` (auth heuristic). */
+  /** Accepted connections that closed before a `hello_ok` (auth heuristic). */
   private connectsWithoutHello = 0;
   private handlers: ClientHandlers;
 
@@ -432,8 +432,10 @@ class HirselWsClient {
 
     const socket = new WebSocket(this.url);
     this.socket = socket;
+    let opened = false;
 
     socket.addEventListener("open", () => {
+      opened = true;
       const hello: ClientMessage = {
         type: "hello",
         token: this.token,
@@ -452,11 +454,14 @@ class HirselWsClient {
       // The precise, instant auth-reject signal is the pre-auth `error` frame
       // (handled in handleServerMessage); this close-side check is the FALLBACK
       // for a host that just drops the socket with no error frame — an explicit
-      // reject code, or (only until the token has ever authenticated) the socket
-      // closing before `hello_ok` too many times.
+      // reject code, or (only until the token has ever authenticated) an opened
+      // socket closing before `hello_ok` too many times. Never-opened sockets
+      // mean network absence and reconnect without consuming a strike.
       const looksLikeAuthReject =
         AUTH_REJECT_CODES.has((event as CloseEvent).code) ||
-        (!this.everAuthed && ++this.connectsWithoutHello >= MAX_CONNECTS_WITHOUT_HELLO);
+        (opened &&
+          !this.everAuthed &&
+          ++this.connectsWithoutHello >= MAX_CONNECTS_WITHOUT_HELLO);
       if (looksLikeAuthReject) {
         this.handleAuthReject();
         return;

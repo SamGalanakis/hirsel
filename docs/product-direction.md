@@ -34,6 +34,14 @@ The queue is the primary surface; Chat is demoted to a drill-in reached *from* a
   process that emits a `summary` event at 7am. "Ping me if CI goes red" is a monitor emitting a
   `judgment`/`info`. Sam composes his own recurring intelligence and it all lands in one queue.
 
+**The No-Baked-In-Processes Rule.** hirsel ships **zero standing workflows**: no default morning
+digest, no pre-registered timers, no out-of-the-box monitors or recurring jobs of any kind. Every
+scheduled process exists only because Sam set it up (directly or by asking the Agent), and it is his
+to change or delete. The host provides the *machinery* — timer trigger sources, `digest:`-labelled
+jobs that file `summary` events, monitors — never a *default use* of it. A feature that "helpfully"
+registers its own schedule is miscoded; the debug surface and tests may fabricate scheduled events,
+production must not.
+
 **The make-or-break invariant — the interrupt-vs-accrue axis.** An "anything can emit" queue dies if
 info drowns judgment. So the axis is baked into the type: **judgments lead the feed and may push
 (FCM); summaries/info accrue quietly, batch, and auto-read; the one red on the surface is the

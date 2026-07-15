@@ -70,7 +70,7 @@ start_hirsel_host() {
   : "${HIRSEL_AGENT:?HIRSEL_AGENT must be set}"
   : "${HIRSEL_DRIVER:?HIRSEL_DRIVER must be set}"
   : "${HIRSEL_PROVIDER:=codex}"
-  : "${HIRSEL_MODEL:=gpt-5}"
+  : "${HIRSEL_MODEL:=gpt-5.6-sol}"
 
   if port_is_busy "$PORT"; then
     printf 'port %s is busy; refusing to start host\n' "$PORT" >&2
@@ -91,6 +91,7 @@ start_hirsel_host() {
     export HIRSEL_TOKEN
     export HIRSEL_DEBUG=1
     export HIRSEL_DATA_DIR="$DATA_DIR"
+    export HIRSEL_TEMPLATES_DIR="${HIRSEL_TEMPLATES_DIR:-$(repo_root)/templates}"
     export HIRSEL_LISTEN="127.0.0.1:$PORT"
     export RUST_LOG="${RUST_LOG:-hirsel_host=info,hirsel_drivers=info,warn}"
     if [[ -n "${HIRSEL_FAKE_FIXTURE:-}" ]]; then

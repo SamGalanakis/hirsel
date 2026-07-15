@@ -12,7 +12,7 @@ HOST_LOG="/tmp/hirsel-e2e-compaction-host.log"
 HIRSEL_AGENT=lash
 HIRSEL_PROVIDER=codex
 HIRSEL_DRIVER=fake
-HIRSEL_MODEL=gpt-5.5
+HIRSEL_MODEL=gpt-5.6-sol
 trap 'stop_hirsel_host TERM' EXIT
 
 start_hirsel_host fresh

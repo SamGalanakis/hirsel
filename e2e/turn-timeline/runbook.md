@@ -13,7 +13,7 @@ PORT="$(choose_port 3250)"
 BASE="http://127.0.0.1:$PORT"
 
 post_json() {
-  curl -sS -X POST "$BASE/$1" -H 'content-type: application/json' -d "$2"
+  curl -sS -X POST "$BASE/$1" -H "authorization: Bearer $HIRSEL_TOKEN" -H 'content-type: application/json' -d "$2"
 }
 
 wait_jq() {
@@ -22,7 +22,7 @@ wait_jq() {
   timeout="${3:-60}"
   end=$((SECONDS + timeout))
   while [ "$SECONDS" -lt "$end" ]; do
-    json="$(curl -sS "$BASE/$path")" || return 1
+    json="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path")" || return 1
     if printf '%s' "$json" | jq -e "$filter" >/dev/null; then
       printf '%s\n' "$json"
       return 0
@@ -30,7 +30,7 @@ wait_jq() {
     sleep 0.25
   done
   printf 'Timed out waiting for %s filter %s\n' "$path" "$filter" >&2
-  curl -sS "$BASE/$path" >&2 || true
+  curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/$path" >&2 || true
   return 1
 }
 ```

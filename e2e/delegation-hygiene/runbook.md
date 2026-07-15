@@ -21,7 +21,7 @@ Use the standard `post_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` he
 `e2e/channel-discipline/runbook.md`, plus:
 
 ```bash
-subagent_count() { curl -sS "$BASE/debug/processes" | jq '[.processes[] | select(.kind=="subagent")] | length'; }
+subagent_count() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/processes" | jq '[.processes[] | select(.kind=="subagent")] | length'; }
 ```
 
 Host env (pick a verified-free port, never 3089):
@@ -45,7 +45,7 @@ post_json debug/owner-message '{"client_id":"dh-note","body":"Delegate a small r
 # An Agent Chat note exists, and a Sub-agent process exists. The note is short (a hand-off line, not a report).
 NOTE="$(wait_jq debug/chat '.messages[] | select(.author=="agent" and .id > '"$BEFORE"')' 120 | jq -r '[.messages[] | select(.author=="agent" and .id > '"$BEFORE"')] | first | .body')"
 wait_jq debug/processes '.processes[] | select(.kind=="subagent")' 60 >/dev/null
-wait_jq debug/broadcasts '[.events[] | select(.type=="agent_activity")] | last | .state=="idle"' 60 >/dev/null && curl -sS "$BASE/debug/processes" | jq -e '.processes[] | select(.kind=="subagent" and .state=="running")' >/dev/null
+wait_jq debug/broadcasts '[.events[] | select(.type=="agent_activity")] | last | .state=="idle"' 60 >/dev/null && curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/processes" | jq -e '.processes[] | select(.kind=="subagent" and .state=="running")' >/dev/null
 test "$(printf '%s' "$NOTE" | wc -c)" -lt 400   # a delegation note, not a wall of text
 ```
 
@@ -83,7 +83,7 @@ post_json debug/owner-message '{"client_id":"dh-par","body":"Parallelize across 
 
 # Two distinct Sub-agent processes come up.
 wait_jq debug/processes '[.processes[] | select(.kind=="subagent")] | length >= 2' 120 >/dev/null
-IDS="$(curl -sS "$BASE/debug/processes" | jq -r '[.processes[] | select(.kind=="subagent") | .id] | unique | length')"
+IDS="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/processes" | jq -r '[.processes[] | select(.kind=="subagent") | .id] | unique | length')"
 test "$IDS" -ge 2
 
 # Mechanical filesystem proof: the Agent created at least two distinct working dirs under the repo path.

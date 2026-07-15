@@ -37,13 +37,14 @@ Run the gates:
 1. Reset:
 
 ```bash
-curl -sS -X POST "$BASE/debug/reset"
+curl -sS -X POST "$BASE/debug/reset" -H "authorization: Bearer $HIRSEL_TOKEN"
 ```
 
 2. Inject the Owner delegation request:
 
 ```bash
 curl -sS -X POST "$BASE/debug/owner-message" \
+  -H "authorization: Bearer $HIRSEL_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"body":"Please delegate a trivial task to a Sub-agent working in /tmp/hirsel-e2e-delegation-work (create the directory if needed), then ask me before applying the result.","ref":null}'
 ```
@@ -58,6 +59,7 @@ curl -sS -X POST "$BASE/debug/owner-message" \
 
 ```bash
 curl -sS -X POST "$BASE/debug/owner-message" \
+  -H "authorization: Bearer $HIRSEL_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"body":"ship it","ref":ANCHOR_ID}'
 ```
@@ -93,8 +95,9 @@ cargo run -p hirsel-host
 First prove the tool-call smoke:
 
 ```bash
-curl -sS -X POST "$BASE/debug/reset"
+curl -sS -X POST "$BASE/debug/reset" -H "authorization: Bearer $HIRSEL_TOKEN"
 curl -sS -X POST "$BASE/debug/owner-message" \
+  -H "authorization: Bearer $HIRSEL_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"body":"reply with exactly the word pong","ref":null}'
 ```
@@ -106,8 +109,8 @@ Then run the same delegation gates from Scenario A. If the Agent does not send a
 After the real delegation turn uses tools, also prove tool-call visibility:
 
 ```bash
-curl -sS "$BASE/debug/chat" | jq '.messages[] | select(.author == "agent" and (.tool_calls | length > 0))'
-curl -sS "$BASE/debug/broadcasts" | jq '.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done"))'
+curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/chat" | jq '.messages[] | select(.author == "agent" and (.tool_calls | length > 0))'
+curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/broadcasts" | jq '.events[] | select(.type == "turn_event" and (.event.kind == "tool_start" or .event.kind == "tool_done"))'
 ```
 
 Both commands must match at least one row/event from the real turn.

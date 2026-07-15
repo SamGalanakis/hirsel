@@ -23,7 +23,7 @@ Use the standard `post_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` he
 `e2e/channel-discipline/runbook.md`, plus:
 
 ```bash
-subagent_count() { curl -sS "$BASE/debug/processes" | jq '[.processes[] | select(.kind=="subagent")] | length'; }
+subagent_count() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/processes" | jq '[.processes[] | select(.kind=="subagent")] | length'; }
 ```
 
 Host env (verified-free port, never 3089). Note the data dir is reused across the kill/reboot:
@@ -48,7 +48,7 @@ KEEP="$(wait_jq debug/processes '.processes[] | select(.kind=="subagent")' 120 |
 # Workstream DROP: a second delegated task Sam then explicitly cancels.
 post_json debug/owner-message '{"client_id":"rj-drop","body":"Also delegate the changelog scrape to a second Sub-agent in /tmp/hirsel-e2e-rj-drop (create it).","ref":null}' >/dev/null
 wait_jq debug/processes '[.processes[] | select(.kind=="subagent")] | length >= 2' 120 >/dev/null
-DROP="$(curl -sS "$BASE/debug/processes" | jq -r '[.processes[] | select(.kind=="subagent" and .id != "'"$KEEP"'")] | last | .id')"
+DROP="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/processes" | jq -r '[.processes[] | select(.kind=="subagent" and .id != "'"$KEEP"'")] | last | .id')"
 
 # Sam cancels DROP. The Agent should interrupt that Sub-agent; the task is now dead.
 post_json debug/owner-message '{"client_id":"rj-cancel","body":"Kill the changelog scrape — I don'\''t want it anymore.","ref":null}' >/dev/null

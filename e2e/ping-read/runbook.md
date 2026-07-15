@@ -38,7 +38,7 @@ cargo run -p hirsel-host
 Reset:
 
 ```bash
-curl -sS -X POST "$BASE/debug/reset"
+curl -sS -X POST "$BASE/debug/reset" -H "authorization: Bearer $HIRSEL_TOKEN"
 ```
 
 Inject a delegation request that makes scripted mode spawn the fake Sub-agent and file the terminal
@@ -46,6 +46,7 @@ result in a Ping:
 
 ```bash
 curl -sS -X POST "$BASE/debug/owner-message" \
+  -H "authorization: Bearer $HIRSEL_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"body":"Please delegate a trivial task to a Sub-agent working in /tmp/hirsel-e2e-ping-read-work (create the directory if needed), then ask me before applying the result.","ref":null}'
 ```
@@ -57,6 +58,7 @@ Mark it read:
 
 ```bash
 curl -sS -X POST "$BASE/debug/read-ping" \
+  -H "authorization: Bearer $HIRSEL_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"ping_id":PING_ID}'
 ```

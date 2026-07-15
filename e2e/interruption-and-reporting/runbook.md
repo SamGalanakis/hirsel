@@ -21,7 +21,7 @@ Use the standard `post_json` / `wait_jq` / `assert_no_jq_for` / `max_chat_id` / 
 helpers from `e2e/channel-discipline/runbook.md`, plus:
 
 ```bash
-rr_count() { curl -sS "$BASE/debug/pings" | jq '[.pings[] | select(.status=="open" and .requires_response==true)] | length'; }
+rr_count() { curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq '[.pings[] | select(.status=="open" and .requires_response==true)] | length'; }
 ```
 
 Host env (verified-free port, never 3089):
@@ -45,8 +45,8 @@ post_json debug/owner-message '{"client_id":"ir-block","body":"Start deploying t
 wait_jq debug/pings '.pings[] | select(.status=="open" and .requires_response==true and (.name|length>0) and (.description|length>0) and (.quick_replies|length>=1))' 120 >/dev/null
 sleep 3
 test "$(rr_count)" = "1"
-PING_ID="$(curl -sS "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open" and .requires_response==true)] | last | .id')"
-ANCHOR="$(curl -sS "$BASE/debug/pings" | jq -r --argjson id "$PING_ID" '.pings[] | select(.id==$id) | .anchor')"
+PING_ID="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open" and .requires_response==true)] | last | .id')"
+ANCHOR="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r --argjson id "$PING_ID" '.pings[] | select(.id==$id) | .anchor')"
 ```
 
 ## Gate 2: then moves on, and does not nag
@@ -56,7 +56,7 @@ message repeats the Ping's question, over a window.
 
 ```bash
 BEFORE="$(max_chat_id)"
-KEY="$(curl -sS "$BASE/debug/pings" | jq -r --argjson id "$PING_ID" '.pings[] | select(.id==$id) | .description' | tr 'A-Z' 'a-z' | grep -oE '[a-z]{5,}' | head -1)"
+KEY="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r --argjson id "$PING_ID" '.pings[] | select(.id==$id) | .description' | tr 'A-Z' 'a-z' | grep -oE '[a-z]{5,}' | head -1)"
 test -n "$KEY"
 # No new Agent Chat message re-asks the open question for 30s.
 assert_no_jq_for debug/chat '.messages[] | select(.author=="agent" and .id > '"$BEFORE"' and (.body|ascii_downcase|contains("'"$KEY"'")))' 30
@@ -67,7 +67,7 @@ test "$(rr_count)" = "1"
 Then Sam answers via the Quick Reply and the Ping resolves through the normal anchor-ref path:
 
 ```bash
-QR="$(curl -sS "$BASE/debug/pings" | jq -r --argjson id "$PING_ID" '.pings[] | select(.id==$id) | .quick_replies[0].value')"
+QR="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r --argjson id "$PING_ID" '.pings[] | select(.id==$id) | .quick_replies[0].value')"
 post_json debug/owner-message "$(jq -nc --arg b "$QR" --argjson r "$ANCHOR" '{client_id:"ir-answer",body:$b,ref:$r}')" >/dev/null
 wait_jq debug/pings '.pings[] | select(.id=='"$PING_ID"' and .status=="done")' 30 >/dev/null
 ```
@@ -92,8 +92,8 @@ test "$(open_ping_count)" = "1"
 ## Gate 4: the report is outcome-phrased, not a log dump
 
 ```bash
-DESC="$(curl -sS "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open")] | last | .description')"
-CONTENT="$(curl -sS "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open")] | last | .content')"
+DESC="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open")] | last | .description')"
+CONTENT="$(curl -sS -H "authorization: Bearer $HIRSEL_TOKEN" "$BASE/debug/pings" | jq -r '[.pings[] | select(.status=="open")] | last | .content')"
 # Description is a one-line outcome (short); neither field dumps raw logs / stack traces.
 test "$(printf '%s' "$DESC" | wc -c)" -lt 200
 printf '%s\n%s' "$DESC" "$CONTENT" | grep -viqE 'traceback|stack trace|\+ set -|^\s*at [a-z].*\('

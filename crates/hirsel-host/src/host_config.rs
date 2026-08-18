@@ -3,13 +3,12 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::SystemTime,
 };
 
 use anyhow::{Context, anyhow};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 use uuid::Uuid;
 
 const LEGACY_MODEL_SELECTION_FILE: &str = "model-selection.json";
@@ -17,7 +16,7 @@ const LEGACY_MODEL_SELECTION_FILE: &str = "model-selection.json";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentModelOverride {
     pub enabled: bool,
-    pub default_variant: String,
+    pub enabled_variants: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -30,7 +29,7 @@ pub struct ConfigStore {
 
 struct StoreInner {
     document: DocumentMut,
-    modified: Option<SystemTime>,
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,17 +41,14 @@ struct LegacyModelSelection {
 impl ConfigStore {
     pub async fn load(path: PathBuf, data_dir: &Path, docs_path: &Path) -> anyhow::Result<Self> {
         let defaults = default_document(docs_path)?;
-        let (document, modified) = match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => (
-                parse_or_defaults(&path, &contents, &defaults),
-                file_modified(&path),
-            ),
+        let (document, source) = match tokio::fs::read_to_string(&path).await {
+            Ok(contents) => (parse_or_defaults(&path, &contents, &defaults), contents),
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 let mut document = defaults.clone();
                 migrate_legacy_model(data_dir, &mut document).await;
-                persist_atomic(&path, document.to_string().as_bytes()).await?;
-                let modified = file_modified(&path);
-                (document, modified)
+                let source = document.to_string();
+                persist_atomic(&path, source.as_bytes()).await?;
+                (document, source)
             }
             Err(error) => {
                 return Err(error)
@@ -62,7 +58,7 @@ impl ConfigStore {
         Ok(Self {
             path: Arc::new(path),
             defaults: Arc::new(defaults),
-            inner: Arc::new(Mutex::new(StoreInner { document, modified })),
+            inner: Arc::new(Mutex::new(StoreInner { document, source })),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -72,17 +68,8 @@ impl ConfigStore {
     }
 
     pub fn reload_if_changed(&self) {
-        let observed = file_modified(&self.path);
-        let previous = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .modified;
-        if observed == previous {
-            return;
-        }
-        let document = match std::fs::read_to_string(&*self.path) {
-            Ok(contents) => parse_or_defaults(&self.path, &contents, &self.defaults),
+        let source = match std::fs::read_to_string(&*self.path) {
+            Ok(contents) => contents,
             Err(error) => {
                 tracing::warn!(
                     path = %self.path.display(),
@@ -92,12 +79,22 @@ impl ConfigStore {
                 return;
             }
         };
+        if self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .source
+            == source
+        {
+            return;
+        }
+        let document = parse_or_defaults(&self.path, &source, &self.defaults);
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         inner.document = document;
-        inner.modified = observed;
+        inner.source = source;
     }
 
     pub fn model_selection(&self) -> Option<(String, String)> {
@@ -154,15 +151,20 @@ impl ConfigStore {
                     );
                     continue;
                 };
-                let Some(default_variant) = section
-                    .get("default_variant")
-                    .and_then(Item::as_str)
-                    .map(str::to_string)
+                let Some(enabled_variants) = section
+                    .get("enabled_variants")
+                    .and_then(Item::as_array)
+                    .and_then(|variants| {
+                        variants
+                            .iter()
+                            .map(|variant| variant.as_str().map(str::to_string))
+                            .collect::<Option<Vec<_>>>()
+                    })
                 else {
                     tracing::warn!(
                         provider,
                         model_id,
-                        "Sub-agent default variant is missing or invalid; using defaults"
+                        "Sub-agent enabled variants are missing or invalid; using defaults"
                     );
                     continue;
                 };
@@ -170,7 +172,7 @@ impl ConfigStore {
                     model_id.to_string(),
                     SubagentModelOverride {
                         enabled,
-                        default_variant,
+                        enabled_variants,
                     },
                 );
             }
@@ -182,17 +184,19 @@ impl ConfigStore {
     pub async fn set_model_selection(&self, model_id: &str, variant: &str) -> anyhow::Result<()> {
         let _guard = self.write_lock.lock().await;
         self.reload_if_changed();
-        let contents = {
-            let mut inner = self
+        let (document, contents) = {
+            let inner = self
                 .inner
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            ensure_table(&mut inner.document, "model");
-            inner.document["model"]["id"] = value(model_id);
-            inner.document["model"]["variant"] = value(variant);
-            inner.document.to_string()
+            let mut document = inner.document.clone();
+            ensure_table(&mut document, "model");
+            document["model"]["id"] = value(model_id);
+            document["model"]["variant"] = value(variant);
+            let contents = document.to_string();
+            (document, contents)
         };
-        self.persist_and_mark(contents).await
+        self.persist_and_replace(document, contents).await
     }
 
     pub async fn set_subagent_model(
@@ -200,32 +204,44 @@ impl ConfigStore {
         provider: &str,
         model_id: &str,
         enabled: bool,
-        default_variant: &str,
+        enabled_variants: &[String],
     ) -> anyhow::Result<()> {
         let _guard = self.write_lock.lock().await;
         self.reload_if_changed();
-        let contents = {
-            let mut inner = self
+        let (document, contents) = {
+            let inner = self
                 .inner
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            ensure_table(&mut inner.document, "subagent_models");
-            ensure_child_table(&mut inner.document["subagent_models"], provider);
-            ensure_child_table(&mut inner.document["subagent_models"][provider], model_id);
-            inner.document["subagent_models"][provider][model_id]["enabled"] = value(enabled);
-            inner.document["subagent_models"][provider][model_id]["default_variant"] =
-                value(default_variant);
-            inner.document.to_string()
+            let mut document = inner.document.clone();
+            ensure_table(&mut document, "subagent_models");
+            ensure_child_table(&mut document["subagent_models"], provider);
+            ensure_child_table(&mut document["subagent_models"][provider], model_id);
+            document["subagent_models"][provider][model_id]["enabled"] = value(enabled);
+            let mut variants = Array::new();
+            for variant in enabled_variants {
+                variants.push(variant.as_str());
+            }
+            document["subagent_models"][provider][model_id]["enabled_variants"] =
+                Item::Value(variants.into());
+            let contents = document.to_string();
+            (document, contents)
         };
-        self.persist_and_mark(contents).await
+        self.persist_and_replace(document, contents).await
     }
 
-    async fn persist_and_mark(&self, contents: String) -> anyhow::Result<()> {
+    async fn persist_and_replace(
+        &self,
+        document: DocumentMut,
+        contents: String,
+    ) -> anyhow::Result<()> {
         persist_atomic(&self.path, contents.as_bytes()).await?;
-        self.inner
+        let mut inner = self
+            .inner
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .modified = file_modified(&self.path);
+            .unwrap_or_else(|poison| poison.into_inner());
+        inner.document = document;
+        inner.source = contents;
         Ok(())
     }
 }
@@ -263,30 +279,32 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 # The host watches it and reloads changes live; no restart is required.
 # Documentation: {}
 
-# Main Agent model. Models: gpt-5.6-sol. Variants: low, medium, high, xhigh, max.
+# Main Agent model, scoped to HIRSEL_PROVIDER. openrouter: google/gemini-3.7-flash
+# (variant: default). codex: gpt-5.6-sol (variants: low, medium, high, xhigh, max).
 [model]
-id = "gpt-5.6-sol"
-variant = "medium"
+id = "google/gemini-3.7-flash"
+variant = "default"
 
-# Codex CLI model gpt-5.5. Variants: low, medium, high.
-[subagent_models.codex."gpt-5.5"]
-enabled = true
-default_variant = "high"
+# Sub-agent delegation lanes. The catalog is exactly these three rows, one
+# effort each — there is no per-task effort tuning. Set `enabled = false` to
+# take a lane out of service; entries for anything else are ignored.
 
-# Claude Code CLI model claude-opus-4-8. Variants: low, medium, high.
-[subagent_models.claude.claude-opus-4-8]
+# Workhorse lane: judgment-heavy implementation and review-expensive
+# verification.
+[subagent_models.codex."gpt-5.6-sol"]
 enabled = true
-default_variant = "high"
+enabled_variants = ["high"]
 
-# Claude Code CLI model claude-sonnet-5. Variants: low, medium, high.
-[subagent_models.claude.claude-sonnet-5]
+# Economy lane: mechanically verifiable work (checks, audits, bulk analysis,
+# tightly specified edits, recon).
+[subagent_models.codex."gpt-5.6-luna"]
 enabled = true
-default_variant = "medium"
+enabled_variants = ["max"]
 
-# Claude Code CLI model claude-fable-5. Variants: low, medium, high.
-[subagent_models.claude.claude-fable-5]
+# Workhorse lane: taste-critical work (UI, API shape, copy) and fresh review.
+[subagent_models.claude.claude-opus-5]
 enabled = true
-default_variant = "high"
+enabled_variants = ["high"]
 "#,
         docs_path.display()
     )
@@ -313,12 +331,6 @@ async fn migrate_legacy_model(data_dir: &Path, document: &mut DocumentMut) {
             tracing::warn!(path = %path.display(), %error, "legacy model selection is malformed; using defaults");
         }
     }
-}
-
-fn file_modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
 }
 
 async fn persist_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -355,6 +367,7 @@ async fn persist_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::FileTimes;
 
     #[tokio::test]
     async fn seeds_comments_migrates_legacy_and_preserves_comments_on_write() {
@@ -378,29 +391,54 @@ mod tests {
         assert!(seeded.contains("/docs/config.md"));
 
         store
-            .set_subagent_model("codex", "gpt-5.5", false, "medium")
+            .set_subagent_model("codex", "gpt-5.6-luna", false, &["max".to_string()])
             .await
             .unwrap();
         let edited = tokio::fs::read_to_string(path).await.unwrap();
-        assert!(edited.contains("# Codex CLI model gpt-5.5."));
+        assert!(edited.contains("# Economy lane: mechanically verifiable work"));
         assert!(edited.contains("enabled = false"));
+        assert!(edited.contains("enabled_variants = [\"max\"]"));
     }
 
     #[tokio::test]
-    async fn reloads_direct_edits_and_survives_malformed_toml() {
+    async fn reloads_a_direct_edit_with_an_unchanged_modified_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hirsel.toml");
         let store = ConfigStore::load(path.clone(), dir.path(), Path::new("/docs/config.md"))
             .await
             .unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let edited = std::fs::read_to_string(&path)
             .unwrap()
-            .replace("variant = \"medium\"", "variant = \"max\"");
+            .replace("variant = \"default\"", "variant = \"max\"");
         std::fs::write(&path, edited).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
         assert_eq!(store.model_selection().unwrap().1, "max");
+    }
 
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    #[tokio::test]
+    async fn malformed_edits_fall_back_and_a_repair_reloads_without_sleeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hirsel.toml");
+        let store = ConfigStore::load(path.clone(), dir.path(), Path::new("/docs/config.md"))
+            .await
+            .unwrap();
         std::fs::write(&path, "not = [valid").unwrap();
-        assert_eq!(store.model_selection().unwrap().1, "medium");
+        assert_eq!(store.model_selection().unwrap().1, "default");
+
+        let repaired = default_document(Path::new("/docs/config.md"))
+            .unwrap()
+            .to_string();
+        std::fs::write(
+            &path,
+            repaired.replace("variant = \"default\"", "variant = \"high\""),
+        )
+        .unwrap();
+        assert_eq!(store.model_selection().unwrap().1, "high");
     }
 }

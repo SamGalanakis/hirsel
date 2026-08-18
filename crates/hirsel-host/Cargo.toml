@@ -42,7 +42,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"
 subtle = "2.6.1"
-thiserror.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

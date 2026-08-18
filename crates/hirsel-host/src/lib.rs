@@ -16,7 +16,9 @@ pub mod push;
 pub mod side_chat;
 pub mod storage;
 pub mod subagent_models;
+pub mod task_ui;
 pub mod templates;
+mod text;
 pub mod tools;
 pub mod ws;
 
@@ -39,7 +41,7 @@ use tower_http::services::ServeDir;
 
 use crate::{
     config::Config,
-    lash_runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn},
+    lash_runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn, TaskActionContext},
     processes::ProcessStore,
     storage::{MonitorRecord, MonitorWakeOn, Storage, monitor_process_info},
     tools::{ToolSuite, ToolsConfig},
@@ -158,15 +160,16 @@ impl AppState {
         provider: &str,
         model_id: &str,
         enabled: bool,
-        default_variant: &str,
+        enabled_variants: &[String],
     ) -> anyhow::Result<SubagentModelCatalog> {
         let _guard = self.subagent_model_change_lock.lock().await;
         let previous = self.subagent_model_snapshot();
         let catalog = self
             .subagent_models
-            .set(provider, model_id, enabled, default_variant)
+            .set(provider, model_id, enabled, enabled_variants)
             .await?;
         if catalog != previous {
+            self.agent.refresh_subagent_model_tools(&catalog).await?;
             self.broadcast(HostToClient::SubagentModelsChanged {
                 catalog: catalog.clone(),
             });
@@ -182,6 +185,21 @@ impl AppState {
         attachments: Vec<String>,
         mentions: Vec<u64>,
         mode: SendMode,
+    ) -> anyhow::Result<OwnerSubmission> {
+        self.submit_owner_turn(client_id, body, anchor, attachments, mentions, mode, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_owner_turn(
+        &self,
+        client_id: String,
+        body: String,
+        anchor: Option<u64>,
+        attachments: Vec<String>,
+        mentions: Vec<u64>,
+        mode: SendMode,
+        task_action: Option<TaskActionContext>,
     ) -> anyhow::Result<OwnerSubmission> {
         let mentioned_pings = self.storage.mentioned_pings(&mentions).await?;
         let (message, inserted) = self
@@ -200,6 +218,7 @@ impl AppState {
                     attachments: stored_attachments,
                     mentioned_pings,
                     mode,
+                    task_action,
                 })
                 .await
             {
@@ -216,11 +235,6 @@ impl AppState {
                 message: message.clone(),
                 sc: None,
             });
-            if let Some(anchor) = message.r#ref {
-                for event in self.storage.resolve_open_pings_for_anchor(anchor).await? {
-                    self.broadcast(HostToClient::EventUpsert { event });
-                }
-            }
         }
         Ok(OwnerSubmission {
             client_id,
@@ -355,67 +369,84 @@ impl AppState {
             .ping(event_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
-        if action == "choose"
-            && let Some(event) = self.side_chats.decide_event(event_id, &data).await?
-        {
-            return Ok(event);
-        }
         let event = match action.as_str() {
-            "choose" => {
-                if !matches!(current.kind, hirsel_proto::EventKind::Judgment) {
-                    anyhow::bail!("choose is only valid for judgment events");
-                }
-                let choice = data
-                    .get("choice")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("event choose requires data.choice"))?;
-                let choice_label = event_choice_label(&current.ui, choice)
-                    .ok_or_else(|| anyhow::anyhow!("unknown event choice: {choice}"))?;
-                let body = match data.get("note") {
-                    Some(note) => format!(
-                        "{choice_label}\n{}",
-                        note.as_str()
-                            .ok_or_else(|| anyhow::anyhow!("event note must be a string"))?
-                    ),
-                    None => choice_label.to_string(),
-                };
-                if let Some(rule) = data.get("record_rule") {
-                    let rule = rule
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("event record_rule must be a string"))?;
-                    self.storage
-                        .record_taste_rule(event_id, Some(choice), rule)
-                        .await?;
-                }
-                self.submit_owner_message(
-                    format!("event-action-choose-{event_id}"),
-                    body,
-                    Some(current.anchor),
-                    Vec::new(),
-                    Vec::new(),
-                    SendMode::Send,
-                )
-                .await?;
-                self.storage.ping(event_id).await?
+            // These are Host lifecycle verbs, not producer-generated actions.
+            // Validate their exact payload before allowing any mutation.
+            "reopen" => {
+                validate_empty_lifecycle_data(&action, &data)?;
+                self.storage.reopen_ping(event_id).await?
             }
-            "submit" | "dismiss" => self.storage.resolve_ping(event_id).await?,
+            "dismiss" => {
+                validate_empty_lifecycle_data(&action, &data)?;
+                self.storage.resolve_ping(event_id).await?
+            }
             "snooze" => {
-                let until = data
-                    .get("until")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?;
-                let until = DateTime::parse_from_rfc3339(until)
-                    .map_err(|_| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?
-                    .with_timezone(&Utc);
-                if until <= Utc::now() {
-                    anyhow::bail!(INVALID_SNOOZE_UNTIL);
-                }
+                let until = validate_snooze_lifecycle_data(&data)?;
                 self.storage.snooze_event(event_id, until).await?
             }
-            "unsnooze" => self.storage.unsnooze_event(event_id).await?,
-            "archive" => self.storage.archive_event(event_id).await?,
-            "unarchive" => self.storage.unarchive_event(event_id).await?,
-            other => anyhow::bail!("unsupported event action: {other}"),
+            "unsnooze" => {
+                validate_empty_lifecycle_data(&action, &data)?;
+                self.storage.unsnooze_event(event_id).await?
+            }
+            "archive" => {
+                validate_empty_lifecycle_data(&action, &data)?;
+                self.storage.archive_event(event_id).await?
+            }
+            "unarchive" => {
+                validate_empty_lifecycle_data(&action, &data)?;
+                self.storage.unarchive_event(event_id).await?
+            }
+            generated => {
+                if current.status != hirsel_proto::EventStatus::Open {
+                    anyhow::bail!("only an open Task can accept generated actions");
+                }
+                let validated = task_ui::validate_action(&current.ui, generated, &data)?;
+                if !validated.settles {
+                    let body = validated
+                        .choice_label
+                        .as_deref()
+                        .or_else(|| data.get("label").and_then(serde_json::Value::as_str))
+                        .unwrap_or(generated)
+                        .to_string();
+                    self.submit_owner_turn(
+                        format!("event-action-{generated}-{event_id}"),
+                        body,
+                        Some(current.anchor),
+                        Vec::new(),
+                        vec![current.id],
+                        SendMode::Send,
+                        Some(TaskActionContext {
+                            event: current.clone(),
+                            action: generated.to_string(),
+                            data,
+                        }),
+                    )
+                    .await?;
+                    return Ok(current);
+                }
+
+                if generated == "choose" {
+                    if let Some(event) = self.side_chats.decide_event(event_id, &data).await? {
+                        return Ok(event);
+                    }
+                    if !matches!(current.kind, hirsel_proto::EventKind::Judgment) {
+                        anyhow::bail!("choose is only valid for judgment events");
+                    }
+                    let choice_label = validated
+                        .choice_label
+                        .ok_or_else(|| anyhow::anyhow!("choose requires an option-list action"))?;
+                    self.submit_owner_message(
+                        format!("event-action-choose-{event_id}"),
+                        choice_label,
+                        Some(current.anchor),
+                        Vec::new(),
+                        Vec::new(),
+                        SendMode::Send,
+                    )
+                    .await?;
+                }
+                self.storage.resolve_ping(event_id).await?
+            }
         }
         .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
         self.broadcast(HostToClient::EventUpsert {
@@ -423,6 +454,42 @@ impl AppState {
         });
         Ok(event)
     }
+}
+
+fn validate_empty_lifecycle_data(action: &str, data: &serde_json::Value) -> anyhow::Result<()> {
+    if data.is_null() {
+        return Ok(());
+    }
+    let object = data
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("event {action} data must be null or an empty object"))?;
+    if !object.is_empty() {
+        anyhow::bail!("event {action} data must be empty");
+    }
+    Ok(())
+}
+
+fn validate_snooze_lifecycle_data(data: &serde_json::Value) -> anyhow::Result<DateTime<Utc>> {
+    let object = data
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?;
+    if object.len() != 1 || !object.contains_key("until") {
+        anyhow::bail!(INVALID_SNOOZE_UNTIL);
+    }
+    let until = object
+        .get("until")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?;
+    if until.len() > 1024 {
+        anyhow::bail!(INVALID_SNOOZE_UNTIL);
+    }
+    let until = DateTime::parse_from_rfc3339(until)
+        .map_err(|_| anyhow::anyhow!(INVALID_SNOOZE_UNTIL))?
+        .with_timezone(&Utc);
+    if until <= Utc::now() {
+        anyhow::bail!(INVALID_SNOOZE_UNTIL);
+    }
+    Ok(until)
 }
 
 fn event_choice_label<'a>(ui: &'a serde_json::Value, choice: &str) -> Option<&'a str> {
@@ -509,6 +576,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             agent_mode: config.agent,
             provider_mode: config.provider,
             anthropic_api_key: config.anthropic_api_key.clone(),
+            openrouter_api_key: config.openrouter_api_key.clone(),
             model: config.model.clone(),
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
@@ -520,13 +588,18 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcast_log.clone(),
     )
     .await?;
+    let side_session_compatibility = config.compat_side_session_ttl_secs.map(|ttl| {
+        side_chat::SideSessionCompatibility::new(
+            agent.side_chat_backend(),
+            Duration::from_secs(ttl),
+        )
+    });
     let side_chats = Arc::new(side_chat::SideChatManager::new(
-        agent.side_chat_backend(),
+        side_session_compatibility,
         broadcaster.clone(),
         broadcast_log.clone(),
         storage.clone(),
     ));
-    side_chats.spawn_reaper(Duration::from_secs(config.sidechat_ttl_secs));
     let blob_signer = blob_route::BlobSigner::new(config.token.as_bytes());
     let state = AppState {
         token: Arc::from(config.token),
@@ -576,799 +649,4 @@ pub fn router_from_state(state: AppState) -> Router {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use hirsel_proto::{ChatAuthor, PingStatus, SendMode};
-    use serde_json::json;
-
-    use super::*;
-    use crate::config::{AgentMode, Config, DriverMode, ProviderMode};
-
-    #[tokio::test]
-    async fn scripted_next_turn_waits_and_cancel_queued_removes_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let mut broadcasts = state.broadcaster.subscribe();
-
-        state
-            .submit_owner_message(
-                "active".to_string(),
-                "slow:0.4".to_string(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                SendMode::Send,
-            )
-            .await
-            .unwrap();
-        read_until_agent_activity(&mut broadcasts, AgentActivityState::Thinking).await;
-
-        let queued = state
-            .submit_owner_message(
-                "queued".to_string(),
-                "pong".to_string(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                SendMode::NextTurn,
-            )
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            state
-                .storage
-                .all_chat()
-                .await
-                .unwrap()
-                .iter()
-                .all(|message| message.author == ChatAuthor::Owner),
-            "queued next-turn input should not be answered while slow turn is active"
-        );
-
-        let removed_id = state.cancel_queued_message("queued").await.unwrap();
-        assert_eq!(removed_id, queued.message.id);
-        read_until_msg_removed(&mut broadcasts, removed_id).await;
-        assert!(
-            state
-                .storage
-                .all_chat()
-                .await
-                .unwrap()
-                .iter()
-                .all(|message| message.id != removed_id)
-        );
-
-        read_until_agent_activity(&mut broadcasts, AgentActivityState::Idle).await;
-        let messages = state.storage.all_chat().await.unwrap();
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|message| message.author == ChatAuthor::Agent)
-                .count(),
-            1,
-            "only the uncancelled slow turn should receive a scripted reply"
-        );
-    }
-
-    #[tokio::test]
-    async fn scripted_cancel_turn_interrupts_slow_turn_without_reply() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let mut broadcasts = state.broadcaster.subscribe();
-
-        state
-            .submit_owner_message(
-                "active".to_string(),
-                "slow:5".to_string(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                SendMode::Send,
-            )
-            .await
-            .unwrap();
-        read_until_agent_activity(&mut broadcasts, AgentActivityState::Thinking).await;
-
-        state.cancel_turn().await.unwrap();
-        read_until_agent_activity(&mut broadcasts, AgentActivityState::Idle).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        assert!(
-            state
-                .storage
-                .all_chat()
-                .await
-                .unwrap()
-                .iter()
-                .all(|message| message.author == ChatAuthor::Owner),
-            "cancelled slow turn should not produce an Agent reply"
-        );
-    }
-
-    #[tokio::test]
-    async fn owner_message_enqueue_failure_deletes_message_without_broadcast() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let mut broadcasts = state.broadcaster.subscribe();
-
-        let error = state
-            .submit_owner_message(
-                "enqueue-fails".to_string(),
-                "__hirsel_test_enqueue_error__".to_string(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                SendMode::Send,
-            )
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("scripted enqueue failed"));
-        assert!(state.storage.all_chat().await.unwrap().is_empty());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), broadcasts.recv())
-                .await
-                .is_err(),
-            "failed enqueue must not publish a sent message"
-        );
-    }
-
-    #[tokio::test]
-    async fn owner_reply_resolves_ping_and_broadcasts_upsert() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Choose", None)
-            .await
-            .unwrap();
-        let ping = state
-            .storage
-            .create_ping(
-                "choose-release",
-                "Choose whether to release",
-                "Choose",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        state
-            .submit_owner_message(
-                "reply-1".to_string(),
-                "Ship it".to_string(),
-                Some(anchor.id),
-                Vec::new(),
-                Vec::new(),
-                SendMode::Send,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            state.storage.ping(ping.id).await.unwrap().unwrap().status,
-            PingStatus::Done
-        );
-        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
-            event,
-            HostToClient::EventUpsert { event: update }
-                if update.id == ping.id && update.status == PingStatus::Done
-        )));
-    }
-
-    #[tokio::test]
-    async fn mentioning_a_ping_never_resolves_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Status", None)
-            .await
-            .unwrap();
-        let ping = state
-            .storage
-            .create_ping(
-                "status-check",
-                "Check the current status",
-                "Status",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        state
-            .submit_owner_message(
-                "mention-1".to_string(),
-                "What is happening?".to_string(),
-                None,
-                Vec::new(),
-                vec![ping.id],
-                SendMode::Send,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            state.storage.ping(ping.id).await.unwrap().unwrap().status,
-            PingStatus::Open
-        );
-        assert!(state.broadcast_log.recent().iter().all(|event| !matches!(
-            event,
-            HostToClient::EventUpsert { event: update } if update.id == ping.id
-        )));
-    }
-
-    #[tokio::test]
-    async fn set_model_changes_the_next_turn_model_spec() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = test_config(dir.path());
-        config.provider = ProviderMode::Codex;
-        config.model = "gpt-5.6-sol".to_string();
-        let state = build_state(config).await.unwrap();
-
-        let selected = state.set_model("gpt-5.6-sol", "high").await.unwrap();
-        let spec = state
-            .agent
-            .next_turn_model_spec()
-            .expect("Codex runtime has a selectable model");
-
-        assert_eq!(selected.id, "gpt-5.6-sol");
-        assert_eq!(selected.variant, "high");
-        assert_eq!(spec.id, "gpt-5.6-sol");
-        assert_eq!(spec.variant.effort(), Some("high"));
-        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
-            event,
-            HostToClient::ModelChanged { current }
-                if current.id == "gpt-5.6-sol" && current.variant == "high"
-        )));
-    }
-
-    #[tokio::test]
-    async fn set_model_rejects_unknown_models_and_variants() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = test_config(dir.path());
-        config.provider = ProviderMode::Codex;
-        config.model = "gpt-5.6-sol".to_string();
-        let state = build_state(config).await.unwrap();
-
-        // gpt-5.5 is no longer offered for the main agent — reject it, and any
-        // unknown variant, while leaving the configured selection untouched.
-        assert!(state.set_model("gpt-5.5", "high").await.is_err());
-        assert!(state.set_model("gpt-5.6-sol", "impossible").await.is_err());
-        assert_eq!(
-            state.model_snapshot().unwrap().current,
-            ModelSelection {
-                id: "gpt-5.6-sol".to_string(),
-                variant: "medium".to_string(),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn set_subagent_model_persists_and_broadcasts_catalog() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let catalog = state
-            .set_subagent_model("claude", "claude-sonnet-5", false, "low")
-            .await
-            .unwrap();
-        let sonnet = &catalog.providers[1].models[1];
-        assert!(!sonnet.enabled);
-        assert_eq!(sonnet.default_variant, "low");
-        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
-            event,
-            HostToClient::SubagentModelsChanged { catalog }
-                if !catalog.providers[1].models[1].enabled
-        )));
-        let persisted = std::fs::read_to_string(dir.path().join("hirsel.toml")).unwrap();
-        assert!(persisted.contains("[subagent_models.claude.claude-sonnet-5]"));
-        assert!(persisted.contains("default_variant = \"low\""));
-    }
-
-    #[tokio::test]
-    async fn canvas_view_event_enters_main_chat_as_owner_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        state
-            .views
-            .show(
-                None,
-                Some(json!({ "type": "action", "label": "Retry", "action": "retry" })),
-                None,
-                Some("view-canvas".to_string()),
-                "canvas".to_string(),
-            )
-            .await
-            .unwrap();
-
-        let submission = state
-            .handle_view_event(
-                "view-canvas".to_string(),
-                "retry".to_string(),
-                json!({ "attempt": 2 }),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(submission.message.author, ChatAuthor::Owner);
-        assert_eq!(submission.message.r#ref, None);
-        assert!(submission.message.body.contains("`retry`"));
-        assert!(submission.message.body.contains(r#"{"attempt":2}"#));
-    }
-
-    #[tokio::test]
-    async fn ping_view_event_replies_to_anchor_and_auto_resolves_ping() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Choose", None)
-            .await
-            .unwrap();
-        let ping = state
-            .storage
-            .create_ping(
-                "release-window",
-                "Choose a release window",
-                "Choose",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        state
-            .views
-            .show(
-                None,
-                Some(json!({
-                    "type": "optionSet",
-                    "action": "window_selected",
-                    "choices": [{ "label": "Tonight", "value": "tonight" }]
-                })),
-                None,
-                Some("view-ping".to_string()),
-                format!("ping:{}", ping.id),
-            )
-            .await
-            .unwrap();
-
-        let submission = state
-            .handle_view_event(
-                "view-ping".to_string(),
-                "window_selected".to_string(),
-                json!({ "value": "tonight" }),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(submission.message.r#ref, Some(anchor.id));
-        assert_eq!(
-            state.storage.ping(ping.id).await.unwrap().unwrap().status,
-            PingStatus::Done
-        );
-        assert!(state.broadcast_log.recent().iter().any(|event| matches!(
-            event,
-            HostToClient::EventUpsert { event: update }
-                if update.id == ping.id && update.status == PingStatus::Done
-        )));
-    }
-
-    #[tokio::test]
-    async fn event_action_choose_resolves_judgment_and_records_taste_rule() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Choose the release", None)
-            .await
-            .unwrap();
-        let event = state
-            .tools
-            .pings_send_with_view(
-                "release-channel",
-                "Which release channel should we use?",
-                "Stable is slower; `edge` reaches testers now.",
-                anchor.id,
-                true,
-                vec![
-                    hirsel_proto::QuickReply {
-                        value: "Use stable for lower risk".to_string(),
-                        label: "Stable".to_string(),
-                    },
-                    hirsel_proto::QuickReply {
-                        value: "Use edge for faster feedback".to_string(),
-                        label: "Edge".to_string(),
-                    },
-                ],
-                Some(json!({ "type": "text", "text": "release diff" })),
-                Some(2),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(event.kind, hirsel_proto::EventKind::Judgment);
-        assert_eq!(event.ui["type"], "card");
-        assert_eq!(event.ui["children"][0]["type"], "eyebrow");
-        assert_eq!(event.ui["children"][3]["type"], "optionList");
-        assert_eq!(event.ui["children"][3]["options"][0]["key"], "A");
-        assert_eq!(event.ui["children"][4]["type"], "viewSlot");
-        let serialized_ui = event.ui.to_string();
-        assert!(!serialized_ui.contains("wait"));
-        assert!(!serialized_ui.contains("cost"));
-        assert!(!serialized_ui.contains("turns"));
-
-        let resolved = state
-            .handle_event_action(
-                event.id,
-                "choose".to_string(),
-                json!({
-                    "choice": "A",
-                    "record_rule": "Default releases to stable unless feedback speed is critical"
-                }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resolved.status, PingStatus::Done);
-        let owner_reply = state
-            .storage
-            .all_chat()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|message| {
-                message.author == ChatAuthor::Owner && message.r#ref == Some(event.anchor)
-            })
-            .expect("choose should inject an anchor-refed Owner reply");
-        assert_eq!(owner_reply.body, "Stable");
-        let taste = state.storage.taste_decisions().await.unwrap();
-        assert_eq!(taste.len(), 1);
-        assert_eq!(taste[0].event_id, event.id);
-        assert_eq!(taste[0].choice.as_deref(), Some("A"));
-        assert_eq!(
-            taste[0].rule,
-            "Default releases to stable unless feedback speed is critical"
-        );
-    }
-
-    #[tokio::test]
-    async fn event_action_choose_appends_note_to_owner_reply() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Choose the storage design", None)
-            .await
-            .unwrap();
-        let event = state
-            .tools
-            .pings_send(
-                "storage-design",
-                "Where should views be stored?",
-                "Choose the durable representation.",
-                anchor.id,
-                true,
-                vec![
-                    hirsel_proto::QuickReply {
-                        value: "Store views in their own table".to_string(),
-                        label: "sqlite views table".to_string(),
-                    },
-                    hirsel_proto::QuickReply {
-                        value: "Store views alongside events".to_string(),
-                        label: "serialized event field".to_string(),
-                    },
-                ],
-            )
-            .await
-            .unwrap();
-
-        let resolved = state
-            .handle_event_action(
-                event.id,
-                "choose".to_string(),
-                json!({
-                    "choice": "A",
-                    "note": "Keep the schema queryable for debugging."
-                }),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resolved.status, PingStatus::Done);
-        let owner_reply = state
-            .storage
-            .all_chat()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|message| {
-                message.author == ChatAuthor::Owner && message.r#ref == Some(event.anchor)
-            })
-            .expect("choose should inject an anchor-refed Owner reply");
-        assert_eq!(
-            owner_reply.body,
-            "sqlite views table\nKeep the schema queryable for debugging."
-        );
-    }
-
-    #[tokio::test]
-    async fn event_action_archive_and_unarchive_broadcast_full_upserts() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Review the release", None)
-            .await
-            .unwrap();
-        let event = state
-            .tools
-            .pings_send(
-                "release-review",
-                "Review the release",
-                "Choose whether to release.",
-                anchor.id,
-                true,
-                vec![
-                    hirsel_proto::QuickReply {
-                        value: "release".to_string(),
-                        label: "Release".to_string(),
-                    },
-                    hirsel_proto::QuickReply {
-                        value: "hold".to_string(),
-                        label: "Hold".to_string(),
-                    },
-                ],
-            )
-            .await
-            .unwrap();
-        let event_id = event.id;
-
-        let archived = state
-            .handle_event_action(event_id, "archive".to_string(), json!({}))
-            .await
-            .unwrap();
-        assert!(archived.archived);
-        assert_eq!(archived.status, PingStatus::Done);
-        assert!(archived.archived_at.is_some());
-
-        let unarchived = state
-            .handle_event_action(event_id, "unarchive".to_string(), json!({}))
-            .await
-            .unwrap();
-        assert!(!unarchived.archived);
-        assert_eq!(unarchived.status, PingStatus::Done);
-        assert_eq!(unarchived.archived_at, None);
-
-        let updates = state
-            .broadcast_log
-            .recent()
-            .into_iter()
-            .filter_map(|frame| match frame {
-                HostToClient::EventUpsert { event } if event.id == event_id => Some(event),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(updates.len(), 3);
-        assert!(updates[1].archived);
-        assert!(!updates[2].archived);
-    }
-
-    #[tokio::test]
-    async fn event_action_snooze_validates_persists_and_excludes_push() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        state
-            .storage
-            .register_push_token(hirsel_proto::PushPlatform::Android, "device-token")
-            .await
-            .unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Choose", None)
-            .await
-            .unwrap();
-        let event = state
-            .storage
-            .create_ping(
-                "release-choice",
-                "Choose the release channel",
-                "Stable or beta?",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        for data in [
-            json!({}),
-            json!({ "until": "tomorrow" }),
-            json!({ "until": (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339() }),
-        ] {
-            let error = state
-                .handle_event_action(event.id, "snooze".to_string(), data)
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("snooze preset"));
-        }
-
-        let until = Utc::now() + chrono::Duration::minutes(30);
-        let snoozed = state
-            .handle_event_action(
-                event.id,
-                "snooze".to_string(),
-                json!({ "until": until.to_rfc3339() }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(snoozed.snoozed_until, Some(until));
-        assert_eq!(
-            state
-                .storage
-                .ping(event.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .snoozed_until,
-            Some(until)
-        );
-
-        state.pushes.reenqueue_event(&snoozed).await;
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(state.pushes.recorded_pushes().is_empty());
-
-        let unsnoozed = state
-            .handle_event_action(event.id, "unsnooze".to_string(), json!({}))
-            .await
-            .unwrap();
-        assert_eq!(unsnoozed.snoozed_until, None);
-    }
-
-    #[tokio::test]
-    async fn snooze_return_survives_restart_and_repushed_open_judgment() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path()).await.unwrap();
-        storage
-            .register_push_token(hirsel_proto::PushPlatform::Android, "device-token")
-            .await
-            .unwrap();
-        let anchor = storage
-            .append_chat(ChatAuthor::Agent, "Choose", None)
-            .await
-            .unwrap();
-        let event = storage
-            .create_ping(
-                "release-choice",
-                "Choose the release channel",
-                "Stable or beta?",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        storage
-            .snooze_event(event.id, Utc::now() + chrono::Duration::milliseconds(500))
-            .await
-            .unwrap();
-        drop(storage);
-
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        assert!(
-            state
-                .storage
-                .ping(event.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .snoozed_until
-                .is_some()
-        );
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let returned = state
-                    .storage
-                    .ping(event.id)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .snoozed_until
-                    .is_none();
-                if returned && !state.pushes.recorded_pushes().is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("snoozed event returned and pushed");
-
-        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
-            frame,
-            HostToClient::EventUpsert { event: update }
-                if update.id == event.id && update.snoozed_until.is_none()
-        )));
-        assert_eq!(
-            state.pushes.recorded_pushes()[0].payload.data.event_id,
-            event.id
-        );
-    }
-
-    #[tokio::test]
-    async fn scheduled_digest_emits_summary_event_without_push() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let event = state
-            .tools
-            .emit_scheduled_digest(
-                "morning-digest",
-                "Overnight work completed cleanly.",
-                "3 repositories checked",
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(event.kind, hirsel_proto::EventKind::Summary);
-        assert_eq!(event.source.kind, hirsel_proto::EventSourceKind::Scheduled);
-        assert_eq!(event.source.r#ref.as_deref(), Some("morning-digest"));
-        assert_eq!(event.ui["children"][0]["type"], "text");
-        assert_eq!(event.ui["children"][1]["type"], "status");
-        assert_eq!(event.ui["children"][2]["type"], "keyValue");
-        assert!(state.pushes.recorded_pushes().is_empty());
-        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
-            frame,
-            HostToClient::EventUpsert { event: update } if update.id == event.id
-        )));
-    }
-
-    async fn read_until_agent_activity(
-        broadcasts: &mut tokio::sync::broadcast::Receiver<HostToClient>,
-        state: AgentActivityState,
-    ) {
-        loop {
-            match broadcasts.recv().await.unwrap() {
-                HostToClient::AgentActivity {
-                    state: observed, ..
-                } if observed == state => return,
-                _ => {}
-            }
-        }
-    }
-
-    async fn read_until_msg_removed(
-        broadcasts: &mut tokio::sync::broadcast::Receiver<HostToClient>,
-        id: u64,
-    ) {
-        loop {
-            match broadcasts.recv().await.unwrap() {
-                HostToClient::MsgRemoved { id: observed } if observed == id => return,
-                _ => {}
-            }
-        }
-    }
-
-    pub(crate) fn test_config(data_dir: &std::path::Path) -> Config {
-        Config {
-            token: "test-token".to_string(),
-            agent: AgentMode::Scripted,
-            provider: ProviderMode::Anthropic,
-            anthropic_api_key: None,
-            model: "claude-opus-4-7".to_string(),
-            data_dir: data_dir.to_path_buf(),
-            config_path: data_dir.join("hirsel.toml"),
-            docs_path: crate::templates::bundled_docs_path(),
-            templates_dir: crate::templates::bundled_templates_dir(),
-            driver: DriverMode::Fake,
-            fake_fixture: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            debug: true,
-            sidechat_ttl_secs: 86_400,
-        }
-    }
-}
+mod tests;

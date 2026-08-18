@@ -8,7 +8,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use hirsel_proto::{HostToClient, IROH_OWNER_ALPN};
-use iroh::{Endpoint, EndpointId, SecretKey, endpoint::presets};
+use iroh::{Endpoint, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -61,10 +61,6 @@ impl IrohServer {
             accept_task: Some(accept_task),
             relay_task: Some(relay_task),
         })
-    }
-
-    pub fn endpoint_id(&self) -> EndpointId {
-        self.endpoint.id()
     }
 
     pub fn ticket(&self) -> &str {

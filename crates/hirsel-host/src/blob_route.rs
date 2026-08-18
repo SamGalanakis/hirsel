@@ -130,7 +130,7 @@ fn is_authorized(state: &AppState, id: &str, query: &BlobQuery, headers: &Header
         .exp
         .zip(query.sig.as_deref())
         .is_some_and(|(expires_at, signature)| state.blob_signer.verify(id, expires_at, signature))
-        || owner_bearer_matches(headers, &state.token)
+        || owner_bearer_matches(headers, &state.token, state.debug_enabled)
 }
 
 fn content_type_header(mime: &str) -> HeaderValue {

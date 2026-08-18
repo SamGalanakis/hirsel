@@ -9,6 +9,8 @@ use hirsel_drivers::{AgentKind, SessionHandle, SubagentEvent, TerminalOutcome};
 use hirsel_proto::{ProcessInfo, ProcessKind, ProcessState};
 use serde::Serialize;
 
+use crate::text::short_label;
+
 const SUMMARY_BROADCAST_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Default)]
@@ -303,18 +305,6 @@ fn agent_kind_name(agent: AgentKind) -> &'static str {
     match agent {
         AgentKind::Claude => "claude",
         AgentKind::Codex => "codex",
-    }
-}
-
-fn short_label(text: &str) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    const MAX_CHARS: usize = 80;
-    if compact.chars().count() <= MAX_CHARS {
-        compact
-    } else {
-        let mut truncated = compact.chars().take(MAX_CHARS - 3).collect::<String>();
-        truncated.push_str("...");
-        truncated
     }
 }
 

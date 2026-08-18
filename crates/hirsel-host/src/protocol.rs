@@ -247,7 +247,7 @@ async fn authenticate(
 ) -> Result<Option<String>, String> {
     match auth {
         HelloAuth::StaticToken(token) => {
-            if owner_token_matches(&state.token, &token) {
+            if owner_token_matches(&state.token, &token, state.debug_enabled) {
                 Ok(None)
             } else {
                 Err("invalid token".to_string())
@@ -377,10 +377,10 @@ where
             provider,
             model_id,
             enabled,
-            default_variant,
+            enabled_variants,
         } => {
             state
-                .set_subagent_model(&provider, &model_id, enabled, &default_variant)
+                .set_subagent_model(&provider, &model_id, enabled, &enabled_variants)
                 .await?;
         }
         ClientToHost::UploadBlob {
@@ -581,6 +581,7 @@ mod tests {
             agent: AgentMode::Scripted,
             provider: ProviderMode::Anthropic,
             anthropic_api_key: None,
+            openrouter_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
             config_path: dir.path().join("hirsel.toml"),
@@ -590,7 +591,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
-            sidechat_ttl_secs: 86_400,
+            compat_side_session_ttl_secs: Some(86_400),
         })
         .await
         .unwrap();
@@ -630,6 +631,7 @@ mod tests {
             agent: AgentMode::Scripted,
             provider: ProviderMode::Anthropic,
             anthropic_api_key: None,
+            openrouter_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
             config_path: dir.path().join("hirsel.toml"),
@@ -639,7 +641,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: false,
-            sidechat_ttl_secs: 86_400,
+            compat_side_session_ttl_secs: Some(86_400),
         })
         .await
         .unwrap();
@@ -668,6 +670,7 @@ mod tests {
             agent: AgentMode::Scripted,
             provider: ProviderMode::Anthropic,
             anthropic_api_key: None,
+            openrouter_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
             config_path: dir.path().join("hirsel.toml"),
@@ -677,7 +680,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: false,
-            sidechat_ttl_secs: 86_400,
+            compat_side_session_ttl_secs: Some(86_400),
         })
         .await
         .unwrap();
@@ -797,6 +800,7 @@ mod tests {
             agent: AgentMode::Scripted,
             provider: ProviderMode::Anthropic,
             anthropic_api_key: None,
+            openrouter_api_key: None,
             model: "test-model".to_string(),
             data_dir: dir.path().to_path_buf(),
             config_path: dir.path().join("hirsel.toml"),
@@ -806,7 +810,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: false,
-            sidechat_ttl_secs: 86_400,
+            compat_side_session_ttl_secs: Some(86_400),
         })
         .await
         .unwrap();

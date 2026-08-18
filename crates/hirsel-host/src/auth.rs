@@ -7,19 +7,23 @@ use std::{
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use subtle::ConstantTimeEq;
 
-pub fn owner_token_matches(expected: &str, presented: &str) -> bool {
+pub fn owner_token_matches(expected: &str, presented: &str, debug_enabled: bool) -> bool {
+    if debug_enabled {
+        return !presented.trim().is_empty();
+    }
     !expected.is_empty()
         && !presented.is_empty()
         && bool::from(expected.as_bytes().ct_eq(presented.as_bytes()))
 }
 
-pub fn owner_bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
+pub fn owner_bearer_matches(headers: &HeaderMap, expected: &str, debug_enabled: bool) -> bool {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split_once(' '))
         .is_some_and(|(scheme, token)| {
-            scheme.eq_ignore_ascii_case("bearer") && owner_token_matches(expected, token)
+            scheme.eq_ignore_ascii_case("bearer")
+                && owner_token_matches(expected, token, debug_enabled)
         })
 }
 
@@ -69,7 +73,30 @@ impl AuthThrottle {
 
 #[cfg(test)]
 mod tests {
-    use super::AuthThrottle;
+    use axum::http::{HeaderMap, header::AUTHORIZATION};
+
+    use super::{AuthThrottle, owner_bearer_matches, owner_token_matches};
+
+    #[test]
+    fn debug_accepts_any_non_whitespace_owner_token() {
+        assert!(owner_token_matches("configured", "anything", true));
+        assert!(!owner_token_matches("configured", "", true));
+        assert!(!owner_token_matches("configured", " \t", true));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer browser-token".parse().unwrap());
+        assert!(owner_bearer_matches(&headers, "configured", true));
+    }
+
+    #[test]
+    fn production_requires_the_exact_owner_token() {
+        assert!(owner_token_matches("configured", "configured", false));
+        assert!(!owner_token_matches("configured", "anything", false));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer anything".parse().unwrap());
+        assert!(!owner_bearer_matches(&headers, "configured", false));
+    }
 
     #[test]
     fn repeated_auth_failures_back_off_per_peer() {

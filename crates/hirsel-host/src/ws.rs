@@ -79,6 +79,7 @@ mod tests {
             agent: AgentMode::Scripted,
             provider: ProviderMode::Anthropic,
             anthropic_api_key: None,
+            openrouter_api_key: None,
             model: "claude-opus-4-7".to_string(),
             data_dir: dir.path().to_path_buf(),
             config_path: dir.path().join("hirsel.toml"),
@@ -88,7 +89,7 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
-            sidechat_ttl_secs: 86_400,
+            compat_side_session_ttl_secs: Some(86_400),
         };
         let state = build_state(config.clone()).await.unwrap();
         state
@@ -703,22 +704,7 @@ mod tests {
     }
 
     fn test_config(data_dir: &std::path::Path) -> Config {
-        Config {
-            token: "test-token".to_string(),
-            agent: AgentMode::Scripted,
-            provider: ProviderMode::Anthropic,
-            anthropic_api_key: None,
-            model: "claude-opus-4-7".to_string(),
-            data_dir: data_dir.to_path_buf(),
-            config_path: data_dir.join("hirsel.toml"),
-            docs_path: crate::templates::bundled_docs_path(),
-            templates_dir: crate::templates::bundled_templates_dir(),
-            driver: DriverMode::Fake,
-            fake_fixture: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            debug: true,
-            sidechat_ttl_secs: 86_400,
-        }
+        crate::tests::test_config_with_compat_side_sessions(data_dir, 86_400)
     }
 
     fn owner_http_client() -> reqwest::Client {

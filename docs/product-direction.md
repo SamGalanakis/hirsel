@@ -1,179 +1,139 @@
-# Product Direction: hirsel as a judgment-leverage system
+# Product Direction: effortless orchestration through Task Margins
 
-Status: north-star, agreed 2026-07 (supersedes the earlier "conversation-first" framing). This is the
-*why* and the *shape*; `SCOPE.md` remains the v1-vs-deferred ledger and the ADRs remain the record of
-individual decisions. Where this doc and older text disagree (notably: Chat is no longer the home;
-the generative-UI tier is constrained JSON, not HTML-in-iframes), this doc wins and the ADRs will be
-updated to match.
+Status: authoritative current direction, agreed 2026-07 and refined 2026-07-23. It supersedes the visible Chat/Tray/Side Chat and event-queue/scroller concepts recorded in older ADRs. Those documents remain historical evidence; `PRODUCT.md`, `DESIGN.md`, `CONTEXT.md`, and this document define the current product.
 
 ## 1. Thesis
 
-**The scarce resource is Sam's technical judgment and taste. hirsel exists to maximize its leverage.**
+Hirsel should make coordinating a fleet of agents feel like working with one excellent, globally aware collaborator.
 
-Two failure modes bound the design:
+The scarce resource is Sam's judgment and taste. Conventional multi-agent tools waste it in two opposite ways: operator consoles force him to dispatch sessions and reconstruct context, while hands-off autonomy silently makes the very decisions that need his taste. Hirsel puts autonomy between decisions and routes meaningful boundaries back through one Agent.
 
-- **herdr (the incumbent)** makes Sam the *operator* — he manually drives N coding-agent sessions,
-  spending judgment-hours on dispatch, transcript-reading, and context reconstruction. It wastes the
-  scarce resource.
-- **"vibecoding"** makes Sam an *absentee stakeholder* who sets outcomes and rubber-stamps. It
-  *discards* the scarce resource — the machine makes the taste calls, badly.
+The experience must be both minimal and surprising: almost no standing UI, yet the right interface can materialize for the work at hand and transform as that work advances.
 
-hirsel is neither. Sam is **the principal whose decisions and taste are the product.** The metric the
-system optimizes is *high-quality technical decisions routed through Sam per hour, at maximum leverage
-and zero waste.* Autonomy runs **between** his decisions, never instead of them.
+## 2. One Agent, two conversational scopes
 
-## 2. The home is one typed event queue
+There is one Agent and one standing composer.
 
-Everything the system wants *from* Sam or wants to *tell* him is a typed **event** in a single inbox.
-The queue is the primary surface; Chat is demoted to a drill-in reached *from* an event.
+- The resting state is the **global conversation**, aware of all Tasks and processes.
+- Opening a **Task** changes the subject and reveals its related conversation in the margin.
+- The composer becomes Task-scoped by adding the Task Anchor and mention to an ordinary message.
+- Removing the scope speaks globally while the Task stays open.
+- The Agent remains clued in to global and Task-scoped exchanges. A dive never creates a separate session, agent persona, or conversation destination.
 
-- **kinds** (open set): `judgment` (the hero — needs a decision), `summary` (a digest, no decision),
-  `info` (a quiet FYI/notification), … more as they earn their keep.
-- **producers**: the main Agent, sub-agents hitting their own taste boundary, and — the powerful part
-  — **lash jobs Sam schedules.** The "morning brief" is not a bespoke screen; it is a scheduled
-  process that emits a `summary` event at 7am. "Ping me if CI goes red" is a monitor emitting a
-  `judgment`/`info`. Sam composes his own recurring intelligence and it all lands in one queue.
+This is how Hirsel permits deep work without a nested labyrinth: location is flat, scope is explicit, and escape to the global Agent is one reversible gesture.
 
-**The No-Baked-In-Processes Rule.** hirsel ships **zero standing workflows**: no default morning
-digest, no pre-registered timers, no out-of-the-box monitors or recurring jobs of any kind. Every
-scheduled process exists only because Sam set it up (directly or by asking the Agent), and it is his
-to change or delete. The host provides the *machinery* — timer trigger sources, `digest:`-labelled
-jobs that file `summary` events, monitors — never a *default use* of it. A feature that "helpfully"
-registers its own schedule is miscoded; the debug surface and tests may fabricate scheduled events,
-production must not.
+## 3. Tasks are the only durable visible objects
 
-**The make-or-break invariant — the interrupt-vs-accrue axis.** An "anything can emit" queue dies if
-info drowns judgment. So the axis is baked into the type: **judgments lead the feed and may push
-(FCM); summaries/info accrue quietly, batch, and auto-read; the one red on the surface is the
-"needs you" count.** The feed splits into **Needs you** and **For your awareness** sections. This also
-simplifies the Agent's channel-discipline (`prompts/agent.md`): it shrinks from a fuzzy Ping-vs-Chat
-call to "pick the event kind."
+A Task is a stable place for one piece of work. The flat Task inventory answers what exists, what is selected, and which items need the Owner. The selected row carries identity and status; the main field is reserved for the work itself.
 
-## 3. The judgment (hero type) at full fidelity
+A Task owns:
 
-A judgment is minted when the fleet hits the **taste boundary** — anything that encodes a technical /
-architectural / UX commitment. The fleet **stops cold** and surfaces the call *before* it is
-load-bearing. That halt, made visible ("taste boundary — fleet stopped"), is the **anti-vibecoding
-guarantee**: the machine never makes a taste call silently.
+- stable identity and Anchor;
+- a related conversation slice with hard boundaries against other Tasks;
+- an explicit open/done lifecycle;
+- a constrained generated instrument;
+- optional accompanying Views.
 
-Each judgment carries:
+The UI does not add a second overview, feed, evidence ledger, nested task tree, or per-Task chat destination. Tasks may be reordered by urgency, but “queue” is an implementation policy, not the product metaphor.
 
-- the **fork** as a one-line question;
-- **2–3 prefab options**, letter-keyed, one **recommended** with a one-line *why* (and, later, the
-  standing decision it's derived from);
-- an **"unblocks"** line naming the paused work.
+## 4. The generated instrument is the interface
 
-**Minimal chrome.** The card is the event, not a telemetry panel — no wait-time, no cost, no
-turn counts, no ambient run-detail. Space is spent on the decision (fork, options, accompanying UI).
-Fleet run-detail lives in a separate read-only surface, never on the card.
+Each Task may carry a validated semantic JSON tree. A small renderer maps that tree onto the design system. The catalog includes headings, prose, key/value data, status, choices, fields, submit actions, insets, and accompanying View slots.
 
-Three engagement depths, Sam's choice per item:
+The constraint is the source of power:
 
-1. **Decide inline** — one tap on the recommendation (the default gesture).
-2. **Drill in to Chat** — a scoped Side Chat when the memo isn't enough.
-3. **Accompanying dynamic UI** — a diff, a table, an interactive chooser rendered on the card itself.
+- generated content cannot choose raw color, arbitrary layout, glow, or type scales;
+- the renderer owns hierarchy, accessibility, responsive behavior, motion, and safe fallback;
+- the same semantic tree can be rendered by web and native clients;
+- unknown nodes remain visible as a quiet fallback instead of breaking the Task;
+- text is rendered as text, never injected HTML.
 
-Deciding resolves the event and (in the background) writes to the taste store (§5).
+This is not a card generator or a collection of mini-apps. It is a small instrument language that lets Hirsel produce the exact control surface a moment needs while the surrounding product stays calm.
 
-## 4. Events are constrained dynamic JSON UI (the keystone)
+## 5. Instruments can recompose in place
 
-Each event carries a **`ui`: a validated JSON component tree**. A small renderer walks it → DOM,
-applying DESIGN.md tokens. hirsel already has the bones: `app/src/views/` (the catalog + tokens),
-`ViewRenderer.tsx`, the **colors-forbidden** discipline, and `views_show`'s validation-at-the-tool-
-boundary. The queue points that Canvas substrate at cards.
+An action is not synonymous with settlement. A structured Task action may:
 
-Why this is the keystone:
+1. settle the Task, or
+2. transition the same Task to another generated stage.
 
-- **One substrate, three regions.** Judgment card, summary card, full canvas view — the same
-  vocabulary rendered at card size in the queue vs. full size in the canvas. One renderer for phone,
-  desktop, and Android.
-- **Taste-safe by construction.** The vocabulary *cannot express* an arbitrary color, a glow, or a
-  non-hairline fill — so machine-generated UI is on-brand by construction, not by review. The taste
-  boundary reappears at the **render layer**: Sam's DESIGN.md is enforced in the vocabulary itself.
-- **This revises the deferred UI direction.** `SCOPE.md` previously pointed the generative-UI tier at
-  "HTML templates in sandboxed iframes." We choose **constrained JSON UI** instead: more reliably
-  LLM-authorable, inherently sandbox-safe, render-consistent across clients, and taste-enforcing —
-  none of which HTML-in-iframes gives.
-- **Interactive.** Taps and field submits post back a structured **event-action** to the producer's
-  scope (a judgment's option-tap resolves it; a custom job's control posts to that job). This
-  interaction-back path is the one genuinely new protocol piece.
+The deploy reference flow demonstrates the model:
 
-**Templates vs. free composition — the one hard rule.** The hero types are **blessed parameterized
-templates**: the judgment card is pixel-identical every time so the decide-in-3s reflex holds and the
-Agent just fills the data slots. **Free composition** from the catalog is reserved for the long tail
-(a scheduled job's bespoke digest, a one-off review). Both modes; that split. Validate at the tool
-boundary (reject malformed, retry); version the vocabulary; **an unknown node degrades to a fallback
-chip — never breaks, never loses content.**
+```text
+Ship build 4821?
+        │ Ship now
+        ▼
+5% canary healthy — promote?
+        │ Promote to 100%
+        ▼
+Build 4821 live · done
+```
 
-## 5. The taste store (deferred, runs in the background)
+Across the transition, Task id, Anchor, selected row, composer scope, and related conversation remain stable. Reopen restores the last actionable stage rather than resetting to an unrelated beginning. The mock expresses this through declarative stages/transitions; production contracts should preserve that generality instead of hard-coding deployment semantics.
 
-Every judgment Sam decides quietly writes a **standing decision** — no UI cost now. Seeded from his
-`DESIGN.md`, `CLAUDE.md`, and model-taste table (already this, done by hand). Later it surfaces as the
-**codex**: the fleet *cites* standing decisions, *auto-decides* recurring forks ("handled on your
-preferences — override?"), and *litigates* them (files an amendment with evidence + a diff when
-reality contradicts a rule). That compounding layer — a decision's leverage going from 1 to 41× — is
-the endgame, grown in once decision volume exists, not built up front.
+This is the mind-bending part delivered quietly: the interface understands the phase of work and becomes the next instrument without navigation.
 
-## 6. Observable, not operable
+## 6. Conversation lives in the margin
 
-Sub-agents and the fleet are **visible** (ambient, read-only, git/space-aware state) but never typed
-into. No jump-into-session, no per-session permission UI. Steering is **conversational** (intent in
-the composer) and, later, **editing standing decisions** — never terminal-driving. This is a
-deliberate rejection of herdr's operator model.
+Conversation supports the Task rather than dominating the screen. The generated question or status leads; related Owner/Agent exchanges sit in an organic margin beside or below it. Durable Anchor and mention boundaries prevent one Task's messages from bleeding into another even when reply chains interleave.
 
-## 7. Mapping onto the existing stack (this is barely a rebuild)
+There is no drill-in Side Chat. If the Owner needs a global comparison during a Task, he removes scope and asks the globally aware Agent in place. If he needs local depth, he leaves scope active. The open Task never disappears merely because conversational scope changes.
 
-| Concept | Existing primitive | Delta |
-| --- | --- | --- |
-| Event | `Ping` (`hirsel-proto`) | add `kind`, `ui`, `options`, `source`; `requires_response` Ping *is* the judgment type |
-| Prefab options | `quick_replies` | rename/extend; letter-keyed, recommended flag |
-| Dynamic UI / renderer | Canvas / `ViewRenderer.tsx` / `views/tokens.ts` | add interactive nodes (`option`, `field`, `submit`) + interaction-back |
-| Chat drill-in | Side Chats (ADR-0008) | open from a judgment card |
-| Scheduled producers | timers + monitors | generalize to "a scheduled lash job emits events" |
-| Push | FCM gateway (ADR-0009) | judgments push; info/summary don't |
-| Taste store | — (new) | seeded from DESIGN.md / CLAUDE.md; flat in v1 |
+## 7. Utilities are summoned, never visited
 
-## 8. v1 build slice
+Processes, Settings, and Canvas are temporary utilities:
 
-- **proto:** `Event { id, kind, source, name, description, ui, requires_response, state, … }`; the
-  constrained JSON-UI vocabulary v1 (extend the `views` catalog + interactive nodes); an
-  `event_action` inbound op (interaction-back); an `event_upsert` broadcast.
-- **host:** generalize `Ping` → `Event` with `kind`; a blessed **judgment template** the Agent fills;
-  a scheduled-job producer path (a lash program + a schedule → emits events); write-through to a flat
-  taste store on decide.
-- **PWA:** the home *is* the event feed (Needs-you / For-your-awareness); the JSON-UI renderer
-  extended to render cards; the judgment card as a blessed template; interaction-back wired; Side-Chat
-  drill-in from a judgment.
-- **Deferred within this direction:** the codex surface + auto-decide/amendment loop (§5);
-  git-aware Spaces as a separate track; free-composition producer UIs beyond the blessed templates.
+- **Processes** makes background work observable and routes steering back through Hirsel (for example, “Ask Hirsel to stop”).
+- **Settings** changes local/client configuration without becoming a product destination.
+- **Canvas** hosts a larger generated View when one exists; absence is honest, not an empty permanent tab.
 
-## 9. The home interaction (decided)
+On desktop they may dock; on phone they are modal sheets with focus trapping. Closing restores the exact Task, scope, draft, scroll position, and usable focus. No utility contains another Task inventory or conversation.
 
-The home is a **Tinder-like vertical event scroller**: full-viewport, one event per screen, flicked
-through and cleared. Not a sectioned list — a focused pager where each event owns the whole screen,
-so decide-in-3s becomes decide-with-full-attention, thumb-driven, walk-friendly. Settled interaction
-rules:
+## 8. Visual and interaction character
 
-- **Vertical paging / scroll-snap**, one `100svh` event per screen; flick up = next.
-- **Order is the priority axis** (the interrupt-vs-accrue invariant expressed as ordering): blocking
-  judgments first → other needs-you judgments → the awareness tail (`summary`/`info`), which
-  **auto-marks-read as it scrolls past**. A blocking judgment can jump the queue and push.
-- **Buttons carry the real choice** — a multi-option judgment does not reduce to a binary swipe.
-  **Swipes are accelerators**: up = next, right = accept the recommendation, left = snooze to the
-  tail.
-- **Decide → confirm → auto-advance**, with an undo; the "N need you" pager count is the surface's
-  one red.
-- A pure scroller loses at-a-glance, so a slim **pager + a peek-to-overview** (a compact list of the
-  whole queue you can jump from) keeps it from being a tunnel.
-- An **inbox-zero "queue clear"** end state — the peak-end reward of clearing the queue.
+Task Margins is deliberately soft, spare, and non-rectilinear:
 
-The scroller is the *presentation shell*; the cards inside it are unchanged constrained-JSON-UI events
-(§4). A scheduled "digest" `summary` event can still ride at the top as the morning brief without
-being a bespoke surface.
+- warm blue-charcoal and mint interaction, with literal status text rather than color alone;
+- plain rows and hairlines instead of card grids and aggressive boxes;
+- one organic conversation aperture and one organic composer capsule;
+- generated questions lead with generous type and space;
+- Task identity/status stay in the selected row and scope control rather than repeating as desktop banners;
+- motion explains recomposition and focus, never withholds content;
+- 44px phone targets, roving task keys, honest shortcuts, and no document-level overflow down to 320px.
+
+Minimal does not mean inert. It means every visible thing either establishes the current subject, enables a decision, or carries the conversation forward.
+
+## 9. Runtime mapping and compatibility
+
+| Product concept | Current implementation |
+| --- | --- |
+| Task | typed `EventItem` replayed by `event_upsert` |
+| Generated instrument | `ui` tree rendered by `EventCardRenderer` |
+| Stage or settlement action | `event_action { event_id, action, data }`; node settlement intent is explicit |
+| Task conversation | ordinary messages selected by Anchor/ref and Task mentions |
+| Task placement for accompanying View | legacy `ping:<id>` wire spelling |
+| Global conversation | ordinary `send_message` with no Task Anchor/mention |
+| Processes | replayed/streamed `ProcessInfo` plus temporary inspector |
+
+`ping`, `Chat`, `Side Chat`, and queue/scroller language survives in historical docs, protocol fields, debug routes, and compatibility tests. It does not license those concepts as visible destinations.
+
+## 10. Product invariants
+
+1. One Agent, one composer, one flat Task inventory.
+2. Opening a Task changes subject, not interlocutor.
+3. Ambient is the absence of Task focus, not a named mode or destination.
+4. Hirsel knows about work across every Task margin.
+5. Generated UI is constrained, semantic, responsive, and safe by construction.
+6. A Task can adapt through multiple stages without losing identity or context.
+7. Only explicit settling actions close a Task; conversation alone preserves lifecycle.
+8. Utilities always return to the same world.
+9. Status is readable without color; shortcuts are shown only when implemented.
+10. No nested destinations, duplicate identity, dashboard noise, or arbitrary generated chrome.
+
+## 11. Deferred compounding layers
+
+The eventual taste store can turn repeated decisions into standing guidance, citations, and proposed amendments. That is the leverage endgame, but it should grow from real Task decisions rather than precede them. General memory, voice, push, arbitrary UI, and built-in workflows remain deferred until the core orchestration loop proves a specific need.
 
 ## Provenance
 
-Narrowed over a design conversation and three independent model spikes (the "Decisions", "Codex", and
-"Operation" directions) plus a constrained-JSON-UI renderer spike. The three spikes converged, unasked,
-on demoting Chat and on the decision-memo atom; this doc is their synthesis under the judgment-leverage
-thesis, with the event-queue generalization and the JSON-UI keystone added on top.
+This direction synthesizes the “effortless orchestration” exploration, experimental interface research, the selected Task Margins world, and implementation evidence from the current SolidJS reference client. The archived directions remain in `docs/effortless-orchestration/index.html`; Task Margins and the adaptive instrument are the selected present, not one more option in a gallery.

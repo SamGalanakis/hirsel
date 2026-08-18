@@ -83,3 +83,7 @@ signing.properties
 **/*firebase-admin*.json
 **/*credentials*.json
 GoogleService-Info.plist
+
+# Local report/critique output
+e2e/reports/
+.impeccable/critique/

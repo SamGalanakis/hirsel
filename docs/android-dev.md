@@ -29,6 +29,16 @@ The AVD is `hirsel-emu`: a Pixel 6-class x86_64 device with 4 GB RAM, local
 fast-boot snapshots, and a non-Play-Store Google APIs image. The latter matters:
 `adb root` is available when native debugging eventually needs it.
 
+## Native product contract
+
+The Android skin must implement the same current Task Margins world as the web
+reference client: one global conversation, one flat Task inventory, one
+standing composer with removable Task scope, generated Task instruments that
+can recompose in place, and Processes/Settings/Canvas as temporary utilities.
+Legacy `chat`, `ping`, and side-session records in the Rust core are wire
+compatibility, not Android destinations. Do not scaffold an Inbox, Chat list,
+Tray, or Side Chat from those names.
+
 To inspect tools directly:
 
 ```bash
@@ -165,7 +175,8 @@ appId: dev.hirsel.android
 - launchApp
 - assertVisible: "Welcome to hirsel"
 - tapOn: "Continue"
-- assertVisible: "Inbox"
+- assertVisible: "Tasks"
+- assertNotVisible: "Global Hirsel"
 - takeScreenshot: smoke-home
 ```
 

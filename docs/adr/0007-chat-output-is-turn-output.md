@@ -1,3 +1,5 @@
 # Chat output is turn output, not a tool call
 
+> **Product-language update (2026-07-23):** The turn-output decision remains valid. The visible `Chat`/Ping split described below is superseded by the global conversation plus Tasks in `PRODUCT.md`, `DESIGN.md`, `CONTEXT.md`, and `docs/product-direction.md`. `ChatMessage` and Ping spellings below are historical/wire language.
+
 The Agent talks to the Owner the way a normal lash Chat Agent talks: the turn's prose/final value is the Chat message, delivered by the Host when the turn commits (live preview streams via `agent_activity`). The earlier `chat.send` tool is removed because routing ordinary replies through a tool made answering the exception. `pings.send` remains a tool because a Ping is a structured side effect (name, description, Anchor, response requirement, Quick Replies); Chat is not. Consequence: mid-turn permanent Chat messages do not exist — live status is ephemeral activity, and asynchronous output is a Ping.

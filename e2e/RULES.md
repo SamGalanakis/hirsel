@@ -1,126 +1,112 @@
-# E2E Runbook Rules
+# Task E2E rules
 
-Read this before running any scenario in `e2e/`. These are agent-driven runbooks, not scripts. You drive the Hirsel Host debug HTTP endpoints with `curl`, poll observable state, and judge whether the system produced the expected behavior.
+This directory's primary suite covers the current Task Margins product surface:
+one global Hirsel, flat Task dives, generated Task instruments, and temporary
+utilities. Historical wire and backend-only scenarios are isolated under
+[`protocol-compatibility/`](protocol-compatibility/README.md).
 
-## What You're Testing
+## Automated runs
 
-You are testing Hirsel, not the tester model. A run is void if the asserted behavior came from you inventing state, manually writing the expected response, or relying on a visible transcript instead of the Hirsel Host debug surface.
+From `app/`:
 
-## Debug Surface
+```bash
+npm run e2e:task-margins
+npm run e2e:task-host
+```
 
-Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0.1`.
+`e2e:task-margins` boots an isolated mock plus Vite on controlled ports, polls
+readiness, and drives the shared desktop, 390px phone, and 320px narrow suite
+for all four Task Margins runbooks. It captures outgoing WebSocket frames,
+browser errors, request failures, and screenshots, then replaces
+[`reports/task-margins-latest.md`](reports/task-margins-latest.md) and its JSON
+twin.
 
-- `POST /debug/reset` wipes Chat, Pings, process debug state, and starts from a clean session.
-- `POST /debug/upload { "name": "...", "mime": "...", "data_b64": "..." }` stores a blob and returns its Blob JSON.
-- `POST /debug/owner-message { "client_id": "optional-stable-id", "body": "...", "ref": null | message_id, "attachments": ["blob-id"], "mentions": [ping_id], "mode": "send" | "next_turn" }` injects an Owner Chat message through the same host ingress path as the WebSocket; optional `mentions` add Ping context without changing lifecycle, while only `ref` to a Ping Anchor auto-resolves it.
-- `POST /debug/open-side-chat { "ping_id": ... }` opens or resumes a live side chat and returns its scope id and transcript.
-- `POST /debug/side-message { "sc": "side:...", "body": "...", "mentions": [ping_id] }` submits a side-scoped Owner message; poll `/debug/side-chats` for the reply.
-- `POST /debug/conclude { "sc": "side:..." }` drafts the Owner's conclusion without adding the draft to the transcript.
-- `POST /debug/confirm-conclusion { "sc": "side:...", "text": "..." }` posts the anchor-refed Owner conclusion to main Chat, auto-resolves the Ping, and closes the side chat.
-- `POST /debug/read-ping { "ping_id": ... }` marks a Ping read and broadcasts `ping_upsert`.
-- `POST /debug/resolve-ping { "ping_id": ... }` explicitly moves a Ping to done and broadcasts `ping_upsert`.
-- `POST /debug/reopen-ping { "ping_id": ... }` moves a done Ping/Event back to open and broadcasts `event_upsert`.
-- `POST /debug/event-action { "event_id": ..., "action": "choose" | "submit" | "dismiss" | "snooze" | "unsnooze" | "archive" | "unarchive", "data": {...} }` applies the owner-facing Event action and returns the authoritative Event.
-- `POST /debug/trigger-digest { "job_id": "optional", "text": "optional", "status": "optional" }` runs the scheduled-digest producer and returns its summary Event.
-- `GET /debug/taste` returns recorded standing-decision rows.
-- `POST /debug/register-push-token { "platform": "android" | "web" | "ios", "token": "..." }` idempotently upserts a push token and returns its timestamps.
-- `POST /debug/unregister-push-token { "token": "..." }` removes a push token and returns whether a row was removed.
-- `GET /debug/pushes` returns pushes captured by the debug recording sender, including recipient tokens and Event payloads.
-- `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
-- `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
-- `POST /debug/create-monitor { "cmd": "...", "every_secs": 30, "wake_on": "changed" | "exit_zero" | "exit_nonzero" | "regex", "pattern": "...", "label": "..." }` creates a persisted monitor for deterministic monitor runbooks.
-- `POST /debug/set-model { "model_id": "...", "variant": "..." }` validates, persists, and selects the main-Agent model.
-- `GET /debug/subagent-models` returns the Sub-agent model catalog; `POST` with `{ "provider": "...", "model_id": "...", "enabled": bool, "default_variant": "..." }` updates one catalog row.
-- `POST /debug/show-view { "template_id": "..." | null, "spec": {...} | null, "params": {...} | null, "placement": "canvas" | "chat" | "ping:<id>" }` creates an active View and returns its resolved instance.
-- `GET /debug/views` returns active View instances.
-- `POST /debug/view-event { "instance_id": "...", "action": "...", "data": {...} }` routes a View interaction through normal Owner-message ingress.
-- `GET /debug/chat` returns persisted Chat messages.
-- `GET /debug/pings` returns persisted Pings, including required `name` and `description` fields.
-- `GET /debug/events` returns all persisted typed Events, including archived rows.
-- `GET /debug/broadcasts` returns the recent debug-recorded host broadcasts, including `msg`, `msg_removed`, `turn_event`, `process_upsert`, and cancellation `agent_activity` events emitted through the debug/WebSocket ingress path.
-- `GET /debug/processes` returns v1.4 `ProcessInfo` rows for Sub-agents and monitors: `id`, `kind`, `label`, `agent`, `model`, `state`, timestamps, and `summary`.
-- `GET /debug/side-chats` returns only live side chats with their scoped transcripts.
-- `POST /debug/pair { "device_label": "..." }` mints a five-minute pairing code and returns it with the current iroh ticket.
-- `GET /debug/devices` returns paired-device labels, Node-id prefixes, timestamps, and revocation state.
-- `POST /debug/revoke-device` with exactly one of `{ "token": "..." }` or `{ "label": "..." }` revokes matching live devices.
-- `GET /debug/health` returns basic host health and the latest Chat message id.
-- `get_blob_url` returns a short-lived, blob-scoped signed URL for `GET /blob/{id}`. `Authorization: Bearer ...` remains a migration path, but owner tokens are never accepted in query strings. Images are served inline; other MIME types are served as attachments.
+`e2e:task-host` is the production-boundary adaptive Task proof. It builds and
+launches the real Rust Host from a neutral temporary directory with the
+deterministic scripted global Agent, launches Vite separately, polls both
+services, and drives a generated non-settling action through Agent
+recomposition, terminal settlement, reload, and reopen. It replaces
+[`reports/task-host-latest.md`](reports/task-host-latest.md), its JSON twin, and
+the Host-run screenshot.
 
-Agent event tools are `events.judgment { question, context?, options, unblocks?, view? }`,
-`events.notify { name, description, content_md? }`, and
-`events.summary { name, description, content_md | ui }`; tool summaries use the internal names
-`events_judgment`, `events_notify`, and `events_summary`. `pings.send` remains a deprecated alias for
-judgment/info events, with tool-summary name `pings_send`; `pings.resolve { ping_id }` remains the
-compatibility lifecycle tool with summary name `pings_resolve`. A scripted or real Agent must supply
-the required non-empty event fields; runbooks must never synthesize them outside the Agent tool path.
+`e2e:task-host-external-smoke` is an optional, explicit-cost supplement. Its
+default check-only mode never calls a provider; see the
+[`external model smoke runbook`](external-model-smoke/runbook.md). It is not a
+substitute for the deterministic Host gate.
 
-## Scenario Index
+## Primary scenario index
 
-- `attachments` - protocol v1.1 upload, replay, blob fetch, and scripted attachment-note plumbing.
-- `attachment-agent-behavior` - real Codex Agent behavior over image/text attachments.
-- `abandoned-recovery` - ADR-0004 abandoned Sub-agent recovery after SIGKILL/reboot.
-- `compaction` - Agent-initiated context compaction via `continue_as` and post-compaction recall.
-- `delegation-loop` - fake-driver delegation, terminal event, Ping question, Quick Reply, auto-resolution, and acknowledgement.
-- `pings-lifecycle` - named/described Pings, reply auto-resolution, neutral mentions, and explicit Owner/Agent resolution.
-- `ping-read` - Ping read-state round trip and restart persistence.
-- `monitors` - monitor creation, process visibility, wake, and restart survival.
-- `multi-turn-memory` - real Codex conversation recall before and after host restart.
-- `real-subagent` - real Codex Sub-agent spawn, progress, completion, and interruption.
-- `restart-persistence` - real Agent persistence over repeated host restarts.
-- `send-queue-cancel` - send/next-turn queueing and active-turn cancellation.
-- `side-chats` - side-chat loop: seeded open, scoped conversation, resume, conclude, confirm, reply-driven Ping resolution, teardown, and main-Agent reaction.
-- `timers` - timer trigger source registration and wake.
-- `turn-timeline` - live turn timeline ordering and tool event summaries.
-- `channel-discipline` - real-Agent surface choice: a warm result is answered in Chat, a cooled-off result becomes a Ping, a pure acknowledgment is filed nowhere, and nothing is ever double-filed.
-- `delegation-hygiene` - delegation note before the spawn, no redundant sibling sessions (`subagents.list`/`subagents.prompt` reuse), and one working directory per Sub-agent.
-- `interruption-and-reporting` - blocked work sends exactly one `requires_response` Ping then moves on without nagging, and a decision-carrying completion is a single outcome-phrased Ping (never split report + question).
-- `recovery-judgment` - ADR-0004 judgment layer over `abandoned-recovery`: no mechanical respawn after reboot, a nudge re-spawns only what the Agent still wants, and Owner-cancelled work stays dead.
-- `daily-driver` - the whole SCOPE Slice-1 loop (warm Chat exchange → delegation + note → progress → one `requires_response` Ping with Quick Replies → auto-resolving tap → acknowledgement) chained end-to-end in one continuous session with a single reset.
-- `event-queue` - the ADR-0012/0013 typed event lifecycle: a real-Agent judgment with the blessed card `ui`, choose delivering an anchor-refed reply, taste-store `record_rule`, the scheduled digest summary, judgment-only push, and the Done-toggle reopen (plus the no-`until` snooze rejection).
-- `event-snooze-sweep` - the wave-3 lifecycle additions, fully mechanical: durable snooze validation (`until` required, presets named on error), host-timer returns with judgment re-push, restart-surviving returns, unsnooze, and the `clear_finished_events` sweep over the real `/ws` wire stamping `archived_at` while open judgments survive.
-- `event-fork` - event-scoped side chat: open a judgment by Event id, preserve its snapshot, decide while the fork is live, conclude quietly, and tear the fork down.
-- `event-archive-undo` - manual archive of an open judgment, auto-dismiss and feed removal, honest `unarchive` + `reopen` undo, and restart persistence.
-- `views-lifecycle` - standalone View show/update/interaction/clear lifecycle, Ping anchoring, broadcasts, and reconnect replay.
-- `push-discipline` - idempotent token registration/unregistration and the judgment-only push invariant with negative cases.
-- `model-selection` - main- and Sub-agent model broadcasts, fresh-hello reflection, invalid selection, and restart persistence.
-- `interactive-orchestration` - the keep-chat-interactive guarantees: a delegation turn ends while the Sub-agent still runs, a warm question is answered mid-flight, and a long Sub-agent report reaches the Agent untruncated.
+- [`task-continuity`](task-continuity/runbook.md) — global start, deliberate
+  Task dive, Task/global composer scope, interleaved attribution, and return
+  without context loss.
+- [`generated-task-ui`](generated-task-ui/runbook.md) — constrained JSON
+  instruments, adaptive same-Task stages, action payloads, settlement, reload,
+  and reopen. This runbook owns the real-Host adaptive proof as well as its
+  Task Margins gates.
+- [`utility-continuity`](utility-continuity/runbook.md) — Processes, Settings,
+  and Canvas as temporary utilities that return to the same Task, composer
+  scope, and draft.
+- [`task-responsive-keyboard`](task-responsive-keyboard/runbook.md) — one Task
+  inventory, desktop roving keys, phone containment, touch targets, focus
+  restoration, and honest shortcut presentation.
+- **Host adaptive proof** —
+  [`task-host-runner.mjs`](task-host-runner.mjs) drives the real Rust
+  Host/global-Agent/reducer/storage path specified by
+  [`generated-task-ui`](generated-task-ui/runbook.md), with evidence in the
+  [`latest Host report`](reports/task-host-latest.md).
 
-## Neutral Working Directories
+These four runbooks plus the Host-adaptive path are the whole primary index.
+Compatibility runbooks are governed by their own
+[`RULES.md`](protocol-compatibility/RULES.md).
 
-Never let anything under test touch or inherit from the hirsel checkout:
+## Evidence boundary
 
-- Host instances under test run with their working directory in the scenario's `/tmp` workdir (invoke the prebuilt binary by absolute path; the repo is reference material, not a runtime location).
-- Every delegation instruction in an owner message MUST name an explicit throwaway workdir (e.g. "in /tmp/hirsel-e2e-<scenario>-work, which you may create") — an unguided Agent defaults its Sub-agent `cwd` into the host's cwd, and a full-auto CLI running inside the hirsel repo inherits the Owner's personal CLAUDE.md and can write into the checkout.
-- "Create it" means a plain directory (or a fresh `git init` repo when the task needs one) — NEVER a `git worktree add` against an existing checkout. A live run has already produced a sub-agent registering a worktree+branch on the real hirsel repo from exactly this phrasing; after any real-agent scenario, `git worktree list` in the hirsel checkout must show no scenario residue, and any found is cleaned as part of the run's teardown.
-- Runbook executors likewise run from a neutral directory and reference the repo read-only by absolute path.
+Drive the real web app in a clean browser context against either the declared
+dev mock or the debug Host. Assert visible semantics, keyboard focus, layout
+containment, and the exact outgoing frame or authoritative Host update named by
+the runbook.
 
-## Poll, Don't Sleep
+A run is void if the asserted behavior came from DOM injection, direct store
+mutation, fabricated network state, or reading implementation source in place
+of observed behavior.
 
-Every async gate must be checked by polling debug state. Do not `sleep` and assume progress. Use short polling intervals and a clear timeout; each poll should inspect the current JSON and decide whether the gate has matched, is still pending, or has failed.
+## Pre-flight
 
-## Gate Objectively
+1. Record checkout revision and dirty state; prove Vite serves that checkout.
+2. Use the automated runners unless the runbook explicitly calls for a manual
+   diagnostic pass. They choose and own their service ports.
+3. Use a fresh browser context and a unique non-secret development token.
+4. Record viewport sequence, color scheme, reduced-motion preference, console
+   errors, page errors, and failed requests.
+5. Use mouse, keyboard, touch emulation, and observable network frames only.
+6. Use exact runbook viewports. A resized screenshot without interaction is
+   not evidence.
 
-Before judging wording, prove the state transition happened:
+## Isolation and polling
 
-- A delegated run must show a process in `/debug/processes`.
-- A Sub-agent completion must show `kind: "subagent"` and terminal `state: "done"`.
-- A tool-using Agent turn must persist non-empty `tool_calls` on the Agent Chat message and emit `turn_event` `tool_start`/`tool_done` broadcasts while running.
-- An Owner question must appear as a Ping with non-empty `name` and `description` and `requires_response: true`.
-- A Quick Reply response must be an Anchor-refed Owner Chat message.
-- The Agent acknowledgement must be a persisted Agent Chat message after the Owner reply.
+Host fixtures run from neutral temporary working/data directories and must not
+inherit the repository as runtime state. Every asynchronous gate polls an
+observable condition with a deadline; fixed sleeps are not proof. Runners own
+their process groups and must leave no Host, Vite, or browser process behind.
 
-## Abort Triggers
+## Abort conditions
 
-Stop immediately on any of:
+Abort on a service error, malformed frame, unexpected browser error, failed
+request, timeout, incorrect geometry/focus state, or evidence fabricated
+outside the declared path.
 
-- an HTTP error from the debug surface;
-- malformed JSON;
-- a process terminal status of failed when the scenario expected success;
-- a gate that never matches within the scenario timeout;
-- evidence that you, the tester, created the asserted state instead of the system.
+Do not repair the application while claiming to execute a runbook. Fixes and
+fresh proof runs are separate operations.
 
-On abort, report the failing curl command, response body, last observed debug state, and the specific gate that failed.
+## Report format
 
-## Report Format
+Preserve:
 
-On success, report each gate with the observed id or JSON field that proved it. On abort, report RCA and stop; do not repair the system as part of a runbook execution.
+- revision and dirty state;
+- start/completion timestamps;
+- exact invocation and service kinds;
+- browser and viewport environment;
+- screenshot paths;
+- outgoing frames and authoritative Host observations;
+- every passed/failed gate; and
+- the failing command/frame, last observed state, and RCA.

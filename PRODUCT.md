@@ -12,11 +12,13 @@ web
 
 ## Users
 
-Exactly one: Sam — the author of lash, a Rust systems person who lives in terminals and drives coding agents all day. hirsel is his single-player, phone-first personal agent: one human, one long-lived agent, one VM. His context switches between glancing at a phone (is anything blocked on me? what's my agent doing?) and working at depth on a desktop (reading a turn timeline, driving a Side Chat, reviewing delegated work). Assume total fluency — CLI keyboard conventions are features not barriers, density is welcome, hand-holding is insulting. Not a product for sale; no multi-tenancy, no permission gating, no onboarding funnel.
+Exactly one: Sam — the author of lash, a Rust systems person who lives in terminals and drives coding agents all day. hirsel is his single-player, phone-first personal agent: one human, one long-lived agent, one VM. His context switches between glancing at a phone (is any task blocked on me? what is moving?) and working at depth on a desktop (shaping task-generated UI, reading a turn timeline, reviewing delegated work). Assume total fluency — CLI keyboard conventions are features not barriers, density is welcome, hand-holding is insulting. Not a product for sale; no multi-tenancy, no permission gating, no onboarding funnel.
 
 ## Product Purpose
 
-hirsel is the interface to a personal agent that works asynchronously on Sam's behalf. The agent talks to him directly (Chat), sends him async work as **Pings** (named items with a one-line description, open→done, reply auto-resolves) surfaced in a **Tray**, delegates real work to **Sub-agents** shown live as a **turn timeline** (prose → tool call → result), runs background **Processes** (monitors, timers) that can wake it, and can be pulled into a focused **Side Chat** (Slack-style thread) whose **Conclusion** becomes Sam's reply. Success is that hirsel is legible and glanceable — Sam can tell in one look whether anything needs him, watch the agent work when he wants to, and stay out of it when he doesn't. It interrupts him only when genuinely blocked on him.
+hirsel is the interface to one personal agent that works asynchronously on Sam's behalf. The product has one durable user-facing object: the **task**. A task is an addressable unit of work with current state, a constrained JSON-generated interface, and any conversation that changed it. The wire's typed Events are task updates; their stable id and anchor bind generated UI and owner messages to the same task.
+
+Hirsel is always the interlocutor and is globally aware of every task conversation. Opening a task focuses the subject and generated interface, never the agent or the conversation universe. With no task focused, Hirsel is ambient across everything; that state is expressed by the absence of focus rather than a named mode. The standing composer inherits the field's focus and contains no scope control or instructional placeholder. Background processes, tools, model settings, and raw timelines remain inspectable utilities, not destinations or additional product objects. Success is that Sam can see what is moving, dive into one task, and return to the ambient whole without reconstructing context or entering a nested thread.
 
 ## Brand Personality
 
@@ -31,10 +33,11 @@ hirsel is the interface to a personal agent that works asynchronously on Sam's b
 ## Design Principles
 
 - **Glanceable on a phone, deep on a desktop.** Same information; presentation earns the width (phone shelf/sheet ↔ desktop rails/split). Neither surface is a compromise of the other.
-- **The agent is the interface.** No chrome implying a dispatcher, settings sprawl, or a product to sell — the conversation and its artifacts (Pings, timeline, Processes) are the product.
+- **Tasks are the only durable objects.** No Feed, Chat, Side Chat, evidence space, agent thread, or Canvas becomes a parallel destination. Generated UI and conversation live inside the task they affect.
+- **The agent is the interface.** Hirsel remains one globally aware interlocutor. Utilities are summoned and dismissed; they never become the information architecture.
 - **Restraint as respect.** One accent for "needs you," muted for everything else. Silence is a feature; the UI interrupts only when the agent is genuinely blocked on the Owner.
 - **Keyboard-grade and thumb-grade.** CLI composer semantics on desktop, first-class touch on phone — both first-class, neither an afterthought.
-- **Show the work.** Delegation, tool calls, and process state are visible and legible (turn timeline, Processes tab) — the instrument is inspectable, not a black box.
+- **Show the work on demand.** Delegation, tool calls, and process state remain inspectable, but the resting surface shows tasks and the exact judgment or action each task needs.
 
 ## Accessibility & Inclusion
 

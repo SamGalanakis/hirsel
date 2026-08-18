@@ -1,5 +1,7 @@
 # Constrained JSON UI as the event/view substrate
 
+> **Current product clarification (2026-07-23):** The constrained JSON substrate remains authoritative. Its primary visible role is now the adaptive Task instrument, not a card inside an event queue. Structured actions may transition the same open Task through multiple generated stages before a later action settles it.
+
 Settles how events ([ADR-0012]) and Canvas views render, and revises the deferred UI-templates
 direction in `SCOPE.md`. Realizes `docs/product-direction.md` §4.
 

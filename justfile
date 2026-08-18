@@ -10,11 +10,14 @@ default:
 dev port="3089":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Local provider secrets (OPENROUTER_API_KEY, ...) live in ./.env, which is
+    # gitignored — export them before the host inherits the environment.
+    if [[ -f ./.env ]]; then set -a; . ./.env; set +a; fi
     trap 'kill 0 2>/dev/null' EXIT INT TERM
     export HIRSEL_LISTEN="127.0.0.1:{{ port }}"
     export HIRSEL_TOKEN="${HIRSEL_TOKEN:-dev-token}"
     export HIRSEL_DEBUG="${HIRSEL_DEBUG:-1}"
-    export HIRSEL_PROVIDER="${HIRSEL_PROVIDER:-codex}"
+    export HIRSEL_PROVIDER="${HIRSEL_PROVIDER:-openrouter}"
     export HIRSEL_DATA_DIR="${HIRSEL_DATA_DIR:-./data}"
     echo ""
     echo "  hirsel host   http://127.0.0.1:{{ port }}      (WS/API + debug; token: $HIRSEL_TOKEN, provider: $HIRSEL_PROVIDER)"
@@ -32,10 +35,13 @@ dev port="3089":
 run port="3089":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Local provider secrets (OPENROUTER_API_KEY, ...) live in ./.env, which is
+    # gitignored — export them before the host inherits the environment.
+    if [[ -f ./.env ]]; then set -a; . ./.env; set +a; fi
     ( cd app && npm run build )
     export HIRSEL_LISTEN="127.0.0.1:{{ port }}"
     export HIRSEL_TOKEN="${HIRSEL_TOKEN:-dev-token}"
-    export HIRSEL_PROVIDER="${HIRSEL_PROVIDER:-codex}"
+    export HIRSEL_PROVIDER="${HIRSEL_PROVIDER:-openrouter}"
     export HIRSEL_DATA_DIR="${HIRSEL_DATA_DIR:-./data}"
     echo ""
     echo "  hirsel        http://127.0.0.1:{{ port }}      (token: $HIRSEL_TOKEN, provider: $HIRSEL_PROVIDER)"

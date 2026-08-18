@@ -1,34 +1,36 @@
-# Scope: v1 vs deferred
+# Scope: current slice and deferred work
 
-Living document, updated as design decisions land. v1 = the smallest hirsel that Sam daily-drives from his phone.
+Living ledger for the smallest Hirsel Sam can daily-drive. Current visible behavior is governed by `PRODUCT.md`, `DESIGN.md`, `CONTEXT.md`, and `docs/product-direction.md`; ADRs record how the system arrived here.
 
-## v1 (agreed so far)
+## Current slice
 
-- Hirsel Host: single Rust binary embedding lash (sqlite store, inline effects). One repo: host + PWA + (later) templates. [ADR-0001]
-- Agent: one lash session, RLM mode, compacted via Agent Frames. [ADR-0002]
-- Sub-agents: Claude Code + Codex via native `SubagentDriver` implementations (headless JSONL, full-auto, permissions bypassed at spawn) — both drivers in v1. No ACP, no MCP in this path. Division of labor / racing is prompt convention. [ADR-0003]
-- No task abstraction; recovery of dead sub-agent work is Agent judgment. [ADR-0004]
-- Agent wires its own wakes via lash process/trigger/wake machinery; system prompt carries the conventions. [ADR-0005]
-- Chat + Pings: one Chat; Pings carry name, description, markdown, Anchor, requires-response, and optional Quick Replies; open/done lifecycle; Anchor-refed Owner replies auto-resolve them.
-- Memory: none beyond the session itself. The Agent self-compacts via the RLM `continue_as` control op (fresh Agent Frame seeded by the Agent's own summary).
-- Client: SolidJS web app (lashapp component system) as the desktop client and protocol reference implementation. Mobile end-state is native on a shared Rust client core — Android first (Compose + uniffi + FCM), iOS later. [ADR-0010]
-- Transport: transport-agnostic message-stream protocol; v1 over WSS (caddy + bearer token), iroh as milestone two. [ADR-0006] PWA static files served from caddy on the VM (same origin), so no external static hosting until iroh.
-- Client protocol (small and boring): client `hello{last_seen_msg_id}` → atomic `hello_ok{latest_msg_id, messages, pings, processes}` → streams `msg`, `msg_removed`, `turn_event`, `agent_activity`, `ping_upsert`, `process_upsert`, `blob_ok`, and correlated `error`. Client sends `send_message{client_id, body, ref?, mentions?, attachments?, mode?}`, `upload_blob`, `cancel_turn`, `cancel_queued`, `read_ping`, and `resolve_ping`.
-- Agent-driven e2e runbooks use the Host debug surface (reset, inject Owner message, read Chat/Pings, gate on async) with no PWA in the loop.
+- **One Host and one Agent.** A single Rust binary embeds lash and owns one long-lived RLM Agent session, SQLite durability, inline effects, transport, and process supervision. [ADR-0001, ADR-0002]
+- **Effortless orchestration.** The Agent delegates durable work to Claude Code and Codex through native drivers, remains interactive, wakes on terminal events, and uses timers/monitors rather than holding a turn open. [ADR-0003, ADR-0005]
+- **Task Margins client.** The SolidJS reference client rests globally and shows one flat Task inventory. Opening a Task changes the subject, renders its generated instrument and related conversation, and scopes the standing composer. Removing scope speaks globally without closing the Task.
+- **Tasks, not workflow machinery.** A Task is the visible projection of a typed Event: stable identity, Anchor, generated UI, explicit open/done lifecycle. It is not a general host-side workflow/task abstraction; recovery and next steps remain Agent judgment. [ADR-0004]
+- **Adaptive generated instruments.** Validated JSON UI is the Task's primary interface. Structured actions may either settle a Task or transition its instrument to another stage in place. Unknown nodes degrade safely. [ADR-0013]
+- **Temporary utilities.** Processes, Settings, and Canvas dock or overlay the same Task world and restore Task, scope, draft, scroll, and focus on close.
+- **Transport.** The protocol is transport-agnostic; v1 uses WSS with a bearer token, with iroh deferred. The PWA is served alongside the Host. [ADR-0006]
+- **Reference protocol.** `hello`/`hello_ok`, replayed messages/Events/processes/model state, streaming turn activity, blob transfer, generated View state, and explicit Event actions. Legacy `pings`/`ping_id` spellings remain compatibility fields only.
+- **Mobile direction.** Shared Rust client core plus native skins, Android first and iOS later. The native product must reproduce Task Margins rather than the retired Inbox/Chat/Tray IA. [ADR-0010]
+- **Verification.** Unit/contract tests plus the deterministic 38-gate Task Margins browser runner cover global/task attribution, adaptive instruments, utilities, keyboard, phone, narrow layout, and error capture.
 
-## Slices
+## Immediate build slice
 
-1. **Prove the loop (ugly client).** Barebones PWA (Chat + Tray) over WSS → Agent (RLM, minimal system prompt, Sub-agent/Ping/shell bindings) → delegate a real repo task → driver runs it full-auto → terminal event wakes Agent → named requires-response Ping with Quick Reply → tap → Agent receives the Anchor-refed reply and the Ping becomes done.
-2. **Self-hosting.** The Agent improves its own PWA, tasked from the phone.
+1. Keep the Host/Agent/sub-agent loop dependable and interactive.
+2. Deepen the constrained JSON catalog and structured transition contract only when real Tasks need new instruments.
+3. Keep Task attribution, global scope, reload/reopen, and temporary-utility continuity regression-covered.
+4. Bring Android onto the Rust client core with the same Task/global conversation model.
 
-## Deferred (explicitly, with reason)
+## Deferred
 
-- **UI rendering / templates** — REVIVED and redirected. See `docs/product-direction.md` + [ADR-0013]: the generative-UI tier is a **constrained JSON UI** catalog (the existing `app/src/views/` tier, extended with interactive nodes + interaction-back), NOT HTML-in-iframes. The event queue ([ADR-0012]) and Canvas both render through it. The Chat-as-home framing is superseded: the home is a vertical typed-event scroller.
-- **Voice / audio** — hold-to-talk, streaming to VM, server-side STT. Deferred whole.
-- **Any memory system** — markdown notebook, lash observational-memory plugin, and the grounded-memory-units design are all deferred. Revisit when in-context + `continue_as` demonstrably hurts.
-- **Web Push (VAPID)** — deferred; requires-response items surface only in-app until push earns its keep.
-- **ACP driver** — only if an ACP-native agent becomes worth supporting. [ADR-0003]
-- **Restate-backed durability** — sqlite is enough for single-player; EffectHost boundary keeps the door open. [ADR-0001]
-- **Multi-device / additional node keys** — single phone + laptop browser is fine to start.
-- **iOS app** — after the Android app proves the Rust client-core + skin shape. [ADR-0010]
-- **Slack bot entrypoint** — deferred bridge surface; see ADR-0010 addendum for the mapping and why not primary.
+- **Standing decision/taste memory.** Build only after enough real decisions exist to prove the retrieval and amendment model.
+- **General-purpose memory.** No notebook or observational-memory subsystem until in-context state plus `continue_as` demonstrably fails.
+- **Voice/audio.** Hold-to-talk, streaming, and server-side STT are deferred whole.
+- **Web Push.** Requires-response Tasks remain in-app until push earns its operational cost.
+- **ACP drivers.** Add only for a valuable ACP-native agent. [ADR-0003]
+- **Restate durability.** SQLite is sufficient for one Owner; the effect boundary preserves options. [ADR-0001]
+- **Additional devices and iOS.** After Android proves the shared-core/native-skin shape.
+- **Arbitrary generated HTML and nested mini-apps.** Explicitly rejected. New dynamic UI enters through the constrained cross-client vocabulary.
+- **Side Chats or other parallel conversation destinations.** Explicitly retired from the visible product. Contextual dives happen inside a Task while the global Agent remains reachable.
+- **Baked-in recurring workflows.** The Host provides timers, monitors, and schedules; the Agent/Owner creates actual workflows.

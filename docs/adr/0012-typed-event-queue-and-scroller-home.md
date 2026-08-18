@@ -1,5 +1,7 @@
 # Typed event queue and the vertical scroller home
 
+> **Superseded for visible IA (2026-07-23):** Typed Events remain the wire/storage basis of Tasks, but the queue/scroller home, Chat drill-in, pager, and feed metaphors below are retired. The current home is Task Margins: a global resting state, one flat Task inventory, one open Task field, related conversation margin, and one scope-switching composer. See `PRODUCT.md`, `DESIGN.md`, and `docs/product-direction.md`.
+
 Generalizes [ADR-0009]'s Pings into a single typed event stream and makes that stream — not Chat — the
 home. Realizes `docs/product-direction.md`.
 

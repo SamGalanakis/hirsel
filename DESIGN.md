@@ -1,263 +1,130 @@
 ---
 name: hirsel
-description: A calm terminal for one human and one long-lived agent — dark, quiet, exact.
+description: Task Margins — one globally aware orchestrator across a quiet field of task-shaped interfaces.
 colors:
-  bg-base: "oklch(0.141 0.005 285.823)"
-  surface-card: "oklch(0.21 0.006 285.885)"
-  surface-raised: "oklch(0.2 0 0)"
-  fg-primary: "oklch(0.985 0 0)"
-  fg-muted: "oklch(0.705 0.015 286.067)"
-  fg-faint: "oklch(0.708 0 0)"
-  accent-primary: "oklch(0.55 0.13 264.05)"
-  accent-ring: "oklch(0.62 0.14 264.05)"
-  secondary: "oklch(0.274 0.006 286.033)"
-  border-hairline: "oklch(1 0 0 / 10%)"
-  input-hairline: "oklch(1 0 0 / 15%)"
-  status-active: "oklch(0.72 0.115 221)"
-  status-idle: "oklch(0.65 0 0)"
-  status-success: "oklch(0.72 0.185 150)"
-  status-danger: "oklch(0.704 0.191 22.216)"
-  status-attention: "oklch(0.79 0.16 82)"
+  bg-base: "oklch(0.17 0.012 220)"
+  surface: "oklch(0.205 0.014 220)"
+  surface-quiet: "oklch(0.235 0.016 220)"
+  fg-primary: "oklch(0.94 0.01 165)"
+  fg-muted: "oklch(0.72 0.025 175)"
+  accent-primary: "oklch(0.79 0.105 158)"
+  accent-ring: "oklch(0.84 0.10 158)"
+  border-hairline: "oklch(0.90 0.02 180 / 11%)"
+  status-attention: "oklch(0.78 0.13 78)"
+  status-danger: "oklch(0.70 0.17 32)"
 typography:
-  title:
+  task-focus:
     fontFamily: '"Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif'
-    fontSize: "1rem"
-    fontWeight: 600
-    lineHeight: 1.5
-    letterSpacing: "0.01em"
-    fontFeature: '"cv02" 1, "cv03" 1, "cv04" 1, "cv11" 1'
+    fontSize: "clamp(1.25rem, 2.2vw, 1.75rem)"
+    fontWeight: 450
+    lineHeight: 1.2
   body:
     fontFamily: '"Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif'
     fontSize: "0.875rem"
     fontWeight: 400
     lineHeight: 1.625
-    letterSpacing: "normal"
-  meta:
-    fontFamily: '"Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif'
-    fontSize: "0.75rem"
-    fontWeight: 500
-    lineHeight: 1.4
-    letterSpacing: "normal"
-  micro-label:
-    fontFamily: '"Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif'
-    fontSize: "0.68rem"
-    fontWeight: 500
-    lineHeight: 1.2
-    letterSpacing: "0.03em"
   mono:
     fontFamily: '"SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace'
     fontSize: "0.72rem"
     fontWeight: 400
-    lineHeight: 1.4
-    letterSpacing: "normal"
+    lineHeight: 1.45
 rounded:
-  sm: "6px"
-  md: "8px"
-  lg: "10px"
-  xl: "14px"
-  full: "9999px"
-spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  lg: "16px"
-  xl: "24px"
-components:
-  bubble-owner:
-    backgroundColor: "{colors.accent-primary}"
-    textColor: "{colors.fg-primary}"
-    rounded: "{rounded.xl}"
-    padding: "8px 12px"
-    typography: "{typography.body}"
-  bubble-agent:
-    backgroundColor: "{colors.secondary}"
-    textColor: "{colors.fg-primary}"
-    rounded: "{rounded.xl}"
-    padding: "8px 12px"
-    typography: "{typography.body}"
-  button-primary:
-    backgroundColor: "{colors.accent-primary}"
-    textColor: "{colors.fg-primary}"
-    rounded: "{rounded.md}"
-    padding: "0 10px"
-    height: "36px"
-  button-ghost:
-    backgroundColor: "transparent"
-    textColor: "{colors.fg-muted}"
-    rounded: "{rounded.md}"
-    height: "36px"
-  ping-card:
-    backgroundColor: "{colors.surface-card}"
-    textColor: "{colors.fg-primary}"
-    rounded: "{rounded.xl}"
-    padding: "12px"
-  input-field:
-    backgroundColor: "transparent"
-    textColor: "{colors.fg-primary}"
-    rounded: "{rounded.md}"
-    height: "36px"
-    padding: "4px 10px"
-  state-chip:
-    backgroundColor: "{colors.secondary}"
-    textColor: "{colors.fg-muted}"
-    rounded: "{rounded.full}"
-    padding: "1px 6px"
-    typography: "{typography.micro-label}"
+  control: "14px 26px 26px 14px"
+  surface: "28px"
+  organic: "52% 28% 42% 58%"
+  pill: "9999px"
 ---
 
-# Design System: hirsel
+# Design System: Task Margins
 
-## 1. Overview
+## 1. Core idea
 
-**Creative North Star: "The Quiet Instrument"**
+**Focusing a task changes the subject, never the interlocutor.** Hirsel is one continuous intelligence across a flat field of tasks. A task mark unfolds into whatever constrained interface the work needs—choice, boundary, range, form, diff, or status—and conversation appears as plain language in its margin. Selecting the focused task again clears focus and returns to the ambient field.
 
-hirsel is a professional instrument, not a chat toy. It sits in the lineage of a good TUI — lash-tui, Linear, Superhuman — where confidence is carried by typography and spacing, never by decoration. The surface is dark by default — dark is the brand's resting state — but light now ships as a first-class, user-selectable peer (System / Light / Dark, defaulting to System) built from the same canonical tokens, so it must hold the same ≥90 bar in both clients. Everything reads at a glance: is anything blocked on me, what is my agent doing, and can I stay out of it. The instrument is dense but never noisy, exact rather than loud, and it earns trust by respecting attention. Its emotional register is calm competence, never cheer.
+Task Margins has no nested navigation and no separate conversation object. Host compatibility structures stay at the protocol boundary and never enter the product vocabulary.
 
-Density is a feature, not a compromise. The same information presents at phone width (a single ~560px column with shelves and full-screen sheets) and desktop width. **Desktop is an EXPANDED view of mobile, not a different app**: where the phone switches a single column between the Feed (the event queue) and Chat, the desktop (`rail`, ≥1100px) shows them AT ONCE — a slim icon rail ∣ the Feed column ∣ the Chat pane ∣ the right context region (which materialises only when an inspector is active). You decide events and converse without ever "navigating". The frame fills to a ~1600px cap and only then centers, so the width is used by real structure rather than a lonely centered column. In the 900–1099 mid-width band, where the icon rail has no room yet, the phone column still rules but Chat's own Slack-style split opens to ~980px when a Side Chat is live. Monospace earns its place and only its place: tool names in the turn timeline, monitor commands, ids, and keyboard hints. Motion is restrained to state changes — a pulse on a live status dot, a shimmer on "Thinking…", a 200ms slide when a sheet opens — and everything honors `prefers-reduced-motion`.
+## 2. Physical scene and palette
 
-This system explicitly rejects three neighbors. It is **not corporate SaaS chat** (Intercom/Zendesk): no chirpy rounded-friendly bubbles, no marketing tone, no "How can I help you today!" energy. It is **not a consumer assistant** (Siri/Alexa/the ChatGPT mobile app): no mascot personality, no over-explaining, no empty enthusiasm. It is **not a notification slot machine**: no badge spam, no red dots everywhere, no engagement-bait urgency. hirsel signals "needs you" with one restrained escalation and stays silent otherwise.
+Hirsel is used late at a desk and in quick phone glances. The resting scene is a warm blue-charcoal field, closer to oxidized steel than pure black. Regions are formed by whitespace and tonal shifts, not boxes. Mint is the sole interaction color; amber means waiting; coral is reserved for genuine blockage. Light mode is an off-white, cool-paper peer using the same relationships.
 
-**Key Characteristics:**
-- System / Light / Dark theme modes (default System), both schemes shipped from one canonical token set: dark rests on a near-black base (`oklch(0.141 …)`), light on an off-white canvas (`oklch(0.985 …)`, never pure white); hairline borders at 10% alpha do the structural work in both.
-- One brand accent — a muted indigo (`oklch(0.55 0.13 264)`) — reserved for interaction and "attend to this."
-- Inter (with cv-alternate feature settings) for everything human; a monospace stack for machine tokens only.
-- Flat by default: separation via hairline borders and a `foreground/10` ring, not drop shadows.
-- Restraint as respect: muted for everything, escalation is rare and legible without relying on hue alone.
-
-## 2. Colors
-
-A near-neutral dark palette with the faintest cool cast, one indigo accent, and a small, disciplined set of semantic status hues. Grays are OKLCH neutrals with a whisper of blue-violet (hue ~286) so the surface never reads as dead charcoal. **OKLCH is the source of truth** — every token is authored in OKLCH in `app/src/styles.css` and surfaced as CSS custom properties consumed through Tailwind 4's `@theme inline`. The values below describe the dark scheme (the resting state); the light scheme is a shipped peer built from the same OKLCH tokens (see *Theme modes* below).
-
-### Theme modes (shipped, both clients)
-hirsel ships **three theme modes — System / Light / Dark**, defaulting to **System** (follows the OS: `prefers-color-scheme` on web, `isSystemInDarkTheme()` on Android; no Material-You / dynamic color). The choice is persisted (web `localStorage` `hirsel.theme`; Android DataStore/prefs) and applied before first paint so there is no flash. Dark stays the brand's resting register; **light is a first-class, user-selectable peer**, not a parity afterthought, and both schemes are held to the same ≥90 bar on every surface.
-
-The **light scheme** mirrors dark's structure: an off-white canvas `oklch(0.985 0.002 286)` (never pure white), white-paper cards `oklch(1 0 0)` layered on it, a `secondary` quiet fill a hair below canvas, and true hairline borders as dark ink at 10% alpha (`oklch(0.205 0.02 286 / 10%)`, mirroring dark's `white/10%`). The indigo primary and the status hues are darkened for WCAG-AA on the light canvas: `primary oklch(0.52 0.14 264)`, `status-active 0.52 0.12 221`, `status-success 0.52 0.17 149`, `status-attention 0.56 0.15 73`, `status-danger`/`destructive 0.55 0.22 27`, `status-idle 0.55 0 0`. These light values are canonical for **both** clients — the web `:root` and the Android `Theme.kt` light scheme render the same palette.
-
-### Primary
-- **Muted Indigo** (`oklch(0.55 0.13 264.05)`, `--primary`): The single brand and interaction accent. It carries the send button, the unread-Ping dot, the `border-l` stripe on a Ping that requires a response, the reply-quote rail in the composer, and link-style actions. Its restraint is the point: when this indigo appears, it means "this is interactive" or "this wants you." A brighter ring variant (`oklch(0.62 0.14 264.05)`, `--ring`) is used only for focus.
-
-### Neutral
-- **Base** (`oklch(0.141 0.005 285.823)`, `--background`): The app canvas. Near-black, faint cool cast.
-- **Card** (`oklch(0.21 0.006 285.885)`, `--card`): Raised surfaces — Ping cards, Process rows, the composer bar, popovers. One step up from the canvas, no shadow required to separate.
-- **Secondary / Muted** (`oklch(0.274 0.006 286.033)`, `--secondary` = `--muted`): Agent message bubbles, quiet chips, inset wells. The workhorse "quiet fill."
-- **Foreground** (`oklch(0.985 0 0)`, `--foreground`): Primary text. Near-white; AA-plus on every surface.
-- **Muted Foreground** (`oklch(0.705 0.015 286.067)`, `--muted-foreground`): Secondary text — timestamps, meta, labels, dimmed read Pings. Chosen to hold WCAG AA on the card surface; there is no gray-on-gray murk.
-- **Hairline Border** (`oklch(1 0 0 / 10%)`, `--border`): The primary structural device. `white` at 10% opacity — dividers, card edges, the `foreground/10` ring on cards, rail borders. Inputs get a slightly stronger `white/15` (`--input`).
-
-### Status (semantic; sparingly)
-- **Active** (`oklch(0.72 0.115 221)`, `--status-active`): A calm cyan-blue for live work — the pulsing "agent working" dot, running tool spinners, a running Process chip, an in-progress Side Chat.
-- **Success** (`oklch(0.72 0.185 150)`, `--status-success`): A muted green for confirmations only — a sent-reply check, a completed tool, "Done." Never a celebration.
-- **Attention** (`oklch(0.79 0.16 82)`, `--status-attention`): A gold/amber for transient warnings — a queued message, "reconnecting…", an abandoned Process. Warns; does not alarm.
-- **Danger** (`oklch(0.704 0.191 22.216)`, `--status-danger` = `--destructive`): A red reserved for the genuine "blocked on you" escalation and destructive confirms (Discard). It is the loudest thing in the system and appears least. Exactly one red source lives on each surface, and it is the same fact on both — the **needs-you count** (open, undecided judgments the fleet is waiting on): on **phone** it rides the event-queue Feed (its pager / bottom-nav badge); on **desktop** it is the **Feed column header's needs-you count**. The slim icon rail carries no count-bearing red at all, and there is no standing Pings rail (the Feed is the needs-you surface now), so the interrupt is never doubled.
-- **Idle** (`oklch(0.65 0 0)`, `--status-idle`): Pure neutral gray for dormant state.
-
-### Named Rules
-**The One Escalation Rule.** Exactly one color means "genuinely blocked on you": danger red, and only on a single needs-you count per surface — the phone event-queue Feed's needs-you count, or on desktop the **Feed column header's needs-you count** (open, undecided judgments on both). The slim icon rail carries no red — its Processes launcher uses a status-active *tint* dot (not a solid disc) and its active launcher uses the muted fill — so nothing competes with the one red. Indigo means "interactive / worth a look," amber means "transient hiccup," but red is the single interrupt. Do not multiply reds. If two things on screen are shouting, one of them is wrong.
-
-**The Color-Is-Never-Alone Rule.** No state is conveyed by hue alone. A requires-response Ping also carries a persistent left border, bolder text, and an expanded reply input; a Done Ping also dims to 60% opacity and shows a labeled "Done" tag; a Process state also carries its literal word ("running", "failed"). Strip the color and the meaning must survive (WCAG AA, single-user-but-no-excuses).
+- **Canvas:** `oklch(0.17 0.012 220)` dark; `oklch(0.975 0.008 190)` light.
+- **Quiet field:** one tonal step above the canvas, reserved for active controls and summoned utility surfaces. Conversation remains on the uninterrupted canvas.
+- **Primary mint:** `oklch(0.79 0.105 158)` dark / `oklch(0.48 0.12 158)` light. Use for selected task, active choice, focus chip, and send.
+- **Amber:** waiting or queued only. **Coral:** blocked or destructive only.
+- Hairlines are optional boundaries for top bars, overlays, and focus. If whitespace can separate two regions, omit the line.
 
 ## 3. Typography
 
-**Body / UI Font:** Inter (Inter Variable → Inter → `ui-sans-serif`, `system-ui`), with character alternates on: `font-feature-settings: "cv02" "cv03" "cv04" "cv11"` for a cleaner single-story `a`/`g` and straighter terminals — the small tuning that makes Inter read as intentional rather than default.
-**Mono Font:** `SFMono-Regular`, `Cascadia Code`, `Liberation Mono`, Menlo, monospace.
+Inter remains the workhorse. The task name is quiet context; the generated question is the instrument's semantic focus.
 
-**Character:** One humanist sans doing all the human work at a tight, information-dense scale, plus a monospace that appears only where the content is literally machine text. There is no display face — hirsel has no hero, no marketing headline. The largest type on screen is a 16px app title. `text-rendering: optimizeLegibility` and `font-synthesis-weight: none` (no faux-bold; only real Inter weights render).
+- **Focused task:** 20–28px, weight 450, compact but never heroic.
+- **Generated question:** 20–24px, weight 500. It must visibly lead the task name.
+- **Body and conversation:** 14–16px, relaxed leading, no chat-bubble compression.
+- **Meta:** 11–12px. Monospace only for machine tokens, ids, timings, commands, and shortcuts.
+- Avoid oversized bold section headings, all-caps navigation, and decorative monospace.
 
-### Hierarchy
-- **Title** (600, 1rem/16px, line-height 1.5, tracking 0.01em): The app wordmark ("hirsel"), Ping-card titles, dialog headings. The ceiling of the scale — hirsel never goes bigger.
-- **Body** (400, 0.875rem/14px, line-height 1.625): Message bubbles, Ping content, Side Chat transcript, most prose. `leading-relaxed` gives dense text room to breathe.
-- **Meta** (500, 0.75rem/12px): Timestamps, message footers, secondary chips, keyboard-hint emphasis.
-- **Micro-label** (500, ~0.62–0.72rem, tracking 0.02–0.04em, frequently `uppercase`): Section eyebrows ("Prompt", "Probe", "Original question"), state chips, provenance chips. hirsel's densest, quietest tier — a whole vocabulary of ~0.62–0.72rem labels does the fine structural signposting.
-- **Mono** (400, ~0.72rem): Tool names in the timeline, monitor commands, ids, keyboard keys. Rendered `text-foreground/90` on a faint `bg-muted` chip so machine text reads as machine text.
+## 4. Shell and interaction
 
-### Named Rules
-**The Monospace-Earns-It Rule.** Monospace is for machine tokens only: tool names, commands, ids, `@name` handles, keyboard hints. Prose is never monospace, and a label is never monospace just for flavor. If a human wrote it as a sentence, it is Inter.
+### Task field
 
-**The No-Display Rule.** There is no display type and no hero. 16px is the top of the scale. Confidence comes from spacing and restraint, never from a big headline. If a screen wants a 32px title to feel important, the screen is wrong.
+- Desktop: a quiet task index occupies the left margin; the selected task unfolds through the remaining field. It is a list of names and literal statuses, not cards.
+- Phone: tasks become a horizontal, masked strip. The selected task owns the screen below it.
+- Selecting a task focuses it; selecting the focused task again clears focus.
+- Focus is shown by the unfolded instrument, task-row state, and the composer's spatial/tone shift—never by a label inside the composer or color alone.
+- Ambient is the absence of focus. It has no title, empty-state copy, or standing mode label.
 
-## 4. Elevation
+### Generated task surface
 
-hirsel is **flat by default**. Depth is conveyed by tonal layering (canvas → card → secondary fill) and hairline `white/10` borders, not by drop shadows. A resting card announces itself with a one-step-lighter fill plus a `ring-1 ring-foreground/10` hairline and a barely-there `shadow-xs` — enough to lift it off the canvas without a 2014-app cast shadow. Shadows are reserved for surfaces that genuinely float above the plane: overlays, popovers, dialogs, and the floating scroll-to-end pill.
+- Render the Event's constrained JSON `ui` directly into the task field. Do not wrap it in a generic card.
+- Different task needs must produce visibly different instruments while retaining the same typography and tokens.
+- Interaction posts through the existing `event_action` path. Decisions settle in place; a quiet undo remains reachable.
+- Ordinary choices and supporting data are flat rows separated by rhythm or hairlines. The standing composer is the only persistent capsule.
+- Canvas views may appear inside the task when associated, or as a summoned utility when global. Canvas is not a destination.
 
-### Shadow Vocabulary
-- **Resting** (`box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05)` — Tailwind `shadow-xs`): Cards, buttons, inputs. Structural, almost subliminal; the hairline ring does most of the separating.
-- **Floating** (`shadow-sm`): The floating "scroll to end" pill over the transcript.
-- **Overlay** (`shadow-lg`): Genuinely-above-the-plane surfaces only — the expanded Tray panel, dropdown menus, the discard dialog. This is the one place a real shadow is allowed, because the element is literally over other content.
+### Conversation margin
 
-### Named Rules
-**The Hairline-First Rule.** Reach for a `white/10` border before a shadow. Separation between siblings on the same plane (list rows, the composer against the transcript, a rail against Chat) is always a 1px hairline, never a shadow. A shadow means "this floats above everything," and most things do not float.
+- Task conversation is plain prose adjacent to or following the generated instrument. No “Hirsel · task” heading, avatar, bubble, aside, card, or transcript border.
+- Owner lines use stronger foreground; Hirsel lines use muted foreground. Order and language provide authorship.
+- Conversation uses the **Pure Field** rule: no backdrop or enclosing silhouette. Owner lines receive one quiet hairline and slight indentation; Hirsel prose rests directly on the canvas. Collapsed tool disclosures are transparent at rest.
+- On phone the margin follows the instrument in the same scroll flow.
+- With no relevant conversation, the margin does not render or reserve space.
+- Tool timelines may unfold under the relevant Hirsel line on demand; they never create a third column.
 
-## 5. Components
+### Composer
 
-### Message Bubbles (signature)
-- **Shape:** Gently rounded (`rounded-xl`, 14px), `px-3 py-2`, `text-sm leading-relaxed`, capped at `max-w-[80%]`.
-- **Owner:** Filled indigo (`--primary`) with near-white text, right-aligned (`align=end`).
-- **Agent:** Muted secondary fill (`--muted`), left-aligned. The asymmetry (who is filled vs. quiet) does the speaker labeling — no avatars in the main thread.
-- **Footer:** A `text-[0.68rem]` meta row: timestamp, a hover-revealed copy button, and status chips (queued/amber, failed/red, "sending…" italic, "worked out in a side chat"/muted provenance). A finished agent turn hangs a collapsed "turn details" chip beneath its bubble.
-- **Do not** make these read as friendly SaaS chat bubbles — no tails, no drop shadows, no pastel. The rounding is calm, not cute.
+- One composer persists at the bottom of every state.
+- The composer inherits the field: focused task messages use that task's anchor and mention; ambient messages are unanchored.
+- Scope is never a separate composer mode. There is no scope chip, visible mode label, or instructional placeholder.
+- Focus narrows the composer and gives it a restrained mint-local tone; ambient lets it rest wider and neutral.
+- The composer is an organic quiet capsule. Send is round. On phone it stays sticky at the thumb edge while task content moves behind it.
 
-### Turn Timeline (signature)
-- A lash-CLI-style vertical list on a `border-l border-border/60` rail (`pl-3`): prose blocks (muted, so a live turn reads as provisional) interleaved with tool rows and collapsed reasoning, in exact seq order.
-- **Tool row:** a leading state glyph (cyan spinner while running / green check / red cross), then the **tool name in mono** (`font-mono text-[0.72rem] text-foreground/90`), then a truncated host result summary in muted text.
-- **Reasoning:** a thin, dim, collapsed "reasoning" row that expands to dim italic text — deliberately quieter than prose, never a headline.
+### Utilities
 
-### Ping Card
-- **Shape / Surface:** `Card size="sm"` — `bg-card`, `rounded-xl`, `ring-1 ring-foreground/10`, `mx-3 px-3 py-3`.
-- **Requires-response:** a `border-l-2 border-l-primary` indigo stripe; otherwise the left border is transparent (reserving the width so nothing shifts).
-- **Unread:** an `oklch(…)` `bg-primary` dot (`size-2`) plus full-strength `font-medium` foreground text — the "bold email" look. Read cards drop to `text-muted-foreground`.
-- **Done:** the whole card dims to `opacity-60` and shows a labeled "Done" tag with a green check. Non-destructive; the card stays findable.
-- **Actions:** an effort ladder — Quick Reply buttons, an inline Reply input, then a "Discuss" / "in progress · resume" Side Chat link. Overflow lives behind a `⋯` menu; destructive-adjacent actions are labeled, never icon-only.
+Processes has one quiet, standing header control because active work must remain directly inspectable. Settings, model choice, raw timelines, and connection diagnostics live behind the overflow or a keyboard command. Every utility appears as a temporary sheet or inspector; closing it returns to the same focus state.
 
-### Buttons
-- **Shape:** `rounded-md` (8px) default; icon and send buttons are `rounded-full`. Sizes run `xs`/`sm`/`default`(h-9)/`lg` plus a matching icon set.
-- **Primary:** filled indigo (`--primary`), hover `primary/80`. Presses nudge down 1px (`active:translate-y-px`) for a tactile-but-quiet click.
-- **Ghost / Secondary / Outline:** ghost is transparent → `hover:bg-muted`; secondary is the `--secondary` fill; outline is a `--border` stroke over `input/30`. These carry almost all non-primary actions.
-- **Link:** indigo text, underline on hover — the effort-ladder verbs ("Reply", "Discuss") and other low-commitment actions.
-- **Focus:** `focus-visible` shows a 3px `ring-ring/50` plus a border shift. Every keyboard flow has a visible focus ring — non-negotiable.
+## 5. Motion and responsiveness
 
-### Inputs / Composer
-- **Style:** transparent fill over a `--input` (`white/15`) hairline, `rounded-md`, `shadow-xs`, `text-base md:text-sm`. Textareas auto-grow to a `max-h-28` cap and never resize the page.
-- **Focus:** border shifts to `--ring` with a 3px `ring-ring/50` glow; `aria-invalid` swaps to a destructive ring.
-- **Composer chrome:** a `border-t bg-card` bar with a paperclip, the textarea, a round send button, and — on fine-pointer devices only — a `text-[0.66rem]` keyboard-hint row (`Enter send · Shift+Enter newline · Tab queue · Esc stop`). Phone keeps Enter as newline.
+- A task unfolds with one 180–260ms fade/translate continuity animation. Re-selection never bounces or zooms.
+- Generated UI updates in place. Preserve semantic position where possible.
+- At under 900px, the index becomes a horizontal strip, the task surface becomes one column, and conversation follows it.
+- At under 560px, the composer remains sticky above the safe area and communicates focus through tone rather than added copy.
+- On phone, the quiet task identity remains 20px; the generated JSON heading owns the full question so framing is never repeated.
+- Honor `prefers-reduced-motion`; all content is fully visible without animation.
 
-### State / Status Chips
-- Small `rounded-full` pills, `text-[0.62rem]` `font-medium` with a tint-on-semantic pattern: `bg-status-active/15 text-status-active` for running (plus a pulsing dot), `bg-status-danger/15` for failed, `bg-status-attention/15` for abandoned, `bg-muted text-muted-foreground` for quiet/done. The tinted-fill-plus-colored-text pattern keeps them legible and un-loud.
+## 6. Rules
 
-### Tray Shelf & Overlay (signature)
-- **Collapsed:** a slim ~40px `border-t bg-card` shelf pinned above the composer, showing the Ping icon, a count badge (`bg-status-danger` only when a requires-response Ping is open, else `bg-muted-foreground`), and a one-line preview. Hidden entirely when there is nothing to show — no standing empty-inbox chrome.
-- **Expanded:** an absolutely-positioned `rounded-t-xl` panel (~58dvh, `shadow-lg`) that overlays the transcript rather than pushing it, dismissed by tapping the scrim or Esc.
+### Do
 
-### Side Chat (signature)
-- One component tree, responsive: a full-screen `fixed` sheet below 900px; a `border-l` right rail (`clamp(340px,38vw,440px)`) beside a still-live Chat at ≥900px. Framed as "a fancy reply composer" — the same bubble/timeline/markdown surfaces as Chat, labeled by a header, a pinned collapsible seed card (`bg-muted/30`), and a "wrap-up" bar (`bg-muted/20`) above the composer — never recolored into a second app.
+- Keep the task name, current generated instrument, and composer legible in one glance.
+- Let whitespace, indentation, and typography form regions; conversation never gains a decorative backdrop.
+- Keep Hirsel globally aware by routing task-scoped messages through the main conversation.
+- Make task state readable without color.
+- Keep keyboard focus visible and phone targets at least 44px.
 
-### Navigation
-- **Phone / narrow:** the phone-first single column stays — Chat is the whole app. The only chrome is a thin `border-b` top bar carrying the **north-star at rest**: the wordmark plus the **full agent-status indicator** (priority width — it must never truncate to "Agen…"), then a bare connection dot (which expands to the full pill only when reconnecting/offline) and a single `⋯` overflow that folds the quick model variant, Canvas, Processes, and Settings behind one control (≤4 visual chunks). Shelves, sheets, and overlays do the rest. No nav rail.
-- **Desktop (`rail`, ≥1100px): the unified workspace.** Desktop is an EXPANDED view of mobile — **Feed and Chat stand side by side and are never destinations you switch between** (`state.home` is a phone-only concept, unused here). The pre-unification desktop made Queue and Chat nav-rail destinations, so the queue home showed a wide nav rail *and* a queue index — two sidebars — while Chat sat invisible behind a toggle; that paradigm is retired. The four zones, left to right:
-  - **Slim icon rail (~56px).** With Feed and Chat both always visible, the old destination rows are meaningless, so the left rail collapses to a slim icon strip (the Slack/Superhuman lineage): a brand monogram tile on the top datum, a **Processes** launcher (observable fleet; running work is a status-active *tint* dot, never red), and a footer strip (the connection dot, a **Settings** gear, and the `⌘K` keycap). It reclaims horizontal width for the two content panes instead of spending it on chrome. Processes/Settings are not destinations — they dock the shared right region and read `aria-current` (muted fill, never indigo) exactly while they own it.
-  - **Feed column (~clamp(360px,30vw,428px)).** The queue as a scrollable COLUMN of decidable cards — the honest "expanded mobile" form (the phone's full-viewport pager is a thumb gesture; the old index+reader split existed only to keep a lone card from floating in a void, which Chat now fills). Cards are the SAME shared vocabulary as the phone (accent, header, JSON-UI body, decided/undo strip) — desktop is a composition change, not a re-render of cards. Deciding is inline (tap an option); **"Discuss" drops a quoted reference into the standing composer** — no navigation, since Chat is right there. The header carries the surface's **one red**: the needs-you count (open judgments).
-  - **Chat pane (flexible measure).** The prose measure centered in the pane for the transcript; the composer bar spans the pane full-width and re-centers its input at that measure. A sparse transcript bottom-anchors. Its `h-12` header's left carries the calm **agent-status indicator** (the north-star "what is my agent doing"), its right the quiet **ModelChip** + the **Canvas** reopen affordance. The composer is **always mounted** — desktop's standing place to type.
-  - **Right context region — only when a pane is active.** Owned by **one exclusive `rightRegion`** (`sideChat` · `canvas` · `processes` · `settings`, plus the resting `pings`): it renders **exactly one** in-flow `<aside>` at a shared width token (`clamp(340px,38vw,440px)`); inactive panes **unmount** (nothing clips, no hidden focus). Closing any pane returns the region to `pings`, which on desktop renders **nothing** — the Feed is the needs-you surface, so a standing Pings rail beside it would just be the redundancy the unification removed (on phone `pings` is still the Tray shelf/overlay). A newly-arrived Canvas view auto-surfaces **only** from the idle `pings` state, never evicting an occupied pane.
+### Do not
 
-  The four zones share one **top datum**: the icon-rail brand, the Feed header, the chat header, and every pane title sit on the same `h-12` baseline with a single continuous `border-b` hairline across all of them. The width is used: the frame fills to a ~1600px cap and only then centers. `g`-chords move focus between the standing panes (`g f` Feed, `g c` Chat) rather than switching a home; on phone the same chords navigate. Every right-region pane is a non-modal in-flow inspector on desktop; on phone the same enum drives a single full-screen modal sheet (`role="dialog"`, focus-trapped, Esc returns to `pings`).
-
-## 6. Do's and Don'ts
-
-### Do:
-- **Do** treat dark as the resting state. The canvas is near-black `oklch(0.141 …)`; raised surfaces step up one tone to `card`/`secondary`. Light is a shipped, user-selectable peer (System default) drawn from the same tokens — an off-white canvas (never pure white), white-paper cards, and black-ink hairlines mirroring dark's `white/10%` — and is held to the same bar, not an afterthought.
-- **Do** separate siblings with a `white/10` hairline border first, and a `foreground/10` ring on cards — reach for a shadow only when an element genuinely floats (overlay, popover, dialog, floating pill).
-- **Do** keep indigo (`--primary`) rare and meaningful: interaction and "attend to this," nothing decorative.
-- **Do** reserve monospace for machine tokens — tool names, commands, ids, `@name` handles, keyboard keys — and keep all prose in Inter.
-- **Do** make every state legible without color: a stripe, a dot, a weight change, or a literal label alongside the hue. Hold WCAG AA for body and secondary text on every surface.
-- **Do** keep motion to state changes — a pulse, a shimmer, a 200ms sheet slide — and honor `prefers-reduced-motion`.
-- **Do** keep 16px as the top of the type scale. Earn importance with spacing and weight, not size.
-- **Do** keep touch targets thumb-friendly on phone even at high density, and give every keyboard flow a visible focus ring.
-
-### Don't:
-- **Don't** build **corporate SaaS chat** (Intercom / Zendesk): no chirpy rounded-friendly bubbles with tails, no marketing tone, no drop-shadowed pastel cards, no "How can I help you today!" energy.
-- **Don't** build a **consumer assistant** (Siri / Alexa / ChatGPT mobile): no mascot personality, no over-explaining, no empty enthusiasm, no hand-holding onboarding. Assume total fluency.
-- **Don't** build a **notification slot machine**: no badge spam, no red dots scattered around, no engagement-bait urgency. There is exactly one interrupt (danger red on the needs-you count — open judgments the fleet is waiting on) and silence otherwise.
-- **Don't** introduce a second saturated hue or a gradient. The palette is neutral grays + one indigo + a tiny semantic status set. No neon, no glassmorphism, no purple-gradient dark mode.
-- **Don't** multiply reds. If more than one thing is shouting danger, something is miscoded.
-- **Don't** add a display face, a hero headline, or type above 16px. hirsel has no marketing surface.
-- **Don't** cast a heavy drop shadow on a resting card. If it looks like a 2014 app, the shadow is too dark and the blur is too small — use the hairline ring instead.
-- **Don't** set prose, labels, or decoration in monospace. Monospace with no machine content is costume, not signal.
+- Do not ship Feed, Chat, Side Chat, Evidence, Agent, or Canvas as primary destinations.
+- Do not render conversation in bubbles, cards, named panes, or a dedicated third column.
+- Do not create nested task trees, breadcrumbs, graph canvases, or thread stacks.
+- Do not turn generated UI into a dashboard of cards.
+- Do not use glassmorphism, neon edges, heavy shadows, aggressive grids, or repeated rectangular frames.

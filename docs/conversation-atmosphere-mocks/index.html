@@ -1,0 +1,915 @@
+<!doctype html>
+<!--
+THESIS: Compare four ways conversation can occupy Hirsel without turning prose into a card or a finite blob.
+OWN-WORLD: The existing warm blue-charcoal field, sea-glass type, hairline structure, and plain task conversation are held constant; only the spatial atmosphere changes.
+STORY: Read the same realistic transcript four times, compare how each treatment survives a long conversation, and choose the spatial rule that feels inevitable.
+FIRST VIEWPORT: Four equal app excerpts fill one horizontal comparison table; every transcript, tool disclosure, composer, and chrome element is identical.
+FORM: A controlled visual experiment inside the established Task Margins world; Infinite Atmosphere, Conversation Wake, Sculpted Margin, and Pure Field are the four requested variables.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hirsel conversation atmosphere studies</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #070d0f;
+        --canvas: #091113;
+        --surface: #101a1d;
+        --surface-strong: #142125;
+        --surface-live: #17312c;
+        --foreground: #e4ebe7;
+        --muted: #9bafaa;
+        --faint: #6e827e;
+        --mint: #78d3a3;
+        --cyan: #55bdd4;
+        --line: rgba(214, 235, 227, 0.11);
+        --quiet-line: rgba(214, 235, 227, 0.065);
+        --font: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo,
+          monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+        overflow-x: auto;
+        background: var(--page);
+        color: var(--foreground);
+        font-family: var(--font);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      button:focus-visible,
+      textarea:focus-visible {
+        outline: 2px solid color-mix(in oklch, var(--mint) 75%, white);
+        outline-offset: 2px;
+      }
+
+      .page-header {
+        position: sticky;
+        left: 0;
+        z-index: 10;
+        display: flex;
+        min-width: 1480px;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 32px;
+        padding: 24px 28px 20px;
+        border-bottom: 1px solid var(--line);
+        background: color-mix(in oklch, var(--page) 96%, transparent);
+      }
+
+      .page-header h1 {
+        max-width: 22ch;
+        margin: 0;
+        font-size: clamp(1.75rem, 3vw, 2.6rem);
+        font-weight: 480;
+        letter-spacing: -0.025em;
+        line-height: 1.08;
+      }
+
+      .page-header p {
+        max-width: 56ch;
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.875rem;
+        line-height: 1.55;
+        text-align: right;
+      }
+
+      .comparison {
+        display: grid;
+        min-width: 1480px;
+        grid-template-columns: repeat(4, minmax(350px, 1fr));
+        padding: 0 16px 20px;
+      }
+
+      .study {
+        min-width: 0;
+        padding: 18px 12px 0;
+      }
+
+      .study + .study {
+        border-left: 1px solid var(--line);
+      }
+
+      .study-label {
+        display: grid;
+        min-height: 66px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 12px;
+        padding: 0 6px 14px;
+      }
+
+      .study-label h2 {
+        margin: 0 0 4px;
+        font-size: 0.875rem;
+        font-weight: 570;
+        letter-spacing: -0.01em;
+      }
+
+      .study-label p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1.45;
+      }
+
+      .study-label .tag {
+        color: var(--mint);
+        font-size: 0.72rem;
+        white-space: nowrap;
+      }
+
+      .app {
+        position: relative;
+        display: flex;
+        height: calc(100vh - 150px);
+        min-height: 690px;
+        max-height: 920px;
+        flex-direction: column;
+        overflow: hidden;
+        border-top: 1px solid var(--line);
+        background: var(--canvas);
+      }
+
+      .appbar {
+        position: relative;
+        z-index: 5;
+        display: flex;
+        height: 48px;
+        flex: none;
+        align-items: center;
+        gap: 10px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--quiet-line);
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-right: auto;
+        color: var(--foreground);
+        font-weight: 630;
+      }
+
+      .brand-mark {
+        width: 14px;
+        height: 14px;
+        background: var(--foreground);
+        clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+      }
+
+      .connection {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--mint);
+      }
+
+      .processes {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        color: var(--muted);
+      }
+
+      .processes b {
+        color: var(--cyan);
+        font-weight: 600;
+      }
+
+      .more {
+        color: var(--faint);
+        font-size: 0.875rem;
+        letter-spacing: 0.08em;
+      }
+
+      .conversation {
+        position: relative;
+        display: flex;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .atmosphere {
+        pointer-events: none;
+        position: absolute;
+        z-index: 0;
+      }
+
+      .transcript {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        gap: 18px;
+        overflow-y: auto;
+        padding: 32px 34px 30px;
+        scrollbar-color: color-mix(in oklch, var(--muted) 32%, transparent) transparent;
+        scrollbar-width: thin;
+      }
+
+      .turn {
+        position: relative;
+        z-index: 2;
+        max-width: 33rem;
+        font-size: 0.86rem;
+        line-height: 1.58;
+      }
+
+      .turn.owner {
+        padding-left: 27px;
+        color: var(--foreground);
+      }
+
+      .turn.agent {
+        color: var(--muted);
+      }
+
+      .turn p {
+        margin: 0;
+      }
+
+      code {
+        padding: 1px 5px;
+        border-radius: 14px;
+        background: var(--surface-strong);
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.88em;
+      }
+
+      .tool {
+        align-self: flex-start;
+      }
+
+      .tool-toggle {
+        display: inline-flex;
+        min-height: 30px;
+        align-items: center;
+        gap: 7px;
+        padding: 3px 10px 3px 8px;
+        border: 0;
+        border-radius: 999px;
+        background: var(--surface-strong);
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 0.72rem;
+      }
+
+      .chevron {
+        display: inline-block;
+        color: var(--muted);
+        transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      .tool-toggle[aria-expanded="true"] .chevron {
+        transform: rotate(90deg);
+      }
+
+      .sliders {
+        position: relative;
+        width: 14px;
+        height: 12px;
+        opacity: 0.85;
+      }
+
+      .sliders::before,
+      .sliders::after {
+        content: "";
+        position: absolute;
+        left: 1px;
+        width: 12px;
+        height: 1px;
+        background: currentColor;
+      }
+
+      .sliders::before {
+        top: 3px;
+      }
+
+      .sliders::after {
+        bottom: 3px;
+      }
+
+      .tool-details {
+        margin: 7px 0 0 10px;
+        padding-left: 13px;
+        border-left: 1px solid var(--line);
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        line-height: 1.7;
+      }
+
+      .tool-details[hidden] {
+        display: none;
+      }
+
+      .live {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+      }
+
+      .live-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--mint);
+        animation: live-pulse 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+      }
+
+      .composer-wrap {
+        position: relative;
+        z-index: 5;
+        flex: none;
+        padding: 12px 14px 14px;
+        background: linear-gradient(180deg, transparent, var(--canvas) 38%);
+      }
+
+      .composer {
+        display: grid;
+        min-height: 54px;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 9px;
+        padding: 8px 9px 8px 13px;
+        border: 1px solid var(--line);
+        border-radius: 14px 26px 26px 14px;
+        background: var(--surface);
+      }
+
+      .attach {
+        color: var(--muted);
+        font-size: 0.875rem;
+        transform: rotate(-38deg);
+      }
+
+      .composer textarea {
+        min-width: 0;
+        height: 24px;
+        resize: none;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--foreground);
+        font-size: 0.875rem;
+        line-height: 24px;
+      }
+
+      .composer textarea::placeholder {
+        color: #91a5a0;
+        opacity: 1;
+      }
+
+      .send {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border: 0;
+        border-radius: 50%;
+        background: var(--mint);
+        color: var(--canvas);
+        cursor: pointer;
+        font-size: 0.875rem;
+      }
+
+      /* 1 — no closed silhouette: this field continues beyond both edges of
+         the transcript and only its lateral contour is allowed to be visible. */
+      .concept-atmosphere .atmosphere {
+        inset: -90px 5% -90px 4%;
+        background:
+          radial-gradient(
+            ellipse 75% 18% at 62% 13%,
+            color-mix(in oklch, var(--muted) 26%, transparent),
+            transparent 74%
+          ),
+          linear-gradient(180deg, rgba(17, 29, 32, 0.86), rgba(17, 29, 32, 0.72));
+        clip-path: polygon(
+          7% 0,
+          91% 0,
+          97% 8%,
+          93% 19%,
+          99% 31%,
+          95% 45%,
+          100% 58%,
+          94% 73%,
+          98% 86%,
+          89% 100%,
+          9% 100%,
+          2% 89%,
+          5% 76%,
+          0 63%,
+          4% 47%,
+          0 32%,
+          5% 17%,
+          1% 7%
+        );
+      }
+
+      .concept-atmosphere .live {
+        color: var(--muted);
+      }
+
+      /* 2 — each conversational exchange leaves a low-contrast wake. The
+         overlapping fields merge; they are atmosphere, not message containers. */
+      .concept-wake .wake {
+        position: absolute;
+        z-index: 0;
+        border-radius: 46% 54% 57% 43% / 38% 47% 53% 62%;
+        background: var(--surface-strong);
+        opacity: 0.82;
+      }
+
+      .concept-wake .wake-a {
+        top: 30px;
+        right: -8%;
+        width: 94%;
+        height: 250px;
+        transform: rotate(-2deg);
+      }
+
+      .concept-wake .wake-b {
+        top: 168px;
+        left: -5%;
+        width: 98%;
+        height: 285px;
+        border-radius: 58% 42% 48% 52% / 45% 58% 42% 55%;
+        background: var(--surface-strong);
+        opacity: 0.74;
+        transform: rotate(1.4deg);
+      }
+
+      .concept-wake .wake-c {
+        top: 350px;
+        right: -12%;
+        width: 107%;
+        height: 320px;
+        border-radius: 42% 58% 51% 49% / 61% 41% 59% 39%;
+        background: var(--surface-strong);
+        opacity: 0.76;
+        transform: rotate(-1deg);
+      }
+
+      .concept-wake .wake-live {
+        top: 470px;
+        right: -3%;
+        width: 104%;
+        height: 285px;
+        background: var(--surface-live);
+        animation: wake-breathe 3.4s cubic-bezier(0.16, 1, 0.3, 1) infinite alternate;
+      }
+
+      /* 3 — the conversation owns one side of the field. Its boundary is
+         sculpted by the task UI rather than drawn around the transcript. */
+      .concept-sculpted .atmosphere {
+        inset: 0;
+        background: rgba(17, 29, 32, 0.9);
+        clip-path: polygon(
+          20% 0,
+          100% 0,
+          100% 100%,
+          11% 100%,
+          16% 88%,
+          10% 75%,
+          18% 61%,
+          12% 48%,
+          20% 34%,
+          13% 19%
+        );
+      }
+
+      .concept-sculpted .transcript {
+        padding-left: 48px;
+      }
+
+      .concept-sculpted .turn.owner::before {
+        content: "";
+        position: absolute;
+        top: 0.74em;
+        left: 8px;
+        width: 10px;
+        height: 1px;
+        background: color-mix(in oklch, var(--foreground) 54%, transparent);
+      }
+
+      /* 4 — no backdrop. Authorship and rhythm alone form the transcript. */
+      .concept-pure .transcript {
+        padding-right: 24px;
+        padding-left: 24px;
+      }
+
+      .concept-pure .turn {
+        padding-top: 1px;
+      }
+
+      .concept-pure .turn.agent {
+        padding-right: 13px;
+      }
+
+      .concept-pure .turn.owner {
+        margin-left: 18px;
+        padding-left: 17px;
+      }
+
+      .concept-pure .turn.owner::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 1px;
+        background: color-mix(in oklch, var(--muted) 38%, transparent);
+      }
+
+      .concept-pure .tool-toggle {
+        padding-left: 0;
+        background: transparent;
+      }
+
+      @keyframes live-pulse {
+        0%,
+        100% {
+          opacity: 0.55;
+          transform: scale(0.82);
+        }
+        42% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      @keyframes wake-breathe {
+        from {
+          opacity: 0.52;
+          clip-path: inset(3% 2% 1% 3% round 46% 54% 57% 43%);
+        }
+        to {
+          opacity: 0.86;
+          clip-path: inset(0 round 51% 49% 46% 54%);
+        }
+      }
+
+      @media (max-height: 780px) {
+        .page-header {
+          padding-top: 18px;
+          padding-bottom: 15px;
+        }
+
+        .study {
+          padding-top: 13px;
+        }
+
+        .study-label {
+          min-height: 56px;
+        }
+
+        .app {
+          height: calc(100vh - 122px);
+          min-height: 610px;
+        }
+
+        .transcript {
+          gap: 14px;
+          padding-top: 24px;
+          padding-bottom: 22px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="page-header">
+      <h1>How should conversation occupy the field?</h1>
+      <p>
+        Same transcript, density, tools, and composer. Only the spatial rule changes.
+        Open a tool disclosure to test the atmosphere under changing content.
+      </p>
+    </header>
+
+    <main class="comparison" aria-label="Four Hirsel conversation atmosphere studies">
+      <section class="study">
+        <header class="study-label">
+          <div>
+            <h2>Infinite atmosphere</h2>
+            <p>An open-ended lane with no visible beginning or end.</p>
+          </div>
+          <span class="tag">continuous</span>
+        </header>
+        <article class="app concept-atmosphere" aria-label="Infinite atmosphere mock">
+          <header class="appbar">
+            <span class="brand"><span class="brand-mark" aria-hidden="true"></span>hirsel</span>
+            <span>All tasks</span>
+            <span class="connection" aria-label="connected"></span>
+            <span class="processes">⌁ Processes <b>1</b></span>
+            <span class="more" aria-label="More actions">•••</span>
+          </header>
+          <div class="conversation">
+            <div class="atmosphere" aria-hidden="true"></div>
+            <div class="transcript">
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>events.list · 14ms<br />4 open events returned</div>
+              </div>
+              <div class="turn owner"><p>archive all the events</p></div>
+              <div class="turn agent"><p>Archived all 4 events.</p></div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>4 tools
+                </button>
+                <div class="tool-details" hidden>events.archive × 4<br />all completed</div>
+              </div>
+              <div class="turn owner"><p>what is your cwd</p></div>
+              <div class="turn agent">
+                <p>My current working directory is <code>/workspace/code/hirsel</code>.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>runtime.cwd · 8ms<br />/workspace/code/hirsel</div>
+              </div>
+              <div class="turn owner"><p>ok. send a sol agent to find bugs in the hirsel project</p></div>
+              <div class="turn agent">
+                <p>I’m confirming the configured Sol model, then I’ll launch a read-only bug audit.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>subagents.list · 12ms<br />gpt-5.6-sol available</div>
+              </div>
+              <div class="turn agent"><p>Host rotated the Agent session to <code>agent-g1</code>.</p></div>
+              <div class="turn live"><span class="live-dot"></span><p>Bug audit is running in Processes.</p></div>
+            </div>
+            <div class="composer-wrap">
+              <div class="composer">
+                <span class="attach" aria-hidden="true">⌕</span>
+                <textarea aria-label="Message Hirsel" placeholder="Tell Hirsel what matters…"></textarea>
+                <button class="send" type="button" aria-label="Send">↑</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="study">
+        <header class="study-label">
+          <div>
+            <h2>Conversation wake</h2>
+            <p>Each exchange leaves a field that merges into accumulated context.</p>
+          </div>
+          <span class="tag">alive</span>
+        </header>
+        <article class="app concept-wake" aria-label="Conversation wake mock">
+          <header class="appbar">
+            <span class="brand"><span class="brand-mark" aria-hidden="true"></span>hirsel</span>
+            <span>All tasks</span>
+            <span class="connection" aria-label="connected"></span>
+            <span class="processes">⌁ Processes <b>1</b></span>
+            <span class="more" aria-label="More actions">•••</span>
+          </header>
+          <div class="conversation">
+            <div class="wake wake-a" aria-hidden="true"></div>
+            <div class="wake wake-b" aria-hidden="true"></div>
+            <div class="wake wake-c" aria-hidden="true"></div>
+            <div class="wake wake-live" aria-hidden="true"></div>
+            <div class="transcript">
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>events.list · 14ms<br />4 open events returned</div>
+              </div>
+              <div class="turn owner"><p>archive all the events</p></div>
+              <div class="turn agent"><p>Archived all 4 events.</p></div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>4 tools
+                </button>
+                <div class="tool-details" hidden>events.archive × 4<br />all completed</div>
+              </div>
+              <div class="turn owner"><p>what is your cwd</p></div>
+              <div class="turn agent">
+                <p>My current working directory is <code>/workspace/code/hirsel</code>.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>runtime.cwd · 8ms<br />/workspace/code/hirsel</div>
+              </div>
+              <div class="turn owner"><p>ok. send a sol agent to find bugs in the hirsel project</p></div>
+              <div class="turn agent">
+                <p>I’m confirming the configured Sol model, then I’ll launch a read-only bug audit.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>subagents.list · 12ms<br />gpt-5.6-sol available</div>
+              </div>
+              <div class="turn agent"><p>Host rotated the Agent session to <code>agent-g1</code>.</p></div>
+              <div class="turn live"><span class="live-dot"></span><p>Bug audit is running in Processes.</p></div>
+            </div>
+            <div class="composer-wrap">
+              <div class="composer">
+                <span class="attach" aria-hidden="true">⌕</span>
+                <textarea aria-label="Message Hirsel" placeholder="Tell Hirsel what matters…"></textarea>
+                <button class="send" type="button" aria-label="Send">↑</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="study">
+        <header class="study-label">
+          <div>
+            <h2>Sculpted margin</h2>
+            <p>The generated task field physically makes room for conversation.</p>
+          </div>
+          <span class="tag">architectural</span>
+        </header>
+        <article class="app concept-sculpted" aria-label="Sculpted margin mock">
+          <header class="appbar">
+            <span class="brand"><span class="brand-mark" aria-hidden="true"></span>hirsel</span>
+            <span>All tasks</span>
+            <span class="connection" aria-label="connected"></span>
+            <span class="processes">⌁ Processes <b>1</b></span>
+            <span class="more" aria-label="More actions">•••</span>
+          </header>
+          <div class="conversation">
+            <div class="atmosphere" aria-hidden="true"></div>
+            <div class="transcript">
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>events.list · 14ms<br />4 open events returned</div>
+              </div>
+              <div class="turn owner"><p>archive all the events</p></div>
+              <div class="turn agent"><p>Archived all 4 events.</p></div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>4 tools
+                </button>
+                <div class="tool-details" hidden>events.archive × 4<br />all completed</div>
+              </div>
+              <div class="turn owner"><p>what is your cwd</p></div>
+              <div class="turn agent">
+                <p>My current working directory is <code>/workspace/code/hirsel</code>.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>runtime.cwd · 8ms<br />/workspace/code/hirsel</div>
+              </div>
+              <div class="turn owner"><p>ok. send a sol agent to find bugs in the hirsel project</p></div>
+              <div class="turn agent">
+                <p>I’m confirming the configured Sol model, then I’ll launch a read-only bug audit.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>subagents.list · 12ms<br />gpt-5.6-sol available</div>
+              </div>
+              <div class="turn agent"><p>Host rotated the Agent session to <code>agent-g1</code>.</p></div>
+              <div class="turn live"><span class="live-dot"></span><p>Bug audit is running in Processes.</p></div>
+            </div>
+            <div class="composer-wrap">
+              <div class="composer">
+                <span class="attach" aria-hidden="true">⌕</span>
+                <textarea aria-label="Message Hirsel" placeholder="Tell Hirsel what matters…"></textarea>
+                <button class="send" type="button" aria-label="Send">↑</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="study">
+        <header class="study-label">
+          <div>
+            <h2>Pure field</h2>
+            <p>Typography, authorship, and rhythm—nothing surrounds the transcript.</p>
+          </div>
+          <span class="tag">selected</span>
+        </header>
+        <article class="app concept-pure" aria-label="Pure field mock">
+          <header class="appbar">
+            <span class="brand"><span class="brand-mark" aria-hidden="true"></span>hirsel</span>
+            <span>All tasks</span>
+            <span class="connection" aria-label="connected"></span>
+            <span class="processes">⌁ Processes <b>1</b></span>
+            <span class="more" aria-label="More actions">•••</span>
+          </header>
+          <div class="conversation">
+            <div class="transcript">
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>events.list · 14ms<br />4 open events returned</div>
+              </div>
+              <div class="turn owner"><p>archive all the events</p></div>
+              <div class="turn agent"><p>Archived all 4 events.</p></div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>4 tools
+                </button>
+                <div class="tool-details" hidden>events.archive × 4<br />all completed</div>
+              </div>
+              <div class="turn owner"><p>what is your cwd</p></div>
+              <div class="turn agent">
+                <p>My current working directory is <code>/workspace/code/hirsel</code>.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>runtime.cwd · 8ms<br />/workspace/code/hirsel</div>
+              </div>
+              <div class="turn owner"><p>ok. send a sol agent to find bugs in the hirsel project</p></div>
+              <div class="turn agent">
+                <p>I’m confirming the configured Sol model, then I’ll launch a read-only bug audit.</p>
+              </div>
+              <div class="tool">
+                <button class="tool-toggle" type="button" aria-expanded="false">
+                  <span class="chevron">›</span><span class="sliders"></span>1 tool
+                </button>
+                <div class="tool-details" hidden>subagents.list · 12ms<br />gpt-5.6-sol available</div>
+              </div>
+              <div class="turn agent"><p>Host rotated the Agent session to <code>agent-g1</code>.</p></div>
+              <div class="turn live"><span class="live-dot"></span><p>Bug audit is running in Processes.</p></div>
+            </div>
+            <div class="composer-wrap">
+              <div class="composer">
+                <span class="attach" aria-hidden="true">⌕</span>
+                <textarea aria-label="Message Hirsel" placeholder="Tell Hirsel what matters…"></textarea>
+                <button class="send" type="button" aria-label="Send">↑</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      document.querySelectorAll(".tool-toggle").forEach((button) => {
+        button.addEventListener("click", () => {
+          const expanded = button.getAttribute("aria-expanded") === "true";
+          button.setAttribute("aria-expanded", String(!expanded));
+          const details = button.nextElementSibling;
+          if (details) details.hidden = expanded;
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,5 +1,7 @@
-# Replying resolves a Ping; one terminal state, named Done
+# Task settlement is action-authoritative
 
-A Ping has exactly two states: open (needs the Owner's attention) and done (dealt with, kept findable). The Owner replying to its Anchor — Quick Reply, inline reply, or Side Chat Conclusion — transitions it to done automatically, host-side, the moment the Anchor-refed reply lands. This is deliberately mechanical and does not violate ADR-0005's no-policy-code stance: like read-state, it encodes a fact (replied ⇒ handled), not a judgment. Judgments such as whether a Ping is moot remain Agent cognition via `pings.resolve`. The Agent must never resolve a Ping the Owner already replied to nor narrate resolutions in Chat. The UI section is Done, and there is no separate hard-delete state.
+> **Current product clarification (2026-07-23):** Action-authoritative settlement remains current. References to Side Threads below are superseded by Task Margins. An action can also advance an adaptive generated instrument while the Task remains open; settlement intent is explicit rather than inferred from every structured action.
 
-Addendum (same day): a Ping has a required short name (its `@name` Chat handle, at most 32 characters) and one-line description. Tools: `pings.send` / `pings.resolve`. Chat @-mentions are a separate structured field on messages and are lifecycle-neutral — only Anchor-refed replies auto-resolve, so "what's the status of @x?" never marks @x done.
+A Task has exactly two settlement states: open and done. An Owner message may carry both an Anchor `ref` and structured Task `mentions`; both preserve orchestration context and are lifecycle-neutral. Replying, discussing a Task in a side thread, or confirming a side-thread conclusion never implies that the Task was handled.
+
+Settlement is action-authoritative: generated controls send `event_action` (`choose` or `submit`) to move a Task to done, and `reopen` moves it back to open. This keeps conversational dives reversible and prevents an exploratory message from silently removing work from the global orchestrator's Task inventory.

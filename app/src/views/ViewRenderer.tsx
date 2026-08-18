@@ -30,16 +30,22 @@ import type { ViewPlacement, ViewSpec } from "../protocol";
 import { cn } from "@/lib/utils";
 import { getClient } from "../ws/client";
 import {
-  calloutToneClass,
-  PROGRESS_FILL,
-  statusDotClass,
-  toneBadgeClass,
-  toneTextClass,
-} from "./tokens";
+  childNodes,
+  createNodeDispatch,
+  createSharedNodes,
+  isNode,
+  type Node,
+  Notice,
+  PlainText,
+  scalarText,
+  str,
+  UnsupportedNode,
+} from "./nodes";
+import { PROGRESS_FILL, toneTextClass } from "./tokens";
 
 /** How long an interactive control shows its pending/disabled state after a
  * submit. There is no direct ack — the reply returns through the normal
- * chat/ping flow (often replacing/clearing the view), so this is a bounded
+ * conversation/Task flow (often replacing/clearing the view), so this is a bounded
  * fallback so a no-op never freezes the control permanently. */
 const PENDING_MS = 4000;
 
@@ -67,34 +73,16 @@ function createSubmitting() {
   return { pending, begin };
 }
 
-// ---- Safe prop accessors (nothing here may throw on malformed input) ----
-
-/** A catalog component node: an object with a string `type`. */
-type Node = ViewSpec;
-
-function isNode(x: unknown): x is Node {
-  return typeof x === "object" && x !== null && typeof (x as { type?: unknown }).type === "string";
-}
-
-/** Child component nodes of a container, skipping any non-node entries. */
-function childNodes(node: Node): Node[] {
-  const kids = node.children;
-  return Array.isArray(kids) ? kids.filter(isNode) : [];
-}
-
-/** Render a catalog "display scalar" (string | number | boolean) as PLAIN text.
- * Never HTML — markdown/rich text is deferred to catalog v2, so this is the
- * "safe by vocabulary" boundary: agent-authored strings can never inject
- * markup. Nullish renders as empty. */
-function scalarText(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "boolean") return v ? "true" : "false";
-  return String(v);
-}
-
-function str(v: unknown, fallback = ""): string {
-  return typeof v === "string" ? v : fallback;
-}
+// The prop accessors, the inline-text strategy, the placeholder chip and the
+// registry dispatch are shared with the event-card tier — see ./nodes.tsx.
+// This tier sets display scalars as PLAIN text.
+const SHARED_NODES = createSharedNodes({
+  Text: PlainText,
+  textLead: "whitespace-pre-wrap",
+  keyValueValue: "text-sm",
+  statusDot: "size-2",
+  statusLabelTone: false,
+});
 
 // ---- Layout token maps (complete literal classes for the JIT) ----
 
@@ -129,11 +117,11 @@ function rowAlignClass(align: unknown): string {
 function headingClass(level: unknown): string {
   switch (level) {
     case 1:
-      return "text-lg font-semibold tracking-[0.01em] text-foreground";
+      return "text-2xl font-medium tracking-[-0.02em] text-foreground";
     case 3:
       return "text-sm font-semibold text-foreground";
     case 4:
-      return "text-[0.72rem] font-semibold uppercase tracking-[0.06em] text-muted-foreground";
+      return "text-xs font-medium text-muted-foreground";
     case 2:
     default:
       return "text-base font-semibold text-foreground";
@@ -164,7 +152,7 @@ function buttonVariantClass(variant: unknown): string {
 }
 
 const BTN_BASE =
-  "inline-flex select-none items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60";
+  "inline-flex min-h-11 select-none items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60";
 
 // ---- Catalog component renderers ----
 // Each takes a node and returns JSX. They are plain functions invoked within
@@ -210,44 +198,6 @@ function RowNode(node: Node): JSX.Element {
 
 function HeadingNode(node: Node): JSX.Element {
   return <div class={headingClass(node.level)}>{scalarText(node.text)}</div>;
-}
-
-function TextNode(node: Node): JSX.Element {
-  return (
-    <p class={cn("whitespace-pre-wrap text-sm leading-relaxed text-foreground", toneTextClass(str(node.tone)))}>
-      {scalarText(node.text)}
-    </p>
-  );
-}
-
-function DividerNode(): JSX.Element {
-  return <hr class="border-t border-border" />;
-}
-
-function KeyValueNode(node: Node): JSX.Element {
-  const items = Array.isArray(node.items) ? node.items : [];
-  return (
-    <dl class="flex flex-col gap-1.5">
-      <For each={items}>
-        {(raw) => {
-          const item = (raw ?? {}) as Record<string, unknown>;
-          return (
-            <div class="flex items-baseline justify-between gap-3">
-              <dt class="shrink-0 text-xs text-muted-foreground">{scalarText(item.label)}</dt>
-              <dd
-                class={cn(
-                  "min-w-0 text-right text-sm text-foreground",
-                  toneTextClass(str(item.tone)),
-                )}
-              >
-                {scalarText(item.value)}
-              </dd>
-            </div>
-          );
-        }}
-      </For>
-    </dl>
-  );
 }
 
 function TableNode(node: Node): JSX.Element {
@@ -363,36 +313,6 @@ function ChecklistNode(node: Node): JSX.Element {
   );
 }
 
-function BadgeNode(node: Node): JSX.Element {
-  return (
-    <span
-      class={cn(
-        "inline-flex w-fit items-center rounded-full px-2 py-0.5 text-xs font-medium",
-        toneBadgeClass(str(node.tone)),
-      )}
-    >
-      {scalarText(node.label)}
-    </span>
-  );
-}
-
-function StatusNode(node: Node): JSX.Element {
-  const state = str(node.state, "neutral");
-  return (
-    <span class="inline-flex items-center gap-1.5 text-sm text-foreground">
-      <span
-        class={cn(
-          "size-2 shrink-0 rounded-full",
-          statusDotClass(state),
-          state === "running" ? "motion-safe:animate-pulse" : "",
-        )}
-        aria-hidden="true"
-      />
-      {scalarText(node.label)}
-    </span>
-  );
-}
-
 function ProgressNode(node: Node): JSX.Element {
   const raw = typeof node.value === "number" && Number.isFinite(node.value) ? node.value : 0;
   const value = Math.max(0, Math.min(1, raw));
@@ -422,7 +342,7 @@ function ProgressNode(node: Node): JSX.Element {
 function CalloutNode(node: Node): JSX.Element {
   const title = str(node.title);
   return (
-    <div class={cn("flex flex-col gap-1 rounded-md border-l-2 px-3 py-2.5", calloutToneClass(str(node.tone)))}>
+    <div class="flex flex-col gap-1 rounded-lg bg-muted/40 px-3 py-2.5">
       <Show when={title}>
         <div class="text-sm font-semibold text-foreground">{title}</div>
       </Show>
@@ -461,11 +381,11 @@ function OptionSetNode(node: Node): JSX.Element {
   const choices = (Array.isArray(node.choices) ? node.choices : []) as Record<string, unknown>[];
   const label = str(node.label);
   return (
-    <div class="flex flex-col gap-1.5">
+    <div class="flex flex-col gap-2">
       <Show when={label}>
         <span class="text-xs font-medium text-muted-foreground">{label}</span>
       </Show>
-      <div class="flex flex-wrap gap-1.5">
+      <div class="flex flex-col border-y border-border/70">
         <For each={choices}>
           {(choice) => {
             const selected = "selected" in node && node.selected === choice.value;
@@ -474,10 +394,10 @@ function OptionSetNode(node: Node): JSX.Element {
                 type="button"
                 class={cn(
                   BTN_BASE,
-                  "flex-col items-start gap-0",
+                  "w-full flex-col items-start gap-0 rounded-none border-b border-border/70 text-left last:border-b-0",
                   selected
                     ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                    : "border border-border bg-card text-foreground hover:bg-muted",
+                    : "bg-transparent text-foreground hover:bg-muted",
                 )}
                 disabled={pending()}
                 aria-pressed={selected}
@@ -520,7 +440,7 @@ function FormField(props: {
   const placeholder = str(props.field.placeholder);
   const required = props.field.required === true;
   const controlBase =
-    "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60";
+    "min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60";
 
   return (
     <label class="flex flex-col gap-1">
@@ -663,18 +583,14 @@ function FieldNode(node: Node): JSX.Element {
 }
 
 const REGISTRY: Record<string, (node: Node) => JSX.Element> = {
+  ...SHARED_NODES,
   card: CardNode,
   stack: StackNode,
   row: RowNode,
   heading: HeadingNode,
-  text: TextNode,
-  divider: DividerNode,
-  keyValue: KeyValueNode,
   table: TableNode,
   list: ListNode,
   checklist: ChecklistNode,
-  badge: BadgeNode,
-  status: StatusNode,
   progress: ProgressNode,
   callout: CalloutNode,
   action: ActionNode,
@@ -683,30 +599,13 @@ const REGISTRY: Record<string, (node: Node) => JSX.Element> = {
   form: FormNode,
 };
 
-/** Fallback for an unknown/unsupported catalog type: a quiet placeholder rather
- * than a thrown error or a blank. Keeps the surface honest ("something here we
- * can't draw") without breaking the rest of the tree. */
-function UnknownNode(props: { type: string }): JSX.Element {
-  return (
-    <div class="rounded-md border border-dashed border-border px-2.5 py-1.5 text-xs text-muted-foreground">
-      Unsupported view component: <span class="font-mono">{props.type || "(untyped)"}</span>
-    </div>
-  );
-}
-
 /** Recursively render one node via the registry. Non-node values render
- * nothing; unknown types fall back to the placeholder. */
-function ViewNode(props: { node: unknown }): JSX.Element {
-  return (
-    <Show when={isNode(props.node)} fallback={null}>
-      {(() => {
-        const node = props.node as Node;
-        const Comp = REGISTRY[node.type];
-        return <Show when={Comp} fallback={<UnknownNode type={node.type} />}>{Comp!(node)}</Show>;
-      })()}
-    </Show>
-  );
-}
+ * nothing; unknown types fall back to a quiet placeholder rather than a thrown
+ * error or a blank — the surface stays honest ("something here we can't draw")
+ * without breaking the rest of the tree. */
+const ViewNode = createNodeDispatch(REGISTRY, (type) => (
+  <UnsupportedNode label="Unsupported view component:" type={type} />
+));
 
 /** Render a list of nodes inside a container with the given class. */
 function NodeList(props: { nodes: Node[]; class?: string }): JSX.Element {
@@ -722,7 +621,7 @@ export interface ViewRendererProps {
   spec: ViewSpec;
   /** The owning instance — every emitted `view_event` carries it. */
   instanceId: string;
-  /** Where this view is surfaced (canvas | chat | ping:<id>). Carried for
+  /** Where this view is surfaced. Historical inline/Task strings are carried for
    * context/telemetry; the visual output is placement-independent. */
   placement: ViewPlacement;
   /** Test/host seam for owner-initiated events. Defaults to the ws client's
@@ -759,11 +658,7 @@ export function ViewRenderer(props: ViewRendererProps): JSX.Element {
   });
   return (
     <ErrorBoundary
-      fallback={
-        <div class="rounded-md border border-dashed border-border px-2.5 py-1.5 text-xs text-muted-foreground">
-          This view couldn't be displayed.
-        </div>
-      }
+      fallback={<Notice>This view couldn't be displayed.</Notice>}
     >
       <ViewEmitContext.Provider value={{ instanceId: props.instanceId, emit }}>
         <div data-slot="view" data-placement={props.placement}>

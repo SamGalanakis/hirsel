@@ -18,6 +18,17 @@ export type TimelineItem =
       done: boolean;
       ok: boolean | null;
       result: string | null;
+    }
+  | {
+      kind: "code";
+      key: string;
+      codeId: string;
+      language: string;
+      code: string;
+      truncated: boolean;
+      done: boolean;
+      ok: boolean | null;
+      result: string | null;
     };
 
 /**
@@ -31,12 +42,18 @@ export type TimelineItem =
  *   no matching open row (e.g. a reconnect mid-turn dropped the start) is not
  *   discarded — it inserts an already-completed row labelled from its own `name`.
  *
+ * - `code_start`/`code_done` behave exactly like the tool pair, but carry the
+ *   Agent's verbatim program for the cell. They are only folded in when
+ *   `showCode` is set (Settings → "Show agent code"); otherwise the events are
+ *   dropped here, so nothing downstream has to know about the preference.
+ *
  * Input is assumed already sorted by `seq` (the reducer keeps it so); this fold
  * never reorders.
  */
-export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
+export function buildTimeline(events: TimelineEvent[], showCode = false): TimelineItem[] {
   const items: TimelineItem[] = [];
   const toolIndexById = new Map<string, number>();
+  const codeIndexById = new Map<string, number>();
 
   for (const { seq, event } of events) {
     switch (event.kind) {
@@ -87,6 +104,49 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
         row.done = true;
         row.ok = event.ok;
         row.result = event.summary;
+        break;
+      }
+      case "code_start": {
+        if (!showCode) break;
+        codeIndexById.set(event.id, items.length);
+        items.push({
+          kind: "code",
+          key: `code-${event.id}`,
+          codeId: event.id,
+          language: event.language,
+          code: event.code,
+          truncated: event.truncated,
+          done: false,
+          ok: null,
+          result: null,
+        });
+        break;
+      }
+      case "code_done": {
+        if (!showCode) break;
+        const idx = codeIndexById.get(event.id);
+        if (idx === undefined) {
+          // Orphan done (the start was lost across a reconnect): still show the
+          // cell's outcome rather than silently dropping it.
+          codeIndexById.set(event.id, items.length);
+          items.push({
+            kind: "code",
+            key: `code-${event.id}`,
+            codeId: event.id,
+            language: "",
+            code: "",
+            truncated: false,
+            done: true,
+            ok: event.ok,
+            result: event.summary,
+          });
+          break;
+        }
+        const cell = items[idx];
+        if (cell.kind !== "code") break;
+        cell.done = true;
+        cell.ok = event.ok;
+        cell.result = event.summary;
         break;
       }
     }

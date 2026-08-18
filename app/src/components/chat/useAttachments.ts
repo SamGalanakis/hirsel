@@ -31,8 +31,8 @@ export interface AttachmentsController {
 }
 
 /** Owns the composer's staged attachments and the upload orchestration. Created
- * once per ChatView so both the composer (paperclip / paste) and the drop
- * overlay feed the same queue. */
+ * once per TaskShell so both the composer (paperclip / paste) and the drop
+ * paste path feeds the same queue. */
 export function createComposerAttachments(): AttachmentsController {
   const [files, setFiles] = createSignal<PendingFile[]>([]);
 

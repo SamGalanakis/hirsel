@@ -65,8 +65,8 @@ describe("D10: in-memory history cap", () => {
   });
 });
 
-describe("D10: render window slice (ChatView logic)", () => {
-  // The window ChatView renders is a pure tail slice of the buffer; this pins the
+describe("D10: conversation render-window slice", () => {
+  // The visible conversation is a pure tail slice of the buffer; this pins the
   // start/hasOlder math the component relies on.
   const windowStart = (len: number, limit: number) => Math.max(0, len - limit);
 

@@ -1,5 +1,6 @@
-import { Bot, Brain, Check, ChevronRight, ListTree, LoaderCircle, X } from "lucide-solid";
+import { Bot, Braces, Brain, Check, ChevronRight, ListTree, LoaderCircle, X } from "lucide-solid";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
+import { showAgentCode } from "../../lib/prefs";
 import type { TimelineEvent } from "../../store/types";
 import { Markdown, renderInline } from "../Markdown";
 import { buildTimeline, type TimelineItem } from "./timeline";
@@ -134,7 +135,7 @@ function ToolRow(props: {
           </button>
         </Show>
         <Show when={duration()}>
-          <span class="ml-auto shrink-0 pl-1 font-mono text-[0.68rem] tabular-nums text-muted-foreground/60">
+          <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">
             {duration()}
           </span>
         </Show>
@@ -151,6 +152,92 @@ function ToolRow(props: {
   );
 }
 
+/** One Agent program cell (Settings → "Show agent code"). Collapsed by default
+ * to a single quiet row — the source is the exception you open, not the thing
+ * you read every turn — expanding to the verbatim monospace program. Once the
+ * cell completes, a failure tints the row and the well so a broken program is
+ * findable without expanding it. */
+function CodeRow(props: {
+  item: Extract<TimelineItem, { kind: "code" }>;
+  durationMs: number | null;
+}) {
+  const [open, setOpen] = createSignal(false);
+  const running = () => !props.item.done;
+  const failed = () => props.item.done && props.item.ok === false;
+  const label = () => props.item.language || "code";
+  const hasCode = () => props.item.code.length > 0;
+  const duration = () => (props.durationMs !== null ? formatDuration(props.durationMs) : "");
+
+  return (
+    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-code">
+      <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+        <Switch>
+          <Match when={running()}>
+            <LoaderCircle
+              class="size-3 shrink-0 animate-spin text-status-active"
+              aria-label="running"
+            />
+          </Match>
+          <Match when={props.item.ok}>
+            <Check class="size-3 shrink-0 text-status-success" aria-label="ok" />
+          </Match>
+          <Match when={!props.item.ok}>
+            <X class="size-3 shrink-0 text-destructive" aria-label="failed" />
+          </Match>
+        </Switch>
+        <Show
+          when={hasCode()}
+          fallback={
+            <span class="shrink-0 font-mono text-[0.72rem] text-foreground/70">{label()}</span>
+          }
+        >
+          <button
+            type="button"
+            class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            aria-expanded={open()}
+            aria-label={`${label()} program — ${open() ? "hide" : "show"} source`}
+            onClick={() => setOpen((v) => !v)}
+          >
+            <ChevronRight
+              class="size-3 shrink-0 text-muted-foreground/60 transition-transform"
+              classList={{ "rotate-90": open() }}
+              aria-hidden="true"
+            />
+            <Braces class="size-3 shrink-0" aria-hidden="true" />
+            <span
+              class="shrink-0 font-mono text-[0.72rem]"
+              classList={{ "text-foreground": running(), "text-foreground/70": !running() }}
+            >
+              {label()}
+            </span>
+            <Show when={props.item.result}>
+              <span class="min-w-0 flex-1 truncate" classList={{ "text-destructive/90": failed() }}>
+                {props.item.result}
+              </span>
+            </Show>
+          </button>
+        </Show>
+        <Show when={duration()}>
+          <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">
+            {duration()}
+          </span>
+        </Show>
+      </div>
+      <Show when={open() && hasCode()}>
+        <pre
+          class="ml-4 max-h-96 overflow-auto whitespace-pre rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[0.72rem] leading-relaxed text-foreground/80"
+          classList={{ "text-destructive/90": failed() }}
+        >
+          {props.item.code}
+          <Show when={props.item.truncated}>
+            <span class="text-muted-foreground/70">{"\n… truncated"}</span>
+          </Show>
+        </pre>
+      </Show>
+    </li>
+  );
+}
+
 /**
  * The running (or finished) turn rendered as a lash-CLI-style timeline: prose
  * blocks interleaved with tool rows and collapsed reasoning, in exact seq order.
@@ -159,7 +246,7 @@ function ToolRow(props: {
  * details" panel.
  */
 export function Timeline(props: { events: TimelineEvent[] }) {
-  const items = createMemo(() => buildTimeline(props.events));
+  const items = createMemo(() => buildTimeline(props.events, showAgentCode()));
   // Per-tool duration from the client-stamped arrival times (tool_done.at −
   // tool_start.at). Absent when either endpoint predates timing (hand-built
   // events / replayed data), in which case the row simply shows no duration.
@@ -168,8 +255,8 @@ export function Timeline(props: { events: TimelineEvent[] }) {
     const out = new Map<string, number>();
     for (const { event, at } of props.events) {
       if (at === undefined) continue;
-      if (event.kind === "tool_start") starts.set(event.id, at);
-      else if (event.kind === "tool_done") {
+      if (event.kind === "tool_start" || event.kind === "code_start") starts.set(event.id, at);
+      else if (event.kind === "tool_done" || event.kind === "code_done") {
         const start = starts.get(event.id);
         if (start !== undefined) out.set(event.id, at - start);
       }
@@ -198,6 +285,12 @@ export function Timeline(props: { events: TimelineEvent[] }) {
               {(() => {
                 const tool = item as Extract<TimelineItem, { kind: "tool" }>;
                 return <ToolRow item={tool} durationMs={durations().get(tool.toolId) ?? null} />;
+              })()}
+            </Match>
+            <Match when={item.kind === "code"}>
+              {(() => {
+                const cell = item as Extract<TimelineItem, { kind: "code" }>;
+                return <CodeRow item={cell} durationMs={durations().get(cell.codeId) ?? null} />;
               })()}
             </Match>
           </Switch>
@@ -231,7 +324,7 @@ export function TurnDetails(props: {
     <div class="flex flex-col gap-1" data-slot="turn-details">
       <button
         type="button"
-        class="inline-flex w-fit items-center gap-1 rounded-full bg-muted px-1.5 py-px text-[0.68rem] text-muted-foreground transition-colors hover:text-foreground"
+        class="-ml-1 inline-flex w-fit items-center gap-1 rounded px-1 py-px text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
         aria-expanded={expanded()}
         aria-label="Turn details"
         onClick={toggle}

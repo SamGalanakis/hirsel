@@ -3,7 +3,7 @@ import { toast } from "./toast";
 /** Copy `value` to the clipboard, resolving true on success. Uniformly handles
  * a missing Clipboard API (insecure context / old browser) and a rejected
  * permission — both resolve false rather than throwing. */
-export async function copyToClipboard(value: string): Promise<boolean> {
+async function copyToClipboard(value: string): Promise<boolean> {
   try {
     if (!navigator.clipboard?.writeText) return false;
     await navigator.clipboard.writeText(value);

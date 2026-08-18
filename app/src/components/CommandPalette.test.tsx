@@ -7,13 +7,15 @@ import { CommandPalette, ShortcutHelp } from "./CommandPalette";
 vi.mock("../lib/focus", () => ({
   anyOverlayOpen: () => false,
   focusMainComposer: () => {},
+  focusTaskIndex: () => {},
 }));
 
 describe("CommandPalette", () => {
   it("lists the core commands when open", async () => {
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
-    expect(screen.getByText("Focus composer")).toBeInTheDocument();
+    expect(screen.getAllByText("Focus Hirsel").length).toBeGreaterThan(0);
+    expect(screen.getByText("Focus tasks")).toBeInTheDocument();
     expect(screen.getByText("Open Processes")).toBeInTheDocument();
   });
 
@@ -24,7 +26,7 @@ describe("CommandPalette", () => {
     await user.type(input, "process");
     await waitFor(() => {
       expect(screen.getByText("Open Processes")).toBeInTheDocument();
-      expect(screen.queryByText("Focus composer")).not.toBeInTheDocument();
+      expect(screen.queryByText("Focus Hirsel")).not.toBeInTheDocument();
     });
   });
 
@@ -38,13 +40,12 @@ describe("CommandPalette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("offers a 'Search events' escape hatch for an otherwise-unmatched query (Wave-3 ⌘K depth)", async () => {
+  it("does not invent a hidden search destination for an unmatched query", async () => {
     const user = userEvent.setup();
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     const input = await screen.findByRole("combobox");
     await user.type(input, "zzzznope");
-    // Nothing else matches, but the query is always searchable against the queue.
-    await waitFor(() => expect(screen.getByText(/Search events: zzzznope/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("No matching commands")).toBeInTheDocument());
   });
 });
 
@@ -107,7 +108,7 @@ describe("ShortcutHelp", () => {
       expect(screen.getByRole("heading", { name: "Keyboard shortcuts" })).toBeInTheDocument(),
     );
     expect(screen.getByText("Command palette")).toBeInTheDocument();
-    expect(screen.getByText("Focus composer")).toBeInTheDocument();
+    expect(screen.getAllByText("Focus Hirsel").length).toBeGreaterThan(0);
     expect(screen.getByText("Jump to latest")).toBeInTheDocument();
   });
 });

@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  * Proven here:
  *   1. hello_ok seeds a RUNNING sub-agent → header icon badge 1 (status-active).
  *   2. Tapping the header icon opens the full-screen Processes sheet, showing
- *      agent+model chips; expand → "Ask to stop" closes the sheet (back to
+ *      agent+model chips; expand → "Ask Hirsel to stop" closes the sheet (back to
  *      Chat) with the composer pre-filled "stop process <id> (<label>)"
  *      (interrupt routes through the Agent).
  *   3. A committed agent message carrying a tool_calls summary (no live timeline
@@ -158,17 +158,13 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       const screen = render(() => <App />);
       await waitFor(() => expect(store.state.processes).toHaveLength(1), { timeout: 10000 });
 
-      // --- 1. Running sub-agent: overflow badge 1, agent+model chips ---
-      // Processes moved behind the phone header's single ⋯ overflow (§4 IA
-      // cleanup); the running count rides on the ⋯ trigger for glanceability,
-      // and selecting it docks the Processes pane (rightRegion === "processes").
+      // --- 1. Running sub-agent: dedicated Processes count 1, agent+model chips ---
+      // Processes is a standing header control: running work stays directly
+      // inspectable without opening the secondary utility menu.
       const user = userEvent.setup();
-      const overflow = screen.getByLabelText(/More actions/);
-      expect(within(overflow).getByText("1")).toBeTruthy();
-      await user.click(overflow);
-      // The menu content is portaled to document.body (outside the render
-      // container), so query it there.
-      await user.click(await within(document.body).findByRole("menuitem", { name: /Processes/ }));
+      const processesTrigger = screen.getByRole("button", { name: "Processes, 1 running" });
+      expect(within(processesTrigger).getByText("1")).toBeTruthy();
+      await user.click(processesTrigger);
       await waitFor(() => expect(store.state.rightRegion).toBe("processes"));
       await screen.findByText("Running (1)");
       const row = (await screen.findByText("Review the auth refactor")).closest(
@@ -179,16 +175,14 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       expect(runningProcessCount(store.state.processes)).toBe(1);
       checklist.push("running sub-agent shown with agent+model chips, badge 1");
 
-      // --- 2. Expand → Ask to stop → sheet closes back to Chat, pre-filled composer ---
+      // --- 2. Expand → Ask Hirsel to stop → sheet closes back to Tasks, pre-filled composer ---
       fireEvent.click(within(row).getByText("Review the auth refactor").closest("button")!);
-      fireEvent.click(await within(row).findByText("Ask to stop"));
+      fireEvent.click(await within(row).findByText("Ask Hirsel to stop"));
       await waitFor(() => expect(store.state.rightRegion).toBe("none"));
-      const composer = (await screen.findByPlaceholderText(
-        "Message the Agent…",
-      )) as HTMLTextAreaElement;
+      const composer = (await screen.findByLabelText("Message Hirsel")) as HTMLTextAreaElement;
       await waitFor(() => expect(composer.value).toContain("stop process proc-1"));
       expect(composer.value).toContain("Review the auth refactor");
-      checklist.push('"Ask to stop" closed the Processes sheet back to Chat and pre-filled the composer');
+      checklist.push('"Ask Hirsel to stop" closed the Processes sheet back to Tasks and pre-filled the composer');
 
       // --- 3. Committed message with a tool_calls summary but no streamed
       // timeline → the fallback "⚙ N tools" chip (the full v1.5 live-timeline
@@ -230,14 +224,12 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       await waitFor(() => expect(runningProcessCount(store.state.processes)).toBe(0), {
         timeout: 10000,
       });
-      const overflow2 = screen.getByLabelText(/More actions/);
-      expect(within(overflow2).queryByText("1")).toBeNull();
-      // Re-dock Processes directly (the overflow→Processes path is already
-      // proven above; a second userEvent menu cycle on one render is flaky).
-      store.openProcesses();
+      const completedTrigger = screen.getByRole("button", { name: "Processes" });
+      expect(within(completedTrigger).queryByText("1")).toBeNull();
+      await user.click(completedTrigger);
       await screen.findByText("Finished (1)");
       expect(screen.queryByText("Running (1)")).toBeNull();
-      checklist.push("process completed: moved Running → Finished, overflow badge 0");
+      checklist.push("process completed: moved Running → Finished, header count cleared");
 
       // eslint-disable-next-line no-console
       console.log(`[processes-scenario] PASS —\n  - ${checklist.join("\n  - ")}`);

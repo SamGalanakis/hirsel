@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@solidjs/testing-library";
+import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelSnapshot, SubagentModelCatalog } from "../../protocol";
 
@@ -35,10 +35,24 @@ const CATALOG: SubagentModelCatalog = {
       label: "Codex CLI",
       models: [
         {
-          id: "gpt-5.5",
-          label: "GPT-5.5",
-          variants: ["low", "medium", "high"],
-          default_variant: "high",
+          id: "gpt-5.6-sol",
+          label: "Sol",
+          variants: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          enabled_variants: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          enabled: true,
+        },
+        {
+          id: "gpt-5.6-terra",
+          label: "Terra",
+          variants: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          enabled_variants: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          enabled: true,
+        },
+        {
+          id: "gpt-5.6-luna",
+          label: "Luna",
+          variants: ["low", "medium", "high", "xhigh", "max"],
+          enabled_variants: ["low", "medium", "high", "xhigh", "max"],
           enabled: true,
         },
       ],
@@ -48,10 +62,24 @@ const CATALOG: SubagentModelCatalog = {
       label: "Claude Code CLI",
       models: [
         {
-          id: "claude-opus-4-8",
-          label: "Claude Opus 4.8",
+          id: "claude-fable-5",
+          label: "Fable 5",
           variants: ["low", "medium", "high"],
-          default_variant: "high",
+          enabled_variants: ["low", "medium", "high"],
+          enabled: false,
+        },
+        {
+          id: "claude-opus-4-8",
+          label: "Opus 4.8",
+          variants: ["low", "medium", "high"],
+          enabled_variants: ["low", "medium", "high"],
+          enabled: true,
+        },
+        {
+          id: "claude-sonnet-5",
+          label: "Sonnet 5",
+          variants: ["low", "medium", "high"],
+          enabled_variants: ["low", "medium", "high"],
           enabled: true,
         },
       ],
@@ -123,28 +151,110 @@ describe("Settings → Models: main agent", () => {
 
 describe("Settings → Models: sub-agent models", () => {
   it("renders provider groups and model rows", async () => {
-    const { getByText, getByLabelText } = await mount({ subagent_models: CATALOG });
+    const { getByText, getByLabelText, queryByText } = await mount({
+      subagent_models: CATALOG,
+    });
     expect(getByText("Codex CLI")).toBeTruthy();
     expect(getByText("Claude Code CLI")).toBeTruthy();
-    expect(getByText("GPT-5.5")).toBeTruthy();
-    expect(getByLabelText("Enable GPT-5.5")).toBeTruthy();
-    expect(getByLabelText("GPT-5.5 default variant")).toBeTruthy();
+    expect(getByText("Terra")).toBeTruthy();
+    expect(getByText("Luna")).toBeTruthy();
+    expect(getByText("Sol")).toBeTruthy();
+    expect(getByLabelText("Enable Terra")).toBeTruthy();
+    expect(getByLabelText("Terra enabled variants")).toBeTruthy();
+    expect(queryByText("GPT-5.5")).toBeNull();
+  });
+
+  it("orders models from smartest to least capable within each provider", async () => {
+    const { getByText } = await mount({ subagent_models: CATALOG });
+    const precedes = (first: Element, second: Element) =>
+      Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    expect(precedes(getByText("Sol"), getByText("Terra"))).toBe(true);
+    expect(precedes(getByText("Terra"), getByText("Luna"))).toBe(true);
+    expect(precedes(getByText("Fable 5"), getByText("Opus 4.8"))).toBe(true);
+    expect(precedes(getByText("Opus 4.8"), getByText("Sonnet 5"))).toBe(true);
+  });
+
+  it("collapses each provider independently", async () => {
+    const { getByLabelText, queryByText, getByText } = await mount({
+      subagent_models: CATALOG,
+    });
+
+    fireEvent.click(getByLabelText("Collapse Codex CLI models"));
+    expect(queryByText("Sol")).toBeNull();
+    expect(getByText("Fable 5")).toBeTruthy();
+    expect(getByLabelText("Expand Codex CLI models").getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+
+    fireEvent.click(getByLabelText("Expand Codex CLI models"));
+    expect(getByText("Sol")).toBeTruthy();
   });
 
   it("toggling enable sends set_subagent_model with the full row payload", async () => {
     const { getByLabelText } = await mount({ subagent_models: CATALOG });
-    // gpt-5.5 starts enabled; toggling sends the full state (now disabled) with
-    // its unchanged default_variant.
-    fireEvent.click(getByLabelText("Enable GPT-5.5"));
-    expect(setSubagentModel).toHaveBeenCalledWith("codex", "gpt-5.5", false, "high");
+    fireEvent.click(getByLabelText("Enable Terra"));
+    expect(setSubagentModel).toHaveBeenCalledWith(
+      "codex",
+      "gpt-5.6-terra",
+      false,
+      ["low", "medium", "high", "xhigh", "max", "ultra"],
+    );
   });
 
-  it("changing the default variant sends set_subagent_model with the full row payload", async () => {
+  it("variants are independent multi-select controls", async () => {
     const { getByLabelText } = await mount({ subagent_models: CATALOG });
-    const select = getByLabelText("GPT-5.5 default variant") as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "low" } });
-    // Full state: still enabled, new default_variant.
-    expect(setSubagentModel).toHaveBeenCalledWith("codex", "gpt-5.5", true, "low");
+    const high = getByLabelText("Disable Terra high variant");
+    expect(high.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(high);
+    expect(setSubagentModel).toHaveBeenCalledWith(
+      "codex",
+      "gpt-5.6-terra",
+      true,
+      ["low", "medium", "xhigh", "max", "ultra"],
+    );
+  });
+
+  it("settles a pending row when the host broadcasts nested catalog changes", async () => {
+    const { getByLabelText } = await mount({ subagent_models: CATALOG });
+    fireEvent.click(getByLabelText("Disable Terra high variant"));
+
+    const store = await import("../../store/store");
+    const terra = CATALOG.providers[0].models.find(
+      (model) => model.id === "gpt-5.6-terra",
+    )!;
+    store.dispatch({
+      type: "subagent_models_changed",
+      catalog: {
+        providers: [
+          {
+            ...CATALOG.providers[0],
+            models: CATALOG.providers[0].models.map((model) =>
+              model.id === terra.id
+                ? {
+                    ...terra,
+                    enabled_variants: terra.enabled_variants.filter(
+                      (variant) => variant !== "high",
+                    ),
+                  }
+                : model,
+            ),
+          },
+          CATALOG.providers[1],
+        ],
+      },
+    });
+
+    await waitFor(() =>
+      expect(getByLabelText("Enable Terra high variant")).not.toBeDisabled(),
+    );
+    fireEvent.click(getByLabelText("Enable Terra high variant"));
+    expect(setSubagentModel).toHaveBeenLastCalledWith(
+      "codex",
+      "gpt-5.6-terra",
+      true,
+      ["low", "medium", "high", "xhigh", "max", "ultra"],
+    );
   });
 
   it("hides the sub-agent subsection when subagentModels is null", async () => {

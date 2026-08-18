@@ -4,7 +4,7 @@ import { PaneHeader } from "./PaneHeader";
 
 // The shared right-region header (spec item 1): one datum, one title token, and
 // a trailing × close on every DISMISSIBLE pane (Canvas / Processes / Settings /
-// Side Chat) with a consistent focus-visible ring — while the resting Pings home
+// Canvas) with a consistent focus-visible ring — while the standing task world
 // wears the SAME header sans × (it is the default, not a dismissible inspector)
 // and carries its count badge instead. These pin the close parity + the
 // no-close-on-home contract the four inspectors rely on.

@@ -5,8 +5,8 @@
 // unknown node to a quiet fallback chip — never throws, never blanks, never
 // loses content. The nodes carry SEMANTIC tokens only (`tone`, `state`,
 // `recommended`, `boundary`); the renderer alone owns the palette and the type
-// scale, so a machine-authored card is on-brand by construction — it cannot
-// express a raw color, a second accent, a glow, or type above the 16px ceiling.
+// scale, so a machine-authored instrument is on-brand by construction — it
+// cannot express a raw color, a second accent, or a glow.
 //
 // Text is set as text (no HTML injection); the ONLY transform is `` `backtick` ``
 // → monospace, so machine tokens get mono and prose never can (Monospace-Earns-
@@ -28,22 +28,34 @@ import type { JSX } from "solid-js";
 import type { ViewSpec } from "../protocol";
 import { eventUiNodes } from "../store/selectors";
 import { cn } from "@/lib/utils";
-import { eyebrowToneClass, statusDotClass, toneBadgeClass, toneTextClass } from "./tokens";
+import {
+  childNodes,
+  createNodeDispatch,
+  createSharedNodes,
+  type Node,
+  Notice,
+  RichText as Rich,
+  str,
+  UnsupportedNode,
+} from "./nodes";
+import { eyebrowToneClass, statusDotClass } from "./tokens";
 
-type Node = ViewSpec;
-
-function isNode(x: unknown): x is Node {
-  return typeof x === "object" && x !== null && typeof (x as { type?: unknown }).type === "string";
-}
-
-function str(v: unknown, fallback = ""): string {
-  return typeof v === "string" ? v : fallback;
-}
+// The prop accessors, the `backtick` → mono text transform, the placeholder
+// chip and the registry dispatch are shared with the generative-UI tier — see
+// ./nodes.tsx. This tier is the denser instrument and lets a `status` label
+// carry its tone.
+const SHARED_NODES = createSharedNodes({
+  Text: Rich,
+  textLead: "max-w-[68ch]",
+  keyValueValue: "text-xs",
+  statusDot: "size-1.5",
+  statusLabelTone: true,
+});
 
 // ---- Interaction + field context (one card = one scope) ----
 
 interface EventEmit {
-  emit: (action: string, data: unknown) => void;
+  emit: (action: string, data: unknown, settles: boolean) => void;
   disabled: boolean;
   /** Read the card's live field values (keyed by field `name`). */
   fields: () => Record<string, unknown>;
@@ -67,24 +79,6 @@ const useEventEmit = () => useContext(EventEmitContext);
 const CardMetaContext = createContext<{ eyebrowAge?: string }>({});
 const useCardMeta = () => useContext(CardMetaContext);
 
-// ---- `rich`: the ONE text transform. `backtick` segments → mono spans. ----
-// Still text nodes only — prose can never *choose* mono, it only *marks* machine
-// tokens; the renderer decides the font.
-function Rich(props: { text: unknown }): JSX.Element {
-  const parts = () => String(props.text ?? "").split("`");
-  return (
-    <For each={parts()}>
-      {(part, i) =>
-        part === "" ? null : i() % 2 === 1 ? (
-          <span class="font-mono text-[0.92em] tracking-[-0.01em]">{part}</span>
-        ) : (
-          <>{part}</>
-        )
-      }
-    </For>
-  );
-}
-
 // ---- Node renderers (semantic tokens → DESIGN tokens) ----
 
 function EyebrowNode(node: Node): JSX.Element {
@@ -95,13 +89,10 @@ function EyebrowNode(node: Node): JSX.Element {
   return (
     <div
       class={cn(
-        "flex items-center gap-1.5 text-[0.62rem] font-semibold uppercase tracking-[0.06em]",
+        "flex items-center gap-1.5 text-xs font-medium",
         eyebrowToneClass(str(node.tone)),
       )}
     >
-      <Show when={node.boundary === true}>
-        <span class="min-h-[13px] w-[3px] shrink-0 self-stretch rounded-sm bg-primary/40" aria-hidden="true" />
-      </Show>
       <span>
         <Rich text={node.text} />
         <Show when={age()}>
@@ -113,94 +104,30 @@ function EyebrowNode(node: Node): JSX.Element {
 }
 
 function HeadingNode(node: Node): JSX.Element {
-  // 16px ceiling: level-3 is a small sub-heading; default is the fork line.
-  const cls =
-    node.level === 3
-      ? "text-[0.8rem] font-semibold leading-snug text-foreground"
-      : "text-[0.95rem] font-semibold leading-snug tracking-[-0.005em] text-foreground";
+  // The Task identity immediately above the generated instrument is its h2.
+  // The machine-authored question therefore owns h3 and the stronger type
+  // scale; an explicitly nested heading steps down to h4 and stays quiet.
+  if (node.level === 3) {
+    return (
+      <h4 class="text-sm font-medium leading-snug text-foreground">
+        <Rich text={node.text} />
+      </h4>
+    );
+  }
   return (
-    <div class={cls}>
+    <h3 class="max-w-[32ch] text-[clamp(1.75rem,3vw,2.25rem)] font-[500] leading-[1.12] tracking-[-0.025em] text-foreground">
       <Rich text={node.text} />
-    </div>
+    </h3>
   );
 }
 
-function TextNode(node: Node): JSX.Element {
-  return (
-    <p class={cn("text-[0.8rem] leading-relaxed text-foreground", toneTextClass(str(node.tone)))}>
-      <Rich text={node.text} />
-    </p>
-  );
-}
-
-function DividerNode(): JSX.Element {
-  return <hr class="border-t border-border" />;
-}
-
-function KeyValueNode(node: Node): JSX.Element {
-  const items = () => (Array.isArray(node.items) ? node.items : []);
-  return (
-    <dl class="flex flex-col gap-1.5">
-      <For each={items()}>
-        {(raw) => {
-          const item = (raw ?? {}) as Record<string, unknown>;
-          return (
-            <div class="flex items-baseline justify-between gap-3">
-              <dt class="shrink-0 text-[0.62rem] font-semibold uppercase tracking-[0.04em] text-muted-foreground">
-                <Rich text={item.label} />
-              </dt>
-              <dd class={cn("min-w-0 text-right text-xs text-foreground", toneTextClass(str(item.tone)))}>
-                <Rich text={item.value} />
-              </dd>
-            </div>
-          );
-        }}
-      </For>
-    </dl>
-  );
-}
-
-function BadgeNode(node: Node): JSX.Element {
-  return (
-    <span
-      class={cn(
-        "inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[0.68rem] font-semibold",
-        toneBadgeClass(str(node.tone)),
-      )}
-    >
-      <Rich text={node.label} />
-    </span>
-  );
-}
-
-function StatusNode(node: Node): JSX.Element {
-  const state = str(node.state, "neutral");
-  return (
-    <span class="inline-flex items-center gap-2 text-[0.8rem] text-foreground">
-      <span
-        class={cn(
-          "size-1.5 shrink-0 rounded-full",
-          statusDotClass(state),
-          state === "running" ? "motion-safe:animate-pulse" : "",
-        )}
-        aria-hidden="true"
-      />
-      <span class={toneTextClass(str(node.tone))}>
-        <Rich text={node.label} />
-      </span>
-    </span>
-  );
-}
-
-/** One letter-keyed option. Recommended reads through exactly TWO cues — the
- * one-indigo row tint plus a small "Recommended" chip (§6); the key stays neutral
- * so the accent never triples up. A tap posts `choose {choice, label}`. */
+/** One letter-keyed option. Choices are rows, not mini cards or capsules. */
 function OptionListNode(node: Node): JSX.Element {
   const emit = useEventEmit();
   const action = str(node.action, "choose");
   const options = () => (Array.isArray(node.options) ? (node.options as Record<string, unknown>[]) : []);
   return (
-    <div class="flex flex-col gap-1.5">
+    <div class="flex flex-col border-y border-border/70">
       <For each={options()}>
         {(opt) => {
           const recommended = opt.recommended === true;
@@ -211,29 +138,33 @@ function OptionListNode(node: Node): JSX.Element {
               type="button"
               disabled={emit.disabled}
               class={cn(
-                "grid w-full grid-cols-[24px_1fr_auto] items-start gap-2.5 rounded-md border p-2.5 text-left transition-colors active:translate-y-px",
+                "grid min-h-11 w-full grid-cols-[28px_1fr_auto] items-center gap-3 border-b border-border/70 px-1 py-2.5 text-left transition-colors last:border-b-0 active:translate-y-px",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 disabled:active:translate-y-0",
                 recommended
-                  ? "border-primary/40 bg-primary/[0.07]"
-                  : "border-border bg-muted/40 hover:border-border/80",
+                  ? "bg-primary/[0.07]"
+                  : "hover:bg-muted/40",
               )}
-              onClick={() => emit.emit(action, { choice: key, label: label.replace(/`/g, "") })}
+              onClick={() => emit.emit(
+                action,
+                { choice: key, label: label.replace(/`/g, "") },
+                node.settles !== false,
+              )}
             >
-              <span class="grid size-6 shrink-0 place-items-center rounded border border-border bg-card text-[0.7rem] font-bold text-muted-foreground">
+              <span class="font-mono text-xs font-semibold text-muted-foreground">
                 {key}
               </span>
               <span class="flex min-w-0 flex-col">
-                <span class="text-xs font-semibold leading-snug text-foreground">
+                <span class="text-sm font-medium leading-snug text-foreground">
                   <Rich text={opt.label} />
                 </span>
                 <Show when={str(opt.detail)}>
-                  <span class="mt-0.5 text-[0.72rem] leading-snug text-muted-foreground">
+                  <span class="mt-0.5 text-xs leading-snug text-muted-foreground">
                     <Rich text={opt.detail} />
                   </span>
                 </Show>
               </span>
               <Show when={recommended}>
-                <span class="mt-0.5 inline-flex items-center self-center rounded-full bg-primary/[0.12] px-2 py-0.5 text-[0.62rem] font-semibold text-foreground">
+                <span class="self-center text-xs font-medium text-primary">
                   Recommended
                 </span>
               </Show>
@@ -252,18 +183,21 @@ function FieldNode(node: Node): JSX.Element {
   const name = str(node.name, "value");
   const label = str(node.label);
   const placeholder = str(node.placeholder);
+  const required = node.required === true;
   return (
     <div class="flex flex-col gap-1">
       <Show when={label}>
-        <span class="text-[0.62rem] font-semibold uppercase tracking-[0.04em] text-muted-foreground">
+        <span class="text-xs font-medium text-muted-foreground">
           {label}
         </span>
       </Show>
       <input
         type="text"
-        class="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+        class="min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
         placeholder={placeholder}
         aria-label={label || placeholder || name}
+        aria-required={required || undefined}
+        required={required}
         disabled={emit.disabled}
         value={str(emit.fields()[name])}
         onInput={(e) => emit.setField(name, e.currentTarget.value)}
@@ -283,18 +217,15 @@ function SubmitNode(node: Node): JSX.Element {
       type="button"
       disabled={emit.disabled}
       class={cn(
-        "inline-flex h-8 w-fit select-none items-center gap-1.5 rounded-md px-3.5 text-xs font-semibold outline-none transition-colors active:translate-y-px",
+        "inline-flex min-h-11 w-fit select-none items-center gap-1.5 rounded-xl px-4 text-sm font-medium outline-none transition-colors active:translate-y-px",
         "focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60 disabled:active:translate-y-0",
         ghost
           ? "border border-border bg-card text-muted-foreground hover:bg-muted"
           : "bg-primary text-primary-foreground hover:bg-primary/90",
       )}
-      onClick={() => emit.emit(action, { ...emit.fields() })}
+      onClick={() => emit.emit(action, { ...emit.fields() }, node.settles !== false)}
     >
       <Rich text={str(node.label, "Submit")} />
-      <Show when={str(node.kbd)}>
-        <span class="font-mono text-[0.62rem] opacity-80">{str(node.kbd)}</span>
-      </Show>
     </button>
   );
 }
@@ -305,8 +236,8 @@ function SubmitNode(node: Node): JSX.Element {
 function ViewSlotNode(node: Node): JSX.Element {
   const isDiff = node.variant === "diff";
   return (
-    <div class="overflow-hidden rounded-md border border-border bg-muted/40">
-      <div class="px-2.5 pb-1 pt-2 text-[0.62rem] font-bold uppercase tracking-[0.05em] text-muted-foreground">
+    <div class="overflow-hidden border-y border-border/70">
+      <div class="px-1 pb-1 pt-2 text-xs font-medium text-muted-foreground">
         {str(node.title, "accompanying view")}
       </div>
       <Show
@@ -315,7 +246,7 @@ function ViewSlotNode(node: Node): JSX.Element {
           <div class="px-1 pb-1.5 pt-0.5">
             <For each={(Array.isArray(node.rows) ? node.rows : []) as Record<string, unknown>[]}>
               {(row) => (
-                <div class="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b border-border/60 px-2 py-1.5 last:border-0">
+                <div class="grid min-h-11 grid-cols-[auto_1fr_auto] items-center gap-2 border-b border-border/60 px-1 py-1.5 last:border-0">
                   <span class="flex items-center gap-1.5 text-xs font-medium text-foreground">
                     <Show when={str(row.state)}>
                       <span
@@ -330,7 +261,10 @@ function ViewSlotNode(node: Node): JSX.Element {
                     {str(row.label)}
                   </span>
                   <span />
-                  <span class="text-right text-[0.72rem] text-muted-foreground">
+                  <span class="flex items-center gap-2 text-right text-xs text-muted-foreground">
+                    <Show when={str(row.state)}>
+                      <span>{str(row.state)}</span>
+                    </Show>
                     <Rich text={row.value} />
                   </span>
                 </div>
@@ -339,7 +273,7 @@ function ViewSlotNode(node: Node): JSX.Element {
           </div>
         }
       >
-        <div class="py-1.5 font-mono text-[0.68rem] leading-relaxed">
+        <div class="py-1.5 font-mono text-xs leading-relaxed">
           <For each={(Array.isArray(node.lines) ? node.lines : []) as Record<string, unknown>[]}>
             {(ln) => {
               const op = str(ln.op);
@@ -368,18 +302,10 @@ function InsetNode(node: Node): JSX.Element {
   );
 }
 
-function childNodes(node: Node): Node[] {
-  return Array.isArray(node.children) ? node.children.filter(isNode) : [];
-}
-
 const REGISTRY: Record<string, (node: Node) => JSX.Element> = {
+  ...SHARED_NODES,
   eyebrow: EyebrowNode,
   heading: HeadingNode,
-  text: TextNode,
-  divider: DividerNode,
-  keyValue: KeyValueNode,
-  badge: BadgeNode,
-  status: StatusNode,
   optionList: OptionListNode,
   field: FieldNode,
   submit: SubmitNode,
@@ -390,29 +316,9 @@ const REGISTRY: Record<string, (node: Node) => JSX.Element> = {
 /** Unknown/unsupported node → a quiet dashed placeholder naming the type. Keeps
  * the surface honest ("something here we can't draw") without breaking the tree
  * or losing sibling content. */
-function FallbackNode(props: { type: string }): JSX.Element {
-  return (
-    <div class="rounded-md border border-dashed border-border px-2.5 py-1.5 text-[0.72rem] text-muted-foreground">
-      unsupported node: <span class="font-mono">{props.type || "(untyped)"}</span>
-    </div>
-  );
-}
-
-function EventNode(props: { node: unknown }): JSX.Element {
-  return (
-    <Show when={isNode(props.node)} fallback={null}>
-      {(() => {
-        const node = props.node as Node;
-        const Comp = REGISTRY[node.type];
-        return (
-          <Show when={Comp} fallback={<FallbackNode type={node.type} />}>
-            {Comp!(node)}
-          </Show>
-        );
-      })()}
-    </Show>
-  );
-}
+const EventNode = createNodeDispatch(REGISTRY, (type) => (
+  <UnsupportedNode label="unsupported node:" type={type} />
+));
 
 /** Grouped vertical rhythm for the card body (craft wave). A uniform gap makes
  * the eyebrow, the question, the context and the choices read as one flat list;
@@ -460,7 +366,7 @@ export interface EventCardRendererProps {
   /** The constrained JSON-UI card body — a root node or an array of nodes. */
   ui: ViewSpec | ViewSpec[] | undefined;
   /** Post an interaction back (the caller turns it into an `event_action`). */
-  onAction?: (action: string, data: unknown) => void;
+  onAction?: (action: string, data: unknown, settles: boolean) => void;
   /** Disable interactive controls (e.g. the event is already decided). */
   disabled?: boolean;
   /** Wave-3 time axis: the relative age appended to a blocking judgment's
@@ -474,7 +380,7 @@ export interface EventCardRendererProps {
 export function EventCardRenderer(props: EventCardRendererProps): JSX.Element {
   const [values, setValues] = createSignal<Record<string, unknown>>({});
   const emit: EventEmit = {
-    emit: (action, data) => props.onAction?.(action, data),
+    emit: (action, data, settles) => props.onAction?.(action, data, settles),
     get disabled() {
       return props.disabled === true;
     },
@@ -483,11 +389,7 @@ export function EventCardRenderer(props: EventCardRendererProps): JSX.Element {
   };
   return (
     <ErrorBoundary
-      fallback={
-        <div class="rounded-md border border-dashed border-border px-2.5 py-1.5 text-[0.72rem] text-muted-foreground">
-          This card couldn't be displayed.
-        </div>
-      }
+      fallback={<Notice>This card couldn't be displayed.</Notice>}
     >
       <EventEmitContext.Provider value={emit}>
         <CardMetaContext.Provider value={{ get eyebrowAge() { return props.eyebrowAge; } }}>

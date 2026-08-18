@@ -1,0 +1,95 @@
+import { describe, expect, it } from "vitest";
+import type { EventItem } from "../../protocol";
+import type { DisplayMessage } from "../../store/types";
+import {
+  initialTaskNavigation,
+  reconcileTaskNavigation,
+  toggleTaskFocus,
+} from "./task-navigation";
+import { messagesForTask, taskSendContext } from "./task-model";
+
+const task = {
+  id: 7,
+  kind: "judgment",
+  source: { kind: "agent", ref: "host" },
+  name: "@direction",
+  description: "Choose a direction",
+  requires_response: true,
+  quick_replies: [],
+  status: "open",
+  read: false,
+  anchor: 10,
+  ts: "2026-07-23T10:00:00Z",
+  ui: [],
+} satisfies EventItem;
+
+function message(
+  id: number,
+  author: "owner" | "agent",
+  body: string,
+  ref: number | null,
+  mentions: number[] = [],
+): DisplayMessage {
+  return { id, author, body, ref, mentions, ts: `2026-07-23T10:0${id}:00Z` };
+}
+
+describe("messagesForTask", () => {
+  it("follows the anchor and reply chain without admitting unrelated work", () => {
+    const messages = [
+      message(9, "owner", "Unrelated", null),
+      message(10, "agent", "Task begins", null),
+      message(11, "owner", "Explore this", 10),
+      message(12, "agent", "Implicit immediate response", null),
+      message(13, "agent", "Different global update", null),
+      message(14, "owner", "Continue the task", 12),
+    ];
+
+    expect(messagesForTask(task, messages, [task]).map((item) => item.id)).toEqual([10, 11, 12, 14]);
+  });
+
+  it("stops at another durable task boundary without losing later deploy replies", () => {
+    const deploy = { ...task, id: 1, name: "@deploy-4821", anchor: 2 };
+    const auth = { ...task, id: 2, name: "@auth-pr", anchor: 3 };
+    const messages = [
+      message(1, "owner", "Anything need me?", null),
+      message(2, "agent", "Deploy is staged. Ship it?", 1),
+      // The mock's auth anchor descends from deploy's anchor. It is still a
+      // hard durable boundary and must never appear in deploy.
+      message(3, "agent", "Auth is ready. Open the PR?", 2),
+      message(4, "owner", "Check the prod window", 2, [1]),
+      message(5, "agent", "The window is clear.", null),
+      message(6, "owner", "Assign the auth reviewer", 3, [2]),
+      message(7, "agent", "Auth reviewer assigned.", null),
+      message(8, "owner", "Global priority update", null),
+      message(9, "agent", "Global priorities updated.", null),
+      message(10, "owner", "One more deploy check", null, [1]),
+      message(11, "agent", "Deploy check passed.", null),
+      message(12, "agent", "Artifact signature is valid.", 11),
+    ];
+
+    expect(messagesForTask(deploy, messages, [deploy, auth]).map((item) => item.id))
+      .toEqual([2, 4, 5, 10, 11, 12]);
+    expect(messagesForTask(auth, messages, [deploy, auth]).map((item) => item.id))
+      .toEqual([3, 6, 7]);
+  });
+});
+
+describe("task focus", () => {
+  it("maps task and global sends without leaking task identity", () => {
+    expect(taskSendContext(task, 99, [3, task.id])).toEqual({ ref: task.anchor, mentions: [3, task.id] });
+    expect(taskSendContext(null, 99, [3])).toEqual({ ref: 99, mentions: [3] });
+  });
+
+  it("starts ambient and toggles one task into and out of focus", () => {
+    const focused = toggleTaskFocus(initialTaskNavigation, task);
+    expect(focused).toEqual({ focusedId: task.id });
+    expect(toggleTaskFocus(focused, task)).toEqual(initialTaskNavigation);
+  });
+
+  it("returns to ambient when the focused task disappears", () => {
+    const replacement = { ...task, id: 8 };
+    expect(
+      reconcileTaskNavigation(toggleTaskFocus(initialTaskNavigation, task), [replacement]),
+    ).toEqual(initialTaskNavigation);
+  });
+});

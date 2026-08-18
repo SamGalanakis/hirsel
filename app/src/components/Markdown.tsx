@@ -1,6 +1,6 @@
 import { For, Show, type JSX } from "solid-js";
 
-// Minimal, dependency-free, XSS-safe markdown for Chat messages and Inbox Item
+// Minimal, dependency-free, XSS-safe markdown for task conversation
 // content (ports lashapp/frontend/src/components/Markdown.tsx). It renders a
 // useful subset (fenced code blocks, inline `code`, **bold**, *italic*, links,
 // "- " bullet lists) by building real DOM nodes - never innerHTML. This drops

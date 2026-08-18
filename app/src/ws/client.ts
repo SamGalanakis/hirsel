@@ -140,7 +140,7 @@ class HirselWsClient {
     this.socket?.close();
   }
 
-  /** Send a chat message. Returns the synthetic local id of the optimistic
+  /** Send a conversation message. Returns the synthetic local id of the optimistic
    * entry so callers can request a scroll-to before the host echoes a real id. */
   sendMessage(
     body: string,
@@ -170,7 +170,7 @@ class HirselWsClient {
       ref,
       attachments: attachments.map((b) => b.id),
       mode,
-      // v2.1 (ADR-0009): @-mentioned ping ids. Omit when empty so the common
+      // Legacy wire ids for @-mentioned Tasks. Omit when empty so the common
       // case keeps the pre-v2.1 wire shape (host defaults it to []).
       ...(mentions.length > 0 ? { mentions } : {}),
     });
@@ -261,67 +261,10 @@ class HirselWsClient {
     this.sendFrame({ type: "cancel_queued", client_id: clientId });
   }
 
-  /** Mark an Event read. Events share the legacy Ping id space and wire op,
+  /** Mark a Task read through the legacy wire id space and operation,
    * while the event reducer owns the local optimistic flip. */
   readEvent(eventId: number): void {
     this.enqueue({ type: "read_ping", ping_id: eventId });
-  }
-
-  // ---- v2.0 side chats (ADR-0008) ----
-
-  /** "Discuss"/"Ask" (fresh) or "Resume" (fork open) — idempotent per Event on
-   * the host (v2.4), so this is the single entry point for both. Enqueued so a
-   * tap right as the socket drops still fires once reconnected. */
-  openSideChat(eventId: number): void {
-    this.enqueue({ type: "open_side_chat", client_id: makeClientId(), event_id: eventId });
-  }
-
-  /** Send within a side chat's scope. Mirrors sendMessage's optimistic +
-   * fail-timer-free durability model, but via the flat `pendingSideSends`
-   * queue (see store/types.ts) instead of per-message fail timers — side
-   * sends are text-only and this v1 keeps their offline story to "queued,
-   * resent on reconnect" rather than replicating the full failed/retry chip. */
-  sendSideMessage(sc: string, body: string, ref: number | null): number {
-    const clientId = makeClientId();
-    const localId = makeLocalId();
-    dispatch({
-      type: "side_chat_send_local",
-      sc,
-      localId,
-      clientId,
-      body,
-      ref,
-      ts: new Date().toISOString(),
-    });
-    this.sendFrame({ type: "send_message", client_id: clientId, body, ref, sc });
-    return localId;
-  }
-
-  /** Cooperatively interrupt a side chat's active turn (Esc in the side
-   * composer). Best-effort like the main cancelTurn — no-op if idle. */
-  cancelSideTurn(sc: string): void {
-    this.sendFrame({ type: "cancel_turn", sc });
-  }
-
-  /** "Conclude": have the side agent draft the Owner's reply. */
-  concludeSideChat(sc: string): void {
-    dispatch({ type: "side_chat_conclude_requested", sc });
-    this.enqueue({ type: "conclude_side_chat", sc });
-  }
-
-  /** "Send reply" on the confirmation sheet: the Owner's edited-or-not final
-   * text. `anchor` is the item's Anchor message id, recorded locally so the
-   * plain owner reply this produces in main chat can be recognized (client-
-   * derived provenance — the wire carries no marker) for the footer chip. */
-  confirmConclusion(sc: string, text: string, anchor: number): void {
-    dispatch({ type: "side_chat_confirm_sent", sc, anchor });
-    this.enqueue({ type: "confirm_conclusion", sc, text });
-  }
-
-  /** Discard: end the side chat with no conclusion; the item stays open. */
-  discardSideChat(sc: string): void {
-    dispatch({ type: "side_chat_discard_sent", sc });
-    this.enqueue({ type: "discard_side_chat", sc });
   }
 
   // ---- Generative-UI tier (view templates) ----
@@ -329,14 +272,14 @@ class HirselWsClient {
   /** Emit an owner-initiated event from an interactive view component
    * (`action` / `optionSet` / `form`). Enqueued so a tap right as the socket
    * blips still fires once reconnected (like resolve_ping). The reply returns
-   * through the normal chat/ping flow — there is no direct ack — so callers show
+   * through the ordinary conversation/Task flow — there is no direct ack — so callers show
    * a brief local pending state and let the resulting msg/ping_upsert land
-   * normally. The client never creates Chat messages or resolves Pings itself. */
+   * normally. The client never creates messages or settles Tasks itself. */
   sendViewEvent(instanceId: string, action: string, data: unknown): void {
     this.enqueue({ type: "view_event", instance_id: instanceId, action, data });
   }
 
-  // ---- Typed event queue (ADR-0012 / ADR-0013) ----
+  // ---- Task actions (typed Event compatibility wire) ----
 
   /** Emit an owner action from an event card (`choose` / `submit` / `snooze` /
    * `dismiss` / `reopen`). Generalizes the quick-reply resolution + view_event.
@@ -367,20 +310,20 @@ class HirselWsClient {
     this.enqueue({ type: "set_model", model_id: modelId, variant });
   }
 
-  /** Update one sub-agent catalog model's full row state (enabled + default
-   * variant). Enqueued like setModel; settles on `subagent_models_changed`. */
+  /** Update one sub-agent catalog model's full row state (master enabled flag +
+   * enabled reasoning variants). Settles on `subagent_models_changed`. */
   setSubagentModel(
     provider: string,
     modelId: string,
     enabled: boolean,
-    defaultVariant: string,
+    enabledVariants: string[],
   ): void {
     this.enqueue({
       type: "set_subagent_model",
       provider,
       model_id: modelId,
       enabled,
-      default_variant: defaultVariant,
+      enabled_variants: enabledVariants,
     });
   }
 
@@ -525,13 +468,6 @@ class HirselWsClient {
         break;
       }
       case "msg": {
-        // v2.0: sc-scoped frames route to their side chat and never touch
-        // main state (structural guarantee — see reducer.ts). Absent `sc` is
-        // byte-identical to pre-v2.0 main-chat handling.
-        if (message.sc) {
-          dispatch({ type: "side_chat_msg", sc: message.sc, message: message.message });
-          break;
-        }
         dispatch({ type: "msg", payload: message });
         setStoredLastSeen(message.message.id);
         this.reconcileFailTimers();
@@ -543,25 +479,14 @@ class HirselWsClient {
         break;
       }
       case "agent_activity": {
-        if (message.sc) {
-          dispatch({
-            type: "side_chat_agent_activity",
-            sc: message.sc,
-            state: message.state,
-            text: message.text,
-          });
-          break;
-        }
         dispatch({
           type: "agent_activity",
           payload: { state: message.state, text: message.text },
         });
         break;
       }
-      case "ping_upsert": {
-        dispatch({ type: "ping_upsert", payload: message });
-        break;
-      }
+      case "ping_upsert":
+        break; // Legacy wire frame; typed events are authoritative.
       case "event_upsert": {
         dispatch({ type: "event_upsert", payload: message });
         break;
@@ -571,37 +496,7 @@ class HirselWsClient {
         break;
       }
       case "turn_event": {
-        if (message.sc) {
-          dispatch({
-            type: "side_chat_turn_event",
-            sc: message.sc,
-            seq: message.seq,
-            event: message.event,
-          });
-          break;
-        }
         dispatch({ type: "turn_event", payload: message });
-        break;
-      }
-      case "side_chat_open": {
-        // v2.4: event forks address by `event_id`; the legacy `ping_id` alias is
-        // accepted (events share the id space). The `event` snapshot rides the
-        // Event set via a separate `event_upsert`, so the store derives the
-        // pinned card from `state.events` and this frame only seeds the scope.
-        dispatch({
-          type: "side_chat_open",
-          sc: message.sc,
-          pingId: message.event_id ?? message.ping_id ?? 0,
-          messages: message.messages,
-        });
-        break;
-      }
-      case "conclusion_draft": {
-        dispatch({ type: "side_chat_conclusion_draft", sc: message.sc, text: message.text });
-        break;
-      }
-      case "side_chat_closed": {
-        dispatch({ type: "side_chat_closed", sc: message.sc });
         break;
       }
       case "view_upsert": {
@@ -668,7 +563,7 @@ class HirselWsClient {
         } else {
           // An uncorrelated error that arrives AFTER authentication is a runtime
           // protocol error (the pre-auth reject path returned above). Surface it
-          // as a visible inline banner in Chat rather than swallowing it into the
+          // as a visible inline banner in the standing conversation rather than swallowing it into the
           // console, so a failure the Owner should see isn't invisible.
           setProtocolError(message.detail);
         }
@@ -696,20 +591,6 @@ class HirselWsClient {
           ...(pending.mentions && pending.mentions.length > 0
             ? { mentions: pending.mentions }
             : {}),
-        } satisfies ClientMessage),
-      );
-    }
-
-    // v2.0: side-chat sends queued the same way (see openSideChat comment) —
-    // "sends queued" while reconnecting applies to the side sheet too.
-    for (const pending of state.pendingSideSends) {
-      this.socket.send(
-        JSON.stringify({
-          type: "send_message",
-          client_id: pending.clientId,
-          body: pending.body,
-          ref: pending.ref,
-          sc: pending.sc,
         } satisfies ClientMessage),
       );
     }

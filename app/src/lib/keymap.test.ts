@@ -7,6 +7,7 @@ const { overlayRef } = vi.hoisted(() => ({ overlayRef: { open: false } }));
 vi.mock("./focus", () => ({
   anyOverlayOpen: () => overlayRef.open,
   focusMainComposer: () => {},
+  focusTaskIndex: () => {},
 }));
 
 function makeHandlers(): KeymapHandlers {
@@ -47,12 +48,11 @@ describe("keymap", () => {
     press("p");
     expect(handlers.goPane).toHaveBeenCalledWith("processes");
     press("g");
-    press("c");
-    expect(handlers.goPane).toHaveBeenCalledWith("chat");
-    // `g f` focuses the Feed pane (desktop) / navigates to the Feed home (phone).
+    press("h");
+    expect(handlers.goPane).toHaveBeenCalledWith("composer");
     press("g");
-    press("f");
-    expect(handlers.goPane).toHaveBeenCalledWith("feed");
+    press("t");
+    expect(handlers.goPane).toHaveBeenCalledWith("tasks");
     // `c` alone (no leader) is still focus-composer, not a pane switch.
     expect(handlers.focusComposer).toHaveBeenCalledTimes(0);
   });

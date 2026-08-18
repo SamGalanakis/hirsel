@@ -171,7 +171,7 @@ describe("turn details: trailing-prose duplication trim", () => {
   });
 });
 
-describe("turn details: clone-through hardening (mirrors sideChats' fix)", () => {
+describe("turn details: clone-through hardening", () => {
   function agentMsgBody(id: number, body: string): ChatMessage {
     return { id, author: "agent", body, ref: null, ts: `2026-07-10T00:00:0${id}Z`, tool_calls: [] };
   }
@@ -212,5 +212,90 @@ describe("turn details: clone-through hardening (mirrors sideChats' fix)", () =>
     expect(ids).toHaveLength(50);
     expect(ids[0]).toBe(2); // id 1 evicted, oldest of the 50 retained is 2.
     expect(s.turnDetails[51]).toBeTruthy();
+  });
+});
+
+describe("turn details: idle lands before the committing message", () => {
+  function agentMsgBody(id: number, body: string): ChatMessage {
+    return { id, author: "agent", body, ref: null, ts: `2026-08-18T00:00:0${id}Z`, tool_calls: [] };
+  }
+
+  function idle(state: AppState): AppState {
+    return reduce(state, { type: "agent_activity", payload: { state: "idle", text: null } });
+  }
+
+  /** The Host publishes `agent_activity: idle` from the observation bridge the
+   * moment the session commits, and broadcasts the committed `msg` afterwards
+   * from the turn pump — so this is the ordinary live ordering, not an edge
+   * case. Dropping the timeline on idle used to leave the commit with nothing
+   * to freeze, and the bubble fell back to the bare tool chips (no code). */
+  it("still freezes the finished timeline when idle arrives first", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "Running a cell." });
+    s = ev(s, 2, {
+      kind: "code_start",
+      id: "code:1",
+      language: "typescript",
+      code: "finish(await subagents_list());",
+      truncated: false,
+    });
+    s = ev(s, 3, { kind: "tool_start", id: "t1", name: "subagents_list", summary: "" });
+    s = ev(s, 4, { kind: "tool_done", id: "t1", name: "subagents_list", ok: true, summary: "2 agents" });
+    s = ev(s, 5, { kind: "code_done", id: "code:1", ok: true, summary: "34ms" });
+
+    s = idle(s);
+    expect(s.turnEvents).toEqual([]); // live timeline stops rendering at idle…
+
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(7, "Two agents.") } });
+
+    // …but the commit that follows still gets the whole turn, code cells included.
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(s.turnDetails[7][1].event).toMatchObject({ kind: "code_start", language: "typescript" });
+    expect(s.turnDetails[7][4].event).toMatchObject({ kind: "code_done", ok: true });
+    expect(s.lastTurnEvents).toEqual([]);
+  });
+
+  it("still trims the trailing prose duplicate on the idle-first path", () => {
+    let s = ev(initialState(), 1, { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" });
+    s = ev(s, 2, { kind: "prose", text: "Final answer." });
+    s = idle(s);
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(7, "Final answer.") } });
+    expect(s.turnDetails[7].map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("discards a parked timeline once the next turn starts streaming", () => {
+    // A cancelled turn goes idle with no commit to follow.
+    let s = ev(initialState(), 1, { kind: "prose", text: "half a turn" });
+    s = idle(s);
+    // The next turn opens: the abandoned timeline must not attach to its message.
+    s = ev(s, 1, { kind: "tool_start", id: "t9", name: "grep", summary: "foo" });
+    s = reduce(s, { type: "msg", payload: { type: "msg", message: agentMsgBody(8, "found it") } });
+
+    expect(s.turnDetails[8].map((e) => e.event.kind)).toEqual(["tool_start"]);
+    expect(s.lastTurnEvents).toEqual([]);
+  });
+
+  it("does not attach a parked timeline to an owner message", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "a" });
+    s = idle(s);
+    s = reduce(s, {
+      type: "msg",
+      payload: {
+        type: "msg",
+        message: { id: 9, author: "owner", body: "hi", ref: null, ts: "2026-08-18T00:00:09Z" },
+      },
+    });
+    expect(s.turnDetails).toEqual({});
+    // Still parked for the agent commit that will follow.
+    expect(s.lastTurnEvents.map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("drops the parked timeline on a resync (never replayed)", () => {
+    let s = ev(initialState(), 1, { kind: "prose", text: "a" });
+    s = idle(s);
+    s = reduce(s, {
+      type: "hello_ok",
+      payload: { type: "hello_ok", latest_msg_id: 1, messages: [], pings: [] },
+    });
+    expect(s.lastTurnEvents).toEqual([]);
   });
 });

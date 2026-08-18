@@ -1,56 +1,43 @@
-# hirsel PWA
+# Hirsel web app
 
-Mobile-first Vite + SolidJS + TypeScript client for hirsel (slice 1 - see
-`/CONTEXT.md`, `/docs/SCOPE.md`, and `PROTOCOL.md` in this directory for the
-wire protocol this implements verbatim). UI built on Tailwind 4 + Kobalte with
-the shared component primitives and design tokens from the lashapp frontend.
+SolidJS reference client for Task Margins: one globally aware Hirsel, one standing composer, and Tasks as the only durable visible objects. Opening a task renders its constrained JSON interface and related conversation in place; Processes, Settings, and Canvas are temporary utilities.
 
-## Develop against the mock host
+## Development
 
-No Rust host yet? `tools/mock-server.mjs` is a scripted stand-in that speaks
-the full protocol from `PROTOCOL.md`, echoes messages back after ~1s, and runs
-a small "delegate" scenario (send the message `delegate` to see it: agent
-activity → chat reply → an Inbox Item with Quick Replies ~3s later → tapping a
-Quick Reply gets acknowledged and archives the item).
-
-Scripted words for the v1.4 surfaces (Processes tab + tool-call visibility):
-
-- `delegate` — spawns a **sub-agent** process (agent+model chips) that runs with
-  progress-summary updates then completes; watch it in the **Processes** tab move
-  Running → Finished, and use **Ask to stop** while it runs.
-- `tools` — a thinking turn that streams live tool-call rows under "Thinking…",
-  then commits a reply carrying a **⚙ 2 tools** chip you can expand.
-- `monitor` — creates a **monitor** process (code-style probe cmd) that "fires" a
-  few seconds later, updating its summary.
-
-Two processes (a running monitor and a finished sub-agent) are seeded at startup
-so the tab is populated immediately.
+The in-memory mock seeds three task shapes, conversation, and processes. It accepts any non-empty token by default; set `MOCK_TOKEN` only for an explicit rejection test.
 
 ```sh
 npm install
-npm run dev:mock   # mock WS server (port 8787) + vite dev server together
+npm run dev:mock
 ```
 
-Open the printed local URL, enter `dev-token` at the first-run token prompt
-(that's `MOCK_TOKEN` in `tools/mock-server.mjs`, override via env if you like).
-
-## Develop against a real Hirsel Host
+The browser uses same-origin `/ws` and `/blob` routes. Vite proxies them to the
+local mock on port 8787, so only the Vite port needs to be exposed or forwarded.
+Against a real local Host:
 
 ```sh
-VITE_WS_URL=wss://your-host/ws npm run dev
+HIRSEL_TOKEN=dev HIRSEL_DEBUG=1 HIRSEL_PROVIDER=codex HIRSEL_IROH=0 \
+  cargo run -p hirsel-host
+
+HIRSEL_DEV_PROXY_TARGET=ws://127.0.0.1:3089 npm run dev
 ```
 
-`VITE_WS_URL` always wins when set. When unset, the default depends on mode:
+The Codex provider reads the existing OAuth session from `~/.codex/auth.json`.
+In loopback debug mode, the browser may enter any non-empty token; production
+continues to require the exact configured token.
 
-- dev (`npm run dev`): `ws://<current-host>:8787` — the mock server's port.
-- production build: same-origin `ws(s)://<origin>/ws` — the Hirsel Host
-  serves `dist/` itself and exposes its WS endpoint at `/ws`, so a plain
-  `npm run build` needs no configuration at all.
+`VITE_WS_URL=wss://your-host/ws` remains available for an explicit direct
+remote endpoint, but is not needed for the normal forwarded development path.
+
+The mock recognizes `delegate`, `tools`, and `monitor` messages for process/timeline development. Generated task actions are applied authoritatively and logged as `event_action` records. The seeded deploy Task demonstrates a data-driven multi-stage instrument: ship advances to a live canary checkpoint, promotion settles, and reopen restores that prior actionable stage without changing Task identity or conversation scope.
 
 ## Verification
 
 ```sh
-npm run build   # tsc --noEmit && vite build
-npm test        # vitest run - protocol reducer + reconnect backoff + component tests
-npm run lint    # oxlint
+npm run build
+npm test
+npm run lint
+npm run e2e:task-margins
 ```
+
+The browser runner boots isolated services, polls readiness, executes 38 objective desktop/phone/narrow gates (including complete outgoing frames, adaptive stages, utilities, focus, touch targets, and console/request failures), and writes [`../e2e/reports/task-margins-latest.md`](../e2e/reports/task-margins-latest.md). Detailed product flows live in [`../e2e/RULES.md`](../e2e/RULES.md) and its four current task-surface runbooks.

@@ -1,7 +1,7 @@
-// Optimistic archive/unarchive for the typed event queue (archive contract v1),
+// Optimistic archive/unarchive for Tasks (typed Event wire contract),
 // the archive twin of lib/event-decide.ts. Archiving ANY non-archived event
 // (finished or still-open) posts `event_action{action:"archive",data:{}}` to the
-// host IMMEDIATELY and sweeps the card out of the resting queue at once via the
+// host IMMEDIATELY and removes the Task from the active field at once via the
 // optimistic `event_archive_local` override (reconciled by the host's archived
 // event_upsert — both actions are idempotent on the host). Archiving an open
 // event auto-resolves it host-side (`archived=1, status='done'`). Archiving is

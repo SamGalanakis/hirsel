@@ -1,6 +1,6 @@
 // Ported from shadcn/ui `dropdown-menu` (Radix) to SolidJS on @kobalte/core's
 // dropdown-menu, following the Zaidan / react-to-solid conventions. Only the
-// parts the Inbox ⋯ menu needs are ported: Root, Trigger, Portal+Content, Item,
+// parts the compact overflow menu needs are ported: Root, Trigger, Portal+Content, Item,
 // Separator. Unstyled Kobalte primitives + Tailwind theme tokens.
 import * as DropdownMenuPrimitive from "@kobalte/core/dropdown-menu";
 import type { PolymorphicProps } from "@kobalte/core/polymorphic";

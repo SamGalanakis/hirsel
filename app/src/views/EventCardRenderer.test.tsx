@@ -5,7 +5,7 @@ import { EventCardRenderer } from "./EventCardRenderer";
 
 type Emitted = { action: string; data: unknown };
 
-function renderCard(ui: ViewSpec | ViewSpec[], onAction?: (a: string, d: unknown) => void) {
+function renderCard(ui: ViewSpec | ViewSpec[], onAction?: (a: string, d: unknown, settles: boolean) => void) {
   return render(() => <EventCardRenderer ui={ui} onAction={onAction} />);
 }
 
@@ -51,11 +51,24 @@ describe("EventCardRenderer — constrained vocabulary", () => {
     expect(screen.getByText(/Taste boundary/)).toBeTruthy();
     expect(screen.getByText("Option A")).toBeTruthy();
     const recommended = screen.getByText("Recommended");
-    expect(recommended.className).toContain("text-foreground");
-    expect(recommended.className).not.toContain("text-primary");
+    expect(recommended.className).toContain("text-primary");
+    expect(recommended.className).not.toContain("rounded-full");
+    expect(screen.getAllByText("success").length).toBeGreaterThan(0);
     // `backtick` → a mono span (Monospace-Earns-It), and the prose around it stays text.
     expect(screen.getByText("reopen").tagName).toBe("SPAN");
     expect(screen.getByText("reopen").className).toContain("font-mono");
+    const question = screen.getByRole("heading", { level: 3, name: /Which way to wire/ });
+    expect(question.className).toContain("clamp(1.75rem,3vw,2.25rem)");
+  });
+
+  it("keeps nested generated headings below the principal h3", () => {
+    const screen = renderCard([
+      { type: "heading", text: "Choose the rollout" },
+      { type: "heading", level: 3, text: "Rollback notes" },
+    ]);
+
+    expect(screen.getByRole("heading", { level: 3, name: "Choose the rollout" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 4, name: "Rollback notes" })).toBeTruthy();
   });
 
   it("degrades an unknown node to a fallback chip and never throws or loses siblings", () => {
@@ -71,7 +84,7 @@ describe("EventCardRenderer — constrained vocabulary", () => {
   });
 
   it("emits `choose` with {choice, label} when an option is tapped", () => {
-    const onAction = vi.fn<(a: string, d: unknown) => void>();
+    const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
     const screen = renderCard(
       [
         {
@@ -84,21 +97,38 @@ describe("EventCardRenderer — constrained vocabulary", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /New/ }));
     expect(onAction).toHaveBeenCalledTimes(1);
-    const [action, data] = onAction.mock.calls[0] as [string, Emitted["data"]];
+    const [action, data, settles] = onAction.mock.calls[0] as [string, Emitted["data"], boolean];
     expect(action).toBe("choose");
     // The label is stripped of backtick markers in the payload.
     expect(data).toEqual({ choice: "A", label: "New reopen_ping op" });
+    expect(settles).toBe(true);
+  });
+
+  it("marks an adaptive option list as non-settling when declared", () => {
+    const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
+    const screen = renderCard({
+      type: "optionList",
+      action: "advance",
+      settles: false,
+      options: [{ key: "A", label: "Start canary" }],
+    }, onAction);
+    fireEvent.click(screen.getByRole("button", { name: /Start canary/ }));
+    expect(onAction).toHaveBeenCalledWith(
+      "advance",
+      { choice: "A", label: "Start canary" },
+      false,
+    );
   });
 
   it("collects the card's field values and posts them on submit", () => {
-    const onAction = vi.fn<(a: string, d: unknown) => void>();
+    const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
     const screen = renderCard(
       [
         {
           type: "inset",
           children: [
             { type: "field", name: "note", label: "Standing rule", placeholder: "…" },
-            { type: "submit", action: "choose_with_rule", label: "Ship + record rule" },
+            { type: "submit", action: "choose_with_rule", label: "Ship + record rule", kbd: "⌘↵" },
           ],
         },
       ],
@@ -107,11 +137,12 @@ describe("EventCardRenderer — constrained vocabulary", () => {
     const input = screen.getByPlaceholderText("…") as HTMLInputElement;
     fireEvent.input(input, { target: { value: "always dense rows" } });
     fireEvent.click(screen.getByRole("button", { name: /Ship/ }));
-    expect(onAction).toHaveBeenCalledWith("choose_with_rule", { note: "always dense rows" });
+    expect(onAction).toHaveBeenCalledWith("choose_with_rule", { note: "always dense rows" }, true);
+    expect(screen.queryByText("⌘↵")).toBeNull();
   });
 
   it("disables interactive controls when the card is already decided", () => {
-    const onAction = vi.fn<(a: string, d: unknown) => void>();
+    const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
     const screen = render(() => (
       <EventCardRenderer
         ui={[{ type: "optionList", action: "choose", options: [{ key: "A", label: "Alpha" }] }]}

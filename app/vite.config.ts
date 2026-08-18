@@ -1,9 +1,12 @@
-/// <reference types="vitest/config" />
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import solid from "vite-plugin-solid";
 import { defineConfig } from "vitest/config";
 import { VitePWA } from "vite-plugin-pwa";
+
+const devProxy = new URL(process.env.HIRSEL_DEV_PROXY_TARGET ?? "ws://127.0.0.1:8787");
+const devWsTarget = `${devProxy.protocol}//${devProxy.host}`;
+const devHttpTarget = `${devProxy.protocol === "wss:" ? "https:" : "http:"}//${devProxy.host}`;
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -39,14 +42,14 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
-  // Same-origin dev proxy: the browser talks to vite (5173) and vite forwards
-  // the WS + blob traffic to the Hirsel Host on 3089. This means only the vite
-  // port needs forwarding over an SSH tunnel — no separate 3089 forward — and
-  // the app can use a same-origin `/ws` URL (set VITE_WS_URL="same-origin").
+  // Same-origin dev proxy: the browser talks only to Vite and Vite forwards
+  // WS + blob traffic to the local mock by default. Point
+  // HIRSEL_DEV_PROXY_TARGET at a real Host when needed. This keeps remote
+  // development and port forwarding to a single browser-visible origin.
   server: {
     proxy: {
-      "/ws": { target: "ws://127.0.0.1:3089", ws: true, changeOrigin: true },
-      "/blob": { target: "http://127.0.0.1:3089", changeOrigin: true },
+      "/ws": { target: devWsTarget, ws: true, changeOrigin: true },
+      "/blob": { target: devHttpTarget, changeOrigin: true },
     },
   },
   test: {

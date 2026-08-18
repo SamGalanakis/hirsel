@@ -32,11 +32,13 @@ export function TokenGate(props: Props) {
         <h1 class="m-0 text-base font-semibold tracking-[0.01em]">hirsel</h1>
       </div>
       <p class="m-0 max-w-[32ch] text-sm text-muted-foreground">
-        Enter the access token for your Hirsel Host. It's stored only on this device.
+        {import.meta.env.DEV
+          ? "Development mock: enter anything. It stays on this device."
+          : "Enter the access token for your Hirsel Host. It's stored only on this device."}
       </p>
       <form class="flex w-full max-w-[320px] flex-col gap-3" onSubmit={handleSubmit}>
         <Input
-          ref={inputRef}
+          ref={(node) => { inputRef = node; }}
           type="password"
           inputMode="text"
           autocomplete="off"

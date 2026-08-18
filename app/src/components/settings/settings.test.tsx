@@ -41,6 +41,36 @@ describe("Settings: device label persistence", () => {
   });
 });
 
+describe("Settings: About & debug", () => {
+  it("shows the host version reported over hello_ok", async () => {
+    const store = await import("../../store/store");
+    store.dispatch({
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        session_id: "s1",
+        latest_msg_id: 0,
+        messages: [],
+        host_version: "0.9.9-test",
+      },
+    } as never);
+    store.openSettings();
+    const { SettingsSheet } = await import("./SettingsSheet");
+    const { getByText } = render(() => <SettingsSheet />);
+    expect(getByText("0.9.9-test")).toBeTruthy();
+  });
+
+  it("persists the local 'Show agent code' toggle", async () => {
+    const store = await import("../../store/store");
+    store.openSettings();
+    const { SettingsSheet } = await import("./SettingsSheet");
+    const { getByLabelText } = render(() => <SettingsSheet />);
+
+    fireEvent.click(getByLabelText("Show agent code"));
+    expect(memLocalStorage.getItem("hirsel.showAgentCode")).toBe("1");
+  });
+});
+
 describe("Settings: Forget token confirm flow (C5)", () => {
   it("requires confirmation, then clears the stored token and reloads to the gate", async () => {
     const clearStoredToken = vi.fn();

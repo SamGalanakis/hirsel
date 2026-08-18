@@ -4,7 +4,7 @@ import { mergeProps, splitProps } from "solid-js";
 import { cn } from "@/lib/utils";
 import { Button, type ButtonProps } from "@/components/ui/button";
 
-// Ported from the shadcn June-2026 chat "Attachment" component via the lashapp
+// Ported from the shadcn June-2026 conversation "Attachment" component via lashapp
 // SolidJS donor kit (itself a react-to-solid port). Preserves the data-slot /
 // data-state contract the vega `z-attachment-*` tokens key off of.
 

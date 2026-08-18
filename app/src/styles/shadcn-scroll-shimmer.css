@@ -1,5 +1,5 @@
 /* Vendored from the shadcn package's dist/tailwind.css (MIT) — the
-   scroll-fade and shimmer utility families used by the chat components.
+   scroll-fade and shimmer utility families used by conversation components.
    Kept verbatim so a future re-vendor is a clean diff. */
 /* scroll-fade */
 @property --scroll-fade-t {

@@ -1,4 +1,4 @@
-// Optimistic durable snooze/unsnooze for the typed event queue (Wave-3), the
+// Optimistic durable Task snooze/unsnooze (typed Event wire contract), the
 // snooze twin of lib/event-archive.ts. Snoozing an event posts
 // `event_action{snooze,{until}}` to the host IMMEDIATELY and lifts the card out
 // of Active at once via the optimistic `event_snooze_local` flip (which patches

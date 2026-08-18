@@ -20,15 +20,15 @@ function writeDraft(key: string, value: string): void {
   }
 }
 
-/** Shared text-input mechanics for the main Composer, the Inbox inline
- * ReplyInput, and the Side Chat composer: a value signal, coarse-pointer
+/** Shared text-input mechanics for the standing Composer and constrained compact
+ * input surfaces: a value signal, coarse-pointer
  * detection (fine pointers send on Enter, touch uses the send button), and an
  * auto-growing textarea bound via `setRef`. The keyboard map itself stays in
  * each caller (they layer Tab/Esc/ArrowUp differently), but this removes the
  * duplicated matchMedia probe, auto-grow effect, and focus/caret plumbing.
  *
  * Pass `persistKey` to keep the draft in localStorage keyed by surface (`main`,
- * or `sc:<id>` per Side Chat): the draft is restored on mount and re-saved on
+ * identity): the draft is restored on mount and re-saved on
  * every keystroke, so leaving and reopening a surface never loses typed text.
  * A successful send clears the draft (setValue("") removes the stored key). */
 export function useTextInput(maxHeightPx: number, persistKey?: string) {

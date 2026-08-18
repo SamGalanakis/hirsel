@@ -1,7 +1,7 @@
 /* Vega component classes, copied from lashapp/frontend/src/styles/vega.css.
    Only the sections for the primitives hirsel actually uses are carried over
    (badge, button, card, empty, input, label, separator, skeleton, textarea,
-   bubble, marker, message) - the rest of the donor kit is intentionally
+   attachment) - the rest of the donor kit is intentionally
    omitted. These live in the base layer so plain utilities at call sites win. */
 
 /* MARK: Badge */
@@ -185,47 +185,6 @@
   @apply border-input dark:bg-input/30 focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 rounded-md border bg-transparent px-2.5 py-2 text-base shadow-xs transition-[color,box-shadow] focus-visible:ring-[3px] aria-invalid:ring-[3px] md:text-sm;
 }
 
-/* MARK: Bubble */
-.z-bubble {
-  @apply gap-1 data-[align=end]:self-end max-w-[80%] data-[variant=ghost]:max-w-full group-data-[align=end]/message:self-end;
-}
-
-.z-bubble-content {
-  @apply rounded-xl border border-transparent px-3 py-2 text-sm leading-relaxed [button,a]:outline-none [button,a]:focus-visible:border-ring [button,a]:focus-visible:ring-3 [button,a]:focus-visible:ring-ring/50 group-data-[align=end]/bubble:self-end;
-}
-
-.z-bubble-variant-default {
-  @apply *:data-[slot=bubble-content]:bg-primary *:data-[slot=bubble-content]:text-primary-foreground [&>[data-slot=bubble-content]:is(button,a):hover]:bg-primary/80;
-}
-
-.z-bubble-variant-secondary {
-  @apply *:data-[slot=bubble-content]:bg-secondary *:data-[slot=bubble-content]:text-secondary-foreground [&>[data-slot=bubble-content]:is(button,a):hover]:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)];
-}
-
-.z-bubble-variant-muted {
-  @apply *:data-[slot=bubble-content]:bg-muted [&>[data-slot=bubble-content]:is(button,a):hover]:bg-[color-mix(in_oklch,var(--muted),var(--foreground)_5%)];
-}
-
-.z-bubble-variant-tinted {
-  @apply *:data-[slot=bubble-content]:bg-[oklch(from_var(--primary)_0.93_calc(c*0.4)_h)] dark:*:data-[slot=bubble-content]:bg-[oklch(from_var(--primary)_0.3_calc(c*0.4)_h)] *:data-[slot=bubble-content]:text-foreground [&>[data-slot=bubble-content]:is(button,a):hover]:bg-[oklch(from_var(--primary)_0.88_calc(c*0.5)_h)] dark:[&>[data-slot=bubble-content]:is(button,a):hover]:bg-[oklch(from_var(--primary)_0.35_calc(c*0.5)_h)];
-}
-
-.z-bubble-variant-outline {
-  @apply *:data-[slot=bubble-content]:bg-background *:data-[slot=bubble-content]:border-border [&>[data-slot=bubble-content]:is(button,a):hover]:bg-muted [&>[data-slot=bubble-content]:is(button,a):hover]:text-foreground dark:[&>[data-slot=bubble-content]:is(button,a):hover]:bg-input/30;
-}
-
-.z-bubble-variant-ghost {
-  @apply *:data-[slot=bubble-content]:rounded-none *:data-[slot=bubble-content]:bg-transparent *:data-[slot=bubble-content]:p-0 [&>[data-slot=bubble-content]:is(button,a):hover]:bg-muted [&>[data-slot=bubble-content]:is(button,a):hover]:text-foreground dark:[&>[data-slot=bubble-content]:is(button,a):hover]:bg-muted/50 border-none;
-}
-
-.z-bubble-variant-destructive {
-  @apply *:data-[slot=bubble-content]:bg-destructive/10 dark:*:data-[slot=bubble-content]:bg-destructive/20 *:data-[slot=bubble-content]:text-destructive [&>[data-slot=bubble-content]:is(button,a):hover]:bg-destructive/20 dark:[&>[data-slot=bubble-content]:is(button,a):hover]:bg-destructive/30;
-}
-
-.z-bubble-group {
-  @apply gap-2;
-}
-
 /* MARK: Attachment */
 .z-attachment {
   @apply rounded-xl w-fit focus-within:ring-1 focus-within:ring-ring/50;
@@ -281,50 +240,4 @@
 
 .z-attachment-trigger {
   @apply absolute inset-0 z-10 outline-none;
-}
-
-/* MARK: Marker */
-.z-marker {
-  @apply gap-2 text-sm text-muted-foreground [a]:hover:text-foreground [a]:underline-offset-3 [a]:underline [&_svg:not([class*='size-'])]:size-4 min-h-4 text-left;
-}
-
-.z-marker-variant-separator {
-  @apply before:h-px before:min-w-0 before:flex-1 before:bg-border after:h-px after:min-w-0 after:flex-1 after:bg-border before:mr-1 after:ml-1;
-}
-
-.z-marker-variant-border {
-  @apply border-b border-border pb-2;
-}
-
-.z-marker-icon {
-  @apply size-4 [&_svg:not([class*='size-'])]:size-4;
-}
-
-.z-marker-content {
-  @apply group-data-[variant=separator]/marker:flex-none group-data-[variant=separator]/marker:text-center *:[a]:hover:text-foreground *:[a]:underline *:[a]:underline-offset-3;
-}
-
-/* MARK: Message */
-.z-message {
-  @apply text-sm gap-2;
-}
-
-.z-message-avatar {
-  @apply min-w-8 group-has-data-[slot=message-footer]/message:-translate-y-8;
-}
-
-.z-message-content {
-  @apply gap-2.5 group-data-[align=end]/message:*:data-slot:self-end;
-}
-
-.z-message-header {
-  @apply text-xs font-medium text-muted-foreground px-3 group-has-data-[variant=ghost]/message:px-0;
-}
-
-.z-message-footer {
-  @apply text-xs font-medium text-muted-foreground px-3 group-has-data-[variant=ghost]/message:px-0;
-}
-
-.z-message-group {
-  @apply gap-2;
 }

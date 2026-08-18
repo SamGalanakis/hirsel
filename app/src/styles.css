@@ -1,7 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-/* scroll-fade + shimmer utility families used by the ported shadcn chat
-   components (MessageScroller edge fades, Attachment rows, "Thinking…" marker).
+/* scroll-fade + shimmer utility families used by conversation components
+   (edge fades, attachment rows, "Thinking…" marker).
    Vendored verbatim from the shadcn package — see the file header. It defines
    @utility/@property/@keyframes, so it must be imported before vega (which
    consumes `shimmer`/`scroll-fade-*`) but as plain utilities, not in a layer. */
@@ -29,25 +29,25 @@
   --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace;
 
-  --background: oklch(0.985 0.002 286);
-  --foreground: oklch(0.215 0.006 286);
+  --background: oklch(0.975 0.008 190);
+  --foreground: oklch(0.23 0.018 220);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.215 0.006 286);
+  --card-foreground: oklch(0.23 0.018 220);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.215 0.006 286);
-  --primary: oklch(0.52 0.14 264);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.955 0.002 286);
-  --secondary-foreground: oklch(0.26 0.006 286);
-  --muted: oklch(0.955 0.002 286);
-  --muted-foreground: oklch(0.505 0.016 286);
-  --accent: oklch(0.955 0.002 286);
-  --accent-foreground: oklch(0.26 0.006 286);
+  --popover-foreground: oklch(0.23 0.018 220);
+  --primary: oklch(0.48 0.12 158);
+  --primary-foreground: oklch(0.985 0.006 175);
+  --secondary: oklch(0.945 0.012 190);
+  --secondary-foreground: oklch(0.28 0.018 220);
+  --muted: oklch(0.945 0.012 190);
+  --muted-foreground: oklch(0.49 0.035 205);
+  --accent: oklch(0.945 0.012 190);
+  --accent-foreground: oklch(0.28 0.018 220);
   --destructive: oklch(0.55 0.22 27);
   --destructive-solid: oklch(0.55 0.22 27);
   --border: oklch(0.205 0.02 286 / 10%);
   --input: oklch(0.205 0.02 286 / 14%);
-  --ring: oklch(0.55 0.14 264);
+  --ring: oklch(0.54 0.12 158);
 
   --surface: oklch(0.97 0.001 286);
   --surface-foreground: oklch(0.45 0 0);
@@ -76,25 +76,25 @@
 }
 
 .dark {
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.55 0.13 264.05);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: oklch(0.17 0.012 220);
+  --foreground: oklch(0.94 0.01 165);
+  --card: oklch(0.205 0.014 220);
+  --card-foreground: oklch(0.94 0.01 165);
+  --popover: oklch(0.205 0.014 220);
+  --popover-foreground: oklch(0.94 0.01 165);
+  --primary: oklch(0.79 0.105 158);
+  --primary-foreground: oklch(0.19 0.025 185);
+  --secondary: oklch(0.235 0.016 220);
+  --secondary-foreground: oklch(0.94 0.01 165);
+  --muted: oklch(0.235 0.016 220);
+  --muted-foreground: oklch(0.72 0.025 175);
+  --accent: oklch(0.235 0.016 220);
+  --accent-foreground: oklch(0.94 0.01 165);
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-solid: oklch(0.55 0.205 25);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.62 0.14 264.05);
+  --ring: oklch(0.84 0.1 158);
 
   --surface: oklch(0.2 0 0);
   --surface-foreground: oklch(0.708 0 0);
@@ -119,8 +119,8 @@
 /* Named layout breakpoints (desktop-shell). Two thresholds, mobile-first, so
    the codebase has one breakpoint vocabulary instead of scattered `min-[Npx]:`
    literals:
-     `split` — two-pane capable: the side-chat split may appear;
-     `rail`  — desktop: the persistent 3-pane shell (nav rail ∣ chat ∣ context)
+     `split` — two-pane capable: a utility region may appear;
+     `rail`  — desktop: the persistent 3-pane shell (task rail ∣ field ∣ utility)
                engages.
    Layout keys off width only (these); pointer/keyboard behaviour stays on the
    single `(pointer: coarse)` probe in useTextInput. */
@@ -190,6 +190,7 @@
 html,
 body {
   height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -203,6 +204,7 @@ body {
   height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 button,
@@ -214,8 +216,8 @@ textarea {
 
 /* --- Quiet scrollbars, app-wide. The default chunky track is visually loud —
    it reads as chrome competing with the hairline vocabulary, worst along the
-   feed column edge in dark mode. Every scroll container (feed column, chat
-   transcript, peek/queue list, canvas, settings, code blocks) gets the same
+   task-field edge in dark mode. Every scroll container (task field,
+   conversation, canvas, settings, and code blocks) gets the same
    slim, implicit treatment: a thin bar, an always-transparent track, and a
    muted token-driven thumb (so light and dark both inherit the right ink)
    that strengthens slightly while the container is hovered. This is the ONE
@@ -267,24 +269,6 @@ textarea {
 
   &::-webkit-scrollbar {
     display: none;
-  }
-}
-
-/* Dense Done rows (spec item 6): their actions cluster (⋯ Reopen / View in
-   chat) rests hidden and reveals on hover or keyboard focus — but ONLY where a
-   fine pointer can actually hover. On touch (coarse pointer) and for AT the
-   controls stay present and visible; using `opacity` (not display/visibility)
-   keeps them in the accessibility tree and keyboard-reachable, so
-   `:focus-within` reveals them on Tab. Named group is `group/pingrow` on the
-   row (Tailwind emits the escaped `.group\/pingrow`). */
-@media (pointer: fine) {
-  .done-row-actions {
-    opacity: 0;
-    transition: opacity 150ms ease;
-  }
-  .group\/pingrow:hover .done-row-actions,
-  .group\/pingrow:focus-within .done-row-actions {
-    opacity: 1;
   }
 }
 

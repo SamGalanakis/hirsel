@@ -1,10 +1,9 @@
-import { ArrowUp, AtSign, ChevronDown, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
+import { ArrowUp, ChevronDown, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
-import type { DisplayMessage } from "../../store/types";
 import { anyOverlayOpen } from "../../lib/focus";
-import { formatBytes, snippet } from "../../lib/format";
+import { formatBytes } from "../../lib/format";
 import { handleSubmitKeys } from "../../lib/submitKeymap";
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
@@ -15,8 +14,6 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { Textarea } from "../ui/textarea";
-import { resolveMentionIds } from "./mentions";
-import { useMentionPicker } from "./useMentionPicker";
 import { useTextInput } from "./useTextInput";
 import {
   Attachment,
@@ -33,15 +30,10 @@ import type { AttachmentsController } from "./useAttachments";
 
 const MAX_HEIGHT_PX = 112;
 const LONG_PRESS_MS = 450;
-/** Reply-quote preview length — kept at the composer's tighter 60 chars. */
-const REPLY_SNIPPET_MAX = 60;
-
 interface Props {
-  replyingTo: DisplayMessage | undefined | null;
-  onCancelReply: () => void;
   attachments: AttachmentsController;
   thinking: boolean;
-  /** One-shot composer pre-fill (v1.4 "Ask to stop"); consumed once then cleared. */
+  /** One-shot composer pre-fill (v1.4 "Ask Hirsel to stop"); consumed once then cleared. */
   prefill?: string | null;
   onConsumePrefill?: () => void;
   onSend: (
@@ -53,38 +45,25 @@ interface Props {
   ) => void;
   onStop: () => void;
   getLastOwnerBody: () => string | null;
+  /** Focus is expressed by the surrounding field, never by composer copy. */
+  focused?: boolean;
 }
 
-/** Composer anchored at the bottom of Chat. CLI-grade keyboard map on fine-pointer
+/** Composer anchored at the bottom of the task world. CLI-grade keyboard map on fine-pointer
  * devices (Enter send · Shift+Enter newline · Tab queue next-turn · Esc cancel
  * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
  * (long-press = queue). Handles attachment staging (paperclip + paste). */
 export function Composer(props: Props) {
   // Shared input mechanics (value signal, coarse-pointer detection, auto-grow)
-  // with the Inbox inline ReplyInput.
+  // with any future constrained compact input.
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, "main");
   const [sending, setSending] = createSignal(false);
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
-  let textareaRef: HTMLTextAreaElement | undefined;
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressed = false;
 
-  // @-mention picker (v2.1): typing `@` opens a quick-select of open Pings that
-  // inserts an `@handle` token; the outgoing `mentions` are re-parsed from the
-  // body on send (resolveMentionIds), so text and mentions stay in sync.
-  const mentions = useMentionPicker({
-    getEl: () => textareaRef,
-    value,
-    setValue,
-  });
-
-  // Focus the composer when a reply is pre-quoted into it.
-  createEffect(() => {
-    if (props.replyingTo) focus();
-  });
-
-  // Consume a one-shot pre-fill (v1.4 "Ask to stop"): drop the text into the
+  // Consume a one-shot pre-fill (v1.4 "Ask Hirsel to stop"): drop the text into the
   // draft, move the caret to the end, focus, then clear so it fires once.
   createEffect(() => {
     const pre = props.prefill;
@@ -119,23 +98,14 @@ export function Composer(props: Props) {
       setSending(false);
     }
 
-    // Re-parse the composed text into open-Ping ids for send_message.mentions.
-    const mentionIds = resolveMentionIds(body, []);
-    props.onSend(body, props.replyingTo?.id ?? null, mode, blobs, mentionIds);
+    props.onSend(body, null, mode, blobs, []);
     props.attachments.clear();
     setValue("");
-    mentions.close();
-    if (props.replyingTo) props.onCancelReply();
     focus();
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    // The mention picker owns Up/Down/Enter/Tab/Esc ONLY while it is open, so
-    // the composer keymap below (Enter=send, Tab=queue, Esc=cancel) is intact
-    // whenever the picker is closed.
-    if (mentions.handleKeyDown(e)) return;
-    // Esc priority is picker → modal/overlay → stop turn. The picker (above)
-    // owns Esc while open; an open overlay owns it next — gate stop-on-Esc on
+    // An open overlay owns Esc first; gate stop-on-Esc on
     // `!anyOverlayOpen()` so one Esc dismissing a sheet/dialog never *also*
     // kills a live agent turn behind it; only with nothing else up does Esc
     // interrupt the turn (no-op if idle).
@@ -208,35 +178,18 @@ export function Composer(props: Props) {
   const canSend = () => value().trim().length > 0 || props.attachments.files().length > 0;
 
   return (
-    // The bar (border-t + bg-card) bleeds the full center-pane width on desktop;
-    // the inner wrapper re-centers the actual composer content at the prose
-    // measure (`rail:mx-auto rail:max-w-[680px]`), so the input aligns to the
-    // transcript while the bar spans rail-hairline → context-hairline. The
-    // measure is `rail:`-gated, so phone/split are pixel-identical to before.
-    <div class="flex-shrink-0 border-t border-border bg-card px-3 py-2">
-      <div class="w-full rail:mx-auto rail:max-w-[680px]">
-      <Show when={props.replyingTo}>
-        {(replyingTo) => (
-          <div class="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted px-2 py-1">
-            <div class="min-w-0 flex-1">
-              <div class="text-[0.68rem] uppercase tracking-[0.03em] text-primary">
-                Replying to {replyingTo().author === "owner" ? "you" : "Agent"}
-              </div>
-              <div class="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
-                {snippet(replyingTo().body, REPLY_SNIPPET_MAX)}
-              </div>
-            </div>
-            <button
-              type="button"
-              class="p-0.5 text-muted-foreground transition-colors hover:text-foreground"
-              onClick={() => props.onCancelReply()}
-              aria-label="Cancel reply"
-            >
-              <X class="size-4" />
-            </button>
-          </div>
-        )}
-      </Show>
+    // One persistent organic capsule: the sole surface allowed the full pill
+    // signature because it is the stable transition between global and task.
+    <div
+      data-slot="composer-shell"
+      data-focused={props.focused ? "true" : "false"}
+      class="mx-3 mb-3 flex-shrink-0 rounded-[24px_34px_30px_22px] px-3 py-2 ring-1 transition-[max-width,background-color,box-shadow] duration-200 ease-out rail:mx-auto rail:mb-4 rail:w-[calc(100%-2rem)]"
+      classList={{
+        "bg-primary/[0.035] ring-primary/25 rail:max-w-[820px]": props.focused,
+        "bg-card/95 ring-foreground/10 rail:max-w-[1180px]": !props.focused,
+      }}
+    >
+      <div class="w-full">
 
       {/* Staged attachment chips. */}
       <Show when={props.attachments.files().length > 0}>
@@ -288,89 +241,9 @@ export function Composer(props: Props) {
       </Show>
 
       <div class="relative flex items-end gap-2">
-        {/* @-mention picker. Desktop: a keyboard-first popup above the composer
-            (Up/Down move · Enter/Tab accept · Esc dismiss). Phone: a
-            thumb-friendly horizontal chip row of open Pings. Both surface each
-            Ping's @handle (mono) with its one-line description, and both float
-            just above the input so they never push the composer. */}
-        <Show when={mentions.open() && mentions.candidates().length > 0}>
-          <Show
-            when={!coarse()}
-            fallback={
-              <div
-                data-slot="mention-chips"
-                class="no-scrollbar absolute inset-x-0 bottom-full mb-2 flex snap-x gap-1.5 overflow-x-auto pr-6 pb-1 [mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]"
-                role="listbox"
-                aria-label="Mention a Ping"
-              >
-                <For each={mentions.candidates()}>
-                  {(ping) => (
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={false}
-                      data-slot="mention-chip"
-                      class="flex shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-left"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => mentions.accept(ping)}
-                    >
-                      <AtSign class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-                      <span class="font-mono text-xs text-foreground">{ping.name}</span>
-                      <Show when={ping.description.trim().length > 0}>
-                        <span class="max-w-[9rem] truncate text-[0.7rem] text-muted-foreground">
-                          {ping.description}
-                        </span>
-                      </Show>
-                    </button>
-                  )}
-                </For>
-              </div>
-            }
-          >
-            <div
-              data-slot="mention-popup"
-              class="absolute inset-x-0 bottom-full z-30 mb-2 max-h-64 overflow-y-auto rounded-md border border-border bg-card p-1 shadow-lg ring-1 ring-foreground/10"
-              role="listbox"
-              aria-label="Mention a Ping"
-            >
-              <For each={mentions.candidates()}>
-                {(ping, i) => (
-                  <button
-                    type="button"
-                    role="option"
-                    data-slot="mention-option"
-                    aria-selected={i() === mentions.activeIndex()}
-                    class="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left transition-colors"
-                    classList={{
-                      "bg-muted": i() === mentions.activeIndex(),
-                      "hover:bg-muted/60": i() !== mentions.activeIndex(),
-                    }}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onMouseEnter={() => mentions.setActiveIndex(i())}
-                    onClick={() => mentions.accept(ping)}
-                  >
-                    <span class="shrink-0 font-mono text-xs text-foreground">
-                      @{ping.name}
-                    </span>
-                    <Show when={ping.description.trim().length > 0}>
-                      <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                        {ping.description}
-                      </span>
-                    </Show>
-                    <Show when={ping.requires_response}>
-                      <span class="shrink-0 text-[0.62rem] uppercase tracking-[0.03em] text-primary">
-                        needs you
-                      </span>
-                    </Show>
-                  </button>
-                )}
-              </For>
-            </div>
-          </Show>
-        </Show>
 
         <input
-          ref={fileInputRef}
+          ref={(node) => { fileInputRef = node; }}
           type="file"
           multiple
           class="hidden"
@@ -393,32 +266,15 @@ export function Composer(props: Props) {
         <Textarea
           ref={(node: HTMLTextAreaElement) => {
             setRef(node);
-            textareaRef = node;
           }}
           rows={1}
           data-composer="main"
-          class="max-h-28 min-h-0 flex-1 resize-none py-2 leading-snug"
-          placeholder="Message the Agent…"
-          aria-label="Message the Agent"
+          class="max-h-28 min-h-11 flex-1 resize-none border-0 bg-transparent px-1 py-2 leading-snug shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
+          aria-label="Message Hirsel"
           value={value()}
           onInput={(e) => {
             setValue(e.currentTarget.value);
-            mentions.sync();
           }}
-          onKeyUp={(e) => {
-            // Caret moves (arrows/Home/End) can move INTO a mention while the
-            // picker is closed — re-evaluate then. While it is open the picker
-            // already owns the arrows (and keeps its own active-row state), so
-            // don't re-sync and clobber it.
-            if (
-              !mentions.open() &&
-              (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End")
-            ) {
-              mentions.sync();
-            }
-          }}
-          onClick={() => mentions.sync()}
-          onBlur={() => mentions.close()}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
         />
@@ -478,10 +334,10 @@ export function Composer(props: Props) {
 
       {/* Bottom cue row: no standing keyboard-hint teaching (those keys live in
           the `?` shortcut sheet). Only the exceptional offline cue takes space,
-          mirroring the Side Chat wrap-up bar's "reconnect" pattern. */}
+          reserved for exceptional connection state. */}
       <Show when={offline()}>
         <div class="mt-1 flex items-center px-1">
-          <span class="ml-auto flex shrink-0 items-center gap-1 text-[0.66rem] text-status-attention">
+          <span class="ml-auto flex shrink-0 items-center gap-1 text-xs text-status-attention">
             <span
               class="size-1.5 animate-pulse rounded-full bg-status-attention"
               aria-hidden="true"

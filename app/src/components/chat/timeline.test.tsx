@@ -2,7 +2,8 @@ import { fireEvent, render, within } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "../../protocol";
 import type { TimelineEvent } from "../../store/types";
-import { Timeline } from "./Timeline";
+import { setShowAgentCode } from "../../lib/prefs";
+import { Timeline, TurnDetails } from "./Timeline";
 import { buildTimeline } from "./timeline";
 
 function evs(...events: TurnEvent[]): TimelineEvent[] {
@@ -178,5 +179,101 @@ describe("Timeline component", () => {
     ));
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
     expect(row.querySelector('[aria-label="delegation"]')).toBeNull();
+  });
+
+  it("hides agent code cells unless the local preference is on", () => {
+    const events = evs(
+      { kind: "code_start", id: "c1", language: "typescript", code: "finish(1);", truncated: false },
+      { kind: "code_done", id: "c1", ok: true, summary: "12ms" },
+    );
+    expect(buildTimeline(events).map((i) => i.kind)).toEqual([]);
+    const shown = buildTimeline(events, true);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toMatchObject({
+      kind: "code",
+      language: "typescript",
+      code: "finish(1);",
+      done: true,
+      ok: true,
+      result: "12ms",
+    });
+  });
+
+  it("renders the full program in a collapsed cell once the preference is on", () => {
+    setShowAgentCode(true);
+    try {
+      const source = "const out = await shell.run({ cmd: \"true\" });\nfinish(out);";
+      const { container, getByRole, queryByText } = render(() => (
+        <Timeline
+          events={evs({
+            kind: "code_start",
+            id: "c1",
+            language: "typescript",
+            code: source,
+            truncated: false,
+          })}
+        />
+      ));
+      const row = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
+      expect(row).toBeTruthy();
+      // Collapsed by default: the source is not in the DOM until expanded.
+      expect(queryByText(source)).toBeNull();
+      fireEvent.click(getByRole("button", { name: /show source/ }));
+      expect(row.textContent).toContain("finish(out);");
+    } finally {
+      setShowAgentCode(false);
+    }
+  });
+});
+
+/** The committed bubble renders the frozen turn through the very same
+ * `Timeline`, so a turn that ran an Agent program keeps its code cell after the
+ * commit — and the Settings toggle governs it there too, live. */
+describe("committed turn details: agent code cells", () => {
+  const frozen = evs(
+    { kind: "prose", text: "Running a cell." },
+    {
+      kind: "code_start",
+      id: "code:1",
+      language: "typescript",
+      code: "finish(await subagents_list());",
+      truncated: false,
+    },
+    { kind: "tool_start", id: "t1", name: "subagents_list", summary: "" },
+    { kind: "tool_done", id: "t1", name: "subagents_list", ok: true, summary: "2 agents" },
+    { kind: "code_done", id: "code:1", ok: true, summary: "34ms" },
+  );
+
+  it("shows the code cell in a committed turn when the preference is on", () => {
+    setShowAgentCode(true);
+    try {
+      const { container, getByRole } = render(() => <TurnDetails events={frozen} expanded={true} />);
+      const cell = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
+      expect(cell).toBeTruthy();
+      expect(cell.textContent).toContain("typescript");
+      fireEvent.click(getByRole("button", { name: /show source/ }));
+      expect(cell.textContent).toContain("subagents_list()");
+    } finally {
+      setShowAgentCode(false);
+    }
+  });
+
+  it("hides it when the preference is off, keeping the tool row", () => {
+    const { container } = render(() => <TurnDetails events={frozen} expanded={true} />);
+    expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
+    expect(container.querySelector('[data-slot="timeline-tool"]')).toBeTruthy();
+  });
+
+  it("reacts to the toggle without re-committing the message", () => {
+    const { container } = render(() => <TurnDetails events={frozen} expanded={true} />);
+    expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
+    try {
+      setShowAgentCode(true);
+      expect(container.querySelector('[data-slot="timeline-code"]')).toBeTruthy();
+      setShowAgentCode(false);
+      expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
+    } finally {
+      setShowAgentCode(false);
+    }
   });
 });

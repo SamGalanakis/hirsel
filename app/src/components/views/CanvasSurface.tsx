@@ -1,6 +1,10 @@
 import { ChevronLeft, PanelRight } from "lucide-solid";
 import { For, onMount, Show } from "solid-js";
-import { createFocusTrap, createMediaFlag } from "../../lib/focus";
+import {
+  createFocusTrap,
+  createMediaFlag,
+  phoneUtilityRestoreTarget,
+} from "../../lib/focus";
 import { canvasViews } from "../../store/selectors";
 import { closeRightRegion, showCanvas, state } from "../../store/store";
 import { ViewRenderer } from "../../views/ViewRenderer";
@@ -8,15 +12,15 @@ import { PaneHeader } from "../ui/PaneHeader";
 
 // Canvas: the shared right-context surface for `canvas`-placed generative
 // views. On desktop (`rail`) it is an in-flow right column that takes the slot
-// otherwise held by the Pings rail (precedence handled in ChatView); on phone
-// it is a full-screen `fixed` sheet over the chat. The newest canvas view leads
-// (auto-surfaced — ChatView opens the surface when a new one arrives); older
+// otherwise occupied by the task field; on phone
+// it is a full-screen `fixed` sheet over the task world. The newest canvas view leads
+// when explicitly summoned; older
 // canvas views stack beneath so nothing an agent drew is lost.
 
 const RAIL_MQ = "(min-width: 1100px)";
 
 /** True when the Canvas holds the exclusive right region and has something to
- * show. The single-owner enum makes the Side-Chat/Processes/Settings precedence
+ * show. The single-owner enum makes the Canvas/Processes/Settings precedence
  * automatic — Canvas shows only while it owns the region. Same predicate drives
  * the desktop in-flow rail and the phone full-screen sheet. */
 export function canvasActive(): boolean {
@@ -40,7 +44,7 @@ function CanvasBody() {
   );
 }
 
-/** The desktop in-flow Canvas column. Mirrors the Pings rail's frame (width,
+/** The desktop in-flow Canvas column. Mirrors the utility frame (width,
  * left hairline, h-12 header) so the shared right region reads as one slot. */
 export function CanvasRail() {
   return (
@@ -76,11 +80,12 @@ function CanvasPhonePanel() {
     createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
+      restoreTo: () => phone() ? phoneUtilityRestoreTarget() : undefined,
     });
   });
   return (
     <div
-      ref={panelRef}
+      ref={(node) => { panelRef = node; }}
       tabindex={-1}
       data-slot="canvas-sheet"
       role="dialog"
@@ -97,7 +102,7 @@ function CanvasPhonePanel() {
           aria-label="Close Canvas"
         >
           <ChevronLeft class="size-5" aria-hidden="true" />
-          <span>Chat</span>
+          <span>Tasks</span>
         </button>
         <h1
           id="canvas-sheet-heading"

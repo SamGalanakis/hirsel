@@ -13,8 +13,6 @@ import {
   CircleStop,
   Clock,
   Layers,
-  ListFilter,
-  MessageSquareReply,
   MessagesSquare,
   Scale,
   Search,
@@ -23,7 +21,7 @@ import {
 } from "lucide-solid";
 import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import type { EventItem } from "../protocol";
-import { openSideChat, state } from "../store/store";
+import { state } from "../store/store";
 import { archiveEventWithUndo } from "../lib/event-archive";
 import { decideEventWithUndo } from "../lib/event-decide";
 import { snoozeEventWithUndo } from "../lib/event-snooze";
@@ -31,17 +29,10 @@ import { clearFinishedEventsWithUndo } from "../lib/event-sweep";
 import { snoozePresets } from "../lib/snooze-presets";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS, stopActiveTurn } from "../lib/keymap";
 import {
-  type QueueFilterMode,
-  setQueueFilterMode,
-  setQueueSearch,
-} from "./eventq/QueueFilter";
-import {
-  archivedEvents,
   eventUiNodes,
   finishedEvents,
   isOpenJudgment,
-  orderedQueue,
-  snoozedEvents,
+  orderedTasks,
   visibleEvents,
 } from "../store/selectors";
 import { cn } from "@/lib/utils";
@@ -72,10 +63,10 @@ function fuzzyMatch(query: string, text: string): boolean {
 }
 
 /** The judgment the contextual actions ("Decide …", "Snooze current", "Archive
- * current") target: the first open judgment in the resting queue's priority
+ * current") target: the first open judgment in Task priority
  * order (blocking first) — the one that most needs the Owner. */
 function currentJudgment(): EventItem | null {
-  const ordered = orderedQueue(
+  const ordered = orderedTasks(
     visibleEvents(state.events, state.eventArchiveOverrides),
     state.eventDecideOverrides,
   );
@@ -108,32 +99,25 @@ export const CommandPalette: Component<{
   const thinking = () => state.agentActivity.state === "thinking";
   const iconClass = "size-4 shrink-0 text-muted-foreground";
 
-  // The full command set, rebuilt reactively so the dynamic entries (live Side
-  // Chats and the stop-turn action) track store state.
+  // The full command set, rebuilt reactively so the current task actions and
+  // stop-turn action track store state.
   const commands = createMemo<Command[]>(() => {
     const out: Command[] = [
       {
         id: "focus-composer",
-        label: "Focus composer",
+        label: "Focus Hirsel",
         hint: ["/"],
         keywords: "type write message reply",
         icon: <MessagesSquare class={iconClass} aria-hidden="true" />,
         run: focusComposer,
       },
       {
-        id: "go-feed",
-        label: "Focus Feed",
-        hint: ["g", "f"],
-        keywords: "queue events judgments needs you",
+        id: "go-tasks",
+        label: "Focus tasks",
+        hint: ["g", "t"],
+        keywords: "tasks work judgments needs you",
         icon: <Layers class={iconClass} aria-hidden="true" />,
-        run: () => goPane("feed"),
-      },
-      {
-        id: "go-chat",
-        label: "Focus Chat",
-        hint: ["g", "c"],
-        icon: <MessagesSquare class={iconClass} aria-hidden="true" />,
-        run: () => goPane("chat"),
+        run: () => goPane("tasks"),
       },
       {
         id: "go-processes",
@@ -171,22 +155,7 @@ export const CommandPalette: Component<{
       });
     }
 
-    // Resume a live Side Chat.
-    for (const ref of state.sideChatRefs) {
-      out.push({
-        id: `sc-${ref.sc}`,
-        label: "Resume side chat",
-        keywords: "side chat resume",
-        icon: <MessageSquareReply class={iconClass} aria-hidden="true" />,
-        run: () => openSideChat(ref.sc),
-      });
-    }
-
-    // ---- Contextual queue actions (Wave-3 ⌘K depth) ----
-    // Everything below acts on the current queue: the first open judgment for
-    // Decide/Snooze/Archive, the finished set for the sweep, plus the filter
-    // switches and a live "Search events" command. Kept flat (no submenu) so the
-    // fuzzy list stays fast — the snooze presets are individual sub-entries.
+    // Contextual task actions stay flat so the palette remains fast.
     const ev = currentJudgment();
     if (ev) {
       for (const opt of judgmentOptions(ev)) {
@@ -228,52 +197,6 @@ export const CommandPalette: Component<{
         keywords: "sweep archive done",
         icon: <Trash2 class={iconClass} aria-hidden="true" />,
         run: () => clearFinishedEventsWithUndo(finishedIds),
-      });
-    }
-
-    // Filter switches — Active / Needs you always; Snoozed / Archived only when
-    // they hold something.
-    const switches: { mode: QueueFilterMode; label: string; on: boolean }[] = [
-      { mode: "active", label: "Show active queue", on: true },
-      { mode: "needs-you", label: "Show needs-you", on: true },
-      {
-        mode: "snoozed",
-        label: "Show snoozed",
-        on: snoozedEvents(state.events, state.eventArchiveOverrides).length > 0,
-      },
-      {
-        mode: "archived",
-        label: "Show archived",
-        on: archivedEvents(state.events, state.eventArchiveOverrides).length > 0,
-      },
-    ];
-    for (const s of switches) {
-      if (!s.on) continue;
-      out.push({
-        id: `filter-${s.mode}`,
-        label: s.label,
-        keywords: "filter queue view",
-        icon: <ListFilter class={iconClass} aria-hidden="true" />,
-        run: () => {
-          setQueueFilterMode(s.mode);
-          goPane("feed");
-        },
-      });
-    }
-
-    // Live "Search events: <query>" — seeds the queue search and shows Active.
-    const q = query().trim();
-    if (q.length > 0) {
-      out.push({
-        id: "search-events",
-        label: `Search events: ${q}`,
-        keywords: "find filter",
-        icon: <Search class={iconClass} aria-hidden="true" />,
-        run: () => {
-          setQueueSearch(q);
-          setQueueFilterMode("active");
-          goPane("feed");
-        },
       });
     }
 
@@ -367,21 +290,22 @@ export const CommandPalette: Component<{
             </div>
 
             {/* Results — the listbox. */}
-            <ul id="command-palette-list" role="listbox" class="min-h-0 flex-1 overflow-y-auto p-1.5">
+            <div id="command-palette-list" role="listbox" class="min-h-0 flex-1 overflow-y-auto p-1.5">
               <Show
                 when={filtered().length > 0}
                 fallback={
-                  <li class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands</li>
+                  <div class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands</div>
                 }
               >
                 <For each={filtered()}>
                   {(cmd, i) => (
-                    <li
+                    <button
+                      type="button"
                       id={cmd.id}
                       role="option"
                       aria-selected={i() === activeIndex()}
                       class={cn(
-                        "flex cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-foreground",
+                        "flex w-full cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground",
                         i() === activeIndex() && "bg-muted",
                       )}
                       onMouseMove={() => setActiveIndex(i())}
@@ -392,11 +316,11 @@ export const CommandPalette: Component<{
                       <Show when={cmd.hint}>
                         <KeyHint keys={cmd.hint!} />
                       </Show>
-                    </li>
+                    </button>
                   )}
                 </For>
               </Show>
-            </ul>
+            </div>
           </Dialog.Content>
         </div>
       </Dialog.Portal>
@@ -406,7 +330,7 @@ export const CommandPalette: Component<{
 
 // ---- Shortcut cheat-sheet (`?`) --------------------------------------------
 
-const GROUP_ORDER = ["Feed", "General", "Focus", "Chat"] as const;
+const GROUP_ORDER = ["General", "Tasks", "Focus", "Hirsel"] as const;
 
 export const ShortcutHelp: Component<{
   open: boolean;

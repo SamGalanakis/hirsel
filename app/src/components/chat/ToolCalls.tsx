@@ -14,7 +14,7 @@ export function CommittedToolCalls(props: { toolCalls: ToolCall[] }) {
       <div class="flex flex-col gap-1" data-slot="committed-tool-calls">
         <button
           type="button"
-          class="inline-flex w-fit items-center gap-1 rounded-full bg-muted px-1.5 py-px text-[0.68rem] text-muted-foreground transition-colors hover:text-foreground"
+          class="-ml-1 inline-flex w-fit items-center gap-1 rounded px-1 py-px text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
           aria-expanded={expanded()}
           aria-label={`${count()} tool call${count() === 1 ? "" : "s"}`}
           onClick={() => setExpanded((v) => !v)}

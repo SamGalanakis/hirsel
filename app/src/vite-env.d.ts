@@ -3,9 +3,9 @@
 
 interface ImportMetaEnv {
   /** WebSocket URL of the Hirsel Host (or app/tools/mock-server.mjs in dev).
-   * When unset: dev defaults to ws://<current-host>:8787 (the mock server);
-   * production defaults to same-origin ws(s)://<origin>/ws, since the Hirsel
-   * Host serves the built app itself. */
+   * When unset, both development and production use same-origin
+   * ws(s)://<origin>/ws. Vite proxies that path to HIRSEL_DEV_PROXY_TARGET in
+   * development; the Hirsel Host serves it directly in production. */
   readonly VITE_WS_URL?: string;
 }
 

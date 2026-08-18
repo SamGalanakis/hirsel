@@ -1,46 +1,104 @@
 #!/usr/bin/env node
-// Dev harness: a tiny in-memory host implementing PROTOCOL.md (v1 through
-// v2.0 side chats / ADR-0008), with a scripted "agent" so the PWA can be
+// Dev harness: a tiny in-memory host implementing the current task protocol,
+// with a scripted "agent" so the PWA can be
 // developed/demoed without the Rust host. Not durable — restart resets all
 // state. Serves blob content over HTTP on the same port the WS runs on.
 // Run via `npm run dev:mock` (mock + vite together) or `npm run mock-server`.
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8787);
-const TOKEN = process.env.MOCK_TOKEN ?? "dev-token";
+// Development should not make people hunt for a pretend secret. By default the
+// mock accepts any non-empty token. Set MOCK_TOKEN only when a test or demo
+// explicitly needs to exercise rejection with one exact value.
+const TOKEN = process.env.MOCK_TOKEN;
 const REPLAY_LIMIT = 200;
 const ARCHIVED_REPLAY_LIMIT = 20;
 const MAX_BLOB_BYTES = 15 * 1024 * 1024;
+const MAX_ACTION_DATA_BYTES = 8 * 1024;
+const MAX_ACTIONS = 16;
+const MAX_FIELDS = 16;
+const MAX_FIELD_STRING_BYTES = 1024;
+const MAX_CHOICES = 16;
+const MAX_ACTION_NAME_BYTES = 64;
 const REPLY_DELAY_MS = Number(process.env.MOCK_REPLY_MS ?? 1200);
-const SIDECHAT_TTL_MS = Number(process.env.HIRSEL_SIDECHAT_TTL_SECS ?? 86400) * 1000;
 
-/** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[], tool_calls:object[]}[]} */
-const messages = [];
-const inbox = [];
+// Every accepted development token owns an isolated in-memory world. This
+// keeps concurrent runbooks independent while preserving same-token reconnect
+// semantics. AsyncLocalStorage carries that world through reply timers.
+const tenantContext = new AsyncLocalStorage();
+const tenants = new Map();
+
+function currentTenant() {
+  const tenant = tenantContext.getStore();
+  if (!tenant) throw new Error("mock tenant context is unavailable");
+  return tenant;
+}
+
+function scopedCollection(key, target) {
+  return new Proxy(target, {
+    get(_target, property) {
+      const collection = currentTenant()[key];
+      const value = Reflect.get(collection, property, collection);
+      return typeof value === "function" ? value.bind(collection) : value;
+    },
+    set(_target, property, value) {
+      return Reflect.set(currentTenant()[key], property, value);
+    },
+  });
+}
+
+/** @type {{id:number, author:'owner'|'agent', body:string, ref:number|null, ts:string, attachments:object[], tool_calls:object[], mentions:number[]}[]} */
+const messages = scopedCollection("messages", []);
+const events = scopedCollection("events", []);
+// Declarative, per-Task generated-instrument state. The mock does not know
+// about deploys: each flow supplies stages and action/data transitions.
+const eventFlows = scopedCollection("eventFlows", new Map());
 /** @type {{id:string, kind:'subagent'|'monitor', label:string, agent:string|null, model:string|null, state:string, started_ts:string, last_event_ts:string, summary:string|null}[]} */
-const processes = [];
-let nextMsgId = 1;
-let nextInboxId = 1;
-let nextProcSeq = 1;
-const seenClientIds = new Map(); // client_id -> assigned message id
-const blobs = new Map(); // blob id -> { id, name, mime, size, buffer }
+const processes = scopedCollection("processes", []);
+const seenClientIds = scopedCollection("seenClientIds", new Map());
+const blobs = scopedCollection("blobs", new Map());
+const clients = scopedCollection("clients", new Set());
+const runtime = new Proxy({}, {
+  get(_target, property) {
+    return currentTenant()[property];
+  },
+  set(_target, property, value) {
+    currentTenant()[property] = value;
+    return true;
+  },
+});
 
-// --- side chats (v2.0 / ADR-0008) -------------------------------------------
-/** @type {Map<string, {sc:string, itemId:number, messages:object[], nextMsgId:number, turnActive:boolean, turnTimers:NodeJS.Timeout[], ttlTimer:NodeJS.Timeout|null}>} */
-const sideChats = new Map(); // sc -> side chat state
-const sideChatByItem = new Map(); // item_id -> sc (idempotent open/resume, one live side chat per item)
-const sideSeenClientIds = new Map(); // client_id -> { sc, messageId } (per-side-chat send idempotency)
-
-// --- turn model (for v1.2 mode/cancel) --------------------------------------
-let turnActive = false;
-let turnTimers = [];
-/** Messages sent with mode:"next_turn" while a turn was active, awaiting their
- * own turn. Each: { clientId, messageId }. "Claimed" once dequeued. */
-let queuedNextTurn = [];
-
-const clients = new Set();
+function tenantForToken(token) {
+  let tenant = tenants.get(token);
+  if (tenant) return tenant;
+  tenant = {
+    token,
+    messages: [],
+    events: [],
+    eventFlows: new Map(),
+    processes: [],
+    nextMsgId: 1,
+    nextEventId: 1,
+    nextProcSeq: 1,
+    seenClientIds: new Map(),
+    blobs: new Map(),
+    turnActive: false,
+    turnTimers: [],
+    queuedNextTurn: [],
+    clients: new Set(),
+  };
+  tenants.set(token, tenant);
+  tenantContext.run(tenant, () => {
+    if (process.env.MOCK_SEED !== "none") {
+      seedProcesses();
+      seedEvents();
+    }
+  });
+  return tenant;
+}
 
 function now() {
   return new Date().toISOString();
@@ -48,20 +106,24 @@ function now() {
 function log(...args) {
   console.log(`[mock-server]`, ...args);
 }
+function acceptsToken(token) {
+  return typeof token === "string" && token.length > 0 && (!TOKEN || token === TOKEN);
+}
 function broadcast(frame) {
   const json = JSON.stringify(frame);
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(json);
 }
 
-function addMessage(author, body, ref, attachments = [], toolCalls = []) {
+function addMessage(author, body, ref, attachments = [], toolCalls = [], mentions = []) {
   const message = {
-    id: nextMsgId++,
+    id: runtime.nextMsgId++,
     author,
     body,
     ref: ref ?? null,
     ts: now(),
     attachments,
     tool_calls: toolCalls,
+    mentions,
   };
   messages.push(message);
   broadcast({ type: "msg", message });
@@ -98,272 +160,34 @@ function processesForHello() {
   const terminal = processes.filter((p) => TERMINAL_STATES.has(p.state)).slice(-10);
   return [...nonTerminal, ...terminal];
 }
-function upsertInbox(item) {
-  const idx = inbox.findIndex((i) => i.id === item.id);
-  if (idx === -1) inbox.push(item);
-  else inbox[idx] = item;
-  broadcast({ type: "ping_upsert", ping: item });
-}
-function findOpenInboxByAnchor(anchorId) {
-  return inbox.find((i) => i.status === "open" && i.anchor === anchorId);
-}
-
-/** hello_ok side_chats slice: just the {sc, ping_id} refs (v2.0). */
-function sideChatsForHello() {
-  return [...sideChats.values()].map((s) => ({ sc: s.sc, ping_id: s.itemId }));
-}
-
-/** (Re)arm the TTL-close timer for a side chat; any activity resets the clock. */
-function armSideTtl(sc) {
-  const sideChat = sideChats.get(sc);
-  if (!sideChat) return;
-  if (sideChat.ttlTimer) clearTimeout(sideChat.ttlTimer);
-  sideChat.ttlTimer = setTimeout(() => closeSideChat(sc, "ttl-reap"), SIDECHAT_TTL_MS);
-}
-
-/** Tear down a side chat and tell the client, regardless of why (confirm,
- * discard, or a TTL reap) — the client distinguishes "expected" from
- * "host-initiated" by whether IT asked for the close (see the reducer). */
-function closeSideChat(sc, reason) {
-  const sideChat = sideChats.get(sc);
-  if (!sideChat) return;
-  for (const t of sideChat.turnTimers) clearTimeout(t);
-  if (sideChat.ttlTimer) clearTimeout(sideChat.ttlTimer);
-  sideChats.delete(sc);
-  sideChatByItem.delete(sideChat.itemId);
-  broadcast({ type: "side_chat_closed", sc });
-  log("side chat closed:", sc, `(${reason})`);
-}
-
-function addSideMessage(sideChat, author, body, ref = null) {
-  const message = { id: sideChat.nextMsgId++, author, body, ref, ts: now(), attachments: [], tool_calls: [] };
-  sideChat.messages.push(message);
-  broadcast({ type: "msg", message, sc: sideChat.sc });
-  return message;
-}
-function setSideActivity(sideChat, state, text) {
-  broadcast({ type: "agent_activity", state, text: text ?? null, sc: sideChat.sc });
-}
-function emitSideTurnEvent(sideChat, seq, event) {
-  broadcast({ type: "turn_event", seq, event, sc: sideChat.sc });
-}
-function laterSide(sideChat, fn, ms) {
-  const t = setTimeout(fn, ms);
-  sideChat.turnTimers.push(t);
-  return t;
-}
-function finishSideTurn(sideChat) {
-  setSideActivity(sideChat, "idle", null);
-  sideChat.turnActive = false;
-  sideChat.turnTimers = [];
-}
-
-/** `open_side_chat` is idempotent per item (protocol v2.0): resuming answers
- * with the SAME sc + transcript so far; a fresh one gets messages: [] — the
- * seed (item + anchor + recent chat) lives in the side session's prompt
- * layer, never as fake transcript rows. */
-function handleOpenSideChat(ws, frame) {
-  // v2.4: event forks address by `event_id`; `ping_id` stays a legacy alias
-  // (events share the id space).
-  const pingId = frame.event_id ?? frame.ping_id;
-  const existingSc = sideChatByItem.get(pingId);
-  if (existingSc) {
-    const sideChat = sideChats.get(existingSc);
-    ws.send(
-      JSON.stringify({
-        type: "side_chat_open",
-        sc: sideChat.sc,
-        event_id: sideChat.itemId,
-        ping_id: sideChat.itemId,
-        resumed: true,
-        messages: sideChat.messages,
-      }),
-    );
-    log("side chat resumed", sideChat.sc, "for ping", pingId);
-    return;
-  }
-  const sc = `side:${randomUUID()}`;
-  const sideChat = {
-    sc,
-    itemId: pingId,
-    messages: [],
-    nextMsgId: 1,
-    turnActive: false,
-    turnTimers: [],
-    ttlTimer: null,
-  };
-  sideChats.set(sc, sideChat);
-  sideChatByItem.set(pingId, sc);
-  armSideTtl(sc);
-  ws.send(
-    JSON.stringify({
-      type: "side_chat_open",
-      sc,
-      event_id: pingId,
-      ping_id: pingId,
-      resumed: false,
-      messages: [],
-    }),
-  );
-  log("side chat opened", sc, "for ping", pingId);
-}
-
-/** Scripted side-agent reply. Mirrors startReplyTurn's demo hooks (scoped to
- * this side chat) plus a debug-only "ttl-close" body that simulates a
- * host-side reap immediately, so the reconnect-gone / terminal-state path is
- * drivable without waiting out the real TTL. */
-function startSideReplyTurn(sideChat, ownerMessage) {
-  sideChat.turnActive = true;
-  armSideTtl(sideChat.sc); // any activity resets the TTL clock
-  const trimmed = ownerMessage.body.trim().toLowerCase();
-
-  if (trimmed === "ttl-close") {
-    sideChat.turnActive = false;
-    closeSideChat(sideChat.sc, "ttl-close command");
-    return;
-  }
-
-  if (trimmed === "timeline") {
-    setSideActivity(sideChat, "thinking", "Working through it…");
-    laterSide(
-      sideChat,
-      () => emitSideTurnEvent(sideChat, 1, { kind: "prose", text: "Let me check the seeded context. " }),
-      300,
-    );
-    laterSide(
-      sideChat,
-      () => emitSideTurnEvent(sideChat, 2, { kind: "tool_start", id: "s1", name: "read_context", summary: null }),
-      700,
-    );
-    laterSide(
-      sideChat,
-      () =>
-        emitSideTurnEvent(sideChat, 3, {
-          kind: "tool_done",
-          id: "s1",
-          name: "read_context",
-          ok: true,
-          summary: "item + anchor + last 20 messages",
-        }),
-      1300,
-    );
-    laterSide(
-      sideChat,
-      () => emitSideTurnEvent(sideChat, 4, { kind: "prose", text: "Here's a reasonable take on it." }),
-      1700,
-    );
-    laterSide(
-      sideChat,
-      () => {
-        addSideMessage(sideChat, "agent", "Here's a reasonable take on it.", ownerMessage.id);
-        finishSideTurn(sideChat);
-      },
-      2000,
-    );
-    return;
-  }
-
-  setSideActivity(sideChat, "thinking", "Thinking…");
-  laterSide(
-    sideChat,
-    () => {
-      addSideMessage(sideChat, "agent", `Echo (side): ${ownerMessage.body || "(no text)"}`, ownerMessage.id);
-      finishSideTurn(sideChat);
-    },
-    REPLY_DELAY_MS,
-  );
-}
-
-function handleSideSendMessage(frame) {
-  const sideChat = sideChats.get(frame.sc);
-  if (!sideChat) return; // unknown/already-closed scope — a real host errors; the mock just drops it.
-  const already = sideSeenClientIds.get(frame.client_id);
-  if (already) {
-    const existing = sideChat.messages.find((m) => m.id === already.messageId);
-    if (existing) broadcast({ type: "msg", message: existing, sc: sideChat.sc });
-    return;
-  }
-  const message = addSideMessage(sideChat, "owner", frame.body, frame.ref ?? null);
-  sideSeenClientIds.set(frame.client_id, { sc: frame.sc, messageId: message.id });
-  if (!sideChat.turnActive) startSideReplyTurn(sideChat, message);
-}
-
-function handleSideCancelTurn(frame) {
-  const sideChat = sideChats.get(frame.sc);
-  if (!sideChat || !sideChat.turnActive) return;
-  for (const t of sideChat.turnTimers) clearTimeout(t);
-  sideChat.turnTimers = [];
-  addSideMessage(sideChat, "agent", "_Turn cancelled._", null);
-  finishSideTurn(sideChat);
-}
-
-/** A plausible-looking scripted draft: leans on the side chat's own last owner
- * line if there is one, otherwise the item content — never the empty string,
- * since the confirm sheet must always have something to show/edit. */
-function draftConclusion(sideChat) {
-  const item = inbox.find((i) => i.id === sideChat.itemId);
-  const lastOwnerLine = [...sideChat.messages].reverse().find((m) => m.author === "owner");
-  const base = lastOwnerLine ? lastOwnerLine.body : item ? item.content.replace(/\s+/g, " ") : "Sounds good.";
-  return `Based on our side chat: ${base}`;
-}
-
-function handleConcludeSideChat(frame) {
-  const sideChat = sideChats.get(frame.sc);
-  if (!sideChat) return;
-  setSideActivity(sideChat, "thinking", "Drafting your reply…");
-  laterSide(
-    sideChat,
-    () => {
-      const text = draftConclusion(sideChat);
-      setSideActivity(sideChat, "idle", null);
-      broadcast({ type: "conclusion_draft", sc: sideChat.sc, text });
-    },
-    REPLY_DELAY_MS,
-  );
-}
-
-/** `confirm_conclusion`: post the Owner's (possibly-edited) reply as a normal
- * anchor-refed MAIN chat message (idempotent client_id keeps a resend from
- * double-posting), archive the item (idempotent — a no-op if the Agent
- * already archived it), then discard the side session + transcript. */
-function handleConfirmConclusion(frame) {
-  const sideChat = sideChats.get(frame.sc);
-  if (!sideChat) return;
-  const item = inbox.find((i) => i.id === sideChat.itemId);
-  const clientId = `side-conclude:${frame.sc}`;
-  if (!seenClientIds.has(clientId)) {
-    const message = addMessage("owner", frame.text, item ? item.anchor : null);
-    seenClientIds.set(clientId, message.id);
-    if (item && item.status === "open") upsertInbox({ ...item, status: "done" });
-  }
-  closeSideChat(frame.sc, "concluded");
-}
-
-function handleDiscardSideChat(frame) {
-  closeSideChat(frame.sc, "discarded");
+function upsertEvent(item) {
+  const idx = events.findIndex((event) => event.id === item.id);
+  if (idx === -1) events.push(item);
+  else events[idx] = item;
+  broadcast({ type: "event_upsert", event: item });
 }
 
 function later(fn, ms) {
   const t = setTimeout(fn, ms);
-  turnTimers.push(t);
+  runtime.turnTimers.push(t);
   return t;
 }
 function clearTurnTimers() {
-  for (const t of turnTimers) clearTimeout(t);
-  turnTimers = [];
+  for (const t of runtime.turnTimers) clearTimeout(t);
+  runtime.turnTimers = [];
 }
 
 /** Finish the active turn, then drain the next_turn queue (one turn each). */
 function finishTurn() {
   setActivity("idle", null);
-  turnActive = false;
-  turnTimers = [];
+  runtime.turnActive = false;
+  runtime.turnTimers = [];
   drainQueue();
 }
 
 function drainQueue() {
-  if (turnActive || queuedNextTurn.length === 0) return;
-  const next = queuedNextTurn.shift(); // claim it
+  if (runtime.turnActive || runtime.queuedNextTurn.length === 0) return;
+  const next = runtime.queuedNextTurn.shift(); // claim it
   log("claimed queued message", next.messageId);
   const message = messages.find((m) => m.id === next.messageId);
   if (message) startReplyTurn(message);
@@ -371,7 +195,7 @@ function drainQueue() {
 
 /** Kick off a scripted agent reply for an owner message. */
 function startReplyTurn(ownerMessage) {
-  turnActive = true;
+  runtime.turnActive = true;
   log("turn start", ownerMessage.id, JSON.stringify(ownerMessage.body.slice(0, 24)));
   // Test/demo hook: a long-running turn so queue/cancel windows are comfortable.
   if (ownerMessage.body.trim().toLowerCase() === "hold") {
@@ -385,7 +209,7 @@ function startReplyTurn(ownerMessage) {
   if (ownerMessage.body.trim().toLowerCase() === "delegate") {
     // Spawn a sub-agent Runtime Process that runs alongside the turn: it goes
     // running (with progress-summary updates) → done, broadcasting each step.
-    const procId = `proc-${nextProcSeq++}`;
+    const procId = `proc-${runtime.nextProcSeq++}`;
     const label = "Review the auth refactor and open a PR";
     upsertProcess({
       id: procId,
@@ -409,9 +233,11 @@ function startReplyTurn(ownerMessage) {
       setTimeout(() => upsertProcess({ id: procId, summary: "writing review notes…" }), 5000);
       setTimeout(() => {
         upsertProcess({ id: procId, state: "done", summary: "done — 3 files reviewed, PR opened" });
-        // Independent follow-up: an inbox item lands when it finishes.
-        upsertInbox({
-          id: nextInboxId++,
+        // Independent follow-up: a typed task lands when it finishes.
+        upsertEvent({
+          id: runtime.nextEventId++,
+          kind: "judgment",
+          source: { kind: "subagent", ref: procId },
           name: "review-diff",
           description: "Sub-agent finished — approve or reject the diff",
           content:
@@ -422,7 +248,20 @@ function startReplyTurn(ownerMessage) {
             { value: "approve", label: "Approve" },
             { value: "reject", label: "Reject" },
           ],
+          ui: [
+            { type: "heading", text: "Review the delegated diff" },
+            { type: "text", tone: "muted", text: "The sub-agent finished and the diff is ready." },
+            {
+              type: "optionList",
+              action: "choose",
+              options: [
+                { key: "approve", label: "Approve", recommended: true },
+                { key: "reject", label: "Reject" },
+              ],
+            },
+          ],
           status: "open",
+          read: false,
           ts: now(),
         });
       }, 8000);
@@ -484,7 +323,7 @@ function startReplyTurn(ownerMessage) {
     }, 3600);
   } else if (ownerMessage.body.trim().toLowerCase() === "monitor") {
     // Create a monitor Runtime Process (running), then have it "fire" once.
-    const procId = `proc-${nextProcSeq++}`;
+    const procId = `proc-${runtime.nextProcSeq++}`;
     upsertProcess({
       id: procId,
       kind: "monitor",
@@ -498,7 +337,7 @@ function startReplyTurn(ownerMessage) {
     later(() => {
       addMessage(
         "agent",
-        "Monitor is live — I'll ping you here if the health check starts failing.",
+        "Monitor is live — I'll alert you here if the health check starts failing.",
         ownerMessage.id,
       );
       finishTurn();
@@ -520,20 +359,6 @@ function startReplyTurn(ownerMessage) {
       finishTurn();
     }, REPLY_DELAY_MS);
   }
-}
-
-function acknowledgeInboxResponse(item, ownerMessage) {
-  // ADR-0009: the Owner replying to an item's Anchor resolves it to `done`
-  // automatically, host-side, the moment the reply lands — before (and
-  // independent of) the Agent's acknowledgment turn. This is the mechanical
-  // reply-resolves rule the client mirrors optimistically.
-  if (item.status === "open") upsertInbox({ ...item, status: "done" });
-  turnActive = true;
-  setActivity("thinking", "Noting your response…");
-  later(() => {
-    addMessage("agent", `Got it — noted: "${ownerMessage.body}".`, ownerMessage.id);
-    finishTurn();
-  }, 1000);
 }
 
 function resolveAttachments(ids) {
@@ -567,30 +392,28 @@ function handleSendMessage(frame) {
   }
 
   const attachments = resolveAttachments(frame.attachments);
-  const message = addMessage("owner", frame.body, frame.ref, attachments);
+  const message = addMessage(
+    "owner",
+    frame.body,
+    frame.ref,
+    attachments,
+    [],
+    frame.mentions ?? [],
+  );
   seenClientIds.set(frame.client_id, message.id);
-
-  // Anchored replies resolve their inbox item regardless of mode.
-  if (message.ref !== null) {
-    const item = findOpenInboxByAnchor(message.ref);
-    if (item) {
-      acknowledgeInboxResponse(item, message);
-      return;
-    }
-  }
 
   // mode=next_turn while a turn is running: hold for the current turn to finish.
   // (mode=send during a turn is treated as normal ingress — Early Injection is
   // indistinguishable from a plain reply in this mock.)
-  if (frame.mode === "next_turn" && turnActive) {
-    queuedNextTurn.push({ clientId: frame.client_id, messageId: message.id });
+  if (frame.mode === "next_turn" && runtime.turnActive) {
+    runtime.queuedNextTurn.push({ clientId: frame.client_id, messageId: message.id });
     log("queued next_turn message", message.id);
     return;
   }
 
-  if (turnActive) {
+  if (runtime.turnActive) {
     // Plain send mid-turn = Early Injection: it joins the running turn (already
-    // echoed to chat above), the mock does not spawn a separate reply.
+    // echoed to the conversation above), the mock does not spawn a separate reply.
     log("early-injected into active turn", message.id);
     return;
   }
@@ -598,20 +421,20 @@ function handleSendMessage(frame) {
 }
 
 function handleCancelTurn() {
-  if (!turnActive) return; // no-op if idle
+  if (!runtime.turnActive) return; // no-op if idle
   clearTurnTimers();
   addMessage("agent", "_Turn cancelled._", null);
   finishTurn();
 }
 
 function handleCancelQueued(ws, frame) {
-  const idx = queuedNextTurn.findIndex((q) => q.clientId === frame.client_id);
+  const idx = runtime.queuedNextTurn.findIndex((q) => q.clientId === frame.client_id);
   if (idx === -1) {
     // Not queued (never was, or already claimed/replied).
     ws.send(JSON.stringify({ type: "error", detail: "already claimed", client_id: frame.client_id }));
     return;
   }
-  const [removed] = queuedNextTurn.splice(idx, 1);
+  const [removed] = runtime.queuedNextTurn.splice(idx, 1);
   // Drop it from history — it never reached the Agent.
   const mi = messages.findIndex((m) => m.id === removed.messageId);
   if (mi !== -1) messages.splice(mi, 1);
@@ -621,16 +444,202 @@ function handleCancelQueued(ws, frame) {
 }
 
 function handleResolvePing(frame) {
-  // ADR-0009: "Mark done" — the Ping's terminal `done` state.
-  const item = inbox.find((i) => i.id === frame.ping_id);
+  // Legacy client input remains accepted, but the visible mock contract is
+  // event-native and therefore always publishes an event_upsert.
+  const item = events.find((event) => event.id === frame.ping_id);
   if (!item || item.status !== "open") return;
-  upsertInbox({ ...item, status: "done" });
+  upsertEvent({ ...item, status: "done" });
 }
 
 function handleReadPing(frame) {
-  const item = inbox.find((i) => i.id === frame.ping_id);
+  const item = events.find((event) => event.id === frame.ping_id);
   if (!item || item.read === true) return; // idempotent
-  upsertInbox({ ...item, read: true });
+  upsertEvent({ ...item, read: true });
+}
+
+function applyEventFlowStage(item, flow, stageIndex) {
+  const stage = flow.stages[stageIndex];
+  if (!stage) return false;
+  flow.current = stageIndex;
+  upsertEvent({
+    ...item,
+    ...(stage.description ? { description: stage.description } : {}),
+    ui: stage.ui,
+    status: stage.status ?? "open",
+  });
+  return true;
+}
+
+function transitionFor(stage, frame) {
+  return stage.transitions?.find((transition) =>
+    transition.action === frame.action
+      && (transition.choice === undefined || transition.choice === frame.data?.choice));
+}
+
+function actionDataObject(action, data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`Task action \`${action}\` data must be an object`);
+  }
+  if (Buffer.byteLength(JSON.stringify(data)) > MAX_ACTION_DATA_BYTES) {
+    throw new Error(`Task action data exceeds ${MAX_ACTION_DATA_BYTES} bytes`);
+  }
+  return data;
+}
+
+function validateGeneratedAction(ui, action, data) {
+  const object = actionDataObject(action, data);
+  const actions = new Map();
+  const fields = new Map();
+  const stack = Array.isArray(ui) ? [...ui] : [ui];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object" || Array.isArray(node)) continue;
+    if (node.type === "optionList" || node.type === "submit") {
+      const declared = typeof node.action === "string"
+        ? node.action
+        : node.type === "optionList" ? "choose" : "submit";
+      if (Buffer.byteLength(declared) > MAX_ACTION_NAME_BYTES) {
+        throw new Error(`Task action name exceeds ${MAX_ACTION_NAME_BYTES} bytes`);
+      }
+      if (actions.size >= MAX_ACTIONS) throw new Error(`Task UI exceeds ${MAX_ACTIONS} actions`);
+      if (actions.has(declared)) throw new Error(`duplicate Task action declaration \`${declared}\``);
+      const options = new Map();
+      if (node.type === "optionList") {
+        const declaredOptions = Array.isArray(node.options) ? node.options : [];
+        if (declaredOptions.length > MAX_CHOICES) {
+          throw new Error(`Task option list exceeds ${MAX_CHOICES} choices`);
+        }
+        for (const option of declaredOptions) {
+          if (options.has(option.key)) throw new Error(`duplicate Task option key \`${option.key}\``);
+          options.set(option.key, option.label);
+        }
+      }
+      actions.set(declared, {
+        settles: node.settles !== false,
+        kind: node.type === "optionList" ? "options" : "form",
+        options,
+      });
+    } else if (node.type === "field") {
+      if (fields.size >= MAX_FIELDS) throw new Error(`Task UI exceeds ${MAX_FIELDS} fields`);
+      if (node.kind !== undefined && node.kind !== "text") {
+        throw new Error(`Task field kind must be \`text\``);
+      }
+      if (fields.has(node.name)) throw new Error(`duplicate Task field name \`${node.name}\``);
+      fields.set(node.name, { required: node.required === true });
+    }
+    if (Array.isArray(node.children)) stack.push(...node.children);
+  }
+  const spec = actions.get(action);
+  if (!spec) throw new Error(`action \`${action}\` is not declared by the current Task UI`);
+  if (spec.kind === "options") {
+    const keys = Object.keys(object);
+    const unknown = keys.find((key) => key !== "choice" && key !== "label");
+    if (unknown) throw new Error(`unknown Task action data field \`${unknown}\``);
+    if (typeof object.choice !== "string") throw new Error("Task action requires data.choice");
+    if (Buffer.byteLength(object.choice) > MAX_FIELD_STRING_BYTES) {
+      throw new Error(`Task action data.choice exceeds ${MAX_FIELD_STRING_BYTES} bytes`);
+    }
+    const label = spec.options.get(object.choice);
+    if (typeof label !== "string") {
+      throw new Error(`unknown Task action choice: ${object.choice}`);
+    }
+    if (object.label !== undefined) {
+      if (typeof object.label !== "string") throw new Error("Task action data.label must be a string");
+      if (Buffer.byteLength(object.label) > MAX_FIELD_STRING_BYTES) {
+        throw new Error(`Task action data.label exceeds ${MAX_FIELD_STRING_BYTES} bytes`);
+      }
+      if (object.label !== label) {
+        throw new Error(`Task action data.label does not match choice \`${object.choice}\``);
+      }
+    }
+    return { settles: spec.settles, choiceLabel: label };
+  }
+  const keys = Object.keys(object);
+  if (keys.length > MAX_FIELDS) throw new Error(`Task action data exceeds ${MAX_FIELDS} fields`);
+  const unknown = keys.find((key) => !fields.has(key));
+  if (unknown) throw new Error(`unknown Task action data field \`${unknown}\``);
+  for (const [name, field] of fields) {
+    const value = object[name];
+    if (value === undefined) {
+      if (field.required) throw new Error(`Task action requires data.${name}`);
+      continue;
+    }
+    if (typeof value !== "string") throw new Error(`Task action data.${name} must be a string`);
+    if (Buffer.byteLength(value) > MAX_FIELD_STRING_BYTES) {
+      throw new Error(`Task action data.${name} exceeds ${MAX_FIELD_STRING_BYTES} bytes`);
+    }
+    if (field.required && value.length === 0) {
+      throw new Error(`Task action requires non-empty data.${name}`);
+    }
+  }
+  return { settles: spec.settles, choiceLabel: null };
+}
+
+function validateEmptyLifecycleData(action, data) {
+  if (data === undefined || data === null) return;
+  const object = actionDataObject(action, data);
+  if (Object.keys(object).length !== 0) throw new Error(`event ${action} data must be empty`);
+}
+
+function applyEventAction(frame) {
+  const item = events.find((event) => event.id === frame.event_id);
+  if (!item) throw new Error(`unknown event: ${frame.event_id}`);
+  const flow = eventFlows.get(item.id);
+  if (frame.action === "reopen") {
+    validateEmptyLifecycleData(frame.action, frame.data);
+    if (flow) {
+      applyEventFlowStage(item, flow, flow.reopenStage ?? Math.max(0, flow.current - 1));
+    } else {
+      upsertEvent({ ...item, status: "open" });
+    }
+    log("event_action", frame.event_id, frame.action, JSON.stringify(frame.data));
+    return;
+  }
+  if (["dismiss", "archive", "unarchive", "unsnooze"].includes(frame.action)) {
+    validateEmptyLifecycleData(frame.action, frame.data);
+    const next = frame.action === "dismiss"
+      ? { status: "done" }
+      : frame.action === "archive"
+        ? { archived: true }
+        : frame.action === "unarchive"
+          ? { archived: false }
+          : { snoozed_until: null };
+    upsertEvent({ ...item, ...next });
+    log("event_action", frame.event_id, frame.action, JSON.stringify(frame.data));
+    return;
+  }
+  if (frame.action === "snooze") {
+    const object = actionDataObject(frame.action, frame.data);
+    if (Object.keys(object).length !== 1 || typeof object.until !== "string"
+      || Buffer.byteLength(object.until) > MAX_FIELD_STRING_BYTES
+      || !Number.isFinite(Date.parse(object.until)) || Date.parse(object.until) <= Date.now()) {
+      throw new Error("snooze requires data.until as a future RFC3339 timestamp");
+    }
+    upsertEvent({ ...item, snoozed_until: object.until });
+    log("event_action", frame.event_id, frame.action, JSON.stringify(frame.data));
+    return;
+  }
+  if (item.status !== "open") throw new Error("only an open Task can accept generated actions");
+  const validated = validateGeneratedAction(item.ui, frame.action, frame.data);
+  if (flow) {
+    const transition = transitionFor(flow.stages[flow.current], frame);
+    if (transition && applyEventFlowStage(item, flow, transition.to)) {
+      log("event_action", frame.event_id, frame.action, JSON.stringify(frame.data));
+      return;
+    }
+  }
+  if (validated.settles) upsertEvent({ ...item, status: "done" });
+  log("event_action", frame.event_id, frame.action, JSON.stringify(frame.data));
+}
+
+function handleEventAction(ws, frame) {
+  try {
+    applyEventAction(frame);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ws.send(JSON.stringify({ type: "error", detail }));
+    log("event_action_rejected", frame.event_id, frame.action, detail);
+  }
 }
 
 // --- HTTP (blob content) + WS on the same port ------------------------------
@@ -638,12 +647,13 @@ const httpServer = createServer((req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const match = url.pathname.match(/^\/blob\/(.+)$/);
   if (req.method === "GET" && match) {
-    if (url.searchParams.get("token") !== TOKEN) {
+    const token = url.searchParams.get("token");
+    if (!acceptsToken(token)) {
       res.writeHead(403);
       res.end("forbidden");
       return;
     }
-    const blob = blobs.get(decodeURIComponent(match[1]));
+    const blob = tenants.get(token)?.blobs.get(decodeURIComponent(match[1]));
     if (!blob) {
       res.writeHead(404);
       res.end("not found");
@@ -666,11 +676,11 @@ const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (ws) => {
   let helloed = false;
-  clients.add(ws);
+  let tenant = null;
   log("connection opened");
 
   ws.on("close", () => {
-    clients.delete(ws);
+    tenant?.clients.delete(ws);
     log("connection closed");
   });
 
@@ -690,48 +700,60 @@ wss.on("connection", (ws) => {
         ws.close(1002, "expected hello first");
         return;
       }
-      if (frame.token !== TOKEN) {
+      if (!acceptsToken(frame.token)) {
         ws.send(JSON.stringify({ type: "error", detail: "invalid token" }));
         ws.close(1008, "invalid token");
         return;
       }
       helloed = true;
+      tenant = tenantForToken(frame.token);
+      tenant.clients.add(ws);
+      tenantContext.run(tenant, () => {
       const lastSeen = frame.last_seen_msg_id;
       const replayMessages =
         lastSeen === null || lastSeen === undefined
           ? messages.slice(-REPLAY_LIMIT)
           : messages.filter((m) => m.id > lastSeen);
-      const openItems = inbox.filter((i) => i.status === "open");
-      const doneItems = inbox
-        .filter((i) => i.status !== "open")
+      const openEvents = events.filter((event) => event.status === "open");
+      const doneEvents = events
+        .filter((event) => event.status !== "open")
         .slice(-ARCHIVED_REPLAY_LIMIT);
       ws.send(
         JSON.stringify({
           type: "hello_ok",
-          latest_msg_id: nextMsgId - 1,
+          latest_msg_id: runtime.nextMsgId - 1,
           messages: replayMessages,
-          pings: [...openItems, ...doneItems],
+          pings: [], // Legacy wire field; Tasks are carried by `events`.
+          events: [...openEvents, ...doneEvents],
           processes: processesForHello(),
-          side_chats: sideChatsForHello(),
+          model: {
+            current: { id: "gpt-5.6-sol", variant: "medium" },
+            available: [
+              {
+                id: "gpt-5.6-sol",
+                label: "GPT-5.6 Sol",
+                variants: ["low", "medium", "high", "xhigh", "max"],
+                default_variant: "medium",
+              },
+            ],
+          },
         }),
       );
       log("hello ok, replayed", replayMessages.length, "messages");
+      });
       return;
     }
 
+    tenantContext.run(tenant, () => {
     switch (frame.type) {
       case "send_message":
-        // v2.0: sc present routes to that side chat; absent is main (byte-
-        // identical to the pre-v2.0 wire shape).
-        if (frame.sc) handleSideSendMessage(frame);
-        else handleSendMessage(frame);
+        handleSendMessage(frame);
         break;
       case "upload_blob":
         handleUploadBlob(ws, frame);
         break;
       case "cancel_turn":
-        if (frame.sc) handleSideCancelTurn(frame);
-        else handleCancelTurn();
+        handleCancelTurn();
         break;
       case "cancel_queued":
         handleCancelQueued(ws, frame);
@@ -742,17 +764,8 @@ wss.on("connection", (ws) => {
       case "read_ping":
         handleReadPing(frame);
         break;
-      case "open_side_chat":
-        handleOpenSideChat(ws, frame);
-        break;
-      case "conclude_side_chat":
-        handleConcludeSideChat(frame);
-        break;
-      case "confirm_conclusion":
-        handleConfirmConclusion(frame);
-        break;
-      case "discard_side_chat":
-        handleDiscardSideChat(frame);
+      case "event_action":
+        handleEventAction(ws, frame);
         break;
       case "hello":
         ws.send(JSON.stringify({ type: "error", detail: "hello already sent" }));
@@ -760,6 +773,7 @@ wss.on("connection", (ws) => {
       default:
         ws.send(JSON.stringify({ type: "error", detail: `unknown frame type: ${frame.type}` }));
     }
+    });
   });
 });
 
@@ -768,7 +782,7 @@ wss.on("connection", (ws) => {
 function seedProcesses() {
   const ago = (mins) => new Date(Date.now() - mins * 60_000).toISOString();
   processes.push({
-    id: `proc-${nextProcSeq++}`,
+    id: `proc-${runtime.nextProcSeq++}`,
     kind: "monitor",
     label: "tail -n0 -F /var/log/deploy.log",
     agent: null,
@@ -779,7 +793,7 @@ function seedProcesses() {
     summary: "every 30s — fired: 'deploy complete: build 4821'",
   });
   processes.push({
-    id: `proc-${nextProcSeq++}`,
+    id: `proc-${runtime.nextProcSeq++}`,
     kind: "subagent",
     label: "Draft release notes for v1.4",
     agent: "writer",
@@ -789,24 +803,35 @@ function seedProcesses() {
     last_event_ts: ago(11),
     summary: "done — release notes drafted (2 revisions)",
   });
+  processes.push({
+    id: `proc-${runtime.nextProcSeq++}`,
+    kind: "subagent",
+    label: "Check the release candidate against the deployment runbook",
+    agent: "release-reviewer",
+    model: "gpt-5.5",
+    state: "running",
+    started_ts: ago(8),
+    last_event_ts: ago(1),
+    summary: "verifying rollback and health-check steps…",
+  });
 }
 
-if (process.env.MOCK_SEED !== "none") seedProcesses();
-
-/** Seed a short chat + two open Inbox Items so the Tray, Side Chats, and the
- * Done section have content on first load (dev/demo only). */
-function seedInbox() {
+/** Seed a short transcript and three typed Tasks so the default task world has
+ * meaningful open and settled states on first load (dev/demo only). */
+function seedEvents() {
   const ago = (mins) => new Date(Date.now() - mins * 60_000).toISOString();
   const push = (author, body, ref = null, ts = now()) => {
-    const m = { id: nextMsgId++, author, body, ref, ts, attachments: [], tool_calls: [] };
+    const m = { id: runtime.nextMsgId++, author, body, ref, ts, attachments: [], tool_calls: [], mentions: [] };
     messages.push(m);
     return m;
   };
   push("owner", "morning — anything need me?", null, ago(30));
   const a1 = push("agent", "Deploy of build 4821 is staged and green. Ship it to prod now?", messages.at(-1).id, ago(29));
   const a2 = push("agent", "The auth refactor branch is ready to merge — want me to open the PR?", a1.id, ago(20));
-  inbox.push({
-    id: nextInboxId++,
+  const deploy = {
+    id: runtime.nextEventId++,
+    kind: "judgment",
+    source: { kind: "monitor", ref: "deploy-watch" },
     name: "deploy-4821",
     description: "Ship the staged prod build?",
     content: "**Deploy build 4821 to prod?**\n\nTests are green and the staging smoke passed.",
@@ -816,37 +841,119 @@ function seedInbox() {
       { value: "ship it", label: "Ship it" },
       { value: "hold off", label: "Hold off" },
     ],
+    blocking: true,
+    ui: [
+      { type: "eyebrow", tone: "accent", text: "Production boundary" },
+      { type: "heading", text: "Ship build 4821 to production?" },
+      { type: "text", tone: "muted", text: "Staging smoke and required checks are green." },
+      {
+        type: "optionList",
+        action: "advance",
+        settles: false,
+        options: [
+          { key: "A", label: "Ship now", detail: "Promote the staged artifact", recommended: true },
+          { key: "B", label: "Hold", detail: "Leave production unchanged" },
+        ],
+      },
+    ],
     status: "open",
+    read: false,
     ts: ago(29),
+  };
+  events.push(deploy);
+  eventFlows.set(deploy.id, {
+    current: 0,
+    reopenStage: 1,
+    stages: [
+      {
+        status: "open",
+        description: "Ship the staged prod build?",
+        ui: deploy.ui,
+        transitions: [{ action: "advance", choice: "A", to: 1 }],
+      },
+      {
+        status: "open",
+        description: "Canary is healthy — promote production?",
+        ui: [
+          { type: "eyebrow", tone: "accent", text: "Canary checkpoint" },
+          { type: "heading", text: "Canary is healthy. Promote production?" },
+          { type: "status", state: "success", label: "5% canary · 0 errors · p95 184ms" },
+          { type: "text", tone: "muted", text: "The staged artifact has passed the live canary window." },
+          {
+            type: "optionList",
+            action: "choose",
+            options: [
+              { key: "A", label: "Promote to 100%", detail: "Complete the production rollout", recommended: true },
+              { key: "B", label: "Roll back canary", detail: "Return production to the previous build" },
+            ],
+          },
+        ],
+        transitions: [
+          { action: "choose", choice: "A", to: 2 },
+          { action: "choose", choice: "B", to: 3 },
+        ],
+      },
+      {
+        status: "done",
+        description: "Build 4821 is live and healthy",
+        ui: [
+          { type: "eyebrow", tone: "accent", text: "Production complete" },
+          { type: "heading", text: "Build 4821 is live" },
+          { type: "status", state: "success", label: "100% · healthy" },
+        ],
+      },
+      {
+        status: "done",
+        description: "Canary rolled back; production unchanged",
+        ui: [
+          { type: "eyebrow", text: "Production unchanged" },
+          { type: "heading", text: "Canary rolled back" },
+          { type: "status", state: "neutral", label: "Previous build remains live" },
+        ],
+      },
+    ],
   });
-  inbox.push({
-    id: nextInboxId++,
+  events.push({
+    id: runtime.nextEventId++,
+    kind: "judgment",
+    source: { kind: "agent", ref: "hirsel" },
     name: "auth-pr",
     description: "Open the PR for the auth refactor branch",
     content: "Auth refactor branch is ready — I can open the PR whenever you like.",
     anchor: a2.id,
-    requires_response: false,
+    requires_response: true,
     quick_replies: [],
+    ui: [
+      { type: "heading", text: "Open the auth refactor PR?" },
+      { type: "text", tone: "muted", text: "The branch is ready for review." },
+      { type: "field", name: "reviewer", label: "Reviewer", placeholder: "required", required: true },
+      { type: "submit", action: "submit", label: "Open PR" },
+    ],
     status: "open",
     read: true,
     ts: ago(20),
   });
-  inbox.push({
-    id: nextInboxId++,
+  events.push({
+    id: runtime.nextEventId++,
+    kind: "summary",
+    source: { kind: "scheduled", ref: "nightly-backup" },
     name: "nightly-backup",
     description: "Nightly backup verified — 0 errors",
     content: "Nightly backup completed and verified. Nothing needed from you.",
     anchor: a2.id,
     requires_response: false,
     quick_replies: [],
+    ui: [
+      { type: "heading", text: "Nightly backup verified" },
+      { type: "status", state: "success", label: "0 errors" },
+    ],
     status: "done",
     read: true,
     ts: ago(40),
   });
 }
 
-if (process.env.MOCK_SEED !== "none") seedInbox();
-
 httpServer.listen(PORT, () => {
-  log(`listening on ws://localhost:${PORT} + http blobs at /blob/:id (token: ${TOKEN})`);
+  const auth = TOKEN ? `token: ${TOKEN}` : "any non-empty token";
+  log(`listening on ws://localhost:${PORT} + http blobs at /blob/:id (${auth})`);
 });

@@ -132,15 +132,10 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       closeClient = () => getClient()?.close();
 
       const screen = render(() => <App />);
-      // Cutover (ADR-0012): Chat is the drill-in shell off the scroller home;
-      // this scenario drives the chat transcript, so drill in.
-      store.goToChatDrillIn();
       await screen.findByText("Ready.");
 
       // Send the trigger word.
-      const composer = (await screen.findByPlaceholderText(
-        "Message the Agent…",
-      )) as HTMLTextAreaElement;
+      const composer = (await screen.findByLabelText("Message Hirsel")) as HTMLTextAreaElement;
       fireEvent.input(composer, { target: { value: "timeline" } });
       fireEvent.click(screen.getByLabelText("Send"));
       await screen.findByText("timeline");
@@ -210,7 +205,11 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       await screen.findByText("seq keeps the tool between the two prose blocks.");
       checklist.push("reasoning row collapsed by default, expands to its text on click");
 
-      // 5. Commit: an agent message + idle collapses the live timeline.
+      // 5. Commit: idle + an agent message collapses the live timeline. The
+      // real Host publishes the idle boundary from the observation bridge the
+      // moment the session commits and only then broadcasts the message from
+      // the turn pump, so idle-before-msg is the order to prove.
+      host.push({ type: "agent_activity", state: "idle", text: null });
       host.push({
         type: "msg",
         message: {
@@ -223,7 +222,6 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
           tool_calls: [{ name: "read_file", ok: true }],
         },
       });
-      host.push({ type: "agent_activity", state: "idle", text: null });
 
       await screen.findByText("Checked the reducer — no changes needed.");
       await waitFor(() => expect(timeline()).toBeNull());

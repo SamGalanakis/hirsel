@@ -1,4 +1,4 @@
-// Optimistic decide→resolve with undo for the typed event queue (ADR-0012),
+// Optimistic Task settlement/reopen with undo (typed Event wire contract).
 // Deciding a judgment (choosing an
 // option, submitting fields, or accepting the recommendation) posts an
 // `event_action` to the host IMMEDIATELY and flips the card to decided at once
@@ -6,7 +6,7 @@
 // `done` event_upsert). A ~5s "Undo" toast offers recovery: it re-opens the
 // event on the host via an `event_action{action:"reopen"}` (the Done-as-toggle
 // peer of a decide) and optimistically un-flips it. Reopen wiring is the same
-// recovery machinery Pings use; the host side lands with the event cutover.
+// recovery machinery used by the legacy wire lifecycle.
 
 import { dispatch } from "../store/store";
 import { getClient } from "../ws/client";
@@ -75,7 +75,7 @@ export function reopenEvent(eventId: number): void {
 }
 
 /** Awareness auto-read: flip `read` locally for an instant chip, AND round-trip
- * it on the wire — events share the ping id space, so `read_ping` is the read
+ * it on the wire — Tasks share the legacy id space, so `read_ping` is the read
  * op. Without the wire half the flag lived in client RAM only: every `hello_ok`
  * full replace reverted the chip to "new" and a second device never learned.
  * The host broadcasts the updated event back, reconciling the local flip. */

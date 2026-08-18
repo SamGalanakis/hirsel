@@ -1,11 +1,6 @@
-// Cross-surface focus handoff between the two composers that can be on screen
-// at once (main Chat + an open Side Chat). Exactly one composer should hold
-// focus at a time (design: "visible focus cues, one composer focused"), so
-// leaving/closing a side chat returns focus to the main composer where the
-// Owner's next keystroke would go. DOM-query based (rather than a passed ref)
-// so it works across the component boundary without threading a ref through
-// ChatView → SideChatSheet. Deferred a microtask so it runs after the sheet's
-// own teardown has settled.
+// Focus handoff for the standing Hirsel composer and the flat task index.
+// DOM-query based so summoned utilities can return attention without threading
+// refs through the shell. Deferred a microtask so it runs after teardown.
 
 import { createSignal, onCleanup } from "solid-js";
 
@@ -34,14 +29,14 @@ export function focusMainComposer(): void {
   });
 }
 
-/** Move focus into the desktop Feed column so its keyboard map (J/K, options,
- * Discuss) is live — the desktop-unified peer of `focusMainComposer` for the
- * `g f` / `g i` chords. The column root carries `tabindex=-1` + the data attr so
- * it can hold focus. No-op below the rail breakpoint (the column isn't mounted;
- * the phone chord navigates home instead). */
-export function focusFeedColumn(): void {
+/** Move focus to the open task, or the first task when the global field is
+ * active. This is the task-world peer of `focusMainComposer`. */
+export function focusTaskIndex(): void {
   queueMicrotask(() => {
-    document.querySelector<HTMLElement>("[data-feed-column]")?.focus();
+    const nav = document.querySelector<HTMLElement>('[data-slot="task-index"]');
+    const task = nav?.querySelector<HTMLElement>('[aria-current="page"]') ??
+      nav?.querySelector<HTMLElement>("button");
+    task?.focus();
   });
 }
 
@@ -56,22 +51,28 @@ const FOCUSABLE_SELECTOR = [
 
 function focusablesWithin(panel: HTMLElement): HTMLElement[] {
   return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    // Skip hidden nodes; `offsetParent === null` catches display:none ancestors.
-    // The active element is kept even if the check is fooled (e.g. jsdom, where
-    // layout is not computed), so tabbing never dead-ends.
-    (el) => el.offsetParent !== null || el === document.activeElement,
+    (el) => {
+      if (el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      return Array.from(el.getClientRects()).some((rect) => rect.width > 0 && rect.height > 0);
+    },
   );
+}
+
+interface LiveFocusTrap {
+  id: symbol;
+  getPanel: () => HTMLElement | undefined | null;
 }
 
 // A module-level stack so nested overlays compose: only the topmost live trap
 // handles Tab/Escape and owns Tab-trapping, so opening a confirm dialog over a
 // sheet transfers control to the dialog and hands it back on close, without the
-// two traps fighting over focus.
-const trapStack: symbol[] = [];
+// two traps fighting over focus. Keeping the panel getter also lets cleanup
+// distinguish a nested-dialog handoff from a different utility taking over.
+const trapStack: LiveFocusTrap[] = [];
 
-/** Whether any modal overlay / focus trap is currently open (the Side Chat
- * sheet, its confirm/discard dialogs, the Lightbox, the Processes/Settings
- * sheets — anything built on `createFocusTrap`). Callers use this to yield Esc:
+/** Whether any modal overlay / focus trap is currently open. Callers yield Esc:
  * an Esc meant to dismiss an open overlay must not also trigger a background
  * action (e.g. the main composer stopping a live agent turn). Derived from the
  * trap stack so it stays accurate as overlays open and close. */
@@ -85,12 +86,34 @@ export interface FocusTrapOptions {
   onEscape?: () => void;
   /** Gate Tab-trapping: return false to move initial focus + handle Escape +
    * restore focus, but leave Tab free (e.g. a desktop in-flow side rail beside a
-   * still-live main chat, where trapping Tab would strand the keyboard). Omitted
+   * still-live standing conversation, where trapping Tab would strand the keyboard). Omitted
    * = always trap (a true modal). Re-evaluated on each Tab. */
   trapTab?: () => boolean;
-  /** Element to restore focus to on cleanup; defaults to whatever was focused
-   * when the trap was created (the trigger). */
+  /** Preferred element to restore focus to on cleanup; re-evaluated after the
+   * panel unmounts so a responsive trigger can become the correct destination
+   * while the utility is open. Falls back to whatever was focused when the
+   * trap was created. */
   restoreTo?: () => HTMLElement | null | undefined;
+}
+
+/** The stable trigger used when a phone utility sheet is dismissed. It remains
+ * mounted while a utility is open, unlike the portaled menu item that launched
+ * it. Kept here so every utility uses exactly the same restoration contract. */
+export function phoneUtilityRestoreTarget(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-slot="phone-overflow-trigger"]');
+}
+
+/** Processes has its own standing header control, so its inspector returns to
+ * that control instead of the unrelated utility overflow. */
+export function processesRestoreTarget(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-slot="processes-trigger"]');
+}
+
+function canReceiveRestoredFocus(element: HTMLElement | null | undefined): element is HTMLElement {
+  if (!element?.isConnected || element.hasAttribute("disabled")) return false;
+  if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+  const style = window.getComputedStyle?.(element);
+  return style?.display !== "none" && style?.visibility !== "hidden";
 }
 
 /** Focus management for an overlay panel: move focus into it on mount, trap Tab
@@ -104,20 +127,39 @@ export function createFocusTrap(
   options: FocusTrapOptions = {},
 ): void {
   const id = Symbol("focus-trap");
-  const restoreEl = (options.restoreTo?.() ?? (document.activeElement as HTMLElement | null)) ?? null;
-  trapStack.push(id);
+  const capturedRestoreEl = (document.activeElement as HTMLElement | null) ?? null;
+  trapStack.push({ id, getPanel });
 
-  const isTopmost = () => trapStack[trapStack.length - 1] === id;
+  const isTopmost = () => trapStack[trapStack.length - 1]?.id === id;
   const shouldTrapTab = () => options.trapTab?.() ?? true;
 
-  // Move initial focus into the panel, deferred a microtask so the panel's own
-  // mount (and any autofocus below it) has settled first.
-  queueMicrotask(() => {
+  // Move initial focus after the next paint. Overlay/menu libraries commonly
+  // restore focus to their trigger during teardown; a microtask here races
+  // that restoration and can leave a freshly-opened sheet focused behind
+  // itself. One animation frame lets both the old overlay and responsive CSS
+  // settle, so visibility is measured against the UI the user can actually see.
+  let ensureFocusFrame: number | null = null;
+  const ensureVisibleFocus = () => {
     if (!isTopmost()) return;
     const panel = getPanel();
-    if (!panel || panel.contains(document.activeElement)) return;
-    (focusablesWithin(panel)[0] ?? panel).focus();
-  });
+    if (!panel) return;
+    const active = document.activeElement as HTMLElement | null;
+    const visibleItems = focusablesWithin(panel);
+    if (active === panel || (active !== null && visibleItems.includes(active))) return;
+    (visibleItems[0] ?? panel).focus();
+  };
+  const scheduleVisibleFocus = () => {
+    if (ensureFocusFrame !== null) window.cancelAnimationFrame(ensureFocusFrame);
+    ensureFocusFrame = window.requestAnimationFrame(() => {
+      ensureFocusFrame = null;
+      ensureVisibleFocus();
+    });
+  };
+  queueMicrotask(scheduleVisibleFocus);
+  // A desktop inspector can become a modal sheet without remounting. Its
+  // desktop close button then has a zero box while still being active; repair
+  // that handoff after the viewport settles.
+  window.addEventListener("resize", scheduleVisibleFocus);
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (!isTopmost()) return;
@@ -137,25 +179,77 @@ export function createFocusTrap(
     }
     const first = items[0];
     const last = items[items.length - 1];
-    if (e.shiftKey) {
-      if (active === first || !panel.contains(active)) {
-        e.preventDefault();
-        last.focus();
-      }
-    } else if (active === last || !panel.contains(active)) {
-      e.preventDefault();
-      first.focus();
-    }
+    const activeIndex = active === null ? -1 : items.indexOf(active);
+    const next = e.shiftKey
+      ? activeIndex <= 0 ? last : items[activeIndex - 1]
+      : activeIndex === -1 || active === last ? first : items[activeIndex + 1];
+    // A portaled modal's descendants are not guaranteed to be contiguous in
+    // the document-wide tab order. Own every modal Tab step rather than only
+    // wrapping the edges, so focus cannot visit background controls between
+    // two controls that are both inside the panel.
+    e.preventDefault();
+    // Run in the window capture phase and stop this Tab completely. Portal and
+    // overlay libraries may install their own bubbling focus restoration; if
+    // they run after this handler they can move focus back outside the still
+    // open modal. A true modal owns the entire Tab gesture.
+    e.stopImmediatePropagation();
+    next.focus();
   };
 
-  window.addEventListener("keydown", onKeyDown);
+  const onFocusIn = (event: FocusEvent) => {
+    if (!isTopmost() || !shouldTrapTab()) return;
+    const panel = getPanel();
+    const target = event.target;
+    if (!panel || !(target instanceof HTMLElement)) return;
+    if (target === panel || focusablesWithin(panel).includes(target)) return;
+    // Overlay libraries may restore their trigger while a menu tears down.
+    // Reclaim on the next paint, after that restoration stack has settled, to
+    // avoid a synchronous focus tug-of-war while keeping the open modal owned.
+    scheduleVisibleFocus();
+  };
+
+  // Live process rows can change representation as they finish. If the
+  // focused row is replaced, browsers move focus to BODY without a useful
+  // focusin target. Observe the modal subtree and repair that handoff after
+  // Solid has completed the DOM mutation.
+  const panelObserver = new MutationObserver(() => {
+    if (!shouldTrapTab()) return;
+    queueMicrotask(ensureVisibleFocus);
+  });
+  const observedPanel = getPanel();
+  if (observedPanel) {
+    panelObserver.observe(observedPanel, { childList: true, subtree: true });
+  }
+
+  window.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("focusin", onFocusIn);
 
   onCleanup(() => {
-    window.removeEventListener("keydown", onKeyDown);
-    const i = trapStack.lastIndexOf(id);
+    if (ensureFocusFrame !== null) window.cancelAnimationFrame(ensureFocusFrame);
+    window.removeEventListener("resize", scheduleVisibleFocus);
+    window.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("focusin", onFocusIn);
+    panelObserver.disconnect();
+    const i = trapStack.findIndex((trap) => trap.id === id);
     if (i !== -1) trapStack.splice(i, 1);
-    // Restore focus to the trigger, deferred so it lands after the panel has
-    // unmounted (otherwise focus would bounce back into the disappearing node).
-    queueMicrotask(() => restoreEl?.focus?.());
+    // Resolve the preferred target after teardown. This matters when a desktop
+    // inspector becomes a phone sheet while it is open: the visible phone
+    // overflow is now the honest destination even though it was not the launch
+    // target. A newly-opened sibling utility retains focus; a nested overlay may
+    // only hand focus back to an element inside the still-live parent panel.
+    queueMicrotask(() => {
+      const preferred = options.restoreTo?.();
+      const target = canReceiveRestoredFocus(preferred)
+        ? preferred
+        : canReceiveRestoredFocus(capturedRestoreEl)
+          ? capturedRestoreEl
+          : null;
+      const parentTrap = trapStack[trapStack.length - 1];
+      if (parentTrap) {
+        if (target && parentTrap.getPanel()?.contains(target)) target.focus();
+        return;
+      }
+      target?.focus();
+    });
   });
 }

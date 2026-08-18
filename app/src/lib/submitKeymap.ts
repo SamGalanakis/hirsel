@@ -1,5 +1,5 @@
-// The composer submit keymap, shared verbatim by the main Composer, the Inbox
-// inline ReplyInput, and the Side Chat composer so the three never drift apart.
+// The composer submit keymap, shared by standing and compact input surfaces so
+// submit behavior never drifts apart.
 // Each caller layers its own surface-specific keys (the @-mention picker, Esc
 // stop/cancel, Tab-to-queue) around this call — those differ per surface — but
 // the common core (Cmd/Ctrl+Enter send, the coarse-pointer guard, Enter-send,
@@ -16,7 +16,7 @@ export interface SubmitKeymapHandlers {
   onSend: () => void;
   /** ArrowUp on an empty input recalls the last owner message. Return the text
    * to recall, or null when there is nothing to recall. Omit to disable recall
-   * entirely (the Inbox ReplyInput has no history to walk). */
+   * entirely when a compact input has no history to walk. */
   recallLast?: () => string | null;
   /** Apply a recalled draft: set the value and move the caret to the end. */
   onRecall?: (text: string) => void;

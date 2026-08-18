@@ -1,27 +1,26 @@
 // Pure reducer over the client's protocol-facing state. Kept free of any
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
-import type { ChatMessage, EventItem, ProcessInfo, ViewInstance } from "../protocol";
+import type { EventItem, ProcessInfo, ViewInstance } from "../protocol";
 import type {
   Action,
   AppState,
   DisplayMessage,
   PendingSend,
-  SideChatState,
   TimelineEvent,
   Upload,
 } from "./types";
 
 /** Cap on retained finished-turn timelines (session memory for "turn details").
- * A live chat session has few turns; this only guards a pathological long run. */
+ * A live conversation has few turns; this only guards a pathological long run. */
 const TURN_DETAILS_LIMIT = 50;
 
-/** Hard cap on the in-memory chat history (D10). An always-open PWA would
+/** Hard cap on the in-memory conversation history (D10). An always-open PWA would
  * otherwise grow `messages` without bound across a multi-day session — every
  * append is O(n) to render and the unseen scan is O(n) per scroll. We keep the
  * most-recent slice; older rows fall out of memory (the host still holds the
  * canonical history, replayed from `last_seen` on reconnect). Comfortably larger
- * than the render window (see ChatView) so "load older" has headroom. Oldest are
+ * than the visible conversation window so "load older" has headroom. Oldest are
  * dropped from the FRONT, so optimistic sends (always newest, at the tail) and
  * the reconciliation that matches them are never disturbed. */
 export const MESSAGES_CAP = 600;
@@ -98,15 +97,12 @@ function trimTrailingProse(events: TimelineEvent[], body: string): TimelineEvent
 /** Freeze the just-finished turn's timeline onto the committing message id,
  * dropping the oldest retained turn once over the session cap.
  *
- * `turnDetails` has the identical `Record<key, TimelineEvent[]>` shape as
- * `sideChats` and shares its latent hazard (see cloneSideChat/setSideChat's
- * notes): `details` may be a live reactive store proxy, so a plain
+ * `details` may be a live reactive store proxy, so a plain
  * `{ ...details, [msgId]: events }` copies the *other* entries' array
  * references verbatim rather than cloning their contents. Feeding one of
  * those live references back into a store write — even nested inside an
- * otherwise-fresh wrapper object — is what caused sideChats' same-length
- * array replacement to intermittently land empty. Every entry (the new one
- * and every carried-over one) gets a fresh array here for the same reason. */
+ * otherwise-fresh wrapper object can make a same-length array replacement
+ * land empty. Every entry gets a fresh array here for that reason. */
 function retainTurnDetails(
   details: Record<number, TimelineEvent[]>,
   msgId: number,
@@ -164,82 +160,6 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
   return { ...state, messages: capMessages([...state.messages, message]) };
 }
 
-/** Same idea as `reconcileOrAppend`, scoped to one side chat's own message
- * list. Side sends are text-only (no attachments/mode), so this is a smaller
- * shape: it just returns the next list plus the reconciled clientId (if any)
- * so the caller can drop the matching `pendingSideSends` entry. */
-function reconcileSideMessages(
-  messages: DisplayMessage[],
-  message: DisplayMessage,
-): { messages: DisplayMessage[]; reconciledClientId: string | null } {
-  if (messages.some((m) => !m.pending && m.id === message.id)) {
-    return { messages, reconciledClientId: null };
-  }
-  if (message.author === "owner") {
-    const idx = messages.findIndex((m) => m.pending && m.body === message.body);
-    if (idx !== -1) {
-      const reconciled = messages[idx];
-      const next = messages.slice();
-      next[idx] = { ...message };
-      return { messages: next, reconciledClientId: reconciled.clientId ?? null };
-    }
-  }
-  return { messages: [...messages, message], reconciledClientId: null };
-}
-
-/** Shallow-clone a SideChatState, including FRESH references for its two
- * array fields. `state` (the reducer's input) may be a live reactive store
- * proxy (see store.ts's `appSnapshot`): spreading it copies key/value pairs
- * but not nested array *contents*, so a carried-over `messages`/`turnEvents`
- * stays the exact same tracked array reference. Feeding that same reference
- * back into a store write — even nested inside an otherwise-fresh wrapper
- * object — confused Solid's merge on the *next* write to that path (traced
- * to an empty `messages` after a resume's `side_chat_open`). Spread this
- * before layering further overrides, everywhere an existing/current
- * SideChatState is carried into a new one. */
-function cloneSideChat(sideChat: SideChatState): SideChatState {
-  return { ...sideChat, messages: [...sideChat.messages], turnEvents: [...sideChat.turnEvents] };
-}
-
-/** Set (insert or replace) one entry in the sideChats map, cloning every
- * OTHER entry through too rather than letting it ride along as a live store
- * reference embedded in the otherwise-fresh returned object — the same
- * hazard `cloneSideChat` guards against, just at the map level instead of a
- * single entry. `value` should already be a fresh SideChatState (built via
- * `cloneSideChat(existing)` plus overrides, or `freshSideChat`). Side chat
- * counts are small (a handful at most, per the critique's "multiple side
- * chats" case), so cloning every entry on every update is cheap. */
-function setSideChat(
-  sideChats: AppState["sideChats"],
-  sc: string,
-  value: SideChatState,
-): AppState["sideChats"] {
-  const next: AppState["sideChats"] = {};
-  for (const [key, existing] of Object.entries(sideChats)) {
-    next[key] = key === sc ? value : cloneSideChat(existing);
-  }
-  if (!(sc in next)) next[sc] = value;
-  return next;
-}
-
-/** A fresh SideChatState for a side chat the client has just learned is live
- * (opened, resumed, or seeded from `hello_ok.side_chats`). */
-function freshSideChat(sc: string, pingId: number, messages: ChatMessage[]): SideChatState {
-  return {
-    sc,
-    pingId,
-    messages,
-    agentActivity: { state: "idle", text: null },
-    turnEvents: [],
-    drafting: false,
-    draft: null,
-    confirming: false,
-    discarding: false,
-    pingResolved: false,
-    ended: false,
-  };
-}
-
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "hello_ok": {
@@ -289,30 +209,10 @@ export function reduce(state: AppState, action: Action): AppState {
         pendingSends = pendingSends.filter((p) => p.clientId !== reconciled.clientId);
       }
 
-      // v2.0: reconcile live side chats against hello_ok.side_chats. A sc
-      // still listed survives untouched (its hydrated state, if any, is kept
-      // as-is — the resume flow re-fetches the transcript via open_side_chat,
-      // which is idempotent). A sc that was hydrated but has now vanished
-      // either resolved while offline (this client asked for the close, so
-      // the outcome is already known — drop it silently) or was closed
-      // elsewhere/reaped (mark it `ended` so a currently-open sheet shows the
-      // graceful terminal state instead of just disappearing).
-      const sideChatRefs = action.payload.side_chats ?? [];
-      const liveScs = new Set(sideChatRefs.map((r) => r.sc));
-      const sideChats: AppState["sideChats"] = {};
-      for (const [sc, sideChat] of Object.entries(state.sideChats)) {
-        if (liveScs.has(sc)) {
-          sideChats[sc] = cloneSideChat(sideChat);
-        } else if (!sideChat.confirming && !sideChat.discarding) {
-          sideChats[sc] = { ...cloneSideChat(sideChat), ended: true };
-        }
-        // else: resolved while offline as expected — drop.
-      }
-
       return {
         ...state,
         messages: capMessages([...merged, ...pending]),
-        // Typed event queue (ADR-0012): the snapshot's event set is
+        // Task snapshot: the compatibility wire's Event set is
         // authoritative on reconnect — a full replace (an event resolved while
         // offline is reflected). Defensive default so a malformed
         // frame can't white-screen the app.
@@ -328,10 +228,6 @@ export function reduce(state: AppState, action: Action): AppState {
         eventArchiveOverrides: state.eventArchiveOverrides.filter((id) =>
           (action.payload.events ?? []).some((e) => e.id === id && e.archived !== true),
         ),
-        // Signal the wholesale event-set swap to the queue scroller so it
-        // re-anchors its viewport and drops per-session bookkeeping (see
-        // AppState.eventsSnapshotSeq).
-        eventsSnapshotSeq: state.eventsSnapshotSeq + 1,
         lastSeenMsgId: latest_msg_id,
         // Keep the last reported host version if this frame (or an older host)
         // omits it, so a resync never regresses About to "Not reported".
@@ -347,8 +243,7 @@ export function reduce(state: AppState, action: Action): AppState {
         // already-shown messages are kept (session memory, orthogonal to sync).
         processes: action.payload.processes ?? [],
         turnEvents: [],
-        sideChatRefs,
-        sideChats,
+        lastTurnEvents: [],
         // Generative-UI tier: the snapshot's view set is authoritative on
         // reconnect — a full replace (a view cleared while offline is gone).
         // Defensive default like processes so a malformed frame can't
@@ -364,40 +259,27 @@ export function reduce(state: AppState, action: Action): AppState {
       if (state.removedIds.includes(message.id)) return state;
       const next = reconcileOrAppend(state, message);
 
-      // v2.0 provenance (client-derived; no wire marker): a plain owner reply
-      // whose ref matches an anchor a confirm_conclusion just targeted is the
-      // conclusion landing in main chat. Tag it for the footer chip and fire
-      // the one-shot "land and highlight" signal ChatView consumes.
-      let awaitingConclusions = next.awaitingConclusions;
-      let conclusionChips = next.conclusionChips;
-      let lastConclusion = next.lastConclusion;
-      if (message.author === "owner" && message.ref !== null && awaitingConclusions[message.ref]) {
-        const sc = awaitingConclusions[message.ref];
-        const rest = { ...awaitingConclusions };
-        delete rest[message.ref];
-        awaitingConclusions = rest;
-        conclusionChips = [...conclusionChips, message.id].slice(-500);
-        lastConclusion = { sc, messageId: message.id };
-      }
-
       // A committed agent message ends the turn: freeze its live timeline into
       // session memory keyed to this message (the "turn details" affordance),
-      // then clear the ephemeral live buffer. The timeline's trailing prose
-      // block is dropped first when it just restates the committed body (see
-      // trimTrailingProse) — otherwise the expander's last row would be a
-      // verbatim repeat of the message everyone can already read. Only stash
-      // a non-empty (post-trim) timeline.
+      // then clear the ephemeral live buffer. The timeline is normally still
+      // live, but the Host's idle boundary usually beats the message it
+      // belongs to onto the wire (see `lastTurnEvents`), in which case the
+      // just-ended turn's events are parked there instead — either way the
+      // commit freezes them. The timeline's trailing prose block is dropped
+      // first when it just restates the committed body (see trimTrailingProse)
+      // — otherwise the expander's last row would be a verbatim repeat of the
+      // message everyone can already read. Only stash a non-empty (post-trim)
+      // timeline.
       const commits = message.author === "agent";
-      const frozenEvents = commits ? trimTrailingProse(state.turnEvents, message.body) : state.turnEvents;
+      const liveEvents = state.turnEvents.length > 0 ? state.turnEvents : state.lastTurnEvents;
+      const frozenEvents = commits ? trimTrailingProse(liveEvents, message.body) : state.turnEvents;
       const stash = commits && frozenEvents.length > 0;
       return {
         ...next,
-        awaitingConclusions,
-        conclusionChips,
-        lastConclusion,
         lastSeenMsgId:
           state.lastSeenMsgId === null ? message.id : Math.max(state.lastSeenMsgId, message.id),
         turnEvents: commits ? [] : next.turnEvents,
+        lastTurnEvents: commits ? [] : next.lastTurnEvents,
         turnDetails: stash
           ? retainTurnDetails(state.turnDetails, message.id, frozenEvents)
           : next.turnDetails,
@@ -429,9 +311,18 @@ export function reduce(state: AppState, action: Action): AppState {
           state: action.payload.state,
           text: action.payload.text,
         },
-        // Turn boundary: idle clears the live timeline (a cancelled turn may go
-        // idle without a committed message; its partial timeline is dropped).
+        // Turn boundary: idle ends the live timeline, so it stops rendering
+        // under the thinking marker — but the committing agent message lands
+        // AFTER this frame (the Host publishes idle from the observation
+        // bridge and the message from the turn pump), so the events are parked
+        // in `lastTurnEvents` for that commit to freeze rather than dropped.
+        // A cancelled turn goes idle with no commit to follow; its parked
+        // timeline is simply discarded when the next turn starts.
         turnEvents: action.payload.state === "idle" ? [] : state.turnEvents,
+        lastTurnEvents:
+          action.payload.state === "idle" && state.turnEvents.length > 0
+            ? state.turnEvents
+            : state.lastTurnEvents,
       };
 
     case "process_upsert":
@@ -443,6 +334,10 @@ export function reduce(state: AppState, action: Action): AppState {
     case "turn_event":
       return {
         ...state,
+        // A turn event after an idle boundary belongs to a NEW turn: whatever
+        // the previous turn parked is now stale (its commit either landed or
+        // never will) and must not attach to this turn's message.
+        lastTurnEvents: [],
         turnEvents: upsertTurnEvent(state.turnEvents, {
           seq: action.payload.seq,
           event: action.payload.event,
@@ -450,41 +345,7 @@ export function reduce(state: AppState, action: Action): AppState {
         }),
       };
 
-    case "ping_upsert": {
-      const ping = action.payload.ping;
-      // Edge case (critique, binding): the Agent can resolve a Ping while its
-      // side chat is still open. Don't kill the sheet — flag a non-blocking
-      // banner; Conclude/Discard both remain available. Fully derivable here,
-      // so no separate action/dispatch is needed for it.
-      let sideChats = state.sideChats;
-      if (ping.status !== "open") {
-        const hasResolvable = Object.values(state.sideChats).some(
-          (sc) => sc.pingId === ping.id && !sc.pingResolved,
-        );
-        // Guarded so the common case (no matching live side chat) leaves
-        // `sideChats` as the untouched live reference — cheap, and safe,
-        // since nothing rebuilds a fresh wrapper around it in that case. Once
-        // something IS changing, every entry (not just the matching one) is
-        // cloned through, not just aliased into the fresh map (see
-        // cloneSideChat's note on why a live reference can't ride along).
-        if (hasResolvable) {
-          const next: AppState["sideChats"] = {};
-          for (const [sc, sideChat] of Object.entries(state.sideChats)) {
-            next[sc] =
-              sideChat.pingId === ping.id && !sideChat.pingResolved
-                ? { ...cloneSideChat(sideChat), pingResolved: true }
-                : cloneSideChat(sideChat);
-          }
-          sideChats = next;
-        }
-      }
-      return {
-        ...state,
-        sideChats,
-      };
-    }
-
-    // ---- Typed event queue (ADR-0012) ----
+    // ---- Task collection (typed Event wire frames) ----
 
     case "event_upsert": {
       const event = action.payload.event;
@@ -680,203 +541,6 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "connection_status":
       return { ...state, connection: action.status };
-
-    // ---- v2.0 side chats (ADR-0008) ----
-    // Every case below only ever touches `sideChats[sc]` / `sideChatRefs` /
-    // `pendingSideSends` / `awaitingConclusions` — never `messages`,
-    // `agentActivity`, or `turnEvents` — which is the structural guarantee
-    // that sc-scoped routing can never leak into (or read from) main state.
-
-    case "side_chat_open": {
-      // Idempotent per Ping (protocol v2.0): resuming a live side chat answers
-      // with the SAME sc and its transcript so far, so this both creates a
-      // fresh scope and refreshes an already-hydrated one.
-      const existing = state.sideChats[action.sc];
-      const sideChat = existing
-        ? { ...cloneSideChat(existing), messages: action.messages, ended: false }
-        : freshSideChat(action.sc, action.pingId, action.messages);
-      const sideChatRefs = state.sideChatRefs.some((r) => r.sc === action.sc)
-        ? state.sideChatRefs
-        : [...state.sideChatRefs, { sc: action.sc, ping_id: action.pingId }];
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, sideChat),
-        sideChatRefs,
-      };
-    }
-
-    case "side_chat_msg": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state; // unknown/already-closed scope; drop.
-      const cloned = cloneSideChat(sideChat);
-      const { messages, reconciledClientId } = reconcileSideMessages(
-        cloned.messages,
-        action.message,
-      );
-      const commits = action.message.author === "agent";
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloned,
-          messages,
-          turnEvents: commits ? [] : cloned.turnEvents,
-        }),
-        pendingSideSends: reconciledClientId
-          ? state.pendingSideSends.filter((p) => p.clientId !== reconciledClientId)
-          : state.pendingSideSends,
-      };
-    }
-
-    case "side_chat_send_local": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      const localMessage: DisplayMessage = {
-        id: action.localId,
-        author: "owner",
-        body: action.body,
-        ref: action.ref,
-        ts: action.ts,
-        pending: true,
-        clientId: action.clientId,
-      };
-      const cloned = cloneSideChat(sideChat);
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloned,
-          messages: [...cloned.messages, localMessage],
-        }),
-        pendingSideSends: [
-          ...state.pendingSideSends,
-          { sc: action.sc, clientId: action.clientId, body: action.body, ref: action.ref },
-        ],
-      };
-    }
-
-    case "side_chat_agent_activity": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      const cloned = cloneSideChat(sideChat);
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloned,
-          agentActivity: { state: action.state, text: action.text },
-          turnEvents: action.state === "idle" ? [] : cloned.turnEvents,
-        }),
-      };
-    }
-
-    case "side_chat_turn_event": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      const cloned = cloneSideChat(sideChat);
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloned,
-          turnEvents: upsertTurnEvent(cloned.turnEvents, {
-            seq: action.seq,
-            event: action.event,
-            at: Date.now(),
-          }),
-        }),
-      };
-    }
-
-    case "side_chat_conclude_requested": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloneSideChat(sideChat),
-          drafting: true,
-        }),
-      };
-    }
-
-    case "side_chat_conclusion_draft": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloneSideChat(sideChat),
-          drafting: false,
-          draft: action.text,
-        }),
-      };
-    }
-
-    case "side_chat_keep_editing": {
-      // "Keep editing" returns to the side chat, never a discard: just clear
-      // the draft so the confirmation sheet closes and the composer returns.
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloneSideChat(sideChat),
-          draft: null,
-        }),
-      };
-    }
-
-    case "side_chat_confirm_sent": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloneSideChat(sideChat),
-          confirming: true,
-        }),
-        awaitingConclusions: { ...state.awaitingConclusions, [action.anchor]: action.sc },
-      };
-    }
-
-    case "side_chat_discard_sent": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state;
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloneSideChat(sideChat),
-          discarding: true,
-        }),
-      };
-    }
-
-    case "side_chat_closed": {
-      const sideChat = state.sideChats[action.sc];
-      if (!sideChat) return state; // already gone (e.g. duplicate delivery).
-      const sideChatRefs = state.sideChatRefs.filter((r) => r.sc !== action.sc);
-      if (sideChat.confirming || sideChat.discarding) {
-        // Expected close (conclude/discard) completed — drop the record. Every
-        // remaining entry is cloned through rather than spread-aliased (see
-        // cloneSideChat) since this rebuilds a fresh top-level map.
-        const rest: AppState["sideChats"] = {};
-        for (const [sc, other] of Object.entries(state.sideChats)) {
-          if (sc !== action.sc) rest[sc] = cloneSideChat(other);
-        }
-        return { ...state, sideChats: rest, sideChatRefs };
-      }
-      // Host-initiated close we didn't ask for (TTL reap, or closed
-      // elsewhere): mark terminal so a currently-open sheet shows "This side
-      // chat ended" gracefully instead of the surface just vanishing.
-      return {
-        ...state,
-        sideChats: setSideChat(state.sideChats, action.sc, {
-          ...cloneSideChat(sideChat),
-          ended: true,
-        }),
-        sideChatRefs,
-      };
-    }
-
-    case "clear_last_conclusion":
-      return { ...state, lastConclusion: null };
 
     case "view_upsert": {
       const { instance_id, placement, spec } = action.payload;

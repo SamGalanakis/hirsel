@@ -1,15 +1,19 @@
 import { Activity, ChevronLeft } from "lucide-solid";
 import { onMount, Show } from "solid-js";
-import { createFocusTrap, createMediaFlag } from "../../lib/focus";
+import {
+  createFocusTrap,
+  createMediaFlag,
+  processesRestoreTarget,
+} from "../../lib/focus";
 import { closeRightRegion, state } from "../../store/store";
 import { PaneHeader } from "../ui/PaneHeader";
 import { ProcessesView } from "./ProcessesView";
 
 // The Processes surface as one of the exclusive right-region panes (v2.3).
-// Below `rail` it is a full-screen `fixed` sheet over the chat (a true modal —
+// Below `rail` it is a full-screen `fixed` sheet over the task world (a true modal —
 // Tab is trapped, `aria-modal` honest); at/above `rail` it is an in-flow
-// `<aside>` docked at the right edge of the frame, sharing the Pings-rail width
-// token and h-12 header datum, never covering the chat. Only mounted while it
+// `<aside>` docked at the right edge of the frame, sharing the utility width
+// token and h-12 header datum, never covering the standing conversation. Only mounted while it
 // owns the region, so it (and its focusables) UNMOUNT the moment another pane
 // takes the region.
 const RAIL_MQ = "(min-width: 1100px)";
@@ -22,6 +26,9 @@ function ProcessesPanel() {
     createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
+      // Resolve this again on teardown: Processes may have opened from a
+      // shortcut as a desktop inspector and become a phone sheet while open.
+      restoreTo: () => phone() ? processesRestoreTarget() : undefined,
     });
   });
 
@@ -38,7 +45,7 @@ function ProcessesPanel() {
     // slides up 200ms; the desktop pane-swap does a subtler right-slide + fade
     // 150ms so a same-width pane change reads as a transition, not a flash.
     <div
-      ref={panelRef}
+      ref={(node) => { panelRef = node; }}
       tabindex={-1}
       data-slot="processes-panel"
       role={phone() ? "dialog" : "complementary"}
@@ -49,17 +56,17 @@ function ProcessesPanel() {
         motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
         motion-safe:rail:slide-in-from-bottom-0 motion-safe:rail:slide-in-from-right-2 motion-safe:rail:duration-150"
     >
-      {/* Phone header (rail:hidden): a back affordance to Chat, safe-area padded,
+      {/* Phone header (rail:hidden): a back affordance to Tasks, safe-area padded,
           centered title. */}
       <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:hidden">
         <button
           type="button"
-          class="flex items-center gap-0.5 rounded-md px-2 py-1 text-sm text-foreground transition-colors hover:bg-muted"
+          class="flex min-h-11 items-center gap-0.5 rounded-md px-2 text-sm text-foreground transition-colors hover:bg-muted"
           onClick={closeRightRegion}
           aria-label="Close Processes"
         >
           <ChevronLeft class="size-5" aria-hidden="true" />
-          <span>Chat</span>
+          <span>Tasks</span>
         </button>
         <h1
           id="processes-panel-heading"
@@ -85,10 +92,7 @@ function ProcessesPanel() {
   );
 }
 
-/** Processes surface (single-owner right region / desktop-shell): a full-screen
- * modal sheet with a back affordance on phone; an in-flow right-edge inspector
- * on desktop. Mounted inside ChatView's row so the desktop aside sits at the
- * right of the frame (ultrawide margins stay clear of it). */
+/** Processes is a modal sheet on phone and an in-flow inspector on desktop. */
 export function ProcessesSheet() {
   return (
     <Show when={state.rightRegion === "processes"}>

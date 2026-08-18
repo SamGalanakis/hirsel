@@ -1,4 +1,6 @@
-// Hand-written mirror of ../PROTOCOL.md (canonical). If that file changes, this
+// Hand-written mirror of ../PROTOCOL.md (canonical). Historical Chat/Ping names
+// in this file are wire-only compatibility spellings, never product destinations.
+// If that file changes, this
 // file and the Rust `hirsel-proto` crate both need to change to match.
 //
 // Transport: WebSocket, JSON text frames, one message per frame.
@@ -29,6 +31,8 @@ export interface ChatMessage {
   ref: number | null; // id of the chat message this replies to
   ts: string; // RFC3339
   attachments?: Blob[]; // v1.1, default []
+  /** Task ids explicitly addressed by this message. */
+  mentions?: number[];
   /** v1.4: tools invoked in the turn that committed this (agent) message.
    * Optional on the wire; absent/empty renders no footer chip. */
   tool_calls?: ToolCall[];
@@ -98,11 +102,9 @@ export interface ViewSpec {
   [prop: string]: unknown;
 }
 
-/** Where a view is surfaced. `canvas` → the shared right context surface (a
- * full-screen sheet on phone); `chat` → an inline block in the transcript;
- * `ping:<id>` → inside the matching Ping card. A `view_event` from a `ping:<id>`
- * view becomes the anchor-refed owner reply that auto-resolves the Ping (the
- * host does that — the client just emits the event). */
+/** Wire placement. `canvas` is the utility surface; historical `chat` means
+ * inline conversation and `ping:<id>` means inside the matching Task. The old
+ * strings remain protocol-only for backend compatibility. */
 export type ViewPlacement = "canvas" | "chat" | (string & {});
 
 /** One active view instance. Keyed by `instance_id`; an update in place is just
@@ -175,14 +177,6 @@ export interface EventItem {
    * data and old hosts stay valid. Toggled by `event_action`
    * archive/unarchive; the client filters (hello_ok carries archived events). */
   archived?: boolean;
-  /** v2.4 (event forks): the `sc` of the live fork discussing this Event, or
-   * `null`/absent when none is open. Set host-side when a fork opens
-   * (`open_side_chat`), cleared when it closes or the Event is decided; every
-   * transition is broadcast via `event_upsert`. Drives the calm "discussion open
-   * · resume" chip on the card and the resume path — wire-authoritative, so the
-   * chip appears and clears purely from upserts. Optional on the wire; absent is
-   * treated as no fork. */
-  fork_sc?: string | null;
   /** Wave-3 (durable snooze): the instant this Event returns to the resting
    * queue, or `null`/absent when it is not snoozed. Set host-side by an
    * `event_action{snooze,{until}}` and cleared by `unsnooze` — or, when the
@@ -226,14 +220,14 @@ export interface ModelSnapshot {
   available: AvailableModel[];
 }
 
-/** One model in the sub-agent catalog: like an AvailableModel plus an `enabled`
- * flag (a disabled model can't be used to spawn a Sub-agent). `default_variant`
- * is the reasoning variant a spawned Sub-agent runs at. */
+/** One model in the sub-agent catalog: `enabled` is the master availability
+ * switch and `enabled_variants` is the independently selectable reasoning
+ * allow-list. */
 export interface SubagentModel {
   id: string;
   label: string;
   variants: string[];
-  default_variant: string;
+  enabled_variants: string[];
   enabled: boolean;
 }
 
@@ -271,9 +265,6 @@ export interface SendMessageMsg {
   ref: number | null;
   attachments?: string[]; // v1.1 blob ids, default []
   mode?: SendMode; // v1.2, default "send"
-  /** v2.0: side chat scope. Absent = main conversation (byte-identical to
-   * pre-v2.0 wire shape); present = routed to that side session. */
-  sc?: string;
   /** v2.1 (ADR-0009 addendum): ping ids @-mentioned in the body. The host
    * validates every id and appends each Ping's context to the Agent turn.
    * Lifecycle-neutral — mentioning a Ping never resolves it. Default []/omitted. */
@@ -326,8 +317,6 @@ export interface GetBlobUrlMsg {
 /** v1.2: cooperatively interrupt the active agent turn (Esc). No-op if idle. */
 export interface CancelTurnMsg {
   type: "cancel_turn";
-  /** v2.0: side chat scope (see SendMessageMsg). */
-  sc?: string;
 }
 
 /** v1.2: cancel a not-yet-claimed queued (next_turn) message. Host maps
@@ -337,44 +326,11 @@ export interface CancelQueuedMsg {
   client_id: string;
 }
 
-/** v2.0 (ADR-0008) / v2.4 (event forks): open (or resume) the fork for an Event.
- * Idempotent per Event — if it already has a live fork the host answers with the
- * SAME sc, the current Event snapshot, and its transcript so far; otherwise a
- * fresh scope. Events share the ping id space, so the host still accepts the
- * legacy `ping_id`; new clients send `event_id`. */
-export interface OpenSideChatMsg {
-  type: "open_side_chat";
-  client_id: string;
-  /** v2.4: the Event to fork. */
-  event_id: number;
-  /** Legacy alias (== event_id); accepted by the host but no longer sent. */
-  ping_id?: number;
-}
-
-/** v2.0: side agent drafts the Owner's reply (a real side turn). */
-export interface ConcludeSideChatMsg {
-  type: "conclude_side_chat";
-  sc: string;
-}
-
-/** v2.0: the Owner's edited-or-not final text, confirming the conclusion. */
-export interface ConfirmConclusionMsg {
-  type: "confirm_conclusion";
-  sc: string;
-  text: string;
-}
-
-/** v2.0: end the side chat with no conclusion; the item stays open. */
-export interface DiscardSideChatMsg {
-  type: "discard_side_chat";
-  sc: string;
-}
-
 /** Generative-UI tier: an owner-initiated event from an interactive view
  * component (`action` / `optionSet` / `form`). The host looks the instance up
  * and routes it through the normal owner-submission path — for a `ping:<id>`
- * view it becomes the anchor-refed reply that auto-resolves the Ping. The
- * client must NOT create Chat messages, resolve Pings, or open any side channel
+ * view it becomes an anchor-refed reply without settling the Task. The client
+ * must NOT create messages, settle Tasks, or open any side channel
  * directly; it only emits this frame. `data` is the component's declared payload
  * (`null` for a bare `action`, `{ value }` for `optionSet`, an object keyed by
  * field `name` for `form`). */
@@ -421,15 +377,15 @@ export interface SetModelMsg {
   variant: string;
 }
 
-/** Update one sub-agent catalog model's enabled state and/or default reasoning
- * variant. Carries the FULL row state (both fields) so it's a complete upsert,
- * not a diff; the host applies it and broadcasts `subagent_models_changed`. */
+/** Update one sub-agent catalog model's master state and reasoning allow-list.
+ * Carries the FULL row state so it's a complete upsert, not a diff; the host
+ * applies it and broadcasts `subagent_models_changed`. */
 export interface SetSubagentModelMsg {
   type: "set_subagent_model";
   provider: string;
   model_id: string;
   enabled: boolean;
-  default_variant: string;
+  enabled_variants: string[];
 }
 
 export type ClientMessage =
@@ -442,10 +398,6 @@ export type ClientMessage =
   | GetBlobUrlMsg
   | CancelTurnMsg
   | CancelQueuedMsg
-  | OpenSideChatMsg
-  | ConcludeSideChatMsg
-  | ConfirmConclusionMsg
-  | DiscardSideChatMsg
   | ViewEventMsg
   | EventActionMsg
   | ClearFinishedEventsMsg
@@ -453,14 +405,6 @@ export type ClientMessage =
   | SetSubagentModelMsg;
 
 // ---- Server -> client ----
-
-/** v2.0: a live side chat, as tracked by hello_ok for reconnect + resume. Just
- * the reference — no transcript; the client fetches that via `open_side_chat`
- * (idempotent) if/when the Owner resumes it. */
-export interface SideChatRef {
-  sc: string;
-  ping_id: number;
-}
 
 export interface HelloOkMsg {
   type: "hello_ok";
@@ -475,9 +419,6 @@ export interface HelloOkMsg {
   /** v1.4: all non-terminal processes + the last 10 terminal ones. Optional on
    * the wire; absent is treated as []. */
   processes?: ProcessInfo[];
-  /** v2.0: live side chats surviving reconnect. Optional on the wire; absent
-   * is treated as []. */
-  side_chats?: SideChatRef[];
   /** Generative-UI tier: the authoritative active view set on (re)connect.
    * Optional on the wire (serde-default []); absent is treated as []. */
   views?: ViewInstance[];
@@ -495,8 +436,6 @@ export interface HelloOkMsg {
 export interface MsgMsg {
   type: "msg";
   message: ChatMessage;
-  /** v2.0: side chat scope (see SendMessageMsg). Absent = main conversation. */
-  sc?: string;
 }
 
 export type AgentActivityState = "thinking" | "idle";
@@ -505,8 +444,6 @@ export interface AgentActivityMsg {
   type: "agent_activity";
   state: AgentActivityState;
   text: string | null;
-  /** v2.0: side chat scope (see SendMessageMsg). Absent = main conversation. */
-  sc?: string;
 }
 
 export interface PingUpsertMsg {
@@ -557,12 +494,17 @@ export interface ProcessUpsertMsg {
  * block/run; tool_start opens a row that tool_done (matched by `id`) resolves.
  * `tool_done` carries its own `name` too, so an orphan done (no matching start,
  * e.g. a reconnect mid-turn) still renders a labelled row. Host `summary`
- * strings are clean one-liners (no raw JSON). */
+ * strings are clean one-liners (no raw JSON).
+ * `code_start`/`code_done` pair the same way for one Agent program cell, except
+ * `code_start.code` is the FULL source (rendered as code, not condensed);
+ * `truncated` marks the rare cell clipped at the host's 64 KiB safety cap. */
 export type TurnEvent =
   | { kind: "prose"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool_start"; id: string; name: string; summary: string | null }
-  | { kind: "tool_done"; id: string; name: string; ok: boolean; summary: string | null };
+  | { kind: "tool_done"; id: string; name: string; ok: boolean; summary: string | null }
+  | { kind: "code_start"; id: string; language: string; code: string; truncated: boolean }
+  | { kind: "code_done"; id: string; ok: boolean; summary: string | null };
 
 /** v1.5: ephemeral timeline event streamed while the Agent's turn runs (like
  * agent_activity); never stored or replayed. `seq` strictly orders events
@@ -572,8 +514,6 @@ export interface TurnEventMsg {
   type: "turn_event";
   seq: number;
   event: TurnEvent;
-  /** v2.0: side chat scope (see SendMessageMsg). Absent = main conversation. */
-  sc?: string;
 }
 
 export interface ErrorMsg {
@@ -583,43 +523,6 @@ export interface ErrorMsg {
    * so the client can mark the right chip/bubble. Not in the canonical doc's
    * minimal error shape, but hosts may include it; absent for global errors. */
   client_id?: string;
-}
-
-/** v2.0 / v2.4: answers `open_side_chat`. Idempotent per Event: a fresh fork
- * carries `messages: []` (the seed lives in the side session's prompt layer, not
- * as transcript rows); resuming a live one carries its transcript so far and
- * `resumed: true`. v2.4 adds the full `event` snapshot the fork was seeded with
- * (host-built prompt context — the blessed `ui` + current `fork_sc`), so the
- * pinned card renders THE card, not a reconstruction. */
-export interface SideChatOpenMsg {
-  type: "side_chat_open";
-  sc: string;
-  /** v2.4: the forked Event's id (== ping_id; events share the id space). */
-  event_id?: number;
-  /** Legacy alias (== event_id). */
-  ping_id?: number;
-  /** v2.4: the Event snapshot this fork is scoped to (its blessed `ui`,
-   * `fork_sc`, kind, name). Absent on a legacy Ping fork. */
-  event?: EventItem;
-  /** v2.4: true when this answered a resume of an already-live fork. */
-  resumed?: boolean;
-  messages: ChatMessage[];
-}
-
-/** v2.0: the side agent's drafted reply. NOT appended to the side transcript —
- * it only ever lives in the confirmation sheet. */
-export interface ConclusionDraftMsg {
-  type: "conclusion_draft";
-  sc: string;
-  text: string;
-}
-
-/** v2.0: the side chat has ended — via confirm_conclusion, discard_side_chat,
- * or a host-side TTL reap. The client cannot tell which from this frame alone;
- * it distinguishes by whether IT asked for the close (see the reducer). */
-export interface SideChatClosedMsg {
-  type: "side_chat_closed";
-  sc: string;
 }
 
 /** Generative-UI tier: seed or update a view in place, keyed by `instance_id`.
@@ -664,9 +567,6 @@ export type ServerMessage =
   | ProcessUpsertMsg
   | TurnEventMsg
   | ErrorMsg
-  | SideChatOpenMsg
-  | ConclusionDraftMsg
-  | SideChatClosedMsg
   | ViewUpsertMsg
   | ViewRemovedMsg
   | ModelChangedMsg

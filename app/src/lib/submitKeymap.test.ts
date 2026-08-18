@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { handleSubmitKeys, type SubmitKeymapHandlers } from "./submitKeymap";
 
 // The shared composer submit keymap (extracted from Composer / ReplyInput /
-// SideChatSheet so the three never drift). These are pure-function tests over a
+// every composer so keyboard behavior never drifts). These are pure-function tests over a
 // stubbed KeyboardEvent — no DOM.
 
 function keyEvent(init: Partial<KeyboardEvent> & { key: string }): KeyboardEvent {

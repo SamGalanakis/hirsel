@@ -52,8 +52,6 @@ async function renderComposer(props: {
   const { Composer } = await import("./Composer");
   const utils = render(() => (
     <Composer
-      replyingTo={null}
-      onCancelReply={() => {}}
       attachments={stubAttachments()}
       thinking={props.thinking ?? false}
       onSend={(props.onSend ?? (() => {})) as never}

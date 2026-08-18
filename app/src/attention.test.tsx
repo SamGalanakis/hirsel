@@ -75,7 +75,6 @@ function helloOk(events: EventItem[]) {
       pings: [],
       events,
       processes: [],
-      side_chats: [],
       views: [],
     },
   };

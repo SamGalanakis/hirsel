@@ -34,7 +34,7 @@ export function Toaster() {
               {(action) => (
                 <button
                   type="button"
-                  class="shrink-0 rounded-sm px-1.5 py-0.5 text-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  class="inline-flex shrink-0 items-center rounded-sm px-1.5 py-0.5 text-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3"
                   onClick={() => action().onClick()}
                 >
                   {action().label}
@@ -43,7 +43,7 @@ export function Toaster() {
             </Show>
             <button
               type="button"
-              class="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+              class="grid shrink-0 place-items-center text-muted-foreground transition-colors hover:text-foreground [@media(pointer:coarse)]:size-11"
               aria-label="Dismiss"
               onClick={() => dismissToast(t.id)}
             >

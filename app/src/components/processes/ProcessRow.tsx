@@ -6,8 +6,8 @@ import { Card } from "../ui/card";
 
 interface Props {
   process: ProcessInfo;
-  /** "Ask to stop": switch to Chat with the composer pre-filled. Subagent only,
-   * while running — interrupts route through the Agent, never a direct kill. */
+  /** "Ask Hirsel to stop": return to Tasks with the composer pre-filled. Subagent only,
+   * while running — interrupts route through Hirsel, never a direct kill. */
   onAskToStop: (process: ProcessInfo) => void;
 }
 
@@ -26,7 +26,7 @@ function StateChip(props: { state: ProcessState }) {
   const running = () => props.state === "running";
   return (
     <span
-      class="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[0.62rem] font-medium tracking-[0.02em]"
+      class="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-xs font-medium"
       classList={{
         "bg-status-active/15 text-status-active": running(),
         "bg-status-danger/15 text-status-danger": props.state === "failed",
@@ -52,7 +52,7 @@ function StateChip(props: { state: ProcessState }) {
 function StateMark(props: { state: ProcessState }) {
   return (
     <span
-      class="inline-flex shrink-0 items-center gap-1.5 text-[0.68rem] text-muted-foreground"
+      class="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
       data-state={props.state}
     >
       <span
@@ -91,8 +91,9 @@ export function ProcessRow(props: Props) {
     >
       <button
         type="button"
-        class="flex min-w-0 flex-1 items-center gap-2 py-2.5 text-left"
+        class="flex min-w-0 flex-1 items-center gap-2 py-2.5 text-left [@media(pointer:coarse)]:min-h-11"
         aria-expanded={false}
+        aria-label={`Open details for ${p().label}`}
         onClick={() => setExpanded(true)}
       >
         <span class="shrink-0 text-muted-foreground">
@@ -127,7 +128,7 @@ export function ProcessRow(props: Props) {
     >
       <button
         type="button"
-        class="flex w-full items-start gap-2 text-left"
+        class="flex min-h-11 w-full items-start gap-2 text-left"
         aria-expanded={expanded()}
         onClick={() => setExpanded((v) => !v)}
       >
@@ -160,12 +161,12 @@ export function ProcessRow(props: Props) {
           <Show when={isSubagent() && (p().agent || p().model)}>
             <span class="flex flex-wrap items-center gap-1">
               <Show when={p().agent}>
-                <span class="rounded bg-muted px-1.5 py-px text-[0.62rem] font-medium text-muted-foreground">
+                <span class="rounded bg-muted px-1.5 py-px text-xs font-medium text-muted-foreground">
                   {p().agent}
                 </span>
               </Show>
               <Show when={p().model}>
-                <span class="rounded bg-muted px-1.5 py-px text-[0.62rem] text-muted-foreground">
+                <span class="rounded bg-muted px-1.5 py-px text-xs text-muted-foreground">
                   {p().model}
                 </span>
               </Show>
@@ -173,7 +174,7 @@ export function ProcessRow(props: Props) {
           </Show>
 
           {/* Meta line: relative start (+ last-fired for a monitor that fired). */}
-          <span class="flex flex-wrap items-center gap-x-2 text-[0.68rem] text-muted-foreground">
+          <span class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
             <span>started {formatRelativeTime(p().started_ts)}</span>
             <Show when={isMonitor() && hasFired()}>
               <span aria-hidden="true">·</span>
@@ -198,7 +199,7 @@ export function ProcessRow(props: Props) {
       <Show when={expanded()}>
         <div class="ml-6 flex flex-col gap-2 border-l border-border/60 pl-3 pt-1">
           <div class="flex flex-col gap-0.5">
-            <span class="text-[0.62rem] uppercase tracking-[0.04em] text-muted-foreground">
+            <span class="text-xs font-medium text-muted-foreground">
               {isMonitor() ? "Probe" : "Prompt"}
             </span>
             <Show
@@ -213,28 +214,28 @@ export function ProcessRow(props: Props) {
 
           <Show when={p().summary}>
             <div class="flex flex-col gap-0.5">
-              <span class="text-[0.62rem] uppercase tracking-[0.04em] text-muted-foreground">
+              <span class="text-xs font-medium text-muted-foreground">
                 Latest
               </span>
               <span class="text-[0.78rem] text-foreground/90 wrap-break-word">{p().summary}</span>
             </div>
           </Show>
 
-          <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-[0.68rem] text-muted-foreground">
+          <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
             <span>Started {formatRelativeTime(p().started_ts)}</span>
             <span>Updated {formatRelativeTime(p().last_event_ts)}</span>
           </div>
 
-          {/* "Ask to stop" — subagent, while running. Routes the interrupt
-              through the Agent (composer pre-fill), never a direct host kill. */}
+          {/* "Ask Hirsel to stop" — subagent, while running. Routes the interrupt
+              through Hirsel (composer pre-fill), never a direct host kill. */}
           <Show when={isSubagent() && running()}>
             <button
               type="button"
-              class="mt-0.5 inline-flex w-fit items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[0.72rem] font-medium text-foreground transition-colors hover:border-status-danger/60 hover:text-status-danger"
+              class="mt-0.5 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-md border border-border px-3 text-[0.72rem] font-medium text-foreground transition-colors hover:border-status-danger/60 hover:text-status-danger"
               onClick={() => props.onAskToStop(p())}
             >
               <OctagonX class="size-3.5" aria-hidden="true" />
-              Ask to stop
+              Ask Hirsel to stop
             </button>
           </Show>
         </div>

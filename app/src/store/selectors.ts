@@ -2,11 +2,10 @@ import type {
   EventItem,
   ProcessInfo,
   ProcessState,
-  SideChatRef,
   ViewInstance,
   ViewSpec,
 } from "../protocol";
-// ---- Typed event queue (ADR-0012) ----
+// ---- Task collection (typed Events on the compatibility wire) ----
 
 /** Effective "decided/resolved" state for an Event, folding in the optimistic
  * decide override (`eventDecideOverrides`):
@@ -41,7 +40,7 @@ export function isEventSnoozed(event: EventItem, now: number = Date.now()): bool
 
 /** The resting queue: every event that is neither archived NOR snoozed. THE
  * default filter — every surface that renders or counts the queue (phone
- * scroller pages + pager counts, the desktop Feed column, the peek/queue list,
+ * flat task index and focused task field,
  * the phone nav badge, the needs-you count) reads through this, so an archived or
  * snoozed event vanishes everywhere at once and counts stay honest against the
  * filtered set. `now` is injectable for deterministic tests. */
@@ -51,19 +50,6 @@ export function visibleEvents(
   now: number = Date.now(),
 ): EventItem[] {
   return events.filter((e) => !isEventArchived(e, archiveOverrides) && !isEventSnoozed(e, now));
-}
-
-/** The quiet "Snoozed (n)" view's data: non-archived snoozed events, soonest to
- * return first (a rising queue of things coming back). Each row shows its return
- * time + Unsnooze. `now` is injectable for deterministic tests. */
-export function snoozedEvents(
-  events: EventItem[],
-  archiveOverrides: number[],
-  now: number = Date.now(),
-): EventItem[] {
-  return events
-    .filter((e) => !isEventArchived(e, archiveOverrides) && isEventSnoozed(e, now))
-    .sort((a, b) => Date.parse(a.snoozed_until ?? "") - Date.parse(b.snoozed_until ?? ""));
 }
 
 /** The set the "Clear finished (n)" sweep removes: finished (decided, or read
@@ -81,22 +67,6 @@ export function finishedEvents(
   );
 }
 
-/** The quiet Archived(n) view's data — the day-log (Wave-3 time axis): archived
- * events, newest-first by `archived_at` (the instant it was swept), falling back
- * to `id` order when the timestamp is absent (old data / a just-archived
- * optimistic row before the host echo). A missing `archived_at` sorts to the top
- * (a fresh sweep is the most recent thing). */
-export function archivedEvents(events: EventItem[], archiveOverrides: number[]): EventItem[] {
-  return events
-    .filter((e) => isEventArchived(e, archiveOverrides))
-    .sort((a, b) => {
-      const ta = a.archived_at ? Date.parse(a.archived_at) : Number.POSITIVE_INFINITY;
-      const tb = b.archived_at ? Date.parse(b.archived_at) : Number.POSITIVE_INFINITY;
-      if (ta !== tb) return tb - ta;
-      return b.id - a.id;
-    });
-}
-
 /** "Finished" per the archive contract: done, OR read awareness that never
  * needed a response — exactly the set `events.clear` sweeps, and the gate for
  * the card overflow's Archive action (an open judgment is archived only by the
@@ -106,14 +76,14 @@ export function isEventFinished(event: EventItem, decideOverrides: number[]): bo
 }
 
 /** A judgment still needing the Owner: kind judgment, open, not optimistically
- * decided. The queue's hero rank. */
+ * decided. The highest-priority Task state. */
 export function isOpenJudgment(event: EventItem, decideOverrides: number[]): boolean {
   return event.kind === "judgment" && !isEventResolved(event, decideOverrides);
 }
 
 /** The ONE red on the surface (ADR-0012): the "N need you" count = open,
  * undecided judgments. Awareness never contributes. */
-export function openJudgmentCount(events: EventItem[], decideOverrides: number[]): number {
+export function tasksNeedingOwnerCount(events: EventItem[], decideOverrides: number[]): number {
   return events.filter((e) => isOpenJudgment(e, decideOverrides)).length;
 }
 
@@ -133,7 +103,7 @@ function tsAsc(a: EventItem, b: EventItem): number {
  * rank sorts earlier. (Wave-3: the old client-only "snoozed to the tail" band is
  * gone — durable snooze removes an event from the resting set entirely, so it
  * never reaches this ordering.) */
-function queueRank(event: EventItem, decideOverrides: number[]): number {
+function taskPriorityRank(event: EventItem, decideOverrides: number[]): number {
   const open = isOpenJudgment(event, decideOverrides);
   if (open && event.blocking) return 0;
   if (open) return 1;
@@ -144,10 +114,10 @@ function queueRank(event: EventItem, decideOverrides: number[]): number {
 /** Order the queue for the scroller: priority band first, oldest-waited first
  * within a band, id as a stable final tiebreak. Pure + total (never throws) so
  * the scroller and its tests share one ordering. */
-export function orderedQueue(events: EventItem[], decideOverrides: number[]): EventItem[] {
+export function orderedTasks(events: EventItem[], decideOverrides: number[]): EventItem[] {
   return events.slice().sort((a, b) => {
-    const ra = queueRank(a, decideOverrides);
-    const rb = queueRank(b, decideOverrides);
+    const ra = taskPriorityRank(a, decideOverrides);
+    const rb = taskPriorityRank(b, decideOverrides);
     if (ra !== rb) return ra - rb;
     const t = tsAsc(a, b);
     if (t !== 0) return t;
@@ -195,28 +165,18 @@ export function isProcessRunning(state: ProcessState): boolean {
   return state === "running";
 }
 
-/** Count backing the Processes tab badge (v1.4): running processes only.
- * Deliberately independent of the Inbox unread badge and document.title. */
+/** Count backing the Processes utility badge: running processes only.
+ * Deliberately independent of Task attention state and document.title. */
 export function runningProcessCount(processes: ProcessInfo[]): number {
   return processes.filter((p) => isProcessRunning(p.state)).length;
 }
 
-// ---- v2.0 side chats (ADR-0008) ----
-
-/** The live side chat for a Ping, if any — drives the "in progress · resume"
- * affordance on its card in place of the plain "Discuss" entry. Derived from
- * `hello_ok.side_chats` + open/closed tracking (`sideChatRefs`), not from the
- * (possibly never-hydrated) `sideChats` map. */
-export function sideChatForPing(refs: SideChatRef[], pingId: number): SideChatRef | null {
-  return refs.find((r) => r.ping_id === pingId) ?? null;
-}
-
 // ---- Generative-UI tier (view templates) ----
 
-/** The numeric Ping id a `ping:<id>` placement targets, or null for any other
- * placement (`canvas` / `chat`) or a malformed value. One parser so the Ping
- * card and the placement routing agree on what "belongs to this Ping" means. */
-export function parsePingPlacement(placement: string): number | null {
+/** The Task id targeted by the legacy wire placement `ping:<id>`, or null.
+ * Product surfaces call this a Task; only the persisted protocol spelling is
+ * retained for backend compatibility. */
+export function parseTaskPlacement(placement: string): number | null {
   const m = /^ping:(\d+)$/.exec(placement);
   if (!m) return null;
   const id = Number(m[1]);
@@ -229,14 +189,10 @@ export function canvasViews(views: ViewInstance[]): ViewInstance[] {
   return views.filter((v) => v.placement === "canvas");
 }
 
-/** Views placed inline in the chat transcript, in arrival order. */
-export function chatViews(views: ViewInstance[]): ViewInstance[] {
+/** Views placed inline in the global conversation, in arrival order. The
+ * `chat` string is a legacy wire value, not a product destination. */
+export function conversationViews(views: ViewInstance[]): ViewInstance[] {
   return views.filter((v) => v.placement === "chat");
-}
-
-/** Views that belong inside a given Ping's card (`ping:<id>` placement). */
-export function viewsForPing(views: ViewInstance[], pingId: number): ViewInstance[] {
-  return views.filter((v) => parsePingPlacement(v.placement) === pingId);
 }
 
 /** Group processes into Running / Finished, each newest-activity-first

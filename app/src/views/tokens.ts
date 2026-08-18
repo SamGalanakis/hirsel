@@ -86,7 +86,7 @@ export function calloutToneClass(tone: string | undefined): string {
 export const PROGRESS_FILL = "bg-primary";
 
 // ---- Event-card vocabulary (ADR-0013) — the interactive sibling maps ----
-// The event queue's `eyebrow` carries a wider tone set than `text` (an `accent`
+// A generated Task instrument's `eyebrow` carries a wider tone set than `text` (an `accent`
 // tone → the one indigo, for a taste-boundary label). Kept here beside the other
 // tone maps so the palette authority stays in one file.
 

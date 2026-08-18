@@ -21,7 +21,7 @@ function ev(overrides: Partial<EventItem> = {}): EventItem {
   };
 }
 
-describe("hello_ok seeds the event queue (generalizing pings)", () => {
+describe("hello_ok seeds Tasks from typed Events", () => {
   it("seeds events from the frame and defaults to [] when absent", () => {
     const seeded = reduce(initialState(), {
       type: "hello_ok",

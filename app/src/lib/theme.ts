@@ -16,8 +16,8 @@ export type ThemeMode = "system" | "light" | "dark";
 const STORAGE_KEY = "hirsel.theme";
 // Browser-chrome tint: the dark canvas (oklch 0.141) ≈ #141414; the light
 // canvas (oklch 0.985 0.002 286) ≈ #fafafb. Mirrors index.html.
-const DARK_META = "#141414";
-const LIGHT_META = "#fafafb";
+const DARK_META = "#162126";
+const LIGHT_META = "#f5faf7";
 
 function readStored(): ThemeMode {
   try {

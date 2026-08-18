@@ -3,9 +3,8 @@ import { reduce } from "./reducer";
 import { initialState } from "./types";
 import {
   canvasViews,
-  chatViews,
-  parsePingPlacement,
-  viewsForPing,
+  conversationViews,
+  parseTaskPlacement,
 } from "./selectors";
 import type { ViewInstance } from "../protocol";
 
@@ -113,26 +112,20 @@ describe("view placement selectors", () => {
     view("p12", "ping:12"),
   ];
 
-  it("parsePingPlacement extracts the ping id, else null", () => {
-    expect(parsePingPlacement("ping:7")).toBe(7);
-    expect(parsePingPlacement("ping:012")).toBe(12);
-    expect(parsePingPlacement("canvas")).toBeNull();
-    expect(parsePingPlacement("chat")).toBeNull();
-    expect(parsePingPlacement("ping:")).toBeNull();
-    expect(parsePingPlacement("ping:abc")).toBeNull();
+  it("parseTaskPlacement extracts the task id from the legacy placement", () => {
+    expect(parseTaskPlacement("ping:7")).toBe(7);
+    expect(parseTaskPlacement("ping:012")).toBe(12);
+    expect(parseTaskPlacement("canvas")).toBeNull();
+    expect(parseTaskPlacement("chat")).toBeNull();
+    expect(parseTaskPlacement("ping:")).toBeNull();
+    expect(parseTaskPlacement("ping:abc")).toBeNull();
   });
 
   it("canvasViews returns canvas placements in order (newest last)", () => {
     expect(canvasViews(views).map((v) => v.instance_id)).toEqual(["c1", "c2"]);
   });
 
-  it("chatViews returns chat placements", () => {
-    expect(chatViews(views).map((v) => v.instance_id)).toEqual(["chat1"]);
-  });
-
-  it("viewsForPing matches only that ping's placement", () => {
-    expect(viewsForPing(views, 7).map((v) => v.instance_id)).toEqual(["p7"]);
-    expect(viewsForPing(views, 12).map((v) => v.instance_id)).toEqual(["p12"]);
-    expect(viewsForPing(views, 99)).toEqual([]);
+  it("conversationViews returns inline placements", () => {
+    expect(conversationViews(views).map((v) => v.instance_id)).toEqual(["chat1"]);
   });
 });

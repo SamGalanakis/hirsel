@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Check production file-size budget
         run: bash scripts/check-production-file-size.sh
+      - name: Check the plugin aggregator is in sync with plugins/
+        run: bash scripts/check-plugins-synced.sh
 
   rust:
     name: Rust

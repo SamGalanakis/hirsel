@@ -13,6 +13,9 @@ dev port="3089":
     # Local provider secrets (OPENROUTER_API_KEY, ...) live in ./.env, which is
     # gitignored — export them before the host inherits the environment.
     if [[ -f ./.env ]]; then set -a; . ./.env; set +a; fi
+    # A plugin folder dropped in since the last run is picked up here, so the
+    # dev loop never builds against a stale generated registry.
+    bash scripts/sync-plugins.sh
     trap 'kill 0 2>/dev/null' EXIT INT TERM
     export HIRSEL_LISTEN="127.0.0.1:{{ port }}"
     export HIRSEL_TOKEN="${HIRSEL_TOKEN:-dev-token}"
@@ -66,8 +69,14 @@ test:
     cd app && npm test -- --run
 
 check:
+    bash scripts/check-plugins-synced.sh
     cargo clippy --workspace --all-targets -- -D warnings
     cd app && npx tsc --noEmit
+
+# Regenerate the plugin aggregator from the folders under plugins/. Run after
+# adding or removing a plugin folder; `just dev` runs it for you.
+sync-plugins:
+    bash scripts/sync-plugins.sh
 
 # Headless Android emulator loop. VM paths and tool versions live in
 # /workspace/android/env.sh; see docs/android-dev.md.

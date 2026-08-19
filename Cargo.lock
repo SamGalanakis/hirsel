@@ -1800,6 +1800,8 @@ dependencies = [
  "futures-util",
  "hirsel-client-core",
  "hirsel-drivers",
+ "hirsel-plugin-api",
+ "hirsel-plugins",
  "hirsel-proto",
  "hmac",
  "image",
@@ -1827,11 +1829,43 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tokio-util",
  "toml_edit",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "hirsel-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hirsel-plugin-hello"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hirsel-plugin-api",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hirsel-plugins"
+version = "0.1.0"
+dependencies = [
+ "hirsel-plugin-api",
+ "hirsel-plugin-hello",
 ]
 
 [[package]]

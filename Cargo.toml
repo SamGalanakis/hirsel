@@ -5,6 +5,11 @@ members = [
   "crates/hirsel-client-ffi",
   "crates/hirsel-drivers",
   "crates/hirsel-host",
+  "crates/hirsel-plugin-api",
+  "crates/hirsel-plugins",
+  # In-tree plugins: installing one is dropping the folder in, running
+  # scripts/sync-plugins.sh, and rebuilding (see docs/plugins.md).
+  "plugins/*",
 ]
 resolver = "3"
 
@@ -20,6 +25,8 @@ async-trait = "0.1.89"
 chrono = { version = "0.4.42", features = ["serde", "clock"] }
 futures-util = "0.3.31"
 hirsel-drivers = { path = "crates/hirsel-drivers" }
+hirsel-plugin-api = { path = "crates/hirsel-plugin-api" }
+hirsel-plugins = { path = "crates/hirsel-plugins" }
 hirsel-proto = { path = "crates/hirsel-proto" }
 iroh = "=1.0.2"
 iroh-tickets = "=1.0.0"

@@ -103,10 +103,11 @@ export function phoneUtilityRestoreTarget(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-slot="phone-overflow-trigger"]');
 }
 
-/** Processes has its own standing header control, so its inspector returns to
- * that control instead of the unrelated utility overflow. */
+/** Processes is opened from the one floating overflow now that the home header
+ * bar is gone, so its inspector restores to that same trigger. Kept as its own
+ * named export because Processes owns a distinct entry in that menu. */
 export function processesRestoreTarget(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('[data-slot="processes-trigger"]');
+  return phoneUtilityRestoreTarget();
 }
 
 function canReceiveRestoredFocus(element: HTMLElement | null | undefined): element is HTMLElement {

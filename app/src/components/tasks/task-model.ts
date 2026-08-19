@@ -22,6 +22,50 @@ export function taskTone(task: EventItem, decideOverrides: number[] = []): strin
   return "bg-status-idle";
 }
 
+/** How much a Task needs the Owner, as a sortable rank over the SAME state
+ * vocabulary `taskState` renders (lower = needs you more). "done" is not a
+ * candidate at all and returns null: landing the Owner on work he already
+ * settled would be the opposite of most-needing. */
+function neediness(task: EventItem, decideOverrides: number[]): number | null {
+  switch (taskState(task, decideOverrides)) {
+    case "blocked on you": return 0;
+    case "needs you": return 1;
+    // Unread awareness sits between an open judgment and work merely in
+    // motion: nothing is asked of the Owner, but he has not seen it yet.
+    case "new": return 2;
+    case "moving": return 3;
+    default: return null; // "done"
+  }
+}
+
+/** The one Task to open on load: the most-needing task, newest first within a
+ * band (the freshest thing asking for you is the one you are landing on),
+ * with the higher id as a stable final tiebreak. Pure and total — the shell
+ * effect and its tests share this one rule. Returns null when nothing in the
+ * field wants the Owner, which is the ambient field's cue to stay ambient. */
+export function mostNeedingTask(
+  tasks: EventItem[],
+  decideOverrides: number[] = [],
+): EventItem | null {
+  let best: EventItem | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  let bestTs = Number.NEGATIVE_INFINITY;
+  for (const task of tasks) {
+    const rank = neediness(task, decideOverrides);
+    if (rank === null) continue;
+    const parsed = Date.parse(task.ts);
+    // An unparseable ts must never outrank a real one; it sinks to the oldest.
+    const ts = Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+    if (best === null || rank < bestRank
+      || (rank === bestRank && (ts > bestTs || (ts === bestTs && task.id > best.id)))) {
+      best = task;
+      bestRank = rank;
+      bestTs = ts;
+    }
+  }
+  return best;
+}
+
 /** Follow one Task's durable anchor/mention boundary through reply refs. A
  * message that starts or addresses another durable Task is a hard boundary,
  * even when its anchor happens to descend from this Task's anchor. */

@@ -71,7 +71,8 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - Phone: tasks become a horizontal, masked strip. The selected task owns the screen below it.
 - Selecting a task focuses it; selecting the focused task again clears focus.
 - Focus is shown by the unfolded instrument, task-row state, and the composer's spatial/tone shift—never by a label inside the composer or color alone.
-- Ambient is the absence of focus. It has no title, empty-state copy, or standing mode label.
+- On load the most-needing task opens focused (blocked on you → needs you → unseen → moving, newest first); with no open task the field rests ambient. Focus is chosen once per load: a task arriving later never steals it.
+- Ambient is the absence of focus — the deliberate zoom-out reached with Esc. It has no title, empty-state copy, or standing mode label.
 
 ### Generated task surface
 
@@ -100,7 +101,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 
 ### Utilities
 
-Processes has one quiet, standing header control because active work must remain directly inspectable. Settings, model choice, raw timelines, and connection diagnostics live behind the overflow or a keyboard command. Every utility appears as a temporary sheet or inspector; closing it returns to the same focus state.
+Home has no header bar: the field's top anchor is its content. One quiet floating `⋯` is the only standing chrome, and every utility — Processes, settings, model choice, raw timelines, connection diagnostics — is reachable from it or a keyboard command. Processes leads that menu and carries a running count, so active work stays directly inspectable without a bar. Connection state is visible only when abnormal; a healthy socket shows nothing. Every utility appears as a temporary sheet or inspector, keeps its own pane header, and closing it returns to the same focus state.
 
 ## 5. Motion and responsiveness
 

@@ -100,6 +100,9 @@ export function TaskIndex(props: {
           );
         }}
       </For>
+      {/* Trailing room for the ⋯ that floats over the strip's right end at
+          phone widths; the rail column has the field's own top-right corner. */}
+      <div aria-hidden="true" class="w-10 shrink-0 rail:hidden" />
     </nav>
   );
 }

@@ -5,29 +5,27 @@ STORY: Open a task, act through its generated instrument, speak within it, then 
 FIRST VIEWPORT: Task index at the left/top, one unfolded JSON-generated task instrument, conversation in its margin, and one standing bottom composer.
 FORM: Task Margins, the user-pinned synthesis; focus changes the subject, never the interlocutor.
 */
-import { Activity, X } from "lucide-solid";
+import { X } from "lucide-solid";
 import { createEffect, createMemo, For, on, Show } from "solid-js";
 import type { Blob, EventItem, SendMode } from "../../protocol";
 import { markEventRead } from "../../lib/event-decide";
 import {
   conversationViews,
   orderedTasks,
-  runningProcessCount,
   visibleEvents,
 } from "../../store/selectors";
 import {
   clearComposerPrefill,
   clearProtocolError,
   clearTaskFocus,
-  openProcesses,
+  focusTask,
   reconcileTaskFocus,
   state,
   toggleTaskFocus,
 } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { ViewRenderer } from "../../views/ViewRenderer";
-import { BrandMark } from "../BrandMark";
-import { ConnectionPill } from "../ConnectionPill";
+import { ConnectionPill, connectionLabel } from "../ConnectionPill";
 import { PhoneOverflowMenu } from "../PhoneOverflowMenu";
 import { ProcessesSheet } from "../processes/ProcessesSheet";
 import { SettingsSheet } from "../settings/SettingsSheet";
@@ -36,7 +34,7 @@ import { createComposerAttachments } from "../chat/useAttachments";
 import { CanvasRail, CanvasSheet } from "../views/CanvasSurface";
 import { AmbientField, TaskField } from "./TaskFields";
 import { TaskIndex } from "./TaskIndex";
-import { taskSendContext } from "./task-model";
+import { mostNeedingTask, taskSendContext } from "./task-model";
 
 export function TaskShell() {
   const attachments = createComposerAttachments();
@@ -44,7 +42,6 @@ export function TaskShell() {
 
   const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
   const tasks = createMemo(() => orderedTasks(visible(), state.eventDecideOverrides));
-  const processCount = () => runningProcessCount(state.processes);
   const focusedTask = createMemo(() =>
     tasks().find((task) => task.id === state.focusedTaskId) ?? null
   );
@@ -56,6 +53,24 @@ export function TaskShell() {
   });
 
   createEffect(() => reconcileTaskFocus(tasks().map((task) => task.id)));
+
+  // Open focused by default. The field hydrates with the handshake (`hello_ok`
+  // carries the whole Task set and is dispatched immediately before the socket
+  // reports `connected`), so the first "connected" is the one honest moment at
+  // which "what needs me most right now?" has an answer.
+  //
+  // It fires exactly ONCE per load, whatever happens afterwards: a reconnect
+  // re-enters "connected" and must not re-subject the field, and a Task
+  // arriving while the Owner sits in the ambient field never steals focus —
+  // ambient is a deliberate state (Esc), not an empty one waiting to be filled.
+  let autoFocusSettled = false;
+  createEffect(on(() => state.connection, (connection) => {
+    if (autoFocusSettled || connection !== "connected") return;
+    autoFocusSettled = true;
+    if (state.focusedTaskId !== null) return; // a focus already chosen wins
+    const task = mostNeedingTask(tasks(), state.eventDecideOverrides);
+    if (task) focusTask(task.id);
+  }));
 
   // A focus change re-subjects the whole field: start the new task at its top,
   // and bring its chip into view so the marker and the instrument it opened are
@@ -96,35 +111,30 @@ export function TaskShell() {
   }
 
   return (
-    <div data-slot="task-shell" class="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col overflow-hidden">
-      <header class="flex h-14 shrink-0 items-center gap-3 px-gutter">
-        <div class="flex items-center gap-2">
-          <BrandMark size={20} />
-          <h1 class="m-0 text-sm font-semibold tracking-[0.01em]">hirsel</h1>
-        </div>
-        <div class="ml-auto"><ConnectionPill compact /></div>
-        <button
-          type="button"
-          data-slot="processes-trigger"
-          aria-label={
-            processCount() > 0
-              ? `Processes, ${processCount()} running`
-              : "Processes"
-          }
-          aria-pressed={state.rightRegion === "processes"}
-          class="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 aria-pressed:bg-muted aria-pressed:text-foreground"
-          onClick={openProcesses}
-        >
-          <Activity class="size-4" aria-hidden="true" />
-          <span class="hidden rail:inline">Processes</span>
-          <Show when={processCount() > 0}>
-            <span class="min-w-4 text-center font-semibold text-status-active" aria-hidden="true">
-              {processCount() > 99 ? "99+" : processCount()}
-            </span>
-          </Show>
-        </button>
-        <PhoneOverflowMenu />
-      </header>
+    <div data-slot="task-shell" class="relative mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col overflow-hidden">
+      {/* Home has no header bar. The brandmark, the standing connection dot and
+          the Processes button were chrome the Owner reads past every time; the
+          top anchor is now the content itself. What survives floats over the
+          field: one quiet ⋯ (every utility, including Processes, lives behind
+          it) and connection state ONLY while it is abnormal. Utility panes keep
+          their own PaneHeader — this collapse is the home shell's alone. */}
+      <div
+        data-slot="home-affordances"
+        class="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start gap-2 px-gutter pt-[calc(env(safe-area-inset-top)+0.5rem)]"
+      >
+        {/* Silence is the healthy state (PRODUCT "restraint as respect"): a
+            connected socket shows nothing at all. Announcement is NOT silent
+            though — one never-unmounted live region speaks every transition,
+            including the recovery the visible pill can't report because it has
+            already left the screen. The pill itself is then decorative. */}
+        <span data-slot="connection-status" class="sr-only" role="status" aria-live="polite">
+          {connectionLabel(state.connection)}
+        </span>
+        <Show when={state.connection !== "connected"}>
+          <div class="pointer-events-auto" aria-hidden="true"><ConnectionPill /></div>
+        </Show>
+        <div class="pointer-events-auto ml-auto"><PhoneOverflowMenu /></div>
+      </div>
 
       <div class="flex min-h-0 flex-1 flex-col rail:flex-row">
         <TaskIndex

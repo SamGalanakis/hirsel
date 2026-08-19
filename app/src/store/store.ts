@@ -116,6 +116,13 @@ export function toggleTaskFocus(id: number): void {
   setState("focusedTaskId", (current) => (current === id ? null : id));
 }
 
+/** Focus a Task unconditionally. Distinct from `toggleTaskFocus` for callers
+ * that are not a selection gesture — the load-time auto-focus in particular,
+ * where "toggle" would be the wrong contract. */
+export function focusTask(id: number): void {
+  setState("focusedTaskId", id);
+}
+
 /** Leave the focused Task for the ambient field. The exit path behind Esc, the
  * focused chip's × affordance, and the ⌘K "Clear task focus" command. */
 export function clearTaskFocus(): void {

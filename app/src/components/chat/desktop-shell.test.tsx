@@ -97,7 +97,7 @@ function makeClient(store: typeof import("../../store/store")) {
   };
 }
 
-async function setupApp(tasks: EventItem[]) {
+async function setupApp(tasks: EventItem[], options: { keepDefaultFocus?: boolean } = {}) {
   const store = await import("../../store/store");
   const fakeClient = makeClient(store);
   vi.doMock("../../ws/client", () => ({
@@ -113,6 +113,10 @@ async function setupApp(tasks: EventItem[]) {
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event } });
   }
   const screen = render(() => <App />);
+  // Load now opens focused on the most-needing task (see "Opens focused by
+  // default" below). These gates exercise selection FROM the ambient field,
+  // which is one Esc away, so they start from the cleared state.
+  if (!options.keepDefaultFocus) store.clearTaskFocus();
   return { store, screen, fakeClient };
 }
 
@@ -351,13 +355,18 @@ describe("Task Margins shell", () => {
     expect(screen.getByRole("heading", { name: "choose direction" })).toBeInTheDocument();
   });
 
-  it("restores phone Processes focus to its dedicated trigger and keeps Settings close touch-sized", async () => {
+  it("restores phone Processes focus to the floating overflow and keeps Settings close touch-sized", async () => {
     matchMedia(false);
-    const { screen, store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
-    const user = userEvent.setup();
-    const processesTrigger = screen.getByRole("button", { name: "Processes" });
+    const { store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // The home header bar is gone: Processes is reached from the one floating
+    // ⋯, and that trigger is what a dismissed sheet restores to.
+    const processesTrigger = document.querySelector(
+      '[data-slot="phone-overflow-trigger"]',
+    ) as HTMLElement;
 
     await user.click(processesTrigger);
+    await user.click(await within(document.body).findByRole("menuitem", { name: /Processes/ }));
     await waitFor(() => expect(store.state.rightRegion).toBe("processes"));
     const processesPanel = document.querySelector('[data-slot="processes-panel"]') as HTMLElement;
     const phoneProcessesClose = within(processesPanel).getByText("Tasks").closest("button")!;
@@ -374,12 +383,14 @@ describe("Task Margins shell", () => {
   it("restores a desktop-opened Processes utility to its phone trigger after a viewport change", async () => {
     const { screen, store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
     const composer = screen.getByLabelText("Message Hirsel");
-    const processesTrigger = screen.getByRole("button", { name: "Processes" });
+    const processesTrigger = document.querySelector(
+      '[data-slot="phone-overflow-trigger"]',
+    ) as HTMLElement;
     composer.focus();
 
-    // A keyboard or command can summon the desktop inspector without using the
-    // overflow trigger. Resizing while it is open must change the eventual
-    // restoration target to the standing Processes control.
+    // A keyboard or command can summon the desktop inspector without opening
+    // the overflow. Resizing while it is open must change the eventual
+    // restoration target to the floating overflow trigger.
     store.openProcesses();
     const panel = await waitFor(() => {
       const node = document.querySelector('[data-slot="processes-panel"]') as HTMLElement;
@@ -418,5 +429,147 @@ describe("Task Margins shell", () => {
     expect(screen.getByLabelText("Message Hirsel")).not.toHaveAttribute("placeholder");
     expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
     expect(document.querySelector('[data-slot="phone-nav"]')).toBeNull();
+  });
+});
+
+describe("Home header collapse", () => {
+  it("leaves one floating overflow instead of a bar, and no standing status", async () => {
+    const { screen } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    const shell = document.querySelector('[data-slot="task-shell"]') as HTMLElement;
+
+    // No bar: no brandmark/wordmark, no standing Processes button, and the
+    // shell's own top anchor is its content.
+    expect(shell.querySelector("header")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "hirsel" })).toBeNull();
+    expect(document.querySelector('[data-slot="processes-trigger"]')).toBeNull();
+
+    const affordances = document.querySelector('[data-slot="home-affordances"]') as HTMLElement;
+    expect(affordances.className).toContain("absolute");
+    expect(affordances.contains(
+      document.querySelector('[data-slot="phone-overflow-trigger"]'),
+    )).toBe(true);
+
+    // Connected is silence: nothing VISIBLE reports it (the only "connected"
+    // in there is the sr-only live region asserted in the next gate).
+    expect(affordances.querySelector('[data-slot="badge"]')).toBeNull();
+  });
+
+  it("shows connection state only while it is abnormal, and keeps it announced", async () => {
+    const { store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    const affordances = document.querySelector('[data-slot="home-affordances"]') as HTMLElement;
+
+    const live = within(affordances).getByRole("status");
+    expect(live).toHaveAttribute("aria-live", "polite");
+    expect(live.textContent).toBe("connected");
+    // Nothing is drawn for a healthy socket; the live region is sr-only.
+    expect(live.className).toContain("sr-only");
+    expect(affordances.querySelector('[data-slot="badge"]')).toBeNull();
+
+    store.dispatch({ type: "connection_status", status: "reconnecting" });
+    await waitFor(() => expect(affordances.textContent).toContain("reconnecting"));
+    expect(live.textContent).toBe("reconnecting…");
+
+    store.dispatch({ type: "connection_status", status: "connected" });
+    // Recovery is announced by the same never-unmounted live region, even
+    // though the visible pill has already left.
+    await waitFor(() => expect(live.textContent).toBe("connected"));
+    expect(affordances.querySelector('[data-slot="badge"]')).toBeNull();
+  });
+
+  it("reaches Processes and Settings from that one overflow", async () => {
+    const { store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    // The dismissed sheet's overlay leaves `pointer-events: none` on <body> for
+    // longer than the panel itself lives; this gate is about what the menu
+    // reaches, not that teardown timing.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    store.dispatch({
+      type: "process_upsert",
+      payload: {
+        type: "process_upsert",
+        process: {
+          id: "p1",
+          kind: "subagent",
+          label: "Review the auth refactor",
+          agent: null,
+          model: null,
+          state: "running",
+          started_ts: "2026-07-13T01:00:00Z",
+          last_event_ts: "2026-07-13T01:00:00Z",
+          summary: null,
+        },
+      },
+    });
+
+    await user.click(document.querySelector('[data-slot="phone-overflow-trigger"]') as HTMLElement);
+    const processes = await within(document.body).findByRole("menuitem", { name: /Processes/ });
+    // Live work still announces its count without a bar to carry it.
+    expect(processes.textContent).toContain("1");
+    await user.click(processes);
+    await waitFor(() => expect(store.state.rightRegion).toBe("processes"));
+
+    // Back to the field, then the same menu reaches Settings.
+    store.closeRightRegion();
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="processes-panel"]')).toBeNull()
+    );
+    await user.click(document.querySelector('[data-slot="phone-overflow-trigger"]') as HTMLElement);
+    await user.click(await within(document.body).findByRole("menuitem", { name: "Settings" }));
+    await waitFor(() => expect(store.state.rightRegion).toBe("settings"));
+  });
+});
+
+describe("Opens focused by default", () => {
+  const moving = (id: number, name: string): EventItem => ({
+    ...task(id, name, name),
+    kind: "summary",
+    blocking: false,
+    read: true,
+    requires_response: false,
+  });
+
+  it("lands on the most-needing task rather than the ambient field", async () => {
+    const { screen, store } = await setupApp(
+      [moving(1, "@rollout"), task(2, "@choose-direction", "Choose direction")],
+      { keepDefaultFocus: true },
+    );
+
+    expect(store.state.focusedTaskId).toBe(2);
+    expect(document.querySelector('[data-slot="task-field"]')).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /choose direction, blocked on you/ }))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("stays ambient after Esc, and a later task never steals focus back", async () => {
+    const { screen, store } = await setupApp(
+      [task(1, "@choose-direction", "Choose direction")],
+      { keepDefaultFocus: true },
+    );
+    expect(store.state.focusedTaskId).toBe(1);
+
+    const composer = screen.getByLabelText("Message Hirsel");
+    composer.focus();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    await waitFor(() => expect(store.state.focusedTaskId).toBeNull());
+
+    store.dispatch({
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: task(2, "@urgent-call", "Urgent call") },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /urgent call/ })).toBeInTheDocument()
+    );
+    expect(store.state.focusedTaskId).toBeNull();
+    expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
+
+    // A reconnect re-enters "connected"; auto-focus is once per LOAD.
+    store.dispatch({ type: "connection_status", status: "reconnecting" });
+    store.dispatch({ type: "connection_status", status: "connected" });
+    expect(store.state.focusedTaskId).toBeNull();
+  });
+
+  it("rests ambient when there is no open task", async () => {
+    const { store } = await setupApp([], { keepDefaultFocus: true });
+    expect(store.state.focusedTaskId).toBeNull();
+    expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
   });
 });

@@ -5,24 +5,24 @@ import { resolve as pathResolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
- * Headless scenario (spec v1.4 gate; adapted for the header-icon
- * layout): the Processes header icon + tool-call visibility driven through
- * the REAL App over a REAL WebSocket against an in-process scripted host that
- * PUSHES server frames on command. The bottom TabBar and Processes tab are
- * gone — Processes now opens from a header icon (next to ConnectionPill) as a
- * full-screen sheet with a back affordance.
+ * Headless scenario (spec v1.4 gate; adapted for the collapsed home header):
+ * Processes reached from the floating overflow + tool-call visibility driven
+ * through the REAL App over a REAL WebSocket against an in-process scripted
+ * host that PUSHES server frames on command. The bottom TabBar, the Processes
+ * tab and the home header bar are all gone — Processes now opens from the one
+ * quiet ⋯ as a full-screen sheet with a back affordance.
  *
  * Proven here:
- *   1. hello_ok seeds a RUNNING sub-agent → header icon badge 1 (status-active).
- *   2. Tapping the header icon opens the full-screen Processes sheet, showing
+ *   1. hello_ok seeds a RUNNING sub-agent → the ⋯ carries the count 1.
+ *   2. Opening Processes from that menu shows the full-screen sheet, with
  *      agent+model chips; expand → "Ask Hirsel to stop" closes the sheet (back to
  *      Chat) with the composer pre-filled "stop process <id> (<label>)"
  *      (interrupt routes through the Agent).
  *   3. A committed agent message carrying a tool_calls summary (no live timeline
  *      streamed) shows the fallback "⚙ 2 tools" chip that expands to the per-tool
  *      ok list. (The live v1.5 timeline path lives in timeline-scenario.test.tsx.)
- *   4. process_upsert done → the sub-agent moves Running → Finished, header
- *      icon badge 0.
+ *   4. process_upsert done → the sub-agent moves Running → Finished, the ⋯
+ *      count clears.
  */
 
 const now = () => new Date().toISOString();
@@ -158,13 +158,21 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       const screen = render(() => <App />);
       await waitFor(() => expect(store.state.processes).toHaveLength(1), { timeout: 10000 });
 
-      // --- 1. Running sub-agent: dedicated Processes count 1, agent+model chips ---
-      // Processes is a standing header control: running work stays directly
-      // inspectable without opening the secondary utility menu.
-      const user = userEvent.setup();
-      const processesTrigger = screen.getByRole("button", { name: "Processes, 1 running" });
-      expect(within(processesTrigger).getByText("1")).toBeTruthy();
-      await user.click(processesTrigger);
+      // --- 1. Running sub-agent: Processes count 1, agent+model chips ---
+      // The home header bar is gone; Processes leads the one floating ⋯ menu
+      // and carries the running count there.
+      // A dismissed sheet's overlay leaves `pointer-events: none` on <body>
+      // after its panel is gone, which would block the next ⋯ click.
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const overflow = () =>
+        document.querySelector('[data-slot="phone-overflow-trigger"]') as HTMLElement;
+      expect(overflow().getAttribute("aria-label")).toBe("More actions, 1 processes running");
+      await user.click(overflow());
+      const processesItem = await within(document.body).findByRole("menuitem", {
+        name: /Processes/,
+      });
+      expect(processesItem.textContent).toContain("1");
+      await user.click(processesItem);
       await waitFor(() => expect(store.state.rightRegion).toBe("processes"));
       await screen.findByText("Running (1)");
       const row = (await screen.findByText("Review the auth refactor")).closest(
@@ -224,12 +232,18 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       await waitFor(() => expect(runningProcessCount(store.state.processes)).toBe(0), {
         timeout: 10000,
       });
-      const completedTrigger = screen.getByRole("button", { name: "Processes" });
-      expect(within(completedTrigger).queryByText("1")).toBeNull();
-      await user.click(completedTrigger);
+      await waitFor(() =>
+        expect(overflow().getAttribute("aria-label")).toBe("More actions")
+      );
+      await user.click(overflow());
+      const completedItem = await within(document.body).findByRole("menuitem", {
+        name: /Processes/,
+      });
+      expect(completedItem.textContent).not.toContain("1");
+      await user.click(completedItem);
       await screen.findByText("Finished (1)");
       expect(screen.queryByText("Running (1)")).toBeNull();
-      checklist.push("process completed: moved Running → Finished, header count cleared");
+      checklist.push("process completed: moved Running → Finished, overflow count cleared");
 
       // eslint-disable-next-line no-console
       console.log(`[processes-scenario] PASS —\n  - ${checklist.join("\n  - ")}`);

@@ -34,7 +34,7 @@ use lash::{
         observations::{RemoteSessionCursor, RemoteSessionObservationEventPayload},
         usage::RemoteTurnEvent,
     },
-    rlm::{RlmDialect, RlmSessionBuilderExt},
+    rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect},
     runtime::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest},
     tools::{
         LashlangToolBinding, StaticToolExecute, ToolCall, ToolContract, ToolDefinition,

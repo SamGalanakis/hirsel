@@ -139,7 +139,13 @@ impl LashAgentRuntime {
             // silent reinterpretation — `agent_tool_surface` folds the dialect
             // into the rotation fingerprint so the switch lands on a fresh
             // session with a handoff seed.
-            .rlm_dialect(AGENT_RLM_DIALECT)?
+            .plugin_option(
+                RLM_PROTOCOL_PLUGIN_ID,
+                RlmCreateExtras {
+                    dialect: Some(AGENT_RLM_DIALECT),
+                    ..RlmCreateExtras::default()
+                },
+            )?
             .prompt_contribution(lash::prompt::PromptContribution::guidance(
                 "Hirsel Agent",
                 session_guidance,

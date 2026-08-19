@@ -1776,3 +1776,49 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
         "toggling a plugin rotates the tool-surface fingerprint"
     );
 }
+
+/// Lash refuses a process registration whose input is `Engine` (or `ToolCall`)
+/// unless it names a captured execution env, so every hirsel start builder for
+/// an engine row must declare one and it must survive into the registration.
+#[test]
+fn engine_start_requests_declare_a_captured_execution_env() {
+    let now = Utc::now();
+    let monitor = MonitorRecord {
+        id: "monitor-1".to_string(),
+        cmd: "test -f done".to_string(),
+        every_secs: 30,
+        wake_on: MonitorWakeOn::Regex,
+        pattern: Some("ready".to_string()),
+        label: "build ready".to_string(),
+        created_ts: now,
+        last_event_ts: now,
+        last_run_ts: None,
+        last_output: None,
+        summary: None,
+        cancelled_ts: None,
+    };
+    let policy = SessionPolicy::new(lash::TurnBudget::Unbounded);
+    let requests = [
+        subagent_start_request(
+            "proc-1",
+            "agent",
+            json!({ "prompt": "go", "cwd": "/tmp" }),
+            host_process_env_spec(policy.clone()),
+        ),
+        monitor_start_request(&monitor, "agent", host_process_env_spec(policy)),
+    ];
+
+    for request in requests {
+        assert!(
+            matches!(request.input, ProcessInput::Engine { .. }),
+            "start builder no longer produces an engine row"
+        );
+        let env_spec = request
+            .env_spec
+            .clone()
+            .expect("engine start declares an execution env");
+        let env_ref = env_spec.stable_ref().expect("stable execution env ref");
+        let registration = request.into_registration(Some(env_ref.clone()));
+        assert_eq!(registration.env_ref, Some(env_ref));
+    }
+}

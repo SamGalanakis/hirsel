@@ -506,7 +506,14 @@ impl LashAgentRuntime {
             if let Err(error) = self
                 .core
                 .processes()
-                .start(monitor_start_request(&monitor, &self.session_id), scope)
+                .start(
+                    monitor_start_request(
+                        &monitor,
+                        &self.session_id,
+                        host_process_env_spec(self.session.policy_snapshot()),
+                    ),
+                    scope,
+                )
                 .await
             {
                 tracing::warn!(%error, monitor_id = %monitor.id, "failed to resume monitor process");
@@ -679,7 +686,11 @@ impl LashAgentRuntime {
         self.core
             .processes()
             .start(
-                monitor_start_request(record, &self.session_id),
+                monitor_start_request(
+                    record,
+                    &self.session_id,
+                    host_process_env_spec(self.session.policy_snapshot()),
+                ),
                 inline_trigger_scope(format!("monitor-debug-create:{}", record.id)),
             )
             .await?;

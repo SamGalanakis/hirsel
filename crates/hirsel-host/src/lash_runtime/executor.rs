@@ -409,6 +409,7 @@ impl HirselToolExecutor {
                 "prompt": prompt,
                 "cwd": cwd,
             }),
+            context.process_execution_env_spec(),
         );
         Ok(HirselToolOutcome::with_intents(
             subagent_spawn_result(&process_id),
@@ -508,7 +509,11 @@ impl HirselToolExecutor {
             .monitors_create(cmd, every_secs, wake_on, pattern, label)
             .await
             .map_err(|error| error.to_string())?;
-        let request = monitor_start_request(&record, context.session_id());
+        let request = monitor_start_request(
+            &record,
+            context.session_id(),
+            context.process_execution_env_spec(),
+        );
         Ok(HirselToolOutcome::with_intents(
             monitors_create_result(&record)?,
             vec![lash_core::ToolIntent::StartProcess(Box::new(

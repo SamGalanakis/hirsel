@@ -21,13 +21,14 @@ use lash::{
     InputItem, PromptLayerSink, TurnInput,
     observe::RemoteSessionObservationStreamItem,
     plugins::{
-        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
+        PluginError, PluginExtensionContribution, PluginFactory, PluginOptions, PluginRegistrar,
         PluginSessionContext, SessionPlugin,
     },
     process::{
         ProcessAwaitOutput, ProcessAwaiter, ProcessCompletionAuthority, ProcessEventAppendRequest,
-        ProcessEventType, ProcessIdentity, ProcessInput, ProcessStartRequest, ProcessStatus,
-        ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
+        ProcessEventType, ProcessExecutionEnvSpec, ProcessIdentity, ProcessInput,
+        ProcessStartRequest, ProcessStatus, ProcessWakeDelivery, ProcessWakeSpec,
+        RecoveryDisposition, SessionScope,
     },
     provider::{ProviderHandle, ProviderOptions, ReasoningSelection},
     remote::{

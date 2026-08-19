@@ -241,6 +241,19 @@ pub(super) fn subagent_event_types() -> Vec<ProcessEventType> {
     ]
 }
 
+/// The execution env a host-owned start declares.
+///
+/// Lash refuses an `Engine` (or `ToolCall`) process registration that names no
+/// captured execution env: attempts must be able to rebuild the env they run
+/// under, at recovery as well as at start. A start raised inside a recorded tool
+/// attempt takes the attempt's own env
+/// ([`lash::tools::AttemptContext::process_execution_env_spec`]); a start the
+/// host raises directly has no agent frame, so it mirrors lash's own frameless
+/// fallback — default plugin options over the session's current policy.
+pub(super) fn host_process_env_spec(policy: SessionPolicy) -> ProcessExecutionEnvSpec {
+    ProcessExecutionEnvSpec::new(PluginOptions::default(), policy)
+}
+
 /// A Sub-agent row lash executes itself, through [`HirselSubagentEngine`].
 ///
 /// `OwnerBound` rather than `Rerunnable`: starting a Driver is not idempotent,
@@ -251,6 +264,7 @@ pub(super) fn subagent_start_request(
     process_id: &str,
     session_id: &str,
     payload: Value,
+    env_spec: ProcessExecutionEnvSpec,
 ) -> ProcessStartRequest {
     ProcessStartRequest::new(
         process_id.to_string(),
@@ -261,6 +275,7 @@ pub(super) fn subagent_start_request(
         RecoveryDisposition::OwnerBound,
         ProcessOriginator::session(SessionScope::new(session_id)),
     )
+    .with_env_spec(env_spec)
     .with_wake_session_id(Some(session_id.to_string()))
     .with_observers([session_id.to_string()])
     .with_event_types(subagent_event_types())
@@ -269,6 +284,7 @@ pub(super) fn subagent_start_request(
 pub(super) fn monitor_start_request(
     record: &MonitorRecord,
     session_id: &str,
+    env_spec: ProcessExecutionEnvSpec,
 ) -> ProcessStartRequest {
     ProcessStartRequest::new(
         record.id.clone(),
@@ -282,6 +298,7 @@ pub(super) fn monitor_start_request(
         RecoveryDisposition::Rerunnable,
         ProcessOriginator::session(SessionScope::new(session_id)),
     )
+    .with_env_spec(env_spec)
     .with_wake_session_id(Some(session_id.to_string()))
     .with_observers([session_id.to_string()])
     .with_event_types(monitor_event_types())

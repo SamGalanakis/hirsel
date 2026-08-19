@@ -325,3 +325,71 @@ textarea {
     scroll-behavior: auto !important;
   }
 }
+
+/* Syntax highlighting (highlight.js class names, emitted by the lazily loaded
+   lowlight chunk). Deliberately a five-role palette drawn from existing
+   semantic tokens — mint for the interaction-adjacent role (keywords), muted
+   for the receding roles (comments, punctuation) — rather than a stock
+   rainbow theme, so code keeps the field's quiet and light mode follows the
+   same relationships automatically. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-type,
+.hljs-built_in,
+.hljs-name {
+  color: var(--primary);
+}
+
+.hljs-string,
+.hljs-symbol,
+.hljs-attr,
+.hljs-attribute,
+.hljs-meta-string {
+  color: var(--status-success);
+}
+
+.hljs-number,
+.hljs-regexp,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-link {
+  color: var(--status-attention);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.hljs-deletion {
+  color: var(--destructive);
+}
+
+.hljs-addition {
+  color: var(--status-success);
+}
+
+.hljs-meta,
+.hljs-punctuation,
+.hljs-operator,
+.hljs-params {
+  color: var(--muted-foreground);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}

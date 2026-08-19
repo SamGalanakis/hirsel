@@ -19,8 +19,9 @@ plugins/<id>/
 `<id>` must be lowercase kebab-case and must equal `Plugin::id()`. A plugin
 whose id is invalid or duplicated is logged and skipped at boot.
 
-`plugins/hello/` is the tracked template: copy it, rename it, delete what you
-do not need.
+The layout above and the trait below are the whole template: make the folder,
+implement the two required methods, and add only the surfaces you need. No
+plugin ships in this repository — `plugins/` is empty until you install one.
 
 ## The contract
 

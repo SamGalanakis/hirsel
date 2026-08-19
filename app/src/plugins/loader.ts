@@ -27,7 +27,7 @@ import {
 import type { PluginApi, PluginFactory, PluginInfo, SlotComponent, SlotName } from "./types";
 
 /** Every in-repo UI module, lazily imported. Keys are the glob's own relative
- * paths (`../../../plugins/hello/ui/index.tsx`). `eager: false` keeps each in
+ * paths (`../../../plugins/<id>/ui/index.tsx`). `eager: false` keeps each in
  * its own chunk, so a plugin the Owner has switched off costs no bytes at
  * startup. */
 const UI_MODULES = import.meta.glob("../../../plugins/*/ui/index.tsx");

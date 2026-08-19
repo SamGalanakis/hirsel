@@ -166,17 +166,21 @@ describe("plugin loader: failure isolation", () => {
 describe("plugin discovery", () => {
   it("takes the plugin id from its folder name", async () => {
     const { pluginIdFromPath } = await import("./loader");
-    expect(pluginIdFromPath("../../../plugins/hello/ui/index.tsx")).toBe("hello");
+    expect(pluginIdFromPath("../../../plugins/greeter/ui/index.tsx")).toBe("greeter");
     expect(pluginIdFromPath("../../../plugins/github-notifier/ui/index.tsx")).toBe(
       "github-notifier",
     );
-    expect(pluginIdFromPath("../../../plugins/hello/ui/helpers.tsx")).toBeNull();
+    expect(pluginIdFromPath("../../../plugins/greeter/ui/helpers.tsx")).toBeNull();
   });
 
-  it("discovers the in-repo hello UI module", async () => {
+  it("keys discovered modules by plugin id", async () => {
     const { discoveredModules } = await import("./loader");
-    // The glob is a build-time fact: the repo's plugins/hello/ui/index.tsx is
-    // compiled into the app, so it must show up as a candidate.
-    expect(Object.keys(discoveredModules())).toContain("hello");
+    // The glob is a build-time fact: whatever `plugins/*/ui/index.tsx` folders
+    // exist at build time are compiled in, keyed by folder name. No plugin is
+    // installed in this repository, so the candidate set is empty here — the
+    // shape is what matters.
+    const discovered = discoveredModules();
+    expect(discovered).toBeTypeOf("object");
+    expect(Object.keys(discovered)).toEqual([]);
   });
 });

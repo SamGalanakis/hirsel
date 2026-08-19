@@ -107,7 +107,7 @@ pub struct PluginRegistration {
     pub plugin: Box<dyn Plugin>,
     /// The plugin crate's `package.version`.
     pub version: &'static str,
-    /// The plugin folder, repository-relative (e.g. `"plugins/hello"`).
+    /// The plugin folder, repository-relative (e.g. `"plugins/github-notifier"`).
     pub dir: &'static str,
 }
 

@@ -643,26 +643,13 @@ function handleEventAction(ws, frame) {
 }
 
 // --- Plugin tier (dev stand-in for the Host's plugin registry) --------------
-// One in-memory plugin, matching the in-repo `plugins/hello` UI, so the whole
-// browser half (the roster, the enable/settings writes, a plugin's own routes,
-// and plugin_push) is exercisable without the Rust Host. The UI itself is
-// compiled into the app by Vite and is never served from here. State is
-// process-wide, not per-tenant: a dev fixture, not a durability model.
-const pluginState = {
-  hello: {
-    id: "hello",
-    label: "Hello Plugin",
-    version: "0.1.0",
-    enabled: true,
-    error: null,
-    settings: [
-      { key: "greeting", label: "Greeting word", kind: "string", default: "Hello" },
-      { key: "shout", label: "Shout it", kind: "boolean", default: false },
-      { key: "token", label: "API token", kind: "secret" },
-    ],
-    values: { greeting: "Hello", shout: false, token: null },
-  },
-};
+// The roster and the enable/settings writes are served without the Rust Host,
+// so the browser half (Settings → Plugins, the slot machinery) is exercisable
+// against the mock. No plugin is installed in this repository, so the roster
+// starts empty; adding an entry here gives a plugin under development a dev
+// stand-in. State is process-wide, not per-tenant: a dev fixture, not a
+// durability model.
+const pluginState = {};
 
 function pluginInfo(p) {
   return {
@@ -681,16 +668,6 @@ function pluginInfo(p) {
       }),
     ),
   };
-}
-
-/** The hello plugin's OWN route. The Rust side mounts a per-plugin router under
- * /api/plugins/<id>/…; this is the dev stand-in for hello's. */
-let greetCount = 0;
-function helloGreet(plugin, params) {
-  const word = plugin.values.greeting || "Hello";
-  const text = `${word}, ${params?.name ?? "world"}!`;
-  greetCount += 1;
-  return { text: plugin.values.shout ? text.toUpperCase() : text, count: greetCount };
 }
 
 function bearerToken(req) {
@@ -719,21 +696,6 @@ async function readJsonBody(req) {
   }
 }
 
-/** Push a frame to every connected client of every tenant (dev convenience). */
-function broadcastAll(frame) {
-  const json = JSON.stringify(frame);
-  for (const tenant of tenants.values()) {
-    for (const ws of tenant.clients) if (ws.readyState === ws.OPEN) ws.send(json);
-  }
-}
-
-let tickCount = 0;
-setInterval(() => {
-  if (!pluginState.hello.enabled) return;
-  tickCount += 1;
-  broadcastAll({ type: "plugin_push", plugin: "hello", topic: "tick", data: { count: tickCount } });
-}, 5000).unref();
-
 /** Returns true when the request was a plugin route and has been answered. */
 async function handlePluginRoute(req, res, url) {
   if (!url.pathname.startsWith("/api/plugins")) return false;
@@ -747,15 +709,14 @@ async function handlePluginRoute(req, res, url) {
     return true;
   }
 
-  // `greet` is hello's own route; `enabled`/`settings` are the Host's roster
-  // administration for any plugin.
-  const action = url.pathname.match(/^\/api\/plugins\/([^/]+)\/(greet|enabled|settings)$/);
+  // The Host's roster administration, available for any plugin. A plugin's own
+  // routes are nested alongside these under /api/plugins/<id>/ by the Rust
+  // Host; the mock serves only the administration pair.
+  const action = url.pathname.match(/^\/api\/plugins\/([^/]+)\/(enabled|settings)$/);
   const plugin = action ? pluginState[decodeURIComponent(action[1])] : null;
   if (req.method === "POST" && action && plugin) {
     const body = await readJsonBody(req);
-    if (action[2] === "greet") {
-      sendJson(res, 200, helloGreet(plugin, body));
-    } else if (action[2] === "enabled") {
+    if (action[2] === "enabled") {
       plugin.enabled = Boolean(body.enabled);
       log("plugin", plugin.id, plugin.enabled ? "enabled" : "disabled");
       sendJson(res, 200, { ok: true });

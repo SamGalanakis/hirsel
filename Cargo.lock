@@ -1782,22 +1782,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-plugin-hello"
-version = "0.1.0"
-dependencies = [
- "axum",
- "hirsel-plugin-api",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "hirsel-plugins"
 version = "0.1.0"
 dependencies = [
  "hirsel-plugin-api",
- "hirsel-plugin-hello",
 ]
 
 [[package]]

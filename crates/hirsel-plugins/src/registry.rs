@@ -8,9 +8,5 @@ use hirsel_plugin_api::PluginRegistration;
 
 /// Every installed plugin, in folder order.
 pub fn all() -> Vec<PluginRegistration> {
-    vec![PluginRegistration::new(
-        hirsel_plugin_hello::plugin(),
-        "0.1.0",
-        "plugins/hello",
-    )]
+    Vec::new()
 }

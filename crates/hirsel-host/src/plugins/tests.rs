@@ -182,6 +182,63 @@ impl Plugin for PushPlugin {
     }
 }
 
+/// A plugin exercising the surfaces an installed plugin uses at once: a
+/// setting, a tool, and a route that reads settings and writes KV.
+struct GreeterPlugin;
+
+#[async_trait]
+impl Plugin for GreeterPlugin {
+    fn id(&self) -> &'static str {
+        "greeter"
+    }
+
+    fn label(&self) -> &'static str {
+        "Greeter"
+    }
+
+    fn settings(&self) -> Vec<SettingDescriptor> {
+        vec![SettingDescriptor::string("greeting", "Greeting").with_default("Hello")]
+    }
+
+    fn tools(&self) -> Vec<PluginTool> {
+        vec![PluginTool::new(
+            "ping",
+            "Echo a message back.",
+            json!({}),
+            |_ctx, args| async move { Ok(json!({ "pong": true, "message": args["message"] })) },
+        )]
+    }
+
+    fn routes(&self) -> Option<Router<PluginRouterState>> {
+        Some(Router::new().route("/greet", post(greet)))
+    }
+}
+
+/// `POST /api/plugins/greeter/greet` — the greeting comes from settings and
+/// the count from KV, so one response covers both persistence surfaces.
+async fn greet(
+    axum::extract::State(ctx): axum::extract::State<PluginCtx>,
+    axum::Json(request): axum::Json<Value>,
+) -> axum::Json<Value> {
+    let greeting = ctx
+        .setting_str("greeting")
+        .unwrap_or_else(|| "Hello".to_string());
+    let count = ctx
+        .kv()
+        .get("greet_count")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        + 1;
+    ctx.kv().set("greet_count", json!(count)).await.unwrap();
+    axum::Json(json!({
+        "text": format!("{greeting}, {}!", request["name"].as_str().unwrap_or("")),
+        "count": count,
+    }))
+}
+
 #[tokio::test]
 async fn invalid_and_duplicate_plugin_ids_are_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -448,34 +505,76 @@ async fn plugin_events_land_in_the_feed() {
     );
 }
 
-/// The tracked `plugins/hello` template, exercised through the real host:
-/// its tool dispatches, its route runs behind the owner gate, and its KV
-/// counter survives across calls.
+/// No plugins are installed in this repository, so the generated registry is
+/// empty: the host must still boot, expose no plugin surface, and serve the
+/// management API with an empty list.
 #[tokio::test]
-async fn hello_plugin_works_end_to_end_in_the_real_host() {
+async fn an_empty_generated_registry_boots_a_clean_host() {
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
 
-    // Registered from the generated aggregator, enabled on first sight.
-    assert!(state.plugins.is_running("hello"));
-    assert_eq!(state.plugins.tool_names(), vec!["plugin__hello__ping"]);
-
-    // Its skills folder is resolved and folded into the agent prompt.
+    assert!(state.plugins.tool_names().is_empty());
     let skills = state.plugins.skills_prompt();
     assert!(
-        skills.contains("## Plugin skill: Hello / greeting"),
-        "hello's skills must reach the agent prompt: {skills:?}"
+        !skills.contains("## Plugin skill:"),
+        "no installed plugin can contribute skills: {skills:?}"
     );
+
+    let response = crate::router_from_state(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/plugins")
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = serde_json::from_slice(&read_body(response).await).unwrap();
+    assert_eq!(body["plugins"], json!([]));
+}
+
+/// An installed plugin, exercised through the real router: its tool
+/// dispatches, its route runs behind the owner gate, its KV counter survives
+/// across calls, and disabling it takes both surfaces away.
+#[tokio::test]
+async fn an_installed_plugin_works_end_to_end_in_the_real_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    // The generated registry is empty in this repository, so the host under
+    // test is restarted over a fixture registration — the same code path
+    // `build_state` uses, with a plugin to exercise.
+    state.plugins = PluginHost::start(
+        vec![PluginRegistration::new(
+            Box::new(GreeterPlugin),
+            "1.0.0",
+            "plugins/greeter",
+        )],
+        state.storage.clone(),
+        state.tools.clone(),
+        state.broadcaster.clone(),
+        state.broadcast_log.clone(),
+        test_supervisor_config(),
+    )
+    .await
+    .unwrap();
+
+    // Registered from the aggregator, enabled on first sight.
+    assert!(state.plugins.is_running("greeter"));
+    assert_eq!(state.plugins.tool_names(), vec!["plugin__greeter__ping"]);
 
     // Tool dispatch through the shared plugin tool table.
     let result = state
         .tools
         .plugin_tools()
-        .call("plugin__hello__ping", json!({ "message": "hi" }))
+        .call("plugin__greeter__ping", json!({ "message": "hi" }))
         .await
-        .expect("hello registers plugin__hello__ping")
+        .expect("greeter registers plugin__greeter__ping")
         .unwrap();
     assert_eq!(result, json!({ "pong": true, "message": "hi" }));
 
@@ -489,7 +588,7 @@ async fn hello_plugin_works_end_to_end_in_the_real_host() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/plugins/hello/greet")
+                    .uri("/api/plugins/greeter/greet")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "name": "Sam" }).to_string()))
@@ -516,12 +615,12 @@ async fn hello_plugin_works_end_to_end_in_the_real_host() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let body: Value = serde_json::from_slice(&read_body(response).await).unwrap();
-    let hello = &body["plugins"][0];
-    assert_eq!(hello["id"], json!("hello"));
-    assert_eq!(hello["version"], json!("0.1.0"));
-    assert_eq!(hello["state"], json!("running"));
-    assert_eq!(hello["values"]["greeting"], json!("Hello"));
-    assert_eq!(hello["settings"][0]["kind"], json!("string"));
+    let entry = &body["plugins"][0];
+    assert_eq!(entry["id"], json!("greeter"));
+    assert_eq!(entry["version"], json!("1.0.0"));
+    assert_eq!(entry["state"], json!("running"));
+    assert_eq!(entry["values"]["greeting"], json!("Hello"));
+    assert_eq!(entry["settings"][0]["kind"], json!("string"));
 
     // Settings save reaches the plugin, and the route reflects it.
     let response = router
@@ -529,7 +628,7 @@ async fn hello_plugin_works_end_to_end_in_the_real_host() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugins/hello/settings")
+                .uri("/api/plugins/greeter/settings")
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -545,7 +644,7 @@ async fn hello_plugin_works_end_to_end_in_the_real_host() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugins/hello/greet")
+                .uri("/api/plugins/greeter/greet")
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "name": "Sam" }).to_string()))
@@ -562,7 +661,7 @@ async fn hello_plugin_works_end_to_end_in_the_real_host() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugins/hello/enabled")
+                .uri("/api/plugins/greeter/enabled")
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "enabled": false }).to_string()))
@@ -577,7 +676,7 @@ async fn hello_plugin_works_end_to_end_in_the_real_host() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugins/hello/greet")
+                .uri("/api/plugins/greeter/greet")
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "name": "Sam" }).to_string()))

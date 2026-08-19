@@ -135,7 +135,10 @@ describe("Task Margins shell", () => {
     expect(document.querySelector('[data-slot="task-field"]')).toBeInTheDocument();
     const identity = screen.getByRole("heading", { level: 2, name: "choose direction" });
     const question = screen.getByRole("heading", { level: 3, name: "Choose the visual direction" });
-    expect(identity.className).toBe("sr-only");
+    // The task name is visible quiet context now, not screen-reader-only; the
+    // generated question still visibly leads it (DESIGN §3).
+    expect(identity.className).not.toContain("sr-only");
+    expect(identity.className).toContain("text-muted-foreground");
     expect(question.className).toContain("clamp(1.75rem,3vw,2.25rem)");
     expect(document.querySelector('[data-slot="task-field"]')?.textContent).not.toContain("blocked on you");
     expect(screen.getByText("Move with the focused direction")).toBeInTheDocument();
@@ -207,6 +210,97 @@ describe("Task Margins shell", () => {
     expect(document.querySelector('[data-slot="task-scope"]')).toBeNull();
     expect(screen.queryByText("Ambient")).toBeNull();
     expect(screen.queryByText("Global Hirsel")).toBeNull();
+  });
+
+  it("marks the focused chip, dims the rest, and offers a labelled exit", async () => {
+    const { screen, store } = await setupApp([
+      task(1, "@choose-direction", "Choose direction"),
+      task(2, "@orchestration-copy", "Shape the orchestration copy"),
+    ]);
+    const nav = screen.getByRole("navigation", { name: "Tasks" });
+    const first = within(nav).getByRole("button", { name: /choose direction, blocked on you/ });
+    const second = within(nav).getByRole("button", { name: /orchestration copy, blocked on you/ });
+
+    expect(first).not.toHaveAttribute("aria-current");
+    await fireEvent.click(first);
+
+    // The marker is a 2px accent rule on the edge the chip shares with the
+    // field, never a tint, and the other chips step back.
+    expect(first).toHaveAttribute("aria-current", "page");
+    expect(first.className).toContain("border-b-2");
+    expect(first.classList.contains("border-primary")).toBe(true);
+    expect(first.classList.contains("bg-primary/[0.08]")).toBe(false);
+    expect(second.classList.contains("opacity-55")).toBe(true);
+    expect(first.classList.contains("opacity-55")).toBe(false);
+
+    await fireEvent.click(within(nav).getByRole("button", { name: "Clear focus" }));
+    expect(store.state.focusedTaskId).toBeNull();
+    expect(first).not.toHaveAttribute("aria-current");
+    expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
+  });
+
+  it("lands `g t` on the focused chip rather than the top of the index", async () => {
+    const { screen } = await setupApp([
+      task(1, "@choose-direction", "Choose direction"),
+      task(2, "@orchestration-copy", "Shape the orchestration copy"),
+    ]);
+    const nav = screen.getByRole("navigation", { name: "Tasks" });
+    const second = within(nav).getByRole("button", { name: /orchestration copy, blocked on you/ });
+    await fireEvent.click(second);
+    screen.getByLabelText("Message Hirsel").blur();
+
+    fireEvent.keyDown(window, { key: "g" });
+    fireEvent.keyDown(window, { key: "t" });
+    await waitFor(() => expect(second).toHaveFocus());
+  });
+
+  it("walks the Esc ladder: a live turn is stopped, an idle focused task is left", async () => {
+    const { screen, store, fakeClient } = await setupApp([
+      task(1, "@choose-direction", "Choose direction"),
+    ]);
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+    expect(store.state.focusedTaskId).toBe(1);
+
+    // Rung 2: a running turn owns Esc — the composer stops it and focus stays.
+    store.dispatch({ type: "agent_activity", payload: { state: "thinking", text: null } });
+    const composer = screen.getByLabelText("Message Hirsel");
+    composer.focus();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(fakeClient.cancelTurn).toHaveBeenCalledTimes(1);
+    expect(store.state.focusedTaskId).toBe(1);
+    expect(document.querySelector('[data-slot="task-field"]')).toBeInTheDocument();
+
+    // Rung 3: idle again, the same key leaves the task for the ambient field —
+    // and still works with the caret in the composer.
+    store.dispatch({ type: "agent_activity", payload: { state: "idle", text: null } });
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(fakeClient.cancelTurn).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(store.state.focusedTaskId).toBeNull());
+    expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
+  });
+
+  it("lets the generated instrument own the framing instead of repeating the description", async () => {
+    const framed: EventItem = {
+      ...task(1, "@rollout", "Roll out the migration"),
+      ui: [{ type: "status", label: "Waiting on the migration window" }],
+    };
+    const { screen } = await setupApp([framed]);
+    await fireEvent.click(screen.getByRole("button", { name: /rollout/ }));
+
+    const field = document.querySelector('[data-slot="task-field"]') as HTMLElement;
+    expect(field.textContent).toContain("Waiting on the migration window");
+    // The description is the fallback title the instrument already stands in
+    // for — printing both is the duplication this gate removes.
+    expect(field.textContent).not.toContain("Roll out the migration");
+  });
+
+  it("still shows the description when the event carries no generated UI", async () => {
+    const bare: EventItem = { ...task(1, "@rollout", "Roll out the migration"), ui: [] };
+    const { screen } = await setupApp([bare]);
+    await fireEvent.click(screen.getByRole("button", { name: /rollout/ }));
+
+    expect(document.querySelector('[data-slot="task-field"]')?.textContent)
+      .toContain("Roll out the migration");
   });
 
   it("sends focused messages through the global transcript with task mention and anchor", async () => {

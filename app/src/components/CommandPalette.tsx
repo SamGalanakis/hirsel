@@ -14,6 +14,7 @@ import {
   Clock,
   Layers,
   MessagesSquare,
+  Minimize2,
   Scale,
   Search,
   Settings,
@@ -21,7 +22,7 @@ import {
 } from "lucide-solid";
 import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import type { EventItem } from "../protocol";
-import { state } from "../store/store";
+import { clearTaskFocus, state } from "../store/store";
 import { archiveEventWithUndo } from "../lib/event-archive";
 import { decideEventWithUndo } from "../lib/event-decide";
 import { snoozeEventWithUndo } from "../lib/event-snooze";
@@ -144,6 +145,19 @@ export const CommandPalette: Component<{
         run: jumpToLatest,
       },
     ];
+
+    // The exit from a focused Task, mirroring the Esc ladder's last rung. Only
+    // offered while there is a focus to leave.
+    if (state.focusedTaskId !== null) {
+      out.push({
+        id: "clear-focus",
+        label: "Clear task focus",
+        hint: ["Esc"],
+        keywords: "ambient leave exit close unfocus back",
+        icon: <Minimize2 class={iconClass} aria-hidden="true" />,
+        run: clearTaskFocus,
+      });
+    }
 
     if (thinking()) {
       out.push({

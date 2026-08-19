@@ -178,15 +178,22 @@ export function Composer(props: Props) {
   const canSend = () => value().trim().length > 0 || props.attachments.files().length > 0;
 
   return (
-    // One persistent organic capsule: the sole surface allowed the full pill
-    // signature because it is the stable transition between global and task.
+    // The composer sits in the same frame as the field above it, so its left
+    // edge lands on the field's left edge at every width — that shared edge is
+    // what makes it read as the floor of the screen rather than a floating bar.
+    <div class="mx-auto w-full max-w-frame flex-shrink-0 px-gutter pb-3 rail:pb-4">
+    {/* One persistent organic capsule: the sole surface allowed the full pill
+        signature because it is the stable transition between global and task.
+        Focus narrows it to the reading measure and tints it mint; ambient lets
+        it rest at the full frame width (DESIGN §4). It keeps a visible hairline
+        at rest so the floor is legible before it is touched. */}
     <div
       data-slot="composer-shell"
       data-focused={props.focused ? "true" : "false"}
-      class="mx-3 mb-3 flex-shrink-0 rounded-[24px_34px_30px_22px] px-3 py-2 ring-1 transition-[max-width,background-color,box-shadow] duration-200 ease-out rail:mx-auto rail:mb-4 rail:w-[calc(100%-2rem)]"
+      class="w-full rounded-full px-3 py-2 ring-1 transition-[max-width,background-color,box-shadow] duration-200 ease-out"
       classList={{
-        "bg-primary/[0.035] ring-primary/25 rail:max-w-[820px]": props.focused,
-        "bg-card/95 ring-foreground/10 rail:max-w-[1180px]": !props.focused,
+        "bg-primary/[0.035] ring-primary/25 rail:max-w-measure": props.focused,
+        "bg-card/95 ring-border": !props.focused,
       }}
     >
       <div class="w-full">
@@ -347,6 +354,7 @@ export function Composer(props: Props) {
         </div>
       </Show>
       </div>
+    </div>
     </div>
   );
 }

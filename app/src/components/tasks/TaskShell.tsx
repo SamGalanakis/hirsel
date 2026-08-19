@@ -6,7 +6,7 @@ FIRST VIEWPORT: Task index at the left/top, one unfolded JSON-generated task ins
 FORM: Task Margins, the user-pinned synthesis; focus changes the subject, never the interlocutor.
 */
 import { Activity, X } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, For, on, Show } from "solid-js";
 import type { Blob, EventItem, SendMode } from "../../protocol";
 import { markEventRead } from "../../lib/event-decide";
 import {
@@ -18,8 +18,11 @@ import {
 import {
   clearComposerPrefill,
   clearProtocolError,
+  clearTaskFocus,
   openProcesses,
+  reconcileTaskFocus,
   state,
+  toggleTaskFocus,
 } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { ViewRenderer } from "../../views/ViewRenderer";
@@ -33,23 +36,17 @@ import { createComposerAttachments } from "../chat/useAttachments";
 import { CanvasRail, CanvasSheet } from "../views/CanvasSurface";
 import { AmbientField, TaskField } from "./TaskFields";
 import { TaskIndex } from "./TaskIndex";
-import {
-  initialTaskNavigation,
-  reconcileTaskNavigation,
-  toggleTaskFocus,
-} from "./task-navigation";
 import { taskSendContext } from "./task-model";
 
 export function TaskShell() {
   const attachments = createComposerAttachments();
-  const [navigation, setNavigation] = createSignal(initialTaskNavigation);
   let taskScrollRef: HTMLDivElement | undefined;
 
   const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
   const tasks = createMemo(() => orderedTasks(visible(), state.eventDecideOverrides));
   const processCount = () => runningProcessCount(state.processes);
   const focusedTask = createMemo(() =>
-    tasks().find((task) => task.id === navigation().focusedId) ?? null
+    tasks().find((task) => task.id === state.focusedTaskId) ?? null
   );
   const taskViews = createMemo(() => {
     const task = focusedTask();
@@ -58,14 +55,21 @@ export function TaskShell() {
     return state.views.filter((view) => view.placement === `ping:${task.id}`);
   });
 
-  createEffect(() => setNavigation((current) => reconcileTaskNavigation(current, tasks())));
+  createEffect(() => reconcileTaskFocus(tasks().map((task) => task.id)));
 
-  createEffect(on(() => navigation().focusedId, () => {
+  // A focus change re-subjects the whole field: start the new task at its top,
+  // and bring its chip into view so the marker and the instrument it opened are
+  // never in two different places (the strip in particular scrolls
+  // independently and would otherwise leave the marker off-screen).
+  createEffect(on(() => state.focusedTaskId, (focusedId) => {
     if (taskScrollRef) taskScrollRef.scrollTop = 0;
+    if (focusedId === null) return;
+    const chip = document.querySelector<HTMLElement>(`[data-task-id="${focusedId}"]`);
+    chip?.scrollIntoView?.({ inline: "center", block: "nearest" });
   }));
 
   function selectTask(task: EventItem): void {
-    setNavigation((current) => toggleTaskFocus(current, task));
+    toggleTaskFocus(task.id);
     if (!task.read) markEventRead(task.id);
   }
 
@@ -93,7 +97,7 @@ export function TaskShell() {
 
   return (
     <div data-slot="task-shell" class="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col overflow-hidden">
-      <header class="flex h-14 shrink-0 items-center gap-3 px-4 rail:px-6">
+      <header class="flex h-14 shrink-0 items-center gap-3 px-gutter">
         <div class="flex items-center gap-2">
           <BrandMark size={20} />
           <h1 class="m-0 text-sm font-semibold tracking-[0.01em]">hirsel</h1>
@@ -125,26 +129,39 @@ export function TaskShell() {
       <div class="flex min-h-0 flex-1 flex-col rail:flex-row">
         <TaskIndex
           tasks={tasks()}
-          focusedId={navigation().focusedId}
+          focusedId={state.focusedTaskId}
           decideOverrides={state.eventDecideOverrides}
           onSelect={selectTask}
+          onClearFocus={clearTaskFocus}
         />
         <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div ref={(node) => { taskScrollRef = node; }} data-slot="task-scroll" class="min-h-0 flex-1 overflow-y-auto">
+          {/* The field is anchored to the composer, not to the top bar: short
+              content rests just above the composer (its children carry
+              `min-h-full` + end-alignment), long content still scrolls from the
+              top because it simply outgrows the container. */}
+          <div
+            ref={(node) => { taskScrollRef = node; }}
+            data-slot="task-scroll"
+            class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto"
+          >
             <Show when={focusedTask()} fallback={<AmbientField />}>
               {(task) => <TaskField task={task()} tasks={tasks()} views={taskViews()} />}
             </Show>
             <Show when={!focusedTask() && conversationViews(state.views).length > 0}>
-              <div class="mx-auto flex w-full max-w-[760px] flex-col gap-4 px-6 pb-12">
-                <For each={conversationViews(state.views)}>
-                  {(view) => <ViewRenderer spec={view.spec} instanceId={view.instance_id} placement={view.placement} />}
-                </For>
+              <div class="mx-auto w-full max-w-frame px-gutter pb-12">
+                <div class="flex w-full max-w-measure flex-col gap-4">
+                  <For each={conversationViews(state.views)}>
+                    {(view) => (
+                      <ViewRenderer spec={view.spec} instanceId={view.instance_id} placement={view.placement} />
+                    )}
+                  </For>
+                </div>
               </div>
             </Show>
           </div>
 
           <Show when={state.protocolError}>
-            <div role="alert" class="mx-4 mb-2 flex items-center gap-3 rounded-lg bg-muted px-3 text-sm text-foreground">
+            <div role="alert" class="mx-gutter mb-2 flex items-center gap-3 rounded-lg bg-muted px-3 text-sm text-foreground">
               <span class="min-w-0 flex-1 py-3">{state.protocolError}</span>
               <button
                 type="button"

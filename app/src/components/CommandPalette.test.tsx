@@ -40,6 +40,20 @@ describe("CommandPalette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("offers the focus exit only while a task is focused", async () => {
+    const store = await import("../store/store");
+    const { unmount } = render(() => <CommandPalette open onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
+    expect(screen.queryByText("Clear task focus")).toBeNull();
+    unmount();
+
+    store.toggleTaskFocus(11);
+    render(() => <CommandPalette open onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Clear task focus")).toBeInTheDocument());
+    await userEvent.setup().click(screen.getByText("Clear task focus"));
+    await waitFor(() => expect(store.state.focusedTaskId).toBeNull());
+  });
+
   it("does not invent a hidden search destination for an unmatched query", async () => {
     const user = userEvent.setup();
     render(() => <CommandPalette open onOpenChange={() => {}} />);
@@ -110,5 +124,8 @@ describe("ShortcutHelp", () => {
     expect(screen.getByText("Command palette")).toBeInTheDocument();
     expect(screen.getAllByText("Focus Hirsel").length).toBeGreaterThan(0);
     expect(screen.getByText("Jump to latest")).toBeInTheDocument();
+    // The Tasks group is no longer an empty heading the sheet silently drops.
+    expect(screen.getByText("Tasks")).toBeInTheDocument();
+    expect(screen.getByText("Clear task focus")).toBeInTheDocument();
   });
 });

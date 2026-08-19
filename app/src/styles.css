@@ -127,6 +127,20 @@
 @theme {
   --breakpoint-split: 900px;
   --breakpoint-rail: 1100px;
+
+  /* The task world's one horizontal rhythm, so the field, its conversation and
+     the composer read as one column instead of three stacked widths:
+       `frame`   — the outer field width every standing surface centres in;
+       `measure` — the reading/instrument column inside it, left-anchored, so
+                   the instrument, the ambient conversation and the focused
+                   composer all share one left edge at every width;
+       `gutter`  — the single side inset (index, field, composer, header),
+                   replacing the old px-3 / px-4 / px-6 mix.
+     Nothing in the task world should re-introduce a literal px width or a
+     bespoke inset. */
+  --container-frame: 1180px;
+  --container-measure: 820px;
+  --spacing-gutter: 1.5rem;
 }
 
 @theme inline {

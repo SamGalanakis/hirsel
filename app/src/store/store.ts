@@ -12,6 +12,12 @@ interface UiState {
   composerPrefill: string | null;
   protocolError: string | null;
   settingsScrollTarget: SettingsSection | null;
+  /** The one focused Task, or `null` for the ambient field. Ambient is the
+   * absence of focus, so `null` is the resting value, not a mode. It lives here
+   * rather than inside the shell because focus is now reachable from outside the
+   * task tree — the Esc ladder and the ⌘K "Clear task focus" command both need
+   * to leave a Task without owning the shell's internals. */
+  focusedTaskId: number | null;
 }
 
 /** A jump-to target within the Settings pane, used by callers that open
@@ -27,6 +33,7 @@ function initialStore(): Store {
     composerPrefill: null,
     protocolError: null,
     settingsScrollTarget: null,
+    focusedTaskId: null,
   };
 }
 
@@ -98,6 +105,30 @@ export function dispatch(action: Action): void {
     // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
     // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
     setState("views", reconcile(next.views, { key: "instance_id" }));
+  });
+}
+
+// ---- Task focus -------------------------------------------------------------
+
+/** Focus a Task, or return to ambient when it is already the focused one —
+ * selecting the focused task again clears focus (DESIGN §4). */
+export function toggleTaskFocus(id: number): void {
+  setState("focusedTaskId", (current) => (current === id ? null : id));
+}
+
+/** Leave the focused Task for the ambient field. The exit path behind Esc, the
+ * focused chip's × affordance, and the ⌘K "Clear task focus" command. */
+export function clearTaskFocus(): void {
+  setState("focusedTaskId", null);
+}
+
+/** Drop focus when the focused Task is no longer in the visible field (archived,
+ * swept, resynced away). Untracked like `dispatch`: it is called from the shell's
+ * reconciliation effect and must not subscribe that effect to its own write. */
+export function reconcileTaskFocus(visibleIds: number[]): void {
+  untrack(() => {
+    const focused = state.focusedTaskId;
+    if (focused !== null && !visibleIds.includes(focused)) setState("focusedTaskId", null);
   });
 }
 

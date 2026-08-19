@@ -74,15 +74,17 @@ export function AmbientField() {
   return (
     <div
       data-slot="ambient-field"
-      class="mx-auto w-full max-w-[760px] px-6 py-8 rail:min-h-full rail:px-12 rail:py-12"
+      class="mx-auto flex min-h-full w-full max-w-frame flex-col justify-end px-gutter py-8 rail:py-12"
     >
-      <ConversationMargin messages={messages()} thinking={state.agentActivity.state === "thinking"} />
-      {/* home.section: plugin cards on the ambient field, below the recent
-          global conversation — the resting view an Owner lands on with no Task
-          focused, so an ambient plugin surface (a feed, a status card) belongs
-          here and nowhere else. `ctx` is `{}`: there is no subject. */}
-      <div class="mt-8 flex flex-col gap-4 empty:hidden">
-        <PluginSlot name="home.section" />
+      <div class="w-full max-w-measure">
+        <ConversationMargin messages={messages()} thinking={state.agentActivity.state === "thinking"} />
+        {/* home.section: plugin cards on the ambient field, below the recent
+            global conversation — the resting view an Owner lands on with no Task
+            focused, so an ambient plugin surface (a feed, a status card) belongs
+            here and nowhere else. `ctx` is `{}`: there is no subject. */}
+        <div class="mt-8 flex flex-col gap-4 empty:hidden">
+          <PluginSlot name="home.section" />
+        </div>
       </div>
     </div>
   );
@@ -91,7 +93,12 @@ export function AmbientField() {
 export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: ViewInstance[] }) {
   const related = () => messagesForTask(props.task, state.messages, props.tasks);
   const resolved = () => isEventResolved(props.task, state.eventDecideOverrides);
-  const uiOwnsHeading = () => eventUiNodes(props.task.ui).some((node) => node.type === "heading");
+  // The generated instrument owns the Task's framing whenever it renders
+  // anything at all — the same precedence `eventTitle()` applies (heading, else
+  // status/text label, else the wire description). Gating on a heading alone
+  // printed the description a second time under an instrument that already
+  // stated it.
+  const uiOwnsFraming = () => eventUiNodes(props.task.ui).length > 0;
   const hasConversation = () => related().length > 0
     || state.agentActivity.state === "thinking"
     || state.turnEvents.length > 0;
@@ -99,15 +106,19 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
     <div
       data-slot="task-field"
       data-task={props.task.id}
-      class="mx-auto grid w-full max-w-[1180px] gap-14 px-6 py-12 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2 motion-safe:duration-200 rail:min-h-full rail:content-center rail:px-12 rail:py-12"
+      class="mx-auto grid min-h-full w-full max-w-frame content-end gap-14 px-gutter py-12 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2 motion-safe:duration-200"
       classList={{ "rail:grid-cols-[minmax(320px,1fr)_minmax(280px,.72fr)] rail:items-center": hasConversation() }}
     >
-      <section class="min-w-0">
-        <h2 class="sr-only">{taskName(props.task)}</h2>
-        <Show when={!uiOwnsHeading()}>
-          <p class="max-w-[46ch] text-sm leading-relaxed text-muted-foreground">{props.task.description}</p>
+      <section class="min-w-0 max-w-measure">
+        {/* Quiet identity: the task name is context, and the generated question
+            below must visibly lead it (DESIGN §3). */}
+        <h2 class="m-0 text-[1.25rem] font-[450] leading-tight text-muted-foreground">
+          {taskName(props.task)}
+        </h2>
+        <Show when={!uiOwnsFraming()}>
+          <p class="mt-2 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">{props.task.description}</p>
         </Show>
-        <div class="max-w-[620px]">
+        <div class="mt-4">
           <EventCardRenderer
             ui={props.task.ui}
             disabled={resolved()}

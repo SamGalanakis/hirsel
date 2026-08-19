@@ -4,11 +4,13 @@
 // it suppresses itself whenever the Owner is typing in a field or an overlay
 // owns input, so it never steals a keystroke from the composer or a dialog.
 //
-// Esc is intentionally NOT handled here — the composer's "stop turn" and the
-// focus-trap Escape handling own it, and this layer must not fight them.
+// Esc is the one key this layer shares: it owns only the LAST rung of the Esc
+// ladder (leave the focused Task). The rungs above it — an open overlay's focus
+// trap, and the composer stopping a live turn — keep Esc for themselves, and
+// `escapeField` yields to both rather than fighting them.
 
 import { createSignal } from "solid-js";
-import { openProcesses, openSettings } from "../store/store";
+import { clearTaskFocus, openProcesses, openSettings, state } from "../store/store";
 import { getClient } from "../ws/client";
 // SEAM (created in a parallel worktree): true while a modal/overlay/focus-trap
 // owns input. Used to suppress the bare-key layer so summoned surfaces keep the
@@ -65,6 +67,20 @@ export function stopActiveTurn(): void {
   getClient()?.cancelTurn();
 }
 
+/** The Esc ladder, in priority order:
+ *   1. an overlay/dialog is open  → its focus trap owns Esc (yield);
+ *   2. an agent turn is running   → the composer's stop owns Esc (yield);
+ *   3. a Task is focused          → leave it for the ambient field.
+ * Returns true when this layer consumed the key, so the caller can
+ * `preventDefault` only on the rung it actually acted on. */
+export function escapeField(): boolean {
+  if (anyOverlayOpen()) return false;
+  if (state.agentActivity.state === "thinking") return false;
+  if (state.focusedTaskId === null) return false;
+  clearTaskFocus();
+  return true;
+}
+
 // ---- Cheat-sheet / hint vocabulary (one source for help + palette hints) ------
 
 export interface Shortcut {
@@ -78,6 +94,7 @@ export interface Shortcut {
 export const SHORTCUTS: Shortcut[] = [
   { keys: ["⌘", "K"], label: "Command palette", group: "General" },
   { keys: ["?"], label: "Keyboard shortcuts", group: "General" },
+  { keys: ["Esc"], label: "Clear task focus", group: "Tasks" },
   { keys: ["/"], label: "Focus Hirsel", group: "Hirsel" },
   { keys: ["G"], label: "Jump to latest", group: "Hirsel" },
   { keys: ["Enter"], label: "Send message", group: "Hirsel" },
@@ -99,6 +116,8 @@ export interface KeymapHandlers {
   jumpToLatest(): void;
   openPalette(): void;
   showHelp(): void;
+  /** Runs the Esc ladder; true when it consumed the key. */
+  escapeField(): boolean;
 }
 
 /** The production wiring: bare-key/chord actions run the shared action helpers;
@@ -110,6 +129,7 @@ export const defaultHandlers: KeymapHandlers = {
   jumpToLatest,
   openPalette: () => setCommandPaletteOpen(true),
   showHelp: () => setShortcutHelpOpen(true),
+  escapeField,
 };
 
 /** True when the event originated in a text-entry surface — where a bare key is
@@ -154,6 +174,15 @@ export function installGlobalKeymap(handlers: KeymapHandlers = defaultHandlers):
 
     // No other modifier combo belongs to this layer.
     if (meta || e.altKey) return;
+
+    // Esc is checked ahead of the typing suppression below: it is never typed
+    // content, so leaving a Task must work with the caret in the composer too.
+    // `escapeField` yields to an open overlay and to a live turn, so this can
+    // only ever fire on the ladder's last rung.
+    if (e.key === "Escape") {
+      if (handlers.escapeField()) e.preventDefault();
+      return;
+    }
 
     // The bare-key layer is silent while the Owner is typing or an overlay owns
     // input — this is what keeps it from ever eating a composer keystroke.

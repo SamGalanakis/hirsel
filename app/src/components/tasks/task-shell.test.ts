@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { EventItem } from "../../protocol";
 import type { DisplayMessage } from "../../store/types";
 import {
-  initialTaskNavigation,
-  reconcileTaskNavigation,
+  clearTaskFocus,
+  reconcileTaskFocus,
+  state,
   toggleTaskFocus,
-} from "./task-navigation";
+} from "../../store/store";
 import { messagesForTask, taskSendContext } from "./task-model";
 
 const task = {
@@ -81,15 +82,32 @@ describe("task focus", () => {
   });
 
   it("starts ambient and toggles one task into and out of focus", () => {
-    const focused = toggleTaskFocus(initialTaskNavigation, task);
-    expect(focused).toEqual({ focusedId: task.id });
-    expect(toggleTaskFocus(focused, task)).toEqual(initialTaskNavigation);
+    clearTaskFocus();
+    expect(state.focusedTaskId).toBeNull();
+    toggleTaskFocus(task.id);
+    expect(state.focusedTaskId).toBe(task.id);
+    toggleTaskFocus(task.id);
+    expect(state.focusedTaskId).toBeNull();
+  });
+
+  it("moves focus straight to another task without passing through ambient", () => {
+    clearTaskFocus();
+    toggleTaskFocus(task.id);
+    toggleTaskFocus(8);
+    expect(state.focusedTaskId).toBe(8);
+    clearTaskFocus();
   });
 
   it("returns to ambient when the focused task disappears", () => {
-    const replacement = { ...task, id: 8 };
-    expect(
-      reconcileTaskNavigation(toggleTaskFocus(initialTaskNavigation, task), [replacement]),
-    ).toEqual(initialTaskNavigation);
+    toggleTaskFocus(task.id);
+    reconcileTaskFocus([8]);
+    expect(state.focusedTaskId).toBeNull();
+  });
+
+  it("keeps focus while the focused task is still in the field", () => {
+    toggleTaskFocus(task.id);
+    reconcileTaskFocus([8, task.id]);
+    expect(state.focusedTaskId).toBe(task.id);
+    clearTaskFocus();
   });
 });

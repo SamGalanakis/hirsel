@@ -9,6 +9,7 @@ pub mod iroh;
 pub mod lash_runtime;
 pub mod model_selection;
 pub mod monitors;
+pub mod plugins;
 pub mod process_run;
 pub mod processes;
 mod protocol;
@@ -61,6 +62,7 @@ pub struct AppState {
     pub tools: ToolSuite,
     pub pushes: push::PushGateway,
     pub views: templates::ViewManager,
+    pub plugins: plugins::PluginHost,
     pub subagent_models: subagent_models::SubagentModelState,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
@@ -571,6 +573,24 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         .return_expired_snoozes()
         .await
         .context("return expired snoozed events at startup")?;
+    // Plugins boot before the agent: their tools have to be in the catalog
+    // when the first tool-surface fingerprint is computed, and their skills
+    // have to be in the guidance before the session prompt is assembled.
+    let plugin_host = plugins::PluginHost::start(
+        hirsel_plugins::all(),
+        storage.clone(),
+        tools.clone(),
+        broadcaster.clone(),
+        broadcast_log.clone(),
+        plugins::SupervisorConfig::default(),
+    )
+    .await
+    .context("start in-tree plugins")?;
+    let agent_guidance = format!(
+        "{}{}",
+        lash_runtime::agent_guidance(&config),
+        plugin_host.skills_prompt()
+    );
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
             agent_mode: config.agent,
@@ -581,7 +601,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
             config_store,
-            agent_guidance: lash_runtime::agent_guidance(&config),
+            agent_guidance,
         },
         tools.clone(),
         broadcaster.clone(),
@@ -612,6 +632,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         tools,
         pushes,
         views,
+        plugins: plugin_host,
         subagent_models,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
@@ -631,7 +652,8 @@ pub fn router_from_state(state: AppState) -> Router {
         .route("/readyz", axum::routing::get(health::readyz))
         .route("/ws", axum::routing::get(ws::ws_handler))
         .route("/blob/:id", axum::routing::get(blob_route::blob_handler))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .merge(plugins::routes(state.clone()));
     if state.debug_enabled {
         app = app.merge(debug::routes(state.clone()));
     }

@@ -135,6 +135,16 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Re-advertise the agent tool catalog after a plugin was enabled or
+    /// disabled. A no-op on the scripted and degraded backends, which have no
+    /// lash session to refresh.
+    pub async fn refresh_plugin_tools(&self, tool_names: &[String]) -> anyhow::Result<()> {
+        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
+            runtime.refresh_plugin_tools(tool_names).await?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn next_turn_model_spec(&self) -> Option<lash::ModelSpec> {
         self.model_selection

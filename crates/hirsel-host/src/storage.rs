@@ -10,6 +10,7 @@ mod devices;
 mod events;
 mod meta;
 mod monitors;
+mod plugins;
 mod push_tokens;
 mod schema;
 mod side_chat;

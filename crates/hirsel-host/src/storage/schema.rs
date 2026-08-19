@@ -107,6 +107,22 @@ impl Storage {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS plugin_state (
+                plugin_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS plugin_settings (
+                plugin_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (plugin_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS plugin_kv (
+                plugin_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (plugin_id, key)
+            );
             ",
         )?;
         // Side-chat sessions are process-local and deliberately do not survive

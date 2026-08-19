@@ -1682,3 +1682,97 @@ fn timer_registration(value: Value, created_at_ms: u64) -> TriggerSubscriptionRe
         updated_at_ms: created_at_ms,
     }
 }
+
+/// A plugin whose only surface is one agent tool.
+struct CatalogTestPlugin;
+
+#[hirsel_plugin_api::async_trait]
+impl hirsel_plugin_api::Plugin for CatalogTestPlugin {
+    fn id(&self) -> &'static str {
+        "catalog-test"
+    }
+
+    fn label(&self) -> &'static str {
+        "Catalog test"
+    }
+
+    fn tools(&self) -> Vec<hirsel_plugin_api::PluginTool> {
+        vec![hirsel_plugin_api::PluginTool::new(
+            "ping",
+            "Reply with pong.",
+            serde_json::json!({ "type": "object", "properties": {} }),
+            |_ctx, _args| async move { Ok(serde_json::json!({ "pong": true })) },
+        )]
+    }
+}
+
+/// Plugin tools are not a parallel catalog: they are ordinary definitions on
+/// the same provider, so they resolve a contract, appear in the manifest list,
+/// and feed the tool-surface fingerprint exactly like a built-in does.
+#[tokio::test]
+async fn plugin_tools_join_the_real_agent_tool_catalog() {
+    let (executor, storage, _broadcast_log, _dir) = test_event_executor().await;
+    let (broadcaster, _keepalive) = broadcast::channel(8);
+    let host = crate::plugins::PluginHost::start(
+        vec![hirsel_plugin_api::PluginRegistration::new(
+            Box::new(CatalogTestPlugin),
+            "1.0.0",
+            "plugins/catalog-test",
+        )],
+        storage,
+        executor.tools.clone(),
+        broadcaster,
+        BroadcastLog::default(),
+        crate::plugins::SupervisorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let tools = executor.tools.clone();
+    let provider = HirselToolProvider { executor };
+    assert!(
+        provider
+            .tool_manifests()
+            .iter()
+            .any(|manifest| manifest.name == "plugin__catalog_test__ping"),
+        "an enabled plugin's tool must be advertised by the agent tool provider"
+    );
+    assert!(
+        provider
+            .resolve_contract("plugin__catalog_test__ping")
+            .is_some(),
+        "the plugin tool must resolve a contract through the normal path"
+    );
+
+    let with_plugin = agent_tool_surface(&provider.definitions()).unwrap();
+    assert!(
+        with_plugin
+            .tool_names
+            .contains(&"plugins.catalog_test.ping".to_string()),
+        "the plugin tool binds into the lashlang surface as plugins.<id>.<tool>"
+    );
+
+    // Dispatch runs the plugin's handler and returns its JSON verbatim.
+    let result = tools
+        .plugin_tools()
+        .call("plugin__catalog_test__ping", serde_json::json!({}))
+        .await
+        .expect("registered plugin tool")
+        .unwrap();
+    assert_eq!(result, serde_json::json!({ "pong": true }));
+
+    // Disabling drops it back out of the same catalog, and the surface
+    // fingerprint moves with it.
+    host.set_enabled("catalog-test", false).await.unwrap();
+    assert!(
+        !provider
+            .tool_manifests()
+            .iter()
+            .any(|manifest| manifest.name == "plugin__catalog_test__ping")
+    );
+    let without_plugin = agent_tool_surface(&provider.definitions()).unwrap();
+    assert_ne!(
+        without_plugin.fingerprint, with_plugin.fingerprint,
+        "toggling a plugin rotates the tool-surface fingerprint"
+    );
+}

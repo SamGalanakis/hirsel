@@ -1091,6 +1091,14 @@ pub(crate) fn test_config(data_dir: &std::path::Path) -> Config {
     }
 }
 
+/// `test_config` with debug off, so the owner token is checked exactly.
+pub(crate) fn test_config_production_auth(data_dir: &std::path::Path) -> Config {
+    Config {
+        debug: false,
+        ..test_config(data_dir)
+    }
+}
+
 /// `test_config` with the legacy side-session compatibility window enabled.
 pub(crate) fn test_config_with_compat_side_sessions(
     data_dir: &std::path::Path,

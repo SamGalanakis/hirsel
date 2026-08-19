@@ -73,7 +73,11 @@ impl LashAgentRuntime {
         );
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
-        let tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
+        let mut tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
+        // Plugins are booted before the agent runtime, so the tools of every
+        // enabled plugin are part of the first tool-surface fingerprint rather
+        // than rotating the session immediately after startup.
+        tool_definitions.extend(tools.plugin_tools().definitions());
         let tool_surface = agent_tool_surface(&tool_definitions)?;
         let session_bootstrap = tools
             .prepare_agent_session(&tool_surface.fingerprint, &tool_surface.tool_names)
@@ -223,6 +227,25 @@ impl LashAgentRuntime {
             )
             .await
             .context("enqueue Sub-agent model tool-catalog refresh")?;
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    /// Toggling a plugin adds or removes agent tools, which changes the tool
+    /// surface. The refresh goes through the same catalog-refresh command the
+    /// Sub-agent model settings use; the surface fingerprint rotates the agent
+    /// session on the next generation check, which is accepted behaviour for a
+    /// deliberate owner action.
+    pub(super) async fn refresh_plugin_tools(&self, tool_names: &[String]) -> anyhow::Result<()> {
+        let fingerprint = format!("{:x}", Sha256::digest(tool_names.join("\n").as_bytes()));
+        self.session
+            .commands()
+            .refresh_tool_catalog(
+                "Plugin enablement changed",
+                format!("plugin-tools:{fingerprint}"),
+            )
+            .await
+            .context("enqueue plugin tool-catalog refresh")?;
         self.notify.notify_one();
         Ok(())
     }

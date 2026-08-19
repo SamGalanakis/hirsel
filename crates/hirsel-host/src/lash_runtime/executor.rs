@@ -17,7 +17,10 @@ pub(super) struct HirselToolProvider {
 
 impl HirselToolProvider {
     pub(super) fn definitions(&self) -> Vec<ToolDefinition> {
-        hirsel_tool_definitions(&self.executor.tools.subagent_model_snapshot())
+        let mut definitions =
+            hirsel_tool_definitions(&self.executor.tools.subagent_model_snapshot());
+        definitions.extend(self.executor.tools.plugin_tools().definitions());
+        definitions
     }
 }
 
@@ -133,7 +136,19 @@ impl HirselToolExecutor {
             "monitors_list" => self.monitors_list().await?.into(),
             "monitors_cancel" => self.monitors_cancel(call.args, call.context).await?,
             "shell_run" => self.shell_run(call.args).await?.into(),
-            other => return Err(format!("Unknown tool: {other}")),
+            // Plugin tools share this dispatch path with the built-ins: same
+            // provider, same recorded attempt, same failure shape. Only the
+            // namespace (`plugin__<id>__<name>`) and the 120s handler timeout
+            // are plugin-specific, and both live in the registry.
+            other => match self
+                .tools
+                .plugin_tools()
+                .call(other, call.args.clone())
+                .await
+            {
+                Some(result) => result?.into(),
+                None => return Err(format!("Unknown tool: {other}")),
+            },
         };
         Ok(outcome)
     }

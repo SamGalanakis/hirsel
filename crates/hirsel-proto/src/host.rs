@@ -108,4 +108,13 @@ pub enum HostToClient {
     ViewRemoved {
         instance_id: String,
     },
+    /// A message an enabled plugin broadcast to every connected client via
+    /// `PluginCtx::push`. `plugin` is the plugin id; `topic` and `data` are
+    /// entirely the plugin's own vocabulary — the host neither interprets nor
+    /// validates them, it fans them out.
+    PluginPush {
+        plugin: String,
+        topic: String,
+        data: serde_json::Value,
+    },
 }

@@ -48,6 +48,9 @@ pub struct ToolSuite {
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
     terminal_events: TerminalEventBus,
+    /// Tools contributed by enabled plugins. Empty until the plugin host
+    /// registers into it, and empty forever when no plugin is installed.
+    plugin_tools: crate::plugins::PluginToolRegistry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +197,15 @@ impl ToolSuite {
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
             terminal_events: TerminalEventBus::new(128),
+            plugin_tools: crate::plugins::PluginToolRegistry::default(),
         }
+    }
+
+    /// The live plugin tool table. The plugin host writes it; the agent tool
+    /// provider reads it on every catalog resolution, so an enable/disable is
+    /// visible without rebuilding the provider.
+    pub(crate) fn plugin_tools(&self) -> &crate::plugins::PluginToolRegistry {
+        &self.plugin_tools
     }
 
     pub(crate) fn terminal_events(&self) -> TerminalEventReceiver {

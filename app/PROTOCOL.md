@@ -234,6 +234,32 @@ Current placements are:
 Task instruments use `Event.ui`. A standalone View does not become a Task and
 does not create a conversation scope.
 
+## Plugin pushes
+
+An enabled plugin can broadcast to every connected client:
+
+```json
+{ "type": "plugin_push", "plugin": "<id>", "topic": "...", "data": <any JSON> }
+```
+
+`plugin` is the plugin id (lowercase kebab, matching its folder under
+`plugins/`). `topic` and `data` are the plugin's own vocabulary — the host
+neither interprets nor validates them, it fans them out. A client routes the
+frame to the UI module registered for that plugin id and ignores frames whose
+`plugin` it does not know.
+
+Plugins are otherwise addressed over HTTP, not the socket, under `/api/plugins`
+(same bearer-token gate as the rest of the API):
+
+- `GET /api/plugins` →
+  `{"plugins":[{"id","label","version","state":"running"|"disabled"|"errored","error"?,"settings":[{key,label,kind,default?}],"values":{...}}]}`.
+  Secret values read back as `"<set>"` when stored and `null` when unset.
+- `POST /api/plugins/<id>/enabled` with `{"enabled":bool}`.
+- `POST /api/plugins/<id>/settings` with `{"values":{...}}`; a value of
+  `"<set>"` or an absent key leaves a stored secret unchanged.
+- `/api/plugins/<id>/...` — the plugin's own routes, served only while it is
+  enabled (404 otherwise). `enabled` and `settings` are reserved names.
+
 ## Temporary utilities
 
 The browser keeps one local exclusive `rightRegion`:
@@ -304,6 +330,30 @@ The raw owner token is never a blob query parameter. Image attachments may be
 fed to a vision turn; all stored attachments are also described to the Agent by
 their Host path.
 
+## Plugin tier
+
+A plugin may push to its own browser-side UI over the same socket:
+
+```json
+{ "type": "plugin_push", "plugin": "github", "topic": "tick", "data": {} }
+```
+
+`data` is opaque: the client never interprets it and never stores it as app
+state. The frame is routed to the handlers that plugin registered for `topic`
+(`api.onPush`), and dropped when nobody is listening.
+
+Everything else in the plugin tier is HTTP on the Host's origin, authenticated
+with the same owner token as a `Bearer` header. The Host's own surface is `GET
+/api/plugins` (the roster: state, settings descriptors, values), `POST
+/api/plugins/<id>/enabled`, and `POST /api/plugins/<id>/settings`, all behind
+Settings → Plugins. Each plugin additionally mounts its own router under
+`/api/plugins/<id>/…`, which only that plugin's UI calls.
+
+Plugin UI is not served over the protocol at all: it lives in the repo at
+`plugins/<id>/ui/index.tsx` and is compiled into the app. Installing a plugin
+means adding its folder and rebuilding. The client initialises a compiled-in UI
+only when the roster reports that plugin is not `disabled`.
+
 ## Current frame index
 
 The Rust `ClientToHost` union currently accepts:
@@ -328,6 +378,7 @@ event_upsert, process_upsert,
 model_changed, subagent_models_changed,
 blob_ok, blob_url, error,
 view_upsert, view_removed,
+plugin_push,
 side_chat_open, conclusion_draft, side_chat_closed
 ```
 

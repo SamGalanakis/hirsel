@@ -3,6 +3,7 @@ import { For, Show } from "solid-js";
 import type { EventItem, ViewInstance } from "../../protocol";
 import type { DisplayMessage } from "../../store/types";
 import { decideEventWithUndo, reopenEvent } from "../../lib/event-decide";
+import { PluginSlot } from "../../plugins/PluginSlot";
 import { eventUiNodes, isEventResolved } from "../../store/selectors";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
@@ -76,6 +77,13 @@ export function AmbientField() {
       class="mx-auto w-full max-w-[760px] px-6 py-8 rail:min-h-full rail:px-12 rail:py-12"
     >
       <ConversationMargin messages={messages()} thinking={state.agentActivity.state === "thinking"} />
+      {/* home.section: plugin cards on the ambient field, below the recent
+          global conversation — the resting view an Owner lands on with no Task
+          focused, so an ambient plugin surface (a feed, a status card) belongs
+          here and nowhere else. `ctx` is `{}`: there is no subject. */}
+      <div class="mt-8 flex flex-col gap-4 empty:hidden">
+        <PluginSlot name="home.section" />
+      </div>
     </div>
   );
 }
@@ -128,7 +136,16 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
           </For>
         </div>
       </section>
-      <ConversationMargin messages={related()} thinking={state.agentActivity.state === "thinking"} />
+      {/* The Task's margin column: its conversation, then task.panel plugin
+          contributions. The margin is the Task world's secondary surface —
+          context beside the instrument, never over it — which is exactly what a
+          plugin panel about this Task is. `ctx` carries the Task's id. */}
+      <div class="min-w-0">
+        <ConversationMargin messages={related()} thinking={state.agentActivity.state === "thinking"} />
+        <div class="flex flex-col gap-4 py-4 empty:hidden">
+          <PluginSlot name="task.panel" ctx={{ taskId: props.task.id }} />
+        </div>
+      </div>
     </div>
   );
 }

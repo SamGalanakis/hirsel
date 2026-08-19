@@ -13,12 +13,14 @@ import { APP_VERSION } from "../../lib/version";
 import { clearSettingsScrollTarget, closeRightRegion, state } from "../../store/store";
 import { clearStoredToken, getStoredToken } from "../../ws/client";
 import { PaneHeader } from "../ui/PaneHeader";
+import { PluginSlot } from "../../plugins/PluginSlot";
 import { AboutSection } from "./AboutSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { ConfirmForgetDialog, ConnectionSection } from "./ConnectionSection";
 import { IdentitySection } from "./IdentitySection";
 import { ModelsSection } from "./ModelsSection";
 import { NotificationsSection } from "./NotificationsSection";
+import { PluginsSection } from "./PluginsSection";
 import {
   computeFingerprint,
   copyText,
@@ -179,6 +181,13 @@ function SettingsPanel() {
           onDebugChange={toggleDebug}
           onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
         />
+        {/* Plugins: the Host-backed roster (state, on/off, declared settings),
+            then whatever settings UI the plugins themselves contribute. Last in
+            the pane — the app's own settings stay above third-party surface. */}
+        <PluginsSection />
+        <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
+          <PluginSlot name="settings.section" />
+        </div>
       </div>
 
       <Show when={confirmForget()}>

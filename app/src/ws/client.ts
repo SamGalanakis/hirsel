@@ -3,6 +3,8 @@
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
 // upload correlation and the v1.2 send-mode / cancel frames.
 import type { Blob, ClientMessage, SendMode, ServerMessage } from "../protocol";
+import { httpBaseFromWs } from "../lib/endpoint";
+import { deliverPluginPush } from "../plugins/registry";
 import { dispatch, setProtocolError, state } from "../store/store";
 import { jitteredDelayMs } from "./backoff";
 
@@ -89,16 +91,6 @@ function makeLocalId(): number {
  * from the same origin root). The signed blob URL (D9) is host-relative, so this
  * prefixes it. */
 let blobBase = "";
-function deriveBlobBase(wsUrl: string): string {
-  try {
-    const u = new URL(wsUrl);
-    u.protocol = u.protocol === "wss:" ? "https:" : "http:";
-    u.pathname = u.pathname.replace(/\/ws\/?$/, "");
-    return u.toString().replace(/\/$/, "");
-  } catch {
-    return "";
-  }
-}
 
 class HirselWsClient {
   private url: string;
@@ -511,6 +503,13 @@ class HirselWsClient {
         dispatch({ type: "model_changed", current: message.current });
         break;
       }
+      case "plugin_push": {
+        // Plugin data is not app state: it never enters the reducer/store.
+        // The registry fans the frame out to that plugin's `onPush` handlers
+        // and drops it when nobody is listening.
+        deliverPluginPush(message);
+        break;
+      }
       case "subagent_models_changed": {
         dispatch({ type: "subagent_models_changed", catalog: message.catalog });
         break;
@@ -611,7 +610,7 @@ export function startClient(
   handlers: ClientHandlers = {},
 ): HirselWsClient {
   client?.close();
-  blobBase = deriveBlobBase(url);
+  blobBase = httpBaseFromWs(url);
   client = new HirselWsClient(url, token, handlers);
   client.connect();
   return client;

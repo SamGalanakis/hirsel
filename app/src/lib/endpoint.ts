@@ -15,3 +15,25 @@ export function resolveWsUrl(): string {
   if (raw === "same-origin" || raw === "/ws") return sameOriginWs();
   return raw ?? sameOriginWs();
 }
+
+/** The HTTP origin that serves the same Host as a given WS URL: ws→http,
+ * wss→https, and a trailing `/ws` path dropped (the Host serves the app, blob
+ * bytes, the plugin REST surface, and plugin UI bundles from one origin root).
+ * Returns a bare origin with no trailing slash, so callers concatenate a
+ * host-relative path directly. Single source of truth for every out-of-band
+ * fetch (blob assets in ws/client.ts, `/api/...` in lib/api.ts). */
+export function httpBaseFromWs(wsUrl: string): string {
+  try {
+    const u = new URL(wsUrl);
+    u.protocol = u.protocol === "wss:" ? "https:" : "http:";
+    u.pathname = u.pathname.replace(/\/ws\/?$/, "");
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+/** The HTTP origin for the configured endpoint. */
+export function resolveHttpBase(): string {
+  return httpBaseFromWs(resolveWsUrl());
+}

@@ -555,6 +555,18 @@ export interface SubagentModelsChangedMsg {
   catalog: SubagentModelCatalog;
 }
 
+/** Plugin tier: an unsolicited push from one Host-side plugin to its own
+ * browser-side UI bundle. The app never interprets `data` — it routes the frame
+ * to the handlers that plugin registered for `topic` via `api.onPush` and does
+ * nothing else. A frame for an unknown plugin or an unsubscribed topic is
+ * dropped silently; plugin data is never app state. */
+export interface PluginPushMsg {
+  type: "plugin_push";
+  plugin: string;
+  topic: string;
+  data: unknown;
+}
+
 export type ServerMessage =
   | HelloOkMsg
   | MsgMsg
@@ -570,4 +582,5 @@ export type ServerMessage =
   | ViewUpsertMsg
   | ViewRemovedMsg
   | ModelChangedMsg
-  | SubagentModelsChangedMsg;
+  | SubagentModelsChangedMsg
+  | PluginPushMsg;

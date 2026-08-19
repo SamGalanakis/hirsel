@@ -642,9 +642,146 @@ function handleEventAction(ws, frame) {
   }
 }
 
-// --- HTTP (blob content) + WS on the same port ------------------------------
+// --- Plugin tier (dev stand-in for the Host's plugin registry) --------------
+// One in-memory plugin, matching the in-repo `plugins/hello` UI, so the whole
+// browser half (the roster, the enable/settings writes, a plugin's own routes,
+// and plugin_push) is exercisable without the Rust Host. The UI itself is
+// compiled into the app by Vite and is never served from here. State is
+// process-wide, not per-tenant: a dev fixture, not a durability model.
+const pluginState = {
+  hello: {
+    id: "hello",
+    label: "Hello Plugin",
+    version: "0.1.0",
+    enabled: true,
+    error: null,
+    settings: [
+      { key: "greeting", label: "Greeting word", kind: "string", default: "Hello" },
+      { key: "shout", label: "Shout it", kind: "boolean", default: false },
+      { key: "token", label: "API token", kind: "secret" },
+    ],
+    values: { greeting: "Hello", shout: false, token: null },
+  },
+};
+
+function pluginInfo(p) {
+  return {
+    id: p.id,
+    label: p.label,
+    version: p.version,
+    state: p.error ? "errored" : p.enabled ? "running" : "disabled",
+    error: p.error,
+    settings: p.settings,
+    // Secrets are reported as a sentinel, never in clear.
+    values: Object.fromEntries(
+      Object.entries(p.values).map(([k, v]) => {
+        const spec = p.settings.find((s) => s.key === k);
+        if (spec?.kind !== "secret") return [k, v];
+        return [k, v ? "<set>" : null];
+      }),
+    ),
+  };
+}
+
+/** The hello plugin's OWN route. The Rust side mounts a per-plugin router under
+ * /api/plugins/<id>/…; this is the dev stand-in for hello's. */
+let greetCount = 0;
+function helloGreet(plugin, params) {
+  const word = plugin.values.greeting || "Hello";
+  const text = `${word}, ${params?.name ?? "world"}!`;
+  greetCount += 1;
+  return { text: plugin.values.shout ? text.toUpperCase() : text, count: greetCount };
+}
+
+function bearerToken(req) {
+  const header = req.headers.authorization ?? "";
+  return header.startsWith("Bearer ") ? header.slice("Bearer ".length) : null;
+}
+
+function sendJson(res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+    "Cache-Control": "no-store",
+  });
+  res.end(payload);
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  if (chunks.length === 0) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+
+/** Push a frame to every connected client of every tenant (dev convenience). */
+function broadcastAll(frame) {
+  const json = JSON.stringify(frame);
+  for (const tenant of tenants.values()) {
+    for (const ws of tenant.clients) if (ws.readyState === ws.OPEN) ws.send(json);
+  }
+}
+
+let tickCount = 0;
+setInterval(() => {
+  if (!pluginState.hello.enabled) return;
+  tickCount += 1;
+  broadcastAll({ type: "plugin_push", plugin: "hello", topic: "tick", data: { count: tickCount } });
+}, 5000).unref();
+
+/** Returns true when the request was a plugin route and has been answered. */
+async function handlePluginRoute(req, res, url) {
+  if (!url.pathname.startsWith("/api/plugins")) return false;
+  if (!acceptsToken(bearerToken(req))) {
+    sendJson(res, 401, { error: "unauthorized" });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/plugins") {
+    sendJson(res, 200, { plugins: Object.values(pluginState).map(pluginInfo) });
+    return true;
+  }
+
+  // `greet` is hello's own route; `enabled`/`settings` are the Host's roster
+  // administration for any plugin.
+  const action = url.pathname.match(/^\/api\/plugins\/([^/]+)\/(greet|enabled|settings)$/);
+  const plugin = action ? pluginState[decodeURIComponent(action[1])] : null;
+  if (req.method === "POST" && action && plugin) {
+    const body = await readJsonBody(req);
+    if (action[2] === "greet") {
+      sendJson(res, 200, helloGreet(plugin, body));
+    } else if (action[2] === "enabled") {
+      plugin.enabled = Boolean(body.enabled);
+      log("plugin", plugin.id, plugin.enabled ? "enabled" : "disabled");
+      sendJson(res, 200, { ok: true });
+    } else {
+      for (const [key, value] of Object.entries(body.values ?? {})) {
+        if (key in plugin.values) plugin.values[key] = value;
+      }
+      log("plugin", plugin.id, "settings saved");
+      sendJson(res, 200, { ok: true });
+    }
+    return true;
+  }
+
+  sendJson(res, 404, { error: "not found" });
+  return true;
+}
+
+// --- HTTP (blob content, plugin tier) + WS on the same port ------------------
 const httpServer = createServer((req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  void handlePluginRoute(req, res, url).then((handled) => {
+    if (!handled) handleBlobRoute(req, res, url);
+  });
+});
+
+function handleBlobRoute(req, res, url) {
   const match = url.pathname.match(/^\/blob\/(.+)$/);
   if (req.method === "GET" && match) {
     const token = url.searchParams.get("token");
@@ -670,7 +807,7 @@ const httpServer = createServer((req, res) => {
   }
   res.writeHead(404);
   res.end("not found");
-});
+}
 
 const wss = new WebSocketServer({ server: httpServer });
 

@@ -12,6 +12,7 @@ import {
   shortcutHelpOpen,
 } from "./lib/keymap";
 import { titleBadgeEnabled } from "./lib/prefs";
+import { startPlugins } from "./plugins/loader";
 import {
   eventTitle,
   isOpenJudgment,
@@ -56,6 +57,14 @@ function App() {
       },
     });
     onCleanup(() => client.close());
+  });
+
+  // Plugin tier: load browser bundles once the socket has actually
+  // authenticated. The boot manifest and every plugin RPC use the same owner
+  // token, so loading before `hello_ok` would just race a 401; `startPlugins`
+  // latches, so a later reconnect never mounts a plugin's components twice.
+  createEffect(() => {
+    if (state.connection === "connected") startPlugins();
   });
 
   // The "needs you" count is the SINGLE truth the attention layer reads: open,

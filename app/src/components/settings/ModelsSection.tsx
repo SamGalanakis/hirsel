@@ -7,7 +7,7 @@ import type { ModelSelection, SubagentModel } from "../../protocol";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { titleCase } from "./prefs";
-import { Card, SectionHeader, SubHeading, Select, Toggle } from "./rows";
+import { Group, SectionHeader, SubHeading, Select, Toggle } from "./rows";
 
 /** Main-agent model + reasoning-variant controls, reflecting `state.model`.
  * Changing either sends `set_model`; the tapped control shows a brief pending
@@ -54,8 +54,8 @@ function MainAgentModel() {
   return (
     <Show when={current()}>
       <SubHeading>Main agent</SubHeading>
-      <Card class="divide-y divide-border">
-        <div class="flex items-center justify-between gap-3 px-3.5 py-3">
+      <Group class="divide-y divide-border">
+        <div class="flex items-center justify-between gap-3 py-3">
           <div class="flex min-w-0 items-center gap-2">
             <span class="text-sm text-foreground">Model</span>
             <Show when={busy() && pending()?.control === "model"}>
@@ -71,7 +71,7 @@ function MainAgentModel() {
             options={available().map((m) => ({ value: m.id, label: m.label }))}
           />
         </div>
-        <div class="flex items-center justify-between gap-3 px-3.5 py-3">
+        <div class="flex items-center justify-between gap-3 py-3">
           <div class="flex min-w-0 items-center gap-2">
             <span class="text-sm text-foreground">Reasoning</span>
             <Show when={busy() && pending()?.control === "variant"}>
@@ -87,7 +87,7 @@ function MainAgentModel() {
             options={(selectedModel()?.variants ?? []).map((v) => ({ value: v, label: titleCase(v) }))}
           />
         </div>
-      </Card>
+      </Group>
     </Show>
   );
 }
@@ -117,13 +117,13 @@ function SubagentModelRow(props: {
 
   return (
     <div
-      class="px-3.5 py-3 transition-opacity"
+      class="py-3 transition-opacity"
       classList={{ "opacity-60": props.pending }}
     >
       <div class="flex items-center gap-3">
         <div class="min-w-0 flex-1">
           <div class="truncate text-sm text-foreground">{props.model.label}</div>
-          <div class="mt-0.5 truncate font-mono text-[0.7rem] text-muted-foreground">
+          <div class="mt-0.5 truncate font-mono text-meta text-muted-foreground">
             {props.model.id}
           </div>
         </div>
@@ -153,7 +153,7 @@ function SubagentModelRow(props: {
                 disabled={props.pending || !props.model.enabled || isLast()}
                 title={isLast() ? "At least one variant must stay enabled" : undefined}
                 onClick={() => toggleVariant(variant)}
-                class="min-h-8 rounded-full border px-2.5 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-55"
+                class="min-h-8 rounded-full border px-2.5 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-55 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3.5"
                 classList={{
                   "border-primary/60 bg-primary/10 text-foreground": active(),
                   "border-border bg-surface text-muted-foreground hover:border-input hover:text-foreground":
@@ -222,7 +222,7 @@ function SubagentModels() {
   return (
     <Show when={catalog()}>
       <SubHeading>Sub-agent models</SubHeading>
-      <p class="mb-2 px-1 text-xs leading-snug text-muted-foreground">
+      <p class="mb-2 text-xs leading-snug text-muted-foreground">
         Choose which models and reasoning levels an Agent may use for Sub-agents.
       </p>
       <div class="flex flex-col gap-3">
@@ -235,7 +235,7 @@ function SubagentModels() {
                 aria-controls={providerPanelId(group.provider)}
                 aria-label={`${isCollapsed(group.provider) ? "Expand" : "Collapse"} ${group.label} models`}
                 onClick={() => toggleProvider(group.provider)}
-                class="mb-1 flex min-h-8 w-full items-center justify-between rounded-lg px-1 text-[0.68rem] font-medium uppercase tracking-[0.06em] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11"
+                class="mb-1 flex min-h-8 w-full items-center justify-between rounded-lg text-xs font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11"
               >
                 <span>{group.label}</span>
                 <ChevronDown
@@ -245,7 +245,7 @@ function SubagentModels() {
                 />
               </button>
               <Show when={!isCollapsed(group.provider)}>
-                <Card
+                <Group
                   id={providerPanelId(group.provider)}
                   class="divide-y divide-border"
                 >
@@ -259,7 +259,7 @@ function SubagentModels() {
                       />
                     )}
                   </For>
-                </Card>
+                </Group>
               </Show>
             </div>
           )}

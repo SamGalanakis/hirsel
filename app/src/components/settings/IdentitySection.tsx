@@ -4,7 +4,7 @@
 import { createSignal, type JSX } from "solid-js";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Card, CopyRow, Field, SectionHeader } from "./rows";
+import { Group, CopyRow, Field, SectionHeader } from "./rows";
 
 export function IdentitySection(props: {
   deviceLabel: string;
@@ -29,7 +29,7 @@ export function IdentitySection(props: {
   return (
     <>
       <SectionHeader>Device label &amp; identity</SectionHeader>
-      <Card class="p-3.5">
+      <Group class="py-3">
         <Field
           title="Device label"
           subtitle="A local name for this browser. Stored here only — the web client sends no label to the Host."
@@ -49,8 +49,8 @@ export function IdentitySection(props: {
             Save
           </Button>
         </div>
-      </Card>
-      <Card class="mt-2.5 p-3.5">
+      </Group>
+      <Group class="mt-2.5 py-3">
         <Field
           title="Device identity"
           subtitle="A stable, one-way fingerprint of this browser's access token. Safe to share."
@@ -58,7 +58,7 @@ export function IdentitySection(props: {
         <div class="mt-2.5">
           <CopyRow value={props.fingerprint} label="identity fingerprint" mono />
         </div>
-      </Card>
+      </Group>
     </>
   );
 }

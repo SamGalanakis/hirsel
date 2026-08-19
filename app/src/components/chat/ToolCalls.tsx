@@ -31,7 +31,7 @@ export function CommittedToolCalls(props: { toolCalls: ToolCall[] }) {
           <ul class="ml-1 flex flex-col gap-0.5 border-l border-border/60 pl-2.5">
             <For each={props.toolCalls}>
               {(tc) => (
-                <li class="flex items-center gap-1.5 text-[0.72rem]">
+                <li class="flex items-center gap-1.5 text-meta">
                   <Show
                     when={tc.ok}
                     fallback={<X class="size-3 shrink-0 text-destructive" aria-label="failed" />}

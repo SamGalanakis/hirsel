@@ -45,7 +45,7 @@ function CanvasBody() {
 }
 
 /** The desktop in-flow Canvas column. Mirrors the utility frame (width,
- * left hairline, h-12 header) so the shared right region reads as one slot. */
+ * left hairline, h-14 header) so the shared right region reads as one slot. */
 export function CanvasRail() {
   return (
     <Show when={canvasActive()}>

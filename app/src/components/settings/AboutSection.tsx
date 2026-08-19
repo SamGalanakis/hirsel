@@ -5,7 +5,7 @@ import type { JSX } from "solid-js";
 import { setShowAgentCode, showAgentCode } from "../../lib/prefs";
 import { APP_VERSION } from "../../lib/version";
 import { state } from "../../store/store";
-import { Card, Field, SectionHeader, Toggle } from "./rows";
+import { Group, Field, SectionHeader, Toggle } from "./rows";
 
 export function AboutSection(props: {
   debug: boolean;
@@ -15,22 +15,22 @@ export function AboutSection(props: {
   return (
     <>
       <SectionHeader>About &amp; debug</SectionHeader>
-      <Card class="divide-y divide-border">
-        <div class="flex items-center justify-between gap-3 px-3.5 py-3">
+      <Group class="divide-y divide-border">
+        <div class="flex items-center justify-between gap-3 py-3">
           <span class="text-sm text-foreground">App version</span>
           <span class="font-mono text-xs text-muted-foreground">{APP_VERSION}</span>
         </div>
-        <div class="flex items-center justify-between gap-3 px-3.5 py-3">
+        <div class="flex items-center justify-between gap-3 py-3">
           <span class="text-sm text-foreground">Host version</span>
           <span class="font-mono text-xs text-muted-foreground">
             {state.hostVersion ?? (state.connection === "connected" ? "Not reported" : "—")}
           </span>
         </div>
-        <div class="flex items-center gap-3 px-3.5 py-3">
+        <div class="flex items-center gap-3 py-3">
           <Field title="Debug mode" subtitle="Verbose client logging for diagnostics." />
           <Toggle ariaLabel="Debug mode" checked={props.debug} onChange={props.onDebugChange} />
         </div>
-        <div class="flex items-center gap-3 px-3.5 py-3">
+        <div class="flex items-center gap-3 py-3">
           <Field
             title="Show agent code"
             subtitle="Render the Agent's own program for each turn step in the timeline."
@@ -44,7 +44,7 @@ export function AboutSection(props: {
         <button
           type="button"
           onClick={props.onCopyDiagnostics}
-          class="flex w-full items-center gap-3 px-3.5 py-3 text-left outline-none transition-colors hover:bg-muted focus-visible:bg-muted"
+          class="flex w-full items-center gap-3 py-3 text-left outline-none transition-colors hover:bg-muted focus-visible:bg-muted"
         >
           <div class="min-w-0 flex-1">
             <Field
@@ -54,7 +54,7 @@ export function AboutSection(props: {
           </div>
           <Copy class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         </button>
-      </Card>
+      </Group>
     </>
   );
 }

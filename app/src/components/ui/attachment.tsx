@@ -154,20 +154,6 @@ const AttachmentAction = (props: AttachmentActionProps) => {
   );
 };
 
-type AttachmentTriggerProps = ComponentProps<"button">;
-
-const AttachmentTrigger = (props: AttachmentTriggerProps) => {
-  const mergedProps = mergeProps({ type: "button" } as const, props);
-  const [local, others] = splitProps(mergedProps, ["class"]);
-  return (
-    <button
-      data-slot="attachment-trigger"
-      class={cn("z-attachment-trigger absolute inset-0 z-10 outline-none", local.class)}
-      {...others}
-    />
-  );
-};
-
 type AttachmentGroupProps = ComponentProps<"div">;
 
 const AttachmentGroup = (props: AttachmentGroupProps) => {
@@ -193,6 +179,5 @@ export {
   AttachmentGroup,
   AttachmentMedia,
   AttachmentTitle,
-  AttachmentTrigger,
   type AttachmentState,
 };

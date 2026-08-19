@@ -2,16 +2,22 @@ import { X } from "lucide-solid";
 import { type JSX, Show } from "solid-js";
 import { cn } from "@/lib/utils";
 
-// The one header the exclusive right region wears, so its panes read as ONE
-// physical slot rather than four different surfaces (spec item 1). Before this,
-// older inspectors diverged in title size and close placement; this component
-// right-aligned ×, and Processes/Settings wore a `text-base font-semibold` h1
-// with a LEFT-aligned × — four treatments in the same `h-12` slot. PaneHeader
-// fixes the datum for the desktop presentations of Canvas / Processes /
-// Settings: one `h-12` bar on the shared top hairline, a 16px leading icon, one
-// title token (`text-sm font-medium`), and — for every DISMISSIBLE pane — a
-// single trailing × with a consistent focus-visible ring (a stable
-// muscle-memory close target).
+// The one header the exclusive right region wears at EVERY width, so its panes
+// read as ONE physical slot rather than several different surfaces. Processes
+// and Settings used to carry a second, phone-only `<header>` with a `‹ Tasks`
+// chevron — a navigation stack hirsel does not have. Utility panes are summoned
+// and DISMISSED, never "gone back from" (DESIGN §4 Utilities: "Every utility
+// appears as a temporary sheet or inspector; closing it returns to the same
+// focus state"), and "Tasks" is not a place you travel to — it is the standing
+// world underneath. So there is one header, one title, one trailing × labelled
+// "Close", at both widths.
+//
+// The datum: `h-14`, matching the task-world header (TaskShell) so summoning a
+// pane never jogs the content below it; sticky at the top of its pane with the
+// shared top hairline; safe-area top padding so the phone sheet clears the
+// notch; a 16px leading icon; one title token (`text-sm font-medium`); and a
+// coarse-pointer size bump on the × so the thumb target clears 44px
+// (PRODUCT: "phone targets at least 44px").
 
 interface Props {
   /** 16px leading icon (`size-4`), decorative (`aria-hidden`). */
@@ -33,7 +39,10 @@ export function PaneHeader(props: Props) {
   return (
     <div
       class={cn(
-        "flex h-12 flex-shrink-0 items-center gap-2 border-b border-border px-3",
+        // `box-content` so the safe-area inset stacks ON TOP of the h-14 datum
+        // instead of eating into it — the bar is 56px of chrome everywhere,
+        // plus whatever the notch demands.
+        "sticky top-0 z-10 box-content flex h-14 flex-shrink-0 items-center gap-2 border-b border-border bg-background px-3 pt-[env(safe-area-inset-top)]",
         props.class,
       )}
     >

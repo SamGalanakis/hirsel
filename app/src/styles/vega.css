@@ -237,7 +237,3 @@
 .z-attachment-group {
   @apply gap-3 scroll-px-1 py-1;
 }
-
-.z-attachment-trigger {
-  @apply absolute inset-0 z-10 outline-none;
-}

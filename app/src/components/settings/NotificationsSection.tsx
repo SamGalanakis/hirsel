@@ -8,7 +8,7 @@
 import { createSignal, type JSX, Show } from "solid-js";
 import { setTitleBadgeEnabled, titleBadgeEnabled } from "../../lib/prefs";
 import { Button } from "../ui/button";
-import { Card, Field, SectionHeader, Toggle } from "./rows";
+import { Group, Field, SectionHeader, Toggle } from "./rows";
 
 export function NotificationsSection(): JSX.Element {
   const notificationsSupported = typeof Notification !== "undefined";
@@ -27,8 +27,8 @@ export function NotificationsSection(): JSX.Element {
   return (
     <>
       <SectionHeader>Notifications</SectionHeader>
-      <Card class="divide-y divide-border">
-        <div class="flex items-center gap-3 px-3.5 py-3">
+      <Group class="divide-y divide-border">
+        <div class="flex items-center gap-3 py-3">
           <Field
             title="Tab title badge"
             subtitle="Open judgments that need you show as “(3) hirsel” in this browser tab."
@@ -39,7 +39,7 @@ export function NotificationsSection(): JSX.Element {
             onChange={setTitleBadgeEnabled}
           />
         </div>
-        <div class="flex items-center gap-3 px-3.5 py-3">
+        <div class="flex items-center gap-3 py-3">
           <Field
             title="Desktop notifications"
             subtitle={
@@ -71,7 +71,7 @@ export function NotificationsSection(): JSX.Element {
             </Button>
           </Show>
         </div>
-      </Card>
+      </Group>
     </>
   );
 }

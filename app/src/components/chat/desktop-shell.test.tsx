@@ -369,15 +369,19 @@ describe("Task Margins shell", () => {
     await user.click(await within(document.body).findByRole("menuitem", { name: /Processes/ }));
     await waitFor(() => expect(store.state.rightRegion).toBe("processes"));
     const processesPanel = document.querySelector('[data-slot="processes-panel"]') as HTMLElement;
-    const phoneProcessesClose = within(processesPanel).getByText("Tasks").closest("button")!;
-    fireEvent.click(phoneProcessesClose);
+    // ONE header, one exit: a phone sheet carries exactly one "Close Processes"
+    // control and no back-to-Tasks chevron — hirsel has no navigation stack.
+    expect(within(processesPanel).queryByText("Tasks")).toBeNull();
+    const processesClose = within(processesPanel).getByLabelText("Close Processes");
+    fireEvent.click(processesClose);
     await waitFor(() => expect(processesTrigger).toHaveFocus());
 
     store.openSettings();
     await waitFor(() => expect(store.state.rightRegion).toBe("settings"));
     const settingsPanel = document.querySelector('[data-slot="settings-panel"]') as HTMLElement;
-    expect(within(settingsPanel).getByText("Tasks").closest("button")?.className)
-      .toContain("min-h-11");
+    expect(within(settingsPanel).queryByText("Tasks")).toBeNull();
+    expect(within(settingsPanel).getByLabelText("Close Settings").className)
+      .toContain("[@media(pointer:coarse)]:size-11");
   });
 
   it("restores a desktop-opened Processes utility to its phone trigger after a viewport change", async () => {
@@ -402,7 +406,7 @@ describe("Task Margins shell", () => {
     await waitFor(() => expect(panel).toHaveAttribute("role", "dialog"));
     await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
 
-    const phoneClose = within(panel).getByText("Tasks").closest("button")!;
+    const phoneClose = within(panel).getByLabelText("Close Processes");
     phoneClose.focus();
     fireEvent.keyDown(phoneClose, { key: "Tab", shiftKey: true });
     expect(panel.contains(document.activeElement)).toBe(true);

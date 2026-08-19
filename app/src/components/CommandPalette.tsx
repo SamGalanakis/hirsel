@@ -407,7 +407,7 @@ const KeyHint: Component<{ keys: string[] }> = (props) => (
   <span class="flex shrink-0 items-center gap-1">
     <For each={props.keys}>
       {(k) => (
-        <kbd class="grid h-5 min-w-5 place-items-center rounded-sm border border-border bg-muted px-1 font-mono text-[0.72rem] text-foreground/90">
+        <kbd class="grid h-5 min-w-5 place-items-center rounded-sm border border-border bg-muted px-1 font-mono text-meta text-foreground/90">
           {k}
         </kbd>
       )}

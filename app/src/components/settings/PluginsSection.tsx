@@ -19,7 +19,7 @@ import {
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Card, Field, SectionHeader, Toggle } from "./rows";
+import { Group, Field, SectionHeader, Toggle } from "./rows";
 
 /** The one-word run state, coloured like the rest of the app: success green for
  * running, muted for off, and the error red only for a genuine failure. */
@@ -90,7 +90,7 @@ function SettingsForm(props: { plugin: PluginInfo; onSaved: () => void }) {
 
   return (
     <Show when={props.plugin.settings.length > 0}>
-      <div class="border-t border-border px-3.5 py-3">
+      <div class="border-t border-border py-3">
         <For each={props.plugin.settings}>
           {(spec) => (
             <div class="mb-2.5 flex items-center gap-3 last:mb-0">
@@ -166,7 +166,7 @@ function PluginRow(props: { plugin: PluginInfo; onChanged: () => void }) {
 
   return (
     <div data-slot="plugin-row" data-plugin={props.plugin.id}>
-      <div class="flex items-center gap-3 px-3.5 py-3">
+      <div class="flex items-center gap-3 py-3">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2">
             <span class="truncate text-sm text-foreground">{props.plugin.label}</span>
@@ -216,11 +216,11 @@ export function PluginsSection(): JSX.Element {
   return (
     <Show when={(plugins()?.length ?? 0) > 0}>
       <SectionHeader id="settings-plugins">Plugins</SectionHeader>
-      <Card class="divide-y divide-border">
+      <Group class="divide-y divide-border">
         <For each={plugins() ?? []}>
           {(plugin) => <PluginRow plugin={plugin} onChanged={() => void refresh()} />}
         </For>
-      </Card>
+      </Group>
     </Show>
   );
 }

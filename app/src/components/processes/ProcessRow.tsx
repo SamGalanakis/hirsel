@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, ChevronRight, OctagonX, Radar } from "lucide-solid";
+import { Bot, ChevronDown, OctagonX, Radar } from "lucide-solid";
 import { createSignal, Show } from "solid-js";
 import type { ProcessInfo, ProcessState } from "../../protocol";
 import { formatRelativeTime } from "../../lib/format";
@@ -70,6 +70,19 @@ function StateMark(props: { state: ProcessState }) {
   );
 }
 
+/** The one disclosure mark in this list: a chevron that ROTATES between closed
+ * and open. A `›` pointing off the right edge promises navigation to somewhere
+ * else; these rows unfold in place, so it lied. One mark, both presentations. */
+function DisclosureChevron(props: { expanded: boolean; class?: string }) {
+  return (
+    <ChevronDown
+      aria-hidden="true"
+      class={`size-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out ${props.class ?? ""}`}
+      classList={{ "-rotate-90": !props.expanded }}
+    />
+  );
+}
+
 export function ProcessRow(props: Props) {
   const [expanded, setExpanded] = createSignal(false);
   const p = () => props.process;
@@ -92,9 +105,9 @@ export function ProcessRow(props: Props) {
       <button
         type="button"
         class="flex min-w-0 flex-1 items-center gap-2 py-2.5 text-left [@media(pointer:coarse)]:min-h-11"
-        aria-expanded={false}
-        aria-label={`Open details for ${p().label}`}
-        onClick={() => setExpanded(true)}
+        aria-expanded={expanded()}
+        aria-label={`Show details for ${p().label}`}
+        onClick={() => setExpanded((v) => !v)}
       >
         <span class="shrink-0 text-muted-foreground">
           <Show when={isSubagent()} fallback={<Radar class="size-4" aria-label="Monitor" />}>
@@ -107,13 +120,19 @@ export function ProcessRow(props: Props) {
             <span class="min-w-0 flex-1 truncate text-sm text-muted-foreground">{p().label}</span>
           }
         >
-          <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-[0.72rem] text-muted-foreground">
+          <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-meta text-muted-foreground">
             {p().label}
           </code>
         </Show>
+        {/* Started-at, in row mode too: two runs of the same agent carry the
+            SAME label, so without it the list is a wall of identical rows with
+            no order. It is the one meta that makes them tellable apart. */}
+        <span class="shrink-0 text-meta tabular-nums text-muted-foreground">
+          {formatRelativeTime(p().started_ts)}
+        </span>
       </button>
       <StateMark state={p().state} />
-      <ChevronRight class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <DisclosureChevron expanded={expanded()} />
     </div>
   );
 
@@ -150,7 +169,7 @@ export function ProcessRow(props: Props) {
                 </span>
               }
             >
-              <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-[0.72rem] text-foreground/90">
+              <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-meta text-foreground/90">
                 {p().label}
               </code>
             </Show>
@@ -184,15 +203,11 @@ export function ProcessRow(props: Props) {
 
           {/* Latest summary line (single line, truncated). */}
           <Show when={p().summary}>
-            <span class="min-w-0 truncate text-[0.72rem] text-muted-foreground">{p().summary}</span>
+            <span class="min-w-0 truncate text-meta text-muted-foreground">{p().summary}</span>
           </Show>
         </span>
 
-        <span class="mt-0.5 shrink-0 text-muted-foreground">
-          <Show when={expanded()} fallback={<ChevronRight class="size-4" aria-hidden="true" />}>
-            <ChevronDown class="size-4" aria-hidden="true" />
-          </Show>
-        </span>
+        <DisclosureChevron expanded={expanded()} class="mt-0.5" />
       </button>
 
       {/* Expanded detail. */}
@@ -206,7 +221,7 @@ export function ProcessRow(props: Props) {
               when={isMonitor()}
               fallback={<span class="text-sm text-foreground">{p().label}</span>}
             >
-              <code class="rounded bg-muted px-1.5 py-1 font-mono text-[0.72rem] text-foreground/90 wrap-break-word">
+              <code class="rounded bg-muted px-1.5 py-1 font-mono text-meta text-foreground/90 wrap-break-word">
                 {p().label}
               </code>
             </Show>
@@ -231,7 +246,7 @@ export function ProcessRow(props: Props) {
           <Show when={isSubagent() && running()}>
             <button
               type="button"
-              class="mt-0.5 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-md border border-border px-3 text-[0.72rem] font-medium text-foreground transition-colors hover:border-status-danger/60 hover:text-status-danger"
+              class="mt-0.5 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-md border border-border px-3 text-meta font-medium text-foreground transition-colors hover:border-status-danger/60 hover:text-status-danger"
               onClick={() => props.onAskToStop(p())}
             >
               <OctagonX class="size-3.5" aria-hidden="true" />

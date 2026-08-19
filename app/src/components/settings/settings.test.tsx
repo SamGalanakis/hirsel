@@ -71,6 +71,49 @@ describe("Settings: About & debug", () => {
   });
 });
 
+describe("Settings: DESIGN conformance of the pane chrome", () => {
+  it("uses sentence-case headings on quiet frameless groups, and one close", async () => {
+    const store = await import("../../store/store");
+    store.openSettings();
+    const { SettingsSheet } = await import("./SettingsSheet");
+    const { getAllByRole, getAllByLabelText, container } = render(() => <SettingsSheet />);
+
+    // DESIGN §3 rules out all-caps section headings; they carry rank by weight
+    // and the whitespace above them instead.
+    const headings = getAllByRole("heading", { level: 2 });
+    expect(headings.length).toBeGreaterThan(1);
+    for (const h of headings) {
+      expect(h.className).not.toContain("uppercase");
+      expect(h.textContent).not.toBe(h.textContent?.toUpperCase());
+    }
+
+    // DESIGN §6 forbids repeated rectangular frames: no section is a bordered,
+    // rounded, filled card any more. (The Forget-token alertdialog is a genuine
+    // overlay and is not rendered here.)
+    expect(container.querySelectorAll(".rounded-xl.border.bg-card")).toHaveLength(0);
+
+    // Exactly one exit, and it is a close.
+    expect(getAllByLabelText("Close Settings")).toHaveLength(1);
+  });
+
+  it("gives the theme segments and the debug switch thumb-grade hit areas", async () => {
+    const store = await import("../../store/store");
+    store.openSettings();
+    const { SettingsSheet } = await import("./SettingsSheet");
+    const { getByLabelText, getAllByRole } = render(() => <SettingsSheet />);
+
+    const coarse = "[@media(pointer:coarse)]:min-h-11";
+    for (const segment of getAllByRole("radio")) {
+      expect(segment.className).toContain(coarse);
+    }
+    // The switch's 20x36px track stays the visual; the button around it grows.
+    const toggle = getByLabelText("Show agent code");
+    expect(toggle.className).toContain(coarse);
+    expect(toggle.className).toContain("[@media(pointer:coarse)]:min-w-11");
+    expect(toggle.querySelector(".h-5.w-9")).not.toBeNull();
+  });
+});
+
 describe("Settings: Forget token confirm flow (C5)", () => {
   it("requires confirmation, then clears the stored token and reloads to the gate", async () => {
     const clearStoredToken = vi.fn();

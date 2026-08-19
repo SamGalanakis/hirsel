@@ -1,4 +1,4 @@
-import { ChevronLeft, Settings as SettingsIcon } from "lucide-solid";
+import { Settings as SettingsIcon } from "lucide-solid";
 import { createSignal, onMount, Show } from "solid-js";
 import { resolveWsUrl } from "../../lib/endpoint";
 import {
@@ -114,7 +114,7 @@ function SettingsPanel() {
 
   return (
     // Same responsive presentation as ProcessesPanel — phone: a full-screen
-    // modal `fixed` sheet with a back affordance; desktop (`rail`): an in-flow
+    // modal `fixed` sheet; desktop (`rail`): an in-flow
     // right-edge inspector inside ChatView's row, one exclusive slot, never over
     // the chat measure on the left.
     <div
@@ -123,35 +123,15 @@ function SettingsPanel() {
       data-slot="settings-panel"
       role={phone() ? "dialog" : "complementary"}
       aria-modal={phone() ? "true" : undefined}
-      aria-labelledby={phone() ? "settings-panel-heading" : "settings-pane-title"}
+      aria-labelledby="settings-pane-title"
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
         rail:relative rail:inset-auto rail:z-auto rail:min-h-0 rail:w-[clamp(340px,38vw,440px)] rail:shrink-0 rail:border-l rail:border-border rail:pb-0
         motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
         motion-safe:rail:slide-in-from-bottom-0 motion-safe:rail:slide-in-from-right-2 motion-safe:rail:duration-150"
     >
-      {/* Phone header (rail:hidden): back affordance to Tasks. */}
-      <header class="flex flex-shrink-0 items-center gap-2 border-b border-border px-2 py-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] rail:hidden">
-        <button
-          type="button"
-          class="flex min-h-11 items-center gap-0.5 rounded-md px-2 text-sm text-foreground transition-colors hover:bg-muted"
-          onClick={closeRightRegion}
-          aria-label="Close Settings"
-        >
-          <ChevronLeft class="size-5" aria-hidden="true" />
-          <span>Tasks</span>
-        </button>
-        <h1
-          id="settings-panel-heading"
-          class="m-0 flex-1 text-center text-base font-semibold tracking-[0.01em]"
-        >
-          Settings
-        </h1>
-        <span class="w-[3.25rem]" aria-hidden="true" />
-      </header>
-      {/* Desktop header (hidden rail:flex): shared PaneHeader — one datum,
-          trailing × close with the sibling focus-visible ring. */}
+      {/* ONE header at both widths — see PaneHeader. Settings is summoned and
+          dismissed; the × is the whole exit vocabulary, at every width. */}
       <PaneHeader
-        class="hidden rail:flex"
         icon={<SettingsIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
         title="Settings"
         titleId="settings-pane-title"
@@ -160,7 +140,7 @@ function SettingsPanel() {
       />
 
       {/* Block flow (not a flex column): as a flex item this scroll region can
-          shrink to the available height (min-h-0) and scroll, while its cards
+          shrink to the available height (min-h-0) and scroll, while its groups
           keep their natural height instead of compressing to fit. */}
       <div class="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-8">
         <AppearanceSection />

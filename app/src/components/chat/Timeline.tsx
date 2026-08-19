@@ -35,7 +35,7 @@ function ReasoningRow(props: { text: string }) {
     <li class="flex flex-col gap-1" data-slot="timeline-reasoning">
       <button
         type="button"
-        class="inline-flex w-fit items-center gap-1 text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+        class="inline-flex w-fit items-center gap-1 text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
         aria-expanded={open()}
         onClick={() => setOpen((v) => !v)}
       >
@@ -48,7 +48,7 @@ function ReasoningRow(props: { text: string }) {
         <span class="italic">reasoning</span>
       </button>
       <Show when={open()}>
-        <p class="whitespace-pre-wrap pl-4 text-[0.72rem] italic leading-relaxed text-muted-foreground/60">
+        <p class="whitespace-pre-wrap pl-4 text-meta italic leading-relaxed text-muted-foreground/60">
           {renderInline(props.text)}
         </p>
       </Show>
@@ -98,7 +98,7 @@ function ToolRow(props: {
           when={hasDetail()}
           fallback={
             <span
-              class="shrink-0 font-mono text-[0.72rem]"
+              class="shrink-0 font-mono text-meta"
               classList={{
                 "text-foreground": running() || delegation(),
                 "text-foreground/70": !running() && !delegation(),
@@ -122,7 +122,7 @@ function ToolRow(props: {
               aria-hidden="true"
             />
             <span
-              class="shrink-0 font-mono text-[0.72rem]"
+              class="shrink-0 font-mono text-meta"
               classList={{
                 "text-foreground": running() || delegation(),
                 "text-foreground/70": !running() && !delegation(),
@@ -142,7 +142,7 @@ function ToolRow(props: {
       </div>
       <Show when={open() && hasDetail()}>
         <pre
-          class="ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[0.72rem] leading-relaxed text-foreground/80"
+          class="ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80"
           classList={{ "text-destructive/90": props.item.done && props.item.ok === false }}
         >
           {detail()}
@@ -188,7 +188,7 @@ function CodeRow(props: {
         <Show
           when={hasCode()}
           fallback={
-            <span class="shrink-0 font-mono text-[0.72rem] text-foreground/70">{label()}</span>
+            <span class="shrink-0 font-mono text-meta text-foreground/70">{label()}</span>
           }
         >
           <button
@@ -205,7 +205,7 @@ function CodeRow(props: {
             />
             <Braces class="size-3 shrink-0" aria-hidden="true" />
             <span
-              class="shrink-0 font-mono text-[0.72rem]"
+              class="shrink-0 font-mono text-meta"
               classList={{ "text-foreground": running(), "text-foreground/70": !running() }}
             >
               {label()}
@@ -225,7 +225,7 @@ function CodeRow(props: {
       </div>
       <Show when={open() && hasCode()}>
         <pre
-          class="ml-4 max-h-96 overflow-auto whitespace-pre rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[0.72rem] leading-relaxed text-foreground/80"
+          class="ml-4 max-h-96 overflow-auto whitespace-pre rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80"
           classList={{ "text-destructive/90": failed() }}
         >
           {props.item.code}

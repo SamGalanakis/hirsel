@@ -7,24 +7,29 @@ import { For, type JSX, Show } from "solid-js";
 import { cn } from "../../lib/utils";
 import { copyText } from "./prefs";
 
-/** Grouped card — a raised white-paper (light) / step-up (dark) surface with a
- * hairline border, mirroring the Android SettingsCard. */
-export function Card(props: { children: JSX.Element; class?: string; id?: string }) {
+/** A settings group: flat rows on the canvas, separated by hairlines, with the
+ * region formed by the whitespace above its heading — NOT a rounded frame.
+ * Settings used to stack seven bordered `bg-card` rectangles down one narrow
+ * pane, which DESIGN forbids twice over (§2 "Regions are formed by whitespace
+ * and tonal shifts, not boxes"; §6 "no repeated rectangular frames"). Rows keep
+ * their own padding and the pane's own `px-4` gives the measure, so content
+ * lines up with the section heading instead of being inset inside a box. */
+export function Group(props: { children: JSX.Element; class?: string; id?: string }) {
   return (
-    <div
-      id={props.id}
-      class={cn("overflow-hidden rounded-xl border border-border bg-card", props.class)}
-    >
+    <div id={props.id} class={cn("scroll-mt-4", props.class)}>
       {props.children}
     </div>
   );
 }
 
+/** Section heading. Sentence case, at the meta size — DESIGN §3 rules out
+ * all-caps ("Avoid oversized bold section headings, all-caps navigation"), so
+ * the heading earns its rank from weight and the whitespace above it. */
 export function SectionHeader(props: { children: JSX.Element; id?: string }) {
   return (
     <h2
       id={props.id}
-      class="mt-6 mb-2 px-1 text-[0.68rem] font-medium uppercase tracking-[0.06em] text-muted-foreground first:mt-0 scroll-mt-4"
+      class="mt-8 mb-2 text-sm font-medium text-foreground first:mt-0 scroll-mt-4"
     >
       {props.children}
     </h2>
@@ -66,10 +71,12 @@ export function SegmentedControl<T extends string>(props: {
               type="button"
               role="radio"
               aria-checked={selected()}
-              class="flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+              class="flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11"
               classList={{
-                "bg-card font-medium text-foreground shadow-[0_1px_2px_0_rgb(0_0_0/0.06)]":
-                  selected(),
+                // `shadow-raised` — the theme-adaptive lift token. The literal
+                // `rgb(0 0 0/0.06)` this replaces was invisible on the dark
+                // canvas, so a chosen segment lost its lift in the resting theme.
+                "bg-card font-medium text-foreground shadow-raised": selected(),
                 "text-muted-foreground hover:text-foreground": !selected(),
               }}
               onClick={() => props.onChange(opt.value)}
@@ -100,20 +107,29 @@ export function Toggle(props: {
       aria-label={props.ariaLabel}
       disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
-      class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
-      classList={{
-        "border-primary bg-primary": props.checked,
-        "border-input bg-secondary": !props.checked,
-      }}
+      // The 20×36px switch is the VISUAL, not the target: on a coarse pointer
+      // the button grows to a 44px square hit area around it (PRODUCT: "phone
+      // targets at least 44px") while the track keeps its quiet proportions.
+      class="group inline-flex shrink-0 items-center justify-end outline-none disabled:cursor-wait disabled:opacity-50 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
     >
+      {/* Ring on the track, not the grown hit box, so keyboard focus outlines
+          the switch the eye sees. */}
       <span
         aria-hidden="true"
-        class="pointer-events-none ml-0.5 size-3.5 rounded-full transition-transform"
+        class="relative flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors group-focus-visible:ring-2 group-focus-visible:ring-ring"
         classList={{
-          "translate-x-4 bg-primary-foreground": props.checked,
-          "translate-x-0 bg-muted-foreground": !props.checked,
+          "border-primary bg-primary": props.checked,
+          "border-input bg-secondary": !props.checked,
         }}
-      />
+      >
+        <span
+          class="pointer-events-none ml-0.5 size-3.5 rounded-full transition-transform"
+          classList={{
+            "translate-x-4 bg-primary-foreground": props.checked,
+            "translate-x-0 bg-muted-foreground": !props.checked,
+          }}
+        />
+      </span>
     </button>
   );
 }
@@ -149,10 +165,11 @@ export function Select<T extends string>(props: {
 }
 
 /** A sub-heading within a section (e.g. "Main agent" / a provider name inside
- * the Models section). Quieter than a SectionHeader, louder than a Field. */
+ * the Models section). Quieter than a SectionHeader — it must not outrank the
+ * heading it lives under. */
 export function SubHeading(props: { children: JSX.Element }) {
   return (
-    <h3 class="mt-4 mb-1.5 px-1 text-xs font-medium text-foreground first:mt-0">{props.children}</h3>
+    <h3 class="mt-5 mb-1 text-xs font-medium text-muted-foreground first:mt-0">{props.children}</h3>
   );
 }
 

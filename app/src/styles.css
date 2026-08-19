@@ -58,6 +58,11 @@
   --status-danger: var(--destructive);
   --status-attention: oklch(0.56 0.15 73);
 
+  /* The one raised-control elevation (selected segment). A token rather than a
+     hardcoded rgb() so the lift is honest on BOTH canvases: an ink shadow on
+     the light paper, a lifted hairline-and-shade on the dark field. */
+  --elevation-raised: 0 1px 2px 0 oklch(0.23 0.018 220 / 8%);
+
   /* Brand cube faces — theme-aware so the isometric mark's silhouette holds on
      BOTH canvases without a defensive contrast chip. LIGHT: ink-ish faces (a lit
      top, a mid side, a shadowed left, a slate facet) read solid on the off-white
@@ -105,6 +110,12 @@
   --status-danger: var(--destructive);
   --status-attention: oklch(0.79 0.16 82);
 
+  /* Dark: a drop shadow is invisible on the charcoal field, so the same lift
+     reads as a hairline top highlight plus a shade beneath. */
+  --elevation-raised:
+    inset 0 1px 0 0 oklch(1 0 0 / 7%),
+    0 1px 2px 0 oklch(0 0 0 / 35%);
+
   /* Brand cube faces — DARK keeps the brand's resting near-whites (the mark's
      original fills, verbatim): a white top, an off-white right, the near-black
      left that recedes into the canvas, a slate facet. */
@@ -127,6 +138,14 @@
 @theme {
   --breakpoint-split: 900px;
   --breakpoint-rail: 1100px;
+
+  /* `meta` — the one named size below `text-xs` (DESIGN §3: meta is 11–12px;
+     11.5px sits inside that floor). It was a de-facto token already, written
+     out as an arbitrary `0.72rem` value at ~15 call sites — ids, timings, commands,
+     shortcuts, summaries. Named once here so the scale has a vocabulary and no
+     call site can drift below the floor. Size only — leading stays inherited,
+     exactly as the arbitrary value it replaces behaved. */
+  --text-meta: 0.72rem;
 }
 
 @theme inline {
@@ -167,6 +186,8 @@
   --color-status-success: var(--status-success);
   --color-status-danger: var(--status-danger);
   --color-status-attention: var(--status-attention);
+
+  --shadow-raised: var(--elevation-raised);
 }
 
 @layer base {

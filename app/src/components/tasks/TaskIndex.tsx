@@ -1,7 +1,7 @@
 import { X } from "lucide-solid";
 import { For, Show } from "solid-js";
 import type { EventItem } from "../../protocol";
-import { taskName, taskState, taskTone } from "./task-model";
+import { taskLabel, taskName, taskStatus, taskTone } from "./task-model";
 
 export function TaskIndex(props: {
   tasks: EventItem[];
@@ -42,7 +42,10 @@ export function TaskIndex(props: {
         {(task) => {
           const focused = () => props.focusedId === task.id;
           const dimmed = () => props.focusedId !== null && !focused();
-          const status = () => taskState(task, props.decideOverrides);
+          // One status decision per chip; the word and the dot are both reads
+          // of it.
+          const status = () => taskStatus(task, props.decideOverrides);
+          const label = () => taskLabel(status());
           return (
             // The chip and its exit are siblings, never nested: a button inside a
             // button is invalid, and the × is a second, separately-labelled
@@ -53,7 +56,7 @@ export function TaskIndex(props: {
                 data-task-id={task.id}
                 aria-pressed={focused()}
                 aria-current={focused() ? "page" : undefined}
-                aria-label={`${taskName(task)}, ${status()}${focused() ? ", focused; activate to clear focus" : ""}`}
+                aria-label={`${taskName(task)}, ${label()}${focused() ? ", focused; activate to clear focus" : ""}`}
                 // The focused chip is marked by a 2px accent rule on the edge it
                 // shares with the field it opened — bottom in the horizontal
                 // strip, left in the rail column — so the marker points at the
@@ -69,7 +72,7 @@ export function TaskIndex(props: {
                 onKeyDown={(event) => moveFocus(event, task)}
               >
                 <span
-                  class={`size-1.5 shrink-0 rounded-full ${taskTone(task, props.decideOverrides)}`}
+                  class={`size-1.5 shrink-0 rounded-full ${taskTone(status())}`}
                   aria-hidden="true"
                 />
                 <span class="max-w-48 truncate">{taskName(task)}</span>
@@ -83,7 +86,7 @@ export function TaskIndex(props: {
                       focused(),
                   }}
                 >
-                  {status()}
+                  {label()}
                 </span>
               </button>
               <Show when={focused()}>

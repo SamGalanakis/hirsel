@@ -4,8 +4,24 @@
 // the thinking marker and the committed-turn "turn details" view.
 import type { TimelineEvent } from "../../store/types";
 
+/** Where a started step (a tool call, an Agent program cell) has got to. A step
+ * is running until its `done` arrives; everything an outcome carries — the
+ * ok/fail verdict, the result payload, the measured duration — exists only in
+ * the done state, so "finished but with no verdict" is not representable. */
+export type StepStatus =
+  | { state: "running" }
+  | {
+      state: "done";
+      ok: boolean;
+      result: string | null;
+      /** Wall time between the start and done arrivals; null when either
+       * endpoint carried no client timestamp (hand-built or replayed events). */
+      durationMs: number | null;
+    };
+
 /** A rendered timeline row. Prose/reasoning blocks carry accumulated markdown;
- * a tool row carries its start summary plus (once resolved) its done result. */
+ * a tool row carries its start summary plus its `status`, which holds the done
+ * result once it resolves. */
 export type TimelineItem =
   | { kind: "prose"; key: string; text: string }
   | { kind: "reasoning"; key: string; text: string }
@@ -15,9 +31,7 @@ export type TimelineItem =
       toolId: string;
       name: string;
       summary: string | null;
-      done: boolean;
-      ok: boolean | null;
-      result: string | null;
+      status: StepStatus;
     }
   | {
       kind: "code";
@@ -26,10 +40,11 @@ export type TimelineItem =
       language: string;
       code: string;
       truncated: boolean;
-      done: boolean;
-      ok: boolean | null;
-      result: string | null;
+      status: StepStatus;
     };
+
+/** A row that a start/done pair drives. */
+type StepItem = Extract<TimelineItem, { status: StepStatus }>;
 
 /**
  * Fold ordered timeline events into interleaved items, exactly in `seq` order:
@@ -87,12 +102,56 @@ export function splitStreamingReply(events: TimelineEvent[]): StreamingSplit {
   };
 }
 
+/**
+ * One start/done pairing, over its OWN id namespace.
+ *
+ * Tools and code cells stream independent id spaces, so each fold gets its own
+ * pairing: an id can never resolve — or borrow a duration from — a row of the
+ * other kind. `start` opens a row at the current position; `done` resolves the
+ * matching open row in place, or, when its start never arrived (a reconnect
+ * mid-turn dropped it), appends the already-completed row `orphan` builds.
+ */
+function stepPairing(items: TimelineItem[]) {
+  const indexById = new Map<string, number>();
+  const startedAt = new Map<string, number>();
+  return {
+    start(id: string, at: number | undefined, row: StepItem): void {
+      indexById.set(id, items.length);
+      if (at !== undefined) startedAt.set(id, at);
+      items.push(row);
+    },
+    done(
+      id: string,
+      at: number | undefined,
+      outcome: { ok: boolean; result: string | null },
+      orphan: () => StepItem,
+    ): void {
+      const from = startedAt.get(id);
+      const status: StepStatus = {
+        state: "done",
+        ok: outcome.ok,
+        result: outcome.result,
+        durationMs: at !== undefined && from !== undefined ? at - from : null,
+      };
+      const idx = indexById.get(id);
+      const row = idx === undefined ? undefined : items[idx];
+      if (row === undefined) {
+        indexById.set(id, items.length);
+        items.push({ ...orphan(), status });
+        return;
+      }
+      if (!("status" in row)) return;
+      row.status = status;
+    },
+  };
+}
+
 export function buildTimeline(events: TimelineEvent[], showCode = false): TimelineItem[] {
   const items: TimelineItem[] = [];
-  const toolIndexById = new Map<string, number>();
-  const codeIndexById = new Map<string, number>();
+  const tools = stepPairing(items);
+  const code = stepPairing(items);
 
-  for (const { seq, event } of events) {
+  for (const { seq, event, at } of events) {
     switch (event.kind) {
       case "prose":
       case "reasoning": {
@@ -105,85 +164,55 @@ export function buildTimeline(events: TimelineEvent[], showCode = false): Timeli
         break;
       }
       case "tool_start": {
-        toolIndexById.set(event.id, items.length);
-        items.push({
+        tools.start(event.id, at, {
           kind: "tool",
           key: `tool-${event.id}`,
           toolId: event.id,
           name: event.name,
           summary: event.summary,
-          done: false,
-          ok: null,
-          result: null,
+          status: { state: "running" },
         });
         break;
       }
       case "tool_done": {
-        const idx = toolIndexById.get(event.id);
-        if (idx === undefined) {
-          // Orphan done (no matching tool_start — e.g. the start was lost across
-          // a reconnect). Render it as an already-completed row from its own name.
-          toolIndexById.set(event.id, items.length);
-          items.push({
-            kind: "tool",
-            key: `tool-${event.id}`,
-            toolId: event.id,
-            name: event.name,
-            summary: null,
-            done: true,
-            ok: event.ok,
-            result: event.summary,
-          });
-          break;
-        }
-        const row = items[idx];
-        if (row.kind !== "tool") break;
-        row.done = true;
-        row.ok = event.ok;
-        row.result = event.summary;
+        // An orphan done is labelled from its own `name` — the start carried
+        // the summary, so there is none to show.
+        tools.done(event.id, at, { ok: event.ok, result: event.summary }, () => ({
+          kind: "tool",
+          key: `tool-${event.id}`,
+          toolId: event.id,
+          name: event.name,
+          summary: null,
+          status: { state: "running" },
+        }));
         break;
       }
       case "code_start": {
         if (!showCode) break;
-        codeIndexById.set(event.id, items.length);
-        items.push({
+        code.start(event.id, at, {
           kind: "code",
           key: `code-${event.id}`,
           codeId: event.id,
           language: event.language,
           code: event.code,
           truncated: event.truncated,
-          done: false,
-          ok: null,
-          result: null,
+          status: { state: "running" },
         });
         break;
       }
       case "code_done": {
         if (!showCode) break;
-        const idx = codeIndexById.get(event.id);
-        if (idx === undefined) {
-          // Orphan done (the start was lost across a reconnect): still show the
-          // cell's outcome rather than silently dropping it.
-          codeIndexById.set(event.id, items.length);
-          items.push({
-            kind: "code",
-            key: `code-${event.id}`,
-            codeId: event.id,
-            language: "",
-            code: "",
-            truncated: false,
-            done: true,
-            ok: event.ok,
-            result: event.summary,
-          });
-          break;
-        }
-        const cell = items[idx];
-        if (cell.kind !== "code") break;
-        cell.done = true;
-        cell.ok = event.ok;
-        cell.result = event.summary;
+        // An orphan done has no source to show, only the cell's outcome — which
+        // still beats dropping it silently.
+        code.done(event.id, at, { ok: event.ok, result: event.summary }, () => ({
+          kind: "code",
+          key: `code-${event.id}`,
+          codeId: event.id,
+          language: "",
+          code: "",
+          truncated: false,
+          status: { state: "running" },
+        }));
         break;
       }
     }

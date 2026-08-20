@@ -10,12 +10,15 @@ import {
   X,
 } from "lucide-solid";
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type { Blob, SendMode } from "../../protocol";
+import type { Blob, EventItem, SendMode } from "../../protocol";
 import { state } from "../../store/store";
 import { anyOverlayOpen } from "../../lib/focus";
 import { formatBytes } from "../../lib/format";
 import { handleSubmitKeys } from "../../lib/submitKeymap";
+import { resolveMentionIds } from "../../lib/task-ref";
 import { toast } from "../../lib/toast";
+import { TASK_REF_PICKER_ID, TaskRefPicker } from "./TaskRefPicker";
+import { createTaskRefPicker } from "./useTaskRefPicker";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { useTextInput } from "./useTextInput";
@@ -53,6 +56,9 @@ interface Props {
   getLastOwnerBody: () => string | null;
   /** Focus is expressed by the surrounding field, never by composer copy. */
   focused?: boolean;
+  /** The citable field: every resting Task, in queue order. The `#` picker
+   * offers these and the send resolves refs against them. */
+  tasks?: EventItem[];
 }
 
 /** Composer anchored at the bottom of the task world. CLI-grade keyboard map on fine-pointer
@@ -75,6 +81,16 @@ export function Composer(props: Props) {
   const [sending, setSending] = createSignal(false);
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
+  let textRef: HTMLTextAreaElement | undefined;
+  // Typing `#` cites a Task. The picker owns the trigger, the caret anchor and
+  // its own keyboard rung; the composed text stays the only record of what was
+  // cited, so `mentions` is re-derived from the body at send time.
+  const picker = createTaskRefPicker({
+    getEl: () => textRef,
+    value,
+    setValue,
+    tasks: () => props.tasks ?? [],
+  });
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressed = false;
 
@@ -107,13 +123,20 @@ export function Composer(props: Props) {
       setSending(false);
     }
 
-    props.onSend(body, null, mode, blobs, []);
+    // The body IS the mention list: every `#id` still standing in the text at
+    // send time, resolved against the live field. A deleted token drops its
+    // mention for free, and a ref naming nothing is left as plain prose.
+    props.onSend(body, null, mode, blobs, resolveMentionIds(body, props.tasks ?? []));
     props.attachments.clear();
     setValue("");
+    picker.close();
     focus();
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    // The picker gets the keys first, and only while it is open: arrows move the
+    // active row, Enter/Tab accept it, Esc closes the picker and nothing else.
+    if (picker.handleKeyDown(e)) return;
     // An open overlay owns Esc first; gate stop-on-Esc on
     // `!anyOverlayOpen()` so one Esc dismissing a sheet/dialog never *also*
     // kills a live agent turn behind it; only with nothing else up does Esc
@@ -346,6 +369,7 @@ export function Composer(props: Props) {
         <Textarea
           ref={(node: HTMLTextAreaElement) => {
             setRef(node);
+            textRef = node;
           }}
           rows={1}
           data-composer="main"
@@ -355,12 +379,33 @@ export function Composer(props: Props) {
              thumbs use it. */
           class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 leading-snug shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
           aria-label="Message Hirsel"
+          aria-expanded={picker.open() ? true : undefined}
+          aria-controls={picker.open() ? TASK_REF_PICKER_ID : undefined}
+          aria-activedescendant={
+            picker.open() && picker.activeIndex() >= 0
+              ? `${TASK_REF_PICKER_ID}-option-${picker.candidates()[picker.activeIndex()].id}`
+              : undefined
+          }
           value={value()}
           onInput={(e) => {
             setValue(e.currentTarget.value);
+            picker.sync(true);
           }}
           onKeyDown={handleKeyDown}
+          /* The caret can also move without the text changing (arrows, a click,
+             a selection): re-evaluate on those too, so stepping back into a
+             half-typed `#dep` reopens the list the Owner left. */
+          onKeyUp={() => picker.sync()}
+          onClick={() => picker.sync()}
+          onBlur={() => picker.close()}
           onPaste={handlePaste}
+        />
+        <TaskRefPicker
+          candidates={picker.candidates()}
+          activeIndex={picker.activeIndex()}
+          anchorX={picker.anchor().x}
+          onAccept={(task) => picker.accept(task)}
+          onHover={picker.setActiveIndex}
         />
         {/* Stop stands on every pointer type while a turn is live — it is the
             one thing in the capsule Enter cannot do. */}

@@ -2,6 +2,7 @@ import type { PhrasingContent, RootContent, Table } from "mdast";
 import { createMemo, For, Show, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { CodeBlock } from "./markdown/CodeBlock";
+import { TaskRefText } from "./tasks/TaskRefTag";
 import { mdastToString, parseMarkdown, parseStreamingMarkdown } from "./markdown/parse";
 
 // CommonMark + GFM rendering for task conversation content. The source is
@@ -29,24 +30,33 @@ function safeHref(url: string | null | undefined): string | null {
 const inlineCodeClass = "rounded bg-muted/70 px-1 py-0.5 font-mono text-[0.85em]";
 const linkClass = "underline decoration-current/50 underline-offset-2 hover:decoration-current";
 
-function renderPhrasing(nodes: readonly PhrasingContent[]): JSX.Element[] {
+/** `noRefs` suppresses Task-citation lifting for a subtree that cannot host a
+ * control — a link label, where a nested button would be invalid markup. */
+function renderPhrasing(nodes: readonly PhrasingContent[], noRefs = false): JSX.Element[] {
   const out: JSX.Element[] = [];
   for (const node of nodes) {
     switch (node.type) {
       case "text":
-        out.push(node.value);
+        // Task citations are lifted out of prose here and nowhere else, so a
+        // `#12` inside code, a link label or an autolink stays literal. The
+        // cheap `includes` keeps every ordinary line on the plain-string path.
+        out.push(
+          !noRefs && node.value.includes("#")
+            ? <TaskRefText value={node.value} />
+            : node.value,
+        );
         break;
       case "inlineCode":
         out.push(<code class={inlineCodeClass}>{node.value}</code>);
         break;
       case "strong":
-        out.push(<strong class="font-medium text-foreground">{renderPhrasing(node.children)}</strong>);
+        out.push(<strong class="font-medium text-foreground">{renderPhrasing(node.children, noRefs)}</strong>);
         break;
       case "emphasis":
-        out.push(<em>{renderPhrasing(node.children)}</em>);
+        out.push(<em>{renderPhrasing(node.children, noRefs)}</em>);
         break;
       case "delete":
-        out.push(<del class="text-muted-foreground">{renderPhrasing(node.children)}</del>);
+        out.push(<del class="text-muted-foreground">{renderPhrasing(node.children, noRefs)}</del>);
         break;
       case "break":
         out.push(<br />);
@@ -62,10 +72,10 @@ function renderPhrasing(nodes: readonly PhrasingContent[]): JSX.Element[] {
               title={node.title ?? undefined}
               class={linkClass}
             >
-              {renderPhrasing(node.children)}
+              {renderPhrasing(node.children, true)}
             </a>
           ) : (
-            <>{renderPhrasing(node.children)}</>
+            <>{renderPhrasing(node.children, noRefs)}</>
           ),
         );
         break;

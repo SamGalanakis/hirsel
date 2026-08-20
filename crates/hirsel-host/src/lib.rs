@@ -39,7 +39,7 @@ use hirsel_proto::{
     SendMode, SubagentModelCatalog, ViewInstance,
 };
 use tokio::sync::{Mutex, broadcast};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
     config::Config,
@@ -661,7 +661,13 @@ pub fn router_from_state(state: AppState) -> Router {
     let app_dir =
         std::env::var_os("HIRSEL_APP_DIR").map_or_else(|| "app/dist".into(), PathBuf::from);
     if app_dir.exists() {
-        app = app.fallback_service(ServeDir::new(&app_dir));
+        // SPA history fallback: the client owns `/t/<id>` Task deep links, and a
+        // cold load of one is a request this server has never heard of. Anything
+        // the asset directory cannot answer gets the app shell, which then reads
+        // the path and opens that Task.
+        app = app.fallback_service(
+            ServeDir::new(&app_dir).fallback(ServeFile::new(app_dir.join("index.html"))),
+        );
     } else {
         tracing::warn!(
             app_dir = %app_dir.display(),

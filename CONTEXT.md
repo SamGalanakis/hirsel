@@ -19,6 +19,9 @@ _Avoid_: card, inbox item, notification, queue item, thread
 **Global conversation:** The standing exchange between Owner and Agent across everything. It is the resting state and remains aware of every Task and Task-scoped exchange. There is one composer; Task scope adds an Anchor and Task mention to an ordinary message, and can be removed without navigating away.
 _Avoid_: chat destination, session list, global thread
 
+**Task ref:** A Task's citation form, `#<id>` — the wire id with a `#`. One spelling everywhere: on the Task chip, on the focused Task card (where one click copies it), typed in the composer to cite a Task, rendered as an inline tag in conversation, and as the tail of the Task's `/t/<id>` address. Typing `#` in the composer opens the Task picker; the composed text is the only record, re-parsed into `send_message.mentions` at send time. Chip focus decides where a message lives (its Anchor); a typed ref decides what it cites.
+_Avoid_: handle, tag, hashtag, @mention
+
 **Task margin:** The Task-related slice of the same conversation, selected by durable Anchor and Task mentions. It provides local context beside the Task instrument without creating a nested thread or separate Agent.
 _Avoid_: side chat, sub-conversation, fork
 

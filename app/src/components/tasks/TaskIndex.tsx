@@ -3,6 +3,7 @@ import { createSignal, For } from "solid-js";
 import type { EventItem } from "../../protocol";
 import { archiveEventWithUndo } from "../../lib/event-archive";
 import { createOverlayPresence } from "../../lib/focus";
+import { formatTaskRef } from "../../lib/task-ref";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -94,7 +95,7 @@ function TaskChip(props: {
         // the promise this name makes is one the chip itself keeps — Esc is the
         // other way out. Clearing focus is deliberately NOT a menu item: the
         // menu is for acting on the Task, not for navigating away from it.
-        aria-label={`${taskName(props.task)}, ${label()}${props.focused ? ", focused; activate to clear focus" : ""}`}
+        aria-label={`${taskName(props.task)}, ${label()}, task ${formatTaskRef(props.task.id)}${props.focused ? ", focused; activate to clear focus" : ""}`}
         // The focused chip is marked by a 2px accent rule on the edge it shares
         // with the field it opened — bottom in the horizontal strip, left in the
         // rail column — so the marker points at the instrument. The transparent
@@ -116,6 +117,18 @@ function TaskChip(props: {
           class={`size-1.5 shrink-0 rounded-full ${taskTone(status())}`}
           aria-hidden="true"
         />
+        {/* The citation handle, in the one spelling it has everywhere else:
+            mono, quiet, no chip or border around it (DESIGN §3 "monospace only
+            for machine tokens"). It reads as a column of refs down the rail,
+            which is what makes `#12` in a draft findable at a glance. It is
+            decorative here — the chip's accessible name already carries it. */}
+        <span
+          data-slot="task-ref"
+          class="shrink-0 font-mono text-meta text-muted-foreground/70"
+          aria-hidden="true"
+        >
+          {formatTaskRef(props.task.id)}
+        </span>
         <span class="max-w-48 truncate">{taskName(props.task)}</span>
         <span
           class="ml-auto text-xs text-muted-foreground group-hover/task:invisible group-focus-within/task:invisible [@media(pointer:coarse)]:invisible"

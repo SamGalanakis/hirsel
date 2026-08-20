@@ -255,9 +255,13 @@ async function main() {
     await page.getByText("Task decided").waitFor();
     check("terminal action settles authoritatively", settled.status === "done", `Host status=${settled.status}`);
 
-    await page.reload({ waitUntil: "domcontentloaded" });
+    // A cold load at the ROOT. Not a reload: the address bar tracks focus, so a
+    // reload would carry the `/t/<id>` of the Task just settled, and a deep link
+    // is a focus the Owner already chose — it outranks the landing heuristic by
+    // design (the Task-margins suite proves that path).
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
     await appReady(page);
-    // Settled work never wins load-time focus, so after the reload the field
+    // Settled work never wins load-time focus, so on a root load the field
     // rests ambient and the chip is the way back into the decided Task.
     const restedAmbient = await page.evaluate(() => ({
       taskFields: document.querySelectorAll('[data-slot="task-field"]').length,

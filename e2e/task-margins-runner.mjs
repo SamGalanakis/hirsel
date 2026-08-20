@@ -268,6 +268,143 @@ async function main() {
     const taskFrame = await frameAfter(startFrame, (frame) => frame.type === "send_message" && frame.body === "What would make this unsafe?");
     check("exact task frame", taskFrame.ref === 2 && taskFrame.mentions?.length === 1 && taskFrame.mentions[0] === 1, JSON.stringify(taskFrame));
 
+    // ---- Task refs: citing one Task from inside another ---------------------
+    // `#` opens the picker under the caret, filters on the name, inserts the
+    // Task's ref, and the send carries that citation ALONGSIDE the focused
+    // Task's own mention — focus decides where the line lives, the ref decides
+    // what it cites.
+    const refPicker = page.locator('[data-slot="task-ref-picker"]');
+    const refOptions = page.locator("[data-task-ref-option]");
+    startFrame = sentFrames.length;
+    await textarea.click();
+    await textarea.pressSequentially("hold until #");
+    await refPicker.waitFor();
+    const wholeField = await refOptions.evaluateAll((rows) => rows.map((row) => row.dataset.taskRefOption));
+    await textarea.pressSequentially("auth");
+    await page.waitForFunction(() => document.querySelectorAll("[data-task-ref-option]").length === 1);
+    check(
+      "# picker opens on the caret and filters",
+      wholeField.length === 3
+        && (await refOptions.first().getAttribute("data-task-ref-option")) === "2"
+        && (await textarea.getAttribute("aria-activedescendant")) === "task-ref-picker-option-2",
+      `lone # offered ${wholeField.join(",")}; "#auth" narrowed to task 2`,
+    );
+
+    // Esc is the picker's own rung: it closes the list and leaves the Task open.
+    await page.keyboard.press("Escape");
+    check(
+      "picker Esc closes the picker only",
+      (await refPicker.count()) === 0
+        && (await taskField.getAttribute("data-task")) === "1"
+        && (await deploy.getAttribute("aria-pressed")) === "true"
+        && (await textarea.inputValue()) === "hold until #auth",
+      "one Escape dismissed the list without clearing task focus or the draft",
+    );
+
+    await textarea.pressSequentially("-");
+    await refPicker.waitFor();
+    await page.keyboard.press("Enter");
+    check(
+      "Enter inserts the ref rather than sending",
+      (await textarea.inputValue()) === "hold until #2 " && (await refPicker.count()) === 0,
+      `composer now "${await textarea.inputValue()}"`,
+    );
+
+    await send.click();
+    const citedFrame = await frameAfter(startFrame, (frame) => frame.type === "send_message" && frame.body === "hold until #2");
+    check(
+      "cited send carries the ref and the focus",
+      citedFrame.ref === 2
+        && JSON.stringify(citedFrame.mentions) === JSON.stringify([2, 1]),
+      JSON.stringify(citedFrame),
+    );
+
+    // The citation comes back as an inline tag in the Task margin, and pressing
+    // it moves focus to the Task it names.
+    const refTag = page.locator('[data-slot="task-ref-tag"][data-task-ref="2"]');
+    await refTag.first().waitFor();
+    // Read it through a poll: the margin re-renders as the mock's reply lands,
+    // and a node resolved a frame earlier can be detached by the time it is
+    // measured (an detached node reports empty computed style, not stale one).
+    const tagShape = await page
+      .waitForFunction(() => {
+        const element = document.querySelector('[data-slot="task-ref-tag"][data-task-ref="2"]');
+        if (!element) return null;
+        // The app resets `button { font: inherit }` outside the cascade layers,
+        // so the ref's monospace lives on the text span inside the control.
+        const family = getComputedStyle(element.firstElementChild ?? element).fontFamily;
+        if (!family) return null;
+        return {
+          text: element.textContent.trim(),
+          label: element.getAttribute("aria-label"),
+          family,
+          decoration: getComputedStyle(element).textDecorationLine,
+        };
+      })
+      .then((handle) => handle.jsonValue());
+    check(
+      "cited task renders as an inline ref tag",
+      tagShape.text === "#2" && /mono/i.test(tagShape.family)
+        && tagShape.label === "auth pr, task #2" && tagShape.decoration === "underline",
+      JSON.stringify(tagShape),
+    );
+    await refTag.first().click();
+    await page.locator('[data-slot="task-field"][data-task="2"]').waitFor();
+    check(
+      "activating a ref tag focuses that task",
+      (await auth.getAttribute("aria-pressed")) === "true"
+        && new URL(page.url()).pathname === "/t/2",
+      `focus moved to auth pr; address bar ${new URL(page.url()).pathname}`,
+    );
+
+    // The ref is the Task's standing address, not a picker-only artefact: it
+    // rides the chip ahead of the name, in mono, on the same optical line, and
+    // the focused card carries a copyable one.
+    const refShape = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll("[data-task-id]"));
+      const chips = rows.map((row) => {
+        const ref = row.querySelector('[data-slot="task-ref"]');
+        const name = row.querySelector('[data-slot="task-ref"] + span');
+        if (!ref || !name) return null;
+        const refBox = ref.getBoundingClientRect();
+        const nameBox = name.getBoundingClientRect();
+        const style = getComputedStyle(ref);
+        return {
+          id: row.dataset.taskId,
+          text: ref.textContent.trim(),
+          family: style.fontFamily,
+          mono: /mono/i.test(style.fontFamily),
+          leadsName: Math.round(refBox.right) <= Math.round(nameBox.left),
+          centreDelta: Math.abs((refBox.top + refBox.bottom) / 2 - (nameBox.top + nameBox.bottom) / 2),
+        };
+      });
+      const copy = document.querySelector('[data-slot="task-ref-copy"]');
+      return {
+        chips,
+        copy: copy
+          ? {
+            text: copy.textContent.trim(),
+            label: copy.getAttribute("aria-label"),
+            mono: /mono/i.test(getComputedStyle(copy.firstElementChild ?? copy).fontFamily),
+          }
+          : null,
+      };
+    });
+    check(
+      "every task carries its ref, quietly and in line",
+      refShape.chips.length === 3
+        && refShape.chips.every((chip) => chip && chip.mono && chip.leadsName && chip.centreDelta <= 1.5)
+        && refShape.chips.map((chip) => chip.text).join(",") === "#1,#2,#3"
+        && refShape.copy?.text === "#2"
+        && refShape.copy.label === "Copy task ref #2"
+        && refShape.copy.mono,
+      JSON.stringify(refShape),
+    );
+
+    // Back out of the citation and re-open the deploy task the rest of the
+    // suite is written against.
+    await ensureFocused(1);
+
     const taskScroll = page.locator('[data-slot="task-scroll"]');
     await taskScroll.evaluate((element) => { element.scrollTop = 14; });
     await deploy.click();
@@ -369,7 +506,11 @@ async function main() {
     const promoteFrame = await frameAfter(startFrame, (frame) => frame.type === "event_action" && frame.event_id === 1);
     await page.getByText("Task decided").waitFor();
     check("exact promotion payload", promoteFrame.action === "choose" && promoteFrame.data?.choice === "A", JSON.stringify(promoteFrame));
-    await page.reload({ waitUntil: "domcontentloaded" });
+    // A cold load at the ROOT, which is what the load-time focus rule is about.
+    // (A reload would carry the `/t/1` address of the task just decided, and a
+    // deep link is a focus the Owner already chose — it outranks the heuristic
+    // by design. That path is proved on its own two checks below.)
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
     await appReady(page);
     // Every seeded task is settled at this point, so nothing ranks as needing
     // the Owner and the same load-time rule must leave the field ambient —
@@ -379,11 +520,28 @@ async function main() {
     );
     check(
       "nothing needing rests ambient",
-      settledChips.length === 3 && settledChips.every((label) => /, done$/.test(label ?? ""))
+      settledChips.length === 3 && settledChips.every((label) => /, done, task #\d+$/.test(label ?? ""))
         && (await ambientField.count()) === 1
         && (await taskField.count()) === 0
         && await composerShell.getAttribute("data-focused") === "false",
       `all-settled load stays ambient; chips ${JSON.stringify(settledChips)}`,
+    );
+    check(
+      "the address bar carries the ambient root",
+      new URL(page.url()).pathname === "/",
+      `ambient is addressed as ${new URL(page.url()).pathname}`,
+    );
+    // A `/t/<id>` deep link is a focus already chosen: it opens that Task on a
+    // cold load even when the most-needing rule would have rested ambient.
+    await page.goto(`${origin}/t/3`, { waitUntil: "domcontentloaded" });
+    await appReady(page);
+    await taskCard.waitFor();
+    check(
+      "deep link opens its task on a cold load",
+      (await taskField.getAttribute("data-task")) === "3"
+        && (await ambientField.count()) === 0
+        && (await page.getByRole("button", { name: /nightly backup, done/i }).getAttribute("aria-pressed")) === "true",
+      "/t/3 landed focused on nightly backup over the all-settled ambient rule",
     );
     await page.getByRole("button", { name: /deploy 4821, done/i }).click();
     await page.getByText("Task decided").waitFor();
@@ -676,7 +834,11 @@ async function main() {
     const touchTargets = await page.evaluate(() => {
       const selectors = {
         tasks: '[data-slot="task-index"] button',
-        choices: '[data-slot="task-field"] button',
+        // Inline Task citations are excluded on purpose, and only they: WCAG
+        // 2.5.8's inline exception covers a target sitting in a sentence, whose
+        // size is constrained by the line it is set on. Every control that owns
+        // its own row is still held to 44px.
+        choices: '[data-slot="task-field"] button:not([data-slot="task-ref-tag"])',
         send: 'button[aria-label="Send"]',
         overflow: '[data-slot="phone-overflow-trigger"]',
         attach: 'button[aria-label="Attach files"]',

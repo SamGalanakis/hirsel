@@ -6,8 +6,9 @@ FIRST VIEWPORT: Task index at the left/top, one unfolded JSON-generated task ins
 FORM: Task Margins, the user-pinned synthesis; focus changes the subject, never the interlocutor.
 */
 import { ArrowDown, X } from "lucide-solid";
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Blob, EventItem, SendMode } from "../../protocol";
+import { taskIdFromPath, taskPath } from "../../lib/deep-link";
 import { markEventRead } from "../../lib/event-decide";
 import {
   conversationViews,
@@ -17,6 +18,7 @@ import {
 import {
   clearComposerPrefill,
   clearProtocolError,
+  clearTaskFocus,
   dispatch,
   effectiveEvents,
   focusTask,
@@ -268,9 +270,43 @@ export function TaskShell() {
     if (autoFocusSettled || connection !== "connected") return;
     autoFocusSettled = true;
     if (state.focusedTaskId !== null) return; // a focus already chosen wins
-    const task = mostNeedingTask(tasks());
+    // A `/t/<id>` deep link is a focus the Owner already chose, so it outranks
+    // the most-needing rule — but only when it names a Task actually in the
+    // field. A stale link falls back to the ordinary landing.
+    const linked = taskIdFromPath(window.location.pathname);
+    const task = tasks().find((item) => item.id === linked) ?? mostNeedingTask(tasks());
     if (task) focusTask(task.id);
+    // A link naming a Task the field no longer holds must not leave its address
+    // standing over an ambient screen.
+    else if (linked !== null) window.history.replaceState(null, "", "/");
   }));
+
+  // Focus → address bar. DEFERRED, and that is the whole subtlety: this effect
+  // and the landing rule above both run at setup, and an eager first pass would
+  // write `/` over the very deep link the landing is about to read. It waits for
+  // a real focus change instead. The first one REPLACES (landing at `/` and
+  // being put in a Task is one navigation, not two); every later one pushes, so
+  // Back walks the Tasks the Owner opened.
+  let urlSettled = false;
+  createEffect(on(() => state.focusedTaskId, (id) => {
+    const path = taskPath(id);
+    const settled = urlSettled;
+    urlSettled = true;
+    if (window.location.pathname === path) return;
+    const url = `${path}${window.location.search}`;
+    if (settled) window.history.pushState(null, "", url);
+    else window.history.replaceState(null, "", url);
+  }, { defer: true }));
+
+  onMount(() => {
+    const onPop = () => {
+      const id = taskIdFromPath(window.location.pathname);
+      if (id === null) clearTaskFocus();
+      else if (tasks().some((task) => task.id === id)) focusTask(id);
+    };
+    window.addEventListener("popstate", onPop);
+    onCleanup(() => window.removeEventListener("popstate", onPop));
+  });
 
   // A focus change re-subjects the whole field: start at the newest line and
   // bring the new task's chip into view, so the marker and the instrument it
@@ -470,6 +506,7 @@ export function TaskShell() {
 
           <Composer
             focused={focusedTask() !== null}
+            tasks={tasks()}
             attachments={attachments}
             thinking={state.agentActivity.state === "thinking"}
             prefill={state.composerPrefill}

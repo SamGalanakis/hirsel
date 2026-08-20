@@ -221,19 +221,23 @@ export function Composer(props: Props) {
     <div class="mx-auto w-full max-w-frame flex-shrink-0 px-gutter pb-3 rail:pb-4">
     {/* One persistent organic capsule: the sole surface allowed the full pill
         signature because it is the stable transition between global and task.
-        Focus narrows it to the reading measure and tints it mint; ambient lets
-        it rest at the full frame width (DESIGN §4). It keeps a visible hairline
-        at rest so the floor is legible before it is touched. */}
+        It has ONE width in every state — the reading measure it shares with the
+        instrument and the conversation above it (DESIGN §4). Focus changes its
+        tone only. The capsule used to narrow on focus, which moved it and its
+        Send button ~300px sideways on every toggle; continuity of the one
+        standing element beats the width distinction, and the ambient capsule
+        was the odd one out anyway — wider than the conversation it sat under.
+        It keeps a visible hairline at rest so the floor is legible before it is
+        touched. */}
     <div
       data-slot="composer-shell"
       data-focused={props.focused ? "true" : "false"}
       data-dropping={dragging() ? "true" : "false"}
-      class="w-full rounded-full px-3 py-2 ring-1 transition-[max-width,background-color,box-shadow] duration-200 ease-out"
+      class="w-full rounded-full px-3 py-2 ring-1 transition-[background-color,box-shadow] duration-200 ease-out rail:max-w-measure"
       classList={{
         // The drop state overrides both resting tones: while a file is in the
         // air the capsule is the one thing on screen that must read as a
         // target, so it takes the full mint ring regardless of focus.
-        "rail:max-w-measure": props.focused,
         "ring-primary bg-primary/10": dragging(),
         "bg-primary/[0.035] ring-primary/25": props.focused && !dragging(),
         "bg-card/95 ring-border": !props.focused && !dragging(),

@@ -216,6 +216,47 @@ describe("Task Margins shell", () => {
     expect(screen.queryByText("Global Hirsel")).toBeNull();
   });
 
+  it("keeps the composer geometrically identical across the focus swap", async () => {
+    const { screen } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    // Everything that can place or size the capsule. The composer is the one
+    // element on screen through every state, so the swap may change its tone
+    // and nothing else: it used to narrow from the frame width to the reading
+    // measure on focus, which slid it and its send target sideways on every
+    // toggle (DESIGN §4, §5).
+    const geometric = /^(rail:|split:)?(w-|min-w-|max-w-|mx-|ml-|mr-|px-|pl-|pr-|py-|basis-|flex-|justify-|self-)/;
+    const shape = () => {
+      const shell = document.querySelector('[data-slot="composer-shell"]') as HTMLElement;
+      return {
+        outer: (shell.parentElement as HTMLElement).className.split(/\s+/).filter((c) => geometric.test(c)).sort(),
+        capsule: shell.className.split(/\s+/).filter((c) => geometric.test(c)).sort(),
+      };
+    };
+
+    const ambient = shape();
+    expect(ambient.capsule).toContain("w-full");
+    expect(ambient.capsule).toContain("rail:max-w-measure");
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+    expect(document.querySelector('[data-slot="composer-shell"]')).toHaveAttribute("data-focused", "true");
+    expect(shape()).toEqual(ambient);
+  });
+
+  it("swaps the two fields with one shared motion and one shared inset", async () => {
+    const { screen } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    // Focus and ambient are one surface changing subject: the same enter
+    // animation and the same vertical inset, so neither the motion nor the
+    // resting position of the content betrays which field is on screen.
+    const swap = /^motion-safe:|^p[xy]-|^rail:py-/;
+    const marks = (slot: string) =>
+      (document.querySelector(`[data-slot="${slot}"]`) as HTMLElement)
+        .className.split(/\s+/).filter((c) => swap.test(c)).sort();
+
+    const ambient = marks("ambient-field");
+    expect(ambient).toContain("motion-safe:animate-in");
+    expect(ambient).toContain("motion-safe:duration-200");
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+    expect(marks("task-field")).toEqual(ambient);
+  });
+
   it("marks the focused chip, dims the rest, and offers a labelled exit", async () => {
     const { screen, store } = await setupApp([
       task(1, "@choose-direction", "Choose direction"),

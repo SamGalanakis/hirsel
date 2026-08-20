@@ -271,10 +271,14 @@ export const CommandPalette: Component<{
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange} modal>
       <Dialog.Portal>
         <Dialog.Overlay class="fixed inset-0 z-50 bg-black/50 data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0" />
-        <div class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[14vh]">
+        {/* Dynamic viewport units, not `vh`: the palette is a text-entry
+            surface, so the on-screen keyboard is up whenever it is used, and
+            `14vh + 60vh` measured against the large viewport pushed the bottom
+            of the result list under the keyboard on a phone. */}
+        <div class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[14dvh]">
           <Dialog.Content
             class={cn(
-              "flex max-h-[60vh] w-full max-w-[560px] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-lg outline-none",
+              "flex max-h-[60dvh] w-full max-w-[560px] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-lg outline-none",
               "data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0 data-[expanded]:zoom-in-95",
             )}
           >

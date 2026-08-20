@@ -233,8 +233,10 @@ function renderNodes(nodes: readonly RootContent[]): JSX.Element[] {
         out.push(<ListBlock node={node} />);
         break;
       case "blockquote":
+        // Same zero-floor track as the block root: a quoted table or code
+        // block must scroll inside the quote, not widen it.
         out.push(
-          <blockquote class="grid gap-2 border-l border-border/60 pl-2.5 text-muted-foreground">
+          <blockquote class="grid grid-cols-[minmax(0,1fr)] gap-2 border-l border-border/60 pl-2.5 text-muted-foreground">
             {renderNodes(node.children)}
           </blockquote>,
         );
@@ -288,7 +290,15 @@ export function Markdown(props: { children: string; class?: string }) {
   return (
     <div
       data-testid="markdown"
-      class={`grid gap-2 text-sm leading-relaxed wrap-break-word ${props.class ?? ""}`}
+      /* The column is `minmax(0,1fr)` rather than the implicit `auto` track.
+         An auto track is floored at its item's min-content width, so a wide
+         table or an unbreakable command line in a code block widened this
+         block — and every ancestor with it — past the viewport, where the app
+         shell's `overflow: hidden` simply cut it off with nothing to scroll.
+         With a zero floor the block stays at its parent's width and the
+         `overflow-x-auto` boxes inside it do the scrolling they were written
+         to do. */
+      class={`grid grid-cols-[minmax(0,1fr)] gap-2 text-sm leading-relaxed wrap-break-word ${props.class ?? ""}`}
     >
       <For each={tree().children}>{(node) => renderNodes([node])}</For>
     </div>

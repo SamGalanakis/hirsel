@@ -70,7 +70,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - Desktop: a quiet task index occupies the left margin; the selected task unfolds through the remaining field. It is a list of names and literal statuses, not cards.
 - Phone: tasks become a horizontal, masked strip. The selected task owns the screen below it.
 - Selecting a task focuses it; selecting the focused task again clears focus.
-- Focus is shown by the unfolded instrument, task-row state, and the composer's spatial/tone shift—never by a label inside the composer or color alone.
+- Focus is shown by the unfolded instrument, task-row state, and the composer's tonal shift—never by a label inside the composer, by moving or resizing it, or by color alone.
 - On load the most-needing task opens focused (blocked on you → needs you → unseen → moving, newest first); with no open task the field rests ambient. Focus is chosen once per load: a task arriving later never steals it.
 - Ambient is the absence of focus — the deliberate zoom-out reached with Esc. It has no title, empty-state copy, or standing mode label.
 
@@ -96,7 +96,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - One composer persists at the bottom of every state.
 - The composer inherits the field: focused task messages use that task's anchor and mention; ambient messages are unanchored.
 - Scope is never a separate composer mode. There is no scope chip, visible mode label, or instructional placeholder.
-- Focus narrows the composer and gives it a restrained mint-local tone; ambient lets it rest wider and neutral.
+- The composer holds one width in every state: the reading measure it shares with the instrument and the conversation above it, so its left and right edges are the same in ambient and in focus. Focus changes only its tone, to a restrained mint-local tint; ambient rests neutral. (Focus used to narrow it from the frame width to the measure. That moved the one permanently visible element — and its send target — sideways on every toggle, and left the ambient capsule wider than the conversation it sat under. Continuity of the standing element beats the width distinction.)
 - The composer is an organic quiet capsule. Send is round. On phone it stays sticky at the thumb edge while task content moves behind it.
 
 ### Utilities
@@ -106,6 +106,8 @@ Home has no header bar: the field's top anchor is its content. One quiet floatin
 ## 5. Motion and responsiveness
 
 - A task unfolds with one 180–260ms fade/translate continuity animation. Re-selection never bounces or zooms.
+- Clearing focus uses that same animation, in the same direction: focus and ambient are one surface changing subject, not two panels trading places. Nothing else moves through the swap — the composer, the task strip and the floating `⋯` stay exactly where they are, and may only change tone.
+- Wide content (tables, code, process rows) scrolls inside its own box. Nothing widens the field, and the page itself never scrolls sideways at any width.
 - Generated UI updates in place. Preserve semantic position where possible.
 - At under 900px, the index becomes a horizontal strip, the task surface becomes one column, and conversation follows it.
 - At under 560px, the composer remains sticky above the safe area and communicates focus through tone rather than added copy.

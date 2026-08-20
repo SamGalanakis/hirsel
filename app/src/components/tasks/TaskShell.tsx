@@ -248,7 +248,11 @@ export function TaskShell() {
                expanding turn-details block from shoving the text the Owner is
                reading; the browser holds the anchored node still and absorbs
                the growth above it. */
-            class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto [overflow-anchor:auto]"
+            /* `@container/field` so the task field can size its own columns
+               against the width it actually has rather than the window's: a
+               summoned utility pane takes its width out of this row, and the
+               media query cannot see that. */
+            class="@container/field flex min-h-0 flex-1 flex-col justify-end overflow-y-auto [overflow-anchor:auto]"
           >
             <Show when={focusedTask()} fallback={<AmbientField />}>
               {(task) => <TaskField task={task()} tasks={tasks()} views={taskViews()} />}

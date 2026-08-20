@@ -185,4 +185,22 @@ describe("Markdown safety and streaming", () => {
     expect(container.querySelectorAll("a")).toHaveLength(0);
     expect(container.textContent).toContain("the docs");
   });
+
+  // The block is a grid, and a grid's implicit track is floored at its item's
+  // min-content width — so without an explicit zero floor a wide table or an
+  // unbreakable command line widened this block and every ancestor past the
+  // viewport, where the shell's `overflow: hidden` cut it off with nothing to
+  // scroll. The scroll boxes below only work inside a track that can shrink.
+  it("keeps wide content inside its own scroll box instead of widening the column", () => {
+    const { container } = render(() => (
+      <Markdown>
+        {"| a | b |\n| --- | --- |\n| 1 | 2 |\n\n> | c | d |\n> | --- | --- |\n> | 3 | 4 |"}
+      </Markdown>
+    ));
+    expect(container.firstElementChild?.className).toContain("grid-cols-[minmax(0,1fr)]");
+    expect(container.querySelector("blockquote")?.className).toContain("grid-cols-[minmax(0,1fr)]");
+    for (const table of container.querySelectorAll("table")) {
+      expect(table.parentElement?.className).toContain("overflow-x-auto");
+    }
+  });
 });

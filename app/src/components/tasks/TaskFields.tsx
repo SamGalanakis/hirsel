@@ -24,6 +24,22 @@ import { formatBytes } from "../../lib/format";
  * virtualisation to earn here). */
 const MARGIN_WINDOW = 30;
 
+/** The one focus-swap motion, shared verbatim by both fields so the swap reads
+ * as one surface changing subject rather than two panels trading places: a
+ * single 200ms fade + 8px settle in the same direction, whichever way focus
+ * moves. It is deliberately the ONLY thing that moves — the composer, the task
+ * strip and the floating ⋯ are stationary through the swap — and it stays on
+ * the left/up axes because a rightward or downward translate inside the
+ * `overflow-y-auto` field would push a transient scrollbar. `motion-safe`
+ * collapses the whole thing to an instant swap under prefers-reduced-motion. */
+const FIELD_SWAP =
+  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2 motion-safe:duration-200";
+
+/** One vertical rhythm for both fields. They alternate in the same slot and are
+ * both bottom-anchored, so a different inset would drop the content by that
+ * difference on every focus toggle. */
+const FIELD_PADDING = "px-gutter py-8 rail:py-12";
+
 function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: boolean }) {
   const [revealed, setRevealed] = createSignal(MARGIN_WINDOW);
   const shown = () => props.messages.slice(-revealed());
@@ -141,7 +157,7 @@ export function AmbientField() {
   return (
     <div
       data-slot="ambient-field"
-      class="mx-auto flex min-h-full w-full max-w-frame flex-col justify-end px-gutter py-8 rail:py-12"
+      class={`mx-auto flex min-h-full w-full max-w-frame flex-col justify-end ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
       <div class="w-full max-w-measure">
         <ConversationMargin messages={messages()} thinking={state.agentActivity.state === "thinking"} />
@@ -173,8 +189,21 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
     <div
       data-slot="task-field"
       data-task={props.task.id}
-      class="mx-auto grid min-h-full w-full max-w-frame content-end gap-14 px-gutter py-12 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2 motion-safe:duration-200"
-      classList={{ "rail:grid-cols-[minmax(320px,1fr)_minmax(280px,.72fr)] rail:items-center": hasConversation() }}
+      /* `grid-cols-[minmax(0,1fr)]`, not a bare implicit column: an auto track
+         sizes to its item's min-content, so one wide table or unbroken command
+         line inside the instrument would widen the whole field past the
+         viewport instead of scrolling inside its own box. */
+      class={`mx-auto grid min-h-full w-full max-w-frame grid-cols-[minmax(0,1fr)] content-end gap-14 ${FIELD_PADDING} ${FIELD_SWAP}`}
+      /* Two columns need the desktop shell (`rail`) AND a field actually wide
+         enough to hold them: a summoned utility pane takes its width from this
+         same row, and at 1100px it leaves ~470px — less than the two column
+         minimums put together, which pushed the margin straight out of the
+         field. The container query is the honest condition, since the media
+         query cannot see the pane. */
+      classList={{
+        "rail:@[46rem]/field:grid-cols-[minmax(320px,1fr)_minmax(280px,.72fr)] rail:@[46rem]/field:items-center":
+          hasConversation(),
+      }}
     >
       <section class="min-w-0 max-w-measure">
         {/* Quiet identity: the task name is context, and the generated question

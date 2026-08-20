@@ -1,6 +1,7 @@
 import { fireEvent, render } from "@solidjs/testing-library";
 import { createRoot } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Blob } from "../../protocol";
 import { LARGE_PASTE_CHARS } from "./paste";
 
 // Composer input parity (paste images, large-paste-as-ref, drag & drop). These
@@ -197,5 +198,61 @@ describe("host limits", () => {
     // The cap is stated, and stated before the send rather than after a
     // round-trip the Host would have rejected.
     expect(toasts().map((t) => t.message)).toContain('"huge.bin" is too large (max 15 MB)');
+  });
+});
+
+describe("the upload lifecycle on the staged file", () => {
+  /** Drive the real controller against a stubbed ws client, so the record under
+   * test is the one the chips render from. */
+  async function stagedWithClient(uploadBlob: (clientId: string) => Promise<Blob>) {
+    vi.doMock("../../ws/client", async () => {
+      const real = await vi.importActual<typeof import("../../ws/client")>("../../ws/client");
+      return {
+        ...real,
+        getClient: () => ({ uploadBlob: (clientId: string) => uploadBlob(clientId) }),
+      };
+    });
+    const rendered = await renderComposer();
+    paste(rendered.textarea, transfer({ files: [new File(["x"], "a.png", { type: "image/png" })] }));
+    return rendered;
+  }
+
+  const blobFor = (id: string): Blob => ({ id, name: "a.png", mime: "image/png", size: 1 });
+
+  it("stages idle, ends done carrying the blob, and never re-uploads it", async () => {
+    let calls = 0;
+    const { attachments } = await stagedWithClient(async () => {
+      calls += 1;
+      return blobFor("blob-1");
+    });
+    expect(attachments.files()[0].upload).toEqual({ state: "idle" });
+
+    expect(await attachments.uploadAll()).toEqual([blobFor("blob-1")]);
+    // Done OWNS the blob: there is no done-without-a-blob to defend against.
+    expect(attachments.files()[0].upload).toEqual({ state: "done", blob: blobFor("blob-1") });
+
+    // A second send re-uses the resolved blob rather than uploading again.
+    expect(await attachments.uploadAll()).toEqual([blobFor("blob-1")]);
+    expect(calls).toBe(1);
+  });
+
+  it("records the failure reason once, and retry returns the chip to uploading", async () => {
+    let fail = true;
+    const { attachments, findByLabelText, findByText } = await stagedWithClient(async () => {
+      if (fail) throw new Error("host said no");
+      return blobFor("blob-2");
+    });
+
+    await expect(attachments.uploadAll()).rejects.toThrow();
+    expect(attachments.files()[0].upload).toEqual({ state: "error", message: "host said no" });
+    // The chip re-rendered off the record — reactivity survives the path write.
+    expect(await findByText("Upload failed")).toBeTruthy();
+
+    fail = false;
+    const retry = await findByLabelText("Retry upload");
+    fireEvent.click(retry);
+    await vi.waitFor(() =>
+      expect(attachments.files()[0].upload).toEqual({ state: "done", blob: blobFor("blob-2") }),
+    );
   });
 });

@@ -66,7 +66,6 @@ function appSnapshot(): AppState {
     model: state.model,
     subagentModels: state.subagentModels,
     pendingSends: state.pendingSends,
-    uploads: state.uploads,
     processes: state.processes,
     turnEvents: state.turnEvents,
     lastTurnEvents: state.lastTurnEvents,
@@ -105,7 +104,6 @@ export function dispatch(action: Action): void {
     );
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
-    setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("processes", reconcile(next.processes, { key: "id" }));
     setState("turnEvents", next.turnEvents);
     // Never rendered directly (the parking slot for a turn whose idle boundary

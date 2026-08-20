@@ -10,7 +10,6 @@ import type {
   EventOverride,
   PendingSend,
   TimelineEvent,
-  Upload,
 } from "./types";
 
 /** Cap on retained finished-turn timelines (session memory for "turn details").
@@ -200,10 +199,6 @@ function retainTurnDetails(
     }
   }
   return next;
-}
-
-function setUpload(uploads: Upload[], clientId: string, patch: Partial<Upload>): Upload[] {
-  return uploads.map((u) => (u.clientId === clientId ? { ...u, ...patch } : u));
 }
 
 /** Reconcile an incoming owner-authored `msg` against the oldest still-pending
@@ -608,51 +603,6 @@ export function reduce(state: AppState, action: Action): AppState {
           m.pending && m.clientId === action.clientId ? { ...m, failed: false } : m,
         ),
       };
-
-    case "upload_start":
-      return {
-        ...state,
-        uploads: [
-          ...state.uploads.filter((u) => u.clientId !== action.clientId),
-          {
-            clientId: action.clientId,
-            name: action.name,
-            size: action.size,
-            mime: action.mime,
-            state: "uploading",
-          },
-        ],
-      };
-
-    case "blob_ok":
-      return {
-        ...state,
-        uploads: setUpload(state.uploads, action.clientId, {
-          state: "done",
-          blobId: action.blob.id,
-        }),
-      };
-
-    case "upload_error":
-      return {
-        ...state,
-        uploads: setUpload(state.uploads, action.clientId, { state: "error" }),
-      };
-
-    case "upload_retry":
-      return {
-        ...state,
-        uploads: setUpload(state.uploads, action.clientId, { state: "uploading" }),
-      };
-
-    case "upload_remove":
-      return {
-        ...state,
-        uploads: state.uploads.filter((u) => u.clientId !== action.clientId),
-      };
-
-    case "uploads_clear":
-      return { ...state, uploads: [] };
 
     case "connection_status":
       return { ...state, connection: action.status };

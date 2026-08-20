@@ -578,12 +578,14 @@ class HirselWsClient {
         break;
       }
       case "blob_ok": {
+        // Resolving the correlated promise IS the notification: the awaiting
+        // `runUpload` records the done state (with this blob) on the staged
+        // file. Nothing else in the app tracks uploads.
         const pending = this.uploads.get(message.client_id);
         if (pending) {
           pending.resolve(message.blob);
           this.uploads.delete(message.client_id);
         }
-        dispatch({ type: "blob_ok", clientId: message.client_id, blob: message.blob });
         break;
       }
       case "blob_url": {
@@ -627,7 +629,6 @@ class HirselWsClient {
             this.historyRequest = null;
             historyReq.reject(new Error(message.detail));
           }
-          if (pending) dispatch({ type: "upload_error", clientId: message.client_id });
         } else {
           // An uncorrelated error that arrives AFTER authentication is a runtime
           // protocol error (the pre-auth reject path returned above). Surface it

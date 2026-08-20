@@ -87,12 +87,6 @@ export function Composer(props: Props) {
     props.onConsumePrefill?.();
   });
 
-  const uploadState = (clientId: string): AttachmentState => {
-    const u = state.uploads.find((x) => x.clientId === clientId);
-    if (!u) return "idle";
-    return u.state; // "uploading" | "done" | "error"
-  };
-
   async function submit(mode: SendMode) {
     const body = value().trim();
     const hasFiles = props.attachments.files().length > 0;
@@ -193,6 +187,15 @@ export function Composer(props: Props) {
   const describe = (pf: PendingFile) =>
     pf.lines === undefined ? formatBytes(pf.size) : `Pasted text · ${pf.lines} lines`;
 
+  /** The chip's hover text: the full name and, for a paste, its opening lines —
+   * the chip itself stays one quiet row so several staged items never push the
+   * capsule off the floor. A failed upload shows WHY on hover; the `error`
+   * state carries its reason, so the chip no longer has to say only "failed". */
+  const chipTitle = (pf: PendingFile): string => {
+    const head = pf.text ? `${pf.name}\n\n${pf.text.slice(0, 400)}` : pf.name;
+    return pf.upload.state === "error" ? `${head}\n\n${pf.upload.message}` : head;
+  };
+
   function onSendPointerDown() {
     longPressed = false;
     if (!coarse()) return;
@@ -250,17 +253,16 @@ export function Composer(props: Props) {
         <AttachmentGroup class="mb-2">
           <For each={props.attachments.files()}>
             {(pf) => {
-              const st = () => uploadState(pf.clientId);
-              // `title` carries the full name and, for a paste, its opening
-              // lines — the chip itself stays one quiet row so several staged
-              // items never push the capsule off the floor.
+              // The chip's lifecycle now lives on the staged file itself, so
+              // this is a plain field read instead of a join into a second store.
+              const st = (): AttachmentState => pf.upload.state;
               return (
                 <Attachment
                   size="sm"
                   state={st()}
                   class="w-52"
                   data-kind={pf.kind}
-                  title={pf.text ? `${pf.name}\n\n${pf.text.slice(0, 400)}` : pf.name}
+                  title={chipTitle(pf)}
                 >
                   <AttachmentMedia variant={pf.previewUrl ? "image" : "icon"}>
                     <Show

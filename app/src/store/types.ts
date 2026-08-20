@@ -76,20 +76,6 @@ export interface AgentActivity {
   text: string | null;
 }
 
-/** Per-file upload state driving the composer attachment chips (v1.1). Purely
- * the state machine + resolved blob; the raw File/preview object-URL live in
- * the Composer, keyed by the same `clientId`. */
-export type UploadState = "uploading" | "done" | "error";
-
-export interface Upload {
-  clientId: string;
-  name: string;
-  size: number;
-  mime: string;
-  state: UploadState;
-  blobId?: string; // set once blob_ok correlates
-}
-
 /** A single ordered timeline event from the running turn (v1.5), carrying its
  * wire `seq` alongside the tagged event body. Accumulated in `seq` order while
  * the Agent is thinking; folded into a rendered timeline by `buildTimeline`. */
@@ -145,7 +131,6 @@ export interface AppState {
    * `subagent_models_changed`. `null` on older hosts (the control hides). */
   subagentModels: SubagentModelCatalog | null;
   pendingSends: PendingSend[];
-  uploads: Upload[];
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
    * hello_ok.processes and kept current by process_upsert. */
   processes: ProcessInfo[];
@@ -208,12 +193,6 @@ export type Action =
     }
   | { type: "send_failed"; clientId: string }
   | { type: "send_retry"; clientId: string }
-  | { type: "upload_start"; clientId: string; name: string; size: number; mime: string }
-  | { type: "blob_ok"; clientId: string; blob: Blob }
-  | { type: "upload_error"; clientId: string }
-  | { type: "upload_retry"; clientId: string }
-  | { type: "upload_remove"; clientId: string }
-  | { type: "uploads_clear" }
   | { type: "connection_status"; status: ConnectionStatus }
   // ---- Generative-UI tier (view templates) ----
   | { type: "view_upsert"; payload: ViewUpsertMsg }
@@ -236,7 +215,6 @@ export function initialState(): AppState {
     model: null,
     subagentModels: null,
     pendingSends: [],
-    uploads: [],
     processes: [],
     turnEvents: [],
     lastTurnEvents: [],

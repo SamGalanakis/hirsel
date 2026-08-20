@@ -180,8 +180,43 @@ async function main() {
         + `cause=${error.message}`,
       );
     }
-    await page.locator(`[data-task-id="${seeded.id}"]`).click();
-    await page.getByRole("heading", { name: "A Task that changes with the work" }).waitFor();
+    // The seeded fixture is a blocking judgment, so the load-time rule already
+    // opens it focused; clicking the chip would TOGGLE that focus back off.
+    const ensureFocused = async (id) => {
+      const open = await page.locator(`[data-slot="task-field"][data-task="${id}"]`).count();
+      if (open === 1) return;
+      await page.locator(`[data-task-id="${id}"]`).click();
+      await page.locator(`[data-slot="task-card"]`).waitFor();
+    };
+    await ensureFocused(seeded.id);
+    const seededHeading = page.getByRole("heading", { name: "A Task that changes with the work" });
+    await seededHeading.waitFor();
+    // The generated question renders inside the pinned card, above the Task's
+    // own conversation and below its quiet identity.
+    const cardFraming = await page.evaluate(() => {
+      const card = document.querySelector('[data-slot="task-card"]');
+      const identity = card?.querySelector("h2");
+      const generated = card?.querySelector("h3");
+      return {
+        identity: identity?.textContent?.trim() ?? null,
+        identityPx: identity ? Number.parseFloat(getComputedStyle(identity).fontSize) : 0,
+        generated: generated?.textContent?.trim() ?? null,
+        generatedPx: generated ? Number.parseFloat(getComputedStyle(generated).fontSize) : 0,
+        position: card ? getComputedStyle(card).position : "missing",
+        conversationBelow: Boolean(card && document.querySelector('[data-slot="task-conversation"]')
+          && card.getBoundingClientRect().bottom
+            <= document.querySelector('[data-slot="task-conversation"]').getBoundingClientRect().top + 1),
+      };
+    });
+    check(
+      "host Task opens as a pinned card",
+      cardFraming.identity === "adaptive host proof"
+        && cardFraming.generated === "A Task that changes with the work"
+        && cardFraming.identityPx < cardFraming.generatedPx
+        && cardFraming.position === "sticky"
+        && cardFraming.conversationBelow,
+      JSON.stringify(cardFraming),
+    );
     await page.getByRole("textbox", { name: "Confirmation" }).fill("ready");
     await page.getByRole("button", { name: "Continue" }).click();
 
@@ -222,7 +257,19 @@ async function main() {
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await appReady(page);
-    await page.locator(`[data-task-id="${seeded.id}"]`).click();
+    // Settled work never wins load-time focus, so after the reload the field
+    // rests ambient and the chip is the way back into the decided Task.
+    const restedAmbient = await page.evaluate(() => ({
+      taskFields: document.querySelectorAll('[data-slot="task-field"]').length,
+      ambient: document.querySelectorAll('[data-slot="ambient-field"]').length,
+      focused: document.querySelector('[data-slot="composer-shell"]')?.getAttribute("data-focused"),
+    }));
+    check(
+      "settled Task does not steal load-time focus",
+      restedAmbient.taskFields === 0 && restedAmbient.ambient === 1 && restedAmbient.focused === "false",
+      JSON.stringify(restedAmbient),
+    );
+    await ensureFocused(seeded.id);
     await page.getByText("Task decided").waitFor();
     await page.getByRole("button", { name: "Reopen" }).click();
     const reopened = await eventState(seeded.id, (event) => event.status === "open");

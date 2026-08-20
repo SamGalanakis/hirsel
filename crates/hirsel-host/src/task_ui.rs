@@ -2,6 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
+use crate::json_spec::{
+    SEMANTIC_TONES, STATUS_STATES, allowed, optional_bool, optional_enum, optional_integer_range,
+    optional_string, required_display_scalar, required_enum, required_string,
+};
+
 const MAX_NODES: usize = 128;
 const MAX_DEPTH: usize = 8;
 pub const MAX_ACTION_DATA_BYTES: usize = 8 * 1024;
@@ -297,39 +302,39 @@ fn validate_node(node: &Value, at: &str, depth: usize, nodes: &mut usize) -> any
         }
         "eyebrow" => {
             allowed(object, &["type", "text", "tone", "boundary"], at)?;
-            required_display(object, "text", at)?;
-            optional_enum(object, "tone", &TONES, at)?;
+            required_display_scalar(object, "text", at)?;
+            optional_enum(object, "tone", &EYEBROW_TONES, at)?;
             optional_bool(object, "boundary", at)?;
         }
         "heading" => {
             allowed(object, &["type", "text", "level"], at)?;
-            required_display(object, "text", at)?;
-            optional_u64_range(object, "level", 1, 4, at)?;
+            required_display_scalar(object, "text", at)?;
+            optional_integer_range(object, "level", 1, 4, at)?;
         }
         "text" => {
             allowed(object, &["type", "text", "tone"], at)?;
-            required_display(object, "text", at)?;
-            optional_enum(object, "tone", &TONES, at)?;
+            required_display_scalar(object, "text", at)?;
+            optional_enum(object, "tone", &SEMANTIC_TONES, at)?;
         }
         "keyValue" => {
             allowed(object, &["type", "items"], at)?;
             validate_object_items(object, "items", at, |item, item_at| {
                 allowed(item, &["label", "value", "tone"], item_at)?;
                 required_string(item, "label", item_at)?;
-                required_display(item, "value", item_at)?;
-                optional_enum(item, "tone", &TONES, item_at)
+                required_display_scalar(item, "value", item_at)?;
+                optional_enum(item, "tone", &SEMANTIC_TONES, item_at)
             })?;
         }
         "badge" => {
             allowed(object, &["type", "label", "tone"], at)?;
             required_string(object, "label", at)?;
-            optional_enum(object, "tone", &TONES, at)?;
+            optional_enum(object, "tone", &SEMANTIC_TONES, at)?;
         }
         "status" => {
             allowed(object, &["type", "state", "label", "tone"], at)?;
             required_string(object, "label", at)?;
-            required_enum(object, "state", &STATES, at)?;
-            optional_enum(object, "tone", &TONES, at)?;
+            required_enum(object, "state", &STATUS_STATES, at)?;
+            optional_enum(object, "tone", &SEMANTIC_TONES, at)?;
         }
         "divider" => allowed(object, &["type"], at)?,
         "optionList" => validate_option_list(object, at)?,
@@ -395,10 +400,9 @@ fn validate_node(node: &Value, at: &str, depth: usize, nodes: &mut usize) -> any
     Ok(())
 }
 
-const TONES: [&str; 7] = [
+const EYEBROW_TONES: [&str; 7] = [
     "default", "muted", "accent", "success", "warning", "danger", "neutral",
 ];
-const STATES: [&str; 5] = ["neutral", "running", "success", "warning", "danger"];
 
 fn validate_option_list(object: &Map<String, Value>, at: &str) -> anyhow::Result<()> {
     allowed(object, &["type", "action", "settles", "options"], at)?;
@@ -472,95 +476,6 @@ where
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("{item_at} must be an object"))?;
         validate_item(item, &item_at)?;
-    }
-    Ok(())
-}
-
-fn allowed(object: &Map<String, Value>, keys: &[&str], at: &str) -> anyhow::Result<()> {
-    if let Some(key) = object.keys().find(|key| !keys.contains(&key.as_str())) {
-        anyhow::bail!("unknown property `{key}` at {at}");
-    }
-    Ok(())
-}
-
-fn required_string<'a>(
-    object: &'a Map<String, Value>,
-    key: &str,
-    at: &str,
-) -> anyhow::Result<&'a str> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{at}.{key} must be a non-empty string"))
-}
-
-fn optional_string(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if object.get(key).is_some() {
-        required_string(object, key, at)?;
-    }
-    Ok(())
-}
-
-fn required_display(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    let value = object
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("{at}.{key} is required"))?;
-    if !is_display(value) {
-        anyhow::bail!("{at}.{key} must be a string, number, or boolean");
-    }
-    Ok(())
-}
-
-fn is_display(value: &Value) -> bool {
-    value.is_string() || value.is_number() || value.is_boolean()
-}
-
-fn optional_bool(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if object.get(key).is_some_and(|value| !value.is_boolean()) {
-        anyhow::bail!("{at}.{key} must be a boolean");
-    }
-    Ok(())
-}
-
-fn required_enum(
-    object: &Map<String, Value>,
-    key: &str,
-    values: &[&str],
-    at: &str,
-) -> anyhow::Result<()> {
-    let value = required_string(object, key, at)?;
-    if !values.contains(&value) {
-        anyhow::bail!("{at}.{key} must be one of {}", values.join(", "));
-    }
-    Ok(())
-}
-
-fn optional_enum(
-    object: &Map<String, Value>,
-    key: &str,
-    values: &[&str],
-    at: &str,
-) -> anyhow::Result<()> {
-    if object.get(key).is_some() {
-        required_enum(object, key, values, at)?;
-    }
-    Ok(())
-}
-
-fn optional_u64_range(
-    object: &Map<String, Value>,
-    key: &str,
-    min: u64,
-    max: u64,
-    at: &str,
-) -> anyhow::Result<()> {
-    if let Some(value) = object.get(key) {
-        let value = value
-            .as_u64()
-            .filter(|value| (min..=max).contains(value))
-            .ok_or_else(|| anyhow::anyhow!("{at}.{key} must be between {min} and {max}"))?;
-        let _ = value;
     }
     Ok(())
 }

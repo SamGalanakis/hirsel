@@ -1,5 +1,3 @@
-use std::sync::{Arc, RwLock};
-
 use anyhow::anyhow;
 use hirsel_proto::{AvailableModel, ModelSelection, ModelSnapshot};
 use lash::provider::{ModelCapability, ReasoningCapability, ReasoningEncoding, ReasoningSelection};
@@ -68,7 +66,6 @@ fn registry(provider: ProviderMode) -> &'static [RegistryEntry] {
 #[derive(Clone)]
 pub struct ModelSelectionState {
     provider: ProviderMode,
-    current: Arc<RwLock<ModelSelection>>,
     fallback: ModelSelection,
     config_store: ConfigStore,
 }
@@ -80,25 +77,15 @@ impl ModelSelectionState {
         configured_model: &str,
     ) -> anyhow::Result<Self> {
         let fallback = selection_for_configured_model(provider, configured_model)?;
-        let current = selection_from_store(provider, &config_store, &fallback);
         Ok(Self {
             provider,
-            current: Arc::new(RwLock::new(current)),
             fallback,
             config_store,
         })
     }
 
     pub fn current(&self) -> ModelSelection {
-        let selection = selection_from_store(self.provider, &self.config_store, &self.fallback);
-        *self
-            .current
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = selection.clone();
-        self.current
-            .read()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
+        selection_from_store(self.provider, &self.config_store, &self.fallback)
     }
 
     pub fn snapshot(&self) -> ModelSnapshot {
@@ -116,10 +103,6 @@ impl ModelSelectionState {
         self.config_store
             .set_model_selection(&selection.id, &selection.variant)
             .await?;
-        *self
-            .current
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = selection;
         Ok(())
     }
 

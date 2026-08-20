@@ -399,7 +399,7 @@ impl AppState {
                 self.storage.unarchive_event(event_id).await?
             }
             generated => {
-                if current.status != hirsel_proto::EventStatus::Open {
+                if current.lifecycle() != hirsel_proto::EventLifecycle::Open {
                     anyhow::bail!("only an open Task can accept generated actions");
                 }
                 let validated = task_ui::validate_action(&current.ui, generated, &data)?;

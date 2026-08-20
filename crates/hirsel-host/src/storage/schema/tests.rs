@@ -94,3 +94,64 @@ async fn open_migrates_legacy_ping_rows() {
     assert!(persisted[0].read);
     assert!(persisted[1].archived);
 }
+
+#[tokio::test]
+async fn open_normalizes_contradictory_event_lifecycle_rows_idempotently() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let anchor = storage
+        .append_chat(hirsel_proto::ChatAuthor::Agent, "anchor", None)
+        .await
+        .unwrap();
+    let archived_open = storage
+        .create_ping(
+            "archived-open",
+            "Archived open",
+            "body",
+            anchor.id,
+            true,
+            vec![],
+        )
+        .await
+        .unwrap();
+    let snoozed_done = storage
+        .create_ping(
+            "snoozed-done",
+            "Snoozed done",
+            "body",
+            anchor.id,
+            true,
+            vec![],
+        )
+        .await
+        .unwrap();
+    {
+        let conn = storage.conn.lock().await;
+        conn.execute(
+            "UPDATE pings SET archived = 1, status = 'open', archived_at = NULL, snoozed_until = '2026-08-21T12:00:00Z' WHERE id = ?1",
+            [archived_open.id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE pings SET archived = 0, status = 'done', archived_at = '2026-08-20T12:00:00Z', snoozed_until = '2026-08-21T12:00:00Z' WHERE id = ?1",
+            [snoozed_done.id],
+        )
+        .unwrap();
+    }
+    drop(storage);
+
+    for _ in 0..2 {
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let archived = storage.ping(archived_open.id).await.unwrap().unwrap();
+        assert_eq!(archived.status, EventStatus::Done);
+        assert!(archived.archived);
+        assert!(archived.archived_at.is_some());
+        assert_eq!(archived.snoozed_until, None);
+
+        let done = storage.ping(snoozed_done.id).await.unwrap().unwrap();
+        assert_eq!(done.status, EventStatus::Done);
+        assert!(!done.archived);
+        assert_eq!(done.archived_at, None);
+        assert_eq!(done.snoozed_until, None);
+    }
+}

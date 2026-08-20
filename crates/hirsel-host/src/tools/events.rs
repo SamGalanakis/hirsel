@@ -2,8 +2,7 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use hirsel_proto::{
-    ChatAuthor, Event, EventKind, EventSource, EventSourceKind, EventStatus, HostToClient, Ping,
-    QuickReply,
+    ChatAuthor, Event, EventKind, EventSource, EventSourceKind, HostToClient, Ping, QuickReply,
 };
 
 use super::{JudgmentOptionInput, ToolSuite, info_ui};
@@ -279,25 +278,14 @@ impl ToolSuite {
     }
 
     pub async fn events_clear(&self) -> anyhow::Result<usize> {
-        let event_ids = self
-            .storage
-            .all_pings()
-            .await?
-            .into_iter()
-            .filter(|event| {
-                !event.archived
-                    && (event.status == EventStatus::Done
-                        || (event.read && !event.requires_response))
-            })
-            .map(|event| event.id)
-            .collect::<Vec<_>>();
-        let count = self.storage.archive_finished_events().await?;
-        for event_id in event_ids {
-            if let Some(event) = self.storage.ping(event_id).await? {
-                self.broadcast(HostToClient::EventUpsert { event });
-            }
+        let events = self.storage.archive_finished_events().await?;
+        for event in &events {
+            debug_assert!(!crate::storage::Storage::is_live(event, Utc::now()));
+            self.broadcast(HostToClient::EventUpsert {
+                event: event.clone(),
+            });
         }
-        Ok(count)
+        Ok(events.len())
     }
 
     pub(crate) async fn return_expired_snoozes(&self) -> anyhow::Result<Vec<Event>> {

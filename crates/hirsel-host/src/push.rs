@@ -11,7 +11,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use hirsel_proto::{Event, EventKind, EventStatus};
+use hirsel_proto::{Event, EventKind};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::Storage;
@@ -303,13 +303,7 @@ impl PushGateway {
     }
 
     pub(crate) async fn enqueue_event(&self, event: &Event) {
-        if !matches!(event.kind, EventKind::Judgment)
-            || event.status != EventStatus::Open
-            || event.archived
-            || event
-                .snoozed_until
-                .is_some_and(|snoozed_until| snoozed_until > Utc::now())
-        {
+        if !matches!(event.kind, EventKind::Judgment) || !Storage::is_live(event, Utc::now()) {
             return;
         }
         if !self.claim_delivery(event.id) {

@@ -57,9 +57,12 @@ logged — a warning names the instance id and the reason only.
 
 The first time the Host writes a `[providers]` table for a config file, it seeds
 one OpenAI-compatible instance (`openrouter`, pointed at OpenRouter's base URL
-with `google/gemini-3.7-flash` as its default model), writing `api_key` only if
-`OPENROUTER_API_KEY` is set and non-empty. It also seeds `[model].provider` from
-`HIRSEL_PROVIDER` and `[model].id` from `HIRSEL_MODEL` when those keys are
+with `google/gemini-3.7-flash` as its default model) — but only when the
+environment gives it a reason to exist: `OPENROUTER_API_KEY` is set and
+non-empty, or `HIRSEL_PROVIDER=openrouter` (that mode needs the row to exist
+before a key is pasted into it). A Host booting on Codex with no OpenRouter key
+gets no keyless instance it could never call. It also seeds `[model].provider`
+from `HIRSEL_PROVIDER` and `[model].id` from `HIRSEL_MODEL` when those keys are
 absent.
 
 The presence of the `[providers]` table is the once-only marker. A file that
@@ -87,6 +90,21 @@ variant = "default"
 longer exists — or naming `claude` — is not a boot error either: the Host logs a
 warning and falls back to the booted provider.
 
+For the main Agent, `[model].provider` is what the Host boots on. At startup it
+resolves the main-agent provider once: the stored instance when it is set and
+can actually boot, the `HIRSEL_PROVIDER` default otherwise. An
+`openai_compatible` instance boots on **its own** `base_url` and `api_key` — an
+edit to either is picked up at the next start, and `OPENROUTER_API_KEY` is a
+first-boot seed that is never consulted again.
+
+A stored choice that cannot boot — no `api_key` stored, an id that is not in the
+roster, `claude` (Sub-agents only, ADR-0015), or `codex` with no readable
+`~/.codex/auth.json` — falls back to the environment default and says so: a
+warning naming the instance and the reason, and a standing notice on the
+Providers tab, e.g. `configured provider "acme" is unavailable at boot: no API
+key is stored — running on Codex`. Nothing is probed over the network, and no
+key material appears in either.
+
 What the model choice looks like depends on the selected provider:
 
 - **`codex`** — a curated registry the Host validates against. The main Agent
@@ -109,10 +127,16 @@ warning and falls back to that provider's default model.
 
 - **Main Agent model** — from the Agent's next turn. The selection is validated,
   persisted, and applied to the live session before the op returns.
-- **Main Agent provider** — at the next Host start. The provider handle is built
-  once at boot and baked into the running session; there is no live swap, so the
-  choice is stored and reported immediately while the session keeps running on
-  the provider it booted with. Settings shows which one that is.
+- **Main Agent provider** — at the next Host start, and it really is picked up
+  there: the Host resolves `[model].provider` at startup and builds the running
+  session's provider handle from it, including that instance's stored base URL
+  and key. The handle is built once and baked into the session, so there is no
+  live swap; the choice is stored and reported immediately while the session
+  keeps running on the provider it booted with, and Settings shows which one
+  that is. If the stored choice cannot boot, the Host falls back to the
+  environment default and posts the notice described above.
+- **A booted instance's `base_url` or `api_key`** — at the next Host start, for
+  the same reason. The stored values are what the Host builds the handle from.
 - **Fork provider and model** — stored only. No fork runtime consumes them yet.
 
 ## Sub-agent lanes

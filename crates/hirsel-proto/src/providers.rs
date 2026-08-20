@@ -78,4 +78,8 @@ pub struct ProviderRoster {
     /// the next host start, so the client can say so plainly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub booted_provider_id: Option<String>,
+    /// Set when a stored provider choice could not be honoured at boot and the
+    /// host fell back. Carries no key material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_notice: Option<String>,
 }

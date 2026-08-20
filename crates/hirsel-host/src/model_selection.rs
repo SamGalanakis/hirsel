@@ -520,7 +520,11 @@ mod tests {
         store: &ConfigStore,
         provider: ProviderMode,
     ) -> ProviderRosterState {
-        ProviderRosterState::new(store.clone(), provider, Some(dir.path().to_path_buf()))
+        ProviderRosterState::new(
+            store.clone(),
+            &crate::boot_provider::BootProvider::env_default(provider),
+            Some(dir.path().to_path_buf()),
+        )
     }
 
     async fn state(

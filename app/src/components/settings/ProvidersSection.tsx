@@ -499,6 +499,13 @@ export function ProvidersSection(): JSX.Element {
         </p>
       }
     >
+      {/* Degraded but running: the host fell back to its environment default
+        * because a stored choice could not boot. DESIGN §2 keeps amber for
+        * waiting and coral for genuine blockage, so this standing line speaks
+        * in the muted voice — it reports, it does not alarm. */}
+      <Show when={roster()?.boot_notice}>
+        <p class="mb-2 text-xs leading-snug text-muted-foreground">{roster()?.boot_notice}</p>
+      </Show>
       <Group class="divide-y divide-border">
         <For each={roster()?.instances ?? []}>
           {(instance) => (

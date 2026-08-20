@@ -1209,6 +1209,89 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     assert_eq!(fork.current.variant, "max");
 }
 
+/// A `hirsel.toml` naming a stored instance as the main Agent's provider, with
+/// or without a key. Written before the host boots, exactly as an Owner's
+/// previous session (or hand edit) would have left it.
+async fn seed_stored_choice(data_dir: &std::path::Path, api_key: Option<&str>) {
+    let key_line = api_key
+        .map(|key| format!("api_key = \"{key}\"\n"))
+        .unwrap_or_default();
+    tokio::fs::write(
+        data_dir.join("hirsel.toml"),
+        format!(
+            "[providers.acme]\nkind = \"openai_compatible\"\nlabel = \"Acme\"\n\
+             base_url = \"https://acme.invalid/v1\"\n{key_line}default_model = \"acme/model\"\n\n\
+             [model]\nprovider = \"acme\"\nid = \"acme/model\"\nvariant = \"default\"\n"
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_stored_main_agent_provider_is_what_the_host_boots_on() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_stored_choice(dir.path(), Some("sk-acme-boot-key")).await;
+    let mut config = test_config(dir.path());
+    // The environment says Codex; the stored roster choice says Acme, and the
+    // stored choice is the one that can actually boot.
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+
+    let roster = state.provider_roster().await;
+    assert_eq!(roster.booted_provider_id.as_deref(), Some("acme"));
+    assert_eq!(roster.boot_notice, None);
+    // The model picker follows the same choice, in free text.
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.provider_id.as_deref(), Some("acme"));
+    assert!(snapshot.free_text_model);
+    let encoded = serde_json::to_string(&roster).unwrap();
+    assert!(!encoded.contains("sk-acme-boot-key"), "{encoded}");
+}
+
+#[tokio::test]
+async fn a_stored_provider_with_no_key_falls_back_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_stored_choice(dir.path(), None).await;
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+
+    let roster = state.provider_roster().await;
+    assert_eq!(roster.booted_provider_id.as_deref(), Some("codex"));
+    let notice = roster
+        .boot_notice
+        .expect("a discarded choice must be reported");
+    assert!(notice.contains("acme"), "{notice}");
+    assert!(notice.contains("no API key is stored"), "{notice}");
+    assert!(notice.ends_with("running on Codex"), "{notice}");
+}
+
+#[tokio::test]
+async fn a_hand_edited_claude_choice_falls_back_instead_of_bricking_the_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("hirsel.toml"),
+        "[providers]\n\n[model]\nprovider = \"claude\"\nid = \"gpt-5.6-sol\"\nvariant = \"high\"\n",
+    )
+    .await
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+
+    let roster = state.provider_roster().await;
+    assert_eq!(roster.booted_provider_id.as_deref(), Some("codex"));
+    let notice = roster
+        .boot_notice
+        .expect("a discarded choice must be reported");
+    assert!(notice.contains("claude"), "{notice}");
+    assert!(notice.contains("ADR-0015"), "{notice}");
+}
+
 #[tokio::test]
 async fn claude_is_rejected_for_both_resident_agents_and_broadcasts_nothing() {
     let dir = tempfile::tempdir().unwrap();

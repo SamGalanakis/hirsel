@@ -56,6 +56,7 @@ use uuid::Uuid;
 
 use crate::{
     BroadcastLog,
+    boot_provider::BootPlan,
     config::{AgentMode, Config, DriverMode, ProviderMode},
     host_config::ConfigStore,
     model_selection::ModelSelectionState,

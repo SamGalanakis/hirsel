@@ -599,6 +599,7 @@ fn hello_ok_round_trips_chat_and_pings() {
                 removable: false,
             }],
             booted_provider_id: Some("codex".to_string()),
+            boot_notice: None,
         }),
         views: Vec::new(),
     };
@@ -1177,6 +1178,7 @@ fn providers_changed_round_trips_and_masks_stay_masked() {
             },
         ],
         booted_provider_id: Some("codex".to_string()),
+        boot_notice: None,
     };
     let frame = HostToClient::ProvidersChanged {
         roster: roster.clone(),
@@ -1186,6 +1188,33 @@ fn providers_changed_round_trips_and_masks_stay_masked() {
     assert!(!encoded.contains("sk-or-v1"));
     let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, frame);
+}
+
+#[test]
+fn a_boot_notice_is_absent_from_the_wire_until_there_is_one() {
+    let mut roster = ProviderRoster {
+        instances: Vec::new(),
+        booted_provider_id: Some("codex".to_string()),
+        boot_notice: None,
+    };
+    let encoded = serde_json::to_string(&roster).unwrap();
+    assert!(!encoded.contains("boot_notice"), "{encoded}");
+    assert_eq!(
+        serde_json::from_str::<ProviderRoster>(&encoded).unwrap(),
+        roster
+    );
+
+    roster.boot_notice = Some(
+        "configured provider \"acme\" is unavailable at boot: no API key is stored — running on \
+         Codex"
+            .to_string(),
+    );
+    let encoded = serde_json::to_string(&roster).unwrap();
+    assert!(encoded.contains("no API key is stored"), "{encoded}");
+    assert_eq!(
+        serde_json::from_str::<ProviderRoster>(&encoded).unwrap(),
+        roster
+    );
 }
 
 #[test]

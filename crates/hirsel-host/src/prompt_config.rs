@@ -187,8 +187,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let roster =
-            ProviderRosterState::new(store.clone(), provider, Some(dir.path().to_path_buf()));
+        let roster = ProviderRosterState::new(
+            store.clone(),
+            &crate::boot_provider::BootProvider::env_default(provider),
+            Some(dir.path().to_path_buf()),
+        );
         PromptConfig::new(
             provider,
             store,

@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod blob_route;
+pub mod boot_provider;
 pub mod config;
 pub mod debug;
 pub mod health;
@@ -720,11 +721,12 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     )
     .await
     .with_context(|| format!("load host config from {}", config.config_path.display()))?;
-    let providers_roster = providers::ProviderRosterState::new(
-        config_store.clone(),
-        config.provider,
-        provider_detect::home_dir(),
-    );
+    // One resolution, shared: the roster reports what actually booted and the
+    // agent runtime builds its handle from the same answer, so the two can
+    // never disagree about which provider the session is on.
+    let home = provider_detect::home_dir();
+    let boot = boot_provider::resolve(&config_store, config.provider, home.as_deref()).await;
+    let providers_roster = providers::ProviderRosterState::new(config_store.clone(), &boot, home);
     let subagent_models = subagent_models::SubagentModelState::load(config_store.clone());
     let storage = Storage::open(&config.data_dir)
         .await
@@ -790,6 +792,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         lash_runtime::RuntimeConfig {
             agent_mode: config.agent,
             provider_mode: config.provider,
+            boot_plan: boot.plan,
             anthropic_api_key: config.anthropic_api_key.clone(),
             openrouter_api_key: config.openrouter_api_key.clone(),
             model: config.model.clone(),

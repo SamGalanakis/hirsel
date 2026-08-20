@@ -23,6 +23,7 @@ use hirsel_proto::{
 };
 
 use crate::{
+    boot_provider::BootProvider,
     config::ProviderMode,
     host_config::{ConfigStore, EnvBootstrap, StoredProvider},
     provider_detect,
@@ -56,6 +57,9 @@ pub struct ProviderRosterState {
     /// The provider the host actually booted on, as a roster id. The legacy
     /// `anthropic` boot mode is not a roster instance, so it reports `None`.
     booted_provider_id: Option<String>,
+    /// Set when a stored provider choice could not be honoured at boot. Carries
+    /// no key material — an instance id and a reason.
+    boot_notice: Option<String>,
     /// The home directory detection probes. Explicit so tests can point it at a
     /// fixture instead of the real login files.
     home: Option<PathBuf>,
@@ -79,10 +83,14 @@ impl AgentProviderChoice {
 }
 
 impl ProviderRosterState {
-    pub fn new(config_store: ConfigStore, booted: ProviderMode, home: Option<PathBuf>) -> Self {
+    /// `booted` is the host's single boot resolution — see
+    /// [`crate::boot_provider`]. The roster reports what actually booted, so
+    /// the client's "differs from booted" copy stays truthful.
+    pub fn new(config_store: ConfigStore, booted: &BootProvider, home: Option<PathBuf>) -> Self {
         Self {
             config_store,
-            booted_provider_id: booted_provider_id(booted),
+            booted_provider_id: booted.id.clone(),
+            boot_notice: booted.notice.clone(),
             home,
         }
     }
@@ -108,6 +116,7 @@ impl ProviderRosterState {
         ProviderRoster {
             instances,
             booted_provider_id: self.booted_provider_id.clone(),
+            boot_notice: self.boot_notice.clone(),
         }
     }
 
@@ -344,7 +353,7 @@ pub fn env_bootstrap(
 
 /// The roster id a boot mode corresponds to. Anthropic is a legacy boot path,
 /// not a roster instance.
-fn booted_provider_id(provider: ProviderMode) -> Option<String> {
+pub(crate) fn booted_provider_id(provider: ProviderMode) -> Option<String> {
     match provider {
         ProviderMode::Codex => Some(CODEX_ID.to_string()),
         ProviderMode::OpenRouter => Some("openrouter".to_string()),
@@ -441,7 +450,11 @@ mod tests {
         )
         .await
         .unwrap();
-        ProviderRosterState::new(store, booted, Some(dir.path().to_path_buf()))
+        ProviderRosterState::new(
+            store,
+            &BootProvider::env_default(booted),
+            Some(dir.path().to_path_buf()),
+        )
     }
 
     fn instance<'a>(roster: &'a ProviderRoster, id: &str) -> &'a ProviderInstance {
@@ -586,7 +599,7 @@ mod tests {
             );
         }
         // A rejected add leaves the roster exactly as it was: the two built-ins
-        // plus the instance the store seeded.
+        // and nothing else, because no boot environment seeded an instance.
         let snapshot = state.snapshot().await;
         assert_eq!(
             snapshot
@@ -594,7 +607,7 @@ mod tests {
                 .iter()
                 .map(|instance| instance.id.as_str())
                 .collect::<Vec<_>>(),
-            [CODEX_ID, CLAUDE_ID, "openrouter"]
+            [CODEX_ID, CLAUDE_ID]
         );
         assert!(!instance(&snapshot, CLAUDE_ID).agent_selectable);
         assert!(instance(&snapshot, CODEX_ID).agent_selectable);
@@ -702,8 +715,11 @@ mod tests {
             assert!(detection.path.starts_with(dir.path().to_str().unwrap()));
         }
 
-        let homeless =
-            ProviderRosterState::new(state.config_store.clone(), ProviderMode::Codex, None);
+        let homeless = ProviderRosterState::new(
+            state.config_store.clone(),
+            &BootProvider::env_default(ProviderMode::Codex),
+            None,
+        );
         let detection = instance(&homeless.snapshot().await, CODEX_ID)
             .detection
             .clone()

@@ -326,6 +326,9 @@ export interface ProviderRoster {
   /** The provider the resident session actually booted on — a main-agent
    * provider change is stored at once but only takes effect on restart. */
   booted_provider_id?: string;
+  /** Set when a stored provider choice could not be honoured at boot and the
+   * host fell back to its environment default. Carries no key material. */
+  boot_notice?: string;
 }
 
 /** Which resident agent a provider op addresses. */

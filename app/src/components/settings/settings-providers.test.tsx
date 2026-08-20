@@ -113,6 +113,19 @@ describe("Settings → Providers: the roster", () => {
     expect(container.innerHTML).not.toContain(FULL_KEY);
   });
 
+  it("shows a boot notice as one quiet standing line, and nothing when there is none", async () => {
+    const { queryByText, unmount } = await mount();
+    expect(queryByText(/is unavailable at boot/)).toBeNull();
+    unmount();
+
+    const notice =
+      'configured provider "acme" is unavailable at boot: no API key is stored — running on Codex';
+    const { getByText } = await mount({ ...ROSTER, boot_notice: notice });
+    const line = getByText(notice);
+    // Degraded but running speaks in the muted voice, not an alert colour.
+    expect(line.className).toContain("text-muted-foreground");
+  });
+
   it("omits an untouched key from the patch: unchanged, not cleared", async () => {
     const { getByLabelText, getByText } = await mount();
     fireEvent.click(getByLabelText("Edit OpenRouter"));

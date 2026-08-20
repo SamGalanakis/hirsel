@@ -445,7 +445,8 @@ on, and any accepted roster edit broadcasts the whole thing back:
         "removable": true
       }
     ],
-    "booted_provider_id": "codex"
+    "booted_provider_id": "codex",
+    "boot_notice": "configured provider \"acme\" is unavailable at boot: no API key is stored — running on Codex"
   }
 }
 ```
@@ -462,9 +463,17 @@ never appears in the main-agent or fork provider select. `removable` is `false`
 for the two built-ins.
 
 `booted_provider_id` is the provider the resident main-agent session actually
-booted on. A main-agent provider change is stored immediately, but the running
-session stays where it is until the Host restarts — the client says so rather
-than implying a live switch.
+booted on: the stored `[model].provider`, when the Host could honour it, and
+the environment default otherwise. A main-agent provider change is stored
+immediately, but the running session stays where it is until the Host restarts
+— the client says so rather than implying a live switch.
+
+`boot_notice` is present only when a stored provider choice could not boot (no
+key stored, an unknown id, a Sub-agents-only provider, a missing Codex login)
+and the Host fell back to its environment default. It names the instance and
+the reason, carries no key material, and stands until the next restart; the
+client shows it as a quiet standing line on the Providers surface, because the
+Host is degraded but running.
 
 **Masked secrets.** A stored API key NEVER leaves the Host. The wire describes
 it as `{ "present": bool, "tail": string }`, where `tail` is at most the last

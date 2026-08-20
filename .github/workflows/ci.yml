@@ -18,13 +18,25 @@ jobs:
   checks:
     name: Checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: Check production file-size budget
-        run: bash scripts/check-production-file-size.sh
-      - name: Check the plugin aggregator is in sync with plugins/
-        run: bash scripts/check-plugins-synced.sh
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Enable pinned npm
+        run: corepack enable
+      - name: Install web dependencies
+        working-directory: app
+        run: npm ci
+      - name: Run static checks
+        run: bash scripts/check-static.sh
 
   rust:
     name: Rust
@@ -37,8 +49,6 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97 # v2.8.2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
       - run: cargo test --workspace
 
@@ -61,7 +71,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test -- --run
-      - run: npm run lint
 
   android:
     name: Android
@@ -143,24 +152,7 @@ jobs:
 
       - name: Build Android native libraries and Kotlin bindings from source
         if: steps.changes.outputs.android == 'true'
-        run: |
-          rm -rf android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64
-          rm -f android/app/src/main/kotlin/dev/hirsel/core/hirsel_client_ffi.kt
-          cargo ndk \
-            --target arm64-v8a \
-            --target x86_64 \
-            --platform 26 \
-            --output-dir android/app/src/main/jniLibs \
-            build --release -p hirsel-client-ffi
-          cargo build --release -p hirsel-client-ffi
-          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)"
-          cargo run --release -p hirsel-client-ffi --features bindgen-cli --bin uniffi-bindgen -- \
-            generate \
-            --library "$target_dir/release/libhirsel_client_ffi.so" \
-            --language kotlin \
-            --config crates/hirsel-client-ffi/uniffi.toml \
-            --out-dir android/app/src/main/kotlin \
-            --no-format
+        run: bash android/build-native.sh
 
       - name: Build debug APK
         if: steps.changes.outputs.android == 'true'

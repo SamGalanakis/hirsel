@@ -69,9 +69,7 @@ test:
     cd app && npm test -- --run
 
 check:
-    bash scripts/check-plugins-synced.sh
-    cargo clippy --workspace --all-targets -- -D warnings
-    cd app && npx tsc --noEmit
+    bash scripts/check-static.sh
 
 # Regenerate the plugin aggregator from the folders under plugins/. Run after
 # adding or removing a plugin folder; `just dev` runs it for you.

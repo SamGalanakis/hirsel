@@ -182,6 +182,10 @@ export function PromptSection(): JSX.Element {
   createEffect(() => {
     const prompts = state.prompts;
     if (!prompts) return;
+    // Equal snapshots are still acknowledgements. The store increments this
+    // once per prompts_changed frame because equal nested fields do not notify
+    // Solid effects on their own.
+    void state.promptsRevision;
     // Solid stores merge object slices in place. Subscribe to the fields a
     // full prompts_changed frame may replace rather than only the stable root
     // proxy, then settle every control from that authoritative snapshot.

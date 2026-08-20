@@ -197,8 +197,8 @@ impl AppState {
         let snapshot = self.prompt_snapshot();
         if snapshot != previous {
             self.agent.apply_agent_prompt().await?;
-            self.broadcast_prompts(&snapshot);
         }
+        self.broadcast_prompts(&snapshot);
         Ok(snapshot)
     }
 
@@ -206,12 +206,9 @@ impl AppState {
     /// default. Persisted only — no runtime consumes the fork config yet.
     pub async fn set_fork_prompt(&self, text: &str) -> anyhow::Result<PromptSnapshot> {
         let _guard = self.prompt_change_lock.lock().await;
-        let previous = self.prompt_snapshot();
         self.prompts.set_fork_prompt(text).await?;
         let snapshot = self.prompt_snapshot();
-        if snapshot != previous {
-            self.broadcast_prompts(&snapshot);
-        }
+        self.broadcast_prompts(&snapshot);
         Ok(snapshot)
     }
 
@@ -222,12 +219,9 @@ impl AppState {
         variant: &str,
     ) -> anyhow::Result<PromptSnapshot> {
         let _guard = self.prompt_change_lock.lock().await;
-        let previous = self.prompt_snapshot();
         self.prompts.set_fork_model(model_id, variant).await?;
         let snapshot = self.prompt_snapshot();
-        if snapshot != previous {
-            self.broadcast_prompts(&snapshot);
-        }
+        self.broadcast_prompts(&snapshot);
         Ok(snapshot)
     }
 

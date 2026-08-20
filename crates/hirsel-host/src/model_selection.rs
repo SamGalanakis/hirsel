@@ -31,21 +31,31 @@ struct RegistryEntry {
 // Current ChatGPT-account model metadata confirms this ID and its effort tokens.
 // The main agent is deliberately pinned to GPT-5.6 Sol; keep this curated until
 // the host has a provider-backed catalog.
-const CODEX_REGISTRY: &[RegistryEntry] = &[
+const CODEX_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    variants: &["low", "medium", "high", "xhigh", "max"],
+    default_variant: "medium",
+    context_window_tokens: 200_000,
+    variant_kind: VariantKind::Effort,
+}];
+
+// Forks have their own curated surface: Luna is the economy default, while Sol
+// remains available as a deliberate escalation without becoming selectable by
+// the resident Agent.
+const CODEX_FORK_REGISTRY: &[RegistryEntry] = &[
+    RegistryEntry {
+        id: "gpt-5.6-luna",
+        label: "GPT-5.6 Luna",
+        variants: &["low", "medium", "high", "xhigh", "max"],
+        default_variant: "max",
+        context_window_tokens: 200_000,
+        variant_kind: VariantKind::Effort,
+    },
     RegistryEntry {
         id: "gpt-5.6-sol",
         label: "GPT-5.6 Sol",
         variants: &["low", "medium", "high", "xhigh", "max"],
-        default_variant: "medium",
-        context_window_tokens: 200_000,
-        variant_kind: VariantKind::Effort,
-    },
-    // The cheap lane. It is here so a fork — a triage read that must not cost
-    // what the main session costs — has a real option under this provider.
-    RegistryEntry {
-        id: "gpt-5.6-luna",
-        label: "GPT-5.6 Luna",
-        variants: &["low", "medium", "high"],
         default_variant: "medium",
         context_window_tokens: 200_000,
         variant_kind: VariantKind::Effort,
@@ -56,6 +66,15 @@ const CODEX_REGISTRY: &[RegistryEntry] = &[
 // there is no host-selectable effort ladder to offer, so the entry carries the
 // single provider-default variant.
 const OPENROUTER_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
+    id: "google/gemini-3.7-flash",
+    label: "Gemini 3.7 Flash",
+    variants: &[PROVIDER_DEFAULT_VARIANT],
+    default_variant: PROVIDER_DEFAULT_VARIANT,
+    context_window_tokens: 1_000_000,
+    variant_kind: VariantKind::ProviderDefault,
+}];
+
+const OPENROUTER_FORK_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
     id: "google/gemini-3.7-flash",
     label: "Gemini 3.7 Flash",
     variants: &[PROVIDER_DEFAULT_VARIANT],
@@ -79,20 +98,31 @@ fn default_fork_model_id(provider: ProviderMode) -> Option<&'static str> {
 /// The fork's fallback selection: its default model at that model's default
 /// variant.
 pub fn default_fork_selection(provider: ProviderMode) -> Option<ModelSelection> {
-    let entry = registry_entry(provider, default_fork_model_id(provider)?)?;
+    let entry = fork_registry_entry(provider, default_fork_model_id(provider)?)?;
     Some(ModelSelection {
         id: entry.id.to_string(),
         variant: entry.default_variant.to_string(),
     })
 }
 
-/// Validate a model id + variant against the booted provider's registry.
+/// Validate a main-Agent model id + variant against the booted provider's
+/// main-Agent registry.
 pub fn validate(
     provider: ProviderMode,
     model_id: &str,
     variant: &str,
 ) -> anyhow::Result<ModelSelection> {
     validate_selection(provider, model_id, variant)
+}
+
+/// Validate a fork model id + variant against the booted provider's fork-only
+/// registry.
+pub fn validate_fork(
+    provider: ProviderMode,
+    model_id: &str,
+    variant: &str,
+) -> anyhow::Result<ModelSelection> {
+    validate_fork_selection(provider, model_id, variant)
 }
 
 /// The curated main-agent models for a provider. Anthropic mode pins its model
@@ -102,6 +132,14 @@ fn registry(provider: ProviderMode) -> &'static [RegistryEntry] {
     match provider {
         ProviderMode::Codex => CODEX_REGISTRY,
         ProviderMode::OpenRouter => OPENROUTER_REGISTRY,
+        ProviderMode::Anthropic => &[],
+    }
+}
+
+fn fork_registry(provider: ProviderMode) -> &'static [RegistryEntry] {
+    match provider {
+        ProviderMode::Codex => CODEX_FORK_REGISTRY,
+        ProviderMode::OpenRouter => OPENROUTER_FORK_REGISTRY,
         ProviderMode::Anthropic => &[],
     }
 }
@@ -180,7 +218,15 @@ fn selection_from_store(
 }
 
 pub fn available_models(provider: ProviderMode) -> Vec<AvailableModel> {
-    registry(provider)
+    available_from_registry(registry(provider))
+}
+
+pub fn available_fork_models(provider: ProviderMode) -> Vec<AvailableModel> {
+    available_from_registry(fork_registry(provider))
+}
+
+fn available_from_registry(entries: &[RegistryEntry]) -> Vec<AvailableModel> {
+    entries
         .iter()
         .map(|entry| AvailableModel {
             id: entry.id.to_string(),
@@ -267,8 +313,33 @@ fn validate_selection(
     })
 }
 
+fn validate_fork_selection(
+    provider: ProviderMode,
+    model_id: &str,
+    variant: &str,
+) -> anyhow::Result<ModelSelection> {
+    let entry = fork_registry_entry(provider, model_id)
+        .ok_or_else(|| anyhow!("unknown fork model: {model_id}"))?;
+    if !entry.variants.contains(&variant) {
+        return Err(anyhow!(
+            "unknown variant `{variant}` for fork model `{model_id}`; available variants: {}",
+            entry.variants.join(", ")
+        ));
+    }
+    Ok(ModelSelection {
+        id: entry.id.to_string(),
+        variant: variant.to_string(),
+    })
+}
+
 fn registry_entry(provider: ProviderMode, model_id: &str) -> Option<&'static RegistryEntry> {
     registry(provider).iter().find(|entry| entry.id == model_id)
+}
+
+fn fork_registry_entry(provider: ProviderMode, model_id: &str) -> Option<&'static RegistryEntry> {
+    fork_registry(provider)
+        .iter()
+        .find(|entry| entry.id == model_id)
 }
 
 #[cfg(test)]
@@ -290,8 +361,34 @@ mod tests {
         let selected = validate_selection(ProviderMode::Codex, "gpt-5.6-sol", "high").unwrap();
         assert_eq!(selected.id, "gpt-5.6-sol");
         assert_eq!(selected.variant, "high");
+        assert!(validate_selection(ProviderMode::Codex, "gpt-5.6-luna", "max").is_err());
         assert!(validate_selection(ProviderMode::Codex, "gpt-5", "high").is_err());
         assert!(validate_selection(ProviderMode::Codex, "gpt-5.6-sol", "impossible").is_err());
+    }
+
+    #[test]
+    fn codex_fork_registry_defaults_to_luna_max_and_can_escalate_to_sol() {
+        let models = available_fork_models(ProviderMode::Codex);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.6-luna", "gpt-5.6-sol"]
+        );
+        assert_eq!(
+            models[0].variants,
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(models[0].default_variant, "max");
+        assert_eq!(
+            default_fork_selection(ProviderMode::Codex),
+            Some(ModelSelection {
+                id: "gpt-5.6-luna".to_string(),
+                variant: "max".to_string(),
+            })
+        );
+        assert!(validate_fork_selection(ProviderMode::Codex, "gpt-5.6-sol", "high").is_ok());
     }
 
     #[test]

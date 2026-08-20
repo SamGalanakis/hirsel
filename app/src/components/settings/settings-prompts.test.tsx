@@ -17,19 +17,19 @@ const memLocalStorage: Storage = {
 const PROMPTS: PromptSnapshot = {
   agent: { text: "Bundled main prompt", is_default: true },
   fork: {
-    current: { id: "gpt-5.6-luna", variant: "medium" },
+    current: { id: "gpt-5.6-luna", variant: "max" },
     available: [
-      {
-        id: "gpt-5.6-sol",
-        label: "GPT-5.6 Sol",
-        variants: ["low", "medium", "high"],
-        default_variant: "medium",
-      },
       {
         id: "gpt-5.6-luna",
         label: "GPT-5.6 Luna",
-        variants: ["low", "medium", "high"],
-        default_variant: "low",
+        variants: ["low", "medium", "high", "xhigh", "max"],
+        default_variant: "max",
+      },
+      {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6 Sol",
+        variants: ["low", "medium", "high", "xhigh", "max"],
+        default_variant: "medium",
       },
     ],
     prompt: { text: "Bundled fork prompt", is_default: true },
@@ -84,8 +84,21 @@ describe("Settings → Prompt", () => {
     expect(getByText(/Runs once per incoming event to triage it/i)).toBeTruthy();
     expect((getByLabelText("Fork agent model") as HTMLSelectElement).value).toBe("gpt-5.6-luna");
     expect((getByLabelText("Fork agent reasoning variant") as HTMLSelectElement).value).toBe(
-      "medium",
+      "max",
     );
+  });
+
+  it("settles a save when the accepted snapshot is unchanged", async () => {
+    const { getByLabelText, store } = await mount(PROMPTS);
+    const editor = getByLabelText("Main agent system prompt") as HTMLTextAreaElement;
+    fireEvent.input(editor, { target: { value: "   " } });
+    fireEvent.click(getByLabelText("Save Main agent system prompt"));
+    expect(setAgentPrompt).toHaveBeenCalledWith("   ");
+    expect(editor).toBeDisabled();
+
+    store.dispatch({ type: "prompts_changed", prompts: PROMPTS });
+
+    await waitFor(() => expect(editor).not.toBeDisabled());
   });
 
   it("keeps the main prompt local until Save and settles from the broadcast", async () => {

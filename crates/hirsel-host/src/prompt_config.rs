@@ -15,7 +15,7 @@ use hirsel_proto::{ForkAgentConfig, ModelSelection, PromptDoc, PromptSnapshot};
 use crate::{
     config::ProviderMode,
     host_config::ConfigStore,
-    model_selection::{available_models, default_fork_selection, validate},
+    model_selection::{available_fork_models, default_fork_selection, validate_fork},
 };
 
 /// The bundled Agent prompt. The Owner's override replaces this body; the host
@@ -65,7 +65,7 @@ impl PromptConfig {
         let Some((id, variant)) = self.config_store.fork_model_selection() else {
             return Some(fallback);
         };
-        match validate(self.provider, &id, &variant) {
+        match validate_fork(self.provider, &id, &variant) {
             Ok(selection) => Some(selection),
             Err(error) => {
                 tracing::warn!(
@@ -81,7 +81,7 @@ impl PromptConfig {
     pub fn fork(&self) -> Option<ForkAgentConfig> {
         Some(ForkAgentConfig {
             current: self.fork_model()?,
-            available: available_models(self.provider),
+            available: available_fork_models(self.provider),
             prompt: doc(self.config_store.fork_prompt_override(), FORK_PROMPT),
         })
     }
@@ -119,7 +119,7 @@ impl PromptConfig {
                 "fork model selection requires HIRSEL_PROVIDER=codex or HIRSEL_PROVIDER=openrouter"
             );
         }
-        let selection = validate(self.provider, model_id, variant)?;
+        let selection = validate_fork(self.provider, model_id, variant)?;
         self.config_store
             .set_fork_model(&selection.id, &selection.variant)
             .await?;
@@ -239,12 +239,17 @@ mod tests {
             prompts.fork_model(),
             Some(ModelSelection {
                 id: "gpt-5.6-luna".to_string(),
-                variant: "medium".to_string(),
+                variant: "max".to_string(),
             })
         );
 
-        assert!(prompts.set_fork_model("gpt-5.6-luna", "high").await.is_ok());
-        assert_eq!(prompts.fork_model().unwrap().variant, "high");
+        assert!(
+            prompts
+                .set_fork_model("gpt-5.6-luna", "xhigh")
+                .await
+                .is_ok()
+        );
+        assert_eq!(prompts.fork_model().unwrap().variant, "xhigh");
         // Off-registry ids and variants are rejected commands, and the stored
         // selection is untouched.
         assert!(

@@ -38,7 +38,10 @@ describe("buildTimeline (fold)", () => {
       ),
     );
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "tool", done: true, ok: true, result: "3 matches" });
+    expect(items[0]).toMatchObject({
+      kind: "tool",
+      status: { state: "done", ok: true, result: "3 matches" },
+    });
   });
 
   it("renders an orphan tool_done as a completed row using its own name", () => {
@@ -47,10 +50,8 @@ describe("buildTimeline (fold)", () => {
     expect(items[0]).toMatchObject({
       kind: "tool",
       name: "grep",
-      done: true,
-      ok: false,
-      result: "no match",
       summary: null,
+      status: { state: "done", ok: false, result: "no match" },
     });
   });
 
@@ -193,9 +194,7 @@ describe("Timeline component", () => {
       kind: "code",
       language: "typescript",
       code: "finish(1);",
-      done: true,
-      ok: true,
-      result: "12ms",
+      status: { state: "done", ok: true, result: "12ms" },
     });
   });
 

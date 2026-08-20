@@ -61,16 +61,18 @@ function ReasoningRow(props: { text: string }) {
  * live cursor is always the running step. Carries a quiet right-aligned mono
  * duration once resolved, and — when it produced a result/error — click-to-
  * expand into a mono "well" showing the full, untruncated payload. */
-function ToolRow(props: {
-  item: Extract<TimelineItem, { kind: "tool" }>;
-  durationMs: number | null;
-}) {
+function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
   const [open, setOpen] = createSignal(false);
-  const detail = () => props.item.result ?? props.item.summary;
+  const done = () => (props.item.status.state === "done" ? props.item.status : null);
+  const detail = () => done()?.result ?? props.item.summary;
   const hasDetail = () => (detail() ?? "").length > 0;
-  const running = () => !props.item.done;
+  const running = () => done() === null;
+  const failed = () => done()?.ok === false;
   const delegation = () => isDelegationTool(props.item.name);
-  const duration = () => (props.durationMs !== null ? formatDuration(props.durationMs) : "");
+  const duration = () => {
+    const ms = done()?.durationMs;
+    return ms === undefined || ms === null ? "" : formatDuration(ms);
+  };
 
   return (
     <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-tool">
@@ -82,10 +84,10 @@ function ToolRow(props: {
               aria-label="running"
             />
           </Match>
-          <Match when={props.item.ok}>
+          <Match when={done()?.ok}>
             <Check class="size-3 shrink-0 text-status-success" aria-label="ok" />
           </Match>
-          <Match when={!props.item.ok}>
+          <Match when={done()}>
             <X class="size-3 shrink-0 text-destructive" aria-label="failed" />
           </Match>
         </Switch>
@@ -143,7 +145,7 @@ function ToolRow(props: {
       <Show when={open() && hasDetail()}>
         <pre
           class="ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80"
-          classList={{ "text-destructive/90": props.item.done && props.item.ok === false }}
+          classList={{ "text-destructive/90": failed() }}
         >
           {detail()}
         </pre>
@@ -157,16 +159,17 @@ function ToolRow(props: {
  * you read every turn — expanding to the verbatim monospace program. Once the
  * cell completes, a failure tints the row and the well so a broken program is
  * findable without expanding it. */
-function CodeRow(props: {
-  item: Extract<TimelineItem, { kind: "code" }>;
-  durationMs: number | null;
-}) {
+function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
   const [open, setOpen] = createSignal(false);
-  const running = () => !props.item.done;
-  const failed = () => props.item.done && props.item.ok === false;
+  const done = () => (props.item.status.state === "done" ? props.item.status : null);
+  const running = () => done() === null;
+  const failed = () => done()?.ok === false;
   const label = () => props.item.language || "code";
   const hasCode = () => props.item.code.length > 0;
-  const duration = () => (props.durationMs !== null ? formatDuration(props.durationMs) : "");
+  const duration = () => {
+    const ms = done()?.durationMs;
+    return ms === undefined || ms === null ? "" : formatDuration(ms);
+  };
 
   return (
     <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-code">
@@ -178,10 +181,10 @@ function CodeRow(props: {
               aria-label="running"
             />
           </Match>
-          <Match when={props.item.ok}>
+          <Match when={done()?.ok}>
             <Check class="size-3 shrink-0 text-status-success" aria-label="ok" />
           </Match>
-          <Match when={!props.item.ok}>
+          <Match when={done()}>
             <X class="size-3 shrink-0 text-destructive" aria-label="failed" />
           </Match>
         </Switch>
@@ -210,9 +213,9 @@ function CodeRow(props: {
             >
               {label()}
             </span>
-            <Show when={props.item.result}>
+            <Show when={done()?.result}>
               <span class="min-w-0 flex-1 truncate" classList={{ "text-destructive/90": failed() }}>
-                {props.item.result}
+                {done()?.result}
               </span>
             </Show>
           </button>
@@ -246,23 +249,9 @@ function CodeRow(props: {
  * details" panel.
  */
 export function Timeline(props: { events: TimelineEvent[] }) {
+  // Durations (tool_done.at − tool_start.at) come out of the fold on each row's
+  // status, measured within that row's own id namespace.
   const items = createMemo(() => buildTimeline(props.events, showAgentCode()));
-  // Per-tool duration from the client-stamped arrival times (tool_done.at −
-  // tool_start.at). Absent when either endpoint predates timing (hand-built
-  // events / replayed data), in which case the row simply shows no duration.
-  const durations = createMemo(() => {
-    const starts = new Map<string, number>();
-    const out = new Map<string, number>();
-    for (const { event, at } of props.events) {
-      if (at === undefined) continue;
-      if (event.kind === "tool_start" || event.kind === "code_start") starts.set(event.id, at);
-      else if (event.kind === "tool_done" || event.kind === "code_done") {
-        const start = starts.get(event.id);
-        if (start !== undefined) out.set(event.id, at - start);
-      }
-    }
-    return out;
-  });
   return (
     <ul
       class="ml-1 flex min-w-0 flex-col gap-2 border-l border-border/60 pl-3"
@@ -282,16 +271,10 @@ export function Timeline(props: { events: TimelineEvent[] }) {
               <ReasoningRow text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text} />
             </Match>
             <Match when={item.kind === "tool"}>
-              {(() => {
-                const tool = item as Extract<TimelineItem, { kind: "tool" }>;
-                return <ToolRow item={tool} durationMs={durations().get(tool.toolId) ?? null} />;
-              })()}
+              <ToolRow item={item as Extract<TimelineItem, { kind: "tool" }>} />
             </Match>
             <Match when={item.kind === "code"}>
-              {(() => {
-                const cell = item as Extract<TimelineItem, { kind: "code" }>;
-                return <CodeRow item={cell} durationMs={durations().get(cell.codeId) ?? null} />;
-              })()}
+              <CodeRow item={item as Extract<TimelineItem, { kind: "code" }>} />
             </Match>
           </Switch>
         )}

@@ -41,6 +41,12 @@ pub enum HostToClient {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,
     },
+    Messages {
+        client_id: String,
+        before_id: u64,
+        messages: Vec<ChatMessage>,
+        has_more: bool,
+    },
     ProcessUpsert {
         process: ProcessInfo,
     },

@@ -125,6 +125,24 @@ describe("dev mock task contract", () => {
       ]),
     );
 
+    const historyPage = waitForFrame(
+      connection.ws,
+      (frame) => frame.type === "messages" && frame.client_id === "history-contract",
+    );
+    connection.ws.send(JSON.stringify({
+      type: "fetch_messages",
+      client_id: "history-contract",
+      before_id: 10_000,
+      limit: 2,
+    }));
+    expect(await historyPage).toMatchObject({
+      type: "messages",
+      client_id: "history-contract",
+      before_id: 10_000,
+      has_more: true,
+    });
+    expect((await historyPage).messages).toHaveLength(2);
+
     const seededEvents = first.events as Array<Record<string, unknown>>;
     const deploy = seededEvents.find((event) => event.name === "deploy-4821");
     const auth = seededEvents.find((event) => event.name === "auth-pr");

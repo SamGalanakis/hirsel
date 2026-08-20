@@ -15,6 +15,9 @@ const PORT = Number(process.env.MOCK_PORT ?? 8787);
 // explicitly needs to exercise rejection with one exact value.
 const TOKEN = process.env.MOCK_TOKEN;
 const REPLAY_LIMIT = 200;
+const FETCH_LIMIT = 100;
+const MOCK_HISTORY_COUNT = Math.max(0, Number(process.env.MOCK_HISTORY_COUNT ?? 0));
+const FETCH_DELAY_MS = Math.max(0, Number(process.env.MOCK_FETCH_DELAY_MS ?? 0));
 const ARCHIVED_REPLAY_LIMIT = 20;
 const MAX_BLOB_BYTES = 15 * 1024 * 1024;
 const MAX_ACTION_DATA_BYTES = 8 * 1024;
@@ -94,6 +97,7 @@ function tenantForToken(token) {
   tenantContext.run(tenant, () => {
     if (process.env.MOCK_SEED !== "none") {
       seedProcesses();
+      seedHistory();
       seedEvents();
     }
   });
@@ -418,6 +422,22 @@ function handleSendMessage(frame) {
     return;
   }
   startReplyTurn(message);
+}
+
+function handleFetchMessages(ws, frame) {
+  const requested = Number.isFinite(frame.limit) ? Math.trunc(frame.limit) : 1;
+  const limit = Math.min(FETCH_LIMIT, Math.max(1, requested));
+  const older = messages.filter((message) => message.id < frame.before_id).slice(-limit);
+  const hasMore = older.length > 0 && messages.some((message) => message.id < older[0].id);
+  const respond = () => ws.send(JSON.stringify({
+    type: "messages",
+    client_id: frame.client_id,
+    before_id: frame.before_id,
+    messages: older,
+    has_more: hasMore,
+  }));
+  if (FETCH_DELAY_MS > 0) setTimeout(respond, FETCH_DELAY_MS);
+  else respond();
 }
 
 function handleCancelTurn() {
@@ -855,6 +875,9 @@ wss.on("connection", (ws) => {
       case "send_message":
         handleSendMessage(frame);
         break;
+      case "fetch_messages":
+        handleFetchMessages(ws, frame);
+        break;
       case "upload_blob":
         handleUploadBlob(ws, frame);
         break;
@@ -920,6 +943,23 @@ function seedProcesses() {
     last_event_ts: ago(1),
     summary: "verifying rollback and health-check steps…",
   });
+}
+
+/** Optional long transcript for the dedicated scrollback browser probe. */
+function seedHistory() {
+  const base = Date.now() - MOCK_HISTORY_COUNT * 60_000;
+  for (let index = 1; index <= MOCK_HISTORY_COUNT; index += 1) {
+    messages.push({
+      id: runtime.nextMsgId++,
+      author: index % 2 === 0 ? "agent" : "owner",
+      body: `Archived history ${index}: a stored conversation row used to verify seamless just-in-time scrollback.`,
+      ref: null,
+      ts: new Date(base + index * 60_000).toISOString(),
+      attachments: [],
+      tool_calls: [],
+      mentions: [],
+    });
+  }
 }
 
 /** Seed a short transcript and three typed Tasks so the default task world has

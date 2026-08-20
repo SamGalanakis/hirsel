@@ -16,6 +16,9 @@ top-level `e2e/<scenario>` locations.
   Agent behavior over image and text attachments.
 - [`multi-turn-memory`](multi-turn-memory/runbook.md) — real conversation recall
   before and after restart.
+- [`scrollback-history`](scrollback-history/runbook.md) — browser auto-reveal,
+  correlated Host history paging, prepend anchoring, bounded eviction, and the
+  truthful jump back to latest.
 - [`restart-persistence`](restart-persistence/runbook.md) — Agent persistence
   across repeated Host restarts.
 - [`send-queue-cancel`](send-queue-cancel/runbook.md) — injection, next-turn

@@ -95,6 +95,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - Owner lines use stronger foreground; Hirsel lines use muted foreground. Order and language provide authorship.
 - Conversation uses the **Pure Field** rule: no backdrop or enclosing silhouette. Owner lines receive one quiet hairline and slight indentation; Hirsel prose rests directly on the canvas. Collapsed tool disclosures are transparent at rest.
 - The conversation follows the card in the same scroll flow at every width; phone and desktop differ only in inset.
+- Earlier rows arrive just in time as the reader approaches the top. There is no “earlier messages” control or beginning marker; only a quiet loading line may appear when the reader reaches the edge before a prefetched page lands.
 - With no relevant conversation, it does not render or reserve space.
 - Tool timelines may unfold under the relevant Hirsel line on demand; they never create a third column.
 

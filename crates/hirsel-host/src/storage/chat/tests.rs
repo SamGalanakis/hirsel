@@ -138,6 +138,55 @@ async fn hello_replay_always_carries_the_recent_window_and_grows_past_it() {
 }
 
 #[tokio::test]
+async fn fetch_messages_pages_backwards_at_boundaries_and_caps_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+
+    let empty = storage.fetch_messages(u64::MAX, 20).await.unwrap();
+    assert!(empty.messages.is_empty());
+    assert!(!empty.has_more);
+
+    for id in 1..=150 {
+        storage
+            .append_chat(ChatAuthor::Agent, format!("m{id}"), None)
+            .await
+            .unwrap();
+    }
+
+    let beyond_newest = storage.fetch_messages(10_000, 500).await.unwrap();
+    assert_eq!(beyond_newest.messages.len(), 100);
+    assert_eq!(beyond_newest.messages.first().unwrap().id, 51);
+    assert_eq!(beyond_newest.messages.last().unwrap().id, 150);
+    assert!(beyond_newest.has_more);
+
+    let middle = storage.fetch_messages(76, 20).await.unwrap();
+    assert_eq!(
+        middle
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        (56..=75).collect::<Vec<_>>()
+    );
+    assert!(middle.has_more);
+
+    let before_oldest = storage.fetch_messages(1, 20).await.unwrap();
+    assert!(before_oldest.messages.is_empty());
+    assert!(!before_oldest.has_more);
+
+    let beginning = storage.fetch_messages(6, 20).await.unwrap();
+    assert_eq!(
+        beginning
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert!(!beginning.has_more);
+}
+
+#[tokio::test]
 async fn hello_snapshot_includes_all_archived_events() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();

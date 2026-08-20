@@ -333,6 +333,47 @@ from its lowest upward (so a full resync drops residue), and local history
 below that range is preserved (so a windowed replay never truncates what the
 client still has).
 
+History before that replay window is paged just in time:
+
+```json
+{
+  "type": "fetch_messages",
+  "client_id": "<uuid>",
+  "before_id": 401,
+  "limit": 100
+}
+```
+
+The Host clamps `limit` to `1..=100`, selects rows with `id < before_id`, and
+returns them oldest-to-newest within the page:
+
+```json
+{
+  "type": "messages",
+  "client_id": "<same uuid>",
+  "before_id": 401,
+  "messages": [
+    {
+      "id": 400,
+      "author": "agent",
+      "body": "Earlier message",
+      "ref": null,
+      "ts": "2026-08-20T10:00:00Z",
+      "attachments": []
+    }
+  ],
+  "has_more": true
+}
+```
+
+`client_id` correlates the response or an `error`. `has_more: false` is the
+authoritative beginning of stored history; the browser renders no terminal
+marker there. The browser keeps only one page request in flight. Its bounded
+600-row committed range normally retains the newest edge; while prepending at
+the cap it instead evicts from the newest committed edge so the row being read
+cannot disappear. That creates an intentional newer gap, recorded locally;
+“Jump to latest” reloads the newest Host page before pinning to the bottom.
+
 The live turn timeline is still never replayed. A reconnect mid-turn therefore
 shows committed rows only, and any half-streamed reply is dropped rather than
 left orphaned on screen.

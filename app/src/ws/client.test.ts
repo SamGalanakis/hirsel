@@ -202,6 +202,33 @@ describe("HirselWsClient signed blob URLs (D9)", () => {
   });
 });
 
+describe("HirselWsClient history paging", () => {
+  it("correlates a page and shares one in-flight request", async () => {
+    const { client } = await load();
+    const c = client.startClient("wss://host/ws", "good");
+    const ws = FakeWebSocket.instances[0];
+    ws.serverOpen();
+    ws.serverSend(HELLO_OK);
+
+    const first = c.fetchMessages(201, 100);
+    const second = c.fetchMessages(201, 100);
+    expect(first).toBe(second);
+    const frames = ws.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    const requests = frames.filter((frame) => frame.type === "fetch_messages");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ before_id: 201, limit: 100 });
+
+    ws.serverSend({
+      type: "messages",
+      client_id: requests[0].client_id,
+      before_id: 201,
+      messages: [],
+      has_more: false,
+    });
+    await expect(first).resolves.toMatchObject({ before_id: 201, has_more: false });
+  });
+});
+
 describe("HirselWsClient auth rejection (C5)", () => {
   it("keeps reconnecting when refused connections never reach open", async () => {
     vi.useFakeTimers();

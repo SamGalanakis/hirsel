@@ -86,6 +86,11 @@ pub enum ClientToHost {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<u64>,
     },
+    FetchMessages {
+        client_id: String,
+        before_id: u64,
+        limit: u64,
+    },
     CancelTurn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,

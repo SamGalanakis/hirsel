@@ -391,3 +391,37 @@ posts ONE anchor-refed owner line `Discussed @<event name> → <chosen label>` i
 `msg` flow), closes the fork (`side_chat_closed`), and discards the session. Info/summary forks have
 no decision: `discard_side_chat` clears `fork_sc`, closes the fork, and adds NO main-chat message
 (silent). The v2.0 conclude/confirm frames are not used for event forks.
+
+## v2.5 — bounded conversation history paging (2026-08-20)
+
+The `hello_ok.messages` replay remains the newest-200 attention window. A client can now continue
+before its oldest loaded row without reconnecting:
+
+```json
+{ "type": "fetch_messages", "client_id": "<uuid>", "before_id": 401, "limit": 100 }
+```
+
+The Host clamps `limit` to `1..=100` and answers with the same `ChatMessage` shape used by replay:
+
+```json
+{
+  "type": "messages",
+  "client_id": "<same uuid>",
+  "before_id": 401,
+  "messages": [
+    {
+      "id": 400,
+      "author": "agent",
+      "body": "Earlier message",
+      "ref": null,
+      "ts": "2026-08-20T10:00:00Z",
+      "attachments": []
+    }
+  ],
+  "has_more": true
+}
+```
+
+Rows are ascending within the page and all have `id < before_id`. `has_more` reports whether a
+still-older stored row exists; an empty page has `has_more: false`. The correlation id also scopes
+an `error` response. Existing clients that never send the request retain their newest-200 behavior.

@@ -388,6 +388,14 @@ export interface SetSubagentModelMsg {
   enabled_variants: string[];
 }
 
+/** Request one bounded page immediately before a loaded conversation id. */
+export interface FetchMessagesMsg {
+  type: "fetch_messages";
+  client_id: string;
+  before_id: number;
+  limit: number;
+}
+
 export type ClientMessage =
   | HelloMsg
   | SendMessageMsg
@@ -401,6 +409,7 @@ export type ClientMessage =
   | ViewEventMsg
   | EventActionMsg
   | ClearFinishedEventsMsg
+  | FetchMessagesMsg
   | SetModelMsg
   | SetSubagentModelMsg;
 
@@ -436,6 +445,15 @@ export interface HelloOkMsg {
 export interface MsgMsg {
   type: "msg";
   message: ChatMessage;
+}
+
+/** Correlated response to `fetch_messages`, oldest-to-newest within the page. */
+export interface MessagesMsg {
+  type: "messages";
+  client_id: string;
+  before_id: number;
+  messages: ChatMessage[];
+  has_more: boolean;
 }
 
 export type AgentActivityState = "thinking" | "idle";
@@ -570,6 +588,7 @@ export interface PluginPushMsg {
 export type ServerMessage =
   | HelloOkMsg
   | MsgMsg
+  | MessagesMsg
   | AgentActivityMsg
   | PingUpsertMsg
   | EventUpsertMsg

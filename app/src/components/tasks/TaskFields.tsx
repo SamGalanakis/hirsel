@@ -1,5 +1,5 @@
 import { Check, LoaderCircle } from "lucide-solid";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type { EventItem, ViewInstance } from "../../protocol";
 import type { DisplayMessage } from "../../store/types";
 import { decideEventWithUndo, reopenEvent } from "../../lib/event-decide";
@@ -15,14 +15,6 @@ import { splitStreamingReply } from "../chat/timeline";
 import { CommittedToolCalls } from "../chat/ToolCalls";
 import { messagesForTask, taskName } from "./task-model";
 import { formatBytes } from "../../lib/format";
-
-/** How much conversation renders before asking to be widened, and how much each
- * "earlier messages" press reveals. The old hard `slice(-8)` had no way to
- * reach anything older at all; this window is generous enough that the control
- * is rare, and the reducer's MESSAGES_CAP is still the outer bound (messages
- * are KB-scale, so the whole retained log renders fine — there is no
- * virtualisation to earn here). */
-const CONVERSATION_WINDOW = 30;
 
 /** The one focus-swap motion, shared verbatim by both fields so the swap reads
  * as one surface changing subject rather than two panels trading places: a
@@ -48,33 +40,35 @@ const FIELD_PADDING = "px-gutter py-8 rail:py-12";
  * composer, which is still the majority of the field. */
 const CARD_MAX_HEIGHT = "max-h-[40dvh]";
 
-function Conversation(props: { messages: DisplayMessage[]; thinking?: boolean }) {
-  const [revealed, setRevealed] = createSignal(CONVERSATION_WINDOW);
-  const shown = () => props.messages.slice(-revealed());
-  const hiddenCount = () => Math.max(0, props.messages.length - revealed());
+interface ConversationProps {
+  messages: DisplayMessage[];
+  revealed: number;
+  loadingEarlier: boolean;
+  thinking?: boolean;
+}
+
+function Conversation(props: ConversationProps) {
+  const shown = () => props.messages.slice(-props.revealed);
   const hasContent = () => props.messages.length > 0 || props.thinking || state.turnEvents.length > 0;
   return (
     <Show when={hasContent()}>
       <div data-slot="conversation" class="min-w-0 py-4 rail:py-10">
         <div class="flex max-w-[42rem] flex-col gap-6">
-          {/* Reaching older conversation is a deliberate press, not an infinite
-              scroll: revealing more grows the flow ABOVE the reader, and the
-              scroll container's anchoring keeps their place. */}
-          <Show when={hiddenCount() > 0}>
-            <button
-              type="button"
-              data-slot="reveal-earlier"
-              class="-ml-1 w-fit rounded px-1 py-px text-xs text-muted-foreground underline decoration-current/30 underline-offset-4 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-              onClick={() => setRevealed((n) => n + CONVERSATION_WINDOW)}
+          <Show when={props.loadingEarlier}>
+            <div
+              data-slot="loading-earlier"
+              role="status"
+              class="text-xs text-muted-foreground"
             >
-              {`Earlier messages (${hiddenCount()})`}
-            </button>
+              Loading earlier…
+            </div>
           </Show>
           <Show when={props.messages.length > 0}>
             <For each={shown()}>
               {(message) => (
                 <article
                   aria-label={message.author === "owner" ? "You" : "Hirsel"}
+                  data-message-id={message.id}
                   class="max-w-[42rem]"
                   classList={{
                     "ml-4 border-l border-border/50 pl-4 text-foreground":
@@ -157,10 +151,9 @@ function Conversation(props: { messages: DisplayMessage[]; thinking?: boolean })
   );
 }
 
-export function AmbientField() {
-  // The whole retained log: Conversation owns the render window and the
-  // "earlier messages" reveal, so the ambient field no longer truncates
-  // history a second time on the way in.
+export function AmbientField(props: { revealed: number; loadingEarlier: boolean }) {
+  // The whole retained log; TaskShell owns just-in-time window expansion because
+  // it also owns the scroll geometry and Host backfill boundary.
   const messages = () => state.messages;
   return (
     <div
@@ -173,7 +166,12 @@ export function AmbientField() {
       class={`mx-auto flex min-h-full w-full max-w-frame shrink-0 flex-col justify-end ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
       <div class="w-full max-w-measure">
-        <Conversation messages={messages()} thinking={state.agentActivity.state === "thinking"} />
+        <Conversation
+          messages={messages()}
+          revealed={props.revealed}
+          loadingEarlier={props.loadingEarlier}
+          thinking={state.agentActivity.state === "thinking"}
+        />
         {/* home.section: plugin cards on the ambient field, below the recent
             global conversation — the resting view an Owner lands on with no Task
             focused, so an ambient plugin surface (a feed, a status card) belongs
@@ -186,7 +184,13 @@ export function AmbientField() {
   );
 }
 
-export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: ViewInstance[] }) {
+export function TaskField(props: {
+  task: EventItem;
+  tasks: EventItem[];
+  views: ViewInstance[];
+  revealed: number;
+  loadingEarlier: boolean;
+}) {
   const related = () => messagesForTask(props.task, state.messages, props.tasks);
   const resolved = () => isEventResolved(props.task, state.eventDecideOverrides);
   // The generated instrument owns the Task's framing whenever it renders
@@ -280,7 +284,12 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
             below the card, at the same width, bottom-anchored on the composer
             exactly as ambient conversation is. `ctx` carries the Task's id. */}
         <div data-slot="task-conversation" class="grid flex-1 grid-cols-[minmax(0,1fr)] content-end">
-          <Conversation messages={related()} thinking={state.agentActivity.state === "thinking"} />
+          <Conversation
+            messages={related()}
+            revealed={props.revealed}
+            loadingEarlier={props.loadingEarlier}
+            thinking={state.agentActivity.state === "thinking"}
+          />
           <div class="flex flex-col gap-4 py-4 empty:hidden">
             <PluginSlot name="task.panel" ctx={{ taskId: props.task.id }} />
           </div>

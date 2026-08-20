@@ -164,6 +164,11 @@ impl Storage {
         replay_messages_from_conn(&conn, last_seen_msg_id)
     }
 
+    pub async fn fetch_messages(&self, before_id: u64, limit: u64) -> anyhow::Result<MessagePage> {
+        let conn = self.conn.lock().await;
+        fetch_messages_from_conn(&conn, before_id, limit)
+    }
+
     pub async fn hello_snapshot(
         &self,
         last_seen_msg_id: Option<u64>,
@@ -253,6 +258,51 @@ pub struct HelloSnapshot {
 /// The newest-N conversation window every `hello_ok` carries, whatever cursor
 /// the client presents.
 pub(crate) const HELLO_REPLAY_WINDOW: u64 = 200;
+
+/// Maximum number of rows returned by one just-in-time history request.
+pub(crate) const FETCH_MESSAGES_LIMIT: u64 = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePage {
+    pub messages: Vec<ChatMessage>,
+    pub has_more: bool,
+}
+
+fn fetch_messages_from_conn(
+    conn: &Connection,
+    before_id: u64,
+    requested_limit: u64,
+) -> anyhow::Result<MessagePage> {
+    let limit = requested_limit.clamp(1, FETCH_MESSAGES_LIMIT);
+    // SQLite row ids are signed 64-bit. A protocol u64 above that range simply
+    // means "beyond the newest row", not a binding error.
+    let before_id = before_id.min(i64::MAX as u64);
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, author, body, ref, ts, tool_calls
+        FROM (
+            SELECT id, author, body, ref, ts, tool_calls
+            FROM chat_messages
+            WHERE id < ?1
+            ORDER BY id DESC
+            LIMIT ?2
+        )
+        ORDER BY id ASC
+        ",
+    )?;
+    let rows = stmt.query_map(params![before_id, limit], chat_message_from_row)?;
+    let mut messages = collect_rows(rows)?;
+    load_attachments_for_messages(conn, &mut messages)?;
+    let has_more = match messages.first() {
+        Some(first) => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id < ?1)",
+            params![first.id],
+            |row| row.get(0),
+        )?,
+        None => false,
+    };
+    Ok(MessagePage { messages, has_more })
+}
 
 /// Replay for a `hello`.
 ///

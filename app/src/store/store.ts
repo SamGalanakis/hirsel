@@ -43,6 +43,8 @@ const [state, setState] = createStore<Store>(initialStore());
 function appSnapshot(): AppState {
   return {
     messages: state.messages,
+    hasEarlierMessages: state.hasEarlierMessages,
+    hasLaterMessages: state.hasLaterMessages,
     events: state.events,
     eventDecideOverrides: state.eventDecideOverrides,
     eventArchiveOverrides: state.eventArchiveOverrides,
@@ -77,6 +79,8 @@ export function dispatch(action: Action): void {
   untrack(() => {
     const next = reduce(appSnapshot(), action);
     setState("messages", reconcile(next.messages, { key: "id" }));
+    setState("hasEarlierMessages", next.hasEarlierMessages);
+    setState("hasLaterMessages", next.hasLaterMessages);
     // Task collection: reconcile typed wire Events by id so only the DOM bound to a
     // genuinely-changed event (a re-upsert / decide flip) re-renders.
     setState("events", reconcile(next.events, { key: "id" }));

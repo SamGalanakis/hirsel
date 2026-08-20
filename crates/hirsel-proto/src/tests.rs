@@ -172,6 +172,45 @@ fn send_message_mentions_round_trip() {
 }
 
 #[test]
+fn fetch_messages_and_correlated_page_round_trip() {
+    let request = ClientToHost::FetchMessages {
+        client_id: "history-1".to_string(),
+        before_id: 201,
+        limit: 100,
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        encoded,
+        json!({
+            "type": "fetch_messages",
+            "client_id": "history-1",
+            "before_id": 201,
+            "limit": 100
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ClientToHost>(encoded).unwrap(),
+        request
+    );
+
+    let response = HostToClient::Messages {
+        client_id: "history-1".to_string(),
+        before_id: 201,
+        messages: Vec::new(),
+        has_more: false,
+    };
+    let encoded = serde_json::to_value(&response).unwrap();
+    assert_eq!(encoded["type"], "messages");
+    assert_eq!(encoded["client_id"], "history-1");
+    assert_eq!(encoded["before_id"], 201);
+    assert_eq!(encoded["has_more"], false);
+    assert_eq!(
+        serde_json::from_value::<HostToClient>(encoded).unwrap(),
+        response
+    );
+}
+
+#[test]
 fn cancel_frames_round_trip() {
     let cancel_turn = ClientToHost::CancelTurn { sc: None };
     let encoded = serde_json::to_string(&cancel_turn).unwrap();

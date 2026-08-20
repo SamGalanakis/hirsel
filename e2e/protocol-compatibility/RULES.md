@@ -87,6 +87,7 @@ names in scenario titles and descriptions are wire spellings only.
 - `ping-read` - Ping read-state round trip and restart persistence.
 - `monitors` - monitor creation, process visibility, wake, and restart survival.
 - `multi-turn-memory` - real Codex conversation recall before and after host restart.
+- `scrollback-history` - deterministic browser proof of history paging, prepend anchoring, bounded retention, and latest-page restoration.
 - `real-subagent` - real Codex Sub-agent spawn, progress, completion, and interruption.
 - `restart-persistence` - real Agent persistence over repeated host restarts.
 - `send-queue-cancel` - send/next-turn queueing and active-turn cancellation.

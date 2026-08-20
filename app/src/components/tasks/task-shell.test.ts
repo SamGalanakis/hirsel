@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EventKind } from "../../protocol";
 import type { EventItem } from "../../protocol";
 import type { DisplayMessage } from "../../store/types";
 import {
@@ -12,7 +13,7 @@ import { messagesForTask, mostNeedingTask, taskSendContext } from "./task-model"
 
 const task = {
   id: 7,
-  kind: "judgment",
+  kind: EventKind.Judgment,
   source: { kind: "agent", ref: "host" },
   name: "@direction",
   description: "Choose a direction",
@@ -135,9 +136,9 @@ describe("mostNeedingTask", () => {
     candidate(id, { blocking: true, ...over });
   const needsYou = (id: number, over: Partial<EventItem> = {}) => candidate(id, over);
   const unseen = (id: number, over: Partial<EventItem> = {}) =>
-    candidate(id, { kind: "summary", requires_response: false, read: false, ...over });
+    candidate(id, { kind: EventKind.Summary, requires_response: false, read: false, ...over });
   const movingTask = (id: number, over: Partial<EventItem> = {}) =>
-    candidate(id, { kind: "summary", requires_response: false, read: true, ...over });
+    candidate(id, { kind: EventKind.Summary, requires_response: false, read: true, ...over });
 
   it("has no candidate in an empty field", () => {
     expect(mostNeedingTask([])).toBeNull();

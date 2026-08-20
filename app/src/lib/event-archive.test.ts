@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventKind } from "../protocol";
 
 // Fresh store + mocked ws client per test (the shared singleton pattern,
 // mirroring event-decide.test.ts).
@@ -64,7 +65,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     const { archiveEventWithUndo } = await import("./event-archive");
     const openJudgment = {
       id: 11,
-      kind: "judgment" as const,
+      kind: EventKind.Judgment,
       source: { kind: "agent" as const, ref: "host" },
       name: "@decide-me",
       description: "decide me",
@@ -111,7 +112,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     const { archiveEventWithUndo } = await import("./event-archive");
     const doneEvent = {
       id: 12,
-      kind: "summary" as const,
+      kind: EventKind.Summary,
       source: { kind: "agent" as const, ref: "host" },
       name: "@digest",
       description: "digest",
@@ -145,7 +146,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     const { archiveEventWithUndo } = await import("./event-archive");
     const event = {
       id: 9,
-      kind: "summary" as const,
+      kind: EventKind.Summary,
       source: { kind: "agent" as const, ref: "host" },
       name: "@digest",
       description: "digest",

@@ -12,12 +12,11 @@ import { markEventRead } from "../../lib/event-decide";
 import {
   conversationViews,
   orderedTasks,
-  visibleEvents,
+  taskEvents,
 } from "../../store/selectors";
 import {
   clearComposerPrefill,
   clearProtocolError,
-  clearTaskFocus,
   dispatch,
   effectiveEvents,
   focusTask,
@@ -134,8 +133,9 @@ export function TaskShell() {
     }, { defer: true }),
   );
 
-  const visible = createMemo(() => visibleEvents(effectiveEvents()));
-  const tasks = createMemo(() => orderedTasks(visible()));
+  // The field's whole subject matter: the resting Task set (housekeeping info
+  // events excluded by `taskEvents`), in queue order.
+  const tasks = createMemo(() => orderedTasks(taskEvents(effectiveEvents())));
   const focusedTask = createMemo(() =>
     tasks().find((task) => task.id === state.focusedTaskId) ?? null
   );
@@ -349,7 +349,6 @@ export function TaskShell() {
           tasks={tasks()}
           focusedId={state.focusedTaskId}
           onSelect={selectTask}
-          onClearFocus={clearTaskFocus}
         />
         <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Scrolled text never hard-clips against the top edge: a short

@@ -1,6 +1,7 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventKind } from "../../protocol";
 import type { EventItem } from "../../protocol";
 
 let railViewport = true;
@@ -59,7 +60,7 @@ beforeEach(() => {
 function task(id: number, name: string, heading: string, anchor = 0): EventItem {
   return {
     id,
-    kind: "judgment",
+    kind: EventKind.Judgment,
     source: { kind: "agent", ref: "host" },
     name,
     description: heading,
@@ -167,10 +168,10 @@ describe("Task Margins shell", () => {
       task(2, "@orchestration-copy", "Shape the orchestration copy"),
     ]);
     const nav = screen.getByRole("navigation", { name: "Tasks" });
-    await fireEvent.click(within(nav).getByRole("button", { name: /orchestration copy/ }));
+    await fireEvent.click(within(nav).getByRole("button", { name: /^orchestration copy,/ }));
 
     expect(screen.getByRole("heading", { name: "orchestration copy" })).toBeInTheDocument();
-    expect(within(nav).getByRole("button", { name: /orchestration copy/ }))
+    expect(within(nav).getByRole("button", { name: /^orchestration copy,/ }))
       .toHaveAttribute("aria-pressed", "true");
     expect(document.querySelector('[data-slot="composer-shell"]')).toHaveAttribute(
       "data-focused",
@@ -312,7 +313,7 @@ describe("Task Margins shell", () => {
     expect(card.className).toContain("border-b");
   });
 
-  it("marks the focused chip, dims the rest, and offers a labelled exit", async () => {
+  it("marks the focused chip, dims the rest, and exits when the open chip is activated again", async () => {
     const { screen, store } = await setupApp([
       task(1, "@choose-direction", "Choose direction"),
       task(2, "@orchestration-copy", "Shape the orchestration copy"),
@@ -333,10 +334,46 @@ describe("Task Margins shell", () => {
     expect(second.classList.contains("opacity-55")).toBe(true);
     expect(first.classList.contains("opacity-55")).toBe(false);
 
-    await fireEvent.click(within(nav).getByRole("button", { name: "Clear focus" }));
+    // The chip's accessible name promises this exit, and the chip itself keeps
+    // the promise — there is no separate × any more.
+    expect(first).toHaveAccessibleName(/focused; activate to clear focus/);
+    await fireEvent.click(first);
     expect(store.state.focusedTaskId).toBeNull();
     expect(first).not.toHaveAttribute("aria-current");
     expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
+  });
+
+  it("gives every chip a ⋯ menu whose Delete archives the task", async () => {
+    const user = userEvent.setup();
+    const { screen, store, fakeClient } = await setupApp([
+      task(1, "@choose-direction", "Choose direction"),
+      task(2, "@orchestration-copy", "Shape the orchestration copy"),
+    ]);
+    const nav = screen.getByRole("navigation", { name: "Tasks" });
+
+    // Every chip carries it, not only the focused one — and no × survives.
+    expect(within(nav).queryByRole("button", { name: "Clear focus" })).toBeNull();
+    expect(within(nav).getByRole("button", { name: "Actions for choose direction" }))
+      .toBeInTheDocument();
+    const trigger = within(nav).getByRole("button", {
+      name: "Actions for orchestration copy",
+    });
+
+    await user.click(trigger);
+    const item = await within(document.body).findByRole("menuitem", { name: "Delete" });
+    // The menu owns the keyboard while it is open, so bare keys stay suppressed.
+    const { anyOverlayOpen } = await import("../../lib/focus");
+    expect(anyOverlayOpen()).toBe(true);
+
+    await user.click(item);
+    expect(fakeClient.sendEventAction).toHaveBeenCalledWith(2, "archive", {});
+    // Optimistic: the chip leaves the rail at once, and the toast offers Undo.
+    await waitFor(() =>
+      expect(within(nav).queryByRole("button", { name: /orchestration copy/ })).toBeNull()
+    );
+    expect(store.state.eventOverrides[2]).toMatchObject({ archived: true });
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    await waitFor(() => expect(anyOverlayOpen()).toBe(false));
   });
 
   it("lands `g t` on the focused chip rather than the top of the index", async () => {
@@ -385,7 +422,7 @@ describe("Task Margins shell", () => {
       ui: [{ type: "status", label: "Waiting on the migration window" }],
     };
     const { screen } = await setupApp([framed]);
-    await fireEvent.click(screen.getByRole("button", { name: /rollout/ }));
+    await fireEvent.click(screen.getByRole("button", { name: /^rollout,/ }));
 
     const field = document.querySelector('[data-slot="task-field"]') as HTMLElement;
     expect(field.textContent).toContain("Waiting on the migration window");
@@ -397,7 +434,7 @@ describe("Task Margins shell", () => {
   it("still shows the description when the event carries no generated UI", async () => {
     const bare: EventItem = { ...task(1, "@rollout", "Roll out the migration"), ui: [] };
     const { screen } = await setupApp([bare]);
-    await fireEvent.click(screen.getByRole("button", { name: /rollout/ }));
+    await fireEvent.click(screen.getByRole("button", { name: /^rollout,/ }));
 
     expect(document.querySelector('[data-slot="task-field"]')?.textContent)
       .toContain("Roll out the migration");
@@ -621,10 +658,32 @@ describe("Home header collapse", () => {
 describe("Opens focused by default", () => {
   const moving = (id: number, name: string): EventItem => ({
     ...task(id, name, name),
-    kind: "summary",
+    kind: EventKind.Summary,
     blocking: false,
     read: true,
     requires_response: false,
+  });
+
+  it("never gives a housekeeping info event a chip, focus, or the red count", async () => {
+    const info = (id: number, name: string): EventItem => ({
+      ...task(id, name, name),
+      kind: EventKind.Info,
+      blocking: false,
+      requires_response: true,
+      status: "open",
+    });
+    const { screen, store } = await setupApp([info(1, "@session-rotated")], {
+      keepDefaultFocus: true,
+    });
+
+    const nav = screen.getByRole("navigation", { name: "Tasks" });
+    expect(within(nav).queryByRole("button", { name: /session rotated/ })).toBeNull();
+    // Nothing in the field wants the Owner, so the field stays ambient…
+    expect(store.state.focusedTaskId).toBeNull();
+    expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
+    // …and the tab badge stays silent even though the event is open and claims
+    // to require a response.
+    expect(document.title).toBe("hirsel");
   });
 
   it("lands on the most-needing task rather than the ambient field", async () => {
@@ -656,7 +715,7 @@ describe("Opens focused by default", () => {
       payload: { type: "event_upsert", event: task(2, "@urgent-call", "Urgent call") },
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /urgent call/ })).toBeInTheDocument()
+      expect(screen.getByRole("button", { name: /^urgent call,/ })).toBeInTheDocument()
     );
     expect(store.state.focusedTaskId).toBeNull();
     expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();

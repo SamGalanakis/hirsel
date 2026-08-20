@@ -1,3 +1,4 @@
+import { EventKind } from "../protocol";
 import type {
   EventItem,
   ProcessInfo,
@@ -111,21 +112,36 @@ export function isEventSnoozed(event: EventItem, now: number = Date.now()): bool
 }
 
 /** The resting queue: every event that is neither archived NOR snoozed. THE
- * default filter — every surface that renders or counts the queue (phone
- * flat task index and focused task field,
- * the phone nav badge, the needs-you count) reads through this, so an archived or
- * snoozed event vanishes everywhere at once and counts stay honest against the
- * filtered set. `now` is injectable for deterministic tests. */
+ * lifecycle filter — an archived or snoozed event vanishes from every surface at
+ * once and counts stay honest against the filtered set. Surfaces that render or
+ * count TASKS go one step further, through `taskEvents`; this stays the honest
+ * "everything still resting" set. `now` is injectable for deterministic tests. */
 export function visibleEvents(events: EventItem[], now: number = Date.now()): EventItem[] {
   return events.filter((e) => !isEventArchived(e) && !isEventSnoozed(e, now));
 }
 
+/** THE Task set: the resting queue minus housekeeping `info` (ADR-0012's
+ * quietest band — "session rotated" and friends). An info Event is a
+ * notification, not work: its content already rides the conversation as an
+ * inline message, so giving it a chip too would say the Owner has a Task where
+ * he has only been told something. Every Task surface reads through this one
+ * selector — the rail's chips, the load-time auto-focus, the needs-you count
+ * and its badges, the palette's contextual actions — so no surface can disagree
+ * with another about what a Task is. Info stays on the wire, in the
+ * conversation, and in `visibleEvents` for any surface that deliberately lists
+ * the whole resting queue. */
+export function taskEvents(events: EventItem[], now: number = Date.now()): EventItem[] {
+  return visibleEvents(events, now).filter((e) => e.kind !== EventKind.Info);
+}
+
 /** The set the "Clear finished (n)" sweep removes: finished (decided, or read
- * awareness) events still resting in the queue — never touching what is still
- * open, snoozed, or already archived. One selector so the sweep's count and the
- * ids it archives always agree. */
+ * awareness) Tasks still resting in the queue — never touching what is still
+ * open, snoozed, or already archived. Read off `taskEvents`, so the number on
+ * the command is exactly the number of chips that disappear: sweeping an info
+ * event the Owner was never shown would make the count lie. One selector so the
+ * sweep's count and the ids it archives always agree. */
 export function finishedEvents(events: EventItem[], now: number = Date.now()): EventItem[] {
-  return visibleEvents(events, now).filter(isEventFinished);
+  return taskEvents(events, now).filter(isEventFinished);
 }
 
 /** "Finished" per the archive contract: done, OR read awareness that never
@@ -139,7 +155,7 @@ export function isEventFinished(event: EventItem): boolean {
 /** A judgment still needing the Owner: kind judgment, open, not optimistically
  * decided. The highest-priority Task state. */
 export function isOpenJudgment(event: EventItem): boolean {
-  return event.kind === "judgment" && !isEventResolved(event);
+  return event.kind === EventKind.Judgment && !isEventResolved(event);
 }
 
 /** The ONE red on the surface (ADR-0012): the "N need you" count = open,
@@ -168,7 +184,7 @@ function taskPriorityRank(event: EventItem): number {
   const open = isOpenJudgment(event);
   if (open && event.blocking) return 0;
   if (open) return 1;
-  if (event.kind === "judgment") return 2; // decided judgment, kept in place
+  if (event.kind === EventKind.Judgment) return 2; // decided judgment, kept in place
   return 3; // awareness (summary/info)
 }
 

@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import { reduce } from "./reducer";
 import { projectEvents } from "./selectors";
 import { initialState } from "./types";
+import { EventKind } from "../protocol";
 import type { EventItem } from "../protocol";
 
 function ev(overrides: Partial<EventItem> = {}): EventItem {
   return {
     id: 1,
-    kind: "judgment",
+    kind: EventKind.Judgment,
     source: { kind: "agent", ref: "hirsel-host" },
     name: "@fork",
     description: "a fork",
@@ -63,7 +64,7 @@ describe("hello_ok seeds Tasks from typed Events", () => {
         pings: [],
         events: [
           ev({ id: 1 }),
-          ev({ id: 2, kind: "info", requires_response: false }),
+          ev({ id: 2, kind: EventKind.Info, requires_response: false }),
           ev({ id: 3 }),
           ev({ id: 4 }),
         ],
@@ -92,7 +93,7 @@ describe("hello_ok seeds Tasks from typed Events", () => {
         pings: [],
         events: [
           ev({ id: 1, status: "done" }),
-          ev({ id: 2, kind: "info", requires_response: false, read: true }),
+          ev({ id: 2, kind: EventKind.Info, requires_response: false, read: true }),
           ev({ id: 3, snoozed_until: "2026-07-20T18:00:00+00:00" }),
           ev({ id: 4 }),
         ],
@@ -108,7 +109,7 @@ describe("event_upsert", () => {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 1 }) },
     });
-    s = reduce(s, { type: "event_upsert", payload: { type: "event_upsert", event: ev({ id: 2, kind: "info" }) } });
+    s = reduce(s, { type: "event_upsert", payload: { type: "event_upsert", event: ev({ id: 2, kind: EventKind.Info }) } });
     expect(s.events.map((e) => e.id)).toEqual([1, 2]);
     s = reduce(s, {
       type: "event_upsert",
@@ -147,7 +148,7 @@ describe("optimistic decide / undecide / read", () => {
   it("event_read_local asserts read on the matching event only, leaving the wire truth alone", () => {
     let s = reduce(initialState(), {
       type: "event_upsert",
-      payload: { type: "event_upsert", event: ev({ id: 9, kind: "summary", read: false }) },
+      payload: { type: "event_upsert", event: ev({ id: 9, kind: EventKind.Summary, read: false }) },
     });
     s = reduce(s, { type: "event_read_local", eventId: 9 });
     expect(s.eventOverrides).toEqual({ 9: { read: true } });
@@ -158,7 +159,7 @@ describe("optimistic decide / undecide / read", () => {
   it("a gesture that only restates the wire truth leaves no residue", () => {
     let s = reduce(initialState(), {
       type: "event_upsert",
-      payload: { type: "event_upsert", event: ev({ id: 9, kind: "summary", read: true }) },
+      payload: { type: "event_upsert", event: ev({ id: 9, kind: EventKind.Summary, read: true }) },
     });
     s = reduce(s, { type: "event_read_local", eventId: 9 });
     expect(s.eventOverrides).toEqual({});

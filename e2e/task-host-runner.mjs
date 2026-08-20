@@ -21,6 +21,9 @@ const hostOrigin = `http://127.0.0.1:${hostPort}`;
 const origin = `http://127.0.0.1:${vitePort}`;
 const token = "task-host-e2e-token";
 const exactCommand = "cd app && npm run e2e:task-host";
+/** A recognisable fake key the host is booted with. Nothing but `hirsel.toml`
+ * may ever hold it whole: not a WebSocket frame, not the rendered DOM. */
+const SENTINEL_KEY = "sk-or-e2e-SENTINEL-0123456789abcdef";
 const startedAt = new Date().toISOString();
 const children = [];
 const logs = [];
@@ -101,6 +104,9 @@ async function main() {
     agent: "scripted",
     driver: "fake",
     dataDirPrefix: "hirsel-task-host-",
+    // A key the host really stores, so the secrets gate below is measuring a
+    // configured provider rather than an empty roster.
+    env: { OPENROUTER_API_KEY: SENTINEL_KEY },
   }));
   startProcess(children, "npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
     cwd: app,
@@ -165,6 +171,12 @@ async function main() {
     });
     page.on("pageerror", (error) => browserErrors.push(error.message));
     page.on("websocket", (socket) => websocketUrls.push(socket.url()));
+    // Everything the host says to this page, verbatim — the wire half of the
+    // secrets gate below.
+    const wsFrames = [];
+    page.on("websocket", (socket) => {
+      socket.on("framereceived", (frame) => wsFrames.push(frame.payload));
+    });
     await page.goto(origin, { waitUntil: "domcontentloaded" });
     try {
       await appReady(page);
@@ -186,6 +198,11 @@ async function main() {
     const promptMarker = "Host e2e prompt override";
     await page.locator('[data-slot="phone-overflow-trigger"]').click();
     await page.getByRole("menuitem", { name: "Settings" }).click();
+    const settingsPanel = page.locator('[data-slot="settings-panel"]');
+    await settingsPanel.waitFor();
+    // The prompt editors live under the Agents tab now; Settings lands on
+    // Appearance, so the tab has to be taken before the editor exists.
+    await settingsPanel.getByRole("tab", { name: "Agents", exact: true }).click();
     const promptEditor = page.getByRole("textbox", { name: "Main agent system prompt" });
     await promptEditor.fill(promptMarker);
     await page.getByRole("button", { name: "Save Main agent system prompt" }).click();
@@ -194,13 +211,49 @@ async function main() {
     await page.getByRole("button", { name: "Reset Main agent system prompt to default" }).click();
     await poll("Prompt override removal", async () =>
       !(await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes(promptMarker));
-    await page.getByRole("button", { name: "Close Settings" }).click();
     check(
       "prompt edit round-trip",
       (await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes("[agent]")
         && !(await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes(promptMarker),
       "saved through WebSocket, broadcast back to Settings, then reset removed [agent].prompt",
     );
+
+    // Secrets discipline, end to end: the host stores the key, the wire carries
+    // only presence and a 4-character tail, and the page can render no more of
+    // it than that tail. All three halves are asserted together, because a
+    // gate that passes on an unconfigured provider proves nothing.
+    await settingsPanel.getByRole("tab", { name: "Providers", exact: true }).click();
+    const maskedTail = SENTINEL_KEY.slice(-4);
+    const openRouterRow = settingsPanel.getByText(`Key set · ends ${maskedTail}`, { exact: false });
+    const providersPanel = settingsPanel.locator('[role="tabpanel"]');
+    // `exact` so the instance's own name matches and its base URL — which also
+    // contains "openrouter" — does not: two matches is a strict-mode violation,
+    // and a bare locator timeout would report nothing a reader could act on.
+    await providersPanel.getByText("OpenRouter", { exact: true }).first().waitFor();
+    // A missing tail is a FAILED row with its evidence, not a bare locator
+    // timeout: the three parts below are the point of the gate, and a reader of
+    // the report needs to see which one gave way.
+    const tailShown = await openRouterRow
+      .waitFor({ timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    const rosterText = (await providersPanel.innerText()).replace(/\s+/g, " ").slice(0, 240);
+    const storedWhole = (await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes(SENTINEL_KEY);
+    const textFrames = wsFrames.filter((payload) => typeof payload === "string");
+    const wireClean = !textFrames.join("\n").includes(SENTINEL_KEY);
+    const markup = await page.evaluate(() => document.documentElement.innerHTML);
+    // Nothing longer than the masked tail: the last 8 characters would already
+    // be twice what the client is allowed to know.
+    const domClean = !markup.includes(SENTINEL_KEY) && !markup.includes(SENTINEL_KEY.slice(-8));
+    check(
+      "provider key never leaves the host",
+      storedWhole && wireClean && domClean && tailShown,
+      `hirsel.toml holds the whole key=${storedWhole}; `
+      + `no full key in ${textFrames.length} inbound WS frames=${wireClean}; `
+      + `no key and no 8-character suffix in the rendered DOM=${domClean}; `
+      + `Providers shows the masked tail "${maskedTail}"=${tailShown}; roster reads "${rosterText}"`,
+    );
+    await page.getByRole("button", { name: "Close Settings" }).click();
     // The seeded fixture is a blocking judgment, so the load-time rule already
     // opens it focused; clicking the chip would TOGGLE that focus back off.
     const ensureFocused = async (id) => {

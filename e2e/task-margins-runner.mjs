@@ -709,6 +709,18 @@ async function main() {
     );
 
     await more.click();
+    // ONE Settings entry. The model choice is a tab inside Settings now, so the
+    // menu no longer carries a second row pointing at the same sheet — read the
+    // open menu before summoning anything, because the duplicate would be here.
+    const settingsEntries = await page.evaluate(() =>
+      [...document.querySelectorAll('[role="menuitem"]')]
+        .map((item) => (item.getAttribute("aria-label") ?? item.textContent ?? "").trim())
+        .filter((name) => /settings/i.test(name)));
+    check(
+      "settings entry is singular",
+      settingsEntries.length === 1 && settingsEntries[0] === "Settings",
+      JSON.stringify(settingsEntries),
+    );
     await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     const settingsPanel = page.locator('[data-slot="settings-panel"]');
     await settingsPanel.waitFor();
@@ -778,21 +790,92 @@ async function main() {
     );
     await settingsPanel.getByRole("radio", { name: "Dark" }).click();
     check("settings theme", await page.locator("html.dark").count() === 1, "Dark toggled in the summoned Settings overlay");
+
+    // Settings is side-tab navigation inside that one modal now: a quiet rail at
+    // `rail:` and up. The contract under test is the tab contract itself — seven
+    // named tabs in one list, one selection, ONE tab stop with the arrows moving
+    // inside it, one mounted panel that the selected tab names, and a real swap
+    // of content when another tab is taken.
+    const settingsTablist = settingsPanel.locator('[role="tablist"]');
+    // The Agents tab's own marker. The seeded WebSocket mock reports no prompt
+    // snapshot, so the prompt editor itself is not on screen under THIS runner —
+    // the host-backed suite drives that editor against a real host. What proves
+    // the swap here is the subsection heading the tab always renders.
+    const mainAgentHeading = settingsPanel.getByRole("heading", { name: "Main agent", exact: true });
+    const darkRadio = settingsPanel.getByRole("radio", { name: "Dark" });
+    const readTabs = () => page.evaluate(() => {
+      const panel = document.querySelector('[data-slot="settings-panel"]');
+      const tabs = [...panel.querySelectorAll('[role="tab"]')];
+      const panels = [...panel.querySelectorAll('[role="tabpanel"]')];
+      const labelledBy = panels[0]?.getAttribute("aria-labelledby") ?? null;
+      return {
+        lists: panel.querySelectorAll('[role="tablist"]').length,
+        names: tabs.map((tab) => tab.textContent.trim()),
+        selected: tabs
+          .filter((tab) => tab.getAttribute("aria-selected") === "true")
+          .map((tab) => tab.textContent.trim()),
+        stops: tabs
+          .filter((tab) => tab.getAttribute("tabindex") === "0")
+          .map((tab) => tab.textContent.trim()),
+        restRoved: tabs
+          .filter((tab) => tab.getAttribute("tabindex") !== "0")
+          .every((tab) => tab.getAttribute("tabindex") === "-1"),
+        panels: panels.length,
+        panelLabelledBy: labelledBy
+          ? document.getElementById(labelledBy)?.textContent.trim() ?? null
+          : null,
+      };
+    });
+    const selectedTab = () => page.evaluate(() =>
+      document.querySelector('[data-slot="settings-panel"] [role="tab"][aria-selected="true"]')
+        ?.textContent.trim() ?? null);
+    const TAB_NAMES = [
+      "Appearance",
+      "Agents",
+      "Providers",
+      "Connection & devices",
+      "Notifications",
+      "About & debug",
+      "Plugins",
+    ];
+    const tabsAtOpen = await readTabs();
+    const agentsBefore = await mainAgentHeading.count();
+    await settingsTablist.getByRole("tab", { name: "Agents", exact: true }).click();
+    await mainAgentHeading.waitFor();
+    const tabsOnAgents = await readTabs();
+    const darkAfterAgents = await darkRadio.count();
+    // Activation follows focus in this list, so each key press IS a selection.
+    await settingsTablist.evaluate((node) => node.focus());
+    await page.keyboard.press("ArrowDown");
+    const afterArrow = await poll("settings ArrowDown selection", async () =>
+      (await selectedTab()) === "Providers" ? "Providers" : null, 5_000);
+    await page.keyboard.press("End");
+    const afterEnd = await poll("settings End selection", async () =>
+      (await selectedTab()) === "Plugins" ? "Plugins" : null, 5_000);
+    await page.keyboard.press("Home");
+    const afterHome = await poll("settings Home selection", async () =>
+      (await selectedTab()) === "Appearance" ? "Appearance" : null, 5_000);
+    check(
+      "settings tabs",
+      tabsAtOpen.lists === 1
+        && tabsAtOpen.names.join(" · ") === TAB_NAMES.join(" · ")
+        && tabsAtOpen.selected.length === 1 && tabsAtOpen.selected[0] === "Appearance"
+        && tabsAtOpen.stops.length === 1 && tabsAtOpen.stops[0] === "Appearance"
+        && tabsAtOpen.restRoved
+        && tabsAtOpen.panels === 1 && tabsAtOpen.panelLabelledBy === "Appearance"
+        // The swap is a real swap: Agents' content arrives, Appearance's goes.
+        && agentsBefore === 0 && darkAfterAgents === 0
+        && tabsOnAgents.selected.length === 1 && tabsOnAgents.selected[0] === "Agents"
+        && tabsOnAgents.stops.length === 1 && tabsOnAgents.stops[0] === "Agents"
+        && tabsOnAgents.panels === 1 && tabsOnAgents.panelLabelledBy === "Agents"
+        && afterArrow === "Providers" && afterEnd === "Plugins" && afterHome === "Appearance",
+      JSON.stringify({ tabsAtOpen, agentsBefore, tabsOnAgents, darkAfterAgents, afterArrow, afterEnd, afterHome }),
+    );
+
     // A genuine pointer click: nothing floats over the full-screen overlay's ×.
     await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
     await settingsPanel.waitFor({ state: "detached" });
     check("settings continuity", await taskField.getAttribute("data-task") === "1" && await textarea.inputValue() === stopDraft, "task focus and composer survive Settings");
-    await more.click();
-    await page.getByRole("menuitem", { name: "Model settings", exact: false }).click();
-    await settingsPanel.waitFor();
-    const modelLanding = await page.locator("#settings-models").evaluate((element) => {
-      const panel = element.closest('[data-slot="settings-panel"]');
-      const rect = element.getBoundingClientRect();
-      const panelRect = panel?.getBoundingClientRect();
-      return Boolean(panelRect && rect.top >= panelRect.top && rect.top <= panelRect.bottom);
-    });
-    check("model settings landing", modelLanding, "Models heading is within the opened overlay's viewport");
-    await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
     check("canvas honest N/A", canvasCount === 0, "Canvas not seeded; task focus and draft continuity retained");
 
     await settingsPanel.waitFor({ state: "detached" });
@@ -1035,6 +1118,46 @@ async function main() {
         && await composerShell.getAttribute("data-focused") === "true",
       "task clears to ambient and returns through the same strip item",
     );
+
+    // The same one list, on its other axis: below `rail:` the tabs are a
+    // horizontal strip above the panel, and the key that reaches along it is
+    // ArrowRight rather than the rail's ArrowDown.
+    await more.click();
+    await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+    await settingsPanel.waitFor();
+    const phoneStrip = await page.evaluate(() => {
+      const list = document.querySelector('[data-slot="settings-tabs"]');
+      if (!list) return null;
+      const tabs = [...list.querySelectorAll('[role="tab"]')];
+      const first = tabs[0]?.getBoundingClientRect();
+      const second = tabs[1]?.getBoundingClientRect();
+      return {
+        direction: getComputedStyle(list).flexDirection,
+        tabs: tabs.length,
+        // Horizontal means the second tab sits beside the first, not under it.
+        beside: Boolean(first && second && second.left >= first.right - 1
+          && Math.abs(second.top - first.top) <= 1),
+        selected: tabs.find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent.trim() ?? null,
+      };
+    });
+    // Take the standing tab by pointer rather than calling focus() on the list:
+    // the panel's trap claims focus a frame after it mounts, and a synthetic
+    // focus placed inside that window is taken straight back. The click changes
+    // no selection — Appearance is already the one — it only puts the keyboard
+    // where a phone Owner's tap would have put it.
+    await settingsTablist.getByRole("tab", { name: "Appearance", exact: true }).click();
+    await page.keyboard.press("ArrowRight");
+    const phoneAfterArrow = await poll("phone settings ArrowRight selection", async () =>
+      (await selectedTab()) === "Agents" ? "Agents" : null, 5_000);
+    check(
+      "settings tab strip is horizontal on phone",
+      phoneStrip?.direction === "row" && phoneStrip.tabs === 7 && phoneStrip.beside === true
+        && phoneStrip.selected === "Appearance" && phoneAfterArrow === "Agents",
+      JSON.stringify({ ...phoneStrip, phoneAfterArrow }),
+    );
+    await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
+    await settingsPanel.waitFor({ state: "detached" });
+
     await captureScreenshot(page, "phone-390");
 
     await page.setViewportSize({ width: 320, height: 700 });

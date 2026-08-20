@@ -1,6 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@solidjs/testing-library";
 import { afterEach } from "vitest";
+import { startPlugins } from "./src/plugins/loader";
+
+// Shell tests simulate socket auth, which kicks off the once-per-load plugin
+// roster fetch — in jsdom that fetch fails seconds later and its console.warn
+// can land after the test file finished, racing worker teardown. Latch the
+// loader with an empty roster so no test ever does network. loader.test.ts
+// resetModules()s, so its fresh instances are unaffected.
+startPlugins({ list: async () => [], modules: {} });
 
 // jsdom lacks Element#scrollIntoView / #scrollTo; ChatView scrolls messages
 // into view and the thread to the bottom. No-ops are enough - no layout to

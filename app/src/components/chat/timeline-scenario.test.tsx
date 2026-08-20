@@ -118,6 +118,11 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
     vi.unstubAllEnvs();
   });
 
+  // Deliberately no per-test timeout literal here: this headless scenario
+  // transforms and runs the WHOLE app graph, the slowest thing in the suite and
+  // the most sensitive to machine load. A literal silently overrides
+  // `--testTimeout`, so the gate's own headroom could never reach the one test
+  // that needs it. The suite default and the flag govern.
   it("streams prose ↔ tool ↔ prose ↔ reasoning, then collapses into turn details", async () => {
     const host = await startScriptedHost();
     let closeClient: () => void = () => {};
@@ -275,5 +280,5 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       closeClient();
       await host.close();
     }
-  }, 30000);
+  });
 });

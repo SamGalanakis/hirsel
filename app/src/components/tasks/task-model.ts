@@ -96,11 +96,18 @@ export function messagesForTask(
     const mentions = message.mentions ?? [];
     const namesTarget = message.id === task.anchor || mentions.includes(task.id);
     const mentionsOther = mentions.some((id) => otherTaskIds.has(id));
-    const crossesOtherTask = mentionsOther || (!namesTarget && (
-      otherAnchors.has(message.id)
+    // Naming this Task is membership, full stop — a message may cite several
+    // Tasks and belongs to every margin it names (CONTEXT "Task margin:
+    // selected by durable Anchor and Task mentions"). Citing OTHER Tasks is a
+    // boundary only for a message that does not name this one; without that
+    // gate, writing "same as #7" from inside #12 would eject the Owner's own
+    // line from the margin he wrote it in.
+    const crossesOtherTask = !namesTarget && (
+      mentionsOther
+      || otherAnchors.has(message.id)
       || (message.ref !== null && otherAnchors.has(message.ref))
       || (message.ref !== null && blocked.has(message.ref))
-    ));
+    );
     if (crossesOtherTask) {
       blocked.add(message.id);
       awaitingAgent = false;
@@ -120,6 +127,20 @@ export function messagesForTask(
   return out;
 }
 
+/** How an outgoing message gets its Task context — and how the two ways of
+ * naming a Task compose.
+ *
+ * They are different questions, so they never fight:
+ *  - **Chip focus decides where the message LIVES.** The focused Task's anchor
+ *    becomes the message's `ref`, and its id is always in `mentions`. Focus is
+ *    the field, not a modifier on the sentence.
+ *  - **A typed `#12` decides what the message CITES.** Explicit refs are added
+ *    alongside, in the order they were written, and never re-anchor anything.
+ *
+ * So citing `#7` while `#12` is open sends `ref = 12's anchor`, `mentions =
+ * [7, 12]`: the line stays in 12's margin, where it was written, and also
+ * surfaces in 7's, because it named it. Citing the focused Task itself is
+ * idempotent — the set dedupes. Ambient sends carry exactly the refs typed. */
 export function taskSendContext(
   task: EventItem | null,
   ref: number | null,

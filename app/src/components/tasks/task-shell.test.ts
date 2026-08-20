@@ -75,6 +75,27 @@ describe("messagesForTask", () => {
     expect(messagesForTask(auth, messages, [deploy, auth]).map((item) => item.id))
       .toEqual([3, 6, 7]);
   });
+
+  it("keeps a citing message in its own margin and shows it in the cited one", () => {
+    const deploy = { ...task, id: 1, name: "@deploy-4821", anchor: 2 };
+    const auth = { ...task, id: 2, name: "@auth-pr", anchor: 3 };
+    const field = [deploy, auth];
+    const messages = [
+      message(2, "agent", "Deploy is staged. Ship it?", null),
+      message(3, "agent", "Auth is ready. Open the PR?", null),
+      // Written inside deploy, citing auth: `#2` typed into a deploy-focused
+      // composer sends ref=deploy.anchor, mentions=[2, 1].
+      message(4, "owner", "Hold until #2 lands", 2, [2, 1]),
+      message(5, "agent", "Holding.", null),
+    ];
+
+    expect(messagesForTask(deploy, messages, field).map((item) => item.id))
+      .toEqual([2, 4, 5]);
+    // The reply follows its question into both margins: an agent line answering
+    // a message that cited auth is auth's context too.
+    expect(messagesForTask(auth, messages, field).map((item) => item.id))
+      .toEqual([3, 4, 5]);
+  });
 });
 
 describe("task focus", () => {

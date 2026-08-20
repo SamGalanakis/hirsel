@@ -141,6 +141,11 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
     vi.unstubAllEnvs();
   });
 
+  // Deliberately no per-test timeout literal here: this headless scenario
+  // transforms and runs the WHOLE app graph, the slowest thing in the suite and
+  // the most sensitive to machine load. A literal silently overrides
+  // `--testTimeout`, so the gate's own headroom could never reach the one test
+  // that needs it. The suite default and the flag govern.
   it("runs the full process lifecycle + live/committed tool calls", async () => {
     const host = await startScriptedHost();
     let closeClient: () => void = () => {};
@@ -251,5 +256,5 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       closeClient();
       await host.close();
     }
-  }, 30000);
+  });
 });

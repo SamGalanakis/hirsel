@@ -110,7 +110,7 @@ export const SHORTCUTS: Shortcut[] = [
   // gesture, which is the only one a phone can reach.
   { keys: ["Hold Send"], label: "Queue for next turn (touch)", group: "Hirsel" },
   { keys: ["Esc"], label: "Stop the active turn", group: "Hirsel" },
-  { keys: ["@"], label: "Mention a task", group: "Hirsel" },
+  { keys: ["#"], label: "Cite a task", group: "Hirsel" },
   { keys: ["g", "t"], label: "Focus tasks", group: "Focus" },
   { keys: ["g", "h"], label: "Focus Hirsel", group: "Focus" },
   { keys: ["g", "p"], label: "Processes", group: "Focus" },

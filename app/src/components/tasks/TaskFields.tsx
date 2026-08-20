@@ -2,7 +2,9 @@ import { Check, LoaderCircle } from "lucide-solid";
 import { createMemo, For, Show } from "solid-js";
 import type { EventItem, ViewInstance } from "../../protocol";
 import type { DisplayMessage } from "../../store/types";
+import { copyWithToast } from "../../lib/clipboard";
 import { decideEventWithUndo, reopenEvent } from "../../lib/event-decide";
+import { formatTaskRef } from "../../lib/task-ref";
 import { PluginSlot } from "../../plugins/PluginSlot";
 import { eventUiNodes, isEventResolved } from "../../store/selectors";
 import { state } from "../../store/store";
@@ -247,10 +249,34 @@ export function TaskField(props: {
         >
           <div class="min-w-0">
             {/* Quiet identity: the task name is context, and the generated question
-                below must visibly lead it (DESIGN §3). */}
-            <h2 class="m-0 text-[1.25rem] font-[450] leading-tight text-muted-foreground">
-              {taskName(props.task)}
-            </h2>
+                below must visibly lead it (DESIGN §3). The ref leads the name in
+                the same order the chip uses, so the two readings of one Task
+                line up. It is the only thing on the card that can be taken with
+                you: one click copies `#12`, which is the exact string that
+                cites this Task back in the composer. The deep link is the
+                address bar's job — it already says /t/12 while this Task is
+                open — so the card does not offer a second, longer copy of the
+                same idea. */}
+            <div class="flex items-baseline gap-2">
+              <button
+                type="button"
+                data-slot="task-ref-copy"
+                aria-label={`Copy task ref ${formatTaskRef(props.task.id)}`}
+                title="Copy ref"
+                class="shrink-0 rounded text-meta text-muted-foreground/70 outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:-mx-2 [@media(pointer:coarse)]:-my-3 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+                onClick={() =>
+                  void copyWithToast(
+                    formatTaskRef(props.task.id),
+                    `Copied ${formatTaskRef(props.task.id)}`,
+                  )}
+              >
+                {/* Mono on the text, not the button: see TaskRefTag. */}
+                <span class="font-mono">{formatTaskRef(props.task.id)}</span>
+              </button>
+              <h2 class="m-0 min-w-0 text-[1.25rem] font-[450] leading-tight text-muted-foreground">
+                {taskName(props.task)}
+              </h2>
+            </div>
             <Show when={!uiOwnsFraming()}>
               <p class="mt-2 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">{props.task.description}</p>
             </Show>

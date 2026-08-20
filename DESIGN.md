@@ -69,6 +69,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 
 - Desktop: a quiet task index occupies the left margin; the selected task unfolds through the remaining field. It is a list of names and literal statuses, not cards.
 - Phone: tasks become a horizontal, masked strip. The selected task owns the screen below it.
+- Every task carries its ref — `#<id>`, monospace and quiet — ahead of its name on the chip and on the focused card. It is the task's address: on the card one click copies it, and the browser address bar tracks focus as `/t/<id>`, so the short form and the link are each available exactly once.
 - Selecting a task focuses it; selecting the focused task again clears focus.
 - Focus is shown by the unfolded instrument, task-row state, and the composer's tonal shift—never by a label inside the composer, by moving or resizing it, or by color alone.
 - On load the most-needing task opens focused (blocked on you → needs you → unseen → moving, newest first); with no open task the field rests ambient. Focus is chosen once per load: a task arriving later never steals it.
@@ -97,6 +98,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - The conversation follows the card in the same scroll flow at every width; phone and desktop differ only in inset.
 - Earlier rows arrive just in time as the reader approaches the top. There is no “earlier messages” control or beginning marker; only a quiet loading line may appear when the reader reaches the edge before a prefetched page lands.
 - With no relevant conversation, it does not render or reserve space.
+- A cited Task renders inline as its ref in monospace with one quiet underline — no dot, badge, fill or pill; state belongs to the chip and the card, not to an aside mid-sentence. Activating it focuses that Task. A ref naming nothing the field still holds is left as the literal characters typed.
 - Tool timelines may unfold under the relevant Hirsel line on demand; they never create a third column.
 
 ### Composer
@@ -107,6 +109,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - The composer holds one width in every state: the reading measure it shares with the single column above it — task card and conversation alike — so its left and right edges are the prose's left and right edges, in ambient and in focus alike. It is the floor of that column, not a bar under it. Focus changes only its tone, to a restrained mint-local tint; ambient rests neutral. (Focus used to narrow it from the frame width to the measure. That moved the one permanently visible element — and its send target — sideways on every toggle. Continuity of the standing element beats the width distinction.)
 - It rests one text row high — a 36px row on a fine pointer, 44px where a thumb uses it — and grows with the draft to a four-line ceiling. A capsule taller than the text it holds is a control advertising itself.
 - The composer is an organic quiet capsule. **It carries no affordance a key already does and none that is inert.** On a fine pointer Enter is the send, so there is no Send button; on a coarse pointer Enter is a newline, so the round Send is the only send there and its long-press queues the draft for the next turn. Attach and — while a turn is live — Stop are the only other controls; nothing sits in the capsule waiting to be enabled. (A caret beside Send used to open a "Send now / Queue for next turn" menu and was disabled whenever the draft was empty: the affordance did nothing exactly when it was reached for.) Every route that left the capsule is written down in the `⌘/` sheet — Tab to queue on desktop, hold Send to queue on touch.
+- Typing `#` cites a Task. The picker opens under the caret on the quiet-field tone with one hairline, filters on name or id as you type, is driven entirely from the caret (arrows, Enter/Tab to accept, Esc to close the picker and nothing else) and offers 44px rows to a thumb. It inserts the Task's ref — `#12`, the same monospace string the chip and the card carry — and never a second, prettier spelling of it. The send resolves whatever refs still stand in the text; deleting the token deletes the citation.
 - On phone it stays sticky at the thumb edge while task content moves behind it. Nothing else may rest on it: the toast stack and the "jump to latest" pill clear it rather than land on it, and that pill centres on the reading column, not on the pane.
 
 ### Utilities

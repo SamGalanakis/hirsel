@@ -257,6 +257,61 @@ describe("Task Margins shell", () => {
     expect(marks("task-field")).toEqual(ambient);
   });
 
+  it("stacks the task card and the conversation in ONE column, never two", async () => {
+    const { screen, store } = await setupApp([task(1, "@choose-direction", "Choose direction", 5)]);
+    store.dispatch({
+      type: "msg",
+      payload: {
+        type: "msg",
+        message: { id: 5, author: "agent", body: "Which direction?", ref: null, ts: "2026-07-13T02:00:00Z", attachments: [] },
+      },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+
+    const column = document.querySelector('[data-slot="task-column"]') as HTMLElement;
+    const card = document.querySelector('[data-slot="task-card"]') as HTMLElement;
+    const conversation = document.querySelector('[data-slot="task-conversation"]') as HTMLElement;
+    // Same container, card first: the conversation is no longer a margin beside
+    // the instrument, it is the flow underneath it (DESIGN §4).
+    expect(column.contains(card)).toBe(true);
+    expect(column.contains(conversation)).toBe(true);
+    expect(card.compareDocumentPosition(conversation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(conversation).getByText("Which direction?")).toBeInTheDocument();
+
+    // One width for the whole column — the same measure the composer holds.
+    expect(column.className).toContain("max-w-measure");
+    // Nothing may reintroduce a second track, at any width or container size.
+    const field = document.querySelector('[data-slot="task-field"]') as HTMLElement;
+    for (const node of [field, column, card, conversation]) {
+      expect(node.className).not.toMatch(/grid-cols-\[minmax\(0,1fr\)_/);
+      expect(node.className).not.toContain("@[46rem]");
+    }
+    // Wide content still scrolls inside its own box on both halves.
+    expect(card.className).toContain("grid-cols-[minmax(0,1fr)]");
+    expect(conversation.className).toContain("grid-cols-[minmax(0,1fr)]");
+  });
+
+  it("pins the task card and caps its height so the conversation is never pushed off", async () => {
+    const { screen } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+    const card = document.querySelector('[data-slot="task-card"]') as HTMLElement;
+
+    // Sticky at the top of the scroll container: task context stays legible
+    // while the history below it is read.
+    expect(card.className).toContain("sticky");
+    expect(card.className).toContain("top-0");
+    // A tall instrument stops at the cap and scrolls inside itself rather than
+    // shoving the conversation out of the field.
+    expect(card.className).toContain("max-h-[40dvh]");
+    expect(card.className).toContain("overflow-y-auto");
+    // ...and it never traps the wheel: the pinned card is what most gestures
+    // land on, so scroll chaining stays at its default.
+    expect(card.className).not.toContain("overscroll-contain");
+    // It rides on the canvas with one hairline, not on a decorative surface.
+    expect(card.className).toContain("bg-background");
+    expect(card.className).toContain("border-b");
+  });
+
   it("marks the focused chip, dims the rest, and offers a labelled exit", async () => {
     const { screen, store } = await setupApp([
       task(1, "@choose-direction", "Choose direction"),

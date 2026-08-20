@@ -16,13 +16,13 @@ import { CommittedToolCalls } from "../chat/ToolCalls";
 import { messagesForTask, taskName } from "./task-model";
 import { formatBytes } from "../../lib/format";
 
-/** How much conversation the margin renders before asking to be widened, and
- * how much each "earlier messages" press reveals. The old hard `slice(-8)` had
- * no way to reach anything older at all; this window is generous enough that
- * the control is rare, and the reducer's MESSAGES_CAP is still the outer bound
- * (messages are KB-scale, so the whole retained log renders fine — there is no
+/** How much conversation renders before asking to be widened, and how much each
+ * "earlier messages" press reveals. The old hard `slice(-8)` had no way to
+ * reach anything older at all; this window is generous enough that the control
+ * is rare, and the reducer's MESSAGES_CAP is still the outer bound (messages
+ * are KB-scale, so the whole retained log renders fine — there is no
  * virtualisation to earn here). */
-const MARGIN_WINDOW = 30;
+const CONVERSATION_WINDOW = 30;
 
 /** The one focus-swap motion, shared verbatim by both fields so the swap reads
  * as one surface changing subject rather than two panels trading places: a
@@ -40,14 +40,22 @@ const FIELD_SWAP =
  * difference on every focus toggle. */
 const FIELD_PADDING = "px-gutter py-8 rail:py-12";
 
-function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: boolean }) {
-  const [revealed, setRevealed] = createSignal(MARGIN_WINDOW);
+/** The pinned task card's ceiling. A content-thin task ("session rotated", two
+ * lines) reads as a few lines; a task with tall generated fields stops here and
+ * scrolls inside itself rather than shoving the conversation off screen. It is
+ * `dvh` rather than a fixed height because the budget being divided is the
+ * viewport: on a 700px phone this leaves the conversation ~60dvh minus the
+ * composer, which is still the majority of the field. */
+const CARD_MAX_HEIGHT = "max-h-[40dvh]";
+
+function Conversation(props: { messages: DisplayMessage[]; thinking?: boolean }) {
+  const [revealed, setRevealed] = createSignal(CONVERSATION_WINDOW);
   const shown = () => props.messages.slice(-revealed());
   const hiddenCount = () => Math.max(0, props.messages.length - revealed());
   const hasContent = () => props.messages.length > 0 || props.thinking || state.turnEvents.length > 0;
   return (
     <Show when={hasContent()}>
-      <div data-slot="conversation-margin" class="min-w-0 py-4 rail:py-10">
+      <div data-slot="conversation" class="min-w-0 py-4 rail:py-10">
         <div class="flex max-w-[42rem] flex-col gap-6">
           {/* Reaching older conversation is a deliberate press, not an infinite
               scroll: revealing more grows the flow ABOVE the reader, and the
@@ -57,7 +65,7 @@ function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: bool
               type="button"
               data-slot="reveal-earlier"
               class="-ml-1 w-fit rounded px-1 py-px text-xs text-muted-foreground underline decoration-current/30 underline-offset-4 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-              onClick={() => setRevealed((n) => n + MARGIN_WINDOW)}
+              onClick={() => setRevealed((n) => n + CONVERSATION_WINDOW)}
             >
               {`Earlier messages (${hiddenCount()})`}
             </button>
@@ -150,7 +158,7 @@ function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: bool
 }
 
 export function AmbientField() {
-  // The whole retained log: ConversationMargin owns the render window and the
+  // The whole retained log: Conversation owns the render window and the
   // "earlier messages" reveal, so the ambient field no longer truncates
   // history a second time on the way in.
   const messages = () => state.messages;
@@ -160,7 +168,7 @@ export function AmbientField() {
       class={`mx-auto flex min-h-full w-full max-w-frame flex-col justify-end ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
       <div class="w-full max-w-measure">
-        <ConversationMargin messages={messages()} thinking={state.agentActivity.state === "thinking"} />
+        <Conversation messages={messages()} thinking={state.agentActivity.state === "thinking"} />
         {/* home.section: plugin cards on the ambient field, below the recent
             global conversation — the resting view an Owner lands on with no Task
             focused, so an ambient plugin surface (a feed, a status card) belongs
@@ -182,75 +190,97 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
   // printed the description a second time under an instrument that already
   // stated it.
   const uiOwnsFraming = () => eventUiNodes(props.task.ui).length > 0;
-  const hasConversation = () => related().length > 0
-    || state.agentActivity.state === "thinking"
-    || state.turnEvents.length > 0;
   return (
     <div
       data-slot="task-field"
       data-task={props.task.id}
-      /* `grid-cols-[minmax(0,1fr)]`, not a bare implicit column: an auto track
-         sizes to its item's min-content, so one wide table or unbroken command
-         line inside the instrument would widen the whole field past the
-         viewport instead of scrolling inside its own box. */
-      class={`mx-auto grid min-h-full w-full max-w-frame grid-cols-[minmax(0,1fr)] content-end gap-14 ${FIELD_PADDING} ${FIELD_SWAP}`}
-      /* Two columns need the desktop shell (`rail`) AND a field actually wide
-         enough to hold them: a summoned utility pane takes its width from this
-         same row, and at 1100px it leaves ~470px — less than the two column
-         minimums put together, which pushed the margin straight out of the
-         field. The container query is the honest condition, since the media
-         query cannot see the pane. */
-      classList={{
-        "rail:@[46rem]/field:grid-cols-[minmax(320px,1fr)_minmax(280px,.72fr)] rail:@[46rem]/field:items-center":
-          hasConversation(),
-      }}
+      /* `min-h-full` is load-bearing, not decoration: the scroll container is a
+         `justify-end` flex column, and a child shorter than it would be pushed
+         down — while a child that merely overflows would have its top clipped
+         out of reach by that same `justify-end`. Filling the container makes
+         the alignment a no-op and hands the vertical rhythm back to this
+         field. */
+      class={`mx-auto flex min-h-full w-full max-w-frame flex-col ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
-      <section class="min-w-0 max-w-measure">
-        {/* Quiet identity: the task name is context, and the generated question
-            below must visibly lead it (DESIGN §3). */}
-        <h2 class="m-0 text-[1.25rem] font-[450] leading-tight text-muted-foreground">
-          {taskName(props.task)}
-        </h2>
-        <Show when={!uiOwnsFraming()}>
-          <p class="mt-2 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">{props.task.description}</p>
-        </Show>
-        <div class="mt-4">
-          <EventCardRenderer
-            ui={props.task.ui}
-            disabled={resolved()}
-            onAction={(action, data, settles) => {
-              if (settles) decideEventWithUndo(props.task.id, action, data);
-              else getClient()?.sendEventAction(props.task.id, action, data);
-            }}
-          />
-          <Show when={resolved()}>
-            <div class="mt-6 flex items-center gap-3 text-sm text-status-success">
-              <Check class="size-4" aria-hidden="true" />
-              <span>Task decided</span>
-              <button
-                type="button"
-                class="ml-1 inline-flex items-center rounded px-1 text-xs font-medium text-muted-foreground underline decoration-current/30 underline-offset-4 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3"
-                onClick={() => reopenEvent(props.task.id)}
-              >
-                Reopen
-              </button>
+      {/* ONE column at the reading measure, the same one ambient uses. The task
+          is a pinned context card at its top and the conversation flows below
+          it into the composer — allocation follows content, not role. (This was
+          two columns: the instrument left, the conversation squeezed into a
+          ~400px right margin. A two-line "session rotated" notice then owned
+          half the screen while everything with substance sat in the margin.)
+
+          Both halves are `grid-cols-[minmax(0,1fr)]`, never a bare implicit
+          column: an auto track sizes to its item's min-content, so one wide
+          table or unbroken command line — in the card OR in the conversation —
+          would widen the whole field past the viewport instead of scrolling
+          inside its own box. The column itself is flex rather than grid because
+          a grid item's containing block is its own track, which would pin the
+          sticky card to a zero-travel row and defeat the pin entirely. */}
+      <div
+        data-slot="task-column"
+        class="flex w-full max-w-measure flex-1 flex-col"
+      >
+        <section
+          data-slot="task-card"
+          /* Pinned: the card stays at the top of the scroll container so the
+             task stays legible while its history is read. It is on the canvas
+             like everything else — `bg-background` is what the conversation
+             passes behind, not a decorative surface — with one hairline as the
+             boundary (DESIGN §2). Capped at CARD_MAX_HEIGHT with its own
+             scroll so a tall instrument can never push the conversation off
+             screen. Scroll chaining is deliberately left at its default: the
+             pinned card covers the top of the field, so it is what most wheel
+             gestures land on, and `overscroll-contain` would trap them there
+             once the card reached its own end. */
+          class={`sticky top-0 z-10 grid shrink-0 grid-cols-[minmax(0,1fr)] overflow-y-auto border-b border-border/50 bg-background pb-6 pt-2 ${CARD_MAX_HEIGHT}`}
+        >
+          <div class="min-w-0">
+            {/* Quiet identity: the task name is context, and the generated question
+                below must visibly lead it (DESIGN §3). */}
+            <h2 class="m-0 text-[1.25rem] font-[450] leading-tight text-muted-foreground">
+              {taskName(props.task)}
+            </h2>
+            <Show when={!uiOwnsFraming()}>
+              <p class="mt-2 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">{props.task.description}</p>
+            </Show>
+            <div class="mt-4">
+              <EventCardRenderer
+                ui={props.task.ui}
+                disabled={resolved()}
+                onAction={(action, data, settles) => {
+                  if (settles) decideEventWithUndo(props.task.id, action, data);
+                  else getClient()?.sendEventAction(props.task.id, action, data);
+                }}
+              />
+              <Show when={resolved()}>
+                <div class="mt-6 flex items-center gap-3 text-sm text-status-success">
+                  <Check class="size-4" aria-hidden="true" />
+                  <span>Task decided</span>
+                  <button
+                    type="button"
+                    class="ml-1 inline-flex items-center rounded px-1 text-xs font-medium text-muted-foreground underline decoration-current/30 underline-offset-4 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3"
+                    onClick={() => reopenEvent(props.task.id)}
+                  >
+                    Reopen
+                  </button>
+                </div>
+              </Show>
+              <For each={props.views}>
+                {(view) => (
+                  <div class="mt-6"><ViewRenderer spec={view.spec} instanceId={view.instance_id} placement={view.placement} /></div>
+                )}
+              </For>
             </div>
-          </Show>
-          <For each={props.views}>
-            {(view) => (
-              <div class="mt-6"><ViewRenderer spec={view.spec} instanceId={view.instance_id} placement={view.placement} /></div>
-            )}
-          </For>
-        </div>
-      </section>
-      {/* The Task's margin column: its conversation, then task.panel plugin
-          contributions. The margin is the Task world's secondary surface —
-          context beside the instrument, never over it — which is exactly what a
-          plugin panel about this Task is. `ctx` carries the Task's id. */}
-      <div class="min-w-0">
-        <ConversationMargin messages={related()} thinking={state.agentActivity.state === "thinking"} />
-        <div class="flex flex-col gap-4 py-4 empty:hidden">
-          <PluginSlot name="task.panel" ctx={{ taskId: props.task.id }} />
+          </div>
+        </section>
+        {/* The Task's conversation, then task.panel plugin contributions —
+            below the card, at the same width, bottom-anchored on the composer
+            exactly as ambient conversation is. `ctx` carries the Task's id. */}
+        <div data-slot="task-conversation" class="grid flex-1 grid-cols-[minmax(0,1fr)] content-end">
+          <Conversation messages={related()} thinking={state.agentActivity.state === "thinking"} />
+          <div class="flex flex-col gap-4 py-4 empty:hidden">
+            <PluginSlot name="task.panel" ctx={{ taskId: props.task.id }} />
+          </div>
         </div>
       </div>
     </div>

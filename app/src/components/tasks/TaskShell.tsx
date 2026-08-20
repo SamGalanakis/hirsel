@@ -139,20 +139,19 @@ export function TaskShell() {
     if (task) focusTask(task.id);
   }));
 
-  // A focus change re-subjects the whole field: start the new task at its top,
-  // and bring its chip into view so the marker and the instrument it opened are
-  // never in two different places (the strip in particular scrolls
+  // A focus change re-subjects the whole field: start at the newest line and
+  // bring the new task's chip into view, so the marker and the instrument it
+  // opened are never in two different places (the strip in particular scrolls
   // independently and would otherwise leave the marker off-screen).
+  //
+  // BOTH states start at the bottom now. A focused task used to open at
+  // scrollTop 0 because the instrument sat in its own column and scrolling
+  // away from it lost the subject. The instrument is a PINNED card at the top
+  // of the same column now, visible at every scroll offset, so there is
+  // nothing left to protect by holding the field at its top — and every state
+  // opens where a conversation opens, at its newest line above the composer.
   createEffect(on(() => state.focusedTaskId, (focusedId) => {
-    // A Task starts at its top (the instrument is the subject). Ambient is the
-    // global conversation, so it starts where a conversation starts: at the
-    // newest line, above the composer.
-    if (focusedId === null) {
-      requestAnimationFrame(() => pin(true));
-    } else if (taskScrollRef) {
-      taskScrollRef.scrollTop = 0;
-      measure();
-    }
+    requestAnimationFrame(() => pin(true));
     if (focusedId === null) return;
     const chip = document.querySelector<HTMLElement>(`[data-task-id="${focusedId}"]`);
     chip?.scrollIntoView?.({ inline: "center", block: "nearest" });
@@ -248,11 +247,7 @@ export function TaskShell() {
                expanding turn-details block from shoving the text the Owner is
                reading; the browser holds the anchored node still and absorbs
                the growth above it. */
-            /* `@container/field` so the task field can size its own columns
-               against the width it actually has rather than the window's: a
-               summoned utility pane takes its width out of this row, and the
-               media query cannot see that. */
-            class="@container/field flex min-h-0 flex-1 flex-col justify-end overflow-y-auto [overflow-anchor:auto]"
+            class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto [overflow-anchor:auto]"
           >
             <Show when={focusedTask()} fallback={<AmbientField />}>
               {(task) => <TaskField task={task()} tasks={tasks()} views={taskViews()} />}

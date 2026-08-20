@@ -12,7 +12,10 @@ use crate::{
     codex::{CodexDriver, codex_agent_message, codex_terminal_outcome},
     fake::FakeDriver,
     shared::drain_stderr,
-    types::{AgentKind, SpawnSpec, SubagentDriver, SubagentEvent, TerminalOutcome},
+    types::{
+        AgentKind, DriverError, SessionHandle, SpawnSpec, SubagentDriver, SubagentEvent,
+        TerminalOutcome,
+    },
 };
 
 #[test]
@@ -192,6 +195,77 @@ async fn fake_driver_interrupt_is_terminal() {
             outcome: TerminalOutcome::Interrupted
         }
     );
+}
+
+#[tokio::test]
+async fn fake_driver_rejects_unknown_sessions() {
+    let driver = FakeDriver::default();
+    let handle = SessionHandle {
+        id: "missing-session".to_string(),
+        agent: AgentKind::Codex,
+    };
+
+    assert!(matches!(
+        driver.prompt(&handle, "keep going".to_string()).await,
+        Err(DriverError::SessionNotFound(id)) if id == handle.id
+    ));
+    assert!(matches!(
+        driver.interrupt(&handle).await,
+        Err(DriverError::SessionNotFound(id)) if id == handle.id
+    ));
+    assert!(matches!(
+        driver.events(&handle),
+        Err(DriverError::SessionNotFound(id)) if id == handle.id
+    ));
+}
+
+#[tokio::test]
+async fn fake_driver_retire_ends_an_interrupted_session() {
+    let fixture = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        fixture.path(),
+        serde_json::to_string(&json!({
+            "external_id": "fake-retired",
+            "progress": ["one", "two"],
+            "delay_ms": 200,
+            "terminal": { "status": "done", "summary": "should not happen" }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let driver = FakeDriver::default();
+    let handle = driver
+        .spawn(SpawnSpec {
+            agent: AgentKind::Claude,
+            model: None,
+            variant: None,
+            prompt: "wait".to_string(),
+            cwd: std::env::current_dir().unwrap(),
+            fake_fixture: Some(fixture.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+    let mut events = driver.events(&handle).unwrap();
+    assert!(matches!(
+        events.next().await,
+        Some(SubagentEvent::Started { .. })
+    ));
+
+    driver.interrupt(&handle).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap(),
+        Some(SubagentEvent::Terminal {
+            outcome: TerminalOutcome::Interrupted,
+        })
+    );
+    driver.retire(&handle).await.unwrap();
+
+    assert!(matches!(
+        driver.events(&handle),
+        Err(DriverError::SessionNotFound(id)) if id == handle.id
+    ));
 }
 
 #[tokio::test]

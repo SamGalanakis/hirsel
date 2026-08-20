@@ -1,20 +1,55 @@
 //! Plumbing shared by the CLI-backed drivers: the event fan-out hub, summary
 //! formatting, JSON line writing, and process-group lifecycle helpers.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 use async_stream::stream;
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{ChildStderr, ChildStdin, Command},
+    process::{Child, ChildStderr, ChildStdin, Command},
     sync::broadcast,
 };
 
-use crate::types::{DriverError, DriverResult, EventStream, SubagentEvent};
+use crate::types::{
+    DriverError, DriverResult, EventStream, SessionHandle, SubagentEvent, TerminalOutcome,
+};
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> DriverResult<MutexGuard<'_, T>> {
     mutex.lock().map_err(|_| DriverError::StatePoisoned)
+}
+
+pub(crate) struct SessionRegistry<S> {
+    sessions: Mutex<HashMap<String, Arc<S>>>,
+}
+
+impl<S> Default for SessionRegistry<S> {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<S> SessionRegistry<S> {
+    pub(crate) fn insert(&self, id: String, session: Arc<S>) -> DriverResult<()> {
+        lock(&self.sessions)?.insert(id, session);
+        Ok(())
+    }
+
+    pub(crate) fn get(&self, handle: &SessionHandle) -> DriverResult<Arc<S>> {
+        lock(&self.sessions)?
+            .get(&handle.id)
+            .cloned()
+            .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))
+    }
+
+    pub(crate) fn remove(&self, handle: &SessionHandle) -> DriverResult<Option<Arc<S>>> {
+        Ok(lock(&self.sessions)?.remove(&handle.id))
+    }
 }
 
 pub(crate) struct EventHub {
@@ -110,13 +145,56 @@ pub(crate) fn start_in_process_group(command: &mut Command) {
     }
 }
 
-pub(crate) fn kill_process_group(pgid: i32) {
-    if pgid > 0 {
+pub(crate) struct ProcessGroup(i32);
+
+impl ProcessGroup {
+    pub(crate) fn new(pgid: i32) -> Self {
+        Self(pgid)
+    }
+
+    pub(crate) fn kill_group(&self) {
+        if self.0 <= 0 {
+            return;
+        }
         // Best-effort cleanup for externally spawned CLIs.
         unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
+            libc::kill(-self.0, libc::SIGKILL);
         }
     }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill_group();
+    }
+}
+
+pub(crate) async fn finish_child(
+    mut child: Child,
+    terminal_sent: bool,
+    events: &EventHub,
+    driver_name: &str,
+    terminal_description: &str,
+) {
+    match child.wait().await {
+        Ok(status) if terminal_sent || status.success() => {}
+        Ok(status) => {
+            emit_child_failure(
+                events,
+                format!("{driver_name} exited without {terminal_description}: {status}"),
+            );
+        }
+        Err(error) if !terminal_sent => {
+            emit_child_failure(events, format!("{driver_name} wait failed: {error}"));
+        }
+        Err(_) => {}
+    }
+}
+
+fn emit_child_failure(events: &EventHub, reason: String) {
+    let _ = events.emit(SubagentEvent::Terminal {
+        outcome: TerminalOutcome::Failed { reason },
+    });
 }
 
 pub(crate) async fn drain_stderr(mut stderr: ChildStderr) {

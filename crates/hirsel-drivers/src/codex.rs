@@ -1,7 +1,6 @@
 //! Driver for the `codex app-server` JSON-RPC protocol.
 
 use std::{
-    collections::HashMap,
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -21,8 +20,8 @@ use uuid::Uuid;
 
 use crate::{
     shared::{
-        EventHub, drain_stderr, kill_process_group, lock, short_line, start_in_process_group,
-        terminal_message, write_json_line,
+        EventHub, ProcessGroup, SessionRegistry, drain_stderr, finish_child, lock, short_line,
+        start_in_process_group, terminal_message, write_json_line,
     },
     types::{
         AgentKind, DriverError, DriverResult, EventStream, SessionHandle, SpawnSpec,
@@ -32,29 +31,18 @@ use crate::{
 
 #[derive(Default)]
 pub struct CodexDriver {
-    sessions: Mutex<HashMap<String, Arc<CodexSession>>>,
+    sessions: SessionRegistry<CodexSession>,
 }
 
 struct CodexSession {
     events: Arc<EventHub>,
-    stdin: tokio::sync::Mutex<ChildStdin>,
+    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     thread_id: String,
     cwd: PathBuf,
     active_turn_id: Mutex<Option<String>>,
     next_request_id: AtomicU64,
-    pgid: i32,
-}
-
-impl CodexSession {
-    fn kill_group(&self) {
-        kill_process_group(self.pgid);
-    }
-}
-
-impl Drop for CodexSession {
-    fn drop(&mut self) {
-        kill_process_group(self.pgid);
-    }
+    // Field order keeps implicit teardown aligned with retire: close stdin, then kill the group.
+    process_group: ProcessGroup,
 }
 
 #[async_trait]
@@ -111,23 +99,23 @@ impl SubagentDriver for CodexDriver {
 
         let session = Arc::new(CodexSession {
             events: events.clone(),
-            stdin: tokio::sync::Mutex::new(stdin),
+            stdin: tokio::sync::Mutex::new(Some(stdin)),
             thread_id: thread_id.clone(),
             cwd: task.cwd.clone(),
             active_turn_id: Mutex::new(None),
             next_request_id: AtomicU64::new(4),
-            pgid,
+            process_group: ProcessGroup::new(pgid),
         });
         let handle = SessionHandle {
             id: Uuid::new_v4().to_string(),
             agent: AgentKind::Codex,
         };
-        lock(&self.sessions)?.insert(handle.id.clone(), session.clone());
+        self.sessions.insert(handle.id.clone(), session.clone())?;
 
         {
             let mut stdin = session.stdin.lock().await;
             write_json_line(
-                &mut stdin,
+                stdin.as_mut().ok_or(DriverError::MissingPipe("stdin"))?,
                 &codex_turn_start_request(3, &thread_id, &task.prompt, &task.cwd),
             )
             .await?;
@@ -138,37 +126,25 @@ impl SubagentDriver for CodexDriver {
     }
 
     async fn prompt(&self, handle: &SessionHandle, text: String) -> DriverResult<()> {
-        let session = {
-            let sessions = lock(&self.sessions)?;
-            sessions
-                .get(&handle.id)
-                .cloned()
-                .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?
-        };
+        let session = self.sessions.get(handle)?;
         let request_id = session.next_request_id.fetch_add(1, Ordering::SeqCst);
         let mut stdin = session.stdin.lock().await;
         write_json_line(
-            &mut stdin,
+            stdin.as_mut().ok_or(DriverError::MissingPipe("stdin"))?,
             &codex_turn_start_request(request_id, &session.thread_id, &text, &session.cwd),
         )
         .await
     }
 
     async fn interrupt(&self, handle: &SessionHandle) -> DriverResult<()> {
-        let session = {
-            let sessions = lock(&self.sessions)?;
-            sessions
-                .get(&handle.id)
-                .cloned()
-                .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?
-        };
+        let session = self.sessions.get(handle)?;
         let turn_id = lock(&session.active_turn_id)?
             .clone()
             .ok_or(DriverError::NoActiveTurn)?;
         let request_id = session.next_request_id.fetch_add(1, Ordering::SeqCst);
         let mut stdin = session.stdin.lock().await;
         write_json_line(
-            &mut stdin,
+            stdin.as_mut().ok_or(DriverError::MissingPipe("stdin"))?,
             &json!({
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -183,17 +159,15 @@ impl SubagentDriver for CodexDriver {
     }
 
     async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
-        if let Some(session) = lock(&self.sessions)?.remove(&handle.id) {
-            session.kill_group();
+        if let Some(session) = self.sessions.remove(handle)? {
+            drop(session.stdin.lock().await.take());
+            session.process_group.kill_group();
         }
         Ok(())
     }
 
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream> {
-        let sessions = lock(&self.sessions)?;
-        let session = sessions
-            .get(&handle.id)
-            .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
+        let session = self.sessions.get(handle)?;
         session.events.stream()
     }
 }
@@ -294,7 +268,7 @@ async fn read_codex_thread_id(
 
 async fn read_codex_stdout(
     mut lines: Lines<BufReader<ChildStdout>>,
-    mut child: Child,
+    child: Child,
     session: Arc<CodexSession>,
 ) {
     let mut terminal_sent = false;
@@ -315,6 +289,8 @@ async fn read_codex_stdout(
                         && let Some(turn_id) =
                             value.pointer("/params/turn/id").and_then(Value::as_str)
                     {
+                        // Deliberate protocol difference: Codex reuses one process for multiple
+                        // turns, so each turn can emit its own terminal event. Claude never resets.
                         terminal_sent = false;
                         last_agent_message = None;
                         if let Ok(mut active_turn_id) = lock(&session.active_turn_id) {
@@ -354,24 +330,14 @@ async fn read_codex_stdout(
             }
         }
     }
-    match child.wait().await {
-        Ok(status) if terminal_sent || status.success() => {}
-        Ok(status) => {
-            let _ = session.events.emit(SubagentEvent::Terminal {
-                outcome: TerminalOutcome::Failed {
-                    reason: format!("codex exited without terminal notification: {status}"),
-                },
-            });
-        }
-        Err(error) if !terminal_sent => {
-            let _ = session.events.emit(SubagentEvent::Terminal {
-                outcome: TerminalOutcome::Failed {
-                    reason: format!("codex wait failed: {error}"),
-                },
-            });
-        }
-        Err(_) => {}
-    }
+    finish_child(
+        child,
+        terminal_sent,
+        &session.events,
+        "codex",
+        "terminal notification",
+    )
+    .await;
 }
 
 fn codex_progress(value: &Value) -> Option<String> {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { reduce } from "./reducer";
+import { projectEvents } from "./selectors";
 import { initialState } from "./types";
 import type { EventItem } from "../protocol";
 
@@ -37,19 +38,67 @@ describe("hello_ok seeds Tasks from typed Events", () => {
     expect(absent.events).toEqual([]);
   });
 
-  it("prunes decide overrides for events the snapshot no longer carries", () => {
+  it("drops assertions for events the snapshot no longer carries", () => {
     let s = reduce(initialState(), {
       type: "hello_ok",
       payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], events: [ev({ id: 7 })] },
     });
     s = reduce(s, { type: "event_decide_local", eventId: 7 });
-    expect(s.eventDecideOverrides).toEqual([7]);
-    // Resync without event 7: the stale override is dropped.
+    expect(s.eventOverrides).toEqual({ 7: { decided: true } });
+    // Resync without event 7: the stale assertion is dropped.
     s = reduce(s, {
       type: "hello_ok",
       payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], events: [] },
     });
-    expect(s.eventDecideOverrides).toEqual([]);
+    expect(s.eventOverrides).toEqual({});
+  });
+
+  it("settles every assertion the snapshot has caught up with, and only those", () => {
+    let s = reduce(initialState(), {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 0,
+        messages: [],
+        pings: [],
+        events: [
+          ev({ id: 1 }),
+          ev({ id: 2, kind: "info", requires_response: false }),
+          ev({ id: 3 }),
+          ev({ id: 4 }),
+        ],
+      },
+    });
+    s = reduce(s, { type: "event_decide_local", eventId: 1 });
+    s = reduce(s, { type: "event_read_local", eventId: 2 });
+    s = reduce(s, { type: "event_snooze_local", eventId: 3, until: "2026-07-20T18:00:00Z" });
+    s = reduce(s, { type: "event_archive_local", eventId: 4 });
+    expect(s.eventOverrides).toEqual({
+      1: { decided: true },
+      2: { read: true },
+      3: { snoozedUntil: "2026-07-20T18:00:00Z" },
+      4: { archived: true },
+    });
+
+    // Resync: the host committed the decide and the read (the same instant,
+    // spelled with an offset rather than Z, still settles the snooze), but the
+    // archive never reached it — so ONLY that assertion survives.
+    s = reduce(s, {
+      type: "hello_ok",
+      payload: {
+        type: "hello_ok",
+        latest_msg_id: 0,
+        messages: [],
+        pings: [],
+        events: [
+          ev({ id: 1, status: "done" }),
+          ev({ id: 2, kind: "info", requires_response: false, read: true }),
+          ev({ id: 3, snoozed_until: "2026-07-20T18:00:00+00:00" }),
+          ev({ id: 4 }),
+        ],
+      },
+    });
+    expect(s.eventOverrides).toEqual({ 4: { archived: true } });
   });
 });
 
@@ -75,13 +124,13 @@ describe("event_upsert", () => {
       payload: { type: "event_upsert", event: ev({ id: 3 }) },
     });
     s = reduce(s, { type: "event_decide_local", eventId: 3 });
-    expect(s.eventDecideOverrides).toEqual([3]);
+    expect(s.eventOverrides).toEqual({ 3: { decided: true } });
     // The host's done upsert supersedes the optimistic layer.
     s = reduce(s, {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 3, status: "done" }) },
     });
-    expect(s.eventDecideOverrides).toEqual([]);
+    expect(s.eventOverrides).toEqual({});
     expect(s.events[0].status).toBe("done");
   });
 });
@@ -90,18 +139,29 @@ describe("optimistic decide / undecide / read", () => {
   it("decide_local records once (idempotent), undecide drops it", () => {
     let s = reduce(initialState(), { type: "event_decide_local", eventId: 5 });
     s = reduce(s, { type: "event_decide_local", eventId: 5 });
-    expect(s.eventDecideOverrides).toEqual([5]);
+    expect(s.eventOverrides).toEqual({ 5: { decided: true } });
     s = reduce(s, { type: "event_undecide_local", eventId: 5 });
-    expect(s.eventDecideOverrides).toEqual([]);
+    expect(s.eventOverrides).toEqual({});
   });
 
-  it("event_read_local flips read=true on the matching event only", () => {
+  it("event_read_local asserts read on the matching event only, leaving the wire truth alone", () => {
     let s = reduce(initialState(), {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 9, kind: "summary", read: false }) },
     });
     s = reduce(s, { type: "event_read_local", eventId: 9 });
-    expect(s.events[0].read).toBe(true);
+    expect(s.eventOverrides).toEqual({ 9: { read: true } });
+    expect(s.events[0].read).toBe(false);
+    expect(projectEvents(s.events, s.eventOverrides)[0].read).toBe(true);
+  });
+
+  it("a gesture that only restates the wire truth leaves no residue", () => {
+    let s = reduce(initialState(), {
+      type: "event_upsert",
+      payload: { type: "event_upsert", event: ev({ id: 9, kind: "summary", read: true }) },
+    });
+    s = reduce(s, { type: "event_read_local", eventId: 9 });
+    expect(s.eventOverrides).toEqual({});
   });
 });
 
@@ -109,18 +169,21 @@ describe("optimistic archive / unarchive (archive contract v1)", () => {
   it("archive_local records once (idempotent); unarchive_local drops it", () => {
     let s = reduce(initialState(), { type: "event_archive_local", eventId: 4 });
     s = reduce(s, { type: "event_archive_local", eventId: 4 });
-    expect(s.eventArchiveOverrides).toEqual([4]);
+    expect(s.eventOverrides).toEqual({ 4: { archived: true } });
     s = reduce(s, { type: "event_unarchive_local", eventId: 4 });
-    expect(s.eventArchiveOverrides).toEqual([]);
+    expect(s.eventOverrides).toEqual({});
   });
 
-  it("unarchive_local also flips a wire-archived event's local flag (host echo reconciles)", () => {
+  it("unarchive_local asserts not-archived over a WIRE-archived event (host echo settles it)", () => {
     let s = reduce(initialState(), {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 6, status: "done", archived: true }) },
     });
     s = reduce(s, { type: "event_unarchive_local", eventId: 6 });
-    expect(s.events[0].archived).toBe(false);
+    expect(s.eventOverrides).toEqual({ 6: { archived: false } });
+    // The wire truth is left intact; the projection is what the surfaces read.
+    expect(s.events[0].archived).toBe(true);
+    expect(projectEvents(s.events, s.eventOverrides)[0].archived).toBe(false);
   });
 
   it("a committed archived event_upsert prunes the optimistic override; an unrelated upsert never does", () => {
@@ -135,13 +198,13 @@ describe("optimistic archive / unarchive (archive contract v1)", () => {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 8, status: "done", read: true }) },
     });
-    expect(s.eventArchiveOverrides).toEqual([8]);
+    expect(s.eventOverrides).toEqual({ 8: { archived: true } });
     // The committed archived truth supersedes the optimistic layer.
     s = reduce(s, {
       type: "event_upsert",
       payload: { type: "event_upsert", event: ev({ id: 8, status: "done", archived: true }) },
     });
-    expect(s.eventArchiveOverrides).toEqual([]);
+    expect(s.eventOverrides).toEqual({});
     expect(s.events[0].archived).toBe(true);
   });
 
@@ -171,6 +234,6 @@ describe("optimistic archive / unarchive (archive contract v1)", () => {
         events: [ev({ id: 2, status: "done", archived: true }), ev({ id: 3 })],
       },
     });
-    expect(s.eventArchiveOverrides).toEqual([3]);
+    expect(s.eventOverrides).toEqual({ 3: { archived: true } });
   });
 });

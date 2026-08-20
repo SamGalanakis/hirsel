@@ -192,7 +192,7 @@ export function TaskField(props: {
   loadingEarlier: boolean;
 }) {
   const related = () => messagesForTask(props.task, state.messages, props.tasks);
-  const resolved = () => isEventResolved(props.task, state.eventDecideOverrides);
+  const resolved = () => isEventResolved(props.task);
   // The generated instrument owns the Task's framing whenever it renders
   // anything at all — the same precedence `eventTitle()` applies (heading, else
   // status/text label, else the wire description). Gating on a heading alone

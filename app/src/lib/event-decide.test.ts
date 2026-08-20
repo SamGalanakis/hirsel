@@ -19,8 +19,8 @@ describe("decideEventWithUndo — the event_action round-trip", () => {
 
     const payload = decideEventWithUndo(42, "choose", { choice: "A" }, "New reopen_ping op");
 
-    // Optimistic decide override recorded at once.
-    expect(store.state.eventDecideOverrides).toEqual([42]);
+    // Optimistic decide assertion recorded at once, in the ONE override record.
+    expect(store.state.eventOverrides).toEqual({ 42: { decided: true } });
     // The wire payload matches the contract shape exactly.
     expect(payload).toEqual({ type: "event_action", event_id: 42, action: "choose", data: { choice: "A" } });
     expect(sent).toEqual([{ type: "event_action", event_id: 42, action: "choose", data: { choice: "A" } }]);
@@ -37,10 +37,12 @@ describe("decideEventWithUndo — the event_action round-trip", () => {
     const { decideEventWithUndo, reopenEvent } = await import("./event-decide");
 
     decideEventWithUndo(7, "choose", { choice: "B" });
-    expect(store.state.eventDecideOverrides).toEqual([7]);
+    expect(store.state.eventOverrides).toEqual({ 7: { decided: true } });
 
+    // Reopen asserts "open" again — which the wire truth already says, so the
+    // assertion settles away on the spot and leaves no residue.
     reopenEvent(7);
-    expect(store.state.eventDecideOverrides).toEqual([]);
+    expect(store.state.eventOverrides).toEqual({});
     expect(sent).toEqual([
       { action: "choose", eventId: 7 },
       { action: "reopen", eventId: 7 },

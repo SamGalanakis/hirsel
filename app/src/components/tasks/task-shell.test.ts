@@ -140,31 +140,32 @@ describe("mostNeedingTask", () => {
     candidate(id, { kind: "summary", requires_response: false, read: true, ...over });
 
   it("has no candidate in an empty field", () => {
-    expect(mostNeedingTask([], [])).toBeNull();
+    expect(mostNeedingTask([])).toBeNull();
   });
 
   it("ranks blocked on you over needs you over unseen over moving", () => {
     const field = [movingTask(1), unseen(2), needsYou(3), blocked(4)];
-    expect(mostNeedingTask(field, [])?.id).toBe(4);
-    expect(mostNeedingTask([movingTask(1), unseen(2), needsYou(3)], [])?.id).toBe(3);
-    expect(mostNeedingTask([movingTask(1), unseen(2)], [])?.id).toBe(2);
-    expect(mostNeedingTask([movingTask(1)], [])?.id).toBe(1);
+    expect(mostNeedingTask(field)?.id).toBe(4);
+    expect(mostNeedingTask([movingTask(1), unseen(2), needsYou(3)])?.id).toBe(3);
+    expect(mostNeedingTask([movingTask(1), unseen(2)])?.id).toBe(2);
+    expect(mostNeedingTask([movingTask(1)])?.id).toBe(1);
   });
 
   it("breaks a tie within a band on the newest ts, then the higher id", () => {
-    expect(mostNeedingTask([blocked(1), blocked(2), blocked(3)], [])?.id).toBe(3);
+    expect(mostNeedingTask([blocked(1), blocked(2), blocked(3)])?.id).toBe(3);
     const sameTs = [
       blocked(4, { ts: "2026-07-23T10:00:00Z" }),
       blocked(5, { ts: "2026-07-23T10:00:00Z" }),
     ];
-    expect(mostNeedingTask(sameTs, [])?.id).toBe(5);
+    expect(mostNeedingTask(sameTs)?.id).toBe(5);
     // An unparseable ts must never outrank a real one.
-    expect(mostNeedingTask([blocked(6, { ts: "not-a-date" }), blocked(7)], [])?.id).toBe(7);
+    expect(mostNeedingTask([blocked(6, { ts: "not-a-date" }), blocked(7)])?.id).toBe(7);
   });
 
   it("never lands the Owner on settled work", () => {
-    const settled = blocked(1);
-    expect(mostNeedingTask([settled], [settled.id])).toBeNull();
-    expect(mostNeedingTask([settled, movingTask(2)], [settled.id])?.id).toBe(2);
+    // Settled work reaches here already projected to done (wire or optimistic).
+    const settled = blocked(1, { status: "done" });
+    expect(mostNeedingTask([settled])).toBeNull();
+    expect(mostNeedingTask([settled, movingTask(2)])?.id).toBe(2);
   });
 });

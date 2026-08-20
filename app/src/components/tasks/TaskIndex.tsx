@@ -6,7 +6,6 @@ import { taskName, taskState, taskTone } from "./task-model";
 export function TaskIndex(props: {
   tasks: EventItem[];
   focusedId: number | null;
-  decideOverrides: number[];
   onSelect: (task: EventItem) => void;
   onClearFocus: () => void;
 }) {
@@ -42,7 +41,7 @@ export function TaskIndex(props: {
         {(task) => {
           const focused = () => props.focusedId === task.id;
           const dimmed = () => props.focusedId !== null && !focused();
-          const status = () => taskState(task, props.decideOverrides);
+          const status = () => taskState(task);
           return (
             // The chip and its exit are siblings, never nested: a button inside a
             // button is invalid, and the × is a second, separately-labelled
@@ -69,7 +68,7 @@ export function TaskIndex(props: {
                 onKeyDown={(event) => moveFocus(event, task)}
               >
                 <span
-                  class={`size-1.5 shrink-0 rounded-full ${taskTone(task, props.decideOverrides)}`}
+                  class={`size-1.5 shrink-0 rounded-full ${taskTone(task)}`}
                   aria-hidden="true"
                 />
                 <span class="max-w-48 truncate">{taskName(task)}</span>

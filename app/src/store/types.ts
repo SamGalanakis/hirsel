@@ -49,6 +49,21 @@ export interface PendingSend {
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
 
+/** One Event's optimistic local assertions, each field the value the Owner's
+ * gesture claims the host will shortly commit. An absent field asserts nothing
+ * (the wire truth shows through). `snoozedUntil: null` is a real assertion —
+ * "not snoozed" — as distinct from the field being absent. */
+export interface EventOverride {
+  /** Asserted `status !== "open"` (decide flips it true, reopen/undo false). */
+  decided?: boolean;
+  /** Asserted `archived === true`. */
+  archived?: boolean;
+  /** Asserted `read === true` (awareness auto-read on pass). */
+  read?: boolean;
+  /** Asserted `snoozed_until` (an RFC3339 instant, or `null` for un-snoozed). */
+  snoozedUntil?: string | null;
+}
+
 export interface AgentActivity {
   state: AgentActivityState;
   text: string | null;
@@ -93,20 +108,19 @@ export interface AppState {
    * current by `event_upsert`. Held as an ordered array so the store can
    * `reconcile` it keyed by `id` like messages. */
   events: EventItem[];
-  /** Event ids optimistically decided ("Marked done" / chosen) but not yet
-   * committed by the host. An event is
-   * effectively resolved if its status is done OR its id is here; on commit the
-   * host's done `event_upsert` supersedes it (the reducer prunes the id). Undo
-   * drops the id back off. Bounded. */
-  eventDecideOverrides: number[];
-  /** Event ids optimistically archived (the decided strip's / overflow's
-   * Archive) but not yet committed by the host — the archive twin of
-   * `eventDecideOverrides`. An event is effectively archived if its wire
-   * `archived` flag is true OR its id is here; on commit the host's
-   * archived `event_upsert` supersedes it (the reducer prunes the id).
-   * Unarchive drops the id back off (and flips a wire-archived event's local
-   * flag until the host echo reconciles). Bounded. */
-  eventArchiveOverrides: number[];
+  /** The ONE optimistic layer over `events`, keyed by event id (R6-1). Every
+   * local Event gesture — decide/undecide, archive/unarchive, auto-read,
+   * snooze/unsnooze — records the value it ASSERTS here; `events` itself stays
+   * the untouched wire truth so reconciliation always has something honest to
+   * reconcile against. Read through `projectEvents` (store: `effectiveEvents()`),
+   * never directly by a surface.
+   *
+   * One settle rule governs the whole record: an assertion is dropped exactly
+   * when the wire truth already carries the value it asserts — applied at write
+   * time (so a no-op gesture leaves no residue), on every `event_upsert`, and on
+   * a `hello_ok` resync (where an event the snapshot no longer carries drops its
+   * whole entry). Bounded. */
+  eventOverrides: Record<number, EventOverride>;
   agentActivity: AgentActivity;
   connection: ConnectionStatus;
   lastSeenMsgId: number | null;
@@ -207,8 +221,7 @@ export function initialState(): AppState {
     hasEarlierMessages: false,
     hasLaterMessages: false,
     events: [],
-    eventDecideOverrides: [],
-    eventArchiveOverrides: [],
+    eventOverrides: {},
     agentActivity: { state: "idle", text: null },
     connection: "connecting",
     lastSeenMsgId: null,

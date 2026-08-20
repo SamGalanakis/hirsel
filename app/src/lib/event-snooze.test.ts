@@ -45,10 +45,14 @@ describe("snoozeEventWithUndo — the event_action snooze round-trip", () => {
       data: { until: UNTIL },
     });
     expect(sent).toEqual([{ eventId: 5, action: "snooze", data: { until: UNTIL } }]);
-    expect(store.state.events[0].snoozed_until).toBe(UNTIL);
+    // The wire truth is untouched; the assertion lives in the override record
+    // and shows through the projection.
+    expect(store.state.events[0].snoozed_until).toBeUndefined();
+    expect(store.state.eventOverrides).toEqual({ 5: { snoozedUntil: UNTIL } });
+    expect(store.effectiveEvents()[0].snoozed_until).toBe(UNTIL);
     // Future snoozed_until → excluded from the resting queue.
     const now = Date.parse("2026-07-14T10:00:00Z");
-    expect(visibleEvents(store.state.events, store.state.eventArchiveOverrides, now)).toEqual([]);
+    expect(visibleEvents(store.effectiveEvents(), now)).toEqual([]);
   });
 
   it("raises a quiet Snoozed toast whose Undo un-snoozes (posts unsnooze, clears the field)", async () => {
@@ -86,6 +90,9 @@ describe("snoozeEventWithUndo — the event_action snooze round-trip", () => {
       { eventId: 8, action: "snooze" },
       { eventId: 8, action: "unsnooze" },
     ]);
-    expect(store.state.events[0].snoozed_until).toBeNull();
+    // Un-snooze asserts "no return instant" — the wire truth already says so,
+    // so the assertion settles away and the event is simply back in Active.
+    expect(store.state.eventOverrides).toEqual({});
+    expect(store.effectiveEvents()[0].snoozed_until ?? null).toBeNull();
   });
 });

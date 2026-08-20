@@ -6,16 +6,16 @@ export function taskName(task: EventItem): string {
   return task.name.replace(/^@/, "").replaceAll("-", " ");
 }
 
-export function taskState(task: EventItem, decideOverrides: number[] = []): string {
-  if (isEventResolved(task, decideOverrides)) return "done";
+export function taskState(task: EventItem): string {
+  if (isEventResolved(task)) return "done";
   if (task.blocking) return "blocked on you";
   if (task.kind === "judgment") return "needs you";
   if (task.read) return "moving";
   return "new";
 }
 
-export function taskTone(task: EventItem, decideOverrides: number[] = []): string {
-  if (isEventResolved(task, decideOverrides)) return "bg-status-success";
+export function taskTone(task: EventItem): string {
+  if (isEventResolved(task)) return "bg-status-success";
   if (task.blocking) return "bg-status-danger";
   if (task.kind === "judgment") return "bg-primary";
   if (!task.read) return "bg-status-attention";
@@ -26,8 +26,8 @@ export function taskTone(task: EventItem, decideOverrides: number[] = []): strin
  * vocabulary `taskState` renders (lower = needs you more). "done" is not a
  * candidate at all and returns null: landing the Owner on work he already
  * settled would be the opposite of most-needing. */
-function neediness(task: EventItem, decideOverrides: number[]): number | null {
-  switch (taskState(task, decideOverrides)) {
+function neediness(task: EventItem): number | null {
+  switch (taskState(task)) {
     case "blocked on you": return 0;
     case "needs you": return 1;
     // Unread awareness sits between an open judgment and work merely in
@@ -43,15 +43,12 @@ function neediness(task: EventItem, decideOverrides: number[]): number | null {
  * with the higher id as a stable final tiebreak. Pure and total — the shell
  * effect and its tests share this one rule. Returns null when nothing in the
  * field wants the Owner, which is the ambient field's cue to stay ambient. */
-export function mostNeedingTask(
-  tasks: EventItem[],
-  decideOverrides: number[] = [],
-): EventItem | null {
+export function mostNeedingTask(tasks: EventItem[]): EventItem | null {
   let best: EventItem | null = null;
   let bestRank = Number.POSITIVE_INFINITY;
   let bestTs = Number.NEGATIVE_INFINITY;
   for (const task of tasks) {
-    const rank = neediness(task, decideOverrides);
+    const rank = neediness(task);
     if (rank === null) continue;
     const parsed = Date.parse(task.ts);
     // An unparseable ts must never outrank a real one; it sinks to the oldest.

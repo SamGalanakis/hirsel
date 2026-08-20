@@ -33,7 +33,7 @@ fn render_message(message: &ChatMessage) -> String {
     format!("[{author} #{}] {}", message.id, message.body)
 }
 
-pub(super) fn turn_result_text(result: &lash::TurnResult) -> Option<String> {
+pub(super) fn turn_result_text(result: &lash::TurnReport) -> Option<String> {
     result.assistant_message().map(str::to_string).or_else(|| {
         result.final_value().map(|value| {
             value

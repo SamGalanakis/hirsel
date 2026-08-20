@@ -40,21 +40,21 @@ impl ToolProvider for HirselToolProvider {
             .map(|definition| Arc::new(definition.contract()))
     }
 
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolOutcome {
         StaticToolExecute::execute(&self.executor, call).await
     }
 
-    async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptResult {
+    async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptOutcome {
         StaticToolExecute::execute_attempt(&self.executor, call).await
     }
 }
 
 #[async_trait]
 impl StaticToolExecute for HirselToolExecutor {
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolOutcome {
         match self.execute_inner(call).await {
-            Ok(outcome) => ToolResult::ok(outcome.value),
-            Err(error) => ToolResult::err_fmt(error),
+            Ok(outcome) => ToolOutcome::ok(outcome.value),
+            Err(error) => ToolOutcome::err_fmt(error),
         }
     }
 
@@ -62,19 +62,19 @@ impl StaticToolExecute for HirselToolExecutor {
     /// is declared, not performed: lash admits a declaration only after the
     /// attempt itself is recorded, so a tool that crashed mid-body can never
     /// leave a half-started process behind.
-    async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptResult {
+    async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptOutcome {
         match self.execute_inner(call).await {
-            Ok(outcome) => lash_core::ToolAttemptResult::done(
-                lash_core::ToolResultDone::ok(outcome.value),
+            Ok(outcome) => lash_core::ToolAttemptOutcome::done(
+                lash_core::ToolOutcomeDone::ok(outcome.value),
                 lash_core::ToolIntents::v1(outcome.intents),
             ),
-            Err(error) => lash_core::ToolAttemptResult::done_without_intents(
-                lash_core::ToolResultDone::failure(lash_core::ToolFailure {
+            Err(error) => lash_core::ToolAttemptOutcome::done_without_intents(
+                lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
                     class: lash_core::ToolFailureClass::Execution,
                     code: "tool_error".to_string(),
                     message: error,
                     source: lash_core::ToolFailureSource::Tool,
-                    retry: lash_core::ToolRetryDisposition::Never,
+                    retry: lash_core::ToolRetryStatus::Never,
                     raw: None,
                 }),
             ),

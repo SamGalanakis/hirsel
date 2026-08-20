@@ -18,7 +18,7 @@ use hirsel_proto::{
     SendMode, SubagentModelCatalog, ToolCallSummary, TurnEventKind,
 };
 use lash::{
-    InputItem, PromptLayerSink, TurnInput,
+    InputItem, PromptLayerSink, QueuedTurnDrain, TurnInput,
     observe::RemoteSessionObservationStreamItem,
     plugins::{
         PluginError, PluginExtensionContribution, PluginFactory, PluginOptions, PluginRegistrar,
@@ -27,8 +27,8 @@ use lash::{
     process::{
         ProcessAwaitOutput, ProcessAwaiter, ProcessCompletionAuthority, ProcessEventAppendRequest,
         ProcessEventType, ProcessExecutionEnvSpec, ProcessIdentity, ProcessInput,
-        ProcessStartRequest, ProcessStatus, ProcessWakeDelivery, ProcessWakeSpec,
-        RecoveryDisposition, SessionScope,
+        ProcessStartRequest, ProcessStatus, ProcessWakeDelivery, ProcessWakeSpec, RecoveryContract,
+        SessionScope,
     },
     provider::{ProviderHandle, ProviderOptions, ReasoningSelection},
     remote::{
@@ -38,8 +38,8 @@ use lash::{
     rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect},
     runtime::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest},
     tools::{
-        LashlangToolBinding, StaticToolExecute, ToolCall, ToolContract, ToolDefinition,
-        ToolDefinitionLashlangExt, ToolManifest, ToolProvider, ToolResult,
+        StaticToolExecute, ToolBinding, ToolCall, ToolContract, ToolDefinition,
+        ToolDefinitionBindingExt, ToolManifest, ToolOutcome, ToolProvider,
     },
     triggers::LashSchema,
 };

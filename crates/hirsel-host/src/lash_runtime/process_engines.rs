@@ -272,7 +272,7 @@ pub(super) fn subagent_start_request(
             kind: HIRSEL_SUBAGENT_ENGINE.to_string(),
             payload,
         },
-        RecoveryDisposition::OwnerBound,
+        RecoveryContract::OwnerBound,
         ProcessOriginator::session(SessionScope::new(session_id)),
     )
     .with_env_spec(env_spec)
@@ -295,7 +295,7 @@ pub(super) fn monitor_start_request(
                 "label": record.label,
             }),
         },
-        RecoveryDisposition::Rerunnable,
+        RecoveryContract::Rerunnable,
         ProcessOriginator::session(SessionScope::new(session_id)),
     )
     .with_env_spec(env_spec)

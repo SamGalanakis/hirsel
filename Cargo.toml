@@ -30,12 +30,12 @@ hirsel-plugins = { path = "crates/hirsel-plugins" }
 hirsel-proto = { path = "crates/hirsel-proto" }
 iroh = "=1.0.2"
 iroh-tickets = "=1.0.0"
-lash-core = { git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284" }
-lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284", features = ["rlm"] }
-lash-provider-anthropic = { git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284" }
-lash-provider-openai = { git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284" }
-lash-protocol-rlm = { git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284" }
-lash-sqlite-store = { git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284" }
+lash-core = { git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8" }
+lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8", features = ["rlm"] }
+lash-provider-anthropic = { git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8" }
+lash-provider-openai = { git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8" }
+lash-protocol-rlm = { git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8" }
+lash-sqlite-store = { git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8" }
 libc = "0.2.177"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -54,4 +54,4 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 # dependency never reaches its consumers, so hirsel has to restate it against
 # the same rev or `regress::MatchError` is missing at compile time.
 [patch.crates-io]
-regress = { git = "https://github.com/Ascending-AI/lash", rev = "86339374fc7a1cb2e16030dbd41e47351a798284" }
+regress = { git = "https://github.com/Ascending-AI/lash", rev = "7e095fe36fc06362dedaa6ab6e469dfe91959fe8" }

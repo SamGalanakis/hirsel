@@ -53,7 +53,7 @@ fn test_turn_output(
     tool_calls: Vec<lash_core::ToolCallRecord>,
 ) -> lash::TurnOutput {
     lash::TurnOutput {
-        result: lash::TurnResult {
+        result: lash::TurnReport {
             state: lash_core::SessionSnapshot::new(SessionPolicy::new(lash::TurnBudget::Unbounded)),
             outcome,
             cancellation: None,
@@ -70,7 +70,7 @@ fn test_turn_output(
             children_usage: Vec::new(),
             llm_calls: Vec::new(),
             tool_calls,
-            execution: lash::ExecutionSummary::default(),
+            execution: lash::TurnExecutionMetrics::default(),
             errors: Vec::new(),
         },
         activities: Vec::new(),

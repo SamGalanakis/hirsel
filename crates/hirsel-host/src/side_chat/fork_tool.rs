@@ -3,8 +3,8 @@ use std::sync::Weak;
 use anyhow::Context;
 use async_trait::async_trait;
 use lash::tools::{
-    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
-    ToolDefinitionLashlangExt, ToolResult,
+    StaticToolExecute, StaticToolProvider, ToolBinding, ToolCall, ToolDefinition,
+    ToolDefinitionBindingExt, ToolOutcome,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -55,7 +55,7 @@ pub(super) fn fork_decide_provider(
             }
         }),
     )
-    .with_lashlang_binding(LashlangToolBinding::new(["fork"], "decide"));
+    .with_tool_binding(ToolBinding::new(["fork"], "decide"));
     StaticToolProvider::new(
         vec![definition],
         ForkDecideExecutor {
@@ -68,7 +68,7 @@ pub(super) fn fork_decide_provider(
 
 #[async_trait]
 impl StaticToolExecute for ForkDecideExecutor {
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolOutcome {
         let result = async {
             if call.name != "fork_decide" {
                 anyhow::bail!("unknown fork tool: {}", call.name);
@@ -91,8 +91,8 @@ impl StaticToolExecute for ForkDecideExecutor {
         }
         .await;
         match result {
-            Ok(value) => ToolResult::ok(value),
-            Err(error) => ToolResult::err_fmt(error),
+            Ok(value) => ToolOutcome::ok(value),
+            Err(error) => ToolOutcome::err_fmt(error),
         }
     }
 }

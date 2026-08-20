@@ -219,6 +219,14 @@ export function TaskShell() {
           onClearFocus={clearTaskFocus}
         />
         <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Scrolled text never hard-clips against the top edge: a short
+              background→transparent veil fades it out instead. An overlay
+              rather than a mask on the scroller so the focused state's sticky
+              card (itself bg-background) passes under it invisibly. */}
+          <div
+            aria-hidden="true"
+            class="pointer-events-none absolute inset-x-0 top-0 z-20 h-5 bg-gradient-to-b from-background to-transparent"
+          />
           {/* The field is anchored to the composer, not to the top bar: short
               content rests just above the composer (its children carry
               `min-h-full` + end-alignment), long content still scrolls from the

@@ -19,12 +19,15 @@ async fn blobs_are_stored_as_raw_files_and_idempotent_by_client_id() {
             "upload-1",
             "other.txt",
             "text/plain",
-            b"other bytes".to_vec(),
+            b"first bytes".to_vec(),
         )
         .await
         .unwrap();
 
     assert_eq!(first, duplicate);
+    let persisted = storage.blob(&first.blob.id).await.unwrap().unwrap();
+    assert_eq!(persisted, first);
+    assert!(persisted.path.is_file());
     assert_eq!(tokio::fs::read(&first.path).await.unwrap(), b"first bytes");
     assert_eq!(
         first.path.file_name().and_then(|name| name.to_str()),

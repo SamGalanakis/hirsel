@@ -9,7 +9,15 @@ import { render, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette, ShortcutHelp } from "../components/CommandPalette";
-import { clearTaskFocus, dispatch, state, toggleTaskFocus } from "../store/store";
+import { ProcessesSheet } from "../components/processes/ProcessesSheet";
+import {
+  clearTaskFocus,
+  closeRightRegion,
+  dispatch,
+  openProcesses,
+  state,
+  toggleTaskFocus,
+} from "../store/store";
 import { anyOverlayOpen } from "./focus";
 import { defaultHandlers, installGlobalKeymap, type KeymapHandlers } from "./keymap";
 
@@ -34,6 +42,7 @@ function spyHandlers(overrides: Partial<KeymapHandlers> = {}): KeymapHandlers {
 describe("overlay presence (real registry)", () => {
   beforeEach(() => {
     clearTaskFocus();
+    closeRightRegion();
     dispatch({ type: "agent_activity", payload: { state: "idle", text: null } });
     // Auto-cleanup unmounted the previous test's dialog; if a token had leaked,
     // the global bare-key layer would be dead for the rest of the session.
@@ -52,6 +61,25 @@ describe("overlay presence (real registry)", () => {
 
     expect(state.focusedTaskId).toBe(7);
     expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("does not clear task focus when Esc dismisses a focus-trapped utility", async () => {
+    toggleTaskFocus(3);
+    openProcesses();
+    render(() => <ProcessesSheet />);
+    await waitFor(() => expect(anyOverlayOpen()).toBe(true));
+
+    // Rung 1 again, for the other half of the registry: a utility pane whose
+    // only keyboard claim is its own capture-phase focus trap. The trap closes
+    // the pane synchronously, so unless it also CONSUMES the keystroke the
+    // bubble-phase ladder sees no overlay left and falls through to rung 3,
+    // clearing task focus on the same Esc that only dismissed the pane.
+    const dispose = installGlobalKeymap(defaultHandlers);
+    press("Escape");
+    dispose();
+
+    expect(state.rightRegion).toBe("none");
+    expect(state.focusedTaskId).toBe(3);
   });
 
   it("suppresses bare keys while the shortcut cheat-sheet is open", async () => {

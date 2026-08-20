@@ -195,7 +195,15 @@ export function createFocusTrap(
   const onKeyDown = (e: KeyboardEvent) => {
     if (!isTopmost()) return;
     if (e.key === "Escape") {
-      options.onEscape?.();
+      if (!options.onEscape) return;
+      options.onEscape();
+      // Run in the window capture phase and consume this Escape completely.
+      // Closing typically unmounts the panel and pops this trap synchronously,
+      // so the bubble-phase Esc ladder in lib/keymap.ts would see a world where
+      // no overlay is open and advance to its next rung — clearing task focus on
+      // the very keystroke that only dismissed a utility. A trap that handled
+      // Escape owns the entire gesture.
+      e.stopImmediatePropagation();
       return;
     }
     if (e.key !== "Tab" || !shouldTrapTab()) return;

@@ -87,7 +87,7 @@ Processes, Settings, and Canvas are temporary utilities:
 - **Settings** changes local/client configuration without becoming a product destination.
 - **Canvas** hosts a larger generated View when one exists; absence is honest, not an empty permanent tab.
 
-On desktop they may dock; on phone they are modal sheets with focus trapping. Closing restores the exact Task, scope, draft, scroll position, and usable focus. No utility contains another Task inventory or conversation.
+Presentation follows the visit. **Processes** is a glance kept beside the work, so on desktop it docks as an inspector at the field's right edge and on phone it is a modal sheet; **Canvas** docks the same way. **Settings** is an infrequent, deep, form-shaped visit — grouped rows, identity, prompt editors — with nothing to compare against the field behind it, so it is a full-viewport modal overlay at every width, reading in the same measure the Task world holds rather than a narrow rail. Every one of them is focus-trapped while it is up, and its Escape dismisses it alone. Closing restores the exact Task, scope, draft, scroll position, and usable focus. No utility contains another Task inventory or conversation.
 
 ## 8. Visual and interaction character
 

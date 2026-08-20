@@ -61,7 +61,13 @@ export function SegmentedControl<T extends string>(props: {
     <div
       role="radiogroup"
       aria-label={props.ariaLabel}
-      class="flex items-center gap-1 rounded-lg border border-border bg-secondary p-1"
+      // A control sized by its own choices, not by the column it sits in. Full
+      // width where a thumb uses it; at `rail`, where Settings became a
+      // full-viewport overlay reading at the whole measure, a stretched
+      // three-segment bar 672px wide would be a control shouting about itself
+      // (DESIGN §4: "A capsule taller than the text it holds is a control
+      // advertising itself" — the same rule on the other axis).
+      class="flex w-full items-center gap-1 rounded-lg border border-border bg-secondary p-1 rail:w-fit"
     >
       <For each={props.options}>
         {(opt) => {
@@ -71,7 +77,7 @@ export function SegmentedControl<T extends string>(props: {
               type="button"
               role="radio"
               aria-checked={selected()}
-              class="flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11"
+              class="flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring rail:flex-none rail:px-6 [@media(pointer:coarse)]:min-h-11"
               classList={{
                 // `shadow-raised` — the theme-adaptive lift token. The literal
                 // `rgb(0 0 0/0.06)` this replaces was invisible on the dark

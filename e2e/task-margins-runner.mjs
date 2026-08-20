@@ -616,12 +616,74 @@ async function main() {
         && (await processPanel.locator('[data-slot="task-index"]').count()) === 0,
       "desktop inspector has running/finished groups and no nested destination",
     );
-    // Closed through the pane header's own ×, activated from the keyboard: the
-    // floating ⋯ overlaps that corner of the docked desktop inspector once
-    // touch emulation widens both targets to 44px, so a synthetic pointer click
-    // lands on the ⋯ instead. The Esc route to the same close is asserted
-    // separately as the run's last gate.
-    await processPanel.getByRole("button", { name: "Close Processes" }).press("Enter");
+    // The floating ⋯ anchors to the HOME FIELD's top-right corner, so a docked
+    // utility takes its width out of the box the ⋯ is measured against and the
+    // two can never meet. This used to be the opposite: the strip hung off the
+    // viewport's top-right, so on a fine pointer the ⋯ sat cramped beside the
+    // pane's × and — at this coarse-pointer emulation, where both grow to 44px —
+    // covered it outright, which is why the close below had to be a keypress.
+    const overlaps = (a, b) =>
+      a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    // The dismissed dropdown leaves `pointer-events: none` on <body> for a
+    // moment after its own teardown, which makes every hit test answer <html>.
+    // Wait for the page to be hit-testable again so the gate below measures
+    // occlusion rather than that teardown.
+    const hitTestable = (target) =>
+      pollReady("pointer hit-testing settles", async () =>
+        target.evaluate(() => (document.elementFromPoint(4, 4)?.tagName === "HTML" ? null : true)));
+    await hitTestable(page);
+    const dockedGeometry = await page.evaluate(() => {
+      const box = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        return {
+          left: Math.round(rect.left),
+          right: Math.round(rect.right),
+          top: Math.round(rect.top),
+          bottom: Math.round(rect.bottom),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+      };
+      const hit = (selector, within) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        const target = document.elementFromPoint(
+          rect.left + rect.width / 2,
+          rect.top + rect.height / 2,
+        );
+        return target?.closest(within) ? "self" : (target?.tagName ?? "nothing");
+      };
+      return {
+        more: box('[data-slot="phone-overflow-trigger"]'),
+        strip: box('[data-slot="home-affordances"]'),
+        close: box('[data-slot="processes-panel"] button[aria-label="Close Processes"]'),
+        panel: box('[data-slot="processes-panel"]'),
+        // A hit test is the honest form of "never covered": whatever the paint
+        // order, the centre of each control has to belong to that control.
+        moreHit: hit('[data-slot="phone-overflow-trigger"]', '[data-slot="phone-overflow-trigger"]'),
+        closeHit: hit(
+          '[data-slot="processes-panel"] button[aria-label="Close Processes"]',
+          'button[aria-label="Close Processes"]',
+        ),
+      };
+    });
+    check(
+      "the ⋯ clears a docked pane (coarse pointer)",
+      !overlaps(dockedGeometry.more, dockedGeometry.close)
+        && dockedGeometry.more.right <= dockedGeometry.panel.left
+        && dockedGeometry.strip.right <= dockedGeometry.panel.left
+        && dockedGeometry.moreHit === "self" && dockedGeometry.closeHit === "self"
+        && dockedGeometry.more.height >= 44 && dockedGeometry.more.width >= 44
+        && dockedGeometry.close.height >= 44 && dockedGeometry.close.width >= 44,
+      JSON.stringify(dockedGeometry),
+    );
+    // Closed through the pane header's own ×, with a genuine pointer click —
+    // the workaround the occlusion used to force is gone. The Esc route to the
+    // same close is asserted separately as the run's last gate.
+    await processPanel.getByRole("button", { name: "Close Processes" }).click();
     await processPanel.waitFor({ state: "detached" });
     const utilityAfter = await page.evaluate(() => ({
       task: document.querySelector('[data-slot="task-field"]')?.getAttribute("data-task"),
@@ -650,9 +712,74 @@ async function main() {
     await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     const settingsPanel = page.locator('[data-slot="settings-panel"]');
     await settingsPanel.waitFor();
+    // Settings is an infrequent, deep, form-shaped visit, so on desktop it now
+    // takes the whole viewport instead of docking as a 340–440px inspector: the
+    // overlay IS the viewport, it is an honest modal at this width, and its
+    // rows read in the task world's own column (measure + one gutter each side)
+    // rather than a rail that wrapped every one of them.
+    await hitTestable(page);
+    const settingsGeometry = await page.evaluate(() => {
+      const rect = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const r = element.getBoundingClientRect();
+        return {
+          left: Math.round(r.left),
+          top: Math.round(r.top),
+          right: Math.round(r.right),
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+        };
+      };
+      const panel = document.querySelector('[data-slot="settings-panel"]');
+      const more = document.querySelector('[data-slot="phone-overflow-trigger"]');
+      const moreRect = more?.getBoundingClientRect();
+      return {
+        panel: rect('[data-slot="settings-panel"]'),
+        column: rect('[data-slot="settings-column"]'),
+        // The header's inner row — the box the icon, title and × line up in.
+        headerRow: (() => {
+          const row = document.querySelector("#settings-pane-title")?.parentElement;
+          if (!row) return null;
+          const r = row.getBoundingClientRect();
+          return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) };
+        })(),
+        role: panel?.getAttribute("role"),
+        modal: panel?.getAttribute("aria-modal"),
+        position: panel ? getComputedStyle(panel).position : null,
+        viewport: { width: innerWidth, height: innerHeight },
+        // Nothing floats over a full-screen utility: the ⋯ is behind it, so its
+        // own centre belongs to the overlay.
+        moreCovered: moreRect
+          ? Boolean(
+            document
+              .elementFromPoint(moreRect.left + moreRect.width / 2, moreRect.top + moreRect.height / 2)
+              ?.closest('[data-slot="settings-panel"]'),
+          )
+          : null,
+      };
+    });
+    const FRAME = 720; // --container-frame: measure (42rem) + one gutter each side
+    check(
+      "settings is a full-viewport modal reading in the one column",
+      settingsGeometry.position === "fixed"
+        && settingsGeometry.panel.left === 0 && settingsGeometry.panel.top === 0
+        && settingsGeometry.panel.width === settingsGeometry.viewport.width
+        && settingsGeometry.panel.height === settingsGeometry.viewport.height
+        && settingsGeometry.role === "dialog" && settingsGeometry.modal === "true"
+        && settingsGeometry.column.width === FRAME
+        // Centred, and the header's title lands on the content's own left edge
+        // rather than in the far corner of a 1440px screen.
+        && Math.abs(settingsGeometry.column.left + FRAME / 2 - settingsGeometry.viewport.width / 2) <= 1
+        && settingsGeometry.headerRow.left === settingsGeometry.column.left
+        && settingsGeometry.headerRow.width === FRAME
+        && settingsGeometry.moreCovered === true,
+      JSON.stringify(settingsGeometry),
+    );
     await settingsPanel.getByRole("radio", { name: "Dark" }).click();
-    check("settings theme", await page.locator("html.dark").count() === 1, "Dark toggled in temporary Settings inspector");
-    await settingsPanel.getByRole("button", { name: "Close Settings" }).press("Enter");
+    check("settings theme", await page.locator("html.dark").count() === 1, "Dark toggled in the summoned Settings overlay");
+    // A genuine pointer click: nothing floats over the full-screen overlay's ×.
+    await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
     await settingsPanel.waitFor({ state: "detached" });
     check("settings continuity", await taskField.getAttribute("data-task") === "1" && await textarea.inputValue() === stopDraft, "task focus and composer survive Settings");
     await more.click();
@@ -664,8 +791,8 @@ async function main() {
       const panelRect = panel?.getBoundingClientRect();
       return Boolean(panelRect && rect.top >= panelRect.top && rect.top <= panelRect.bottom);
     });
-    check("model settings landing", modelLanding, "Models heading is within the opened inspector viewport");
-    await settingsPanel.getByRole("button", { name: "Close Settings" }).press("Enter");
+    check("model settings landing", modelLanding, "Models heading is within the opened overlay's viewport");
+    await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
     check("canvas honest N/A", canvasCount === 0, "Canvas not seeded; task focus and draft continuity retained");
 
     await settingsPanel.waitFor({ state: "detached" });
@@ -1048,6 +1175,58 @@ async function main() {
         && fineGeometry.prose.width === fineGeometry.composer.width,
       JSON.stringify(fineGeometry),
     );
+
+    // The same no-overlap contract at the OTHER pointer type. A fine pointer is
+    // where the collision used to read as "cramped side by side" rather than
+    // "covered", and it is the emulation the coarse gate above cannot reach
+    // (`hasTouch` is a context option). Both targets, both pointers, one rule.
+    const fineMore = finePage.locator('[data-slot="phone-overflow-trigger"]');
+    await fineMore.click();
+    await finePage.getByRole("menuitem", { name: /^Processes/ }).click();
+    const finePanel = finePage.locator('[data-slot="processes-panel"]');
+    await finePanel.waitFor();
+    await hitTestable(finePage);
+    const fineDocked = await finePage.evaluate(() => {
+      const box = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const r = element.getBoundingClientRect();
+        return {
+          left: Math.round(r.left),
+          right: Math.round(r.right),
+          top: Math.round(r.top),
+          bottom: Math.round(r.bottom),
+        };
+      };
+      const hit = (selector, within) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const r = element.getBoundingClientRect();
+        const target = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return target?.closest(within) ? "self" : (target?.tagName ?? "nothing");
+      };
+      return {
+        more: box('[data-slot="phone-overflow-trigger"]'),
+        strip: box('[data-slot="home-affordances"]'),
+        close: box('[data-slot="processes-panel"] button[aria-label="Close Processes"]'),
+        panel: box('[data-slot="processes-panel"]'),
+        moreHit: hit('[data-slot="phone-overflow-trigger"]', '[data-slot="phone-overflow-trigger"]'),
+        closeHit: hit(
+          '[data-slot="processes-panel"] button[aria-label="Close Processes"]',
+          'button[aria-label="Close Processes"]',
+        ),
+      };
+    });
+    check(
+      "the ⋯ clears a docked pane (fine pointer)",
+      !overlaps(fineDocked.more, fineDocked.close)
+        && fineDocked.more.right <= fineDocked.panel.left
+        && fineDocked.strip.right <= fineDocked.panel.left
+        && fineDocked.moreHit === "self" && fineDocked.closeHit === "self",
+      JSON.stringify(fineDocked),
+    );
+    await finePanel.getByRole("button", { name: "Close Processes" }).click();
+    await finePanel.waitFor({ state: "detached" });
 
     // "Jump to latest" belongs to the reading column, not to the pane: centred
     // on the pane it drifted right of the column and landed on the prose, and

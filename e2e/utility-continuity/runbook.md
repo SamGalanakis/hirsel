@@ -6,7 +6,7 @@ Automated core: `cd app && npm run e2e:task-margins` → [latest report](../repo
 
 ## Purpose
 
-Prove Processes, Settings, and Canvas are temporary utilities, never destinations: each overlays or docks beside the same task world, and closing it restores the exact task focus and draft.
+Prove Processes, Settings, and Canvas are temporary utilities, never destinations: Processes and Canvas dock beside the same task world and Settings overlays it whole, and closing any of them restores the exact task focus and draft. While one is docked, the floating ⋯ must stay clear of its pane header's close control at every pointer type.
 
 ## Persona and Probe
 
@@ -27,9 +27,9 @@ Act as Sam inspecting background work mid-decision. Open `deploy 4821` and type 
 
 ## Phase 2 — Settings
 
-1. Preserve the current task focus, open `Settings`, and require `[data-slot="settings-panel"]`.
+1. Preserve the current task focus, open `Settings`, and require `[data-slot="settings-panel"]` — a full-viewport modal overlay at every width (`role=dialog`, `aria-modal=true`, box equal to the viewport), with its rows centred on the task world's reading column, never a docked right-edge rail.
 2. Toggle theme once and require the document theme changes. Close with the labelled close control and require the same Task and composer value.
-3. Reopen Settings through `Model settings`; require the Models heading is within the inspector viewport as the landing target, then close.
+3. Reopen Settings through `Model settings`; require the Models heading is within the opened overlay's viewport as the landing target, then close.
 
 ## Phase 3 — Canvas When Available
 

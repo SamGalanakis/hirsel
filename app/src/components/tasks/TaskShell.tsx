@@ -5,8 +5,8 @@ STORY: Open a task, act through its generated instrument, speak within it, then 
 FIRST VIEWPORT: Task index at the left/top, one unfolded JSON-generated task instrument, conversation in its margin, and one standing bottom composer.
 FORM: Task Margins, the user-pinned synthesis; focus changes the subject, never the interlocutor.
 */
-import { X } from "lucide-solid";
-import { createEffect, createMemo, For, on, Show } from "solid-js";
+import { ArrowDown, X } from "lucide-solid";
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import type { Blob, EventItem, SendMode } from "../../protocol";
 import { markEventRead } from "../../lib/event-decide";
 import {
@@ -23,6 +23,7 @@ import {
   state,
   toggleTaskFocus,
 } from "../../store/store";
+import { isAtBottom, scrollToBottom, shouldOfferJump } from "../../lib/scroll";
 import { getClient } from "../../ws/client";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { ConnectionPill, connectionLabel } from "../ConnectionPill";
@@ -39,6 +40,72 @@ import { mostNeedingTask, taskSendContext } from "./task-model";
 export function TaskShell() {
   const attachments = createComposerAttachments();
   let taskScrollRef: HTMLDivElement | undefined;
+
+  // Follow-at-bottom. `following` is a plain mirror, deliberately NOT a signal
+  // the follow effect reads: the effect must react to conversation growth only,
+  // never to its own scrolling. `canJump` is the rendered half.
+  let following = true;
+  const [canJump, setCanJump] = createSignal(false);
+  // When the last programmatic pin started. A smooth jump emits scroll events
+  // all the way down, and each one measures as "not at the bottom yet"; without
+  // this the affordance would flicker back on for the length of the animation.
+  // A timestamp rather than a flag so an interrupted animation heals itself
+  // instead of latching.
+  let pinnedAt = 0;
+  const PIN_SETTLE_MS = 700;
+
+  function measure(): void {
+    const element = taskScrollRef;
+    if (!element) return;
+    const geometry = {
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    };
+    const atBottom = isAtBottom(geometry);
+    if (!atBottom && Date.now() - pinnedAt < PIN_SETTLE_MS) return;
+    following = atBottom;
+    setCanJump(shouldOfferJump(geometry));
+  }
+
+  function pin(instant = true): void {
+    const element = taskScrollRef;
+    if (!element) return;
+    pinnedAt = Date.now();
+    scrollToBottom(element, instant);
+    following = true;
+    setCanJump(false);
+  }
+
+  // One scalar that changes on every kind of conversation growth: a new or
+  // edited message, another streamed delta, or the turn's liveness flipping.
+  // Streaming appends a fresh `turnEvents` entry per delta, so its length moves
+  // with the text.
+  const growth = createMemo(() => {
+    const last = state.messages[state.messages.length - 1];
+    return [
+      state.messages.length,
+      last?.id ?? 0,
+      last?.body.length ?? 0,
+      state.turnEvents.length,
+      state.agentActivity.state,
+    ].join(":");
+  });
+
+  // The whole rule: growth scrolls down only for a reader already at the
+  // bottom. A reader who scrolled up is reading, and is never yanked — the jump
+  // affordance is their way back. Deferred so mounting doesn't count as growth,
+  // and pinned on the next frame so the measurement sees the grown content.
+  createEffect(
+    on(growth, () => {
+      if (!taskScrollRef) return;
+      if (!following) {
+        measure();
+        return;
+      }
+      requestAnimationFrame(() => pin(true));
+    }, { defer: true }),
+  );
 
   const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
   const tasks = createMemo(() => orderedTasks(visible(), state.eventDecideOverrides));
@@ -77,7 +144,15 @@ export function TaskShell() {
   // never in two different places (the strip in particular scrolls
   // independently and would otherwise leave the marker off-screen).
   createEffect(on(() => state.focusedTaskId, (focusedId) => {
-    if (taskScrollRef) taskScrollRef.scrollTop = 0;
+    // A Task starts at its top (the instrument is the subject). Ambient is the
+    // global conversation, so it starts where a conversation starts: at the
+    // newest line, above the composer.
+    if (focusedId === null) {
+      requestAnimationFrame(() => pin(true));
+    } else if (taskScrollRef) {
+      taskScrollRef.scrollTop = 0;
+      measure();
+    }
     if (focusedId === null) return;
     const chip = document.querySelector<HTMLElement>(`[data-task-id="${focusedId}"]`);
     chip?.scrollIntoView?.({ inline: "center", block: "nearest" });
@@ -150,9 +225,30 @@ export function TaskShell() {
               `min-h-full` + end-alignment), long content still scrolls from the
               top because it simply outgrows the container. */}
           <div
-            ref={(node) => { taskScrollRef = node; }}
+            ref={(node) => {
+              taskScrollRef = node;
+              // Start pinned: a conversation opens at its newest line.
+              requestAnimationFrame(() => pin(true));
+              // A markdown image has no intrinsic size until its bytes arrive,
+              // so it lands as a late growth AFTER layout — the classic chat
+              // scroll jump. `load` does not bubble, hence the capture phase.
+              // Re-pinning only while following keeps a scrolled-up reader
+              // exactly where they are.
+              node.addEventListener(
+                "load",
+                () => {
+                  if (following) pin(true);
+                },
+                true,
+              );
+            }}
             data-slot="task-scroll"
-            class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto"
+            onScroll={measure}
+            /* `overflow-anchor` is what keeps a late-loading image or an
+               expanding turn-details block from shoving the text the Owner is
+               reading; the browser holds the anchored node still and absorbs
+               the growth above it. */
+            class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto [overflow-anchor:auto]"
           >
             <Show when={focusedTask()} fallback={<AmbientField />}>
               {(task) => <TaskField task={task()} tasks={tasks()} views={taskViews()} />}
@@ -169,6 +265,25 @@ export function TaskShell() {
               </div>
             </Show>
           </div>
+
+          {/* The standard chat escape hatch, and the ONLY way the view returns
+              to the bottom once the Owner has scrolled away. Quiet and
+              self-effacing: it exists exactly while there is somewhere to jump
+              to, sits in the field rather than over the composer, and says
+              where it goes rather than shouting for attention. */}
+          <Show when={canJump()}>
+            <div class="pointer-events-none relative z-10 flex justify-center">
+              <button
+                type="button"
+                data-slot="jump-to-latest"
+                class="pointer-events-auto absolute bottom-1 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface px-3 py-1.5 text-xs text-surface-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11"
+                onClick={() => pin(false)}
+              >
+                <ArrowDown class="size-3.5" aria-hidden="true" />
+                Jump to latest
+              </button>
+            </div>
+          </Show>
 
           <Show when={state.protocolError}>
             <div role="alert" class="mx-gutter mb-2 flex items-center gap-3 rounded-lg bg-muted px-3 text-sm text-foreground">

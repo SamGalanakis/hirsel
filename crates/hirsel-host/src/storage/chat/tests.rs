@@ -61,14 +61,30 @@ async fn hello_snapshot_derives_latest_id_from_replayed_rows() {
         .await
         .unwrap();
 
+    // `last_seen` is an attention cursor, NOT a history gate: a reload by a
+    // fully caught-up client still gets the recent window back, so the
+    // conversation survives a refresh instead of rendering empty.
     let snapshot = storage.hello_snapshot(Some(1)).await.unwrap();
     assert_eq!(snapshot.latest_msg_id, 2);
-    assert_eq!(snapshot.messages.len(), 1);
-    assert_eq!(snapshot.messages[0].body, "two");
+    assert_eq!(
+        snapshot
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one", "two"]
+    );
 
-    let empty = storage.hello_snapshot(Some(2)).await.unwrap();
-    assert_eq!(empty.latest_msg_id, 2);
-    assert!(empty.messages.is_empty());
+    let caught_up = storage.hello_snapshot(Some(2)).await.unwrap();
+    assert_eq!(caught_up.latest_msg_id, 2);
+    assert_eq!(
+        caught_up
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one", "two"]
+    );
 
     let stale = storage.hello_snapshot(Some(99_999)).await.unwrap();
     assert_eq!(stale.latest_msg_id, 2);
@@ -80,6 +96,45 @@ async fn hello_snapshot_derives_latest_id_from_replayed_rows() {
             .collect::<Vec<_>>(),
         vec!["one", "two"]
     );
+}
+
+#[tokio::test]
+async fn hello_replay_always_carries_the_recent_window_and_grows_past_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    // One more than the window, so the floor is genuinely exercised.
+    let total = super::HELLO_REPLAY_WINDOW + 50;
+    for index in 0..total {
+        storage
+            .append_chat(ChatAuthor::Agent, &format!("m{index}"), None)
+            .await
+            .unwrap();
+    }
+
+    // A caught-up client (the reload case) gets exactly the newest window back
+    // rather than nothing at all.
+    let reload = storage.hello_snapshot(Some(total)).await.unwrap();
+    assert_eq!(reload.latest_msg_id, total);
+    assert_eq!(reload.messages.len() as u64, super::HELLO_REPLAY_WINDOW);
+    assert_eq!(
+        reload.messages[0].body,
+        format!("m{}", total - super::HELLO_REPLAY_WINDOW)
+    );
+    assert_eq!(
+        reload.messages.last().unwrap().body,
+        format!("m{}", total - 1)
+    );
+
+    // A null cursor keeps its historical meaning: the same window.
+    let fresh = storage.hello_snapshot(None).await.unwrap();
+    assert_eq!(fresh.messages.len() as u64, super::HELLO_REPLAY_WINDOW);
+
+    // A client further behind than the window gets everything it missed, not a
+    // truncated window — the cursor still widens the replay, it just can never
+    // narrow it below the window.
+    let behind = storage.hello_snapshot(Some(1)).await.unwrap();
+    assert_eq!(behind.messages.len() as u64, total - 1);
+    assert_eq!(behind.messages[0].body, "m1");
 }
 
 #[tokio::test]

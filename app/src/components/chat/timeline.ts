@@ -50,6 +50,43 @@ export type TimelineItem =
  * Input is assumed already sorted by `seq` (the reducer keeps it so); this fold
  * never reorders.
  */
+/** The running turn split into the work it is doing and the reply it is
+ * currently writing. */
+export interface StreamingSplit {
+  /** Everything before the reply being written: tool rows, reasoning, and any
+   * earlier prose the Agent has already moved on from. Rendered as the quiet
+   * timeline. */
+  activity: TimelineEvent[];
+  /** The accumulated text of the trailing prose run — the sentence being
+   * written right now. Empty when the turn's last act was a tool call or
+   * reasoning, i.e. when no reply is in flight. */
+  reply: string;
+}
+
+/**
+ * Split a running turn's events into activity and the in-flight reply.
+ *
+ * The trailing run of consecutive `prose` deltas is the reply the Agent is
+ * writing at this instant; rendering it in committed-message typography is what
+ * makes a turn read as a chat reply arriving rather than a log scrolling. Any
+ * prose block the Agent has already closed (by calling a tool or thinking)
+ * stays in the timeline, where its provisional styling is honest.
+ *
+ * Exactly-once on commit falls out of this: the reply is derived from
+ * `turnEvents`, which the reducer clears on the committing `msg`, and the
+ * committed row renders in the same typography — so the draft is replaced in
+ * place with no duplicate and no flash.
+ */
+export function splitStreamingReply(events: TimelineEvent[]): StreamingSplit {
+  let start = events.length;
+  while (start > 0 && events[start - 1].event.kind === "prose") start -= 1;
+  const trailing = events.slice(start);
+  return {
+    activity: events.slice(0, start),
+    reply: trailing.map(({ event }) => (event.kind === "prose" ? event.text : "")).join(""),
+  };
+}
+
 export function buildTimeline(events: TimelineEvent[], showCode = false): TimelineItem[] {
   const items: TimelineItem[] = [];
   const toolIndexById = new Map<string, number>();

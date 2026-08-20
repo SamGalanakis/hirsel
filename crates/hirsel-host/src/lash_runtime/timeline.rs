@@ -1,7 +1,15 @@
 use super::*;
 
-pub(super) const TURN_EVENT_BATCH_INTERVAL: Duration = Duration::from_millis(250);
-pub(super) const TURN_EVENT_BATCH_CHARS: usize = 400;
+/// Coalescing window for assistant prose/reasoning deltas.
+///
+/// lash hands us one `AssistantProseDelta` per provider chunk, so this is the
+/// only thing standing between the wire and token-level streaming. It is a
+/// legibility/cost tradeoff, not a capability limit: the old 250ms/400-char
+/// window delivered a finished paragraph in one frame, which reads as a jump
+/// rather than a reply being written. A ~12 frames/second ceiling streams
+/// visibly while still amortising JSON framing over a handful of tokens.
+pub(super) const TURN_EVENT_BATCH_INTERVAL: Duration = Duration::from_millis(80);
+pub(super) const TURN_EVENT_BATCH_CHARS: usize = 120;
 pub(super) const TURN_EVENT_SUMMARY_CHARS: usize = 120;
 /// Agent programs are shown verbatim, so the only cap here is a safety valve
 /// against a pathological cell blowing up the ephemeral turn stream.

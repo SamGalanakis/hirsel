@@ -144,12 +144,17 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       host.push({ type: "agent_activity", state: "thinking", text: "Working through it…" });
       host.push({ type: "turn_event", seq: 1, event: { kind: "prose", text: "First I'll read the reducer." } });
 
-      // 1. Prose block visible before any tool row.
+      // 1. The opening prose is the reply being WRITTEN: the trailing prose run
+      // streams into the margin as a reply in committed typography, not as a
+      // row in the work log. No tool row exists anywhere yet.
       await screen.findByText("First I'll read the reducer.");
       const timeline = () => document.querySelector('[data-slot="timeline"]') as HTMLElement | null;
-      await waitFor(() => expect(timeline()).toBeTruthy());
-      expect(timeline()!.querySelector('[data-slot="timeline-tool"]')).toBeNull();
-      checklist.push("prose block rendered BEFORE any tool row");
+      const reply = () =>
+        document.querySelector('[data-slot="streaming-reply"]') as HTMLElement | null;
+      await waitFor(() => expect(reply()).toBeTruthy());
+      expect(reply()!.textContent).toContain("First I'll read the reducer.");
+      expect(document.querySelector('[data-slot="timeline-tool"]')).toBeNull();
+      checklist.push("opening prose streamed as the in-flight reply, before any tool row");
 
       // 2. Tool starts → spinner (running), no result yet.
       host.push({
@@ -160,10 +165,13 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       await waitFor(() =>
         expect(timeline()!.querySelector('[aria-label="running"]')).toBeTruthy(),
       );
-      // The prose block is the first child; the tool row comes after it (seq order).
+      // Calling a tool CLOSES the reply the Agent was writing: that prose is now
+      // finished work, so it drops into the log ahead of the tool row (seq
+      // order), and no reply is in flight.
       const kinds1 = Array.from(timeline()!.children).map((c) => c.getAttribute("data-slot"));
       expect(kinds1).toEqual(["timeline-prose", "timeline-tool"]);
-      checklist.push("tool row shows a spinner while running, ordered after the prose");
+      expect(reply()).toBeNull();
+      checklist.push("a tool call closed the in-flight reply into the work log, spinner running");
 
       // tool_done → spinner becomes a check, clean summary (no raw JSON).
       host.push({
@@ -184,9 +192,13 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
         event: { kind: "prose", text: "The handler is wired correctly." },
       });
       await screen.findByText("The handler is wired correctly.");
+      // Prose after the tool opens a NEW reply — again in the margin, while the
+      // work log keeps the earlier prose and the resolved tool.
+      await waitFor(() => expect(reply()).toBeTruthy());
+      expect(reply()!.textContent).toContain("The handler is wired correctly.");
       const kinds2 = Array.from(timeline()!.children).map((c) => c.getAttribute("data-slot"));
-      expect(kinds2).toEqual(["timeline-prose", "timeline-tool", "timeline-prose"]);
-      checklist.push("second prose block appeared AFTER the tool row");
+      expect(kinds2).toEqual(["timeline-prose", "timeline-tool"]);
+      checklist.push("prose after the tool opened a new in-flight reply, work log unchanged");
 
       // 4. Reasoning row: collapsed until clicked.
       host.push({
@@ -194,9 +206,18 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
         seq: 5,
         event: { kind: "reasoning", text: "seq keeps the tool between the two prose blocks." },
       });
+      // Reasoning likewise closes the reply, so by now the log holds the whole
+      // prose ↔ tool ↔ prose ↔ reasoning sequence and nothing is in flight.
       const reasoning = () =>
         timeline()!.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement | null;
       await waitFor(() => expect(reasoning()).toBeTruthy());
+      expect(reply()).toBeNull();
+      expect(Array.from(timeline()!.children).map((c) => c.getAttribute("data-slot"))).toEqual([
+        "timeline-prose",
+        "timeline-tool",
+        "timeline-prose",
+        "timeline-reasoning",
+      ]);
       const rToggle = within(reasoning()!).getByRole("button");
       expect(rToggle.getAttribute("aria-expanded")).toBe("false");
       expect(screen.queryByText("seq keeps the tool between the two prose blocks.")).toBeNull();

@@ -1,5 +1,5 @@
 import { Check, LoaderCircle } from "lucide-solid";
-import { For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { EventItem, ViewInstance } from "../../protocol";
 import type { DisplayMessage } from "../../store/types";
 import { decideEventWithUndo, reopenEvent } from "../../lib/event-decide";
@@ -11,18 +11,43 @@ import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { Markdown } from "../Markdown";
 import { Timeline, TurnDetails } from "../chat/Timeline";
+import { splitStreamingReply } from "../chat/timeline";
 import { CommittedToolCalls } from "../chat/ToolCalls";
 import { messagesForTask, taskName } from "./task-model";
 import { formatBytes } from "../../lib/format";
 
+/** How much conversation the margin renders before asking to be widened, and
+ * how much each "earlier messages" press reveals. The old hard `slice(-8)` had
+ * no way to reach anything older at all; this window is generous enough that
+ * the control is rare, and the reducer's MESSAGES_CAP is still the outer bound
+ * (messages are KB-scale, so the whole retained log renders fine — there is no
+ * virtualisation to earn here). */
+const MARGIN_WINDOW = 30;
+
 function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: boolean }) {
+  const [revealed, setRevealed] = createSignal(MARGIN_WINDOW);
+  const shown = () => props.messages.slice(-revealed());
+  const hiddenCount = () => Math.max(0, props.messages.length - revealed());
   const hasContent = () => props.messages.length > 0 || props.thinking || state.turnEvents.length > 0;
   return (
     <Show when={hasContent()}>
       <div data-slot="conversation-margin" class="min-w-0 py-4 rail:py-10">
         <div class="flex max-w-[42rem] flex-col gap-6">
+          {/* Reaching older conversation is a deliberate press, not an infinite
+              scroll: revealing more grows the flow ABOVE the reader, and the
+              scroll container's anchoring keeps their place. */}
+          <Show when={hiddenCount() > 0}>
+            <button
+              type="button"
+              data-slot="reveal-earlier"
+              class="-ml-1 w-fit rounded px-1 py-px text-xs text-muted-foreground underline decoration-current/30 underline-offset-4 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+              onClick={() => setRevealed((n) => n + MARGIN_WINDOW)}
+            >
+              {`Earlier messages (${hiddenCount()})`}
+            </button>
+          </Show>
           <Show when={props.messages.length > 0}>
-            <For each={props.messages.slice(-8)}>
+            <For each={shown()}>
               {(message) => (
                 <article
                   aria-label={message.author === "owner" ? "You" : "Hirsel"}
@@ -66,15 +91,41 @@ function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: bool
             </For>
           </Show>
           <Show when={props.thinking || state.turnEvents.length > 0}>
-            <div class="max-w-[42rem] text-muted-foreground">
-              <Show when={props.thinking}>
-                <div class="mb-3 flex items-center gap-2 text-sm">
-                  <LoaderCircle class="size-3.5 motion-safe:animate-spin" aria-hidden="true" />
-                  {state.agentActivity.text ?? "Thinking…"}
+            {(() => {
+              const split = createMemo(() => splitStreamingReply(state.turnEvents));
+              return (
+                <div class="max-w-[42rem] text-muted-foreground">
+                  {/* The thinking marker is suppressed once a reply is actually
+                      streaming: the arriving text IS the liveness signal, and a
+                      spinner above it just competes with the words. */}
+                  <Show when={props.thinking && !split().reply}>
+                    <div class="mb-3 flex items-center gap-2 text-sm">
+                      <LoaderCircle class="size-3.5 motion-safe:animate-spin" aria-hidden="true" />
+                      {state.agentActivity.text ?? "Thinking…"}
+                    </div>
+                  </Show>
+                  <Show when={split().activity.length > 0}>
+                    <Timeline events={split().activity} />
+                  </Show>
+                  {/* The reply being written, in the same typography as the
+                      committed agent row it becomes — so the commit swaps the
+                      draft out with no visible change. The markdown pipeline
+                      stream-heals partial input, so a half-written fence or link
+                      renders safely as it grows. */}
+                  <Show when={split().reply}>
+                    <article
+                      aria-label="Hirsel"
+                      data-slot="streaming-reply"
+                      aria-busy="true"
+                      class="max-w-[42rem] pr-4 text-muted-foreground"
+                      classList={{ "mt-3": split().activity.length > 0 }}
+                    >
+                      <Markdown>{split().reply}</Markdown>
+                    </article>
+                  </Show>
                 </div>
-              </Show>
-              <Show when={state.turnEvents.length > 0}><Timeline events={state.turnEvents} /></Show>
-            </div>
+              );
+            })()}
           </Show>
         </div>
       </div>
@@ -83,7 +134,10 @@ function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: bool
 }
 
 export function AmbientField() {
-  const messages = () => state.messages.slice(-8);
+  // The whole retained log: ConversationMargin owns the render window and the
+  // "earlier messages" reveal, so the ambient field no longer truncates
+  // history a second time on the way in.
+  const messages = () => state.messages;
   return (
     <div
       data-slot="ambient-field"

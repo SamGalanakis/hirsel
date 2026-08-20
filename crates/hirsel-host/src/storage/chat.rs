@@ -250,37 +250,52 @@ pub struct HelloSnapshot {
     pub events: Vec<Event>,
 }
 
+/// The newest-N conversation window every `hello_ok` carries, whatever cursor
+/// the client presents.
+pub(crate) const HELLO_REPLAY_WINDOW: u64 = 200;
+
+/// Replay for a `hello`.
+///
+/// `last_seen_msg_id` is an ATTENTION cursor (what this client had already
+/// seen), never a history gate: a reload must not empty the conversation just
+/// because the client had seen everything. So the replay is always at least the
+/// newest [`HELLO_REPLAY_WINDOW`] rows, and grows beyond that only for a client
+/// that is further behind than the window. A null cursor keeps its historical
+/// meaning — exactly the window — because that is the same floor.
+///
+/// The client merge is range-authoritative (the snapshot owns everything from
+/// its lowest id up, local history below it is preserved), so re-sending rows
+/// the client already holds is an idempotent replace, not a duplicate.
 fn replay_messages_from_conn(
     conn: &Connection,
     last_seen_msg_id: Option<u64>,
 ) -> anyhow::Result<Vec<ChatMessage>> {
-    let mut messages = if let Some(last_seen_msg_id) = last_seen_msg_id {
-        let mut stmt = conn.prepare(
-            "
-            SELECT id, author, body, ref, ts, tool_calls
-            FROM chat_messages
-            WHERE id > ?1
-            ORDER BY id ASC
-            ",
-        )?;
-        let rows = stmt.query_map(params![last_seen_msg_id], chat_message_from_row)?;
-        collect_rows(rows)?
-    } else {
-        let mut stmt = conn.prepare(
-            "
-            SELECT id, author, body, ref, ts, tool_calls
-            FROM (
-                SELECT id, author, body, ref, ts, tool_calls
-                FROM chat_messages
-                ORDER BY id DESC
-                LIMIT 200
-            )
-            ORDER BY id ASC
-            ",
-        )?;
-        let rows = stmt.query_map([], chat_message_from_row)?;
-        collect_rows(rows)?
+    // Lowest id inside the newest-N window (0 when the table is empty).
+    let window_floor: u64 = conn.query_row(
+        "
+        SELECT COALESCE(MIN(id), 0)
+        FROM (SELECT id FROM chat_messages ORDER BY id DESC LIMIT ?1)
+        ",
+        params![HELLO_REPLAY_WINDOW],
+        |row| row.get(0),
+    )?;
+    // Exclusive cursor: `> window_cursor` is exactly the window.
+    let window_cursor = window_floor.saturating_sub(1);
+    let cursor = match last_seen_msg_id {
+        Some(seen) if seen < window_cursor => seen,
+        _ => window_cursor,
     };
+
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, author, body, ref, ts, tool_calls
+        FROM chat_messages
+        WHERE id > ?1
+        ORDER BY id ASC
+        ",
+    )?;
+    let rows = stmt.query_map(params![cursor], chat_message_from_row)?;
+    let mut messages = collect_rows(rows)?;
     load_attachments_for_messages(conn, &mut messages)?;
     Ok(messages)
 }

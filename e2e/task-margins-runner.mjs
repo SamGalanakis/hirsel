@@ -1,14 +1,13 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
+import { PORTS, pollReady, recordCheck, startProcess, teardown, writeReport as writeHarnessReport } from "./lib/harness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const app = `${root}/app`;
 const reportDir = `${root}/e2e/reports`;
-const mockPort = 39127;
-const vitePort = 39128;
+const { mock: mockPort, vite: vitePort } = PORTS.taskMargins;
 const origin = `http://127.0.0.1:${vitePort}`;
 const token = "task-margins-e2e";
 const exactCommand = "cd app && npm run e2e:task-margins";
@@ -18,15 +17,6 @@ const logs = [];
 const checks = [];
 const screenshots = [];
 
-function gitOutput(args) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  return result.status === 0 ? result.stdout.trim() : "unavailable";
-}
-
-const revision = gitOutput(["rev-parse", "HEAD"]);
-const dirtyOutput = gitOutput(["status", "--porcelain=v1"]);
-const dirtyEntries = dirtyOutput === "unavailable" || dirtyOutput === "" ? 0 : dirtyOutput.split("\n").length;
-
 async function captureScreenshot(page, name) {
   await mkdir(reportDir, { recursive: true });
   const relativePath = `e2e/reports/task-margins-${name}.png`;
@@ -35,116 +25,57 @@ async function captureScreenshot(page, name) {
 }
 
 function check(name, passed, evidence) {
-  checks.push({ name, passed: Boolean(passed), evidence });
-  if (!passed) throw new Error(`${name}: ${evidence}`);
-}
-
-function start(command, args, options) {
-  const child = spawn(command, args, {
-    ...options,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  children.push(child);
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.on("data", (chunk) => logs.push(chunk.toString().trim()));
-  }
-  return child;
+  return recordCheck(checks, name, passed, evidence);
 }
 
 async function poll(label, probe, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const result = await probe();
-      if (result) return result;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 75));
-  }
-  throw new Error(`${label} did not become ready${lastError ? `: ${lastError.message}` : ""}`);
+  return pollReady(label, probe, timeoutMs);
 }
 
 async function writeReport(error = null) {
-  await mkdir(reportDir, { recursive: true });
-  const result = {
-    runner: "task-margins",
-    provenance: {
-      revision,
-      dirty: dirtyEntries > 0,
-      dirty_entries: dirtyEntries,
+  return writeHarnessReport({
+    root,
+    reportDir,
+    basename: "task-margins-latest",
+    title: "Task Margins browser report",
+    report: {
+      runner: "task-margins",
       started_at: startedAt,
-      completed_at: new Date().toISOString(),
       command: exactCommand,
-    },
-    services: [
-      {
-        kind: "seeded-websocket-mock",
-        command: "node tools/mock-server.mjs",
-        cwd: "app",
-        port: mockPort,
+      services: [
+        { kind: "seeded-websocket-mock", command: "node tools/mock-server.mjs", cwd: "app", port: mockPort },
+        { kind: "vite-development-server", command: `npm exec vite -- --host 127.0.0.1 --port ${vitePort} --strictPort`, cwd: "app", port: vitePort },
+      ],
+      browser: {
+        engine: "Chromium",
+        headless: true,
+        viewport_sequence: ["1440x1000", "390x844", "320x700"],
+        color_scheme: "light",
+        reduced_motion: "reduce",
+        touch_emulation: true,
       },
-      {
-        kind: "vite-development-server",
-        command: `npm exec vite -- --host 127.0.0.1 --port ${vitePort} --strictPort`,
-        cwd: "app",
-        port: vitePort,
-      },
-    ],
-    browser: {
-      engine: "Chromium",
-      headless: true,
-      viewport_sequence: ["1440x1000", "390x844", "320x700"],
-      color_scheme: "light",
-      reduced_motion: "reduce",
-      touch_emulation: true,
+      ports: { mock: mockPort, vite: vitePort },
+      screenshots,
+      status: "passed",
+      checks,
     },
-    ports: { mock: mockPort, vite: vitePort },
-    screenshots,
-    status: error ? "failed" : "passed",
-    checks,
-    error: error?.message ?? null,
-  };
-  await writeFile(`${reportDir}/task-margins-latest.json`, `${JSON.stringify(result, null, 2)}\n`);
-  const rows = checks.map(({ name, passed, evidence }) =>
-    `| ${passed ? "PASS" : "FAIL"} | ${name} | ${String(evidence).replaceAll("|", "\\|")} |`);
-  await writeFile(`${reportDir}/task-margins-latest.md`, [
-    "# Task Margins browser report",
-    "",
-    `Status: **${result.status.toUpperCase()}**`,
-    "",
-    `- Revision: \`${result.provenance.revision}\``,
-    `- Worktree: **${result.provenance.dirty ? `dirty (${result.provenance.dirty_entries} entries)` : "clean"}**`,
-    `- Started: \`${result.provenance.started_at}\``,
-    `- Completed: \`${result.provenance.completed_at}\``,
-    `- Command: \`${result.provenance.command}\``,
-    `- Services: ${result.services.map((service) => `${service.kind} (\`${service.command}\`, ${service.cwd}, port ${service.port})`).join("; ")}`,
-    `- Browser: ${result.browser.engine} headless; viewports ${result.browser.viewport_sequence.join(", ")}; color scheme ${result.browser.color_scheme}; reduced motion ${result.browser.reduced_motion}; touch emulation ${result.browser.touch_emulation}`,
-    `- Screenshots: ${result.screenshots.length > 0 ? result.screenshots.map((path) => `\`${path}\``).join(", ") : "none captured before failure"}`,
-    "",
-    "| Gate | Check | Evidence |",
-    "| --- | --- | --- |",
-    ...rows,
-    ...(error ? ["", `Failure: ${error.message}`] : []),
-    "",
-  ].join("\n"));
+    error,
+  });
 }
 
 async function main() {
-  start(process.execPath, ["tools/mock-server.mjs"], {
+  startProcess(children, process.execPath, ["tools/mock-server.mjs"], {
     cwd: app,
     env: { ...process.env, MOCK_PORT: String(mockPort), MOCK_REPLY_MS: "20" },
-  });
-  start("npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
+  }, logs);
+  startProcess(children, "npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
     cwd: app,
     env: {
       ...process.env,
       VITE_WS_URL: "same-origin",
       HIRSEL_DEV_PROXY_TARGET: `ws://127.0.0.1:${mockPort}`,
     },
-  });
+  }, logs);
   await poll("mock", async () => (await fetch(`http://127.0.0.1:${mockPort}/ready`)).status === 404);
   await poll("Vite", async () => (await fetch(origin)).ok);
   check("isolated services", true, `mock ${mockPort}; Vite ${vitePort}; readiness polled`);
@@ -628,23 +559,7 @@ try {
   failure = error;
   process.exitCode = 1;
 } finally {
-  for (const child of children) {
-    try {
-      if (process.platform === "win32") child.kill("SIGTERM");
-      else process.kill(-child.pid, "SIGTERM");
-    } catch { /* owned process group already exited */ }
-  }
-  await Promise.all(children.map((child) => new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) return resolve();
-    child.once("exit", resolve);
-    setTimeout(() => {
-      try {
-        if (process.platform === "win32") child.kill("SIGKILL");
-        else process.kill(-child.pid, "SIGKILL");
-      } catch { /* owned process group already exited */ }
-      resolve();
-    }, 1_000);
-  })));
+  await teardown(children);
   await writeReport(failure);
 }
 

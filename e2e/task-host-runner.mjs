@@ -1,16 +1,21 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
+import {
+  PORTS,
+  pollReady,
+  recordCheck,
+  startHost,
+  startProcess,
+  teardown,
+  writeReport,
+} from "./lib/harness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const app = `${root}/app`;
 const reportDir = `${root}/e2e/reports`;
-const hostPort = 39129;
-const vitePort = 39130;
+const { host: hostPort, vite: vitePort } = PORTS.taskHost;
 const hostOrigin = `http://127.0.0.1:${hostPort}`;
 const origin = `http://127.0.0.1:${vitePort}`;
 const token = "task-host-e2e-token";
@@ -21,42 +26,12 @@ const logs = [];
 const checks = [];
 let dataDir;
 
-function gitOutput(args) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  return result.status === 0 ? result.stdout.trim() : "unavailable";
-}
-
 function check(name, passed, evidence) {
-  checks.push({ name, passed: Boolean(passed), evidence });
-  if (!passed) throw new Error(`${name}: ${evidence}`);
-}
-
-function start(command, args, options) {
-  const child = spawn(command, args, {
-    ...options,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  children.push(child);
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.on("data", (chunk) => logs.push(chunk.toString().trim()));
-  }
-  return child;
+  return recordCheck(checks, name, passed, evidence);
 }
 
 async function poll(label, probe, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const result = await probe();
-      if (result) return result;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 75));
-  }
-  throw new Error(`${label} did not settle${lastError ? `: ${lastError.message}` : ""}`);
+  return pollReady(label, probe, timeoutMs);
 }
 
 async function debug(path, options = {}) {
@@ -92,89 +67,48 @@ async function postEventAction(eventId, action, data) {
   return { response, body: await response.text() };
 }
 
-async function writeReport(error = null) {
-  await mkdir(reportDir, { recursive: true });
-  const revision = gitOutput(["rev-parse", "HEAD"]);
-  const dirty = gitOutput(["status", "--porcelain=v1"]);
-  const result = {
+async function report(error = null) {
+  return writeReport({
+    root,
+    reportDir,
+    basename: "task-host-latest",
+    title: "Host-backed adaptive Task browser report",
+    report: {
     runner: "task-host",
-    provenance: {
-      revision,
-      dirty: Boolean(dirty && dirty !== "unavailable"),
-      dirty_entries: dirty && dirty !== "unavailable" ? dirty.split("\n").length : 0,
-      started_at: startedAt,
-      completed_at: new Date().toISOString(),
-      command: exactCommand,
-    },
+    started_at: startedAt,
+    command: exactCommand,
     services: [
       { kind: "rust-host-scripted-agent", command: "prebuilt target/debug/hirsel-host", cwd: "isolated temporary directory", port: hostPort },
       { kind: "vite-development-server", command: `npm exec vite -- --host 127.0.0.1 --port ${vitePort} --strictPort`, cwd: "app", port: vitePort },
     ],
     browser: { engine: "Chromium", headless: true, viewport: "1280x900", service_workers: "blocked" },
-    status: error ? "failed" : "passed",
+    status: "passed",
     screenshot: "e2e/reports/task-host-latest.png",
     checks,
-    error: error?.message ?? null,
-  };
-  await writeFile(`${reportDir}/task-host-latest.json`, `${JSON.stringify(result, null, 2)}\n`);
-  const rows = checks.map(({ name, passed, evidence }) =>
-    `| ${passed ? "PASS" : "FAIL"} | ${name} | ${String(evidence).replaceAll("|", "\\|")} |`);
-  await writeFile(`${reportDir}/task-host-latest.md`, [
-    "# Host-backed adaptive Task browser report",
-    "",
-    `Status: **${result.status.toUpperCase()}**`,
-    "",
-    `- Revision: \`${revision}\``,
-    `- Worktree: **${result.provenance.dirty ? `dirty (${result.provenance.dirty_entries} entries)` : "clean"}**`,
-    `- Started: \`${result.provenance.started_at}\``,
-    `- Completed: \`${result.provenance.completed_at}\``,
-    `- Command: \`${exactCommand}\``,
-    "- Services: real Rust Host with scripted global Agent; Vite frontend",
-    `- Screenshot: \`${result.screenshot}\``,
-    "",
-    "| Gate | Check | Evidence |",
-    "| --- | --- | --- |",
-    ...rows,
-    ...(error ? ["", `Failure: ${error.message}`] : []),
-    "",
-  ].join("\n"));
+    },
+    error,
+  });
 }
 
 async function main() {
-  dataDir = await mkdtemp(join(tmpdir(), "hirsel-task-host-"));
-  const build = spawnSync("cargo", ["build", "-p", "hirsel-host", "--bin", "hirsel-host"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (build.status !== 0) throw new Error(`Host build failed: ${build.stderr || build.stdout}`);
-  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (metadata.status !== 0) throw new Error(`Cargo metadata failed: ${metadata.stderr}`);
-  const hostBinary = join(JSON.parse(metadata.stdout).target_directory, "debug", "hirsel-host");
-  start(hostBinary, [], {
-    cwd: dataDir,
-    env: {
-      ...process.env,
-      HIRSEL_TOKEN: token,
-      HIRSEL_AGENT: "scripted",
-      HIRSEL_DRIVER: "fake",
-      HIRSEL_DEBUG: "1",
-      HIRSEL_IROH: "0",
-      HIRSEL_DATA_DIR: dataDir,
-      HIRSEL_TEMPLATES_DIR: `${root}/templates`,
-      HIRSEL_LISTEN: `127.0.0.1:${hostPort}`,
-    },
-  });
-  start("npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
+  ({ dataDir } = await startHost({
+    root,
+    children,
+    logs,
+    port: hostPort,
+    token,
+    agent: "scripted",
+    driver: "fake",
+    dataDirPrefix: "hirsel-task-host-",
+  }));
+  startProcess(children, "npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
     cwd: app,
     env: {
       ...process.env,
       VITE_WS_URL: "same-origin",
       HIRSEL_DEV_PROXY_TARGET: `ws://127.0.0.1:${hostPort}`,
     },
-  });
+  }, logs);
   await poll("Rust Host readiness", async () => (await debug("/debug/health")).ok, 60_000);
   await poll("Vite readiness", async () => (await fetch(origin)).ok);
   check("isolated real services", true, `Rust Host ${hostPort}; Vite ${vitePort}; readiness polled`);
@@ -314,25 +248,8 @@ try {
   failure = error;
   process.exitCode = 1;
 } finally {
-  for (const child of children) {
-    try {
-      if (process.platform === "win32") child.kill("SIGTERM");
-      else process.kill(-child.pid, "SIGTERM");
-    } catch { /* owned process group already exited */ }
-  }
-  await Promise.all(children.map((child) => new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) return resolve();
-    child.once("exit", resolve);
-    setTimeout(() => {
-      try {
-        if (process.platform === "win32") child.kill("SIGKILL");
-        else process.kill(-child.pid, "SIGKILL");
-      } catch { /* owned process group already exited */ }
-      resolve();
-    }, 1_000);
-  })));
-  if (dataDir) await rm(dataDir, { recursive: true, force: true });
-  await writeReport(failure);
+  await teardown(children, { dataDirs: [dataDir] });
+  await report(failure);
 }
 
 if (failure) {

@@ -1,27 +1,21 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PORTS, hasCodexAuth, pollReady, startHost, teardown, writeReport } from "./lib/harness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const reportDir = `${root}/e2e/reports`;
-const reportBase = `${reportDir}/task-host-external-smoke-latest`;
-const port = 39131;
+const port = PORTS.externalSmoke.host;
 const origin = `http://127.0.0.1:${port}`;
 const token = "external-smoke-local-owner";
 const startedAt = new Date().toISOString();
 const requestedRun = process.argv.includes("--run");
 const authorized = process.env.HIRSEL_EXTERNAL_SMOKE === "1";
-const codexAuthPresent = Boolean(process.env.HOME)
-  && existsSync(join(process.env.HOME, ".codex", "auth.json"));
+const codexAuthPresent = hasCodexAuth(process.env.HOME);
 const anthropicPresent = Boolean(process.env.ANTHROPIC_API_KEY);
 const provider = process.env.HIRSEL_SMOKE_PROVIDER
   || (anthropicPresent ? "anthropic" : codexAuthPresent ? "codex" : null);
 const configured = provider === "anthropic" ? anthropicPresent : provider === "codex" ? codexAuthPresent : false;
-let child;
+const children = [];
 let dataDir;
 let result = {
   runner: "task-host-external-smoke",
@@ -41,41 +35,8 @@ let result = {
   reason: null,
 };
 
-async function writeReport() {
-  result.completed_at = new Date().toISOString();
-  await mkdir(reportDir, { recursive: true });
-  await writeFile(`${reportBase}.json`, `${JSON.stringify(result, null, 2)}\n`);
-  await writeFile(`${reportBase}.md`, [
-    "# Optional external-model Host smoke",
-    "",
-    `Status: **${result.status.toUpperCase()}**`,
-    "",
-    `- Started: \`${result.started_at}\``,
-    `- Completed: \`${result.completed_at}\``,
-    `- Provider: \`${result.provider}\``,
-    `- Credential source: ${result.credential_source}; values were never read into evidence`,
-    `- External calls: ${result.external_calls}`,
-    `- Command: \`${result.command}\``,
-    `- Reason: ${result.reason ?? "completed"}`,
-    "",
-    ...result.checks.map((check) => `- ${check.passed ? "PASS" : "FAIL"}: ${check.name} — ${check.evidence}`),
-    "",
-  ].join("\n"));
-}
-
 async function poll(label, probe, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await probe();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`${label} timed out${lastError ? `: ${lastError.message}` : ""}`);
+  return pollReady(label, probe, timeoutMs, 100);
 }
 
 async function debug(path, options = {}) {
@@ -91,34 +52,15 @@ async function debug(path, options = {}) {
 }
 
 async function run() {
-  dataDir = await mkdtemp(join(tmpdir(), "hirsel-external-smoke-"));
-  const build = spawnSync("cargo", ["build", "-p", "hirsel-host", "--bin", "hirsel-host"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (build.status !== 0) throw new Error("Host build failed");
-  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (metadata.status !== 0) throw new Error("Cargo metadata failed");
-  const binary = join(JSON.parse(metadata.stdout).target_directory, "debug", "hirsel-host");
-  child = spawn(binary, [], {
-    cwd: dataDir,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "ignore", "ignore"],
-    env: {
-      ...process.env,
-      HIRSEL_TOKEN: token,
-      HIRSEL_AGENT: "lash",
-      HIRSEL_PROVIDER: provider,
-      HIRSEL_DEBUG: "1",
-      HIRSEL_IROH: "0",
-      HIRSEL_DATA_DIR: dataDir,
-      HIRSEL_TEMPLATES_DIR: `${root}/templates`,
-      HIRSEL_LISTEN: `127.0.0.1:${port}`,
-    },
-  });
+  ({ dataDir } = await startHost({
+    root,
+    children,
+    port,
+    token,
+    agent: "lash",
+    provider,
+    dataDirPrefix: "hirsel-external-smoke-",
+  }));
   await poll("Host readiness", async () => (await debug("/debug/health")).ok, 60_000);
   result.checks.push({ name: "production Host ready", passed: true, evidence: `loopback port ${port}` });
   const seeded = await debug("/debug/seed-adaptive-task", { method: "POST", body: "{}" });
@@ -160,14 +102,21 @@ try {
   result.reason = error.message;
   process.exitCode = 1;
 } finally {
-  if (child) {
-    try {
-      if (process.platform === "win32") child.kill("SIGTERM");
-      else process.kill(-child.pid, "SIGTERM");
-    } catch { /* owned process already exited */ }
-  }
-  if (dataDir) await rm(dataDir, { recursive: true, force: true });
-  await writeReport();
+  await teardown(children, { dataDirs: [dataDir] });
+  result.completed_at = new Date().toISOString();
+  await writeReport({
+    root,
+    reportDir,
+    basename: "task-host-external-smoke-latest",
+    title: "Optional external-model Host smoke",
+    report: result,
+    details: [
+      `- Provider: \`${result.provider}\``,
+      `- Credential source: ${result.credential_source}; values were never read into evidence`,
+      `- External calls: ${result.external_calls}`,
+      `- Reason: ${result.reason ?? "completed"}`,
+    ],
+  });
 }
 
 console.log(`${result.status}: ${result.reason}`);

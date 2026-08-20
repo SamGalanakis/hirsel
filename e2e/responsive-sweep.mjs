@@ -12,19 +12,20 @@
  *
  * Output is one JSON blob on stdout; screenshots land in e2e/reports/sweep-*.
  */
-import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { mkdir } from "node:fs/promises";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
+import { PORTS, pollReady, startProcess, teardown, writeReport } from "./lib/harness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const app = `${root}/app`;
 const reportDir = `${root}/e2e/reports`;
-const mockPort = 39131;
-const vitePort = 39132;
+const { mock: mockPort, vite: vitePort } = PORTS.responsiveSweep;
 const origin = `http://127.0.0.1:${vitePort}`;
 const token = "responsive-sweep";
 const children = [];
+const startedAt = new Date().toISOString();
+const exactCommand = "cd app && npm run e2e:responsive-sweep";
 const shot = process.env.SWEEP_SHOTS === "1";
 const tag = process.env.SWEEP_TAG ?? "after";
 
@@ -39,24 +40,8 @@ const WIDTHS = [
   { w: 400, h: 520 }, // phone with an on-screen keyboard up
 ];
 
-function start(command, args, options) {
-  const child = spawn(command, args, { ...options, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-  children.push(child);
-  return child;
-}
-
 async function poll(label, probe, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      if (await probe()) return true;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`${label} not ready${lastError ? `: ${lastError.message}` : ""}`);
+  return pollReady(label, probe, timeoutMs, 100);
 }
 
 const probeGeometry = () => {
@@ -144,11 +129,11 @@ const probeGeometry = () => {
 };
 
 async function main() {
-  start(process.execPath, ["tools/mock-server.mjs"], {
+  startProcess(children, process.execPath, ["tools/mock-server.mjs"], {
     cwd: app,
     env: { ...process.env, MOCK_PORT: String(mockPort), MOCK_REPLY_MS: "20" },
   });
-  start("npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
+  startProcess(children, "npm", ["exec", "vite", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
     cwd: app,
     env: { ...process.env, VITE_WS_URL: "same-origin", HIRSEL_DEV_PROXY_TARGET: `ws://127.0.0.1:${mockPort}` },
   });
@@ -219,17 +204,55 @@ async function main() {
     }
   } finally {
     await browser.close();
-    for (const child of children) {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
-    }
   }
+  if (errors.length > 0) throw new Error(`browser/page errors: ${errors.join("; ")}`);
   process.stdout.write(`${JSON.stringify({ results, errors }, null, 1)}\n`);
+  return { results, errors };
 }
 
-main().then(() => process.exit(0), (error) => {
+let failure = null;
+let sweep = { results: [], errors: [] };
+try {
+  sweep = await main();
+} catch (error) {
+  failure = error;
+  process.exitCode = 1;
   console.error(error);
-  for (const child of children) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
-  }
-  process.exit(1);
-});
+} finally {
+  await teardown(children);
+  const screenshots = shot
+    ? WIDTHS.flatMap(({ w, h }) => ["ambient", "focused", "wide", "Processes", "Settings"].map((state) => `e2e/reports/sweep-${tag}-${w}x${h}-${state}.png`))
+    : [];
+  await writeReport({
+    root,
+    reportDir,
+    basename: "responsive-sweep-latest",
+    title: "Responsive geometry sweep report",
+    report: {
+      runner: "responsive-sweep",
+      started_at: startedAt,
+      command: exactCommand,
+      services: [
+        { kind: "seeded-websocket-mock", command: "node tools/mock-server.mjs", cwd: "app", port: mockPort },
+        { kind: "vite-development-server", command: `npm exec vite -- --host 127.0.0.1 --port ${vitePort} --strictPort`, cwd: "app", port: vitePort },
+      ],
+      browser: {
+        engine: "Chromium",
+        headless: true,
+        viewport_sequence: WIDTHS.map(({ w, h }) => `${w}x${h}`),
+        color_scheme: "dark",
+        touch_emulation: "width < 900",
+      },
+      ports: { mock: mockPort, vite: vitePort },
+      screenshots,
+      results: sweep.results,
+      errors: sweep.errors,
+      checks: [
+        { name: "responsive viewports measured", passed: !failure, evidence: `${sweep.results.length}/${WIDTHS.length} viewports completed` },
+        { name: "browser/page errors", passed: sweep.errors.length === 0, evidence: sweep.errors.join("; ") || "none" },
+      ],
+      status: failure ? "failed" : "passed",
+    },
+    error: failure,
+  });
+}

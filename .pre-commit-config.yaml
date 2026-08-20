@@ -22,31 +22,9 @@ repos:
         entry: Sensitive files must never be committed
         files: '(?i)(^|/)(google-services\.json|[^/]*service[-_]account[^/]*\.json|fcm-[^/]*service[^/]*\.json|[^/]*firebase-admin[^/]*\.json|[^/]*credentials[^/]*\.json|[^/]*\.(keystore|jks|p12|pfx|pkcs12|pem|key|der|kdbx|mobileprovision))$'
 
-      - id: cargo-fmt
-        name: cargo fmt
+      - id: check-static
+        name: static checks
         language: system
-        entry: cargo fmt --all -- --check
-        files: \.rs$
+        entry: bash scripts/check-static.sh
         pass_filenames: false
-
-      - id: cargo-clippy
-        name: cargo clippy
-        language: system
-        entry: cargo clippy --workspace --all-targets -- -D warnings
-        files: \.rs$
-        pass_filenames: false
-        stages: [pre-push]
-
-      - id: web-lint
-        name: web oxlint
-        language: system
-        entry: bash -c 'cd app && npm run lint'
-        files: ^app/
-        pass_filenames: false
-
-      - id: web-types
-        name: web TypeScript
-        language: system
-        entry: bash -c 'cd app && npm exec -- tsc --noEmit'
-        files: ^app/
-        pass_filenames: false
+        always_run: true

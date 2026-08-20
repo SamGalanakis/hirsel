@@ -194,12 +194,10 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
     <div
       data-slot="task-field"
       data-task={props.task.id}
-      /* `min-h-full` is load-bearing, not decoration: the scroll container is a
-         `justify-end` flex column, and a child shorter than it would be pushed
-         down — while a child that merely overflows would have its top clipped
-         out of reach by that same `justify-end`. Filling the container makes
-         the alignment a no-op and hands the vertical rhythm back to this
-         field. */
+      /* `min-h-full` is load-bearing, not decoration: it fills the scroll
+         container so a content-thin task still owns the field's vertical
+         rhythm (card at top, room below) instead of collapsing to a strip.
+         The scroll container itself carries no alignment — see TaskShell. */
       class={`mx-auto flex min-h-full w-full max-w-frame flex-col ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
       {/* ONE column at the reading measure, the same one ambient uses. The task

@@ -247,7 +247,12 @@ export function TaskShell() {
                expanding turn-details block from shoving the text the Owner is
                reading; the browser holds the anchored node still and absorbs
                the growth above it. */
-            class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto [overflow-anchor:auto]"
+            /* No `justify-end` here, ever: on a scroll container it makes a
+               child taller than the viewport overflow UPWARD, and upward
+               overflow is unreachable (scrollHeight never grows). Bottom
+               anchoring for short content is the field's own job via
+               `min-h-full` + its internal alignment. */
+            class="flex min-h-0 flex-1 flex-col overflow-y-auto [overflow-anchor:auto]"
           >
             <Show when={focusedTask()} fallback={<AmbientField />}>
               {(task) => <TaskField task={task()} tasks={tasks()} views={taskViews()} />}

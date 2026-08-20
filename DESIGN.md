@@ -82,13 +82,20 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - Ordinary choices and supporting data are flat rows separated by rhythm or hairlines. The standing composer is the only persistent capsule.
 - Canvas views may appear inside the task when associated, or as a summoned utility when global. Canvas is not a destination.
 
-### Conversation margin
+### One column, task as pinned context card
 
-- Task conversation is plain prose adjacent to or following the generated instrument. No “Hirsel · task” heading, avatar, bubble, aside, card, or transcript border.
+- Every state is ONE centred column at the reading measure. Ambient is the conversation bottom-anchored on the composer; focus adds a **pinned task card** at the top of that same column, with the conversation flowing below it into the composer. Focus never splits the field into two columns and never gives the conversation a margin.
+- The card is sticky at the top of the scroll container, so the task stays legible while its history is read. It sits on the canvas — its only boundary is one hairline — and it is capped at ~40dvh with its own scroll, so a task with tall generated fields can never push the conversation off screen. A content-thin task renders as the few lines it is.
+- Because the card is pinned, a focused task opens where a conversation opens: at its newest line. There is no longer a subject to protect by holding the field at its top.
+- This replaces the two-column focused layout (instrument left, conversation in a ~400px right margin). The reason is content density, honestly: role decided the allocation, so a two-line "session rotated" notice owned half the screen while the conversation carrying all the substance was squeezed into the margin. Allocate by content — and the conversation is primary in every state.
+
+### Conversation
+
+- Task conversation is plain prose following the pinned task card. No “Hirsel · task” heading, avatar, bubble, aside, card, or transcript border.
 - Owner lines use stronger foreground; Hirsel lines use muted foreground. Order and language provide authorship.
 - Conversation uses the **Pure Field** rule: no backdrop or enclosing silhouette. Owner lines receive one quiet hairline and slight indentation; Hirsel prose rests directly on the canvas. Collapsed tool disclosures are transparent at rest.
-- On phone the margin follows the instrument in the same scroll flow.
-- With no relevant conversation, the margin does not render or reserve space.
+- The conversation follows the card in the same scroll flow at every width; phone and desktop differ only in inset.
+- With no relevant conversation, it does not render or reserve space.
 - Tool timelines may unfold under the relevant Hirsel line on demand; they never create a third column.
 
 ### Composer
@@ -96,7 +103,7 @@ Inter remains the workhorse. The task name is quiet context; the generated quest
 - One composer persists at the bottom of every state.
 - The composer inherits the field: focused task messages use that task's anchor and mention; ambient messages are unanchored.
 - Scope is never a separate composer mode. There is no scope chip, visible mode label, or instructional placeholder.
-- The composer holds one width in every state: the reading measure it shares with the instrument and the conversation above it, so its left and right edges are the same in ambient and in focus. Focus changes only its tone, to a restrained mint-local tint; ambient rests neutral. (Focus used to narrow it from the frame width to the measure. That moved the one permanently visible element — and its send target — sideways on every toggle, and left the ambient capsule wider than the conversation it sat under. Continuity of the standing element beats the width distinction.)
+- The composer holds one width in every state: the reading measure it shares with the single column above it — task card and conversation alike — so its left and right edges are the same in ambient and in focus. Focus changes only its tone, to a restrained mint-local tint; ambient rests neutral. (Focus used to narrow it from the frame width to the measure. That moved the one permanently visible element — and its send target — sideways on every toggle, and left the ambient capsule wider than the conversation it sat under. Continuity of the standing element beats the width distinction.)
 - The composer is an organic quiet capsule. Send is round. On phone it stays sticky at the thumb edge while task content moves behind it.
 
 ### Utilities
@@ -109,7 +116,7 @@ Home has no header bar: the field's top anchor is its content. One quiet floatin
 - Clearing focus uses that same animation, in the same direction: focus and ambient are one surface changing subject, not two panels trading places. Nothing else moves through the swap — the composer, the task strip and the floating `⋯` stay exactly where they are, and may only change tone.
 - Wide content (tables, code, process rows) scrolls inside its own box. Nothing widens the field, and the page itself never scrolls sideways at any width.
 - Generated UI updates in place. Preserve semantic position where possible.
-- At under 900px, the index becomes a horizontal strip, the task surface becomes one column, and conversation follows it.
+- At under 900px, the index becomes a horizontal strip. The column itself does not change shape with width — it is one column at every viewport; only the inset and the index do.
 - At under 560px, the composer remains sticky above the safe area and communicates focus through tone rather than added copy.
 - On phone, the quiet task identity remains 20px; the generated JSON heading owns the full question so framing is never repeated.
 - Honor `prefers-reduced-motion`; all content is fully visible without animation.

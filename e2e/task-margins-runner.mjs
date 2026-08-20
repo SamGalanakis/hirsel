@@ -267,7 +267,7 @@ async function main() {
       "same task is one action away from the ambient whole",
     );
 
-    const deployMargin = page.locator('[data-slot="conversation-margin"]');
+    const deployMargin = page.locator('[data-slot="conversation"]');
     const deployAttribution = {
       anchor: await deployMargin.getByText(/Deploy of build 4821/).count(),
       probe: await deployMargin.getByText(/What would make this unsafe/).count(),
@@ -280,7 +280,7 @@ async function main() {
       JSON.stringify(deployAttribution),
     );
     await auth.click();
-    const authMargin = page.locator('[data-slot="conversation-margin"]');
+    const authMargin = page.locator('[data-slot="conversation"]');
     check(
       "interleaved auth attribution",
       (await authMargin.getByText(/auth refactor branch/).count()) === 1
@@ -571,7 +571,7 @@ async function main() {
       document: document.documentElement.scrollWidth,
       stripLeft: document.querySelector('[data-slot="task-index"]')?.getBoundingClientRect().left,
       stripRight: document.querySelector('[data-slot="task-index"]')?.getBoundingClientRect().right,
-      columns: getComputedStyle(document.querySelector('[data-slot="task-field"]')).gridTemplateColumns,
+      columns: getComputedStyle(document.querySelector('[data-slot="task-conversation"]')).gridTemplateColumns,
     }));
     check("390px containment", phoneContainment.document <= phoneContainment.viewport && phoneContainment.stripLeft >= 0 && phoneContainment.stripRight <= 390 && !phoneContainment.columns.includes(" "), JSON.stringify(phoneContainment));
     const phoneTask = await taskField.getAttribute("data-task");
@@ -594,7 +594,7 @@ async function main() {
       const input = document.querySelector('[data-composer="main"]');
       const composer = document.querySelector('[data-slot="composer-shell"]');
       const strip = document.querySelector('[data-slot="task-index"]');
-      const h2 = document.querySelector('[data-slot="task-field"] h2');
+      const h2 = document.querySelector('[data-slot="task-card"] h2');
       return {
         viewport: innerWidth,
         document: document.documentElement.scrollWidth,

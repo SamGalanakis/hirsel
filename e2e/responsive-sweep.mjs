@@ -114,8 +114,11 @@ const probeGeometry = () => {
       ? composerRect.bottom <= window.innerHeight + 1 && composerRect.top >= -1
         && (!sendRect || sendRect.right <= window.innerWidth + 1)
       : false,
+    // One column in both states now. The probe watches the conversation half
+    // of the focused column: a second track here would mean the two-column
+    // margin had crept back.
     gridCols: (() => {
-      const f = document.querySelector('[data-slot="task-field"]');
+      const f = document.querySelector('[data-slot="task-conversation"]');
       return f ? getComputedStyle(f).gridTemplateColumns : null;
     })(),
     pageOverflow: doc.scrollWidth - doc.clientWidth,
@@ -133,7 +136,9 @@ const probeGeometry = () => {
     affordances: rect('[data-slot="home-affordances"]'),
     scroll: rect('[data-slot="task-scroll"]'),
     field: rect('[data-slot="task-field"]') ?? rect('[data-slot="ambient-field"]'),
-    margin: rect('[data-slot="conversation-margin"]'),
+    card: rect('[data-slot="task-card"]'),
+    column: rect('[data-slot="task-column"]'),
+    conversation: rect('[data-slot="conversation"]'),
     firstChip: rect("[data-task-id]"),
   };
 };

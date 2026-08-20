@@ -151,8 +151,10 @@ export function focusTask(id: number): void {
   setState("focusedTaskId", id);
 }
 
-/** Leave the focused Task for the ambient field. The exit path behind Esc, the
- * focused chip's × affordance, and the ⌘K "Clear task focus" command. */
+/** Leave the focused Task for the ambient field. The exit path behind Esc and
+ * the ⌘K "Clear task focus" command. The chip's own exit is `toggleTaskFocus`:
+ * activating the open chip clears it, which is what its accessible name
+ * promises. */
 export function clearTaskFocus(): void {
   setState("focusedTaskId", null);
 }

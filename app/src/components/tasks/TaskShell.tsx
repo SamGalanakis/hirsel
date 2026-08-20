@@ -17,7 +17,6 @@ import {
 import {
   clearComposerPrefill,
   clearProtocolError,
-  clearTaskFocus,
   dispatch,
   effectiveEvents,
   focusTask,
@@ -350,7 +349,6 @@ export function TaskShell() {
           tasks={tasks()}
           focusedId={state.focusedTaskId}
           onSelect={selectTask}
-          onClearFocus={clearTaskFocus}
         />
         <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Scrolled text never hard-clips against the top edge: a short

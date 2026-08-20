@@ -13,9 +13,9 @@ import { createSignal } from "solid-js";
 import { scrollToBottom } from "./scroll";
 import { clearTaskFocus, openProcesses, openSettings, state } from "../store/store";
 import { getClient } from "../ws/client";
-// SEAM (created in a parallel worktree): true while a modal/overlay/focus-trap
-// owns input. Used to suppress the bare-key layer so summoned surfaces keep the
-// keyboard. Documented import: `import { anyOverlayOpen } from "./lib/focus"`.
+// True while a modal/overlay owns input — focus traps and the Kobalte dialogs
+// that register their own presence both feed it. Used to suppress the bare-key
+// layer so summoned surfaces keep the keyboard.
 import { anyOverlayOpen, focusMainComposer, focusTaskIndex } from "./focus";
 
 /** Max gap (ms) between the `g` leader and its second key for a chord to count. */
@@ -95,6 +95,9 @@ export interface Shortcut {
 
 export const SHORTCUTS: Shortcut[] = [
   { keys: ["⌘", "K"], label: "Command palette", group: "General" },
+  // Two routes to the same sheet, listed adjacently: ⌘/ reaches it mid-type,
+  // `?` is the bare-key one you find by accident.
+  { keys: ["⌘", "/"], label: "Keyboard shortcuts", group: "General" },
   { keys: ["?"], label: "Keyboard shortcuts", group: "General" },
   { keys: ["Esc"], label: "Clear task focus", group: "Tasks" },
   { keys: ["/"], label: "Focus Hirsel", group: "Hirsel" },
@@ -171,6 +174,15 @@ export function installGlobalKeymap(handlers: KeymapHandlers = defaultHandlers):
       if (anyOverlayOpen()) return;
       e.preventDefault();
       handlers.openPalette();
+      return;
+    }
+
+    // ⌘/ (Ctrl+/) summons the cheat-sheet on the same terms — reachable with the
+    // caret in the composer, where the bare `?` route is (correctly) content.
+    if (meta && e.key === "/") {
+      if (anyOverlayOpen()) return;
+      e.preventDefault();
+      handlers.showHelp();
       return;
     }
 

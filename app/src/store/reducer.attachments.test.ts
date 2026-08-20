@@ -27,18 +27,39 @@ describe("send_local with attachments and mode", () => {
   it("carries attachments onto the optimistic message and pendingSend blob ids", () => {
     const s = reduce(initialState(), sendLocal("c1", "look", { attachments: [blob("b1")] }));
     expect(s.messages[0].attachments).toEqual([blob("b1")]);
-    expect(s.pendingSends[0]).toEqual({ clientId: "c1", body: "look", ref: null, attachments: ["b1"] });
+    expect(s.pendingSends[0]).toEqual({
+      clientId: "c1",
+      body: "look",
+      ref: null,
+      attachments: ["b1"],
+      mode: "send",
+      mentions: [],
+    });
   });
 
-  it("keeps the bare pendingSend shape for a default send (no attachments/mode)", () => {
+  it("spells a default send's empty attachments/mentions and \"send\" mode out in full", () => {
     const s = reduce(initialState(), sendLocal("c1", "hi"));
-    expect(s.pendingSends[0]).toEqual({ clientId: "c1", body: "hi", ref: null });
+    expect(s.pendingSends[0]).toEqual({
+      clientId: "c1",
+      body: "hi",
+      ref: null,
+      attachments: [],
+      mode: "send",
+      mentions: [],
+    });
     expect(s.messages[0].mode).toBe("send");
   });
 
   it("records a next_turn mode on the pendingSend", () => {
     const s = reduce(initialState(), sendLocal("c1", "later", { mode: "next_turn" }));
-    expect(s.pendingSends[0]).toEqual({ clientId: "c1", body: "later", ref: null, mode: "next_turn" });
+    expect(s.pendingSends[0]).toEqual({
+      clientId: "c1",
+      body: "later",
+      ref: null,
+      attachments: [],
+      mode: "next_turn",
+      mentions: [],
+    });
   });
 });
 

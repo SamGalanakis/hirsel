@@ -6,7 +6,26 @@ import type { Blob, ClientMessage, MessagesMsg, SendMode, ServerMessage } from "
 import { httpBaseFromWs } from "../lib/endpoint";
 import { deliverPluginPush } from "../plugins/registry";
 import { dispatch, setProtocolError, state } from "../store/store";
+import type { PendingSend } from "../store/types";
 import { jitteredDelayMs } from "./backoff";
+
+/** THE `send_message` frame builder — the one place the wire shape is spelled.
+ * Three call sites used to spell it out: the first send, the manual retry, and
+ * the reconnect outbox flush, each re-applying the same defaults and the same
+ * `mentions` omission. `PendingSend` is total, so all this does is apply the one
+ * wire omission there is: an empty `mentions` is dropped, keeping the pre-v2.1
+ * shape a host without the field expects. */
+function sendMessageFrame(pending: PendingSend): ClientMessage {
+  return {
+    type: "send_message",
+    client_id: pending.clientId,
+    body: pending.body,
+    ref: pending.ref,
+    attachments: pending.attachments,
+    mode: pending.mode,
+    ...(pending.mentions.length > 0 ? { mentions: pending.mentions } : {}),
+  };
+}
 
 const TOKEN_KEY = "hirsel.token";
 const LAST_SEEN_KEY = "hirsel.lastSeenMsgId";
@@ -167,17 +186,16 @@ class HirselWsClient {
       mode,
       mentions,
     });
-    this.sendFrame({
-      type: "send_message",
-      client_id: clientId,
-      body,
-      ref,
-      attachments: attachments.map((b) => b.id),
-      mode,
-      // Legacy wire ids for @-mentioned Tasks. Omit when empty so the common
-      // case keeps the pre-v2.1 wire shape (host defaults it to []).
-      ...(mentions.length > 0 ? { mentions } : {}),
-    });
+    this.sendFrame(
+      sendMessageFrame({
+        clientId,
+        body,
+        ref,
+        attachments: attachments.map((b) => b.id),
+        mode,
+        mentions,
+      }),
+    );
     this.armFailTimer(clientId);
     return localId;
   }
@@ -187,15 +205,7 @@ class HirselWsClient {
     const pending = state.pendingSends.find((p) => p.clientId === clientId);
     if (!pending) return;
     dispatch({ type: "send_retry", clientId });
-    this.sendFrame({
-      type: "send_message",
-      client_id: pending.clientId,
-      body: pending.body,
-      ref: pending.ref,
-      attachments: pending.attachments ?? [],
-      mode: pending.mode ?? "send",
-      ...(pending.mentions && pending.mentions.length > 0 ? { mentions: pending.mentions } : {}),
-    });
+    this.sendFrame(sendMessageFrame(pending));
     this.armFailTimer(clientId);
   }
 
@@ -638,19 +648,7 @@ class HirselWsClient {
     // Resend anything still un-acked, oldest first, using its original
     // client_id so the host can dedupe if it received it before the disconnect.
     for (const pending of state.pendingSends) {
-      this.socket.send(
-        JSON.stringify({
-          type: "send_message",
-          client_id: pending.clientId,
-          body: pending.body,
-          ref: pending.ref,
-          attachments: pending.attachments ?? [],
-          mode: pending.mode ?? "send",
-          ...(pending.mentions && pending.mentions.length > 0
-            ? { mentions: pending.mentions }
-            : {}),
-        } satisfies ClientMessage),
-      );
+      this.socket.send(JSON.stringify(sendMessageFrame(pending)));
     }
 
     const queued = this.outbox;

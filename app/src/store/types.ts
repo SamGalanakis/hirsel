@@ -34,17 +34,24 @@ export type DisplayMessage = ChatMessage & {
 /** An outgoing `send_message` this client has emitted but not yet seen
  * reconciled via a server `msg` echo. Kept so reconnect can resend with the
  * same `client_id` (host dedupes) and so we know what to reconcile against. */
+/**
+ * TOTAL, deliberately: every field is always present, because every field is
+ * always meaningful. `attachments: []` and `mode: "send"` are the real values of
+ * a plain message, not absences, and an optional field here only pushed a
+ * `?? []` / `?? "send"` default onto each of the three places that built the
+ * wire frame. The single frame builder (`sendMessageFrame`) owns the one wire
+ * omission there is — `mentions`, dropped when empty to keep the pre-v2.1
+ * shape — so the omission lives at the wire edge rather than in the state. */
 export interface PendingSend {
   clientId: string;
   body: string;
   ref: number | null;
-  // Omitted (not just defaulted) when empty/"send" so the common case keeps the
-  // original {clientId, body, ref} shape the store snapshots and tests encode.
-  attachments?: string[];
-  mode?: SendMode;
+  /** Blob ids for the attachments carried by this send. */
+  attachments: string[];
+  mode: SendMode;
   /** Legacy wire ids for @-mentioned Tasks, so a reconnect resend carries them
-   * too. Omitted when empty (keeps the common-case shape). */
-  mentions?: number[];
+   * too. */
+  mentions: number[];
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";

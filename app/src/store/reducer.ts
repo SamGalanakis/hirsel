@@ -572,12 +572,17 @@ export function reduce(state: AppState, action: Action): AppState {
         clientId,
         mode: sendMode,
       };
-      // Keep the bare {clientId, body, ref} shape unless there is something extra
-      // to carry, so the un-adorned case matches the original wire/replay path.
-      const pendingSend: PendingSend = { clientId, body, ref };
-      if (blobs.length > 0) pendingSend.attachments = blobs.map((b) => b.id);
-      if (sendMode !== "send") pendingSend.mode = sendMode;
-      if (mentionIds.length > 0) pendingSend.mentions = mentionIds;
+      // Total: a plain message carries `[]` / "send" / `[]` as real values. The
+      // wire's one omission (empty `mentions`) is applied by `sendMessageFrame`,
+      // not encoded here.
+      const pendingSend: PendingSend = {
+        clientId,
+        body,
+        ref,
+        attachments: blobs.map((b) => b.id),
+        mode: sendMode,
+        mentions: mentionIds,
+      };
       const grown = [...state.messages, localMessage];
       return {
         ...state,

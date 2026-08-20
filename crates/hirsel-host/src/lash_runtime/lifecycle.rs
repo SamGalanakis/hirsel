@@ -84,7 +84,7 @@ impl LashAgentRuntime {
             .await
             .context("prepare main-agent session generation")?;
         let session_guidance = agent_guidance_with_handoff(
-            config.agent_guidance.clone(),
+            config.prompts.agent_guidance(),
             session_bootstrap.handoff_seed.as_deref(),
         );
         let executor = HirselToolExecutor {
@@ -172,7 +172,8 @@ impl LashAgentRuntime {
             drain_retry_scheduled: AtomicBool::new(false),
             drain_retry_attempts: AtomicU64::new(0),
             model_selection,
-            agent_guidance: Arc::from(config.agent_guidance),
+            prompts: config.prompts.clone(),
+            handoff_seed: session_bootstrap.handoff_seed,
         });
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
@@ -216,6 +217,34 @@ impl LashAgentRuntime {
             })
             .await
             .context("apply selected model to main-agent Lash session")
+    }
+
+    /// Reconcile the live session's prompt with the Owner's configuration.
+    ///
+    /// The system prompt is rebuilt from session policy at the start of every
+    /// turn, so replacing the session prompt layer here takes effect on the
+    /// next turn and never mid-turn. Called before each queued drain (so a hand
+    /// edit of `hirsel.toml` lands without a restart) and right after a
+    /// Settings edit (so the change is applied by the time the op returns).
+    /// Idempotent: an unchanged layer is not written back.
+    pub(super) async fn apply_agent_prompt(&self) -> anyhow::Result<()> {
+        let guidance = agent_guidance_with_handoff(
+            self.prompts.agent_guidance(),
+            self.handoff_seed.as_deref(),
+        );
+        let prompt = lash::prompt::PromptLayer::new().with_contribution(
+            lash::prompt::PromptContribution::guidance("Hirsel Agent", guidance),
+        );
+        if self.session.policy_snapshot().prompt == prompt {
+            return Ok(());
+        }
+        self.session
+            .configure(lash::SessionConfigPatch {
+                prompt: Some(prompt),
+                ..lash::SessionConfigPatch::default()
+            })
+            .await
+            .context("apply the Owner's Agent prompt to the main-agent Lash session")
     }
 
     pub(super) async fn refresh_subagent_model_tools(
@@ -545,6 +574,10 @@ impl LashAgentRuntime {
                 loop {
                     if let Err(error) = runtime.apply_selected_model().await {
                         tracing::warn!(%error, "failed to reconcile main-agent model before queued turn");
+                        break;
+                    }
+                    if let Err(error) = runtime.apply_agent_prompt().await {
+                        tracing::warn!(%error, "failed to reconcile the Agent prompt before queued turn");
                         break;
                     }
                     let drain_id = runtime.next_drain_id();

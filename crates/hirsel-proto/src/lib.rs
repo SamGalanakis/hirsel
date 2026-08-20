@@ -22,8 +22,8 @@ pub use event::{
 };
 pub use host::HostToClient;
 pub use models::{
-    AvailableModel, ModelSelection, ModelSnapshot, SubagentModel, SubagentModelCatalog,
-    SubagentProviderModels,
+    AvailableModel, ForkAgentConfig, ModelSelection, ModelSnapshot, PromptDoc, PromptSnapshot,
+    SubagentModel, SubagentModelCatalog, SubagentProviderModels,
 };
 pub use process::{ProcessInfo, ProcessKind, ProcessState, SideChatSummary};
 pub use turn::{AgentActivityState, TurnEvent, TurnEventKind};

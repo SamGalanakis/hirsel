@@ -10,12 +10,15 @@ pub struct RuntimeConfig {
     pub data_dir: PathBuf,
     pub driver_mode: DriverMode,
     pub config_store: ConfigStore,
-    pub agent_guidance: String,
+    pub prompts: PromptConfig,
 }
 
-pub(crate) fn agent_guidance(config: &Config) -> String {
+/// The host-generated tail of the Agent's guidance: what the Owner's prompt
+/// body is followed by, whatever that body says. Not editable — a prompt edit
+/// must never be able to hide where the runtime configuration lives.
+pub(crate) fn agent_host_section(config: &Config) -> String {
     format!(
-        "{AGENT_PROMPT}\n\n## Host configuration\n\nYour runtime configuration lives at `{}` (hand-editable TOML, hot-reloaded). It is documented at `{}` — read that before changing models or other settings.\n",
+        "\n\n## Host configuration\n\nYour runtime configuration lives at `{}` (hand-editable TOML, hot-reloaded). It is documented at `{}` — read that before changing models or other settings. Your own system prompt lives there too, under `[agent] prompt`.\n",
         config.config_path.display(),
         config.docs_path.display()
     )

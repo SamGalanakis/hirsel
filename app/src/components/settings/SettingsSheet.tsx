@@ -21,6 +21,7 @@ import { IdentitySection } from "./IdentitySection";
 import { ModelsSection } from "./ModelsSection";
 import { NotificationsSection } from "./NotificationsSection";
 import { PluginsSection } from "./PluginsSection";
+import { PromptSection } from "./PromptSection";
 import {
   computeFingerprint,
   copyText,
@@ -145,6 +146,7 @@ function SettingsPanel() {
       <div class="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-8">
         <AppearanceSection />
         <ModelsSection />
+        <PromptSection />
         <ConnectionSection
           endpoint={endpoint}
           deviceLabel={deviceLabel()}

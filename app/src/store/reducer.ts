@@ -335,6 +335,7 @@ export function reduce(state: AppState, action: Action): AppState {
         // the Settings/header controls hide rather than render stale data.
         model: action.payload.model ?? null,
         subagentModels: action.payload.subagent_models ?? null,
+        prompts: action.payload.prompts ?? null,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
         // never replayed) does not survive a resync. Retained turn details for
@@ -635,6 +636,9 @@ export function reduce(state: AppState, action: Action): AppState {
     case "subagent_models_changed":
       // Replace the catalog wholesale with the new one.
       return { ...state, subagentModels: action.catalog };
+
+    case "prompts_changed":
+      return { ...state, prompts: action.prompts };
 
     default:
       return state;

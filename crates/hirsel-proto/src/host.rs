@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::{Blob, ChatMessage};
 use crate::event::Event;
-use crate::models::{ModelSelection, ModelSnapshot, SubagentModelCatalog};
+use crate::models::{ModelSelection, ModelSnapshot, PromptSnapshot, SubagentModelCatalog};
 use crate::process::{ProcessInfo, SideChatSummary};
 use crate::turn::{AgentActivityState, TurnEventKind};
 use crate::view::ViewInstance;
@@ -33,6 +33,9 @@ pub enum HostToClient {
         /// Runtime-selectable Sub-agent model catalog. Older hosts omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_models: Option<SubagentModelCatalog>,
+        /// Owner-editable Agent and fork prompts. Older hosts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompts: Option<PromptSnapshot>,
         #[serde(default)]
         views: Vec<ViewInstance>,
     },
@@ -73,6 +76,11 @@ pub enum HostToClient {
     },
     SubagentModelsChanged {
         catalog: SubagentModelCatalog,
+    },
+    /// The Owner-editable prompt surface after an accepted edit — the whole
+    /// snapshot, because a prompt edit can change the fork config's shape too.
+    PromptsChanged {
+        prompts: PromptSnapshot,
     },
     BlobOk {
         client_id: String,

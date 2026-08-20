@@ -374,6 +374,21 @@ class HirselWsClient {
     });
   }
 
+  /** Persist the main Agent's editable prompt body. Empty resets to bundled. */
+  setAgentPrompt(text: string): void {
+    this.enqueue({ type: "set_agent_prompt", text });
+  }
+
+  /** Persist the incoming-event fork's editable prompt body. */
+  setForkPrompt(text: string): void {
+    this.enqueue({ type: "set_fork_prompt", text });
+  }
+
+  /** Select the incoming-event fork's model + reasoning variant. */
+  setForkModel(modelId: string, variant: string): void {
+    this.enqueue({ type: "set_fork_model", model_id: modelId, variant });
+  }
+
   private armFailTimer(clientId: string): void {
     const existing = this.failTimers.get(clientId);
     if (existing) clearTimeout(existing);
@@ -575,6 +590,10 @@ class HirselWsClient {
       }
       case "subagent_models_changed": {
         dispatch({ type: "subagent_models_changed", catalog: message.catalog });
+        break;
+      }
+      case "prompts_changed": {
+        dispatch({ type: "prompts_changed", prompts: message.prompts });
         break;
       }
       case "blob_ok": {

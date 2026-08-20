@@ -4,7 +4,9 @@ use std::{sync::Arc, time::Duration};
 pub(crate) enum SideChatBackend {
     Lash {
         core: Arc<lash::LashCore>,
-        agent_guidance: Arc<str>,
+        /// Read at open time, not captured at startup, so a legacy side session
+        /// opened after a prompt edit is prompted with the current prompt.
+        prompts: crate::prompt_config::PromptConfig,
     },
     Scripted,
     Degraded(String),

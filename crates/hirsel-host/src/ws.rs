@@ -129,6 +129,7 @@ mod tests {
                 host_version,
                 model,
                 subagent_models,
+                prompts,
                 views,
             } => {
                 assert_eq!(latest_msg_id, 1);
@@ -141,6 +142,11 @@ mod tests {
                 assert!(!host_version.is_empty());
                 assert!(model.is_none());
                 assert!(subagent_models.is_some());
+                // The prompt surface is always reported: the Agent prompt is
+                // editable in every provider mode, including this one.
+                let prompts = prompts.expect("prompt snapshot");
+                assert!(prompts.agent.is_default);
+                assert!(prompts.agent.text.contains("hirsel"));
             }
             other => panic!("unexpected hello response: {other:?}"),
         }

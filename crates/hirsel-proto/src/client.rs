@@ -108,6 +108,21 @@ pub enum ClientToHost {
         enabled: bool,
         enabled_variants: Vec<String>,
     },
+    /// Replace the Agent's system prompt body. An empty or whitespace-only
+    /// `text` clears the override and restores the bundled default.
+    SetAgentPrompt {
+        text: String,
+    },
+    /// Replace the fork agent's prompt body; empty clears the override.
+    SetForkPrompt {
+        text: String,
+    },
+    /// Select the fork agent's model + reasoning variant from the booted
+    /// provider's registry.
+    SetForkModel {
+        model_id: String,
+        variant: String,
+    },
     UploadBlob {
         client_id: String,
         name: String,

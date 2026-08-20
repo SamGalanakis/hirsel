@@ -65,6 +65,7 @@ function appSnapshot(): AppState {
     hostVersion: state.hostVersion,
     model: state.model,
     subagentModels: state.subagentModels,
+    prompts: state.prompts,
     pendingSends: state.pendingSends,
     processes: state.processes,
     turnEvents: state.turnEvents,
@@ -121,6 +122,7 @@ export function dispatch(action: Action): void {
     // a whole new snapshot/catalog (or null) on each change.
     setState("model", next.model);
     setState("subagentModels", next.subagentModels);
+    setState("prompts", next.prompts);
     // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
     // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
     setState("views", reconcile(next.views, { key: "instance_id" }));

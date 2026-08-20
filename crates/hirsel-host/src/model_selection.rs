@@ -31,14 +31,26 @@ struct RegistryEntry {
 // Current ChatGPT-account model metadata confirms this ID and its effort tokens.
 // The main agent is deliberately pinned to GPT-5.6 Sol; keep this curated until
 // the host has a provider-backed catalog.
-const CODEX_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    variants: &["low", "medium", "high", "xhigh", "max"],
-    default_variant: "medium",
-    context_window_tokens: 200_000,
-    variant_kind: VariantKind::Effort,
-}];
+const CODEX_REGISTRY: &[RegistryEntry] = &[
+    RegistryEntry {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6 Sol",
+        variants: &["low", "medium", "high", "xhigh", "max"],
+        default_variant: "medium",
+        context_window_tokens: 200_000,
+        variant_kind: VariantKind::Effort,
+    },
+    // The cheap lane. It is here so a fork — a triage read that must not cost
+    // what the main session costs — has a real option under this provider.
+    RegistryEntry {
+        id: "gpt-5.6-luna",
+        label: "GPT-5.6 Luna",
+        variants: &["low", "medium", "high"],
+        default_variant: "medium",
+        context_window_tokens: 200_000,
+        variant_kind: VariantKind::Effort,
+    },
+];
 
 // OpenRouter routes to Gemini 3.7 Flash, which reasons on its own schedule:
 // there is no host-selectable effort ladder to offer, so the entry carries the
@@ -51,6 +63,37 @@ const OPENROUTER_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
     context_window_tokens: 1_000_000,
     variant_kind: VariantKind::ProviderDefault,
 }];
+
+/// The model a wake-triage fork runs as until the Owner picks another: the
+/// cheapest entry the booted provider offers, because a fork exists to read a
+/// wake without spending the main session's budget. Anthropic mode has no
+/// runtime-selectable registry, so it has no fork model either.
+fn default_fork_model_id(provider: ProviderMode) -> Option<&'static str> {
+    match provider {
+        ProviderMode::Codex => Some("gpt-5.6-luna"),
+        ProviderMode::OpenRouter => Some("google/gemini-3.7-flash"),
+        ProviderMode::Anthropic => None,
+    }
+}
+
+/// The fork's fallback selection: its default model at that model's default
+/// variant.
+pub fn default_fork_selection(provider: ProviderMode) -> Option<ModelSelection> {
+    let entry = registry_entry(provider, default_fork_model_id(provider)?)?;
+    Some(ModelSelection {
+        id: entry.id.to_string(),
+        variant: entry.default_variant.to_string(),
+    })
+}
+
+/// Validate a model id + variant against the booted provider's registry.
+pub fn validate(
+    provider: ProviderMode,
+    model_id: &str,
+    variant: &str,
+) -> anyhow::Result<ModelSelection> {
+    validate_selection(provider, model_id, variant)
+}
 
 /// The curated main-agent models for a provider. Anthropic mode pins its model
 /// through `HIRSEL_MODEL` and never builds a selection state, so it offers no

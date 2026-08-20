@@ -50,7 +50,7 @@ impl AgentRuntime {
             AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
             AgentBackend::Lash(runtime) => crate::side_chat::SideChatBackend::Lash {
                 core: Arc::new(runtime.core.clone()),
-                agent_guidance: Arc::clone(&runtime.agent_guidance),
+                prompts: runtime.prompts.clone(),
             },
             AgentBackend::Degraded(runtime) => {
                 crate::side_chat::SideChatBackend::Degraded(runtime.reason.clone())
@@ -123,6 +123,16 @@ impl AgentRuntime {
             runtime.apply_selected_model().await?;
         }
         Ok(selection)
+    }
+
+    /// Apply the Owner's current Agent prompt to the live session. A no-op on
+    /// the scripted and degraded backends, which have no Lash session to
+    /// reprompt; the config store is still the authority for both.
+    pub async fn apply_agent_prompt(&self) -> anyhow::Result<()> {
+        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
+            runtime.apply_agent_prompt().await?;
+        }
+        Ok(())
     }
 
     pub async fn refresh_subagent_model_tools(
@@ -261,7 +271,11 @@ pub(super) struct LashAgentRuntime {
     pub(super) drain_retry_scheduled: AtomicBool,
     pub(super) drain_retry_attempts: AtomicU64,
     pub(super) model_selection: Option<ModelSelectionState>,
-    pub(super) agent_guidance: Arc<str>,
+    pub(super) prompts: PromptConfig,
+    /// The handoff seed this session opened with, kept so a prompt edit can
+    /// rebuild the session guidance without dropping the seed the rotation
+    /// carried over.
+    pub(super) handoff_seed: Option<String>,
 }
 
 #[derive(Debug, Clone)]

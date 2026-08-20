@@ -134,15 +134,12 @@ impl SideChatManager {
         let context = render_context_block(&event, &anchor, &recent);
         let sc = format!("side:{}", Uuid::new_v4());
         let mut lash_session = match &compatibility.backend {
-            SideChatBackend::Lash {
-                core,
-                agent_guidance,
-            } => Some(
+            SideChatBackend::Lash { core, prompts } => Some(
                 core.session(sc.clone())
                     .store(Arc::new(lash::persistence::InMemorySessionStore::new()))
                     .prompt_contribution(lash::prompt::PromptContribution::guidance(
                         "Hirsel Agent",
-                        agent_guidance.as_ref(),
+                        prompts.agent_guidance(),
                     ))
                     .prompt_contribution(lash::prompt::PromptContribution::guidance(
                         "Side Chat Context",

@@ -555,6 +555,28 @@ fn hello_ok_round_trips_chat_and_pings() {
                 }],
             }],
         }),
+        prompts: Some(PromptSnapshot {
+            agent: PromptDoc {
+                text: "You are hirsel.".to_string(),
+                is_default: true,
+            },
+            fork: Some(ForkAgentConfig {
+                current: ModelSelection {
+                    id: "gpt-5.6-luna".to_string(),
+                    variant: "medium".to_string(),
+                },
+                available: vec![AvailableModel {
+                    id: "gpt-5.6-luna".to_string(),
+                    label: "GPT-5.6 Luna".to_string(),
+                    variants: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                    default_variant: "medium".to_string(),
+                }],
+                prompt: PromptDoc {
+                    text: "Triage the wake.".to_string(),
+                    is_default: false,
+                },
+            }),
+        }),
         views: Vec::new(),
     };
 
@@ -833,6 +855,7 @@ fn hello_ok_defaults_side_chats() {
             host_version: String::new(),
             model: None,
             subagent_models: None,
+            prompts: None,
             views: Vec::new(),
         }
     );

@@ -61,6 +61,7 @@ use crate::{
     host_config::ConfigStore,
     model_selection::ModelSelectionState,
     monitors::{output_tail, run_monitor_tick},
+    prompt_config::PromptConfig,
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
     subagent_models::SubagentModelState,
     text::short_label,
@@ -90,7 +91,6 @@ const TIMER_MIN_RECURRING_SECS: u64 = 60;
 const SNOOZE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const SNOOZE_TICK_INTERVAL: Duration = Duration::from_millis(25);
-pub(crate) const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 
 mod bridges;
 mod condense;
@@ -127,6 +127,6 @@ use tool_schemas::*;
 use turn::*;
 
 pub use provider::RuntimeConfig;
-pub(crate) use provider::agent_guidance;
+pub(crate) use provider::agent_host_section;
 pub use runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn, TaskActionContext};
 pub(crate) use turn::append_mentioned_ping_context;

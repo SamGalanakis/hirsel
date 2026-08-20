@@ -11,6 +11,7 @@ import type {
   MsgMsg,
   ProcessInfo,
   ProcessUpsertMsg,
+  PromptSnapshot,
   SendMode,
   SubagentModelCatalog,
   TurnEvent,
@@ -130,6 +131,9 @@ export interface AppState {
    * `hello_ok.subagent_models` and replaced wholesale by
    * `subagent_models_changed`. `null` on older hosts (the control hides). */
   subagentModels: SubagentModelCatalog | null;
+  /** Effective editable prompts and fork selection. Seeded from
+   * `hello_ok.prompts`, then replaced by `prompts_changed`. */
+  prompts: PromptSnapshot | null;
   pendingSends: PendingSend[];
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
    * hello_ok.processes and kept current by process_upsert. */
@@ -199,7 +203,8 @@ export type Action =
   | { type: "view_removed"; payload: ViewRemovedMsg }
   // ---- Model configuration ----
   | { type: "model_changed"; current: ModelSelection }
-  | { type: "subagent_models_changed"; catalog: SubagentModelCatalog };
+  | { type: "subagent_models_changed"; catalog: SubagentModelCatalog }
+  | { type: "prompts_changed"; prompts: PromptSnapshot };
 
 export function initialState(): AppState {
   return {
@@ -214,6 +219,7 @@ export function initialState(): AppState {
     hostVersion: null,
     model: null,
     subagentModels: null,
+    prompts: null,
     pendingSends: [],
     processes: [],
     turnEvents: [],

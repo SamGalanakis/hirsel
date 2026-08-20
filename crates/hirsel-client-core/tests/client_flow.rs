@@ -84,6 +84,7 @@ fn hello_ok(
         host_version: "0.1.0 (test)".to_string(),
         model: None,
         subagent_models: None,
+        prompts: None,
         views: Vec::new(),
     }
 }

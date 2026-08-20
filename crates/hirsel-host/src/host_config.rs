@@ -181,6 +181,103 @@ impl ConfigStore {
         parsed
     }
 
+    /// The Owner's Agent system-prompt override, or `None` when the key is
+    /// absent, empty, or not a string (the bundled prompt then stands). The
+    /// value is Owner data: it is never logged, only length-reported.
+    pub fn agent_prompt_override(&self) -> Option<String> {
+        self.prompt_override("agent")
+    }
+
+    /// The Owner's fork-agent prompt override, under the same rules.
+    pub fn fork_prompt_override(&self) -> Option<String> {
+        self.prompt_override("fork")
+    }
+
+    fn prompt_override(&self, section: &str) -> Option<String> {
+        self.reload_if_changed();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let text = inner
+            .document
+            .get(section)?
+            .as_table()?
+            .get("prompt")?
+            .as_str()?;
+        (!text.trim().is_empty()).then(|| text.to_string())
+    }
+
+    /// The fork agent's persisted model selection, or `None` when the `[fork]`
+    /// section carries no usable pair.
+    pub fn fork_model_selection(&self) -> Option<(String, String)> {
+        self.reload_if_changed();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let section = inner.document.get("fork")?.as_table()?;
+        let id = section.get("model")?.as_str()?.to_string();
+        let variant = section.get("variant")?.as_str()?.to_string();
+        Some((id, variant))
+    }
+
+    /// Store an Agent prompt override, or remove it when `text` is `None`.
+    pub async fn set_agent_prompt(&self, text: Option<&str>) -> anyhow::Result<()> {
+        self.set_prompt("agent", text).await
+    }
+
+    /// Store a fork prompt override, or remove it when `text` is `None`.
+    pub async fn set_fork_prompt(&self, text: Option<&str>) -> anyhow::Result<()> {
+        self.set_prompt("fork", text).await
+    }
+
+    async fn set_prompt(&self, section: &str, text: Option<&str>) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.reload_if_changed();
+        let (document, contents) = {
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let mut document = inner.document.clone();
+            match text {
+                // A prompt is many lines of prose; a multi-line literal string
+                // keeps the file hand-editable instead of one escaped ribbon.
+                Some(text) => {
+                    ensure_table(&mut document, section);
+                    document[section]["prompt"] = multiline_item(text);
+                }
+                None => {
+                    if let Some(table) = document.get_mut(section).and_then(Item::as_table_mut) {
+                        table.remove("prompt");
+                    }
+                }
+            }
+            let contents = document.to_string();
+            (document, contents)
+        };
+        self.persist_and_replace(document, contents).await
+    }
+
+    pub async fn set_fork_model(&self, model_id: &str, variant: &str) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.reload_if_changed();
+        let (document, contents) = {
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let mut document = inner.document.clone();
+            ensure_table(&mut document, "fork");
+            document["fork"]["model"] = value(model_id);
+            document["fork"]["variant"] = value(variant);
+            let contents = document.to_string();
+            (document, contents)
+        };
+        self.persist_and_replace(document, contents).await
+    }
+
     pub async fn set_model_selection(&self, model_id: &str, variant: &str) -> anyhow::Result<()> {
         let _guard = self.write_lock.lock().await;
         self.reload_if_changed();
@@ -246,6 +343,21 @@ impl ConfigStore {
     }
 }
 
+/// A prompt rendered as a TOML multi-line literal so `hirsel.toml` stays
+/// hand-editable — the default string repr would collapse a page of prose into
+/// one escaped ribbon. Built by parsing the snippet and keeping it only when it
+/// reads back byte-identical; anything the multi-line form cannot carry
+/// verbatim (embedded `"""`, backslashes) falls back to the escaped repr.
+fn multiline_item(text: &str) -> Item {
+    let snippet = format!("prompt = \"\"\"\n{text}\"\"\"\n");
+    let round_trips = snippet
+        .parse::<DocumentMut>()
+        .ok()
+        .and_then(|document| document.get("prompt").cloned())
+        .filter(|item| item.as_str() == Some(text));
+    round_trips.unwrap_or_else(|| value(text))
+}
+
 fn ensure_table(document: &mut DocumentMut, key: &str) {
     if !document.get(key).is_some_and(Item::is_table) {
         document[key] = Item::Table(Table::new());
@@ -284,6 +396,26 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 [model]
 id = "google/gemini-3.7-flash"
 variant = "default"
+
+# The Agent's system prompt. With no `prompt` key (or an empty one) the Agent
+# runs on the bundled `prompts/agent.md`. Set one here or in Settings > Prompt
+# to override it; the change applies from the Agent's next turn. The host
+# appends its own configuration notes to whatever body is in force.
+[agent]
+# prompt = """
+# You are ...
+# """
+
+# The wake-triage fork: which model reads an incoming wake, and the prompt it
+# reads it with. `model` is scoped to HIRSEL_PROVIDER exactly like [model], and
+# `prompt` defaults to the bundled `prompts/fork.md`. Stored but not yet
+# consumed — the fork runtime lands later.
+[fork]
+# model = "gpt-5.6-luna"
+# variant = "medium"
+# prompt = """
+# You are a wake-triage fork ...
+# """
 
 # Sub-agent delegation lanes. The catalog is exactly these three rows, one
 # effort each — there is no per-task effort tuning. Set `enabled = false` to

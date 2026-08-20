@@ -13,6 +13,7 @@ pub mod monitors;
 pub mod plugins;
 pub mod process_run;
 pub mod processes;
+pub mod prompt_config;
 mod protocol;
 pub mod push;
 pub mod side_chat;
@@ -36,7 +37,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use hirsel_proto::{
     AgentActivityState, ChatMessage, HostToClient, ModelSelection, ModelSnapshot, ProcessInfo,
-    SendMode, SubagentModelCatalog, ViewInstance,
+    PromptSnapshot, SendMode, SubagentModelCatalog, ViewInstance,
 };
 use tokio::sync::{Mutex, broadcast};
 use tower_http::services::{ServeDir, ServeFile};
@@ -65,6 +66,7 @@ pub struct AppState {
     pub views: templates::ViewManager,
     pub plugins: plugins::PluginHost,
     pub subagent_models: subagent_models::SubagentModelState,
+    pub prompts: prompt_config::PromptConfig,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
     pub data_dir: Arc<PathBuf>,
@@ -72,6 +74,7 @@ pub struct AppState {
     pub blob_signer: blob_route::BlobSigner,
     model_change_lock: Arc<Mutex<()>>,
     subagent_model_change_lock: Arc<Mutex<()>>,
+    prompt_change_lock: Arc<Mutex<()>>,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
@@ -178,6 +181,60 @@ impl AppState {
             });
         }
         Ok(catalog)
+    }
+
+    pub fn prompt_snapshot(&self) -> PromptSnapshot {
+        self.prompts.snapshot()
+    }
+
+    /// Replace the Agent's system prompt body; empty text restores the bundled
+    /// default. The edit is applied to the live session before the op returns,
+    /// so it is in force from the Agent's next turn.
+    pub async fn set_agent_prompt(&self, text: &str) -> anyhow::Result<PromptSnapshot> {
+        let _guard = self.prompt_change_lock.lock().await;
+        let previous = self.prompt_snapshot();
+        self.prompts.set_agent_prompt(text).await?;
+        let snapshot = self.prompt_snapshot();
+        if snapshot != previous {
+            self.agent.apply_agent_prompt().await?;
+            self.broadcast_prompts(&snapshot);
+        }
+        Ok(snapshot)
+    }
+
+    /// Replace the fork agent's prompt body; empty text restores the bundled
+    /// default. Persisted only — no runtime consumes the fork config yet.
+    pub async fn set_fork_prompt(&self, text: &str) -> anyhow::Result<PromptSnapshot> {
+        let _guard = self.prompt_change_lock.lock().await;
+        let previous = self.prompt_snapshot();
+        self.prompts.set_fork_prompt(text).await?;
+        let snapshot = self.prompt_snapshot();
+        if snapshot != previous {
+            self.broadcast_prompts(&snapshot);
+        }
+        Ok(snapshot)
+    }
+
+    /// Select the fork agent's model from the booted provider's registry.
+    pub async fn set_fork_model(
+        &self,
+        model_id: &str,
+        variant: &str,
+    ) -> anyhow::Result<PromptSnapshot> {
+        let _guard = self.prompt_change_lock.lock().await;
+        let previous = self.prompt_snapshot();
+        self.prompts.set_fork_model(model_id, variant).await?;
+        let snapshot = self.prompt_snapshot();
+        if snapshot != previous {
+            self.broadcast_prompts(&snapshot);
+        }
+        Ok(snapshot)
+    }
+
+    fn broadcast_prompts(&self, snapshot: &PromptSnapshot) {
+        self.broadcast(HostToClient::PromptsChanged {
+            prompts: snapshot.clone(),
+        });
     }
 
     pub async fn submit_owner_message(
@@ -587,10 +644,17 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     )
     .await
     .context("start in-tree plugins")?;
-    let agent_guidance = format!(
-        "{}{}",
-        lash_runtime::agent_guidance(&config),
-        plugin_host.skills_prompt()
+    // What the Owner's prompt body is followed by: the runtime configuration
+    // paths, then the enabled plugins' skills. Host-generated, so a prompt edit
+    // cannot drop it.
+    let prompts = prompt_config::PromptConfig::new(
+        config.provider,
+        config_store.clone(),
+        format!(
+            "{}{}",
+            lash_runtime::agent_host_section(&config),
+            plugin_host.skills_prompt()
+        ),
     );
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
@@ -602,7 +666,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
             config_store,
-            agent_guidance,
+            prompts: prompts.clone(),
         },
         tools.clone(),
         broadcaster.clone(),
@@ -635,6 +699,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         views,
         plugins: plugin_host,
         subagent_models,
+        prompts,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
         data_dir: Arc::new(config.data_dir),
@@ -642,6 +707,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         blob_signer,
         model_change_lock: Arc::new(Mutex::new(())),
         subagent_model_change_lock: Arc::new(Mutex::new(())),
+        prompt_change_lock: Arc::new(Mutex::new(())),
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)

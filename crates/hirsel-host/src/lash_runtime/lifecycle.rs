@@ -592,7 +592,7 @@ impl LashAgentRuntime {
                     runtime.clear_active_turn_id(&drain_id).await;
                     runtime.clear_active_anchor_and_prune().await;
                     match result {
-                        Ok(Some(output)) => {
+                        Ok(QueuedTurnDrain::Ran(output)) => {
                             runtime.drain_retry_attempts.store(0, Ordering::Release);
                             if let Err(error) = materialize_turn_chat(&runtime.tools, &output).await
                             {
@@ -600,7 +600,7 @@ impl LashAgentRuntime {
                             }
                             continue;
                         }
-                        Ok(None) => {
+                        Ok(QueuedTurnDrain::Empty(_)) => {
                             // An empty drain while durable work is still queued
                             // means another owner's session execution lease is
                             // blocking the claim (e.g. a stale lease after an

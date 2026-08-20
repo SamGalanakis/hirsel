@@ -19,7 +19,7 @@ pub(super) fn agent_tool_surface_for_dialect(
     let mut named_bindings = definitions
         .iter()
         .map(|definition| {
-            let binding = LashlangToolBinding::required_for_remote(&definition.manifest)
+            let binding = ToolBinding::required_for_remote(&definition.manifest)
                 .map_err(anyhow::Error::msg)?;
             Ok((
                 format!(
@@ -468,5 +468,5 @@ pub(super) fn tool_definition(
     operation: &str,
 ) -> ToolDefinition {
     ToolDefinition::raw(id, name, description, input_schema, output_schema)
-        .with_lashlang_binding(LashlangToolBinding::new(module_path, operation))
+        .with_tool_binding(ToolBinding::new(module_path, operation))
 }

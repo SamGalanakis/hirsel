@@ -14,7 +14,7 @@ use std::{
 };
 
 use hirsel_plugin_api::{PluginCtx, PluginTool, PluginToolHandler, is_valid_tool_name};
-use lash::tools::{LashlangToolBinding, ToolDefinition, ToolDefinitionLashlangExt};
+use lash::tools::{ToolBinding, ToolDefinition, ToolDefinitionBindingExt};
 use serde_json::{Value, json};
 
 /// A plugin tool body that outlives this is a bug in the plugin, not a slow
@@ -103,7 +103,7 @@ impl PluginToolRegistry {
                     // does not model them further.
                     json!({ "type": "object", "additionalProperties": true }),
                 )
-                .with_lashlang_binding(LashlangToolBinding::new(
+                .with_tool_binding(ToolBinding::new(
                     [PLUGIN_MODULE_ROOT.to_string(), tool.module_segment.clone()],
                     tool.operation.clone(),
                 ))

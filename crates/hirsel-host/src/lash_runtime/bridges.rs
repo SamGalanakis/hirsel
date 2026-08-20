@@ -1,5 +1,70 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlAck {
+    Interrupted,
+    Abandoned,
+}
+
+#[derive(Debug, Default)]
+struct SubagentControlBridgeState {
+    acknowledgements: HashMap<String, ControlAck>,
+    cursors: HashMap<String, u64>,
+}
+
+impl SubagentControlBridgeState {
+    fn retain_live(&mut self, live_process_ids: &HashSet<&str>) {
+        self.acknowledgements
+            .retain(|process_id, _| live_process_ids.contains(process_id.as_str()));
+        self.cursors
+            .retain(|process_id, _| live_process_ids.contains(process_id.as_str()));
+    }
+
+    fn cursor(&self, process_id: &str) -> u64 {
+        self.cursors.get(process_id).copied().unwrap_or(0)
+    }
+
+    fn pending_control(
+        &self,
+        process_id: &str,
+        abandon_requested: bool,
+        interrupt_requested: bool,
+    ) -> Option<ControlAck> {
+        if self.acknowledgements.contains_key(process_id) {
+            return None;
+        }
+        if abandon_requested {
+            Some(ControlAck::Abandoned)
+        } else if interrupt_requested {
+            Some(ControlAck::Interrupted)
+        } else {
+            None
+        }
+    }
+
+    fn acknowledge(&mut self, process_id: &str, acknowledgement: ControlAck) {
+        self.acknowledgements
+            .insert(process_id.to_string(), acknowledgement);
+    }
+
+    fn commit_scan(&mut self, process_id: &str, cursor: u64, acknowledgement: Option<ControlAck>) {
+        self.cursors.insert(process_id.to_string(), cursor);
+        if let Some(acknowledgement) = acknowledgement {
+            self.acknowledge(process_id, acknowledgement);
+        }
+    }
+
+    fn apply_scan_result<E>(
+        &mut self,
+        process_id: &str,
+        result: Result<(u64, Option<ControlAck>), E>,
+    ) -> Result<(), E> {
+        let (cursor, acknowledgement) = result?;
+        self.commit_scan(process_id, cursor, acknowledgement);
+        Ok(())
+    }
+}
+
 impl LashAgentRuntime {
     pub(super) fn spawn_observation_bridge(self: &Arc<Self>) {
         let session = self.session.clone();
@@ -113,8 +178,7 @@ impl LashAgentRuntime {
     ) {
         let tools = self.tools.clone();
         tokio::spawn(async move {
-            let mut cancelled = HashSet::new();
-            let mut abandoned = HashSet::new();
+            let mut state = SubagentControlBridgeState::default();
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -126,6 +190,11 @@ impl LashAgentRuntime {
                         continue;
                     }
                 };
+                let live_process_ids = processes
+                    .iter()
+                    .map(|process| process.id.as_str())
+                    .collect::<HashSet<_>>();
+                state.retain_live(&live_process_ids);
                 for process in processes {
                     if !matches!(process.status, crate::processes::ProcessStatus::Running) {
                         continue;
@@ -134,10 +203,12 @@ impl LashAgentRuntime {
                     let Ok(Some(record)) = process_registry.get_process(&process_id).await else {
                         continue;
                     };
-                    if record.abandon_request.is_some() && !abandoned.contains(&process_id) {
+                    if state.pending_control(&process_id, record.abandon_request.is_some(), false)
+                        == Some(ControlAck::Abandoned)
+                    {
                         match tools.subagents_abandon_process(&process_id).await {
                             Ok(()) => {
-                                abandoned.insert(process_id.clone());
+                                state.acknowledge(&process_id, ControlAck::Abandoned);
                             }
                             Err(error) => {
                                 tracing::warn!(
@@ -149,40 +220,101 @@ impl LashAgentRuntime {
                         }
                         continue;
                     }
-                    if cancelled.contains(&process_id) {
+                    if state.acknowledgements.contains_key(&process_id) {
                         continue;
                     }
-                    let events = match process_registry.events_after(&process_id, 0).await {
-                        Ok(events) => events,
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                process_id = %process_id,
-                                "failed to read Sub-agent process events for control bridge"
-                            );
-                            continue;
+                    let cursor = state.cursor(&process_id);
+                    let scan_result = async {
+                        let events = process_registry
+                            .events_after(&process_id, cursor)
+                            .await
+                            .map_err(|error| {
+                                anyhow::anyhow!("read Lash process events: {error}")
+                            })?;
+                        let next_cursor =
+                            events.last().map(|event| event.sequence).unwrap_or(cursor);
+                        // Lash currently exposes cancellation only through this reserved event
+                        // type. Keep matching the exact wire signal until it gains a typed field.
+                        let interrupt_requested = events
+                            .iter()
+                            .any(|event| event.event_type == "process.cancel_requested");
+                        let acknowledgement =
+                            state.pending_control(&process_id, false, interrupt_requested);
+                        if acknowledgement == Some(ControlAck::Interrupted) {
+                            tools
+                                .subagents_interrupt_process(&process_id)
+                                .await
+                                .map_err(|error| {
+                                    anyhow::anyhow!("deliver Lash cancel request: {error}")
+                                })?;
                         }
-                    };
-                    if events
-                        .iter()
-                        .any(|event| event.event_type == "process.cancel_requested")
-                    {
-                        match tools.subagents_interrupt_process(&process_id).await {
-                            Ok(()) => {
-                                cancelled.insert(process_id.clone());
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    process_id = %process_id,
-                                    "failed to interrupt Sub-agent after Lash cancel request"
-                                );
-                            }
-                        }
+                        Ok::<_, anyhow::Error>((next_cursor, acknowledgement))
+                    }
+                    .await;
+                    if let Err(error) = state.apply_scan_result(&process_id, scan_result) {
+                        tracing::warn!(
+                            %error,
+                            process_id = %process_id,
+                            "failed to scan Sub-agent controls"
+                        );
                     }
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod control_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn state_is_pruned_when_a_process_disappears() {
+        let mut state = SubagentControlBridgeState::default();
+        state.acknowledge("gone", ControlAck::Interrupted);
+        state
+            .apply_scan_result::<()>("gone", Ok((7, None)))
+            .unwrap();
+        state.acknowledge("live", ControlAck::Abandoned);
+        state
+            .apply_scan_result::<()>("live", Ok((3, None)))
+            .unwrap();
+
+        state.retain_live(&HashSet::from(["live"]));
+
+        assert!(!state.acknowledgements.contains_key("gone"));
+        assert!(!state.cursors.contains_key("gone"));
+        assert_eq!(state.acknowledgements["live"], ControlAck::Abandoned);
+        assert_eq!(state.cursor("live"), 3);
+    }
+
+    #[test]
+    fn cursor_does_not_advance_on_scan_error() {
+        let mut state = SubagentControlBridgeState::default();
+        state
+            .apply_scan_result::<&str>("process", Ok((4, None)))
+            .unwrap();
+
+        assert_eq!(
+            state.apply_scan_result("process", Err("event read failed")),
+            Err("event read failed")
+        );
+        assert_eq!(state.cursor("process"), 4);
+    }
+
+    #[test]
+    fn acknowledged_control_is_not_delivered_again() {
+        let mut state = SubagentControlBridgeState::default();
+        assert_eq!(
+            state.pending_control("process", false, true),
+            Some(ControlAck::Interrupted)
+        );
+        state
+            .apply_scan_result::<()>("process", Ok((9, Some(ControlAck::Interrupted))))
+            .unwrap();
+
+        assert_eq!(state.pending_control("process", false, true), None);
+        assert_eq!(state.pending_control("process", true, false), None);
     }
 }
 

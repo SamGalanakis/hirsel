@@ -21,7 +21,7 @@ mod tests;
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use hirsel_plugin_api::{
@@ -29,11 +29,13 @@ use hirsel_plugin_api::{
 };
 use hirsel_proto::HostToClient;
 use serde_json::{Map, Value};
-use tokio::sync::{broadcast, watch};
+use tokio::{
+    sync::{Mutex, broadcast, watch},
+    task::JoinHandle,
+};
 
 use crate::{BroadcastLog, storage::Storage, tools::ToolSuite};
 
-pub use supervisor::PluginState;
 pub(crate) use supervisor::SupervisorConfig;
 pub use tools::PluginToolRegistry;
 
@@ -56,10 +58,40 @@ struct LoadedPlugin {
     settings_tx: watch::Sender<SettingsSnapshot>,
 }
 
+impl LoadedPlugin {
+    fn settings(&self) -> watch::Ref<'_, SettingsSnapshot> {
+        self.settings_tx.borrow()
+    }
+}
+
+enum PluginRuntime {
+    Running { task: JoinHandle<()> },
+    Disabled,
+    Errored { detail: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PluginStatus {
+    Running,
+    Disabled,
+    Errored { detail: String },
+}
+
+impl PluginStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Disabled => "disabled",
+            Self::Errored { .. } => "errored",
+        }
+    }
+}
+
+type RuntimeTable = Arc<Mutex<HashMap<String, PluginRuntime>>>;
+
 struct PluginHostInner {
     plugins: Vec<Arc<LoadedPlugin>>,
-    statuses: supervisor::StatusTable,
-    tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    runtimes: RuntimeTable,
     tool_registry: PluginToolRegistry,
     storage: Storage,
     config: SupervisorConfig,
@@ -89,7 +121,7 @@ impl PluginHost {
         let enabled_flags = storage.plugin_enabled_flags().await?;
         let mut seen: BTreeMap<String, ()> = BTreeMap::new();
         let mut plugins = Vec::new();
-        let mut statuses = HashMap::new();
+        let mut runtimes = HashMap::new();
 
         for registration in registrations {
             let id = registration.plugin.id().to_string();
@@ -132,17 +164,7 @@ impl PluginHost {
                     broadcast_log: broadcast_log.clone(),
                 }),
             );
-            // First sight of a plugin enables it: dropping a folder in and
-            // rebuilding is the install, so it should be live afterwards.
-            let enabled = enabled_flags.get(&id).copied().unwrap_or(true);
-            statuses.insert(
-                id.clone(),
-                if enabled {
-                    supervisor::PluginStatus::running()
-                } else {
-                    supervisor::PluginStatus::disabled()
-                },
-            );
+            runtimes.insert(id.clone(), PluginRuntime::Disabled);
             plugins.push(Arc::new(LoadedPlugin {
                 plugin,
                 id,
@@ -156,33 +178,34 @@ impl PluginHost {
         }
 
         let tool_registry = tools.plugin_tools().clone();
-        let statuses: supervisor::StatusTable = Arc::new(Mutex::new(statuses));
+        let runtimes = Arc::new(Mutex::new(runtimes));
         let mut skills = String::new();
-        let mut tasks = HashMap::new();
         for loaded in &plugins {
-            if !is_enabled(&statuses, &loaded.id) {
+            // First sight of a plugin enables it: dropping a folder in and
+            // rebuilding is the install, so it should be live afterwards.
+            if !enabled_flags.get(&loaded.id).copied().unwrap_or(true) {
                 continue;
             }
-            tool_registry.register(&loaded.id, &loaded.ctx, loaded.plugin.tools());
             if let Some(section) = read_skills(loaded).await {
                 skills.push_str(&section);
             }
-            tasks.insert(
-                loaded.id.clone(),
-                supervisor::spawn(
-                    Arc::clone(&loaded.plugin),
-                    loaded.ctx.clone(),
-                    Arc::clone(&statuses),
-                    config,
-                ),
+            let mut runtime = runtimes.lock().await;
+            tool_registry.register(&loaded.id, &loaded.ctx, loaded.plugin.tools());
+            let supervisor::SpawnedSupervisor { task, start } = supervisor::spawn(
+                Arc::clone(&loaded.plugin),
+                loaded.ctx.clone(),
+                Arc::clone(&runtimes),
+                tool_registry.clone(),
+                config,
             );
+            runtime.insert(loaded.id.clone(), PluginRuntime::Running { task });
+            let _ = start.send(());
         }
 
         Ok(Self {
             inner: Arc::new(PluginHostInner {
                 plugins,
-                statuses,
-                tasks: Mutex::new(tasks),
+                runtimes,
                 tool_registry,
                 storage,
                 config,
@@ -201,20 +224,20 @@ impl PluginHost {
         self.inner.plugins.iter().find(|loaded| loaded.id == id)
     }
 
-    fn status(&self, id: &str) -> supervisor::PluginStatus {
-        self.inner
-            .statuses
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .get(id)
-            .cloned()
-            .unwrap_or_else(supervisor::PluginStatus::disabled)
+    async fn status(&self, id: &str) -> PluginStatus {
+        match self.inner.runtimes.lock().await.get(id) {
+            Some(PluginRuntime::Running { .. }) => PluginStatus::Running,
+            Some(PluginRuntime::Errored { detail }) => PluginStatus::Errored {
+                detail: detail.clone(),
+            },
+            Some(PluginRuntime::Disabled) | None => PluginStatus::Disabled,
+        }
     }
 
     /// True while the plugin's routes and tools should be live. `errored`
     /// plugins stay mounted (the owner can see why) but are not running.
-    pub(crate) fn is_running(&self, id: &str) -> bool {
-        self.status(id).state == PluginState::Running
+    pub(crate) async fn is_running(&self, id: &str) -> bool {
+        self.status(id).await == PluginStatus::Running
     }
 
     /// Persist a new enable flag and start or stop the plugin's tools, daemon,
@@ -224,34 +247,36 @@ impl PluginHost {
             .find(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown plugin `{id}`"))?;
-        let previous = self.status(id);
+        let mut runtimes = self.inner.runtimes.lock().await;
         self.inner.storage.set_plugin_enabled(id, enabled).await?;
-        if enabled && previous.state == PluginState::Running {
-            return Ok(false);
-        }
-        if !enabled && previous.state == PluginState::Disabled {
-            return Ok(false);
-        }
-        if enabled {
-            self.inner
-                .tool_registry
-                .register(id, &loaded.ctx, loaded.plugin.tools());
-            let handle = supervisor::spawn(
-                Arc::clone(&loaded.plugin),
-                loaded.ctx.clone(),
-                Arc::clone(&self.inner.statuses),
-                self.inner.config,
-            );
-            self.tasks().insert(id.to_string(), handle);
-            self.set_status(id, supervisor::PluginStatus::running());
-        } else {
-            self.inner.tool_registry.unregister(id);
-            if let Some(handle) = self.tasks().remove(id) {
-                handle.abort();
+        match (enabled, runtimes.get(id)) {
+            (true, Some(PluginRuntime::Running { .. }))
+            | (false, Some(PluginRuntime::Disabled)) => Ok(false),
+            (true, _) => {
+                self.inner
+                    .tool_registry
+                    .register(id, &loaded.ctx, loaded.plugin.tools());
+                let supervisor::SpawnedSupervisor { task, start } = supervisor::spawn(
+                    Arc::clone(&loaded.plugin),
+                    loaded.ctx.clone(),
+                    Arc::clone(&self.inner.runtimes),
+                    self.inner.tool_registry.clone(),
+                    self.inner.config,
+                );
+                runtimes.insert(id.to_string(), PluginRuntime::Running { task });
+                let _ = start.send(());
+                Ok(true)
             }
-            self.set_status(id, supervisor::PluginStatus::disabled());
+            (false, _) => {
+                self.inner.tool_registry.unregister(id);
+                if let Some(PluginRuntime::Running { task }) =
+                    runtimes.insert(id.to_string(), PluginRuntime::Disabled)
+                {
+                    task.abort();
+                }
+                Ok(true)
+            }
         }
-        Ok(true)
     }
 
     /// Merge `values` into the plugin's persisted settings and publish the new
@@ -276,29 +301,6 @@ impl PluginHost {
     pub(crate) fn tool_names(&self) -> Vec<String> {
         self.inner.tool_registry.names()
     }
-
-    fn set_status(&self, id: &str, status: supervisor::PluginStatus) {
-        self.inner
-            .statuses
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(id.to_string(), status);
-    }
-
-    fn tasks(&self) -> std::sync::MutexGuard<'_, HashMap<String, tokio::task::JoinHandle<()>>> {
-        self.inner
-            .tasks
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-}
-
-fn is_enabled(statuses: &supervisor::StatusTable, id: &str) -> bool {
-    statuses
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(id)
-        .is_some_and(|status| status.state == PluginState::Running)
 }
 
 /// Resolve the repository-relative folder recorded by the generator.

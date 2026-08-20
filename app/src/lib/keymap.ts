@@ -10,6 +10,7 @@
 // `escapeField` yields to both rather than fighting them.
 
 import { createSignal } from "solid-js";
+import { scrollToBottom } from "./scroll";
 import { clearTaskFocus, openProcesses, openSettings, state } from "../store/store";
 import { getClient } from "../ws/client";
 // SEAM (created in a parallel worktree): true while a modal/overlay/focus-trap
@@ -56,10 +57,11 @@ export function goPane(target: PaneTarget): void {
 
 /** Jump to the newest task-context material in the current field. */
 export function jumpToLatest(): void {
-  document.querySelector<HTMLElement>('[data-slot="task-scroll"]')?.scrollTo({
-    top: Number.MAX_SAFE_INTEGER,
-    behavior: "smooth",
-  });
+  const element = document.querySelector<HTMLElement>('[data-slot="task-scroll"]');
+  // Shares the conversation's own bottom-pinning helper, so the keyboard route
+  // and the "jump to latest" affordance land in the same place and both go
+  // instant under `prefers-reduced-motion` (DESIGN §5).
+  if (element) scrollToBottom(element);
 }
 
 /** Best-effort cancel of the live turn — a no-op when the agent is idle. */

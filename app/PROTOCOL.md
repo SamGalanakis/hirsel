@@ -136,6 +136,14 @@ Host conversation output arrives as:
   Agent's own program source (`code_start`/`code_done`, paired by `id`);
 - `msg_removed` for a cancelled queued row.
 
+`turn_event`'s `prose` deltas are the Agent's reply being written: the Host
+forwards lash's per-chunk assistant text, coalesced into roughly 12 frames per
+second so a reply streams visibly instead of landing as a finished paragraph.
+The browser accumulates consecutive `prose` deltas and renders the trailing run
+as the in-flight reply, in the same typography as the committed row it becomes
+— so the commit replaces the draft in place, exactly once, with no duplicate
+flash. No frame is invented for this: `prose` was always an append-chunk.
+
 The live turn timeline is not replayed. A committed Agent row can retain
 `tool_calls`; the browser may retain fuller turn details in session memory
 until reload.
@@ -307,9 +315,27 @@ hello_ok {
 ```
 
 The browser treats `events`, `processes`, and `views` as authoritative snapshot
-slices. Conversation replay uses `last_seen_msg_id`; a null cursor requests the
-Host's bounded initial history. Live updates then arrive as full-record
-upserts. Unknown or rejected requests return `error { detail, client_id? }`.
+slices. Live updates then arrive as full-record upserts. Unknown or rejected
+requests return `error { detail, client_id? }`.
+
+`last_seen_msg_id` is an **attention cursor, not a history gate**. Every
+`hello_ok` carries at least the newest 200 conversation rows, whatever the
+client presents; the cursor only *widens* that replay, for a client further
+behind than the window. A null cursor therefore means the same thing it always
+did — exactly the window.
+
+This is what makes a reload show the conversation. A caught-up client used to
+present its stored cursor and receive nothing, so a refreshed browser rendered
+an empty margin until the next message arrived; `last_seen` governs unseen and
+attention semantics only. Re-sending rows the client already holds is safe
+because the client merge is range-authoritative: the snapshot owns every id
+from its lowest upward (so a full resync drops residue), and local history
+below that range is preserved (so a windowed replay never truncates what the
+client still has).
+
+The live turn timeline is still never replayed. A reconnect mid-turn therefore
+shows committed rows only, and any half-streamed reply is dropped rather than
+left orphaned on screen.
 
 The local dev mock accepts any non-empty static token unless `MOCK_TOKEN` is
 set to exercise exact-token rejection. The Rust Host still compares against

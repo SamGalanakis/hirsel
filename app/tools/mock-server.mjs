@@ -807,11 +807,19 @@ wss.on("connection", (ws) => {
       tenant = tenantForToken(frame.token);
       tenant.clients.add(ws);
       tenantContext.run(tenant, () => {
+      // `last_seen_msg_id` is an attention cursor, not a history gate: replay is
+      // always at least the newest REPLAY_LIMIT rows, and widens past that only
+      // for a client further behind than the window. Mirrors the Rust host
+      // (crates/hirsel-host/src/storage/chat.rs) so a reload shows history here
+      // exactly as it does in production.
       const lastSeen = frame.last_seen_msg_id;
+      const window = messages.slice(-REPLAY_LIMIT);
       const replayMessages =
         lastSeen === null || lastSeen === undefined
-          ? messages.slice(-REPLAY_LIMIT)
-          : messages.filter((m) => m.id > lastSeen);
+          ? window
+          : messages.filter((m) => m.id > lastSeen).length > window.length
+            ? messages.filter((m) => m.id > lastSeen)
+            : window;
       const openEvents = events.filter((event) => event.status === "open");
       const doneEvents = events
         .filter((event) => event.status !== "open")

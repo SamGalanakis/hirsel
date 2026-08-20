@@ -33,6 +33,13 @@ interface Props {
   /** A trailing accessory for a non-dismissible pane. */
   badge?: JSX.Element;
   class?: string;
+  /** Overrides on the header's INNER row — the box the icon, title and × line
+   * up in. A docked pane wants that row full-bleed (the default `px-3`); a
+   * full-viewport pane wants it centred on the same reading column its content
+   * holds, so the title and the × land on the content's own two edges instead
+   * of on the far corners of a 1440px screen. The hairline and the background
+   * stay full-bleed either way — it is one bar, not a floating card. */
+  contentClass?: string;
 }
 
 export function PaneHeader(props: Props) {
@@ -42,27 +49,29 @@ export function PaneHeader(props: Props) {
         // `box-content` so the safe-area inset stacks ON TOP of the h-14 datum
         // instead of eating into it — the bar is 56px of chrome everywhere,
         // plus whatever the notch demands.
-        "sticky top-0 z-10 box-content flex h-14 flex-shrink-0 items-center gap-2 border-b border-border bg-background px-3 pt-[env(safe-area-inset-top)]",
+        "sticky top-0 z-10 box-content flex h-14 flex-shrink-0 flex-col justify-center border-b border-border bg-background pt-[env(safe-area-inset-top)]",
         props.class,
       )}
     >
-      {props.icon}
-      <span
-        id={props.titleId}
-        class="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
-      >
-        {props.title}
-      </span>
-      <Show when={props.onClose} fallback={props.badge}>
-        <button
-          type="button"
-          class="-mr-1 grid size-8 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [@media(pointer:coarse)]:size-11"
-          aria-label={props.closeLabel ?? "Close"}
-          onClick={() => props.onClose?.()}
+      <div class={cn("flex w-full items-center gap-2 px-3", props.contentClass)}>
+        {props.icon}
+        <span
+          id={props.titleId}
+          class="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
         >
-          <X class="size-4" aria-hidden="true" />
-        </button>
-      </Show>
+          {props.title}
+        </span>
+        <Show when={props.onClose} fallback={props.badge}>
+          <button
+            type="button"
+            class="-mr-1 grid size-8 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [@media(pointer:coarse)]:size-11"
+            aria-label={props.closeLabel ?? "Close"}
+            onClick={() => props.onClose?.()}
+          >
+            <X class="size-4" aria-hidden="true" />
+          </button>
+        </Show>
+      </div>
     </div>
   );
 }

@@ -663,6 +663,136 @@ describe("Home header collapse", () => {
   });
 });
 
+describe("Right region: Settings takes the screen, Processes stays beside the work", () => {
+  it("presents Settings as one full-viewport modal at every width", async () => {
+    const { store, screen } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+    store.openSettings();
+    const panel = await waitFor(() => {
+      const node = document.querySelector('[data-slot="settings-panel"]') as HTMLElement;
+      expect(node).toBeInTheDocument();
+      return node;
+    });
+
+    // Full-viewport at the rail width too: every docked-inspector override is
+    // gone, so there is ONE Settings presentation rather than two.
+    expect(panel.className).toContain("fixed");
+    expect(panel.className).toContain("inset-0");
+    expect(panel.className).not.toMatch(/(^|\s)rail:/);
+    expect(panel.className).not.toMatch(/w-\[clamp\(/);
+    // ...and it is an honest modal there, where it used to be a non-modal aside.
+    expect(panel).toHaveAttribute("role", "dialog");
+    expect(panel).toHaveAttribute("aria-modal", "true");
+
+    // A generous reading measure, not a 340px rail — and the SAME one the task
+    // world holds, header row included, so nothing invents a bespoke width.
+    const column = panel.querySelector('[data-slot="settings-column"]') as HTMLElement;
+    expect(column.className).toContain("max-w-frame");
+    expect(column.className).toContain("mx-auto");
+    expect(document.getElementById("settings-pane-title")?.parentElement?.className)
+      .toContain("max-w-frame");
+
+    // Tab is trapped now that it is modal at this width.
+    const close = within(panel).getByLabelText("Close Settings");
+    close.focus();
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(panel.contains(document.activeElement)).toBe(true);
+  });
+
+  it("keeps Processes a docked inspector beside the field", async () => {
+    const { store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    store.openProcesses();
+    const panel = await waitFor(() => {
+      const node = document.querySelector('[data-slot="processes-panel"]') as HTMLElement;
+      expect(node).toBeInTheDocument();
+      return node;
+    });
+    // Processes is a glance kept beside the work: still in-flow at `rail`,
+    // still non-modal there, still the shared utility width.
+    expect(panel).toHaveAttribute("role", "complementary");
+    expect(panel.className).toContain("rail:relative");
+    expect(panel.className).toContain("rail:w-[clamp(340px,38vw,440px)]");
+  });
+
+  it("lets Escape dismiss the full-screen Settings without clearing task focus", async () => {
+    const { store, screen } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
+    expect(store.state.focusedTaskId).toBe(1);
+
+    store.openSettings();
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="settings-panel"]')).toBeInTheDocument()
+    );
+    // The trap consumes Esc entirely, so the keymap's Esc ladder never advances
+    // to its last rung on the same keystroke: the utility closes, the task stays.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(store.state.rightRegion).toBe("none"));
+    expect(store.state.focusedTaskId).toBe(1);
+    expect(document.querySelector('[data-slot="task-field"]')).toBeInTheDocument();
+  });
+});
+
+describe("The floating ⋯ yields to a docked pane", () => {
+  it("anchors the affordance strip to the home field, not to the viewport", async () => {
+    const { store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    const affordances = document.querySelector('[data-slot="home-affordances"]') as HTMLElement;
+    const home = document.querySelector('[data-slot="home-region"]') as HTMLElement;
+
+    // The strip is positioned against the home field (index + task field), not
+    // against the shell: it used to hang off the shell's top-right corner, i.e.
+    // off the VIEWPORT, which is precisely why a docked pane slid underneath it.
+    expect(affordances.parentElement).toBe(home);
+    expect(affordances.className).toContain("absolute");
+    expect(home.className).toContain("relative");
+    // ...and it keeps a full gutter of air inside that corner.
+    expect(affordances.className).toContain("px-gutter");
+
+    store.openProcesses();
+    const panel = await waitFor(() => {
+      const node = document.querySelector('[data-slot="processes-panel"]') as HTMLElement;
+      expect(node).toBeInTheDocument();
+      return node;
+    });
+
+    // The docked pane is OUTSIDE the box the ⋯ is measured against, and is the
+    // home field's own row sibling — so it takes its width out of that box and
+    // the ⋯ (with the pane's close × inside it) cannot overlap at any width or
+    // pointer type. Generic: this holds for whatever owns the region.
+    expect(home.contains(panel)).toBe(false);
+    expect(panel.parentElement).toBe(home.parentElement);
+    expect(home.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(home.className).toContain("flex-1");
+    expect(home.className).toContain("min-w-0");
+    expect(panel.className).toContain("rail:shrink-0");
+    // Nothing may re-pin the strip to the shell or the viewport.
+    expect(affordances.className).not.toContain("fixed");
+    const shell = document.querySelector('[data-slot="task-shell"]') as HTMLElement;
+    expect(affordances.parentElement).not.toBe(shell);
+  });
+
+  it("puts the Canvas rail under the same rule", async () => {
+    const { store } = await setupApp([task(1, "@choose-direction", "Choose direction")]);
+    store.dispatch({
+      type: "view_upsert",
+      payload: {
+        type: "view_upsert",
+        instance_id: "v1",
+        placement: "canvas",
+        spec: { type: "text", text: "drawn" },
+      },
+    } as never);
+    store.showCanvas();
+    const rail = await waitFor(() => {
+      const node = document.querySelector('[data-slot="canvas-rail"]') as HTMLElement;
+      expect(node).toBeInTheDocument();
+      return node;
+    });
+    const home = document.querySelector('[data-slot="home-region"]') as HTMLElement;
+    expect(home.contains(rail)).toBe(false);
+    expect(rail.parentElement).toBe(home.parentElement);
+  });
+});
+
 describe("Opens focused by default", () => {
   const moving = (id: number, name: string): EventItem => ({
     ...task(id, name, name),

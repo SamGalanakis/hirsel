@@ -1,11 +1,7 @@
 import { Settings as SettingsIcon } from "lucide-solid";
 import { createSignal, onMount, Show } from "solid-js";
 import { resolveWsUrl } from "../../lib/endpoint";
-import {
-  createFocusTrap,
-  createMediaFlag,
-  phoneUtilityRestoreTarget,
-} from "../../lib/focus";
+import { createFocusTrap, phoneUtilityRestoreTarget } from "../../lib/focus";
 import { showAgentCode } from "../../lib/prefs";
 import { themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
@@ -30,9 +26,14 @@ import {
   readLocal,
 } from "./prefs";
 
-/** At/above `rail` Settings is an in-flow right-region inspector (Tab stays
- * free, non-modal); below it a full-screen modal sheet whose Tab is trapped. */
-const RAIL_MQ = "(min-width: 1100px)";
+/** The one centred column Settings reads in: the task world's own reading
+ * measure plus a gutter each side (`--container-frame`). Settings is a deep,
+ * form-shaped visit — grouped rows, a device fingerprint, monospace prompt
+ * editors — and the 340–440px inspector rail it used to dock in wrapped every
+ * one of them. It does NOT get a bespoke width: the app has exactly one
+ * horizontal rhythm and a full-viewport utility centres on it like everything
+ * else. */
+const SETTINGS_COLUMN = "mx-auto w-full max-w-frame px-gutter";
 
 function SettingsPanel() {
   const endpoint = resolveWsUrl();
@@ -43,18 +44,21 @@ function SettingsPanel() {
   const [confirmForget, setConfirmForget] = createSignal(false);
 
   let panelRef: HTMLDivElement | undefined;
-  const phone = createMediaFlag("(max-width: 1099.98px)");
 
   onMount(() => {
     void computeFingerprint(getStoredToken()).then(setFingerprint);
-    // Focus management (C21): full-screen modal sheet on phone (trap Tab so the
-    // chat behind stays out of the tab order), in-flow inspector at `rail`
-    // (leave Tab free). Escape returns the right region to Pings; when the
-    // Forget-token dialog is up it sits on top of the trap stack and owns Escape.
+    // ONE focus contract at every width now that Settings is full-viewport
+    // everywhere: a true modal — Tab trapped so the task world behind it stays
+    // out of the tab order, Escape dismissing it and NOTHING else (the trap
+    // consumes the key in the capture phase, so keymap's Esc ladder never
+    // advances to clearing task focus on the same keystroke), and focus
+    // restored to the standing ⋯ that summoned it. That restoration target is
+    // deliberate rather than "whatever was focused": the menu item that opened
+    // Settings has unmounted by the time the panel closes, so the captured
+    // element is a detached node and focus would land nowhere at all.
     createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
-      trapTab: () => !window.matchMedia(RAIL_MQ).matches,
-      restoreTo: () => phone() ? phoneUtilityRestoreTarget() : undefined,
+      restoreTo: phoneUtilityRestoreTarget,
     });
     // Consume a one-shot scroll target (spec item 6): the phone overflow "Model
     // settings" row opens Settings pointed at the Models section — an honest
@@ -113,60 +117,73 @@ function SettingsPanel() {
   }
 
   return (
-    // Same responsive presentation as ProcessesPanel — phone: a full-screen
-    // modal `fixed` sheet; desktop (`rail`): an in-flow
-    // right-edge inspector inside ChatView's row, one exclusive slot, never over
-    // the chat measure on the left.
+    // ONE presentation at every width: a full-viewport modal overlay on the
+    // canvas. Settings is an infrequent, deep, form-shaped visit — unlike
+    // Processes, which is a glance kept BESIDE the work and stays a docked
+    // inspector — so it takes the screen for the length of that visit and gives
+    // its rows, its fingerprints and its monospace prompt editors a real
+    // reading measure instead of a 340px rail. It is still summoned, still
+    // trapped, and still returns the Owner to the exact task they left.
     <div
       ref={(node) => { panelRef = node; }}
       tabindex={-1}
       data-slot="settings-panel"
-      role={phone() ? "dialog" : "complementary"}
-      aria-modal={phone() ? "true" : undefined}
+      role="dialog"
+      aria-modal="true"
       aria-labelledby="settings-pane-title"
+      /* One 200ms fade + 8px settle, the same restrained continuity motion the
+         two fields swap with (DESIGN §5). Deliberately NOT the phone sheet's
+         full slide-up any more: this is no longer a panel rising over the
+         world at one width and docking at another — it IS the surface for the
+         length of the visit, and a full-viewport slide is a gesture the calm
+         voice doesn't need. */
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
-        rail:relative rail:inset-auto rail:z-auto rail:min-h-0 rail:w-[clamp(340px,38vw,440px)] rail:shrink-0 rail:border-l rail:border-border rail:pb-0
-        motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom motion-safe:duration-200
-        motion-safe:rail:slide-in-from-bottom-0 motion-safe:rail:slide-in-from-right-2 motion-safe:rail:duration-150"
+        motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-200"
     >
-      {/* ONE header at both widths — see PaneHeader. Settings is summoned and
-          dismissed; the × is the whole exit vocabulary, at every width. */}
+      {/* ONE header at every width — see PaneHeader. Settings is summoned and
+          dismissed; the × is the whole exit vocabulary. Its row centres on the
+          same column as the content below it, so the title and the × sit on the
+          content's own edges rather than in the far corners of the viewport. */}
       <PaneHeader
         icon={<SettingsIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
         title="Settings"
         titleId="settings-pane-title"
         onClose={closeRightRegion}
         closeLabel="Close Settings"
+        contentClass={SETTINGS_COLUMN}
       />
 
       {/* Block flow (not a flex column): as a flex item this scroll region can
           shrink to the available height (min-h-0) and scroll, while its groups
           keep their natural height instead of compressing to fit. */}
-      <div class="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-8">
-        <AppearanceSection />
-        <ModelsSection />
-        <ConnectionSection
-          endpoint={endpoint}
-          deviceLabel={deviceLabel()}
-          onForget={() => setConfirmForget(true)}
-        />
-        <NotificationsSection />
-        <IdentitySection
-          deviceLabel={deviceLabel()}
-          fingerprint={fingerprint()}
-          onSaveLabel={saveLabel}
-        />
-        <AboutSection
-          debug={debug()}
-          onDebugChange={toggleDebug}
-          onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
-        />
-        {/* Plugins: the Host-backed roster (state, on/off, declared settings),
-            then whatever settings UI the plugins themselves contribute. Last in
-            the pane — the app's own settings stay above third-party surface. */}
-        <PluginsSection />
-        <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
-          <PluginSlot name="settings.section" />
+      <div class="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
+        <div data-slot="settings-column" class={`${SETTINGS_COLUMN} pt-6 pb-16`}>
+          <AppearanceSection />
+          <ModelsSection />
+          <ConnectionSection
+            endpoint={endpoint}
+            deviceLabel={deviceLabel()}
+            onForget={() => setConfirmForget(true)}
+          />
+          <NotificationsSection />
+          <IdentitySection
+            deviceLabel={deviceLabel()}
+            fingerprint={fingerprint()}
+            onSaveLabel={saveLabel}
+          />
+          <AboutSection
+            debug={debug()}
+            onDebugChange={toggleDebug}
+            onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
+          />
+          {/* Plugins: the Host-backed roster (state, on/off, declared settings),
+              then whatever settings UI the plugins themselves contribute. Last
+              in the pane — the app's own settings stay above third-party
+              surface. */}
+          <PluginsSection />
+          <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
+            <PluginSlot name="settings.section" />
+          </div>
         </div>
       </div>
 
@@ -177,14 +194,14 @@ function SettingsPanel() {
   );
 }
 
-/** Settings surface (single-owner right region / desktop-shell): an in-flow
- * inspector reachable from the NavRail gear or the phone header overflow (a
- * full-screen modal sheet on phone). Grouped calm-terminal sections —
- * Appearance, Models, Connection & devices, Notifications, Device label &
- * identity, About & debug — each in its own module beside this one, mirroring
- * the Android Settings screen and adapted honestly to the browser WS client's
- * actual capabilities. Mounted inside ChatView's row so the desktop aside
- * resolves against the frame, not the viewport. */
+/** Settings surface (single-owner right region): a full-viewport modal overlay
+ * at every width, summoned from the standing ⋯ or `g s`. Grouped calm-terminal
+ * sections — Appearance, Models, Connection & devices, Notifications, Device
+ * label & identity, About & debug — each in its own module beside this one,
+ * mirroring the Android Settings screen and adapted honestly to the browser WS
+ * client's actual capabilities. It owns the right region enum like the docked
+ * panes do (so summoning it still evicts Processes or Canvas), but it takes no
+ * room in that row: it is `fixed`, over the whole world. */
 export function SettingsSheet() {
   return (
     <Show when={state.rightRegion === "settings"}>

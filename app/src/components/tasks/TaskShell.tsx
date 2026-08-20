@@ -356,167 +356,187 @@ export function TaskShell() {
 
   return (
     <div data-slot="task-shell" class="relative mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col overflow-hidden">
-      {/* Home has no header bar. The brandmark, the standing connection dot and
-          the Processes button were chrome the Owner reads past every time; the
-          top anchor is now the content itself. What survives floats over the
-          field: one quiet ⋯ (every utility, including Processes, lives behind
-          it) and connection state ONLY while it is abnormal. Utility panes keep
-          their own PaneHeader — this collapse is the home shell's alone. */}
-      <div
-        data-slot="home-affordances"
-        class="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start gap-2 px-gutter pt-[calc(env(safe-area-inset-top)+0.5rem)]"
-      >
-        {/* Silence is the healthy state (PRODUCT "restraint as respect"): a
-            connected socket shows nothing at all. Announcement is NOT silent
-            though — one never-unmounted live region speaks every transition,
-            including the recovery the visible pill can't report because it has
-            already left the screen. The pill itself is then decorative. */}
-        <span data-slot="connection-status" class="sr-only" role="status" aria-live="polite">
-          {connectionLabel(state.connection)}
-        </span>
-        <Show when={state.connection !== "connected"}>
-          <div class="pointer-events-auto" aria-hidden="true"><ConnectionPill /></div>
-        </Show>
-        <div class="pointer-events-auto ml-auto"><PhoneOverflowMenu /></div>
-      </div>
-
       <div class="flex min-h-0 flex-1 flex-col rail:flex-row">
-        <TaskIndex
-          tasks={tasks()}
-          focusedId={state.focusedTaskId}
-          onSelect={selectTask}
-        />
-        <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {/* Scrolled text never hard-clips against the top edge: a short
-              background→transparent veil fades it out instead. An overlay
-              rather than a mask on the scroller so the focused state's sticky
-              card (itself bg-background) passes under it invisibly. */}
+        {/* The HOME REGION: the task index and the field it opens into — the
+            world the floating ⋯ belongs to. It is the flex-1 half of the row,
+            so a docked utility (`shrink-0`, right edge) SHRINKS it, and every
+            affordance anchored inside it moves out of that pane's way by
+            construction. The strip used to hang off the shell at
+            `inset-x-0 top-0`, i.e. off the VIEWPORT's top-right, so a docked
+            pane's header slid underneath it: cramped beside the pane's × on a
+            fine pointer and, once coarse-pointer sizing widened both to 44px,
+            covering it outright. Nothing here knows a pane's width; the layout
+            does. */}
+        <div
+          data-slot="home-region"
+          class="relative flex min-h-0 min-w-0 flex-1 flex-col rail:flex-row"
+        >
+          {/* Home has no header bar. The brandmark, the standing connection dot
+              and the Processes button were chrome the Owner reads past every
+              time; the top anchor is now the content itself. What survives
+              floats over the field: one quiet ⋯ (every utility, including
+              Processes, lives behind it) and connection state ONLY while it is
+              abnormal. Utility panes keep their own PaneHeader — this collapse
+              is the home shell's alone. */}
           <div
-            aria-hidden="true"
-            class="pointer-events-none absolute inset-x-0 top-0 z-20 h-5 bg-gradient-to-b from-background to-transparent"
-          />
-          {/* The field is anchored to the composer, not to the top bar: short
-              content rests just above the composer (its children carry
-              `min-h-full` + end-alignment), long content still scrolls from the
-              top because it simply outgrows the container. */}
-          <div
-            ref={(node) => {
-              taskScrollRef = node;
-              // Start pinned: a conversation opens at its newest line.
-              requestAnimationFrame(() => pin(true));
-              // A markdown image has no intrinsic size until its bytes arrive,
-              // so it lands as a late growth AFTER layout — the classic chat
-              // scroll jump. `load` does not bubble, hence the capture phase.
-              // Re-pinning only while following keeps a scrolled-up reader
-              // exactly where they are.
-              node.addEventListener(
-                "load",
-                () => {
-                  if (following) pin(true);
-                },
-                true,
-              );
-            }}
-            data-slot="task-scroll"
-            onScroll={measure}
-            /* `overflow-anchor` is what keeps a late-loading image or an
-               expanding turn-details block from shoving the text the Owner is
-               reading; the browser holds the anchored node still and absorbs
-               the growth above it. */
-            /* No `justify-end` here, ever: on a scroll container it makes a
-               child taller than the viewport overflow UPWARD, and upward
-               overflow is unreachable (scrollHeight never grows). Bottom
-               anchoring for short content is the field's own job via
-               `min-h-full` + its internal alignment. */
-            class="flex min-h-0 flex-1 flex-col overflow-y-auto [overflow-anchor:auto]"
+            data-slot="home-affordances"
+            class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start gap-2 px-gutter pt-[calc(env(safe-area-inset-top)+0.5rem)]"
           >
-            <Show
-              when={focusedTask()}
-              fallback={<AmbientField revealed={revealed()} loadingEarlier={loadingEarlier()} />}
-            >
-              {(task) => (
-                <TaskField
-                  task={task()}
-                  tasks={tasks()}
-                  views={taskViews()}
-                  revealed={revealed()}
-                  loadingEarlier={loadingEarlier()}
-                />
-              )}
+            {/* Silence is the healthy state (PRODUCT "restraint as respect"): a
+                connected socket shows nothing at all. Announcement is NOT silent
+                though — one never-unmounted live region speaks every transition,
+                including the recovery the visible pill can't report because it
+                has already left the screen. The pill itself is then decorative. */}
+            <span data-slot="connection-status" class="sr-only" role="status" aria-live="polite">
+              {connectionLabel(state.connection)}
+            </span>
+            <Show when={state.connection !== "connected"}>
+              <div class="pointer-events-auto" aria-hidden="true"><ConnectionPill /></div>
             </Show>
-            <Show when={!focusedTask() && conversationViews(state.views).length > 0}>
-              <div class="mx-auto w-full max-w-frame px-gutter pb-12">
-                <div class="flex w-full max-w-measure flex-col gap-4">
-                  <For each={conversationViews(state.views)}>
-                    {(view) => (
-                      <ViewRenderer spec={view.spec} instanceId={view.instance_id} placement={view.placement} />
-                    )}
-                  </For>
+            <div class="pointer-events-auto ml-auto"><PhoneOverflowMenu /></div>
+          </div>
+
+          <TaskIndex
+            tasks={tasks()}
+            focusedId={state.focusedTaskId}
+            onSelect={selectTask}
+          />
+          <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            {/* Scrolled text never hard-clips against the top edge: a short
+                background→transparent veil fades it out instead. An overlay
+                rather than a mask on the scroller so the focused state's sticky
+                card (itself bg-background) passes under it invisibly. */}
+            <div
+              aria-hidden="true"
+              class="pointer-events-none absolute inset-x-0 top-0 z-20 h-5 bg-gradient-to-b from-background to-transparent"
+            />
+            {/* The field is anchored to the composer, not to the top bar: short
+                content rests just above the composer (its children carry
+                `min-h-full` + end-alignment), long content still scrolls from the
+                top because it simply outgrows the container. */}
+            <div
+              ref={(node) => {
+                taskScrollRef = node;
+                // Start pinned: a conversation opens at its newest line.
+                requestAnimationFrame(() => pin(true));
+                // A markdown image has no intrinsic size until its bytes arrive,
+                // so it lands as a late growth AFTER layout — the classic chat
+                // scroll jump. `load` does not bubble, hence the capture phase.
+                // Re-pinning only while following keeps a scrolled-up reader
+                // exactly where they are.
+                node.addEventListener(
+                  "load",
+                  () => {
+                    if (following) pin(true);
+                  },
+                  true,
+                );
+              }}
+              data-slot="task-scroll"
+              onScroll={measure}
+              /* `overflow-anchor` is what keeps a late-loading image or an
+                 expanding turn-details block from shoving the text the Owner is
+                 reading; the browser holds the anchored node still and absorbs
+                 the growth above it. */
+              /* No `justify-end` here, ever: on a scroll container it makes a
+                 child taller than the viewport overflow UPWARD, and upward
+                 overflow is unreachable (scrollHeight never grows). Bottom
+                 anchoring for short content is the field's own job via
+                 `min-h-full` + its internal alignment. */
+              class="flex min-h-0 flex-1 flex-col overflow-y-auto [overflow-anchor:auto]"
+            >
+              <Show
+                when={focusedTask()}
+                fallback={<AmbientField revealed={revealed()} loadingEarlier={loadingEarlier()} />}
+              >
+                {(task) => (
+                  <TaskField
+                    task={task()}
+                    tasks={tasks()}
+                    views={taskViews()}
+                    revealed={revealed()}
+                    loadingEarlier={loadingEarlier()}
+                  />
+                )}
+              </Show>
+              <Show when={!focusedTask() && conversationViews(state.views).length > 0}>
+                <div class="mx-auto w-full max-w-frame px-gutter pb-12">
+                  <div class="flex w-full max-w-measure flex-col gap-4">
+                    <For each={conversationViews(state.views)}>
+                      {(view) => (
+                        <ViewRenderer spec={view.spec} instanceId={view.instance_id} placement={view.placement} />
+                      )}
+                    </For>
+                  </div>
+                </div>
+              </Show>
+            </div>
+
+            {/* The standard chat escape hatch, and the ONLY way the view returns
+                to the bottom once the Owner has scrolled away. Quiet and
+                self-effacing: it exists exactly while there is somewhere to jump
+                to, sits in the field rather than over the composer, and says
+                where it goes rather than shouting for attention. */}
+            {/* It centres on the READING COLUMN, not on the pane: the same
+                `max-w-frame` + `px-gutter` box the field and the composer use, so
+                the pill sits over the middle of the text it belongs to at every
+                width. Centred on the pane it drifted right of the column and
+                landed on the prose. `bottom-3` keeps honest air above the capsule
+                instead of touching its rim. */}
+            <Show when={canJump()}>
+              <div class="pointer-events-none relative z-10 mx-auto flex w-full max-w-frame justify-center px-gutter">
+                <button
+                  type="button"
+                  data-slot="jump-to-latest"
+                  class="pointer-events-auto absolute bottom-3 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface px-3 py-1.5 text-xs text-surface-foreground shadow-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11"
+                  onClick={() => void jumpLatest(false)}
+                >
+                  <ArrowDown class="size-3.5" aria-hidden="true" />
+                  Jump to latest
+                </button>
+              </div>
+            </Show>
+
+            {/* The banner is part of the column, not a pane-wide bar: same frame,
+                same gutter, so its edges are the composer's edges below it. */}
+            <Show when={state.protocolError}>
+              <div
+                role="alert"
+                data-slot="protocol-error"
+                class="mx-auto mb-2 flex w-full max-w-frame items-center gap-3 px-gutter text-sm text-foreground"
+              >
+                <div class="flex w-full items-center gap-3 rounded-lg bg-muted px-3">
+                  <span class="min-w-0 flex-1 py-3">{state.protocolError}</span>
+                  <button
+                    type="button"
+                    class="grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
+                    aria-label="Dismiss connection error"
+                    onClick={clearProtocolError}
+                  >
+                    <X class="size-4" aria-hidden="true" />
+                  </button>
                 </div>
               </div>
             </Show>
-          </div>
 
-          {/* The standard chat escape hatch, and the ONLY way the view returns
-              to the bottom once the Owner has scrolled away. Quiet and
-              self-effacing: it exists exactly while there is somewhere to jump
-              to, sits in the field rather than over the composer, and says
-              where it goes rather than shouting for attention. */}
-          {/* It centres on the READING COLUMN, not on the pane: the same
-              `max-w-frame` + `px-gutter` box the field and the composer use, so
-              the pill sits over the middle of the text it belongs to at every
-              width. Centred on the pane it drifted right of the column and
-              landed on the prose. `bottom-3` keeps honest air above the capsule
-              instead of touching its rim. */}
-          <Show when={canJump()}>
-            <div class="pointer-events-none relative z-10 mx-auto flex w-full max-w-frame justify-center px-gutter">
-              <button
-                type="button"
-                data-slot="jump-to-latest"
-                class="pointer-events-auto absolute bottom-3 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface px-3 py-1.5 text-xs text-surface-foreground shadow-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11"
-                onClick={() => void jumpLatest(false)}
-              >
-                <ArrowDown class="size-3.5" aria-hidden="true" />
-                Jump to latest
-              </button>
-            </div>
-          </Show>
+            <Composer
+              focused={focusedTask() !== null}
+              tasks={tasks()}
+              attachments={attachments}
+              thinking={state.agentActivity.state === "thinking"}
+              prefill={state.composerPrefill}
+              onConsumePrefill={clearComposerPrefill}
+              onSend={send}
+              onStop={() => getClient()?.cancelTurn()}
+              getLastOwnerBody={lastOwnerBody}
+            />
+          </main>
+        </div>
 
-          {/* The banner is part of the column, not a pane-wide bar: same frame,
-              same gutter, so its edges are the composer's edges below it. */}
-          <Show when={state.protocolError}>
-            <div
-              role="alert"
-              data-slot="protocol-error"
-              class="mx-auto mb-2 flex w-full max-w-frame items-center gap-3 px-gutter text-sm text-foreground"
-            >
-              <div class="flex w-full items-center gap-3 rounded-lg bg-muted px-3">
-                <span class="min-w-0 flex-1 py-3">{state.protocolError}</span>
-                <button
-                  type="button"
-                  class="grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
-                  aria-label="Dismiss connection error"
-                  onClick={clearProtocolError}
-                >
-                  <X class="size-4" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-          </Show>
-
-          <Composer
-            focused={focusedTask() !== null}
-            tasks={tasks()}
-            attachments={attachments}
-            thinking={state.agentActivity.state === "thinking"}
-            prefill={state.composerPrefill}
-            onConsumePrefill={clearComposerPrefill}
-            onSend={send}
-            onStop={() => getClient()?.cancelTurn()}
-            getLastOwnerBody={lastOwnerBody}
-          />
-        </main>
-
+        {/* The exclusive right region. `CanvasRail` and `ProcessesSheet` dock
+            here at `rail` widths as `shrink-0` siblings of the home region,
+            which is what makes the ⋯ above yield to them; `SettingsSheet` is a
+            full-viewport overlay and takes no room in this row. */}
         <CanvasRail />
         <CanvasSheet />
         <ProcessesSheet />

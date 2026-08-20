@@ -126,9 +126,10 @@ export interface FocusTrapOptions {
   restoreTo?: () => HTMLElement | null | undefined;
 }
 
-/** The stable trigger used when a phone utility sheet is dismissed. It remains
- * mounted while a utility is open, unlike the portaled menu item that launched
- * it. Kept here so every utility uses exactly the same restoration contract. */
+/** The stable trigger a dismissed utility overlay restores focus to: the one
+ * standing ⋯, which is mounted at every width and stays mounted while a utility
+ * is open, unlike the portaled menu item that launched it. Kept here so every
+ * utility uses exactly the same restoration contract. */
 export function phoneUtilityRestoreTarget(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-slot="phone-overflow-trigger"]');
 }

@@ -2,7 +2,7 @@
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
-import { PORTS, pollReady, recordCheck, startProcess, teardown, writeReport as writeHarnessReport } from "./lib/harness.mjs";
+import { appReady, PORTS, pollReady, recordCheck, startProcess, teardown, writeReport as writeHarnessReport } from "./lib/harness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const app = `${root}/app`;
@@ -110,7 +110,7 @@ async function main() {
     const frameAfter = (start, predicate) => poll("outgoing frame", () => sentFrames.slice(start).find(predicate));
 
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.locator('[aria-label="connected"]').waitFor();
+    await appReady(page);
     const textarea = page.getByRole("textbox", { name: "Message Hirsel" });
     const send = page.getByRole("button", { name: "Send", exact: true });
     const more = page.locator('[data-slot="phone-overflow-trigger"]');
@@ -260,7 +260,7 @@ async function main() {
     await page.getByText("Task decided").waitFor();
     check("exact promotion payload", promoteFrame.action === "choose" && promoteFrame.data?.choice === "A", JSON.stringify(promoteFrame));
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.locator('[aria-label="connected"]').waitFor();
+    await appReady(page);
     await page.getByRole("button", { name: /deploy 4821, done/i }).click();
     await page.getByText("Task decided").waitFor();
     startFrame = sentFrames.length;

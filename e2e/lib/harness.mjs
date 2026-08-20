@@ -49,6 +49,11 @@ export async function pollReady(label, probe, timeoutMs = 30_000, intervalMs = 7
   throw new Error(`${label} did not settle${lastError ? `: ${lastError.message}` : ""}`);
 }
 
+export async function appReady(page) {
+  await page.locator('[data-slot="composer-shell"]').waitFor();
+  await page.locator('[data-slot="task-index"] [data-task-id]').first().waitFor();
+}
+
 function signalProcess(child, signal) {
   try {
     if (child.exitCode !== null || child.signalCode !== null) return;

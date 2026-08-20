@@ -122,7 +122,7 @@ describe("task focus", () => {
 });
 
 describe("mostNeedingTask", () => {
-  // The load-time choice, over the SAME vocabulary taskState renders.
+  // The load-time choice, over the SAME vocabulary taskStatus renders.
   const candidate = (id: number, over: Partial<EventItem> = {}): EventItem => ({
     ...task,
     id,

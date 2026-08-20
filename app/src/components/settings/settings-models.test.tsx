@@ -143,6 +143,49 @@ describe("Settings → Models: main agent", () => {
     expect(setModel).toHaveBeenCalledWith("gpt-5.6-sol", "high");
   });
 
+  // The host broadcasts `model_changed` ONLY when the value actually changed,
+  // and a rejected command returns before broadcasting — so the pending state
+  // must never depend on an echo arriving.
+  it("settles the pending controls on timeout when no broadcast ever arrives", async () => {
+    const { getByLabelText } = await mount({ model: MODEL });
+    const modelSelect = getByLabelText("Main agent model") as HTMLSelectElement;
+    const variantSelect = getByLabelText("Main agent reasoning variant") as HTMLSelectElement;
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(variantSelect, { target: { value: "high" } });
+      expect(setModel).toHaveBeenCalledWith("gpt-5.6-sol", "high");
+      expect(variantSelect.disabled).toBe(true);
+      expect(modelSelect.disabled).toBe(true);
+
+      vi.advanceTimersByTime(4000);
+
+      expect(variantSelect.disabled).toBe(false);
+      expect(modelSelect.disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // …and the settled control still works.
+    fireEvent.change(variantSelect, { target: { value: "max" } });
+    expect(setModel).toHaveBeenLastCalledWith("gpt-5.6-sol", "max");
+  });
+
+  it("settles the pending controls when the host answers with an error frame", async () => {
+    const { getByLabelText } = await mount({ model: MODEL });
+    const store = await import("../../store/store");
+    const modelSelect = getByLabelText("Main agent model") as HTMLSelectElement;
+    const variantSelect = getByLabelText("Main agent reasoning variant") as HTMLSelectElement;
+
+    fireEvent.change(variantSelect, { target: { value: "high" } });
+    expect(variantSelect.disabled).toBe(true);
+
+    store.setProtocolError("unknown variant");
+
+    await waitFor(() => expect(variantSelect).not.toBeDisabled());
+    expect(modelSelect.disabled).toBe(false);
+  });
+
   it("hides the main-agent subsection when model is null", async () => {
     const { queryByLabelText } = await mount({ subagent_models: CATALOG });
     expect(queryByLabelText("Main agent model")).toBeNull();
@@ -255,6 +298,27 @@ describe("Settings → Models: sub-agent models", () => {
       true,
       ["low", "medium", "high", "xhigh", "max", "ultra"],
     );
+  });
+
+  it("settles a pending row on timeout, and on an error frame", async () => {
+    const { getByLabelText } = await mount({ subagent_models: CATALOG });
+    const toggle = () => getByLabelText("Enable Terra") as HTMLInputElement;
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(toggle());
+      expect(toggle()).toBeDisabled();
+      vi.advanceTimersByTime(4000);
+      expect(toggle()).not.toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const store = await import("../../store/store");
+    fireEvent.click(toggle());
+    expect(toggle()).toBeDisabled();
+    store.setProtocolError("model unavailable");
+    await waitFor(() => expect(toggle()).not.toBeDisabled());
   });
 
   it("hides the sub-agent subsection when subagentModels is null", async () => {

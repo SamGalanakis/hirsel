@@ -2,12 +2,31 @@
 // sub-agent model catalog. Both subsections are host-backed — they reflect the
 // store snapshots the Host broadcasts and send commands over the WS client.
 import { ChevronDown, LoaderCircle } from "lucide-solid";
-import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
+import { createEffect, createSignal, For, type JSX, Show, untrack } from "solid-js";
+import { createPendingKeys, type PendingKeys } from "../../lib/pending";
 import type { ModelSelection, SubagentModel } from "../../protocol";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { titleCase } from "./prefs";
 import { Group, SectionHeader, SubHeading, Select, Toggle } from "./rows";
+
+/** Settle every pending control when a protocol `error` frame lands.
+ *
+ * The host validates first and RETURNS on failure — no `model_changed` /
+ * `subagent_models_changed` broadcast follows a rejected write — so the error
+ * banner is the only settle signal a failed command ever produces. Without this
+ * the control would sit disabled until its timeout; with it, the surface
+ * recovers the moment the failure is visible. (Timeout still backstops the
+ * silent cases: a no-op write the host declines to echo, or a dropped frame.) */
+function settleOnProtocolError(pending: PendingKeys): void {
+  let seen = untrack(() => state.protocolError);
+  createEffect(() => {
+    const error = state.protocolError;
+    if (error === seen) return;
+    seen = error;
+    if (error !== null) pending.settleAll();
+  });
+}
 
 /** Main-agent model + reasoning-variant controls, reflecting `state.model`.
  * Changing either sends `set_model`; the tapped control shows a brief pending
@@ -18,19 +37,25 @@ function MainAgentModel() {
   const available = () => state.model?.available ?? [];
   const selectedModel = () => available().find((m) => m.id === current()?.id);
 
-  // The selection we've sent and are awaiting the broadcast for, plus which
-  // control originated it — so the spinner sits on the changed control only.
-  const [pending, setPending] = createSignal<{ sel: ModelSelection; control: "model" | "variant" } | null>(
-    null,
-  );
+  // Which control is awaiting a settle ("model" / "variant"), so the spinner
+  // sits on the changed control only. Bounded: a matching broadcast, an error
+  // frame, or the timeout — the value we're awaiting is NOT guaranteed to be
+  // echoed (the host only broadcasts an actual change).
+  const pending = createPendingKeys();
+  const [awaited, setAwaited] = createSignal<ModelSelection | null>(null);
   createEffect(() => {
-    const p = pending();
+    const sel = awaited();
     const c = current();
-    if (p && c && c.id === p.sel.id && c.variant === p.sel.variant) setPending(null);
+    if (sel && c && c.id === sel.id && c.variant === sel.variant) {
+      setAwaited(null);
+      pending.settleAll();
+    }
   });
+  settleOnProtocolError(pending);
 
   function send(sel: ModelSelection, control: "model" | "variant") {
-    setPending({ sel, control });
+    setAwaited(sel);
+    pending.begin(control);
     getClient()?.setModel(sel.id, sel.variant);
   }
 
@@ -49,7 +74,7 @@ function MainAgentModel() {
     send({ id, variant }, "variant");
   }
 
-  const busy = () => pending() !== null;
+  const busy = () => pending.any();
 
   return (
     <Show when={current()}>
@@ -58,7 +83,7 @@ function MainAgentModel() {
         <div class="flex items-center justify-between gap-3 py-3">
           <div class="flex min-w-0 items-center gap-2">
             <span class="text-sm text-foreground">Model</span>
-            <Show when={busy() && pending()?.control === "model"}>
+            <Show when={pending.isPending("model")}>
               <LoaderCircle class="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Saving" />
             </Show>
           </div>
@@ -74,7 +99,7 @@ function MainAgentModel() {
         <div class="flex items-center justify-between gap-3 py-3">
           <div class="flex min-w-0 items-center gap-2">
             <span class="text-sm text-foreground">Reasoning</span>
-            <Show when={busy() && pending()?.control === "variant"}>
+            <Show when={pending.isPending("variant")}>
               <LoaderCircle class="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Saving" />
             </Show>
           </div>
@@ -189,11 +214,14 @@ function SubagentModels() {
   // the catalog content changes (a broadcast settled the truth); Solid's store
   // updates nested catalog objects in place, so tracking the root reference is
   // insufficient. Coarse but correct: the broadcast is authoritative for all.
-  const [pending, setPending] = createSignal<Set<string>>(new Set());
+  // A rejected or no-op write produces no broadcast at all, so each key is also
+  // bounded by the error frame and by its timeout.
+  const pending = createPendingKeys();
   createEffect(() => {
     catalogVersion();
-    setPending(new Set<string>());
+    pending.settleAll();
   });
+  settleOnProtocolError(pending);
 
   const keyOf = (provider: string, id: string) => `${provider}\u0000${id}`;
   const providerPanelId = (provider: string) => `subagent-provider-${provider}`;
@@ -215,7 +243,7 @@ function SubagentModels() {
   ) {
     const enabled = patch.enabled ?? model.enabled;
     const enabledVariants = patch.enabled_variants ?? model.enabled_variants;
-    setPending((s) => new Set<string>(s).add(keyOf(provider, model.id)));
+    pending.begin(keyOf(provider, model.id));
     getClient()?.setSubagentModel(provider, model.id, enabled, enabledVariants);
   }
 
@@ -254,7 +282,7 @@ function SubagentModels() {
                       <SubagentModelRow
                         provider={group.provider}
                         model={model}
-                        pending={pending().has(keyOf(group.provider, model.id))}
+                        pending={pending.isPending(keyOf(group.provider, model.id))}
                         onChange={(patch) => change(group.provider, model, patch)}
                       />
                     )}

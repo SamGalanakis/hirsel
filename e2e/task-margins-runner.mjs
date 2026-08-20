@@ -114,17 +114,55 @@ async function main() {
     const textarea = page.getByRole("textbox", { name: "Message Hirsel" });
     const send = page.getByRole("button", { name: "Send", exact: true });
     const more = page.locator('[data-slot="phone-overflow-trigger"]');
-    const processesTrigger = page.locator('[data-slot="processes-trigger"]');
+    // There is no standing Processes button any more: home keeps one quiet ⋯
+    // and every utility, Processes included, is summoned from behind it.
+    const openProcesses = async () => {
+      await more.click();
+      await page.getByRole("menuitem", { name: /^Processes/ }).click();
+    };
     const taskField = page.locator('[data-slot="task-field"]');
+    const taskCard = page.locator('[data-slot="task-card"]');
+    /** Focus a task without toggling one that is already open. */
+    const ensureFocused = async (id) => {
+      const open = await page.locator(`[data-slot="task-field"][data-task="${id}"]`).count();
+      if (open === 1) return;
+      await page.locator(`[data-task-id="${id}"]`).click();
+      await taskCard.waitFor();
+    };
     const ambientField = page.locator('[data-slot="ambient-field"]');
     const composerShell = page.locator('[data-slot="composer-shell"]');
+    const question = page.getByRole("heading", { level: 3, name: "Ship build 4821 to production?" });
 
+    // The seeded field carries one blocked task (deploy 4821), so the load-time
+    // rule (DESIGN §"On load the most-needing task opens focused") has to land
+    // on it: card pinned, composer tinted, chip pressed, no ambient field.
+    let deploy = page.getByRole("button", { name: /deploy 4821, blocked on you/i });
+    let auth = page.getByRole("button", { name: /auth pr, needs you/i });
+    await question.waitFor();
     check(
-      "ambient resting state",
+      "most-needing task opens focused",
+      await taskField.getAttribute("data-task") === "1"
+        && (await taskCard.count()) === 1
+        && (await ambientField.count()) === 0
+        && await composerShell.getAttribute("data-focused") === "true"
+        && await deploy.getAttribute("aria-pressed") === "true"
+        && await auth.getAttribute("aria-pressed") === "false"
+        && (await page.locator('[data-slot="task-index"]').count()) === 1,
+      "blocked deploy 4821 wins load-time focus over the needs-you and done tasks",
+    );
+
+    // Esc is the deliberate zoom-out, and ambient carries no title, no task
+    // field, no composer label and no placeholder.
+    await page.keyboard.press("Escape");
+    await ambientField.waitFor();
+    check(
+      "escape rests the field ambient",
       (await ambientField.count()) === 1
         && (await page.locator('[data-slot="task-index"]').count()) === 1
         && (await taskField.count()) === 0
+        && (await taskCard.count()) === 0
         && await composerShell.getAttribute("data-focused") === "false"
+        && await deploy.getAttribute("aria-pressed") === "false"
         && await textarea.getAttribute("placeholder") === null
         && (await page.getByText("Global Hirsel", { exact: true }).count()) === 0,
       "one Tasks inventory; no title, task field, composer label, or placeholder",
@@ -139,33 +177,68 @@ async function main() {
     const globalFrame = await frameAfter(startFrame, (frame) => frame.type === "send_message" && frame.body === "Summarize what matters across everything");
     check("exact global frame", globalFrame.ref === null && (!globalFrame.mentions || globalFrame.mentions.length === 0), JSON.stringify(globalFrame));
 
-    let deploy = page.getByRole("button", { name: /deploy 4821, blocked on you/i });
-    let auth = page.getByRole("button", { name: /auth pr, needs you/i });
     await deploy.click();
-    const question = page.getByRole("heading", { level: 3, name: "Ship build 4821 to production?" });
     await question.waitFor();
+    // The identity is quiet CONTEXT inside the pinned card now (it used to be
+    // sr-only): it renders once, is visible, and the machine-authored question
+    // still visibly leads it in both size and weight.
     const dive = await page.evaluate(() => {
+      const card = document.querySelector('[data-slot="task-card"]');
       const field = document.querySelector('[data-slot="task-field"]');
-      const identity = field?.querySelector("h2");
-      const generated = field?.querySelector("h3");
+      const identity = card?.querySelector("h2");
+      const generated = card?.querySelector("h3");
+      const identityStyle = identity ? getComputedStyle(identity) : null;
       return {
         fieldText: field?.textContent ?? "",
-        identityClass: identity?.className ?? "",
+        identityText: identity?.textContent?.trim() ?? "",
+        identityPx: identityStyle ? Number.parseFloat(identityStyle.fontSize) : 0,
+        identityColor: identityStyle?.color ?? "",
+        identityVisible: Boolean(identity && identity.getBoundingClientRect().height > 0),
         identityCount: field?.querySelectorAll("h2").length ?? 0,
         generatedPx: generated ? Number.parseFloat(getComputedStyle(generated).fontSize) : 0,
+        generatedColor: generated ? getComputedStyle(generated).color : "",
+        cardPosition: card ? getComputedStyle(card).position : "missing",
       };
     });
     check(
-      "generated question leads",
-      dive.identityClass === "sr-only" && dive.identityCount === 1 && dive.generatedPx >= 28 && !dive.fieldText.includes("blocked on you"),
-      `h2=${dive.identityClass}; h3=${dive.generatedPx}px; status lives in selected task row`,
+      "generated question leads its quiet identity",
+      dive.identityCount === 1 && dive.identityVisible && dive.identityText === "deploy 4821"
+        && dive.generatedPx >= 28 && dive.identityPx < dive.generatedPx
+        && dive.identityColor !== dive.generatedColor
+        && !dive.fieldText.includes("blocked on you"),
+      `h2 "${dive.identityText}" ${dive.identityPx}px ${dive.identityColor}; h3 ${dive.generatedPx}px ${dive.generatedColor}; status lives in the chip`,
     );
     check(
       "task focus visible",
       await deploy.getAttribute("aria-pressed") === "true"
         && await composerShell.getAttribute("data-focused") === "true"
+        && dive.cardPosition === "sticky"
         && (await page.locator('[data-slot="task-scope"]').count()) === 0,
-      "selected task row and composer geometry carry focus without a mode label",
+      `selected task row, pinned ${dive.cardPosition} card, and composer tone carry focus without a mode label`,
+    );
+    // One column at the reading measure in BOTH states: the card, the
+    // conversation under it and the standing composer share edges, and the
+    // composer does not move when focus clears.
+    const columnGeometry = await page.evaluate(() => {
+      const box = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        return { left: Math.round(rect.left), width: Math.round(rect.width) };
+      };
+      return {
+        card: box('[data-slot="task-card"]'),
+        conversation: box('[data-slot="task-conversation"]'),
+        composer: box('[data-slot="composer-shell"]'),
+      };
+    });
+    check(
+      "one measure-wide column",
+      columnGeometry.card.left === columnGeometry.conversation.left
+        && columnGeometry.card.width === columnGeometry.conversation.width
+        && columnGeometry.card.width <= 820
+        && columnGeometry.composer.width <= 820,
+      JSON.stringify(columnGeometry),
     );
     startFrame = sentFrames.length;
     await textarea.fill("What would make this unsafe?");
@@ -176,13 +249,20 @@ async function main() {
     const taskScroll = page.locator('[data-slot="task-scroll"]');
     await taskScroll.evaluate((element) => { element.scrollTop = 14; });
     await deploy.click();
+    const ambientComposer = await composerShell.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: Math.round(rect.left), width: Math.round(rect.width) };
+    });
     check(
       "focus clears to ambient",
       (await taskField.count()) === 0
+        && (await taskCard.count()) === 0
         && (await ambientField.count()) === 1
         && await composerShell.getAttribute("data-focused") === "false"
-        && await deploy.getAttribute("aria-pressed") === "false",
-      "activating the focused task removes focus without naming a mode",
+        && await deploy.getAttribute("aria-pressed") === "false"
+        && ambientComposer.left === columnGeometry.composer.left
+        && ambientComposer.width === columnGeometry.composer.width,
+      `activating the focused task removes focus without naming a mode or moving the composer (${JSON.stringify(ambientComposer)})`,
     );
     startFrame = sentFrames.length;
     await textarea.fill("Compare this with the auth task");
@@ -261,6 +341,20 @@ async function main() {
     check("exact promotion payload", promoteFrame.action === "choose" && promoteFrame.data?.choice === "A", JSON.stringify(promoteFrame));
     await page.reload({ waitUntil: "domcontentloaded" });
     await appReady(page);
+    // Every seeded task is settled at this point, so nothing ranks as needing
+    // the Owner and the same load-time rule must leave the field ambient —
+    // landing on already-decided work would be the opposite of most-needing.
+    const settledChips = await page.locator('[data-slot="task-index"] [data-task-id]').evaluateAll(
+      (nodes) => nodes.map((node) => node.getAttribute("aria-label")),
+    );
+    check(
+      "nothing needing rests ambient",
+      settledChips.length === 3 && settledChips.every((label) => /, done$/.test(label ?? ""))
+        && (await ambientField.count()) === 1
+        && (await taskField.count()) === 0
+        && await composerShell.getAttribute("data-focused") === "false",
+      `all-settled load stays ambient; chips ${JSON.stringify(settledChips)}`,
+    );
     await page.getByRole("button", { name: /deploy 4821, done/i }).click();
     await page.getByText("Task decided").waitFor();
     startFrame = sentFrames.length;
@@ -278,6 +372,31 @@ async function main() {
       "literal success and 0 errors accompany the dot",
     );
 
+    // A chip is acted on through its own ⋯ menu — never a hover ×. Delete is
+    // optimistic and its toast carries the honest Undo.
+    const nightlyActions = page.getByRole("button", { name: "Actions for nightly backup" });
+    await nightlyActions.click();
+    const deleteItem = page.getByRole("menuitem", { name: "Delete", exact: true });
+    await deleteItem.waitFor();
+    const chipCross = await page.locator('[data-slot="task-index"] button[aria-label^="Remove"], [data-slot="task-index"] button[aria-label^="Dismiss"]').count();
+    await deleteItem.click();
+    await page.locator('[data-task-id="3"]').waitFor({ state: "detached" });
+    const afterDelete = {
+      chips: await page.locator('[data-slot="task-index"] [data-task-id]').count(),
+      taskFields: await taskField.count(),
+      focused: await composerShell.getAttribute("data-focused"),
+    };
+    const undo = page.getByRole("button", { name: "Undo", exact: true });
+    await undo.click();
+    await page.locator('[data-task-id="3"]').waitFor();
+    check(
+      "chip menu deletes with undo",
+      chipCross === 0 && afterDelete.chips === 2 && afterDelete.taskFields === 0
+        && afterDelete.focused === "false"
+        && (await page.locator('[data-slot="task-index"] [data-task-id]').count()) === 3,
+      `no hover ×; delete swept the focused chip to ambient (${JSON.stringify(afterDelete)}) and Undo restored it`,
+    );
+
     await page.getByRole("button", { name: /deploy 4821, blocked on you/i }).click();
     await textarea.fill("compare blast radius");
     const utilityBefore = await page.evaluate(() => ({
@@ -286,10 +405,21 @@ async function main() {
       draft: document.querySelector('[data-composer="main"]')?.value,
       scroll: document.querySelector('[data-slot="task-scroll"]')?.scrollTop,
     }));
+    await more.click();
     const canvasCount = await page.getByRole("menuitem", { name: "Canvas", exact: true }).count();
-    await processesTrigger.click();
+    const overflowLabel = await more.getAttribute("aria-label");
+    const processesRow = page.getByRole("menuitem", { name: /^Processes/ });
+    const processesRowLabel = (await processesRow.textContent())?.trim();
+    await processesRow.click();
     const processPanel = page.locator('[data-slot="processes-panel"]');
     await processPanel.waitFor();
+    check(
+      "processes summoned from the overflow",
+      overflowLabel === "More actions, 2 processes running"
+        && processesRowLabel === "Processes2"
+        && (await page.locator('[data-slot="processes-trigger"]').count()) === 0,
+      `⋯ reports the running count (${overflowLabel}); row "${processesRowLabel}"; no standing Processes button`,
+    );
     check(
       "processes temporary",
       await processPanel.getAttribute("role") === "complementary"
@@ -298,7 +428,12 @@ async function main() {
         && (await processPanel.locator('[data-slot="task-index"]').count()) === 0,
       "desktop inspector has running/finished groups and no nested destination",
     );
-    await page.keyboard.press("Escape");
+    // Closed through the pane header's own ×, activated from the keyboard: the
+    // floating ⋯ overlaps that corner of the docked desktop inspector once
+    // touch emulation widens both targets to 44px, so a synthetic pointer click
+    // lands on the ⋯ instead. The Esc route to the same close is asserted
+    // separately as the run's last gate.
+    await processPanel.getByRole("button", { name: "Close Processes" }).press("Enter");
     await processPanel.waitFor({ state: "detached" });
     const utilityAfter = await page.evaluate(() => ({
       task: document.querySelector('[data-slot="task-field"]')?.getAttribute("data-task"),
@@ -309,7 +444,7 @@ async function main() {
     }));
     check("desktop utility continuity", utilityAfter.task === utilityBefore.task && utilityAfter.focused === utilityBefore.focused && utilityAfter.draft === utilityBefore.draft && utilityAfter.scroll === utilityBefore.scroll, JSON.stringify(utilityAfter));
 
-    await processesTrigger.click();
+    await openProcesses();
     const runningSubagent = processPanel.locator('[data-slot="process-row"][data-kind="subagent"][data-state="running"] > button');
     await runningSubagent.click();
     await processPanel.getByRole("button", { name: "Ask Hirsel to stop" }).click();
@@ -329,7 +464,7 @@ async function main() {
     await settingsPanel.waitFor();
     await settingsPanel.getByRole("radio", { name: "Dark" }).click();
     check("settings theme", await page.locator("html.dark").count() === 1, "Dark toggled in temporary Settings inspector");
-    await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
+    await settingsPanel.getByRole("button", { name: "Close Settings" }).press("Enter");
     await settingsPanel.waitFor({ state: "detached" });
     check("settings continuity", await taskField.getAttribute("data-task") === "1" && await textarea.inputValue() === stopDraft, "task focus and composer survive Settings");
     await more.click();
@@ -342,24 +477,46 @@ async function main() {
       return Boolean(panelRect && rect.top >= panelRect.top && rect.top <= panelRect.bottom);
     });
     check("model settings landing", modelLanding, "Models heading is within the opened inspector viewport");
-    await settingsPanel.getByRole("button", { name: "Close Settings" }).click();
+    await settingsPanel.getByRole("button", { name: "Close Settings" }).press("Enter");
     check("canvas honest N/A", canvasCount === 0, "Canvas not seeded; task focus and draft continuity retained");
 
+    await settingsPanel.waitFor({ state: "detached" });
+    // A closing utility restores focus a frame after it unmounts, so wait for
+    // that restoration to settle before claiming the keyboard — otherwise the
+    // chord below lands on a chip that the teardown then takes back.
+    await poll("focus settles after the utility closes", async () => {
+      const before = await page.evaluate(() => document.activeElement?.tagName ?? null);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const after = await page.evaluate(() => document.activeElement?.tagName ?? null);
+      return before === after ? after : null;
+    });
     await page.keyboard.press("g");
     await page.keyboard.press("t");
-    const focusId = () => page.evaluate(() => ({
-      focus: document.activeElement?.getAttribute("data-task-id"),
-      selected: document.querySelector('[data-task-id][aria-pressed="true"]')?.getAttribute("data-task-id"),
-      scroll: document.querySelector('[data-slot="task-scroll"]')?.scrollTop,
-    }));
+    await poll("task index takes the keyboard", async () =>
+      page.evaluate(() => document.activeElement?.getAttribute("data-task-id")));
+    const focusId = () => page.evaluate(() => {
+      const scroller = document.querySelector('[data-slot="task-scroll"]');
+      return {
+        focus: document.activeElement?.getAttribute("data-task-id"),
+        selected: document.querySelector('[data-task-id][aria-pressed="true"]')?.getAttribute("data-task-id"),
+        // Both states now open at the newest line, because the task itself is a
+        // pinned card rather than a subject that scrolling away would lose.
+        atBottom: scroller
+          ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2
+          : null,
+      };
+    });
     const sequence = [];
     for (const key of ["ArrowDown", "End", "Home", "ArrowUp", "ArrowRight"]) {
       await page.keyboard.press(key);
-      sequence.push({ key, ...(await focusId()) });
+      sequence.push({ key, ...(await poll(`roving ${key} settles`, async () => {
+        const item = await focusId();
+        return item.atBottom && item.focus ? item : null;
+      }, 5_000)) });
     }
     check(
       "full roving navigation",
-      sequence.every((item) => item.focus === item.selected && item.scroll === 0)
+      sequence.every((item) => item.focus === item.selected && item.atBottom === true)
         && sequence.map((item) => item.focus).join(",") === "2,3,1,3,1",
       JSON.stringify(sequence),
     );
@@ -387,7 +544,7 @@ async function main() {
 
     await page.setViewportSize({ width: 390, height: 844 });
     await textarea.fill("draft survives phone utilities");
-    await processesTrigger.click();
+    await openProcesses();
     await processPanel.waitFor();
     const phoneRole = await processPanel.getAttribute("role");
     const closeProcesses = processPanel.getByRole("button", { name: "Close Processes" });
@@ -472,7 +629,8 @@ async function main() {
       && reverseWrapped;
     await closeProcesses.click();
     await processPanel.waitFor({ state: "detached" });
-    const phoneFocusRestored = await processesTrigger.evaluate(
+    // Focus returns to the affordance that summoned the panel — the standing ⋯.
+    const phoneFocusRestored = await more.evaluate(
       (element) => element === document.activeElement,
     );
     check(
@@ -481,6 +639,10 @@ async function main() {
       `role=${phoneRole}; initial=${JSON.stringify(initialPhoneFocus)}; visible-controls=${visibleFocusableCount}; cycle=${JSON.stringify(tabCycle)}; reverse=${reverseWrapped}; trapped=${trapped}; restored=${phoneFocusRestored}`,
     );
 
+    // Touch targets and phone containment are both statements about the FOCUSED
+    // field (the card's own choices, the single column under it), so the task
+    // has to be open for either to mean anything.
+    await ensureFocused(1);
     const touchTargets = await page.evaluate(() => {
       const selectors = {
         tasks: '[data-slot="task-index"] button',
@@ -497,14 +659,28 @@ async function main() {
     });
     const targetsPass = Object.values(touchTargets).flat().every((size) => size >= 44) && (closeProcessBox?.height ?? 0) >= 44;
     check("all named 44px targets", targetsPass, JSON.stringify({ ...touchTargets, utilityClose: closeProcessBox?.height ?? 0 }));
-    const phoneContainment = await page.evaluate(() => ({
-      viewport: innerWidth,
-      document: document.documentElement.scrollWidth,
-      stripLeft: document.querySelector('[data-slot="task-index"]')?.getBoundingClientRect().left,
-      stripRight: document.querySelector('[data-slot="task-index"]')?.getBoundingClientRect().right,
-      columns: getComputedStyle(document.querySelector('[data-slot="task-conversation"]')).gridTemplateColumns,
-    }));
-    check("390px containment", phoneContainment.document <= phoneContainment.viewport && phoneContainment.stripLeft >= 0 && phoneContainment.stripRight <= 390 && !phoneContainment.columns.includes(" "), JSON.stringify(phoneContainment));
+    const phoneContainment = await page.evaluate(() => {
+      const strip = document.querySelector('[data-slot="task-index"]');
+      const conversation = document.querySelector('[data-slot="task-conversation"]');
+      const card = document.querySelector('[data-slot="task-card"]');
+      return {
+        viewport: innerWidth,
+        document: document.documentElement.scrollWidth,
+        stripLeft: strip?.getBoundingClientRect().left,
+        stripRight: strip?.getBoundingClientRect().right,
+        columns: conversation ? getComputedStyle(conversation).gridTemplateColumns : "missing",
+        cardWidth: card ? Math.round(card.getBoundingClientRect().width) : null,
+        conversationWidth: conversation ? Math.round(conversation.getBoundingClientRect().width) : null,
+      };
+    });
+    check(
+      "390px containment",
+      phoneContainment.document <= phoneContainment.viewport
+        && phoneContainment.stripLeft >= 0 && phoneContainment.stripRight <= 390
+        && !phoneContainment.columns.includes(" ")
+        && phoneContainment.cardWidth === phoneContainment.conversationWidth,
+      JSON.stringify(phoneContainment),
+    );
     const phoneTask = await taskField.getAttribute("data-task");
     const phoneTaskButton = page.locator(`[data-task-id="${phoneTask}"]`);
     await phoneTaskButton.click();
@@ -525,7 +701,9 @@ async function main() {
       const input = document.querySelector('[data-composer="main"]');
       const composer = document.querySelector('[data-slot="composer-shell"]');
       const strip = document.querySelector('[data-slot="task-index"]');
-      const h2 = document.querySelector('[data-slot="task-card"] h2');
+      const card = document.querySelector('[data-slot="task-card"]');
+      const h2 = card?.querySelector("h2");
+      const h3 = card?.querySelector("h3");
       return {
         viewport: innerWidth,
         document: document.documentElement.scrollWidth,
@@ -534,7 +712,20 @@ async function main() {
         composerRight: composer?.getBoundingClientRect().right,
         stripScroll: strip?.scrollWidth,
         stripClient: strip?.clientWidth,
-        identityPosition: h2 ? getComputedStyle(h2).position : "missing",
+        identityCount: document.querySelectorAll('[data-slot="task-field"] h2').length,
+        identityRight: h2 ? h2.getBoundingClientRect().right : null,
+        identityPx: h2 ? Number.parseFloat(getComputedStyle(h2).fontSize) : 0,
+        generatedPx: h3 ? Number.parseFloat(getComputedStyle(h3).fontSize) : 0,
+        cardHeight: card ? card.getBoundingClientRect().height : null,
+        // The declared ceiling itself, rather than a recomputed 40dvh: the
+        // dynamic viewport unit does not always re-resolve after a synthetic
+        // viewport resize, and the contract being asserted is that the card
+        // stops at its cap and leaves the conversation on screen.
+        cardCap: card ? Number.parseFloat(getComputedStyle(card).maxHeight) : null,
+        cardOverflowY: card ? getComputedStyle(card).overflowY : null,
+        conversationTop: document.querySelector('[data-slot="task-conversation"]')
+          ?.getBoundingClientRect().top ?? null,
+        viewportHeight: innerHeight,
       };
     });
     check(
@@ -543,8 +734,41 @@ async function main() {
         && narrow.inputScroll >= narrow.inputClient && narrow.stripScroll > narrow.stripClient,
       JSON.stringify(narrow),
     );
-    check("no duplicate task identity", narrow.identityPosition === "absolute", `semantic h2 remains ${narrow.identityPosition} sr-only`);
+    check(
+      "single quiet identity inside a capped card",
+      narrow.identityCount === 1 && narrow.identityRight <= 320
+        && narrow.identityPx < narrow.generatedPx
+        && Number.isFinite(narrow.cardCap) && narrow.cardHeight <= narrow.cardCap + 1
+        && narrow.cardOverflowY === "auto"
+        && narrow.conversationTop < narrow.viewportHeight,
+      JSON.stringify(narrow),
+    );
     await captureScreenshot(page, "narrow-320");
+
+    // The Esc route out of a utility, DESIGN §4: "closing it returns to the
+    // same focus state", and keymap's own Esc ladder yields the key to an open
+    // overlay's trap. Deliberately the LAST gate so every other gate above is
+    // still executed and reported when this one is red.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await ensureFocused(1);
+    // Read through one evaluate rather than locator getters: a lost focus must
+    // land as a recorded FAIL row, not as a locator timeout.
+    const focusState = () => page.evaluate(() => ({
+      task: document.querySelector('[data-slot="task-field"]')?.getAttribute("data-task") ?? null,
+      focused: document.querySelector('[data-slot="composer-shell"]')?.getAttribute("data-focused") ?? null,
+    }));
+    const beforeEscapeClose = await focusState();
+    await openProcesses();
+    await processPanel.waitFor();
+    await page.keyboard.press("Escape");
+    await processPanel.waitFor({ state: "detached" });
+    const afterEscapeClose = await focusState();
+    check(
+      "escape closes the utility only",
+      afterEscapeClose.task === beforeEscapeClose.task
+        && afterEscapeClose.focused === beforeEscapeClose.focused,
+      `before ${JSON.stringify(beforeEscapeClose)}; after ${JSON.stringify(afterEscapeClose)}`,
+    );
     check("browser console and requests", browserErrors.length === 0 && requestErrors.length === 0, [...browserErrors, ...requestErrors].join("; ") || "no console, page, response, or request failures");
     await context.close();
   } finally {

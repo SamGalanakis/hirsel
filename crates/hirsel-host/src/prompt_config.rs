@@ -10,12 +10,16 @@
 //! Prompt bodies are Owner data. Nothing here logs one — warnings name the key
 //! and the reason, never the text.
 
-use hirsel_proto::{ForkAgentConfig, ModelSelection, PromptDoc, PromptSnapshot};
+use hirsel_proto::{AgentSlot, ForkAgentConfig, ModelSelection, PromptDoc, PromptSnapshot};
 
 use crate::{
     config::ProviderMode,
     host_config::ConfigStore,
-    model_selection::{available_fork_models, default_fork_selection, validate_fork},
+    model_selection::{
+        SelectionMode, available_in_mode, default_fork_selection, default_in_mode, selection_mode,
+        validate_in_mode,
+    },
+    providers::ProviderRosterState,
 };
 
 /// The bundled Agent prompt. The Owner's override replaces this body; the host
@@ -32,6 +36,7 @@ pub const FORK_PROMPT: &str = include_str!("../../../prompts/fork.md");
 pub struct PromptConfig {
     provider: ProviderMode,
     config_store: ConfigStore,
+    roster: ProviderRosterState,
     /// Host-generated text appended after the editable body — the runtime
     /// configuration paths and the enabled plugins' skills. Not editable, and
     /// not part of what Settings shows as the prompt.
@@ -39,12 +44,23 @@ pub struct PromptConfig {
 }
 
 impl PromptConfig {
-    pub fn new(provider: ProviderMode, config_store: ConfigStore, host_section: String) -> Self {
+    pub fn new(
+        provider: ProviderMode,
+        config_store: ConfigStore,
+        roster: ProviderRosterState,
+        host_section: String,
+    ) -> Self {
         Self {
             provider,
             config_store,
+            roster,
             host_section: host_section.into(),
         }
+    }
+
+    /// How the fork's selected provider shapes its model choice.
+    fn fork_mode(&self) -> SelectionMode {
+        selection_mode(&self.roster, self.provider, AgentSlot::Fork)
     }
 
     /// The Agent's effective system prompt body, without the host section.
@@ -61,28 +77,41 @@ impl PromptConfig {
     /// The fork's model selection, or `None` in a provider mode with no
     /// runtime-selectable registry.
     pub fn fork_model(&self) -> Option<ModelSelection> {
-        let fallback = default_fork_selection(self.provider)?;
+        self.fork_model_in(&self.fork_mode())
+    }
+
+    fn fork_model_in(&self, mode: &SelectionMode) -> Option<ModelSelection> {
+        // Anthropic is a legacy boot path that pins its model through
+        // HIRSEL_MODEL: it has no fork surface at all.
+        if self.provider == ProviderMode::Anthropic {
+            return None;
+        }
+        let fallback =
+            || default_in_mode(mode, true).or_else(|| default_fork_selection(self.provider));
         let Some((id, variant)) = self.config_store.fork_model_selection() else {
-            return Some(fallback);
+            return fallback();
         };
-        match validate_fork(self.provider, &id, &variant) {
+        match validate_in_mode(mode, true, &id, &variant) {
             Ok(selection) => Some(selection),
             Err(error) => {
                 tracing::warn!(
                     path = %self.config_store.path().display(),
                     %error,
-                    "persisted fork model is not available for this provider; falling back to the default fork model"
+                    "persisted fork model is not available on the selected provider; falling back to its default model"
                 );
-                Some(fallback)
+                fallback()
             }
         }
     }
 
     pub fn fork(&self) -> Option<ForkAgentConfig> {
+        let mode = self.fork_mode();
         Some(ForkAgentConfig {
-            current: self.fork_model()?,
-            available: available_fork_models(self.provider),
+            current: self.fork_model_in(&mode)?,
+            available: available_in_mode(&mode, true),
             prompt: doc(self.config_store.fork_prompt_override(), FORK_PROMPT),
+            provider_id: mode.provider_id().map(str::to_string),
+            free_text_model: mode.is_free_text(),
         })
     }
 
@@ -114,12 +143,12 @@ impl PromptConfig {
         model_id: &str,
         variant: &str,
     ) -> anyhow::Result<ModelSelection> {
-        if default_fork_selection(self.provider).is_none() {
+        if self.provider == ProviderMode::Anthropic {
             anyhow::bail!(
                 "fork model selection requires HIRSEL_PROVIDER=codex or HIRSEL_PROVIDER=openrouter"
             );
         }
-        let selection = validate_fork(self.provider, model_id, variant)?;
+        let selection = validate_in_mode(&self.fork_mode(), true, model_id, variant)?;
         self.config_store
             .set_fork_model(&selection.id, &selection.variant)
             .await?;
@@ -154,10 +183,21 @@ mod tests {
             dir.path().join("hirsel.toml"),
             dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
+            &crate::host_config::EnvBootstrap::default(),
         )
         .await
         .unwrap();
-        PromptConfig::new(provider, store, "\n\n## Host configuration\n".to_string())
+        let roster = ProviderRosterState::new(
+            store.clone(),
+            &crate::boot_provider::BootProvider::env_default(provider),
+            Some(dir.path().to_path_buf()),
+        );
+        PromptConfig::new(
+            provider,
+            store,
+            roster,
+            "\n\n## Host configuration\n".to_string(),
+        )
     }
 
     #[tokio::test]
@@ -271,6 +311,70 @@ mod tests {
                 .is_err()
         );
         assert_eq!(prompts.fork_model().unwrap().id, "gpt-5.6-luna");
+    }
+
+    #[tokio::test]
+    async fn an_openai_compatible_fork_provider_takes_a_free_text_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = config(&dir, ProviderMode::Codex).await;
+        prompts
+            .roster
+            .add(
+                "router",
+                "Router",
+                "https://example.invalid/v1",
+                "sk-fake-key",
+                "some/model",
+            )
+            .await
+            .unwrap();
+        let choice = prompts.roster.selection_for("router").unwrap();
+        prompts
+            .roster
+            .point_agent_at(
+                AgentSlot::Fork,
+                &choice,
+                &ModelSelection {
+                    id: "some/model".to_string(),
+                    variant: "default".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let fork = prompts.fork().unwrap();
+        assert!(fork.free_text_model);
+        assert!(fork.available.is_empty());
+        assert_eq!(fork.provider_id.as_deref(), Some("router"));
+        assert_eq!(fork.current.id, "some/model");
+
+        // Any id goes; shape is the only check, and the variant is the
+        // provider's own.
+        let selected = prompts
+            .set_fork_model("vendor/another-model", "max")
+            .await
+            .unwrap();
+        assert_eq!(selected.variant, "default");
+        assert_eq!(prompts.fork_model().unwrap().id, "vendor/another-model");
+        assert!(prompts.set_fork_model("  ", "default").await.is_err());
+        assert!(prompts.set_fork_model(" spaced ", "default").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_fork_provider_that_is_gone_degrades_to_the_booted_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = config(&dir, ProviderMode::Codex).await;
+        prompts
+            .config_store
+            .set_agent_provider_and_model("fork", "retired", "model", "some/model", "default")
+            .await
+            .unwrap();
+
+        let fork = prompts.fork().unwrap();
+        assert!(!fork.free_text_model);
+        assert_eq!(fork.provider_id.as_deref(), Some("codex"));
+        assert_eq!(fork.current.id, "gpt-5.6-luna");
+        assert!(fork.available.iter().any(|model| model.id == "gpt-5.6-sol"));
     }
 
     #[tokio::test]

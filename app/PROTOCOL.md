@@ -278,7 +278,9 @@ The browser keeps one local exclusive `rightRegion`:
 - **Canvas** projects current `canvas` View instances. A Host-created Canvas
   View may make the utility available, but it does not replace Task selection.
 - **Settings** combines local browser preferences with Host-backed
-  `model`/`subagent_models`/`prompts` snapshots and their change broadcasts.
+  `model`/`subagent_models`/`prompts`/`providers` snapshots and their change
+  broadcasts, presented as side tabs: Appearance, Agents, Providers,
+  Connection & devices, Notifications, About & debug, Plugins.
 
 On wide screens a utility is an in-flow inspector; on phone it is a modal
 sheet. Only the active utility is mounted. Closing it returns to the same Task,
@@ -311,6 +313,7 @@ hello_ok {
   model
   subagent_models
   prompts
+  providers
   views
 }
 ```
@@ -329,6 +332,11 @@ to the active provider's registry. `set_fork_prompt` follows the same empty-is-
 default rule. The configuration is persisted now; the fork runtime consumes it
 in a follow-up. Any accepted prompt or fork edit broadcasts the full
 `prompts_changed { prompts }` replacement snapshot.
+
+`model` and `prompts.fork` each carry two further fields describing the provider
+the agent runs on: `provider_id` (the instance id, absent on older hosts) and
+`free_text_model` (true when that provider takes any model id it recognises, in
+which case `available` is empty and `current.id` is whatever the Owner typed).
 
 The persisted keys are `[agent].prompt` and `[fork].model`, `[fork].variant`,
 `[fork].prompt` in `data/hirsel.toml`. The store re-reads the file before every
@@ -403,6 +411,102 @@ set to exercise exact-token rejection. The Rust Host still compares against
 its configured `HIRSEL_TOKEN`. The protocol never puts bearer tokens in blob
 URLs or query strings.
 
+## Provider roster
+
+`hello_ok.providers` carries the configured instances a resident agent can run
+on, and any accepted roster edit broadcasts the whole thing back:
+
+```json
+{
+  "type": "providers_changed",
+  "roster": {
+    "instances": [
+      {
+        "id": "codex",
+        "kind": "codex",
+        "label": "Codex",
+        "default_model": "gpt-5.6-sol",
+        "detection": {
+          "detected": true,
+          "path": "/home/owner/.codex/auth.json",
+          "account_hint": "owner@example.com"
+        },
+        "agent_selectable": true,
+        "removable": false
+      },
+      {
+        "id": "openrouter",
+        "kind": "openai_compatible",
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key": { "present": true, "tail": "9f2c" },
+        "default_model": "z-ai/glm-5",
+        "agent_selectable": true,
+        "removable": true
+      }
+    ],
+    "booted_provider_id": "codex",
+    "boot_notice": "configured provider \"acme\" is unavailable at boot: no API key is stored — running on Codex"
+  }
+}
+```
+
+`kind` is `codex`, `claude`, or `openai_compatible`. The first two are local
+OAuth credentials the Host either can see or cannot, described by `detection`
+and re-probed on demand; there is no login flow on the wire, because the Owner
+logs in with that CLI on the Host machine. Every other instance is an
+OpenAI-compatible endpoint the Owner configures.
+
+`agent_selectable` is the Host's answer to "may a resident agent run on this?".
+Claude is `false` (ADR-0015: the Claude driver is a Sub-agent lane only), so it
+never appears in the main-agent or fork provider select. `removable` is `false`
+for the two built-ins.
+
+`booted_provider_id` is the provider the resident main-agent session actually
+booted on: the stored `[model].provider`, when the Host could honour it, and
+the environment default otherwise. A main-agent provider change is stored
+immediately, but the running session stays where it is until the Host restarts
+— the client says so rather than implying a live switch.
+
+`boot_notice` is present only when a stored provider choice could not boot (no
+key stored, an unknown id, a Sub-agents-only provider, a missing Codex login)
+and the Host fell back to its environment default. It names the instance and
+the reason, carries no key material, and stands until the next restart; the
+client shows it as a quiet standing line on the Providers surface, because the
+Host is degraded but running.
+
+**Masked secrets.** A stored API key NEVER leaves the Host. The wire describes
+it as `{ "present": bool, "tail": string }`, where `tail` is at most the last
+four characters and is empty when the key is absent or too short to reveal any
+tail safely. The browser therefore never renders, stores, or logs key material:
+the only key bytes client-side are the transient contents of a password field
+during one edit.
+
+The five roster ops are:
+
+```text
+set_agent_provider { agent: "main" | "fork", provider_id }
+add_provider       { id, label, base_url, api_key, default_model }
+update_provider    { id, label?, base_url?, api_key?, default_model? }
+remove_provider    { id }
+redetect_provider  { id }
+```
+
+`set_agent_provider` seeds that provider's default model and variant for the
+named slot. `update_provider` is a patch: an omitted field is unchanged, and an
+`api_key` of `""` clears the stored key — so a save that leaves the key field
+empty omits `api_key` entirely. Instance ids match
+`^[a-z0-9][a-z0-9_-]{0,31}$`; `codex` and `claude` are reserved. Rejections come
+back as `error { detail }` and broadcast nothing.
+
+**Older-client and older-host tolerance.** `providers` is optional on
+`hello_ok`, and `provider_id` / `free_text_model` are optional on the model and
+fork snapshots: a host without them leaves the client with no roster (the
+Providers tab says so, and the agent provider controls do not render), and a
+client without them ignores the extra fields. A host that sends
+`providers_changed` to a client that does not know the frame is likewise
+harmless — unknown frames are dropped.
+
 ## Attachments and blob access
 
 The client uploads bytes with `upload_blob`, then references returned Blob ids
@@ -449,6 +553,8 @@ The Rust `ClientToHost` union currently accepts:
 hello, send_message, cancel_turn, cancel_queued,
 set_model, set_subagent_model,
 set_agent_prompt, set_fork_prompt, set_fork_model,
+set_agent_provider, add_provider, update_provider,
+remove_provider, redetect_provider,
 upload_blob, get_blob_url,
 event_action, clear_finished_events,
 register_push_token, unregister_push_token,
@@ -464,7 +570,7 @@ paired, hello_ok, msg, msg_removed,
 agent_activity, turn_event,
 event_upsert, process_upsert,
 model_changed, subagent_models_changed,
-prompts_changed,
+prompts_changed, providers_changed,
 blob_ok, blob_url, error,
 view_upsert, view_removed,
 plugin_push,

@@ -1,23 +1,29 @@
 import { Settings as SettingsIcon } from "lucide-solid";
-import { createSignal, onMount, Show } from "solid-js";
+import { createSignal, Match, onMount, Show, Switch } from "solid-js";
 import { resolveWsUrl } from "../../lib/endpoint";
 import { createFocusTrap, phoneUtilityRestoreTarget } from "../../lib/focus";
 import { showAgentCode } from "../../lib/prefs";
 import { themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
 import { APP_VERSION } from "../../lib/version";
-import { clearSettingsScrollTarget, closeRightRegion, state } from "../../store/store";
+import {
+  clearSettingsTab,
+  closeRightRegion,
+  state,
+  type SettingsTab,
+} from "../../store/store";
 import { clearStoredToken, getStoredToken } from "../../ws/client";
 import { PaneHeader } from "../ui/PaneHeader";
 import { PluginSlot } from "../../plugins/PluginSlot";
 import { AboutSection } from "./AboutSection";
+import { AgentsSection } from "./AgentsSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { ConfirmForgetDialog, ConnectionSection } from "./ConnectionSection";
 import { IdentitySection } from "./IdentitySection";
-import { ModelsSection } from "./ModelsSection";
 import { NotificationsSection } from "./NotificationsSection";
 import { PluginsSection } from "./PluginsSection";
-import { PromptSection } from "./PromptSection";
+import { ProvidersSection } from "./ProvidersSection";
+import { SettingsTabs, settingsPanelId, settingsTabId } from "./SettingsTabs";
 import {
   computeFingerprint,
   copyText,
@@ -43,6 +49,10 @@ function SettingsPanel() {
   const [debug, setDebug] = createSignal(readLocal(DEBUG_KEY) === "1");
   const [fingerprint, setFingerprint] = createSignal("…");
   const [confirmForget, setConfirmForget] = createSignal(false);
+  // The landing tab is chosen once, on open: `openSettings("providers")` lands
+  // on Providers, a bare open lands on the first tab. From then on the Owner
+  // owns the selection.
+  const [tab, setTab] = createSignal<SettingsTab>(state.settingsTab ?? "appearance");
 
   let panelRef: HTMLDivElement | undefined;
 
@@ -61,19 +71,9 @@ function SettingsPanel() {
       onEscape: closeRightRegion,
       restoreTo: phoneUtilityRestoreTarget,
     });
-    // Consume a one-shot scroll target (spec item 6): the phone overflow "Model
-    // settings" row opens Settings pointed at the Models section — an honest
-    // affordance instead of silently landing on Appearance. Deferred a
-    // microtask so the panel + its scroll region have laid out first.
-    const target = state.settingsScrollTarget;
-    if (target === "models") {
-      queueMicrotask(() =>
-        document
-          .getElementById("settings-models")
-          ?.scrollIntoView({ block: "start", behavior: "auto" }),
-      );
-    }
-    clearSettingsScrollTarget();
+    // The tab target is a one-shot: consumed here so a later open starts at
+    // the top of the rail again.
+    clearSettingsTab();
   });
 
   function saveLabel(trimmed: string) {
@@ -154,37 +154,68 @@ function SettingsPanel() {
         contentClass={SETTINGS_COLUMN}
       />
 
-      {/* Block flow (not a flex column): as a flex item this scroll region can
-          shrink to the available height (min-h-0) and scroll, while its groups
-          keep their natural height instead of compressing to fit. */}
-      <div class="thin-scrollbar min-h-0 flex-1 overflow-y-auto">
-        <div data-slot="settings-column" class={`${SETTINGS_COLUMN} pt-6 pb-16`}>
-          <AppearanceSection />
-          <ModelsSection />
-          <PromptSection />
-          <ConnectionSection
-            endpoint={endpoint}
-            deviceLabel={deviceLabel()}
-            onForget={() => setConfirmForget(true)}
-          />
-          <NotificationsSection />
-          <IdentitySection
-            deviceLabel={deviceLabel()}
-            fingerprint={fingerprint()}
-            onSaveLabel={saveLabel}
-          />
-          <AboutSection
-            debug={debug()}
-            onDebugChange={toggleDebug}
-            onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
-          />
-          {/* Plugins: the Host-backed roster (state, on/off, declared settings),
-              then whatever settings UI the plugins themselves contribute. Last
-              in the pane — the app's own settings stay above third-party
-              surface. */}
-          <PluginsSection />
-          <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
-            <PluginSlot name="settings.section" />
+      {/* The rail and the panel share ONE column — the same `max-w-frame`
+          measure the header centres on — so the tabs take their width out of
+          it rather than introducing a second horizontal system. Only the panel
+          scrolls: the rail stays put while a long form is read. */}
+      <div
+        data-slot="settings-column"
+        class={`${SETTINGS_COLUMN} flex min-h-0 flex-1 flex-col pt-6 rail:flex-row`}
+      >
+        <SettingsTabs active={tab()} onSelect={setTab} />
+        <div
+          role="tabpanel"
+          id={settingsPanelId(tab())}
+          aria-labelledby={settingsTabId(tab())}
+          tabindex={0}
+          data-slot="settings-tabpanel"
+          class="thin-scrollbar min-h-0 flex-1 overflow-y-auto pb-16 outline-none"
+        >
+          {/* One restrained fade on the swap — the same continuity vocabulary
+              the sheet itself arrives with. Nothing slides. */}
+          <div class="motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150">
+            <Switch>
+              <Match when={tab() === "appearance"}>
+                <AppearanceSection />
+              </Match>
+              <Match when={tab() === "agents"}>
+                <AgentsSection />
+              </Match>
+              <Match when={tab() === "providers"}>
+                <ProvidersSection />
+              </Match>
+              <Match when={tab() === "connection"}>
+                <ConnectionSection
+                  endpoint={endpoint}
+                  deviceLabel={deviceLabel()}
+                  onForget={() => setConfirmForget(true)}
+                />
+                <IdentitySection
+                  deviceLabel={deviceLabel()}
+                  fingerprint={fingerprint()}
+                  onSaveLabel={saveLabel}
+                />
+              </Match>
+              <Match when={tab() === "notifications"}>
+                <NotificationsSection />
+              </Match>
+              <Match when={tab() === "about"}>
+                <AboutSection
+                  debug={debug()}
+                  onDebugChange={toggleDebug}
+                  onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
+                />
+              </Match>
+              <Match when={tab() === "plugins"}>
+                {/* The Host-backed roster (state, on/off, declared settings),
+                    then whatever settings UI the plugins themselves
+                    contribute. */}
+                <PluginsSection />
+                <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
+                  <PluginSlot name="settings.section" />
+                </div>
+              </Match>
+            </Switch>
           </div>
         </div>
       </div>
@@ -197,13 +228,12 @@ function SettingsPanel() {
 }
 
 /** Settings surface (single-owner right region): a full-viewport modal overlay
- * at every width, summoned from the standing ⋯ or `g s`. Grouped calm-terminal
- * sections — Appearance, Models, Connection & devices, Notifications, Device
- * label & identity, About & debug — each in its own module beside this one,
- * mirroring the Android Settings screen and adapted honestly to the browser WS
- * client's actual capabilities. It owns the right region enum like the docked
- * panes do (so summoning it still evicts Processes or Canvas), but it takes no
- * room in that row: it is `fixed`, over the whole world. */
+ * at every width, summoned from the standing ⋯ or `g s`. Seven side tabs —
+ * Appearance, Agents, Providers, Connection & devices, Notifications, About &
+ * debug, Plugins — each in its own module beside this one, and only the active
+ * one mounted. It owns the right region enum like the docked panes do (so
+ * summoning it still evicts Processes or Canvas), but it takes no room in that
+ * row: it is `fixed`, over the whole world. */
 export function SettingsSheet() {
   return (
     <Show when={state.rightRegion === "settings"}>

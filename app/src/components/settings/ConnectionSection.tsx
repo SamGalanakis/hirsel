@@ -9,7 +9,7 @@ import { getStoredToken } from "../../ws/client";
 import { ConnectionPill } from "../ConnectionPill";
 import { Button } from "../ui/button";
 import { maskToken, PHASE_WORD } from "./prefs";
-import { Group, CopyRow, Field, SectionHeader } from "./rows";
+import { Group, CopyRow, Field } from "./rows";
 
 export function ConnectionSection(props: {
   endpoint: string;
@@ -18,7 +18,6 @@ export function ConnectionSection(props: {
 }): JSX.Element {
   return (
     <>
-      <SectionHeader>Connection &amp; devices</SectionHeader>
       <Group class="divide-y divide-border">
         <div class="flex items-center justify-between gap-3 py-3">
           <span class="text-sm text-foreground">Status</span>

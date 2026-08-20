@@ -1,125 +1,147 @@
-// Settings → Models: the canonical home for main-agent model selection and the
-// sub-agent model catalog. Both subsections are host-backed — they reflect the
-// store snapshots the Host broadcasts and send commands over the WS client.
-import { ChevronDown, LoaderCircle } from "lucide-solid";
-import { createEffect, createSignal, For, type JSX, Show, untrack } from "solid-js";
-import { createPendingKeys, type PendingKeys } from "../../lib/pending";
+// Settings → Agents: the two resident agents (ADR-0015) and the catalog the
+// main Agent may spawn Sub-agents from. Main agent first — the one
+// interlocutor — then the ephemeral fork, then the Sub-agent models. Every
+// control is host-backed: it reflects a broadcast snapshot and settles from the
+// next one, never from an optimistic local write.
+import { ChevronDown } from "lucide-solid";
+import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
+import { createPendingKeys } from "../../lib/pending";
 import type { ModelSelection, SubagentModel } from "../../protocol";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
+import {
+  AgentModelRows,
+  AgentProviderRow,
+  createAgentPending,
+  PromptEditor,
+  providerLabel,
+  settleOnProtocolError,
+} from "./agent-config";
+import { ForkAgentSection } from "./ForkAgentSection";
 import { titleCase } from "./prefs";
-import { Group, SectionHeader, SubHeading, Select, Toggle } from "./rows";
+import { Group, SubHeading, Toggle } from "./rows";
 
-/** Settle every pending control when a protocol `error` frame lands.
+const EMPTY_PROMPT = { text: "", is_default: true };
+
+/** The main Agent's provider, model and prompt.
  *
- * The host validates first and RETURNS on failure — no `model_changed` /
- * `subagent_models_changed` broadcast follows a rejected write — so the error
- * banner is the only settle signal a failed command ever produces. Without this
- * the control would sit disabled until its timeout; with it, the surface
- * recovers the moment the failure is visible. (Timeout still backstops the
- * silent cases: a no-op write the host declines to echo, or a dropped frame.) */
-function settleOnProtocolError(pending: PendingKeys): void {
-  let seen = untrack(() => state.protocolError);
-  createEffect(() => {
-    const error = state.protocolError;
-    if (error === seen) return;
-    seen = error;
-    if (error !== null) pending.settleAll();
-  });
-}
+ * Two changes here take effect on two different clocks, and the copy says which
+ * is which: a model change reaches the live session and holds from its next
+ * turn, while a provider change is stored now and the resident session keeps
+ * running on the provider the host booted with. */
+function MainAgent() {
+  const pending = createAgentPending();
+  const snapshot = () => state.model;
+  const current = () => snapshot()?.current;
+  const providerId = () => snapshot()?.provider_id;
+  const placeholder = () =>
+    state.providers?.instances.find((instance) => instance.id === providerId())?.default_model;
 
-/** Main-agent model + reasoning-variant controls, reflecting `state.model`.
- * Changing either sends `set_model`; the tapped control shows a brief pending
- * spinner and the `model_changed` broadcast settles the store. Hidden when the
- * host reports no model snapshot (older hosts). */
-function MainAgentModel() {
-  const current = () => state.model?.current;
-  const available = () => state.model?.available ?? [];
-  const selectedModel = () => available().find((m) => m.id === current()?.id);
-
-  // Which control is awaiting a settle ("model" / "variant"), so the spinner
-  // sits on the changed control only. Bounded: a matching broadcast, an error
-  // frame, or the timeout — the value we're awaiting is NOT guaranteed to be
-  // echoed (the host only broadcasts an actual change).
-  const pending = createPendingKeys();
+  // Which selection we're awaiting, so a settled control is settled by the
+  // truth rather than by the send. Bounded: a matching broadcast, an error
+  // frame, or the timeout — the value is NOT guaranteed to be echoed (the host
+  // only broadcasts an actual change).
   const [awaited, setAwaited] = createSignal<ModelSelection | null>(null);
   createEffect(() => {
-    const sel = awaited();
-    const c = current();
-    if (sel && c && c.id === sel.id && c.variant === sel.variant) {
+    const selection = awaited();
+    const settled = current();
+    if (selection && settled && settled.id === selection.id && settled.variant === selection.variant) {
       setAwaited(null);
       pending.settleAll();
     }
   });
-  settleOnProtocolError(pending);
 
-  function send(sel: ModelSelection, control: "model" | "variant") {
-    setAwaited(sel);
-    pending.begin(control);
-    getClient()?.setModel(sel.id, sel.variant);
+  // The main prompt settles from the authoritative prompts frame, like the
+  // fork's does. Equal snapshots are still acknowledgements.
+  createEffect(() => {
+    const prompts = state.prompts;
+    if (!prompts) return;
+    void state.promptsRevision;
+    void prompts.agent.text;
+    void prompts.agent.is_default;
+    pending.settle("agent-prompt");
+  });
+
+  function select(selection: ModelSelection) {
+    setAwaited(selection);
+    getClient()?.setModel(selection.id, selection.variant);
   }
 
-  function onModelChange(id: string) {
-    if (id === current()?.id) return;
-    const m = available().find((a) => a.id === id);
-    if (!m) return;
-    // A model swap resets to that model's default variant (its `variant`s are a
-    // different set); the variant control then reflects the settled truth.
-    send({ id, variant: m.default_variant }, "model");
-  }
-
-  function onVariantChange(variant: string) {
-    const id = current()?.id;
-    if (!id || variant === current()?.variant) return;
-    send({ id, variant }, "variant");
-  }
-
-  const busy = () => pending.any();
+  /** The running session boots on one provider and stays there. When the stored
+   * choice has moved on, say so plainly and once — no toast, no alarm colour. */
+  const bootedElsewhere = () => {
+    const booted = state.providers?.booted_provider_id;
+    const chosen = providerId();
+    return booted && chosen && booted !== chosen ? providerLabel(booted) : null;
+  };
 
   return (
-    <Show when={current()}>
+    <>
       <SubHeading>Main agent</SubHeading>
       <Group class="divide-y divide-border">
-        <div class="flex items-center justify-between gap-3 py-3">
-          <div class="flex min-w-0 items-center gap-2">
-            <span class="text-sm text-foreground">Model</span>
-            <Show when={pending.isPending("model")}>
-              <LoaderCircle class="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Saving" />
+        <Show when={state.providers}>
+          <div>
+            <AgentProviderRow
+              slot="main"
+              name="Main agent"
+              providerId={providerId()}
+              pending={pending}
+            />
+            <Show when={bootedElsewhere()}>
+              {(booted) => (
+                <p class="pb-3 text-xs leading-snug text-muted-foreground">
+                  Saved. The running Agent stays on {booted()} until the host restarts.
+                </p>
+              )}
             </Show>
           </div>
-          <Select
-            ariaLabel="Main agent model"
-            class="w-[10.5rem] shrink-0"
-            disabled={busy()}
-            value={current()?.id ?? ""}
-            onChange={onModelChange}
-            options={available().map((m) => ({ value: m.id, label: m.label }))}
-          />
-        </div>
-        <div class="flex items-center justify-between gap-3 py-3">
-          <div class="flex min-w-0 items-center gap-2">
-            <span class="text-sm text-foreground">Reasoning</span>
-            <Show when={pending.isPending("variant")}>
-              <LoaderCircle class="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Saving" />
-            </Show>
+        </Show>
+        <Show when={current()}>
+          {(selection) => (
+            <div>
+              <div class="divide-y divide-border">
+                <AgentModelRows
+                  name="Main agent"
+                  freeText={snapshot()?.free_text_model === true}
+                  current={selection()}
+                  available={snapshot()?.available ?? []}
+                  placeholder={placeholder()}
+                  pending={pending}
+                  modelKey="model"
+                  variantKey="variant"
+                  onSelect={select}
+                  onFreeText={(modelId) => select({ id: modelId, variant: selection().variant })}
+                />
+              </div>
+              <p class="pb-3 text-xs leading-snug text-muted-foreground">
+                Applies from the Agent's next turn.
+              </p>
+            </div>
+          )}
+        </Show>
+        <Show when={state.prompts}>
+          <div>
+            <p class="pt-3 text-xs leading-snug text-muted-foreground">
+              The editable body applies from the next turn. Host configuration is appended
+              automatically and is not part of this field.
+            </p>
+            <PromptEditor
+              label="Main agent system prompt"
+              doc={() => state.prompts?.agent ?? EMPTY_PROMPT}
+              pending={pending}
+              pendingKey="agent-prompt"
+              onSave={(text) => getClient()?.setAgentPrompt(text)}
+            />
           </div>
-          <Select
-            ariaLabel="Main agent reasoning variant"
-            class="w-[10.5rem] shrink-0"
-            disabled={busy() || !selectedModel()}
-            value={current()?.variant ?? ""}
-            onChange={onVariantChange}
-            options={(selectedModel()?.variants ?? []).map((v) => ({ value: v, label: titleCase(v) }))}
-          />
-        </div>
+        </Show>
       </Group>
-    </Show>
+    </>
   );
 }
 
 /** One sub-agent model row: identity + master toggle + a quiet multi-select
  * variant field. Any change sends the FULL row state via
- * `set_subagent_model`; `pending` (shared across the section) fades the row
+ * `set_subagent_model`; `pending` (shared across the subsection) fades the row
  * until the `subagent_models_changed` broadcast settles the catalog. */
 function SubagentModelRow(props: {
   provider: string;
@@ -195,8 +217,8 @@ function SubagentModelRow(props: {
   );
 }
 
-/** Sub-agent model catalog, grouped by provider. Hidden when the host reports
- * no catalog (older hosts). */
+/** The Sub-agent model catalog, grouped by provider. Hidden when the host
+ * reports no catalog (older hosts). */
 function SubagentModels() {
   const catalog = () => state.subagentModels;
   const [collapsedProviders, setCollapsedProviders] = createSignal<Set<string>>(new Set());
@@ -249,9 +271,10 @@ function SubagentModels() {
 
   return (
     <Show when={catalog()}>
-      <SubHeading>Sub-agent models</SubHeading>
+      <SubHeading>Sub-agents</SubHeading>
       <p class="mb-2 text-xs leading-snug text-muted-foreground">
-        Choose which models and reasoning levels an Agent may use for Sub-agents.
+        Choose which models and reasoning levels an Agent may use for Sub-agents. Claude is
+        available to Sub-agents only — it never runs the main Agent or the fork.
       </p>
       <div class="flex flex-col gap-3">
         <For each={catalog()?.providers ?? []}>
@@ -298,13 +321,18 @@ function SubagentModels() {
 }
 
 /** Each subsection self-hides when its store field is null (older hosts), so
- * the whole section collapses to nothing on a host that reports neither. */
-export function ModelsSection(): JSX.Element {
+ * the tab collapses to nothing on a host that reports none of them. */
+export function AgentsSection(): JSX.Element {
+  const fork = () => state.prompts?.fork;
   return (
-    <Show when={state.model || state.subagentModels}>
-      <SectionHeader id="settings-models">Models</SectionHeader>
-      <MainAgentModel />
+    <>
+      <Show when={state.model || state.prompts}>
+        <MainAgent />
+      </Show>
+      <Show when={fork()}>
+        {(config) => <ForkAgentSection fork={config} />}
+      </Show>
       <SubagentModels />
-    </Show>
+    </>
   );
 }

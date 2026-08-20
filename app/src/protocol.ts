@@ -223,6 +223,11 @@ export interface AvailableModel {
 export interface ModelSnapshot {
   current: ModelSelection;
   available: AvailableModel[];
+  /** The provider instance this agent runs on. Absent on older hosts. */
+  provider_id?: string;
+  /** True when the selected provider takes a free-text model id: `available`
+   * is then empty and `current.id` is whatever the Owner typed. */
+  free_text_model?: boolean;
 }
 
 /** One editable prompt as the Host actually resolves it. `is_default` means
@@ -238,6 +243,11 @@ export interface ForkAgentConfig {
   current: ModelSelection;
   available: AvailableModel[];
   prompt: PromptDoc;
+  /** The provider instance this agent runs on. Absent on older hosts. */
+  provider_id?: string;
+  /** True when the selected provider takes a free-text model id: `available`
+   * is then empty and `current.id` is whatever the Owner typed. */
+  free_text_model?: boolean;
 }
 
 /** The complete prompt surface carried on `hello_ok` and replaced wholesale
@@ -272,6 +282,57 @@ export interface SubagentProviderModels {
 export interface SubagentModelCatalog {
   providers: SubagentProviderModels[];
 }
+
+// ---- Provider roster ----
+
+/** How a provider instance authenticates and what shape its model choice takes.
+ * `codex` and `claude` are locally-detected OAuth credentials; every other
+ * instance is an OpenAI-compatible endpoint with a base URL and an API key. */
+export type ProviderKind = "codex" | "claude" | "openai_compatible";
+
+/** A stored secret as the wire is allowed to describe it. The full key never
+ * leaves the host — presence and a short tail are the whole vocabulary. */
+export interface MaskedSecret {
+  present: boolean;
+  tail?: string;
+}
+
+/** Whether the host can see the local credentials an OAuth provider needs. */
+export interface DetectionStatus {
+  detected: boolean;
+  path: string;
+  account_hint?: string;
+  detail?: string;
+}
+
+/** One configured provider instance. */
+export interface ProviderInstance {
+  id: string;
+  kind: ProviderKind;
+  label: string;
+  base_url?: string;
+  api_key?: MaskedSecret;
+  default_model?: string;
+  detection?: DetectionStatus;
+  /** Whether the main Agent and the fork may select it. Claude is false. */
+  agent_selectable: boolean;
+  /** Built-in instances (codex, claude) are configured, never removed. */
+  removable: boolean;
+}
+
+/** The whole roster, carried on `hello_ok` and replaced by `providers_changed`. */
+export interface ProviderRoster {
+  instances: ProviderInstance[];
+  /** The provider the resident session actually booted on — a main-agent
+   * provider change is stored at once but only takes effect on restart. */
+  booted_provider_id?: string;
+  /** Set when a stored provider choice could not be honoured at boot and the
+   * host fell back to its environment default. Carries no key material. */
+  boot_notice?: string;
+}
+
+/** Which resident agent a provider op addresses. */
+export type AgentSlot = "main" | "fork";
 
 // ---- Client -> server ----
 
@@ -436,6 +497,47 @@ export interface SetForkModelMsg {
   variant: string;
 }
 
+/** Point one resident agent at a provider instance, seeding that provider's
+ * default model + variant. The host stores it and broadcasts the truth back. */
+export interface SetAgentProviderMsg {
+  type: "set_agent_provider";
+  agent: AgentSlot;
+  provider_id: string;
+}
+
+/** Add an OpenAI-compatible provider instance. */
+export interface AddProviderMsg {
+  type: "add_provider";
+  id: string;
+  label: string;
+  base_url: string;
+  api_key: string;
+  default_model: string;
+}
+
+/** Edit one instance. Omitted fields are unchanged; an `api_key` of `""`
+ * clears the stored key. */
+export interface UpdateProviderMsg {
+  type: "update_provider";
+  id: string;
+  label?: string;
+  base_url?: string;
+  api_key?: string;
+  default_model?: string;
+}
+
+/** Remove a removable instance. */
+export interface RemoveProviderMsg {
+  type: "remove_provider";
+  id: string;
+}
+
+/** Re-probe an OAuth provider's local credentials. */
+export interface RedetectProviderMsg {
+  type: "redetect_provider";
+  id: string;
+}
+
 /** Request one bounded page immediately before a loaded conversation id. */
 export interface FetchMessagesMsg {
   type: "fetch_messages";
@@ -462,7 +564,12 @@ export type ClientMessage =
   | SetSubagentModelMsg
   | SetAgentPromptMsg
   | SetForkPromptMsg
-  | SetForkModelMsg;
+  | SetForkModelMsg
+  | SetAgentProviderMsg
+  | AddProviderMsg
+  | UpdateProviderMsg
+  | RemoveProviderMsg
+  | RedetectProviderMsg;
 
 // ---- Server -> client ----
 
@@ -493,6 +600,9 @@ export interface HelloOkMsg {
   subagent_models?: SubagentModelCatalog;
   /** Editable Agent and fork configuration. Optional for older hosts. */
   prompts?: PromptSnapshot;
+  /** The configured provider roster. Optional on the wire; older hosts omit it
+   * and the Providers tab says so rather than inventing a roster. */
+  providers?: ProviderRoster;
 }
 
 export interface MsgMsg {
@@ -633,6 +743,13 @@ export interface PromptsChangedMsg {
   prompts: PromptSnapshot;
 }
 
+/** The provider roster after an accepted edit — the whole roster, because one
+ * edit can change another instance's derived state. */
+export interface ProvidersChangedMsg {
+  type: "providers_changed";
+  roster: ProviderRoster;
+}
+
 /** Plugin tier: an unsolicited push from one Host-side plugin to its own
  * browser-side UI bundle. The app never interprets `data` — it routes the frame
  * to the handlers that plugin registered for `topic` via `api.onPush` and does
@@ -663,4 +780,5 @@ export type ServerMessage =
   | ModelChangedMsg
   | SubagentModelsChangedMsg
   | PromptsChangedMsg
+  | ProvidersChangedMsg
   | PluginPushMsg;

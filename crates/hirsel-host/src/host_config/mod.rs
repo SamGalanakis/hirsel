@@ -11,6 +11,11 @@ use tokio::io::AsyncWriteExt;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 use uuid::Uuid;
 
+mod provider_store;
+
+use provider_store::seed_bootstrap;
+pub use provider_store::{EnvBootstrap, OPENAI_COMPATIBLE_KIND, StoredProvider};
+
 const LEGACY_MODEL_SELECTION_FILE: &str = "model-selection.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,10 +44,30 @@ struct LegacyModelSelection {
 }
 
 impl ConfigStore {
-    pub async fn load(path: PathBuf, data_dir: &Path, docs_path: &Path) -> anyhow::Result<Self> {
+    pub async fn load(
+        path: PathBuf,
+        data_dir: &Path,
+        docs_path: &Path,
+        bootstrap: &EnvBootstrap,
+    ) -> anyhow::Result<Self> {
         let defaults = default_document(docs_path)?;
-        let (document, source) = match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => (parse_or_defaults(&path, &contents, &defaults), contents),
+        // A file the host could not parse is left exactly as the Owner wrote
+        // it: the in-memory defaults keep the host alive, but nothing is
+        // seeded over a file that is one typo away from being correct.
+        let mut writable = true;
+        let (mut document, mut source) = match tokio::fs::read_to_string(&path).await {
+            Ok(contents) => match contents.parse::<DocumentMut>() {
+                Ok(document) => (document, contents),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "host config is malformed; using built-in defaults"
+                    );
+                    writable = false;
+                    (defaults.clone(), contents)
+                }
+            },
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 let mut document = defaults.clone();
                 migrate_legacy_model(data_dir, &mut document).await;
@@ -55,6 +80,14 @@ impl ConfigStore {
                     .with_context(|| format!("read host config at {}", path.display()));
             }
         };
+        // The presence of a `[providers]` table is the once-only marker: a file
+        // that already has one — even an empty one — is never re-seeded, so a
+        // later `OPENROUTER_API_KEY` change can never overwrite a stored key.
+        if writable && !document.get("providers").is_some_and(Item::is_table) {
+            seed_bootstrap(&mut document, bootstrap);
+            source = document.to_string();
+            persist_atomic(&path, source.as_bytes()).await?;
+        }
         Ok(Self {
             path: Arc::new(path),
             defaults: Arc::new(defaults),
@@ -391,8 +424,27 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 # The host watches it and reloads changes live; no restart is required.
 # Documentation: {}
 
-# Main Agent model, scoped to HIRSEL_PROVIDER. openrouter: google/gemini-3.7-flash
-# (variant: default). codex: gpt-5.6-sol (variants: low, medium, high, xhigh, max).
+# The provider instances the resident agents can run on. `codex` and `claude`
+# are built in — they use the local CLI logins, store no key here, and cannot be
+# removed (`claude` is Sub-agents only, never a resident agent's provider). Add
+# any number of OpenAI-compatible endpoints alongside them:
+#
+# [providers.my-endpoint]
+# kind = "openai_compatible"
+# label = "My endpoint"
+# base_url = "https://example.invalid/v1"
+# api_key = "..."                  # stays in this file; never sent to a client
+# default_model = "some/model"
+#
+# Instance ids are lowercase [a-z0-9][a-z0-9_-]*; `codex` and `claude` are
+# reserved. API keys live here and nowhere else — Settings only ever shows
+# whether one is set and its last four characters.
+
+# Main Agent provider and model. `provider` names an instance above; leave it
+# out to stay on whatever HIRSEL_PROVIDER booted. An OpenAI-compatible provider
+# takes any model id its endpoint offers; codex offers gpt-5.6-sol (variants:
+# low, medium, high, xhigh, max). A model change applies from the Agent's next
+# turn; a provider change applies at the next host start.
 [model]
 id = "google/gemini-3.7-flash"
 variant = "default"
@@ -406,11 +458,13 @@ variant = "default"
 # You are ...
 # """
 
-# The wake-triage fork: which model reads an incoming wake, and the prompt it
-# reads it with. `model` is scoped to HIRSEL_PROVIDER exactly like [model], and
-# `prompt` defaults to the bundled `prompts/fork.md`. Stored but not yet
-# consumed — the fork runtime lands later.
+# The wake-triage fork: which provider and model read an incoming wake, and the
+# prompt they read it with. `provider` works exactly as it does under [model];
+# with none set the fork stays on the booted provider's cheap lane. `prompt`
+# defaults to the bundled `prompts/fork.md`. Stored but not yet consumed — the
+# fork runtime lands later.
 [fork]
+# provider = "codex"
 # model = "gpt-5.6-luna"
 # variant = "medium"
 # prompt = """
@@ -511,9 +565,14 @@ mod tests {
         .await
         .unwrap();
         let path = dir.path().join("hirsel.toml");
-        let store = ConfigStore::load(path.clone(), dir.path(), Path::new("/docs/config.md"))
-            .await
-            .unwrap();
+        let store = ConfigStore::load(
+            path.clone(),
+            dir.path(),
+            Path::new("/docs/config.md"),
+            &EnvBootstrap::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             store.model_selection(),
             Some(("gpt-5.6-sol".to_string(), "high".to_string()))
@@ -536,9 +595,14 @@ mod tests {
     async fn reloads_a_direct_edit_with_an_unchanged_modified_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hirsel.toml");
-        let store = ConfigStore::load(path.clone(), dir.path(), Path::new("/docs/config.md"))
-            .await
-            .unwrap();
+        let store = ConfigStore::load(
+            path.clone(),
+            dir.path(),
+            Path::new("/docs/config.md"),
+            &EnvBootstrap::default(),
+        )
+        .await
+        .unwrap();
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let edited = std::fs::read_to_string(&path)
             .unwrap()
@@ -557,9 +621,14 @@ mod tests {
     async fn malformed_edits_fall_back_and_a_repair_reloads_without_sleeping() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hirsel.toml");
-        let store = ConfigStore::load(path.clone(), dir.path(), Path::new("/docs/config.md"))
-            .await
-            .unwrap();
+        let store = ConfigStore::load(
+            path.clone(),
+            dir.path(),
+            Path::new("/docs/config.md"),
+            &EnvBootstrap::default(),
+        )
+        .await
+        .unwrap();
         std::fs::write(&path, "not = [valid").unwrap();
         assert_eq!(store.model_selection().unwrap().1, "default");
 

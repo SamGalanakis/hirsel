@@ -62,7 +62,7 @@ function stubFetch(plugins: PluginInfo[]) {
 
 async function openPlugins() {
   const store = await import("../../store/store");
-  store.openSettings();
+  store.openSettings("plugins");
   const { SettingsSheet } = await import("./SettingsSheet");
   return render(() => <SettingsSheet />);
 }
@@ -89,10 +89,13 @@ describe("Settings → Plugins", () => {
     expect(getByText("daemon crash-looped: exit status 1")).toBeTruthy();
   });
 
-  it("stays hidden when the Host reports no plugins", async () => {
+  it("renders no roster when the Host reports no plugins", async () => {
     stubFetch([]);
-    const { queryByText } = await openPlugins();
-    await waitFor(() => expect(queryByText("Plugins")).toBeNull());
+    const { container, queryByText } = await openPlugins();
+    await waitFor(() =>
+      expect(container.querySelectorAll("[data-slot='plugin-row']")).toHaveLength(0),
+    );
+    expect(queryByText("GitHub Notifier")).toBeNull();
   });
 
   it("posts the new enabled state and re-reads the roster", async () => {

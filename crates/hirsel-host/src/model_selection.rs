@@ -1,8 +1,8 @@
 use anyhow::anyhow;
-use hirsel_proto::{AvailableModel, ModelSelection, ModelSnapshot};
+use hirsel_proto::{AgentSlot, AvailableModel, ModelSelection, ModelSnapshot};
 use lash::provider::{ModelCapability, ReasoningCapability, ReasoningEncoding, ReasoningSelection};
 
-use crate::{config::ProviderMode, host_config::ConfigStore};
+use crate::{config::ProviderMode, host_config::ConfigStore, providers::ProviderRosterState};
 
 /// How a registry entry's variants map onto the wire.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,6 +105,125 @@ pub fn default_fork_selection(provider: ProviderMode) -> Option<ModelSelection> 
     })
 }
 
+/// The context window a free-text model is assumed to have when the host has
+/// no metadata for it. Deliberately conservative: an over-claimed window is a
+/// truncated turn at the endpoint, an under-claimed one only condenses sooner.
+const UNKNOWN_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+
+/// How the provider a resident agent is pointed at shapes its model choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionMode {
+    /// A curated registry: the host knows every id and every variant.
+    Curated {
+        provider: ProviderMode,
+        provider_id: Option<String>,
+    },
+    /// An OpenAI-compatible endpoint: the model id is free text and the single
+    /// variant defers to the provider.
+    FreeText {
+        provider_id: String,
+        default_model: String,
+    },
+}
+
+impl SelectionMode {
+    pub fn provider_id(&self) -> Option<&str> {
+        match self {
+            Self::Curated { provider_id, .. } => provider_id.as_deref(),
+            Self::FreeText { provider_id, .. } => Some(provider_id),
+        }
+    }
+
+    pub fn is_free_text(&self) -> bool {
+        matches!(self, Self::FreeText { .. })
+    }
+}
+
+/// The mode a resident agent's stored provider puts it in. An absent, removed,
+/// or Sub-agents-only provider leaves the agent on the booted provider's
+/// curated registry — a stale value is a warning, never a boot error.
+pub fn selection_mode(
+    roster: &ProviderRosterState,
+    booted: ProviderMode,
+    agent: AgentSlot,
+) -> SelectionMode {
+    match roster.agent_provider(agent) {
+        Some(choice) if choice.is_free_text() => SelectionMode::FreeText {
+            provider_id: choice.id,
+            default_model: choice.default_model,
+        },
+        Some(choice) => SelectionMode::Curated {
+            provider: ProviderMode::Codex,
+            provider_id: Some(choice.id),
+        },
+        None => SelectionMode::Curated {
+            provider: booted,
+            provider_id: roster.booted_provider_id().map(str::to_string),
+        },
+    }
+}
+
+/// Validate a free-text model id: the host has no registry to check it
+/// against, so it checks the only two things it can — that the Owner typed
+/// something, and that they did not type it with stray whitespace that an
+/// endpoint would reject as an unknown model.
+pub fn validate_free_text(model_id: &str) -> anyhow::Result<ModelSelection> {
+    if model_id.is_empty() || model_id.trim().is_empty() {
+        return Err(anyhow!("model id must not be empty"));
+    }
+    if model_id.trim() != model_id {
+        return Err(anyhow!(
+            "model id `{model_id}` has leading or trailing whitespace"
+        ));
+    }
+    Ok(ModelSelection {
+        id: model_id.to_string(),
+        variant: PROVIDER_DEFAULT_VARIANT.to_string(),
+    })
+}
+
+/// Validate a model id + variant under whichever mode the agent is in.
+pub fn validate_in_mode(
+    mode: &SelectionMode,
+    fork: bool,
+    model_id: &str,
+    variant: &str,
+) -> anyhow::Result<ModelSelection> {
+    match mode {
+        SelectionMode::FreeText { .. } => validate_free_text(model_id),
+        SelectionMode::Curated { provider, .. } if fork => {
+            validate_fork_selection(*provider, model_id, variant)
+        }
+        SelectionMode::Curated { provider, .. } => validate_selection(*provider, model_id, variant),
+    }
+}
+
+/// What a picker may offer under this mode: the curated registry, or nothing
+/// at all because the Owner types the id.
+pub fn available_in_mode(mode: &SelectionMode, fork: bool) -> Vec<AvailableModel> {
+    match mode {
+        SelectionMode::FreeText { .. } => Vec::new(),
+        SelectionMode::Curated { provider, .. } if fork => available_fork_models(*provider),
+        SelectionMode::Curated { provider, .. } => available_models(*provider),
+    }
+}
+
+/// The selection an agent lands on when nothing usable is stored: the
+/// provider's own default model at its default variant.
+pub fn default_in_mode(mode: &SelectionMode, fork: bool) -> Option<ModelSelection> {
+    match mode {
+        SelectionMode::FreeText { default_model, .. } => validate_free_text(default_model).ok(),
+        SelectionMode::Curated { provider, .. } if fork => default_fork_selection(*provider),
+        SelectionMode::Curated { provider, .. } => {
+            let entry = registry(*provider).first()?;
+            Some(ModelSelection {
+                id: entry.id.to_string(),
+                variant: entry.default_variant.to_string(),
+            })
+        }
+    }
+}
+
 /// Validate a main-Agent model id + variant against the booted provider's
 /// main-Agent registry.
 pub fn validate(
@@ -149,12 +268,14 @@ pub struct ModelSelectionState {
     provider: ProviderMode,
     fallback: ModelSelection,
     config_store: ConfigStore,
+    roster: ProviderRosterState,
 }
 
 impl ModelSelectionState {
     pub async fn load(
         provider: ProviderMode,
         config_store: ConfigStore,
+        roster: ProviderRosterState,
         configured_model: &str,
     ) -> anyhow::Result<Self> {
         let fallback = selection_for_configured_model(provider, configured_model)?;
@@ -162,22 +283,31 @@ impl ModelSelectionState {
             provider,
             fallback,
             config_store,
+            roster,
         })
     }
 
+    /// The mode the main Agent's selected provider puts its model choice in.
+    pub fn mode(&self) -> SelectionMode {
+        selection_mode(&self.roster, self.provider, AgentSlot::Main)
+    }
+
     pub fn current(&self) -> ModelSelection {
-        selection_from_store(self.provider, &self.config_store, &self.fallback)
+        self.selection_in(&self.mode())
     }
 
     pub fn snapshot(&self) -> ModelSnapshot {
+        let mode = self.mode();
         ModelSnapshot {
-            current: self.current(),
-            available: available_models(self.provider),
+            current: self.selection_in(&mode),
+            available: available_in_mode(&mode, false),
+            provider_id: mode.provider_id().map(str::to_string),
+            free_text_model: mode.is_free_text(),
         }
     }
 
     pub fn validate(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
-        validate_selection(self.provider, model_id, variant)
+        validate_in_mode(&self.mode(), false, model_id, variant)
     }
 
     pub async fn persist_and_select(&self, selection: ModelSelection) -> anyhow::Result<()> {
@@ -187,32 +317,42 @@ impl ModelSelectionState {
         Ok(())
     }
 
+    /// What the live Lash session runs. The `ProviderHandle` is built once at
+    /// boot and baked into the session, so a main-agent provider pointed
+    /// somewhere else is stored and reported but never applied: the running
+    /// session keeps the booted provider's own selection until the host
+    /// restarts.
     pub fn model_spec(&self) -> anyhow::Result<lash::ModelSpec> {
-        model_spec(self.provider, &self.current())
+        let mode = self.mode();
+        if mode.provider_id() == self.roster.booted_provider_id() {
+            return model_spec_in(&mode, &self.selection_in(&mode));
+        }
+        let booted = SelectionMode::Curated {
+            provider: self.provider,
+            provider_id: self.roster.booted_provider_id().map(str::to_string),
+        };
+        model_spec_in(&booted, &self.fallback)
     }
-}
 
-fn selection_from_store(
-    provider: ProviderMode,
-    config_store: &ConfigStore,
-    fallback: &ModelSelection,
-) -> ModelSelection {
-    let Some((model_id, variant)) = config_store.model_selection() else {
-        tracing::warn!(
-            path = %config_store.path().display(),
-            "host config [model] section is missing or malformed; falling back to configured model"
-        );
-        return fallback.clone();
-    };
-    match validate_selection(provider, &model_id, &variant) {
-        Ok(selection) => selection,
-        Err(error) => {
+    fn selection_in(&self, mode: &SelectionMode) -> ModelSelection {
+        let fallback = || default_in_mode(mode, false).unwrap_or_else(|| self.fallback.clone());
+        let Some((model_id, variant)) = self.config_store.model_selection() else {
             tracing::warn!(
-                path = %config_store.path().display(),
-                %error,
-                "persisted model selection is no longer available; falling back to configured model"
+                path = %self.config_store.path().display(),
+                "host config [model] section is missing or malformed; falling back to the provider's default model"
             );
-            fallback.clone()
+            return fallback();
+        };
+        match validate_in_mode(mode, false, &model_id, &variant) {
+            Ok(selection) => selection,
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.config_store.path().display(),
+                    %error,
+                    "persisted model selection is not available on the selected provider; falling back to its default model"
+                );
+                fallback()
+            }
         }
     }
 }
@@ -239,6 +379,35 @@ fn available_from_registry(entries: &[RegistryEntry]) -> Vec<AvailableModel> {
             default_variant: entry.default_variant.to_string(),
         })
         .collect()
+}
+
+fn model_spec_in(
+    mode: &SelectionMode,
+    selection: &ModelSelection,
+) -> anyhow::Result<lash::ModelSpec> {
+    match mode {
+        SelectionMode::Curated { provider, .. } => model_spec(*provider, selection),
+        SelectionMode::FreeText { .. } => free_text_model_spec(selection),
+    }
+}
+
+/// A spec for a model the host has no registry entry for: reasoning is the
+/// endpoint's business, and the context window is whatever the host happens to
+/// know about that id, or a conservative default.
+fn free_text_model_spec(selection: &ModelSelection) -> anyhow::Result<lash::ModelSpec> {
+    let context_window_tokens = CODEX_REGISTRY
+        .iter()
+        .chain(CODEX_FORK_REGISTRY)
+        .chain(OPENROUTER_REGISTRY)
+        .find(|entry| entry.id == selection.id)
+        .map_or(UNKNOWN_CONTEXT_WINDOW_TOKENS, |entry| {
+            entry.context_window_tokens
+        });
+    lash::ModelSpec::builder(selection.id.clone())
+        .variant(ReasoningSelection::ProviderDefault)
+        .context_window_tokens(context_window_tokens)
+        .build()
+        .map_err(anyhow::Error::msg)
 }
 
 fn model_spec(
@@ -346,11 +515,36 @@ fn fork_registry_entry(provider: ProviderMode, model_id: &str) -> Option<&'stati
 mod tests {
     use super::*;
 
+    fn roster(
+        dir: &tempfile::TempDir,
+        store: &ConfigStore,
+        provider: ProviderMode,
+    ) -> ProviderRosterState {
+        ProviderRosterState::new(
+            store.clone(),
+            &crate::boot_provider::BootProvider::env_default(provider),
+            Some(dir.path().to_path_buf()),
+        )
+    }
+
+    async fn state(
+        dir: &tempfile::TempDir,
+        provider: ProviderMode,
+        configured_model: &str,
+    ) -> ModelSelectionState {
+        let store = store(dir).await;
+        let roster = roster(dir, &store, provider);
+        ModelSelectionState::load(provider, store, roster, configured_model)
+            .await
+            .unwrap()
+    }
+
     async fn store(dir: &tempfile::TempDir) -> ConfigStore {
         ConfigStore::load(
             dir.path().join("hirsel.toml"),
             dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
+            &crate::host_config::EnvBootstrap::default(),
         )
         .await
         .unwrap()
@@ -422,11 +616,8 @@ mod tests {
     #[tokio::test]
     async fn persistence_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let state =
-            ModelSelectionState::load(ProviderMode::Codex, store(&dir).await, "gpt-5.6-sol")
-                .await
-                .unwrap();
-        state
+        let selection_state = state(&dir, ProviderMode::Codex, "gpt-5.6-sol").await;
+        selection_state
             .persist_and_select(ModelSelection {
                 id: "gpt-5.6-sol".to_string(),
                 variant: "max".to_string(),
@@ -434,10 +625,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded =
-            ModelSelectionState::load(ProviderMode::Codex, store(&dir).await, "gpt-5.6-sol")
-                .await
-                .unwrap();
+        let reloaded = state(&dir, ProviderMode::Codex, "gpt-5.6-sol").await;
         assert_eq!(
             reloaded.current(),
             ModelSelection {
@@ -455,7 +643,8 @@ mod tests {
             .set_model_selection("retired-model", "impossible")
             .await
             .unwrap();
-        let state = ModelSelectionState::load(ProviderMode::Codex, store, "gpt-5.6-sol")
+        let roster = roster(&dir, &store, ProviderMode::Codex);
+        let state = ModelSelectionState::load(ProviderMode::Codex, store, roster, "gpt-5.6-sol")
             .await
             .unwrap();
         assert_eq!(
@@ -477,10 +666,15 @@ mod tests {
             .set_model_selection("gpt-5.6-sol", "high")
             .await
             .unwrap();
-        let state =
-            ModelSelectionState::load(ProviderMode::OpenRouter, store, "google/gemini-3.7-flash")
-                .await
-                .unwrap();
+        let roster = roster(&dir, &store, ProviderMode::OpenRouter);
+        let state = ModelSelectionState::load(
+            ProviderMode::OpenRouter,
+            store,
+            roster,
+            "google/gemini-3.7-flash",
+        )
+        .await
+        .unwrap();
         assert_eq!(
             state.current(),
             ModelSelection {
@@ -488,6 +682,130 @@ mod tests {
                 variant: "default".to_string(),
             }
         );
+    }
+
+    async fn router_state(dir: &tempfile::TempDir, booted: ProviderMode) -> ModelSelectionState {
+        let store = store(dir).await;
+        let roster = roster(dir, &store, booted);
+        roster
+            .add(
+                "router",
+                "Router",
+                "https://example.invalid/v1",
+                "sk-fake-key",
+                "some/model",
+            )
+            .await
+            .unwrap();
+        let choice = roster.selection_for("router").unwrap();
+        roster
+            .point_agent_at(
+                AgentSlot::Main,
+                &choice,
+                &ModelSelection {
+                    id: "some/model".to_string(),
+                    variant: "default".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        ModelSelectionState::load(booted, store, roster, "gpt-5.6-sol")
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_openai_compatible_provider_takes_any_non_empty_model_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = router_state(&dir, ProviderMode::Codex).await;
+
+        let snapshot = state.snapshot();
+        assert!(snapshot.free_text_model);
+        assert!(snapshot.available.is_empty());
+        assert_eq!(snapshot.provider_id.as_deref(), Some("router"));
+        assert_eq!(snapshot.current.id, "some/model");
+        assert_eq!(snapshot.current.variant, "default");
+
+        // Any id the endpoint might offer is accepted, and the variant is the
+        // provider's own: the host has no effort ladder to promise.
+        let accepted = state.validate("vendor/brand-new-model", "high").unwrap();
+        assert_eq!(accepted.id, "vendor/brand-new-model");
+        assert_eq!(accepted.variant, "default");
+        // Shape is the only thing left to check.
+        for rejected in ["", "  ", " model", "model "] {
+            assert!(
+                state.validate(rejected, "default").is_err(),
+                "accepted {rejected:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_codex_registry_stays_curated_when_it_is_the_selected_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+        let roster = roster(&dir, &store, ProviderMode::OpenRouter);
+        let choice = roster.selection_for("codex").unwrap();
+        roster
+            .point_agent_at(
+                AgentSlot::Main,
+                &choice,
+                &ModelSelection {
+                    id: "gpt-5.6-sol".to_string(),
+                    variant: "medium".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let state = ModelSelectionState::load(
+            ProviderMode::OpenRouter,
+            store,
+            roster,
+            "google/gemini-3.7-flash",
+        )
+        .await
+        .unwrap();
+
+        let snapshot = state.snapshot();
+        assert!(!snapshot.free_text_model);
+        assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
+        assert_eq!(
+            snapshot
+                .available
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.6-sol"]
+        );
+        assert!(state.validate("gpt-5.6-luna", "max").is_err());
+        assert!(state.validate("gpt-5.6-sol", "impossible").is_err());
+        assert!(state.validate("gpt-5.6-sol", "xhigh").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_main_provider_the_host_did_not_boot_on_leaves_the_live_spec_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = router_state(&dir, ProviderMode::Codex).await;
+        // Stored and reported...
+        assert_eq!(elsewhere.snapshot().provider_id.as_deref(), Some("router"));
+        assert_eq!(elsewhere.current().id, "some/model");
+        // ...but the session was built on the booted provider's handle, so the
+        // spec it runs stays the booted provider's own.
+        let spec = elsewhere.model_spec().unwrap();
+        assert_eq!(spec.id, "gpt-5.6-sol");
+        assert_eq!(spec.variant.effort(), Some("medium"));
+
+        // An agent still on the booted provider runs exactly what it selected.
+        let booted_dir = tempfile::tempdir().unwrap();
+        let booted = state(&booted_dir, ProviderMode::Codex, "gpt-5.6-sol").await;
+        booted
+            .persist_and_select(ModelSelection {
+                id: "gpt-5.6-sol".to_string(),
+                variant: "xhigh".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(booted.model_spec().unwrap().variant.effort(), Some("xhigh"));
     }
 
     #[test]

@@ -336,6 +336,7 @@ export function reduce(state: AppState, action: Action): AppState {
         model: action.payload.model ?? null,
         subagentModels: action.payload.subagent_models ?? null,
         prompts: action.payload.prompts ?? null,
+        providers: action.payload.providers ?? null,
         pendingSends,
         // Fresh sync boundary: seed processes; the live turn timeline (ephemeral,
         // never replayed) does not survive a resync. Retained turn details for
@@ -639,6 +640,11 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "prompts_changed":
       return { ...state, prompts: action.prompts };
+
+    case "providers_changed":
+      // The host sends the whole roster, because one edit can change another
+      // instance's derived state; replace the slice rather than merging.
+      return { ...state, providers: action.roster };
 
     default:
       return state;

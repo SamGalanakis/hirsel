@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod blob_route;
+pub mod boot_provider;
 pub mod config;
 pub mod debug;
 pub mod health;
@@ -15,6 +16,8 @@ pub mod process_run;
 pub mod processes;
 pub mod prompt_config;
 mod protocol;
+pub mod provider_detect;
+pub mod providers;
 pub mod push;
 pub mod side_chat;
 pub mod storage;
@@ -36,8 +39,8 @@ use anyhow::Context;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use hirsel_proto::{
-    AgentActivityState, ChatMessage, HostToClient, ModelSelection, ModelSnapshot, ProcessInfo,
-    PromptSnapshot, SendMode, SubagentModelCatalog, ViewInstance,
+    AgentActivityState, AgentSlot, ChatMessage, HostToClient, ModelSelection, ModelSnapshot,
+    ProcessInfo, PromptSnapshot, ProviderRoster, SendMode, SubagentModelCatalog, ViewInstance,
 };
 use tokio::sync::{Mutex, broadcast};
 use tower_http::services::{ServeDir, ServeFile};
@@ -67,6 +70,7 @@ pub struct AppState {
     pub plugins: plugins::PluginHost,
     pub subagent_models: subagent_models::SubagentModelState,
     pub prompts: prompt_config::PromptConfig,
+    pub providers_roster: providers::ProviderRosterState,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
     pub data_dir: Arc<PathBuf>,
@@ -75,6 +79,7 @@ pub struct AppState {
     model_change_lock: Arc<Mutex<()>>,
     subagent_model_change_lock: Arc<Mutex<()>>,
     prompt_change_lock: Arc<Mutex<()>>,
+    provider_change_lock: Arc<Mutex<()>>,
     iroh_ticket: Arc<StdRwLock<Option<String>>>,
 }
 
@@ -223,6 +228,127 @@ impl AppState {
         let snapshot = self.prompt_snapshot();
         self.broadcast_prompts(&snapshot);
         Ok(snapshot)
+    }
+
+    /// The whole roster, with fresh credential detection for the built-ins.
+    pub async fn provider_roster(&self) -> ProviderRoster {
+        self.providers_roster.snapshot().await
+    }
+
+    /// Point one resident agent at a provider instance, seeding that provider's
+    /// default model and variant in the same write.
+    ///
+    /// The main Agent's `ProviderHandle` is built once at boot and baked into
+    /// the live session, so this stores and broadcasts the choice but does not
+    /// swap the running session's provider — `booted_provider_id` is what lets
+    /// a client say when the change takes effect. The fork is stored only; no
+    /// fork runtime consumes it yet.
+    pub async fn set_agent_provider(
+        &self,
+        agent: AgentSlot,
+        provider_id: &str,
+    ) -> anyhow::Result<ProviderRoster> {
+        let _guard = self.provider_change_lock.lock().await;
+        if self.providers_roster.booted_provider_id().is_none() {
+            anyhow::bail!(
+                "provider selection requires HIRSEL_PROVIDER=codex or HIRSEL_PROVIDER=openrouter"
+            );
+        }
+        let choice = self.providers_roster.selection_for(provider_id)?;
+        let seed = self.seed_selection(agent, &choice)?;
+        self.providers_roster
+            .point_agent_at(agent, &choice, &seed)
+            .await?;
+        match agent {
+            AgentSlot::Main => {
+                if let Some(current) = self.model_snapshot().map(|snapshot| snapshot.current) {
+                    self.broadcast(HostToClient::ModelChanged { current });
+                }
+            }
+            AgentSlot::Fork => {
+                let snapshot = self.prompt_snapshot();
+                self.broadcast_prompts(&snapshot);
+            }
+        }
+        self.broadcast_providers().await
+    }
+
+    pub async fn add_provider(
+        &self,
+        id: &str,
+        label: &str,
+        base_url: &str,
+        api_key: &str,
+        default_model: &str,
+    ) -> anyhow::Result<ProviderRoster> {
+        let _guard = self.provider_change_lock.lock().await;
+        self.providers_roster
+            .add(id, label, base_url, api_key, default_model)
+            .await?;
+        self.broadcast_providers().await
+    }
+
+    pub async fn update_provider(
+        &self,
+        id: &str,
+        label: Option<&str>,
+        base_url: Option<&str>,
+        api_key: Option<&str>,
+        default_model: Option<&str>,
+    ) -> anyhow::Result<ProviderRoster> {
+        let _guard = self.provider_change_lock.lock().await;
+        self.providers_roster
+            .update(id, label, base_url, api_key, default_model)
+            .await?;
+        self.broadcast_providers().await
+    }
+
+    pub async fn remove_provider(&self, id: &str) -> anyhow::Result<ProviderRoster> {
+        let _guard = self.provider_change_lock.lock().await;
+        self.providers_roster.remove(id).await?;
+        self.broadcast_providers().await
+    }
+
+    /// Re-probe one built-in's local credentials. Detection is never cached, so
+    /// the fresh roster this broadcasts is the fresh answer.
+    pub async fn redetect_provider(&self, id: &str) -> anyhow::Result<ProviderRoster> {
+        let _guard = self.provider_change_lock.lock().await;
+        self.providers_roster.redetect(id)?;
+        self.broadcast_providers().await
+    }
+
+    /// The model an agent is seeded with when it moves to a provider: the
+    /// instance's `default_model` for an OpenAI-compatible endpoint, and the
+    /// curated registry's own default for `codex`.
+    fn seed_selection(
+        &self,
+        agent: AgentSlot,
+        choice: &providers::AgentProviderChoice,
+    ) -> anyhow::Result<ModelSelection> {
+        let mode = match choice.is_free_text() {
+            true => model_selection::SelectionMode::FreeText {
+                provider_id: choice.id.clone(),
+                default_model: choice.default_model.clone(),
+            },
+            false => model_selection::SelectionMode::Curated {
+                provider: config::ProviderMode::Codex,
+                provider_id: Some(choice.id.clone()),
+            },
+        };
+        model_selection::default_in_mode(&mode, matches!(agent, AgentSlot::Fork)).ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider `{}` offers no default model to seed; set one first",
+                choice.id
+            )
+        })
+    }
+
+    async fn broadcast_providers(&self) -> anyhow::Result<ProviderRoster> {
+        let roster = self.provider_roster().await;
+        self.broadcast(HostToClient::ProvidersChanged {
+            roster: roster.clone(),
+        });
+        Ok(roster)
     }
 
     fn broadcast_prompts(&self, snapshot: &PromptSnapshot) {
@@ -587,9 +713,20 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         config.config_path.clone(),
         &config.data_dir,
         &config.docs_path,
+        &providers::env_bootstrap(
+            config.provider,
+            &config.model,
+            config.openrouter_api_key.as_deref(),
+        ),
     )
     .await
     .with_context(|| format!("load host config from {}", config.config_path.display()))?;
+    // One resolution, shared: the roster reports what actually booted and the
+    // agent runtime builds its handle from the same answer, so the two can
+    // never disagree about which provider the session is on.
+    let home = provider_detect::home_dir();
+    let boot = boot_provider::resolve(&config_store, config.provider, home.as_deref()).await;
+    let providers_roster = providers::ProviderRosterState::new(config_store.clone(), &boot, home);
     let subagent_models = subagent_models::SubagentModelState::load(config_store.clone());
     let storage = Storage::open(&config.data_dir)
         .await
@@ -644,6 +781,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let prompts = prompt_config::PromptConfig::new(
         config.provider,
         config_store.clone(),
+        providers_roster.clone(),
         format!(
             "{}{}",
             lash_runtime::agent_host_section(&config),
@@ -654,12 +792,14 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         lash_runtime::RuntimeConfig {
             agent_mode: config.agent,
             provider_mode: config.provider,
+            boot_plan: boot.plan,
             anthropic_api_key: config.anthropic_api_key.clone(),
             openrouter_api_key: config.openrouter_api_key.clone(),
             model: config.model.clone(),
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
             config_store,
+            providers: providers_roster.clone(),
             prompts: prompts.clone(),
         },
         tools.clone(),
@@ -694,6 +834,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         plugins: plugin_host,
         subagent_models,
         prompts,
+        providers_roster,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
         data_dir: Arc::new(config.data_dir),
@@ -702,6 +843,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         model_change_lock: Arc::new(Mutex::new(())),
         subagent_model_change_lock: Arc::new(Mutex::new(())),
         prompt_change_lock: Arc::new(Mutex::new(())),
+        provider_change_lock: Arc::new(Mutex::new(())),
         iroh_ticket: Arc::new(StdRwLock::new(None)),
     };
     Ok(state)

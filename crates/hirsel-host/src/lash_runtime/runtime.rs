@@ -66,9 +66,14 @@ impl AgentRuntime {
     ) -> anyhow::Result<Self> {
         let model_selection = match config.provider_mode {
             provider @ (ProviderMode::Codex | ProviderMode::OpenRouter) => Some(
-                ModelSelectionState::load(provider, config.config_store.clone(), &config.model)
-                    .await
-                    .context("load main-agent model selection")?,
+                ModelSelectionState::load(
+                    provider,
+                    config.config_store.clone(),
+                    config.providers.clone(),
+                    &config.model,
+                )
+                .await
+                .context("load main-agent model selection")?,
             ),
             ProviderMode::Anthropic => None,
         };

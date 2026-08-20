@@ -68,7 +68,7 @@ async function mount(prompts?: PromptSnapshot) {
       prompts,
     },
   });
-  store.openSettings();
+  store.openSettings("agents");
   const { SettingsSheet } = await import("./SettingsSheet");
   return { store, ...render(() => <SettingsSheet />) };
 }
@@ -173,9 +173,9 @@ describe("Settings → Prompt", () => {
     expect(setForkPrompt).toHaveBeenCalledWith("Triage this event.");
   });
 
-  it("hides the section for an older host with no prompt snapshot", async () => {
-    const { queryByText, queryByLabelText } = await mount();
-    expect(queryByText("Prompt")).toBeNull();
+  it("hides the prompt editors for an older host with no prompt snapshot", async () => {
+    const { queryByLabelText } = await mount();
     expect(queryByLabelText("Main agent system prompt")).toBeNull();
+    expect(queryByLabelText("Fork agent prompt")).toBeNull();
   });
 });

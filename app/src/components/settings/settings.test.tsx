@@ -27,7 +27,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Settings: device label persistence", () => {
   it("saves a trimmed device label to localStorage", async () => {
     const store = await import("../../store/store");
-    store.openSettings();
+    store.openSettings("connection");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByLabelText, getByText } = render(() => <SettingsSheet />);
 
@@ -54,7 +54,7 @@ describe("Settings: About & debug", () => {
         host_version: "0.9.9-test",
       },
     } as never);
-    store.openSettings();
+    store.openSettings("about");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText } = render(() => <SettingsSheet />);
     expect(getByText("0.9.9-test")).toBeTruthy();
@@ -62,7 +62,7 @@ describe("Settings: About & debug", () => {
 
   it("persists the local 'Show agent code' toggle", async () => {
     const store = await import("../../store/store");
-    store.openSettings();
+    store.openSettings("about");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByLabelText } = render(() => <SettingsSheet />);
 
@@ -72,19 +72,20 @@ describe("Settings: About & debug", () => {
 });
 
 describe("Settings: DESIGN conformance of the pane chrome", () => {
-  it("uses sentence-case headings on quiet frameless groups, and one close", async () => {
+  it("uses sentence-case tab labels on quiet frameless groups, and one close", async () => {
     const store = await import("../../store/store");
     store.openSettings();
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getAllByRole, getAllByLabelText, container } = render(() => <SettingsSheet />);
 
-    // DESIGN §3 rules out all-caps section headings; they carry rank by weight
-    // and the whitespace above them instead.
-    const headings = getAllByRole("heading", { level: 2 });
-    expect(headings.length).toBeGreaterThan(1);
-    for (const h of headings) {
-      expect(h.className).not.toContain("uppercase");
-      expect(h.textContent).not.toBe(h.textContent?.toUpperCase());
+    // DESIGN §3 rules out all-caps navigation and oversized bold headings; the
+    // side tabs carry rank by weight and one mint edge instead.
+    const tabs = getAllByRole("tab");
+    expect(tabs.length).toBeGreaterThan(1);
+    for (const tab of tabs) {
+      expect(tab.className).not.toContain("uppercase");
+      expect(tab.textContent).not.toBe(tab.textContent?.toUpperCase());
+      expect(tab.className).not.toContain("text-lg");
     }
 
     // DESIGN §6 forbids repeated rectangular frames: no section is a bordered,
@@ -98,14 +99,19 @@ describe("Settings: DESIGN conformance of the pane chrome", () => {
 
   it("gives the theme segments and the debug switch thumb-grade hit areas", async () => {
     const store = await import("../../store/store");
-    store.openSettings();
+    store.openSettings("appearance");
     const { SettingsSheet } = await import("./SettingsSheet");
-    const { getByLabelText, getAllByRole } = render(() => <SettingsSheet />);
+    const { getByLabelText, getAllByRole, getByRole } = render(() => <SettingsSheet />);
 
     const coarse = "[@media(pointer:coarse)]:min-h-11";
     for (const segment of getAllByRole("radio")) {
       expect(segment.className).toContain(coarse);
     }
+    // Every tab is a thumb-grade target too, and the switch lives one tab over.
+    for (const tab of getAllByRole("tab")) {
+      expect(tab.className).toContain(coarse);
+    }
+    fireEvent.click(getByRole("tab", { name: "About & debug" }));
     // The switch's 20x36px track stays the visual; the button around it grows.
     const toggle = getByLabelText("Show agent code");
     expect(toggle.className).toContain(coarse);
@@ -125,7 +131,7 @@ describe("Settings: Forget token confirm flow (C5)", () => {
     vi.stubGlobal("location", { reload });
 
     const store = await import("../../store/store");
-    store.openSettings();
+    store.openSettings("connection");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText, getByRole, queryByRole } = render(() => <SettingsSheet />);
 
@@ -149,7 +155,7 @@ describe("Settings: Forget token confirm flow (C5)", () => {
     }));
 
     const store = await import("../../store/store");
-    store.openSettings();
+    store.openSettings("connection");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText, getByRole, queryByRole } = render(() => <SettingsSheet />);
 

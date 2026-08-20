@@ -11,11 +11,12 @@ mod event;
 mod host;
 mod models;
 mod process;
+mod providers;
 mod turn;
 mod view;
 
 pub use chat::{Blob, ChatAuthor, ChatMessage, ToolCallSummary};
-pub use client::{ClientToHost, HelloAuth, PushPlatform, SendMode};
+pub use client::{AgentSlot, ClientToHost, HelloAuth, PushPlatform, SendMode};
 pub use event::{
     Event, EventKind, EventLifecycle, EventSource, EventSourceKind, EventStatus, Ping, PingStatus,
     QuickReply,
@@ -26,6 +27,9 @@ pub use models::{
     SubagentModel, SubagentModelCatalog, SubagentProviderModels,
 };
 pub use process::{ProcessInfo, ProcessKind, ProcessState, SideChatSummary};
+pub use providers::{
+    DetectionStatus, MaskedSecret, ProviderInstance, ProviderKind, ProviderRoster,
+};
 pub use turn::{AgentActivityState, TurnEvent, TurnEventKind};
 pub use view::ViewInstance;
 

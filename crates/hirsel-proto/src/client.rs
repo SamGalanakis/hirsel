@@ -16,6 +16,14 @@ impl SendMode {
     }
 }
 
+/// Which resident agent a provider/model op addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSlot {
+    Main,
+    Fork,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PushPlatform {
@@ -122,6 +130,40 @@ pub enum ClientToHost {
     SetForkModel {
         model_id: String,
         variant: String,
+    },
+    /// Point one resident agent at a provider instance, seeding that provider's
+    /// default model + variant.
+    SetAgentProvider {
+        agent: AgentSlot,
+        provider_id: String,
+    },
+    /// Add an OpenAI-compatible provider instance.
+    AddProvider {
+        id: String,
+        label: String,
+        base_url: String,
+        api_key: String,
+        default_model: String,
+    },
+    /// Edit one instance. Omitted fields are unchanged; an `api_key` of `""`
+    /// clears the stored key.
+    UpdateProvider {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_model: Option<String>,
+    },
+    RemoveProvider {
+        id: String,
+    },
+    /// Re-probe an OAuth provider's local credentials.
+    RedetectProvider {
+        id: String,
     },
     UploadBlob {
         client_id: String,

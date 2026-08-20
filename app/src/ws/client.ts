@@ -2,7 +2,14 @@
 // exponential backoff, offline outgoing queue flushed on reconnect using
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
 // upload correlation and the v1.2 send-mode / cancel frames.
-import type { Blob, ClientMessage, MessagesMsg, SendMode, ServerMessage } from "../protocol";
+import type {
+  AgentSlot,
+  Blob,
+  ClientMessage,
+  MessagesMsg,
+  SendMode,
+  ServerMessage,
+} from "../protocol";
 import { httpBaseFromWs } from "../lib/endpoint";
 import { deliverPluginPush } from "../plugins/registry";
 import { dispatch, setProtocolError, state } from "../store/store";
@@ -389,6 +396,46 @@ class HirselWsClient {
     this.enqueue({ type: "set_fork_model", model_id: modelId, variant });
   }
 
+  // ---- Provider roster ----
+
+  /** Point one resident agent at a provider instance. The host seeds that
+   * provider's default model and broadcasts the resulting snapshots. */
+  setAgentProvider(agent: AgentSlot, providerId: string): void {
+    this.enqueue({ type: "set_agent_provider", agent, provider_id: providerId });
+  }
+
+  /** Add an OpenAI-compatible provider instance. Settles on
+   * `providers_changed`, like every other roster write. */
+  addProvider(instance: {
+    id: string;
+    label: string;
+    base_url: string;
+    api_key: string;
+    default_model: string;
+  }): void {
+    this.enqueue({ type: "add_provider", ...instance });
+  }
+
+  /** Edit one instance. Omitted fields are unchanged; an `api_key` of `""`
+   * clears the stored key, and omitting it leaves the stored key alone — the
+   * client never holds key material to resend. */
+  updateProvider(
+    id: string,
+    patch: { label?: string; base_url?: string; api_key?: string; default_model?: string },
+  ): void {
+    this.enqueue({ type: "update_provider", id, ...patch });
+  }
+
+  /** Remove a removable instance. */
+  removeProvider(id: string): void {
+    this.enqueue({ type: "remove_provider", id });
+  }
+
+  /** Re-probe an OAuth provider's local credentials on the host machine. */
+  redetectProvider(id: string): void {
+    this.enqueue({ type: "redetect_provider", id });
+  }
+
   private armFailTimer(clientId: string): void {
     const existing = this.failTimers.get(clientId);
     if (existing) clearTimeout(existing);
@@ -594,6 +641,10 @@ class HirselWsClient {
       }
       case "prompts_changed": {
         dispatch({ type: "prompts_changed", prompts: message.prompts });
+        break;
+      }
+      case "providers_changed": {
+        dispatch({ type: "providers_changed", roster: message.roster });
         break;
       }
       case "blob_ok": {

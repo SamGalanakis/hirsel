@@ -8,7 +8,7 @@
 import { createSignal, type JSX, Show } from "solid-js";
 import { setTitleBadgeEnabled, titleBadgeEnabled } from "../../lib/prefs";
 import { Button } from "../ui/button";
-import { Group, Field, SectionHeader, Toggle } from "./rows";
+import { Group, Field, Toggle } from "./rows";
 
 export function NotificationsSection(): JSX.Element {
   const notificationsSupported = typeof Notification !== "undefined";
@@ -26,7 +26,6 @@ export function NotificationsSection(): JSX.Element {
 
   return (
     <>
-      <SectionHeader>Notifications</SectionHeader>
       <Group class="divide-y divide-border">
         <div class="flex items-center gap-3 py-3">
           <Field

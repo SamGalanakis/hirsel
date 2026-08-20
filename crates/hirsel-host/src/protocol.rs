@@ -245,6 +245,7 @@ async fn build_snapshot(
         model: state.model_snapshot(),
         subagent_models: Some(state.subagent_model_snapshot()),
         prompts: Some(state.prompt_snapshot()),
+        providers: Some(state.provider_roster().await),
         views,
     };
     Ok((hello, dedupe))
@@ -381,6 +382,43 @@ where
         }
         ClientToHost::SetForkModel { model_id, variant } => {
             state.set_fork_model(&model_id, &variant).await?;
+        }
+        ClientToHost::SetAgentProvider { agent, provider_id } => {
+            state.set_agent_provider(agent, &provider_id).await?;
+        }
+        ClientToHost::AddProvider {
+            id,
+            label,
+            base_url,
+            api_key,
+            default_model,
+        } => {
+            state
+                .add_provider(&id, &label, &base_url, &api_key, &default_model)
+                .await?;
+        }
+        ClientToHost::UpdateProvider {
+            id,
+            label,
+            base_url,
+            api_key,
+            default_model,
+        } => {
+            state
+                .update_provider(
+                    &id,
+                    label.as_deref(),
+                    base_url.as_deref(),
+                    api_key.as_deref(),
+                    default_model.as_deref(),
+                )
+                .await?;
+        }
+        ClientToHost::RemoveProvider { id } => {
+            state.remove_provider(&id).await?;
+        }
+        ClientToHost::RedetectProvider { id } => {
+            state.redetect_provider(&id).await?;
         }
         ClientToHost::UploadBlob {
             client_id,

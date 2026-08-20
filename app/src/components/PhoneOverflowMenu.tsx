@@ -16,15 +16,14 @@ import {
 } from "./ui/dropdown-menu";
 
 // The home shell's single overflow: with the header bar gone, this quiet ⋯ is
-// the only standing chrome, and every utility — Processes, the quick model
-// variant, Canvas, Settings — is reachable from it. Processes leads the menu
-// and carries its own running count, so live work still announces itself
-// without a dedicated button in a bar that no longer exists.
+// the only standing chrome, and every utility — Processes, Canvas, Settings —
+// is reachable from it. Processes leads the menu and carries its own running
+// count, so live work still announces itself without a dedicated button in a
+// bar that no longer exists.
 
 export function PhoneOverflowMenu() {
   const canvasAvailable = () =>
     canvasViews(state.views).length > 0 && state.rightRegion !== "canvas";
-  const model = () => state.model?.current;
   const processCount = () => runningProcessCount(state.processes);
 
   return (
@@ -65,15 +64,6 @@ export function PhoneOverflowMenu() {
             </span>
           </Show>
         </DropdownMenuItem>
-        {/* "Model settings" (spec item 6): the honest label + destination — it
-            opens Settings scrolled to the Models section, not Appearance, so the
-            row's affordance matches where it lands. */}
-        <Show when={model()}>
-          <DropdownMenuItem class="justify-between [@media(pointer:coarse)]:min-h-11" onSelect={() => openSettings("models")}>
-            <span>Model settings</span>
-            <span class="text-xs capitalize text-muted-foreground">{model()?.variant}</span>
-          </DropdownMenuItem>
-        </Show>
         <Show when={canvasAvailable()}>
           <DropdownMenuItem class="[@media(pointer:coarse)]:min-h-11" onSelect={showCanvas}>
             <PanelRight aria-hidden="true" />
@@ -81,7 +71,12 @@ export function PhoneOverflowMenu() {
           </DropdownMenuItem>
         </Show>
         <DropdownMenuSeparator />
-        <DropdownMenuItem class="[@media(pointer:coarse)]:min-h-11" onSelect={openSettings}>
+        {/* ONE Settings entry. The model choice is a tab inside it now, not a
+            second row into the same sheet. */}
+        <DropdownMenuItem
+          class="[@media(pointer:coarse)]:min-h-11"
+          onSelect={() => openSettings()}
+        >
           <SettingsIcon aria-hidden="true" />
           Settings
         </DropdownMenuItem>

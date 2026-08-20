@@ -49,7 +49,6 @@ use lash_core::{
     ProcessValueSelector, SessionPolicy, TriggerStore, TriggerSubscriptionFilter,
     TurnInputCheckpointBoundary, TurnInputIngress, plugin::ProcessEngineContributionContext,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify, broadcast};
@@ -57,11 +56,13 @@ use uuid::Uuid;
 
 use crate::{
     BroadcastLog,
+    boot_provider::BootPlan,
     config::{AgentMode, Config, DriverMode, ProviderMode},
     host_config::ConfigStore,
     model_selection::ModelSelectionState,
     monitors::{output_tail, run_monitor_tick},
     prompt_config::PromptConfig,
+    providers::ProviderRosterState,
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
     subagent_models::SubagentModelState,
     text::short_label,

@@ -862,6 +862,7 @@ async fn test_event_executor() -> (HirselToolExecutor, Storage, BroadcastLog, te
         path.join("hirsel.toml"),
         &path,
         std::path::Path::new("/docs/hirsel-config.md"),
+        &crate::host_config::EnvBootstrap::default(),
     )
     .await
     .unwrap();
@@ -1228,6 +1229,7 @@ async fn subagent_tool_provider_resolves_the_current_settings_schema() {
         dir.path().join("hirsel.toml"),
         dir.path(),
         std::path::Path::new("/docs/hirsel-config.md"),
+        &crate::host_config::EnvBootstrap::default(),
     )
     .await
     .unwrap();
@@ -1269,6 +1271,7 @@ async fn pings_send_uses_active_turn_anchor_when_later_owner_message_is_pending(
         dir.path().join("hirsel.toml"),
         dir.path(),
         std::path::Path::new("/docs/hirsel-config.md"),
+        &crate::host_config::EnvBootstrap::default(),
     )
     .await
     .unwrap();

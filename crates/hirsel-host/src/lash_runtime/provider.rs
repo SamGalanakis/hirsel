@@ -3,13 +3,19 @@ use super::*;
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub agent_mode: AgentMode,
+    /// The `HIRSEL_PROVIDER` boot mode. Still what the legacy anthropic paths
+    /// key off; what the provider handle is built from is `boot_plan`.
     pub provider_mode: ProviderMode,
+    /// The host's single boot resolution: the stored roster choice reconciled
+    /// with the environment default, decided once in `build_state`.
+    pub boot_plan: BootPlan,
     pub anthropic_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub model: String,
     pub data_dir: PathBuf,
     pub driver_mode: DriverMode,
     pub config_store: ConfigStore,
+    pub providers: ProviderRosterState,
     pub prompts: PromptConfig,
 }
 
@@ -102,8 +108,8 @@ pub(super) struct ProviderUnavailable {
 pub(super) async fn build_provider(
     config: &RuntimeConfig,
 ) -> Result<ProviderHandle, ProviderUnavailable> {
-    match config.provider_mode {
-        ProviderMode::Anthropic => {
+    match &config.boot_plan {
+        BootPlan::Env(ProviderMode::Anthropic) => {
             let Some(api_key) = config.anthropic_api_key.clone() else {
                 return Err(ProviderUnavailable {
                     message: "ANTHROPIC_API_KEY is not set for HIRSEL_PROVIDER=anthropic"
@@ -119,27 +125,25 @@ pub(super) async fn build_provider(
                     .into_components(),
             ))
         }
-        ProviderMode::OpenRouter => {
+        BootPlan::Env(ProviderMode::OpenRouter) => {
             let Some(api_key) = config.openrouter_api_key.clone() else {
                 return Err(ProviderUnavailable {
                     message: "OPENROUTER_API_KEY is not set for HIRSEL_PROVIDER=openrouter"
                         .to_string(),
                 });
             };
-            Ok(ProviderHandle::new(
-                lash_provider_openai::OpenAiCompatibleProvider::new(
-                    api_key,
-                    lash_provider_openai::OPENROUTER_BASE_URL,
-                )
-                .with_compat(lash_provider_openai::OpenAiCompat::openrouter())
-                .with_options(ProviderOptions {
-                    expose_thinking: true,
-                    ..ProviderOptions::default()
-                })
-                .into_components(),
+            Ok(openai_compatible_handle(
+                api_key,
+                lash_provider_openai::OPENROUTER_BASE_URL.to_string(),
             ))
         }
-        ProviderMode::Codex => {
+        // A stored instance boots on its own base URL and its own key.
+        // `OPENROUTER_API_KEY` is a first-boot seed and is never consulted
+        // here: whatever Settings shows as stored is what the host runs on.
+        BootPlan::OpenAiCompatible {
+            base_url, api_key, ..
+        } => Ok(openai_compatible_handle(api_key.clone(), base_url.clone())),
+        BootPlan::Env(ProviderMode::Codex) | BootPlan::Codex => {
             let tokens = load_codex_tokens()
                 .await
                 .map_err(|message| ProviderUnavailable { message })?;
@@ -160,6 +164,25 @@ pub(super) async fn build_provider(
     }
 }
 
+/// One OpenAI-compatible handle for both the env OpenRouter mode and a stored
+/// instance. OpenRouter's compat quirks are applied by base URL, never by
+/// assumption: an instance pointing elsewhere must not claim them.
+fn openai_compatible_handle(api_key: String, base_url: String) -> ProviderHandle {
+    let openrouter = base_url == lash_provider_openai::OPENROUTER_BASE_URL;
+    let mut provider = lash_provider_openai::OpenAiCompatibleProvider::new(api_key, base_url);
+    if openrouter {
+        provider = provider.with_compat(lash_provider_openai::OpenAiCompat::openrouter());
+    }
+    ProviderHandle::new(
+        provider
+            .with_options(ProviderOptions {
+                expose_thinking: true,
+                ..ProviderOptions::default()
+            })
+            .into_components(),
+    )
+}
+
 #[derive(Debug)]
 pub(super) struct CodexTokens {
     pub(super) access_token: String,
@@ -168,38 +191,14 @@ pub(super) struct CodexTokens {
     pub(super) account_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct CodexAuthFile {
-    pub(super) tokens: CodexAuthTokens,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct CodexAuthTokens {
-    pub(super) access_token: String,
-    pub(super) refresh_token: String,
-    #[serde(default)]
-    pub(super) account_id: Option<String>,
-    #[serde(default)]
-    pub(super) expires_at: Option<u64>,
-}
-
 pub(super) async fn load_codex_tokens() -> Result<CodexTokens, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let home = crate::provider_detect::home_dir()
         .ok_or_else(|| "HOME is not set; cannot locate ~/.codex/auth.json".to_string())?;
-    let auth_path = home.join(".codex").join("auth.json");
-    let text = tokio::fs::read_to_string(&auth_path)
-        .await
-        .map_err(|error| format!("failed to read {}: {error}", auth_path.display()))?;
-    let auth: CodexAuthFile =
-        serde_json::from_str(&text).map_err(|error| format!("invalid Codex auth JSON: {error}"))?;
-    if auth.tokens.access_token.is_empty() || auth.tokens.refresh_token.is_empty() {
-        return Err("Codex OAuth tokens are missing access_token or refresh_token".to_string());
-    }
+    let tokens = crate::provider_detect::read_codex_tokens(&home).await?;
     Ok(CodexTokens {
-        access_token: auth.tokens.access_token,
-        refresh_token: auth.tokens.refresh_token,
-        expires_at: auth.tokens.expires_at.unwrap_or(0),
-        account_id: auth.tokens.account_id,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: tokens.expires_at.unwrap_or(0),
+        account_id: tokens.account_id,
     })
 }

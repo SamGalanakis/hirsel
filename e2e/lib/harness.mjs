@@ -87,7 +87,7 @@ export async function teardown(children, { timeoutMs = 1_000, dataDirs = [] } = 
   await Promise.all(dataDirs.filter(Boolean).map((dataDir) => rm(dataDir, { recursive: true, force: true })));
 }
 
-export async function startHost({ root, children, logs, port, token, agent, driver, provider, dataDirPrefix }) {
+export async function startHost({ root, children, logs, port, token, agent, driver, provider, dataDirPrefix, env = {} }) {
   const dataDir = await mkdtemp(join(tmpdir(), dataDirPrefix));
   const build = spawnSync("cargo", ["build", "-p", "hirsel-host", "--bin", "hirsel-host"], {
     cwd: root,
@@ -111,6 +111,11 @@ export async function startHost({ root, children, logs, port, token, agent, driv
     HIRSEL_DATA_DIR: dataDir,
     HIRSEL_TEMPLATES_DIR: `${root}/templates`,
     HIRSEL_LISTEN: `127.0.0.1:${port}`,
+    // Runner-supplied extras come last so a gate can boot the host with a
+    // variable of its own (a sentinel API key, say) without the defaults above
+    // having to know about it. `undefined` is filtered out here exactly as it
+    // is for the defaults, so passing an absent value stays a no-op.
+    ...env,
   }).filter(([, value]) => value !== undefined));
   startProcess(children, binary, [], { cwd: dataDir, env: environment }, logs);
   return { dataDir, binary };

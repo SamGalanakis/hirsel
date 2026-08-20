@@ -20,6 +20,13 @@ pub struct AvailableModel {
 pub struct ModelSnapshot {
     pub current: ModelSelection,
     pub available: Vec<AvailableModel>,
+    /// The provider instance this agent runs on. Absent on older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// True when the selected provider takes a free-text model id: `available`
+    /// is then empty and `current.id` is whatever the Owner typed.
+    #[serde(default)]
+    pub free_text_model: bool,
 }
 
 /// One Owner-editable prompt: the text the Agent actually gets, plus whether
@@ -40,6 +47,13 @@ pub struct ForkAgentConfig {
     pub current: ModelSelection,
     pub available: Vec<AvailableModel>,
     pub prompt: PromptDoc,
+    /// The provider instance the fork runs on. Absent on older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// True when the selected provider takes a free-text model id: `available`
+    /// is then empty and `current.id` is whatever the Owner typed.
+    #[serde(default)]
+    pub free_text_model: bool,
 }
 
 /// The Owner-editable prompt surface carried on `hello_ok` and replaced

@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, RwLock},
-};
+use std::collections::BTreeSet;
 
 use anyhow::anyhow;
 use hirsel_drivers::AgentKind;
@@ -78,24 +75,15 @@ pub struct ResolvedSubagentModel {
 #[derive(Clone)]
 pub struct SubagentModelState {
     config_store: ConfigStore,
-    catalog: Arc<RwLock<SubagentModelCatalog>>,
 }
 
 impl SubagentModelState {
     pub fn load(config_store: ConfigStore) -> Self {
-        let catalog = catalog_from_store(&config_store);
-        Self {
-            config_store,
-            catalog: Arc::new(RwLock::new(catalog)),
-        }
+        Self { config_store }
     }
 
     pub fn snapshot(&self) -> SubagentModelCatalog {
-        self.refresh();
-        self.catalog
-            .read()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
+        catalog_from_store(&self.config_store)
     }
 
     /// The model-facing `subagents.spawn` input contract. This is derived from
@@ -232,14 +220,6 @@ impl SubagentModelState {
             .set_subagent_model(provider, model_id, enabled, &canonical_variants)
             .await?;
         Ok(self.snapshot())
-    }
-
-    fn refresh(&self) {
-        let refreshed = catalog_from_store(&self.config_store);
-        *self
-            .catalog
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = refreshed;
     }
 }
 

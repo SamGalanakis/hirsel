@@ -7,6 +7,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use hirsel_proto::Event;
 use hirsel_proto::EventKind;
+use hirsel_proto::EventLifecycle;
 use hirsel_proto::EventSource;
 use hirsel_proto::EventSourceKind;
 use hirsel_proto::EventStatus;
@@ -129,22 +130,20 @@ impl Storage {
 
     pub async fn resolve_ping(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let conn = self.conn.lock().await;
-        let changed = conn.execute(
-            "UPDATE pings SET status = 'done' WHERE id = ?1",
-            params![ping_id],
-        )?;
-        if changed == 0 {
+        let Some(current) = get_ping_optional(&conn, ping_id)? else {
             return Ok(None);
-        }
+        };
+        let lifecycle = match current.lifecycle() {
+            archived @ EventLifecycle::Archived { .. } => archived,
+            _ => EventLifecycle::Done,
+        };
+        set_event_lifecycle(&conn, ping_id, &lifecycle)?;
         Ok(Some(get_ping(&conn, ping_id)?))
     }
 
     pub async fn reopen_ping(&self, ping_id: u64) -> anyhow::Result<Option<Ping>> {
         let conn = self.conn.lock().await;
-        let changed = conn.execute(
-            "UPDATE pings SET status = 'open' WHERE id = ?1",
-            params![ping_id],
-        )?;
+        let changed = set_event_lifecycle(&conn, ping_id, &EventLifecycle::Open)?;
         if changed == 0 {
             return Ok(None);
         }
@@ -168,7 +167,7 @@ impl Storage {
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        if current.status != EventStatus::Open {
+        if current.lifecycle() != EventLifecycle::Open {
             anyhow::bail!("only an open Task can be recomposed");
         }
         let description = description.unwrap_or_else(|| current.description.clone());
@@ -187,41 +186,55 @@ impl Storage {
 
     pub async fn archive_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
         let conn = self.conn.lock().await;
-        let archived_at = Utc::now().to_rfc3339();
-        let changed = conn.execute(
-            "UPDATE pings SET archived = 1, status = 'done', archived_at = COALESCE(archived_at, ?2) WHERE id = ?1",
-            params![event_id, archived_at],
-        )?;
-        if changed == 0 {
+        let Some(current) = get_ping_optional(&conn, event_id)? else {
             return Ok(None);
-        }
+        };
+        let at = match current.lifecycle() {
+            EventLifecycle::Archived { at } => at,
+            _ => Utc::now(),
+        };
+        set_event_lifecycle(&conn, event_id, &EventLifecycle::Archived { at })?;
         Ok(Some(get_ping(&conn, event_id)?))
     }
 
     pub async fn unarchive_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
         let conn = self.conn.lock().await;
-        let changed = conn.execute(
-            "UPDATE pings SET archived = 0, archived_at = NULL WHERE id = ?1",
-            params![event_id],
-        )?;
-        if changed == 0 {
+        let Some(current) = get_ping_optional(&conn, event_id)? else {
             return Ok(None);
-        }
+        };
+        let lifecycle = match current.lifecycle() {
+            EventLifecycle::Archived { .. } => EventLifecycle::Done,
+            lifecycle => lifecycle,
+        };
+        set_event_lifecycle(&conn, event_id, &lifecycle)?;
         Ok(Some(get_ping(&conn, event_id)?))
     }
 
-    pub async fn archive_finished_events(&self) -> anyhow::Result<usize> {
-        let conn = self.conn.lock().await;
-        let archived_at = Utc::now().to_rfc3339();
-        Ok(conn.execute(
-            "
-            UPDATE pings
-            SET archived = 1, status = 'done', archived_at = ?1
-            WHERE archived = 0
-              AND (status = 'done' OR (read != 0 AND requires_response = 0))
-            ",
-            params![archived_at],
-        )?)
+    pub async fn archive_finished_events(&self) -> anyhow::Result<Vec<Event>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let event_ids = {
+            let mut stmt = tx.prepare(
+                "
+                SELECT id FROM pings
+                WHERE archived = 0
+                  AND (status = 'done' OR (read != 0 AND requires_response = 0))
+                ORDER BY id ASC
+                ",
+            )?;
+            stmt.query_map([], |row| row.get::<_, u64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let lifecycle = EventLifecycle::Archived { at: Utc::now() };
+        for event_id in &event_ids {
+            set_event_lifecycle(&tx, *event_id, &lifecycle)?;
+        }
+        let events = event_ids
+            .into_iter()
+            .map(|event_id| get_ping(&tx, event_id))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(events)
     }
 
     pub async fn snooze_event(
@@ -230,25 +243,30 @@ impl Storage {
         until: DateTime<Utc>,
     ) -> anyhow::Result<Option<Event>> {
         let conn = self.conn.lock().await;
-        let changed = conn.execute(
-            "UPDATE pings SET snoozed_until = ?2 WHERE id = ?1",
-            params![event_id, until.to_rfc3339()],
-        )?;
-        if changed == 0 {
+        let Some(current) = get_ping_optional(&conn, event_id)? else {
             return Ok(None);
+        };
+        match current.lifecycle() {
+            EventLifecycle::Open | EventLifecycle::Snoozed { .. } => {
+                set_event_lifecycle(&conn, event_id, &EventLifecycle::Snoozed { until })?;
+            }
+            EventLifecycle::Done | EventLifecycle::Archived { .. } => {
+                anyhow::bail!("only an open event can be snoozed");
+            }
         }
         Ok(Some(get_ping(&conn, event_id)?))
     }
 
     pub async fn unsnooze_event(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
         let conn = self.conn.lock().await;
-        let changed = conn.execute(
-            "UPDATE pings SET snoozed_until = NULL WHERE id = ?1",
-            params![event_id],
-        )?;
-        if changed == 0 {
+        let Some(current) = get_ping_optional(&conn, event_id)? else {
             return Ok(None);
-        }
+        };
+        let lifecycle = match current.lifecycle() {
+            EventLifecycle::Snoozed { .. } => EventLifecycle::Open,
+            lifecycle => lifecycle,
+        };
+        set_event_lifecycle(&conn, event_id, &lifecycle)?;
         Ok(Some(get_ping(&conn, event_id)?))
     }
 
@@ -257,7 +275,14 @@ impl Storage {
         let tx = conn.transaction()?;
         let event_ids = {
             let mut stmt = tx.prepare(
-                "SELECT id FROM pings WHERE snoozed_until IS NOT NULL AND snoozed_until <= ?1 ORDER BY id ASC",
+                "
+                SELECT id FROM pings
+                WHERE status = 'open'
+                  AND archived = 0
+                  AND snoozed_until IS NOT NULL
+                  AND snoozed_until <= ?1
+                ORDER BY id ASC
+                ",
             )?;
             let rows = stmt.query_map(params![now.to_rfc3339()], |row| row.get::<_, u64>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -266,10 +291,9 @@ impl Storage {
             tx.commit()?;
             return Ok(Vec::new());
         }
-        tx.execute(
-            "UPDATE pings SET snoozed_until = NULL WHERE snoozed_until IS NOT NULL AND snoozed_until <= ?1",
-            params![now.to_rfc3339()],
-        )?;
+        for event_id in &event_ids {
+            set_event_lifecycle(&tx, *event_id, &EventLifecycle::Open)?;
+        }
         let events = event_ids
             .into_iter()
             .map(|event_id| get_ping(&tx, event_id))
@@ -314,15 +338,23 @@ impl Storage {
     }
 
     pub async fn resolve_event_fork(&self, event_id: u64) -> anyhow::Result<Option<Event>> {
-        let conn = self.conn.lock().await;
-        let changed = conn.execute(
-            "UPDATE pings SET status = 'done', fork_sc = NULL WHERE id = ?1",
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let Some(current) = get_ping_optional(&tx, event_id)? else {
+            return Ok(None);
+        };
+        let lifecycle = match current.lifecycle() {
+            archived @ EventLifecycle::Archived { .. } => archived,
+            _ => EventLifecycle::Done,
+        };
+        set_event_lifecycle(&tx, event_id, &lifecycle)?;
+        tx.execute(
+            "UPDATE pings SET fork_sc = NULL WHERE id = ?1",
             params![event_id],
         )?;
-        if changed == 0 {
-            return Ok(None);
-        }
-        Ok(Some(get_ping(&conn, event_id)?))
+        let event = get_ping(&tx, event_id)?;
+        tx.commit()?;
+        Ok(Some(event))
     }
 
     pub async fn mentioned_pings(&self, ping_ids: &[u64]) -> anyhow::Result<Vec<Ping>> {
@@ -350,6 +382,31 @@ impl Storage {
         let rows = stmt.query_map([], ping_from_row)?;
         collect_rows(rows)
     }
+
+    pub(crate) fn is_live(event: &Event, now: DateTime<Utc>) -> bool {
+        event.lifecycle().is_live(now)
+    }
+}
+
+fn set_event_lifecycle(
+    conn: &Connection,
+    event_id: u64,
+    lifecycle: &EventLifecycle,
+) -> rusqlite::Result<usize> {
+    let (status, archived, snoozed_until, archived_at) = match lifecycle {
+        EventLifecycle::Open => ("open", false, None, None),
+        EventLifecycle::Snoozed { until } => ("open", false, Some(until.to_rfc3339()), None),
+        EventLifecycle::Done => ("done", false, None, None),
+        EventLifecycle::Archived { at } => ("done", true, None, Some(at.to_rfc3339())),
+    };
+    conn.execute(
+        "
+        UPDATE pings
+        SET status = ?2, archived = ?3, snoozed_until = ?4, archived_at = ?5
+        WHERE id = ?1
+        ",
+        params![event_id, status, archived, snoozed_until, archived_at],
+    )
 }
 
 pub(super) fn ping_snapshot_from_conn(conn: &Connection) -> anyhow::Result<Vec<Ping>> {

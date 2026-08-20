@@ -1,7 +1,7 @@
 use chrono::Utc;
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, EventStatus,
-    HostToClient, ToolCallSummary,
+    ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, HostToClient,
+    ToolCallSummary,
 };
 
 use super::{AgentSessionBootstrap, ToolSuite, info_ui};
@@ -39,13 +39,7 @@ impl ToolSuite {
             .all_pings()
             .await?
             .into_iter()
-            .filter(|event| {
-                event.status == EventStatus::Open
-                    && !event.archived
-                    && event
-                        .snoozed_until
-                        .is_none_or(|snoozed_until| snoozed_until <= Utc::now())
-            })
+            .filter(|event| crate::storage::Storage::is_live(event, Utc::now()))
             .collect::<Vec<_>>();
         let added_tools = display_added_tools(added_tools);
         let mut seed = format!(

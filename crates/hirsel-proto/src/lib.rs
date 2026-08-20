@@ -17,7 +17,8 @@ mod view;
 pub use chat::{Blob, ChatAuthor, ChatMessage, ToolCallSummary};
 pub use client::{ClientToHost, HelloAuth, PushPlatform, SendMode};
 pub use event::{
-    Event, EventKind, EventSource, EventSourceKind, EventStatus, Ping, PingStatus, QuickReply,
+    Event, EventKind, EventLifecycle, EventSource, EventSourceKind, EventStatus, Ping, PingStatus,
+    QuickReply,
 };
 pub use host::HostToClient;
 pub use models::{

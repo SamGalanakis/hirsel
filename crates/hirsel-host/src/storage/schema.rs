@@ -248,13 +248,26 @@ fn migrate_pings_schema(conn: &Connection) -> anyhow::Result<()> {
             [],
         )?;
     }
-    conn.execute(
-        "UPDATE pings SET status = 'done', archived = 1, archived_at = COALESCE(archived_at, ts) WHERE status = 'archived'",
-        [],
-    )?;
-    conn.execute(
-        "UPDATE pings SET archived_at = COALESCE(archived_at, ts) WHERE archived != 0",
-        [],
+    conn.execute_batch(
+        "
+        UPDATE pings
+        SET status = 'done', archived = 1, archived_at = COALESCE(archived_at, ts)
+        WHERE status = 'archived';
+
+        -- Archived is the conservative truth for contradictory legacy rows.
+        UPDATE pings
+        SET status = 'done', archived = 1,
+            snoozed_until = NULL, archived_at = COALESCE(archived_at, ts)
+        WHERE archived != 0;
+
+        UPDATE pings
+        SET archived = 0, snoozed_until = NULL, archived_at = NULL
+        WHERE archived = 0 AND status = 'done';
+
+        UPDATE pings
+        SET archived_at = NULL
+        WHERE archived = 0 AND status = 'open';
+        ",
     )?;
 
     let legacy = {

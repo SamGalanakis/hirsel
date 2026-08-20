@@ -16,6 +16,24 @@ pub enum EventStatus {
     Done,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventLifecycle {
+    Open,
+    Snoozed { until: DateTime<Utc> },
+    Done,
+    Archived { at: DateTime<Utc> },
+}
+
+impl EventLifecycle {
+    pub fn is_live(&self, now: DateTime<Utc>) -> bool {
+        match self {
+            Self::Open => true,
+            Self::Snoozed { until } => *until <= now,
+            Self::Done | Self::Archived { .. } => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
@@ -64,6 +82,26 @@ pub struct Event {
     #[serde(default)]
     pub fork_sc: Option<String>,
     pub ts: DateTime<Utc>,
+}
+
+impl Event {
+    /// Derive the authoritative lifecycle from the legacy wire fields.
+    ///
+    /// Archived is deliberately strongest so old contradictory payloads are
+    /// interpreted conservatively. Host storage normalizes persisted rows.
+    pub fn lifecycle(&self) -> EventLifecycle {
+        if self.archived {
+            EventLifecycle::Archived {
+                at: self.archived_at.unwrap_or(self.ts),
+            }
+        } else if self.status == EventStatus::Done {
+            EventLifecycle::Done
+        } else if let Some(until) = self.snoozed_until {
+            EventLifecycle::Snoozed { until }
+        } else {
+            EventLifecycle::Open
+        }
+    }
 }
 
 /// Source compatibility for the Rust client and the existing agent-tool surface.

@@ -1,5 +1,6 @@
 import { render, waitFor } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventKind } from "./protocol";
 import type { EventItem } from "./protocol";
 
 // Wave 1: the attention layer (tab-title badge, favicon dot, desktop
@@ -46,7 +47,7 @@ const memLocalStorage: Storage = {
 function judgment(id: number, extra: Partial<EventItem> = {}): EventItem {
   return {
     id,
-    kind: "judgment",
+    kind: EventKind.Judgment,
     source: { kind: "subagent", ref: "hirsel-ui" },
     name: `@j${id}`,
     description: "needs you",
@@ -122,7 +123,7 @@ describe("attention layer reads the needs-you count over events", () => {
     dispatch({ type: "event_decide_local", eventId: 9001 });
     dispatch({
       type: "event_upsert",
-      payload: { type: "event_upsert", event: judgment(9003, { kind: "summary", blocking: false }) },
+      payload: { type: "event_upsert", event: judgment(9003, { kind: EventKind.Summary, blocking: false }) },
     });
     await waitFor(() => expect(document.title).toBe("(1) hirsel"));
   });
@@ -187,7 +188,7 @@ describe("desktop notification for a new blocking judgment", () => {
     // A non-blocking awareness event does not notify.
     dispatch({
       type: "event_upsert",
-      payload: { type: "event_upsert", event: judgment(9002, { kind: "info", blocking: false }) },
+      payload: { type: "event_upsert", event: judgment(9002, { kind: EventKind.Info, blocking: false }) },
     });
     await waitFor(() => expect(document.title).toBe("(1) hirsel"));
     expect(notifSpy).toHaveBeenCalledTimes(1);

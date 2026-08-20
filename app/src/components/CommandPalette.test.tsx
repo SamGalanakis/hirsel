@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CommandPalette, ShortcutHelp } from "./CommandPalette";
+import { EventKind } from "../protocol";
 
 // This suite is about the palette's own list/filter behaviour, so the focus
 // module is stubbed out. The real overlay-presence registry is exercised in
@@ -71,7 +72,7 @@ describe("CommandPalette — contextual queue actions (Wave-3 ⌘K depth)", () =
     const store = await import("../store/store");
     const judgment = {
       id: 4242,
-      kind: "judgment" as const,
+      kind: EventKind.Judgment,
       source: { kind: "agent" as const, ref: "host" },
       name: "@ctx",
       description: "context judgment",
@@ -93,7 +94,7 @@ describe("CommandPalette — contextual queue actions (Wave-3 ⌘K depth)", () =
     const readInfo = {
       ...judgment,
       id: 4243,
-      kind: "info" as const,
+      kind: EventKind.Info,
       requires_response: false,
       read: true,
       ui: [{ type: "status", label: "done" }],

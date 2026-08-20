@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventKind } from "../protocol";
 
 // Fresh store + mocked ws client per test (the shared singleton pattern,
 // mirroring event-archive.test.ts).
@@ -22,7 +23,7 @@ describe("snoozeEventWithUndo — the event_action snooze round-trip", () => {
     const { visibleEvents } = await import("../store/selectors");
     const event = {
       id: 5,
-      kind: "judgment" as const,
+      kind: EventKind.Judgment,
       source: { kind: "agent" as const, ref: "host" },
       name: "@j",
       description: "d",
@@ -67,7 +68,7 @@ describe("snoozeEventWithUndo — the event_action snooze round-trip", () => {
     const { snoozeEventWithUndo } = await import("./event-snooze");
     const event = {
       id: 8,
-      kind: "judgment" as const,
+      kind: EventKind.Judgment,
       source: { kind: "agent" as const, ref: "host" },
       name: "@j",
       description: "d",

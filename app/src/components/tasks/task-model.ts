@@ -1,3 +1,4 @@
+import { EventKind } from "../../protocol";
 import type { EventItem } from "../../protocol";
 import { isEventResolved } from "../../store/selectors";
 import type { DisplayMessage } from "../../store/types";
@@ -16,7 +17,7 @@ export type TaskStatus = "done" | "blocked" | "needs-you" | "unseen" | "moving";
 export function taskStatus(task: EventItem): TaskStatus {
   if (isEventResolved(task)) return "done";
   if (task.blocking) return "blocked";
-  if (task.kind === "judgment") return "needs-you";
+  if (task.kind === EventKind.Judgment) return "needs-you";
   if (task.read) return "moving";
   return "unseen";
 }

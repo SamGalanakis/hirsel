@@ -129,7 +129,12 @@ export interface ViewInstance {
  * `summary` is a digest; `info` a quiet notification. Ordering (not a flag)
  * keeps info from drowning judgment. Open set on the wire — an unknown kind is
  * tolerated as awareness. */
-export type EventKind = "judgment" | "summary" | "info";
+export const EventKind = {
+  Judgment: "judgment",
+  Summary: "summary",
+  Info: "info",
+} as const;
+export type EventKind = (typeof EventKind)[keyof typeof EventKind];
 
 /** Who produced an Event: the main Agent, a sub-agent at its own taste
  * boundary, a scheduled lash job (the "morning brief" is one), or a monitor.

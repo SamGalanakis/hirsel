@@ -1,6 +1,7 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventKind } from "../../protocol";
 import type { EventItem } from "../../protocol";
 
 let railViewport = true;
@@ -59,7 +60,7 @@ beforeEach(() => {
 function task(id: number, name: string, heading: string, anchor = 0): EventItem {
   return {
     id,
-    kind: "judgment",
+    kind: EventKind.Judgment,
     source: { kind: "agent", ref: "host" },
     name,
     description: heading,
@@ -621,7 +622,7 @@ describe("Home header collapse", () => {
 describe("Opens focused by default", () => {
   const moving = (id: number, name: string): EventItem => ({
     ...task(id, name, name),
-    kind: "summary",
+    kind: EventKind.Summary,
     blocking: false,
     read: true,
     requires_response: false,

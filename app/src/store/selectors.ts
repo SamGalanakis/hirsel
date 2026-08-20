@@ -1,3 +1,4 @@
+import { EventKind } from "../protocol";
 import type {
   EventItem,
   ProcessInfo,
@@ -139,7 +140,7 @@ export function isEventFinished(event: EventItem): boolean {
 /** A judgment still needing the Owner: kind judgment, open, not optimistically
  * decided. The highest-priority Task state. */
 export function isOpenJudgment(event: EventItem): boolean {
-  return event.kind === "judgment" && !isEventResolved(event);
+  return event.kind === EventKind.Judgment && !isEventResolved(event);
 }
 
 /** The ONE red on the surface (ADR-0012): the "N need you" count = open,
@@ -168,7 +169,7 @@ function taskPriorityRank(event: EventItem): number {
   const open = isOpenJudgment(event);
   if (open && event.blocking) return 0;
   if (open) return 1;
-  if (event.kind === "judgment") return 2; // decided judgment, kept in place
+  if (event.kind === EventKind.Judgment) return 2; // decided judgment, kept in place
   return 3; // awareness (summary/info)
 }
 

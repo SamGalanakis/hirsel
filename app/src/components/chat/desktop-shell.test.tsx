@@ -234,8 +234,14 @@ describe("Task Margins shell", () => {
     };
 
     const ambient = shape();
+    // The capsule fills its frame and the frame IS the reading measure plus a
+    // gutter each side, so the capsule needs no width of its own — it used to
+    // carry a `rail:max-w-measure` that could only ever disagree with the
+    // column above it.
     expect(ambient.capsule).toContain("w-full");
-    expect(ambient.capsule).toContain("rail:max-w-measure");
+    expect(ambient.capsule.filter((c) => /max-w-/.test(c))).toEqual([]);
+    expect(ambient.outer).toContain("max-w-frame");
+    expect(ambient.outer).toContain("px-gutter");
     await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
     expect(document.querySelector('[data-slot="composer-shell"]')).toHaveAttribute("data-focused", "true");
     expect(shape()).toEqual(ambient);
@@ -446,8 +452,10 @@ describe("Task Margins shell", () => {
     ]);
     await fireEvent.click(screen.getByRole("button", { name: /choose direction, blocked on you/ }));
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("Message Hirsel"), "Take option A");
-    await user.click(screen.getByLabelText("Send"));
+    // Enter IS the send on a fine pointer; the capsule carries no Send button
+    // there any more (composer redesign).
+    await user.type(screen.getByLabelText("Message Hirsel"), "Take option A{Enter}");
+    expect(screen.queryByLabelText("Send")).toBeNull();
 
     await waitFor(() => expect(fakeClient.sendMessage).toHaveBeenCalledTimes(1));
     expect(fakeClient.sendMessage).toHaveBeenCalledWith(
@@ -462,8 +470,8 @@ describe("Task Margins shell", () => {
       task(7, "@choose-direction", "Choose direction", 42),
     ]);
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("Message Hirsel"), "Synthesize everything");
-    await user.click(screen.getByLabelText("Send"));
+    await user.type(screen.getByLabelText("Message Hirsel"), "Synthesize everything{Enter}");
+    expect(screen.queryByLabelText("Send")).toBeNull();
 
     await waitFor(() => expect(fakeClient.sendMessage).toHaveBeenCalledTimes(1));
     expect(fakeClient.sendMessage).toHaveBeenCalledWith(

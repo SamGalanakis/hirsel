@@ -139,19 +139,25 @@
   --breakpoint-split: 900px;
   --breakpoint-rail: 1100px;
 
-  /* The task world's one horizontal rhythm, so the field, its conversation and
-     the composer read as one column instead of three stacked widths:
-       `frame`   — the outer field width every standing surface centres in;
-       `measure` — the reading/instrument column inside it, left-anchored, so
-                   the instrument, the ambient conversation and the focused
-                   composer all share one left edge at every width;
+  /* The task world's one horizontal rhythm. There is exactly ONE column width —
+     the reading measure — and everything that stands in the task world holds it:
+       `measure` — the reading/instrument column: the prose the Owner reads, the
+                   pinned task card, and the standing composer, all the same
+                   width and the same two edges at every viewport;
+       `frame`   — that measure plus one gutter each side. It is the box the
+                   field centres, so the column lands in the MIDDLE of the field
+                   rather than pinned to its left with dead space beside it;
        `gutter`  — the single side inset (index, field, composer, header),
                    replacing the old px-3 / px-4 / px-6 mix.
+     The frame used to be 1180px against an 820px measure, and the prose inside
+     that measure was capped narrower still at 42rem — three stacked widths, so
+     the composer's right edge overhung the text it sat under by ~150px and the
+     whole column read left of centre. One measure, derived frame, no third cap.
      Nothing in the task world should re-introduce a literal px width or a
      bespoke inset. */
-  --container-frame: 1180px;
-  --container-measure: 820px;
+  --container-measure: 42rem;
   --spacing-gutter: 1.5rem;
+  --container-frame: calc(var(--container-measure) + 2 * var(--spacing-gutter));
 
   /* `meta` — the one named size below `text-xs` (DESIGN §3: meta is 11–12px;
      11.5px sits inside that floor). It was a de-facto token already, written

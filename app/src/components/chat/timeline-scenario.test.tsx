@@ -137,7 +137,8 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       // Send the trigger word.
       const composer = (await screen.findByLabelText("Message Hirsel")) as HTMLTextAreaElement;
       fireEvent.input(composer, { target: { value: "timeline" } });
-      fireEvent.click(screen.getByLabelText("Send"));
+      // Enter is the send on a fine pointer — the capsule has no Send button.
+      fireEvent.keyDown(composer, { key: "Enter" });
       await screen.findByText("timeline");
 
       // --- Stream the turn timeline ---

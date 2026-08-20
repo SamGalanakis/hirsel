@@ -1,4 +1,4 @@
-import { fireEvent, render, within } from "@solidjs/testing-library";
+import { fireEvent, render } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { createRoot } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -130,20 +130,73 @@ describe("Per-surface draft persistence (task 2)", () => {
 });
 
 describe("Queue-next-turn affordance (task 4)", () => {
-  it("exposes a labeled 'Queue for next turn' action that sends in next_turn mode", async () => {
+  it("queues the draft on Tab, in next_turn mode", async () => {
     const onSend = vi.fn();
-    const { getByLabelText, textarea } = await renderComposer({ onSend });
+    const { textarea } = await renderComposer({ onSend });
     fireEvent.input(textarea, { target: { value: "later work" } });
 
-    const user = userEvent.setup();
-    await user.click(getByLabelText("More send options"));
-    const queue = await within(document.body).findByRole("menuitem", {
-      name: "Queue for next turn",
-    });
-    await user.click(queue);
+    fireEvent.keyDown(textarea, { key: "Tab" });
 
     expect(onSend).toHaveBeenCalledOnce();
     // onSend(body, ref, mode, blobs, mentions) — mode is the 3rd arg.
     expect(onSend.mock.calls[0][2]).toBe("next_turn");
+  });
+
+  it("leaves Tab as ordinary focus movement when the draft is empty", async () => {
+    const onSend = vi.fn();
+    const { textarea } = await renderComposer({ onSend });
+    fireEvent.keyDown(textarea, { key: "Tab" });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("writes BOTH queue routes into the shortcut sheet, since the capsule shows neither", async () => {
+    const { SHORTCUTS } = await import("../../lib/keymap");
+    const queue = SHORTCUTS.filter((s) => /Queue for next turn/.test(s.label));
+    expect(queue.map((s) => s.keys.join("+")).sort()).toEqual(["Hold Send", "Tab"]);
+    expect(queue.every((s) => s.group === "Hirsel")).toBe(true);
+  });
+});
+
+describe("No dead affordances in the capsule (composer redesign)", () => {
+  // Enter is the send on a fine pointer, so a Send button beside it was a
+  // second route to the same thing; the caret next to it opened a send-options
+  // menu that was `disabled` on an empty draft — the affordance did nothing
+  // exactly when it was reached for. Both are gone. A coarse pointer keeps
+  // Send, because there Enter is a newline. jsdom reports a fine pointer.
+  it("shows neither a Send button nor a send-options caret on a fine pointer", async () => {
+    const { queryByLabelText, textarea } = await renderComposer({});
+    expect(queryByLabelText("More send options")).toBeNull();
+    expect(queryByLabelText("Send")).toBeNull();
+    fireEvent.input(textarea, { target: { value: "a non-empty draft" } });
+    expect(queryByLabelText("More send options")).toBeNull();
+    expect(queryByLabelText("Send")).toBeNull();
+  });
+
+  it("still sends on Enter and keeps attach and Stop reachable while thinking", async () => {
+    const onSend = vi.fn();
+    const onStop = vi.fn();
+    const { textarea, getByLabelText } = await renderComposer({ onSend, onStop, thinking: true });
+    expect(getByLabelText("Attach files")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(getByLabelText("Stop the agent"));
+    expect(onStop).toHaveBeenCalledOnce();
+
+    fireEvent.input(textarea, { target: { value: "ship it" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledOnce();
+    expect(onSend.mock.calls[0][2]).toBe("send");
+  });
+
+  it("rests one line high: the capsule's own padding plus a 36px text row", async () => {
+    const { container, textarea } = await renderComposer({});
+    const shell = container.querySelector('[data-slot="composer-shell"]') as HTMLElement;
+    // The resting capsule is 44px on a fine pointer (py-1 + min-h-9), not the
+    // 60px slab it was (py-2 + min-h-11). Asserted through the classes because
+    // jsdom does not lay out.
+    expect(shell.className).toContain("py-1");
+    expect(shell.className).not.toContain("py-2");
+    expect(textarea.className).toContain("min-h-9");
+    expect(textarea.className).toContain("max-h-28");
   });
 });

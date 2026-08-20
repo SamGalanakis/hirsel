@@ -19,7 +19,7 @@ import {
 import { toast } from "../../lib/toast";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Group, Field, SectionHeader, Toggle } from "./rows";
+import { Group, Field, Toggle } from "./rows";
 
 /** The one-word run state, coloured like the rest of the app: success green for
  * running, muted for off, and the error red only for a genuine failure. */
@@ -215,7 +215,6 @@ export function PluginsSection(): JSX.Element {
 
   return (
     <Show when={(plugins()?.length ?? 0) > 0}>
-      <SectionHeader id="settings-plugins">Plugins</SectionHeader>
       <Group class="divide-y divide-border">
         <For each={plugins() ?? []}>
           {(plugin) => <PluginRow plugin={plugin} onChanged={() => void refresh()} />}

@@ -12,6 +12,7 @@ import type {
   ProcessInfo,
   ProcessUpsertMsg,
   PromptSnapshot,
+  ProviderRoster,
   SendMode,
   SubagentModelCatalog,
   TurnEvent,
@@ -134,6 +135,11 @@ export interface AppState {
   /** Effective editable prompts and fork selection. Seeded from
    * `hello_ok.prompts`, then replaced by `prompts_changed`. */
   prompts: PromptSnapshot | null;
+  /** The configured provider roster: every instance an agent can run on, plus
+   * the provider the resident session actually booted on. Seeded from
+   * `hello_ok.providers` and replaced wholesale by `providers_changed`. `null`
+   * on a host that reports no roster. */
+  providers: ProviderRoster | null;
   pendingSends: PendingSend[];
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
    * hello_ok.processes and kept current by process_upsert. */
@@ -204,7 +210,8 @@ export type Action =
   // ---- Model configuration ----
   | { type: "model_changed"; current: ModelSelection }
   | { type: "subagent_models_changed"; catalog: SubagentModelCatalog }
-  | { type: "prompts_changed"; prompts: PromptSnapshot };
+  | { type: "prompts_changed"; prompts: PromptSnapshot }
+  | { type: "providers_changed"; roster: ProviderRoster };
 
 export function initialState(): AppState {
   return {
@@ -220,6 +227,7 @@ export function initialState(): AppState {
     model: null,
     subagentModels: null,
     prompts: null,
+    providers: null,
     pendingSends: [],
     processes: [],
     turnEvents: [],

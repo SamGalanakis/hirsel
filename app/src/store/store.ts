@@ -13,7 +13,7 @@ interface UiState {
   rightRegion: RightRegion;
   composerPrefill: string | null;
   protocolError: string | null;
-  settingsScrollTarget: SettingsSection | null;
+  settingsTab: SettingsTab | null;
   /** The one focused Task, or `null` for the ambient field. Ambient is the
    * absence of focus, so `null` is the resting value, not a mode. It lives here
    * rather than inside the shell because focus is now reachable from outside the
@@ -23,11 +23,22 @@ interface UiState {
   /** Increments for every prompts_changed frame, including an authoritative
    * no-change acknowledgement whose object fields equal the store. */
   promptsRevision: number;
+  /** Increments for every providers_changed frame, on the same terms as
+   * `promptsRevision`: an equal roster is still an acknowledgement. */
+  providersRevision: number;
 }
 
-/** A jump-to target within the Settings pane, used by callers that open
- * Settings pointed at a specific section (see `settingsScrollTarget`). */
-export type SettingsSection = "models";
+/** The Settings panel's side-tab identifiers, in the order the rail lists them.
+ * A caller that opens Settings pointed at one (see `settingsTab`) names it
+ * here; the tab IS the landing, so there is nothing to scroll to. */
+export type SettingsTab =
+  | "appearance"
+  | "agents"
+  | "providers"
+  | "connection"
+  | "notifications"
+  | "about"
+  | "plugins";
 
 type Store = AppState & UiState;
 
@@ -37,9 +48,10 @@ function initialStore(): Store {
     rightRegion: "none",
     composerPrefill: null,
     protocolError: null,
-    settingsScrollTarget: null,
+    settingsTab: null,
     focusedTaskId: null,
     promptsRevision: 0,
+    providersRevision: 0,
   };
 }
 
@@ -70,6 +82,7 @@ function appSnapshot(): AppState {
     model: state.model,
     subagentModels: state.subagentModels,
     prompts: state.prompts,
+    providers: state.providers,
     pendingSends: state.pendingSends,
     processes: state.processes,
     turnEvents: state.turnEvents,
@@ -129,6 +142,10 @@ export function dispatch(action: Action): void {
     setState("prompts", next.prompts);
     if (action.type === "prompts_changed") {
       setState("promptsRevision", (revision) => revision + 1);
+    }
+    setState("providers", next.providers);
+    if (action.type === "providers_changed") {
+      setState("providersRevision", (revision) => revision + 1);
     }
     // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
     // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
@@ -195,17 +212,17 @@ export function openProcesses(): void {
   setState("rightRegion", "processes");
 }
 
-/** Dock the Settings inspector into the right region. An optional `section`
- * points the pane at a specific group on open (e.g. the phone overflow "Model
- * settings" row opens Settings scrolled to Models); omitted opens at the top. */
-export function openSettings(section?: SettingsSection): void {
-  setState({ rightRegion: "settings", settingsScrollTarget: section ?? null });
+/** Summon Settings, optionally on a named tab (`openSettings("providers")`).
+ * Omitted opens on Appearance, the first tab. */
+export function openSettings(tab?: SettingsTab): void {
+  setState({ rightRegion: "settings", settingsTab: tab ?? null });
 }
 
-/** Consume the one-shot Settings scroll target (SettingsPanel reads it on
- * mount, scrolls, then clears it so a later open lands at the top). */
-export function clearSettingsScrollTarget(): void {
-  setState("settingsScrollTarget", null);
+/** Consume the one-shot Settings tab target: the panel reads it on mount to
+ * choose its landing tab, then clears it so a later open starts at the top of
+ * the rail again. */
+export function clearSettingsTab(): void {
+  setState("settingsTab", null);
 }
 
 /** Surface the Canvas view in the right region. */

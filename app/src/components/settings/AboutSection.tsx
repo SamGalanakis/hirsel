@@ -5,7 +5,7 @@ import type { JSX } from "solid-js";
 import { setShowAgentCode, showAgentCode } from "../../lib/prefs";
 import { APP_VERSION } from "../../lib/version";
 import { state } from "../../store/store";
-import { Group, Field, SectionHeader, Toggle } from "./rows";
+import { Group, Field, Toggle } from "./rows";
 
 export function AboutSection(props: {
   debug: boolean;
@@ -14,7 +14,6 @@ export function AboutSection(props: {
 }): JSX.Element {
   return (
     <>
-      <SectionHeader>About &amp; debug</SectionHeader>
       <Group class="divide-y divide-border">
         <div class="flex items-center justify-between gap-3 py-3">
           <span class="text-sm text-foreground">App version</span>

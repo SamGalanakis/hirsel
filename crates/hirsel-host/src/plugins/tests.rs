@@ -52,6 +52,7 @@ async fn test_tools(
         path.join("hirsel.toml"),
         path,
         std::path::Path::new("/docs/hirsel-config.md"),
+        &crate::host_config::EnvBootstrap::default(),
     )
     .await
     .unwrap();

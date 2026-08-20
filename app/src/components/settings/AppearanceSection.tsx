@@ -2,12 +2,11 @@
 // presentation preference.
 import type { JSX } from "solid-js";
 import { setThemeMode, themeMode } from "../../lib/theme";
-import { Group, Field, SectionHeader, SegmentedControl } from "./rows";
+import { Group, Field, SegmentedControl } from "./rows";
 
 export function AppearanceSection(): JSX.Element {
   return (
     <>
-      <SectionHeader>Appearance</SectionHeader>
       <Group class="py-3">
         <Field title="Theme" subtitle="System follows your device's light or dark setting." />
         <div class="mt-3">

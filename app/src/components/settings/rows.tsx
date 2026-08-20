@@ -22,9 +22,11 @@ export function Group(props: { children: JSX.Element; class?: string; id?: strin
   );
 }
 
-/** Section heading. Sentence case, at the meta size — DESIGN §3 rules out
- * all-caps ("Avoid oversized bold section headings, all-caps navigation"), so
- * the heading earns its rank from weight and the whitespace above it. */
+/** Heading for a group a tab holds more than one of (Settings' side tab names
+ * the panel, so a lone group under it needs no heading of its own). Sentence
+ * case, at the meta size — DESIGN §3 rules out all-caps ("Avoid oversized bold
+ * section headings, all-caps navigation"), so the heading earns its rank from
+ * weight and the whitespace above it. */
 export function SectionHeader(props: { children: JSX.Element; id?: string }) {
   return (
     <h2
@@ -171,7 +173,7 @@ export function Select<T extends string>(props: {
 }
 
 /** A sub-heading within a section (e.g. "Main agent" / a provider name inside
- * the Models section). Quieter than a SectionHeader — it must not outrank the
+ * the Agents tab). Quieter than a SectionHeader — it must not outrank the
  * heading it lives under. */
 export function SubHeading(props: { children: JSX.Element }) {
   return (

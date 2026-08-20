@@ -130,6 +130,7 @@ mod tests {
                 model,
                 subagent_models,
                 prompts,
+                providers,
                 views,
             } => {
                 assert_eq!(latest_msg_id, 1);
@@ -142,6 +143,15 @@ mod tests {
                 assert!(!host_version.is_empty());
                 assert!(model.is_none());
                 assert!(subagent_models.is_some());
+                // The roster is always reported: the two built-ins exist in
+                // every boot mode, detected or not.
+                let roster = providers.expect("hello_ok carries the provider roster");
+                assert!(
+                    roster
+                        .instances
+                        .iter()
+                        .any(|instance| instance.id == "codex")
+                );
                 // The prompt surface is always reported: the Agent prompt is
                 // editable in every provider mode, including this one.
                 let prompts = prompts.expect("prompt snapshot");

@@ -10,6 +10,7 @@ pub struct RuntimeConfig {
     pub data_dir: PathBuf,
     pub driver_mode: DriverMode,
     pub config_store: ConfigStore,
+    pub providers: ProviderRosterState,
     pub prompts: PromptConfig,
 }
 
@@ -168,38 +169,14 @@ pub(super) struct CodexTokens {
     pub(super) account_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct CodexAuthFile {
-    pub(super) tokens: CodexAuthTokens,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct CodexAuthTokens {
-    pub(super) access_token: String,
-    pub(super) refresh_token: String,
-    #[serde(default)]
-    pub(super) account_id: Option<String>,
-    #[serde(default)]
-    pub(super) expires_at: Option<u64>,
-}
-
 pub(super) async fn load_codex_tokens() -> Result<CodexTokens, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let home = crate::provider_detect::home_dir()
         .ok_or_else(|| "HOME is not set; cannot locate ~/.codex/auth.json".to_string())?;
-    let auth_path = home.join(".codex").join("auth.json");
-    let text = tokio::fs::read_to_string(&auth_path)
-        .await
-        .map_err(|error| format!("failed to read {}: {error}", auth_path.display()))?;
-    let auth: CodexAuthFile =
-        serde_json::from_str(&text).map_err(|error| format!("invalid Codex auth JSON: {error}"))?;
-    if auth.tokens.access_token.is_empty() || auth.tokens.refresh_token.is_empty() {
-        return Err("Codex OAuth tokens are missing access_token or refresh_token".to_string());
-    }
+    let tokens = crate::provider_detect::read_codex_tokens(&home).await?;
     Ok(CodexTokens {
-        access_token: auth.tokens.access_token,
-        refresh_token: auth.tokens.refresh_token,
-        expires_at: auth.tokens.expires_at.unwrap_or(0),
-        account_id: auth.tokens.account_id,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: tokens.expires_at.unwrap_or(0),
+        account_id: tokens.account_id,
     })
 }

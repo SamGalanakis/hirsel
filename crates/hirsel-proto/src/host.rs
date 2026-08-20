@@ -6,9 +6,15 @@ use crate::chat::{Blob, ChatMessage};
 use crate::event::Event;
 use crate::models::{ModelSelection, ModelSnapshot, PromptSnapshot, SubagentModelCatalog};
 use crate::process::{ProcessInfo, SideChatSummary};
+use crate::providers::ProviderRoster;
 use crate::turn::{AgentActivityState, TurnEventKind};
 use crate::view::ViewInstance;
 
+// `hello_ok` is the whole-session snapshot: it is inherently far larger than
+// the incremental frames beside it, and boxing its fields would put a pointer
+// chase in the wire contract to save bytes on a frame that is sent once per
+// connection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +42,9 @@ pub enum HostToClient {
         /// Owner-editable Agent and fork prompts. Older hosts omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompts: Option<PromptSnapshot>,
+        /// The configured provider roster. Older hosts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        providers: Option<ProviderRoster>,
         #[serde(default)]
         views: Vec<ViewInstance>,
     },
@@ -81,6 +90,11 @@ pub enum HostToClient {
     /// snapshot, because a prompt edit can change the fork config's shape too.
     PromptsChanged {
         prompts: PromptSnapshot,
+    },
+    /// The provider roster after an accepted edit — the whole roster, because
+    /// one edit can change another instance's derived state.
+    ProvidersChanged {
+        roster: ProviderRoster,
     },
     BlobOk {
         client_id: String,

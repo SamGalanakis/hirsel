@@ -85,6 +85,7 @@ fn hello_ok(
         model: None,
         subagent_models: None,
         prompts: None,
+        providers: None,
         views: Vec::new(),
     }
 }

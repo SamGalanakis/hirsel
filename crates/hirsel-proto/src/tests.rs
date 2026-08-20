@@ -541,6 +541,8 @@ fn hello_ok_round_trips_chat_and_pings() {
                 variants: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
                 default_variant: "medium".to_string(),
             }],
+            provider_id: Some("codex".to_string()),
+            free_text_model: false,
         }),
         subagent_models: Some(SubagentModelCatalog {
             providers: vec![SubagentProviderModels {
@@ -575,7 +577,28 @@ fn hello_ok_round_trips_chat_and_pings() {
                     text: "Triage the wake.".to_string(),
                     is_default: false,
                 },
+                provider_id: Some("codex".to_string()),
+                free_text_model: false,
             }),
+        }),
+        providers: Some(ProviderRoster {
+            instances: vec![ProviderInstance {
+                id: "codex".to_string(),
+                kind: ProviderKind::Codex,
+                label: "Codex".to_string(),
+                base_url: None,
+                api_key: MaskedSecret::default(),
+                default_model: "gpt-5.6-sol".to_string(),
+                detection: Some(DetectionStatus {
+                    detected: true,
+                    path: "/home/owner/.codex/auth.json".to_string(),
+                    account_hint: Some("acct-1".to_string()),
+                    detail: None,
+                }),
+                agent_selectable: true,
+                removable: false,
+            }],
+            booted_provider_id: Some("codex".to_string()),
         }),
         views: Vec::new(),
     };
@@ -856,6 +879,7 @@ fn hello_ok_defaults_side_chats() {
             model: None,
             subagent_models: None,
             prompts: None,
+            providers: None,
             views: Vec::new(),
         }
     );
@@ -1029,4 +1053,157 @@ fn main_scope_frames_omit_sc() {
         let encoded = serde_json::to_value(frame).unwrap();
         assert!(encoded.get("sc").is_none());
     }
+}
+
+/// The three `kind` literals are a cross-language contract: the config store
+/// writes them into `hirsel.toml`, the docs quote them, and the client branches
+/// on them to tell an editable OpenAI-compatible instance from a detected OAuth
+/// one. Derived casing does NOT produce the OpenAI spelling — `snake_case`
+/// breaks `OpenAiCompatible` at the capital A — so the literals are pinned here
+/// rather than left to the derive.
+#[test]
+fn provider_kinds_serialize_to_the_documented_literals() {
+    for (kind, literal) in [
+        (ProviderKind::Codex, "codex"),
+        (ProviderKind::Claude, "claude"),
+        (ProviderKind::OpenAiCompatible, "openai_compatible"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(literal));
+        assert_eq!(
+            serde_json::from_value::<ProviderKind>(json!(literal)).unwrap(),
+            kind
+        );
+    }
+}
+
+#[test]
+fn provider_ops_use_snake_case_protocol_names() {
+    assert_eq!(
+        serde_json::to_value(ClientToHost::SetAgentProvider {
+            agent: AgentSlot::Fork,
+            provider_id: "openrouter".to_string(),
+        })
+        .unwrap(),
+        json!({
+            "type": "set_agent_provider",
+            "agent": "fork",
+            "provider_id": "openrouter"
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(ClientToHost::AddProvider {
+            id: "openrouter".to_string(),
+            label: "OpenRouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            api_key: "sk-or-v1-secret".to_string(),
+            default_model: "google/gemini-3.7-flash".to_string(),
+        })
+        .unwrap(),
+        json!({
+            "type": "add_provider",
+            "id": "openrouter",
+            "label": "OpenRouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-v1-secret",
+            "default_model": "google/gemini-3.7-flash"
+        })
+    );
+    // An omitted patch field is absent on the wire, which is how the host
+    // tells "leave the stored key alone" from "clear it".
+    assert_eq!(
+        serde_json::to_value(ClientToHost::UpdateProvider {
+            id: "openrouter".to_string(),
+            label: Some("Router".to_string()),
+            base_url: None,
+            api_key: None,
+            default_model: None,
+        })
+        .unwrap(),
+        json!({
+            "type": "update_provider",
+            "id": "openrouter",
+            "label": "Router"
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(ClientToHost::RemoveProvider {
+            id: "openrouter".to_string(),
+        })
+        .unwrap(),
+        json!({ "type": "remove_provider", "id": "openrouter" })
+    );
+    assert_eq!(
+        serde_json::to_value(ClientToHost::RedetectProvider {
+            id: "codex".to_string(),
+        })
+        .unwrap(),
+        json!({ "type": "redetect_provider", "id": "codex" })
+    );
+}
+
+#[test]
+fn providers_changed_round_trips_and_masks_stay_masked() {
+    let roster = ProviderRoster {
+        instances: vec![
+            ProviderInstance {
+                id: "claude".to_string(),
+                kind: ProviderKind::Claude,
+                label: "Claude".to_string(),
+                base_url: None,
+                api_key: MaskedSecret::default(),
+                default_model: String::new(),
+                detection: Some(DetectionStatus {
+                    detected: false,
+                    path: "/home/owner/.claude/.credentials.json".to_string(),
+                    account_hint: None,
+                    detail: Some("no credentials file".to_string()),
+                }),
+                agent_selectable: false,
+                removable: false,
+            },
+            ProviderInstance {
+                id: "openrouter".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                label: "OpenRouter".to_string(),
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key: MaskedSecret {
+                    present: true,
+                    tail: "cret".to_string(),
+                },
+                default_model: "google/gemini-3.7-flash".to_string(),
+                detection: None,
+                agent_selectable: true,
+                removable: true,
+            },
+        ],
+        booted_provider_id: Some("codex".to_string()),
+    };
+    let frame = HostToClient::ProvidersChanged {
+        roster: roster.clone(),
+    };
+    let encoded = serde_json::to_string(&frame).unwrap();
+    assert!(encoded.starts_with(r#"{"type":"providers_changed""#));
+    assert!(!encoded.contains("sk-or-v1"));
+    let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn model_snapshot_provider_fields_default_for_older_hosts() {
+    let parsed: ModelSnapshot = serde_json::from_value(json!({
+        "current": { "id": "gpt-5.6-sol", "variant": "high" },
+        "available": []
+    }))
+    .unwrap();
+    assert_eq!(parsed.provider_id, None);
+    assert!(!parsed.free_text_model);
+
+    let parsed: ForkAgentConfig = serde_json::from_value(json!({
+        "current": { "id": "gpt-5.6-luna", "variant": "max" },
+        "available": [],
+        "prompt": { "text": "Triage.", "is_default": true }
+    }))
+    .unwrap();
+    assert_eq!(parsed.provider_id, None);
+    assert!(!parsed.free_text_model);
 }

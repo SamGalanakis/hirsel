@@ -1152,3 +1152,163 @@ async fn current_host_starts_without_legacy_side_session_runtime() {
     assert!(error.to_string().contains("HIRSEL_COMPAT_SIDE_SESSIONS=1"));
     assert!(!state.side_chats.reaper_started());
 }
+
+#[tokio::test]
+async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+    state
+        .add_provider(
+            "router",
+            "Router",
+            "https://example.invalid/v1",
+            "sk-fake-router-key",
+            "some/model",
+        )
+        .await
+        .unwrap();
+    state.broadcast_log.clear();
+
+    let roster = state
+        .set_agent_provider(AgentSlot::Main, "router")
+        .await
+        .unwrap();
+
+    // The choice is stored with the provider's default model seeded...
+    assert_eq!(roster.booted_provider_id.as_deref(), Some("codex"));
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.provider_id.as_deref(), Some("router"));
+    assert_eq!(snapshot.current.id, "some/model");
+    assert!(snapshot.free_text_model);
+    assert!(snapshot.available.is_empty());
+    // ...and both the roster and the model chip are told.
+    assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+        event,
+        HostToClient::ProvidersChanged { roster }
+            if roster.instances.iter().any(|instance| instance.id == "router")
+    )));
+    assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+        event,
+        HostToClient::ModelChanged { current } if current.id == "some/model"
+    )));
+    // The key never rides along on any broadcast.
+    let broadcasts = serde_json::to_string(&state.broadcast_log.recent()).unwrap();
+    assert!(!broadcasts.contains("sk-fake-router-key"), "{broadcasts}");
+
+    // The fork is a separate slot with its own seed.
+    state
+        .set_agent_provider(AgentSlot::Fork, "codex")
+        .await
+        .unwrap();
+    let fork = state.prompt_snapshot().fork.unwrap();
+    assert_eq!(fork.provider_id.as_deref(), Some("codex"));
+    assert_eq!(fork.current.id, "gpt-5.6-luna");
+    assert_eq!(fork.current.variant, "max");
+}
+
+#[tokio::test]
+async fn claude_is_rejected_for_both_resident_agents_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+    state.broadcast_log.clear();
+
+    for agent in [AgentSlot::Main, AgentSlot::Fork] {
+        let error = state
+            .set_agent_provider(agent, "claude")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Sub-agents only"), "{error}");
+        assert!(error.contains("ADR-0015"), "{error}");
+    }
+    // A rejected command settles on the error frame alone.
+    assert!(state.broadcast_log.recent().is_empty());
+    assert!(state.model_snapshot().unwrap().provider_id.as_deref() == Some("codex"));
+}
+
+#[tokio::test]
+async fn anthropic_boot_mode_keeps_its_legacy_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    // `test_config` boots on the legacy Anthropic path.
+    let state = build_state(test_config(dir.path())).await.unwrap();
+
+    assert!(state.model_snapshot().is_none());
+    assert!(state.prompt_snapshot().fork.is_none());
+    let roster = state.provider_roster().await;
+    assert_eq!(roster.booted_provider_id, None);
+    assert!(
+        roster
+            .instances
+            .iter()
+            .any(|instance| instance.id == "codex")
+    );
+
+    // Ops that need a resident agent's provider fail cleanly, and the
+    // built-ins stay built in.
+    assert!(
+        state
+            .set_agent_provider(AgentSlot::Main, "codex")
+            .await
+            .is_err()
+    );
+    assert!(state.remove_provider("codex").await.is_err());
+    assert!(state.redetect_provider("nope").await.is_err());
+    assert!(state.redetect_provider("codex").await.is_ok());
+}
+
+#[tokio::test]
+async fn provider_edits_persist_and_never_broadcast_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(test_config(dir.path())).await.unwrap();
+    state
+        .add_provider(
+            "router",
+            "Router",
+            "https://example.invalid/v1",
+            "sk-fake-router-key",
+            "some/model",
+        )
+        .await
+        .unwrap();
+
+    let roster = state
+        .update_provider("router", Some("Renamed"), None, None, Some("other/model"))
+        .await
+        .unwrap();
+    let router = roster
+        .instances
+        .iter()
+        .find(|instance| instance.id == "router")
+        .unwrap();
+    assert_eq!(router.label, "Renamed");
+    assert_eq!(router.default_model, "other/model");
+    assert!(router.api_key.present);
+    assert_eq!(router.api_key.tail, "-key");
+    assert!(router.removable);
+
+    // The full key is in the file and nowhere else.
+    let persisted = std::fs::read_to_string(dir.path().join("hirsel.toml")).unwrap();
+    assert!(persisted.contains("sk-fake-router-key"), "{persisted}");
+    let broadcasts = serde_json::to_string(&state.broadcast_log.recent()).unwrap();
+    assert!(!broadcasts.contains("sk-fake-router-key"), "{broadcasts}");
+
+    let roster = state.remove_provider("router").await.unwrap();
+    assert!(
+        !roster
+            .instances
+            .iter()
+            .any(|instance| instance.id == "router")
+    );
+    assert!(
+        state
+            .add_provider("codex", "X", "https://a.invalid/v1", "k", "m")
+            .await
+            .is_err()
+    );
+}

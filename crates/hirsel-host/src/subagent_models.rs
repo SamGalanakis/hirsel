@@ -444,6 +444,7 @@ mod tests {
             dir.path().join("hirsel.toml"),
             dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
+            &crate::host_config::EnvBootstrap::default(),
         )
         .await
         .unwrap();

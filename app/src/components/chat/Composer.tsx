@@ -1,4 +1,15 @@
-import { ArrowUp, ChevronDown, FileText, LoaderCircle, Paperclip, RotateCcw, Square, X } from "lucide-solid";
+import {
+  ArrowUp,
+  ChevronDown,
+  CornerDownLeft,
+  File as FileIcon,
+  FileText,
+  LoaderCircle,
+  Paperclip,
+  RotateCcw,
+  Square,
+  X,
+} from "lucide-solid";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
@@ -26,7 +37,9 @@ import {
   AttachmentTitle,
   type AttachmentState,
 } from "../ui/attachment";
-import type { AttachmentsController } from "./useAttachments";
+import type { AttachmentsController, PendingFile } from "./useAttachments";
+import { extractTransferFiles, isLargePaste } from "./paste";
+import { createFileDrop } from "./useFileDrop";
 
 const MAX_HEIGHT_PX = 112;
 const LONG_PRESS_MS = 450;
@@ -140,21 +153,45 @@ export function Composer(props: Props) {
     }
   }
 
+  // Clipboard routing, in priority order: files (screenshots, copied images)
+  // become chips; a paste too large to live in a four-line pill becomes a
+  // pasted-text chip; everything else takes the browser's own insertion path
+  // untouched, so ordinary pasting never changes behaviour.
   function handlePaste(e: ClipboardEvent) {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    const files: File[] = [];
-    for (const item of items) {
-      if (item.kind === "file") {
-        const f = item.getAsFile();
-        if (f) files.push(f);
-      }
-    }
+    const data = e.clipboardData;
+    if (!data) return;
+    const { files, rejected } = extractTransferFiles(data);
     if (files.length > 0) {
       e.preventDefault();
-      props.attachments.addFiles(files);
+      for (const reason of new Set(rejected)) toast(reason, { variant: "error" });
+      props.attachments.addPastedFiles(files);
+      return;
+    }
+    const text = data.getData("text/plain");
+    if (text && isLargePaste(text)) {
+      e.preventDefault();
+      props.attachments.addPastedText(text);
     }
   }
+
+  // The escape hatch for auto-attaching: put the paste back into the field.
+  // Peer clients that convert pastes without one ("Show in text field" is
+  // ChatGPT's) are the single loudest complaint about the pattern.
+  function insertAsText(clientId: string) {
+    const text = props.attachments.takeText(clientId);
+    if (text === null) return;
+    const current = value();
+    setValue(current.length > 0 ? `${current}\n${text}` : text);
+    focus();
+    caretToEnd();
+  }
+
+  const dragging = createFileDrop((data) => props.attachments.addFromTransfer(data));
+
+  // One description line per chip kind: a paste is measured in lines (the thing
+  // you actually want to know about it), a file in bytes.
+  const describe = (pf: PendingFile) =>
+    pf.lines === undefined ? formatBytes(pf.size) : `Pasted text · ${pf.lines} lines`;
 
   function onSendPointerDown() {
     longPressed = false;
@@ -190,10 +227,16 @@ export function Composer(props: Props) {
     <div
       data-slot="composer-shell"
       data-focused={props.focused ? "true" : "false"}
+      data-dropping={dragging() ? "true" : "false"}
       class="w-full rounded-full px-3 py-2 ring-1 transition-[max-width,background-color,box-shadow] duration-200 ease-out"
       classList={{
-        "bg-primary/[0.035] ring-primary/25 rail:max-w-measure": props.focused,
-        "bg-card/95 ring-border": !props.focused,
+        // The drop state overrides both resting tones: while a file is in the
+        // air the capsule is the one thing on screen that must read as a
+        // target, so it takes the full mint ring regardless of focus.
+        "rail:max-w-measure": props.focused,
+        "ring-primary bg-primary/10": dragging(),
+        "bg-primary/[0.035] ring-primary/25": props.focused && !dragging(),
+        "bg-card/95 ring-border": !props.focused && !dragging(),
       }}
     >
       <div class="w-full">
@@ -204,17 +247,29 @@ export function Composer(props: Props) {
           <For each={props.attachments.files()}>
             {(pf) => {
               const st = () => uploadState(pf.clientId);
+              // `title` carries the full name and, for a paste, its opening
+              // lines — the chip itself stays one quiet row so several staged
+              // items never push the capsule off the floor.
               return (
-                <Attachment size="sm" state={st()} class="w-52">
+                <Attachment
+                  size="sm"
+                  state={st()}
+                  class="w-52"
+                  data-kind={pf.kind}
+                  title={pf.text ? `${pf.name}\n\n${pf.text.slice(0, 400)}` : pf.name}
+                >
                   <AttachmentMedia variant={pf.previewUrl ? "image" : "icon"}>
-                    <Show when={pf.previewUrl} fallback={<FileText />}>
+                    <Show
+                      when={pf.previewUrl}
+                      fallback={pf.kind === "file" ? <FileIcon /> : <FileText />}
+                    >
                       <img src={pf.previewUrl} alt={pf.name} />
                     </Show>
                   </AttachmentMedia>
                   <AttachmentContent>
                     <AttachmentTitle>{pf.name}</AttachmentTitle>
                     <AttachmentDescription>
-                      <Show when={st() === "error"} fallback={formatBytes(pf.size)}>
+                      <Show when={st() === "error"} fallback={describe(pf)}>
                         Upload failed
                       </Show>
                     </AttachmentDescription>
@@ -229,6 +284,14 @@ export function Composer(props: Props) {
                         onClick={() => props.attachments.retry(pf.clientId)}
                       >
                         <RotateCcw />
+                      </AttachmentAction>
+                    </Show>
+                    <Show when={pf.text !== undefined && st() !== "uploading"}>
+                      <AttachmentAction
+                        aria-label={`Insert "${pf.name}" as text`}
+                        onClick={() => insertAsText(pf.clientId)}
+                      >
+                        <CornerDownLeft />
                       </AttachmentAction>
                     </Show>
                     <Show when={st() !== "uploading"}>
@@ -342,7 +405,15 @@ export function Composer(props: Props) {
       {/* Bottom cue row: no standing keyboard-hint teaching (those keys live in
           the `?` shortcut sheet). Only the exceptional offline cue takes space,
           reserved for exceptional connection state. */}
-      <Show when={offline()}>
+      {/* Transient drop cue. It names the ceiling at the moment a file is in
+          the air — the one moment the limit is actionable — so an over-cap
+          file is a refusal the user was warned about, not a failed send. */}
+      <Show when={dragging()}>
+        <div class="mt-1 flex items-center px-1">
+          <span class="text-xs text-primary">Drop to attach · up to 15 MB per file</span>
+        </div>
+      </Show>
+      <Show when={offline() && !dragging()}>
         <div class="mt-1 flex items-center px-1">
           <span class="ml-auto flex shrink-0 items-center gap-1 text-xs text-status-attention">
             <span

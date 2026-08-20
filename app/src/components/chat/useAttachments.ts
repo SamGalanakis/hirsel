@@ -4,8 +4,15 @@ import { dispatch, state } from "../../store/store";
 import { getClient, makeClientId } from "../../ws/client";
 import { fileToBase64 } from "../../lib/format";
 import { toast } from "../../lib/toast";
-
-const MAX_BYTES = 15 * 1024 * 1024; // 15 MB (protocol decoded-size cap)
+import {
+  type AttachmentKind,
+  attachmentKind,
+  countLines,
+  extractTransferFiles,
+  MAX_ATTACHMENT_BYTES,
+  namePastedFile,
+  pastedTextFile,
+} from "./paste";
 
 /** A file staged in the composer before send. The raw File + preview object-URL
  * live here; the upload state machine (uploading/done/error + blob id) lives in
@@ -16,12 +23,29 @@ export interface PendingFile {
   name: string;
   size: number;
   mime: string;
+  kind: AttachmentKind;
   previewUrl?: string; // object URL, images only
+  /** Original string for a chip made from a large paste. Retained so the paste
+   * can be put back into the field ("Insert as text") — the escape hatch that
+   * keeps auto-attaching from ever being a trap. */
+  text?: string;
+  /** Line count, for the "Pasted text · N lines" description. */
+  lines?: number;
 }
 
 export interface AttachmentsController {
   files: () => PendingFile[];
   addFiles: (list: FileList | File[]) => void;
+  /** Clipboard files: images get a `pasted-image-N.ext` name, since the
+   * clipboard supplies either `image.png` or nothing at all. */
+  addPastedFiles: (list: File[]) => void;
+  /** Stage a large paste as a `pasted-text-N.txt` chip. */
+  addPastedText: (text: string) => void;
+  /** Files carried by a drop, refusing directories with a named reason. */
+  addFromTransfer: (data: DataTransfer | null | undefined) => void;
+  /** Remove a pasted-text chip and hand its text back for inline insertion.
+   * Returns null when the chip is not a retained paste. */
+  takeText: (clientId: string) => string | null;
   removeFile: (clientId: string) => void;
   retry: (clientId: string) => void;
   clear: () => void;
@@ -35,19 +59,72 @@ export interface AttachmentsController {
  * paste path feeds the same queue. */
 export function createComposerAttachments(): AttachmentsController {
   const [files, setFiles] = createSignal<PendingFile[]>([]);
+  // Per-composer counters so a message's pasted items read pasted-image-1,
+  // pasted-image-2 … rather than colliding on one name.
+  let pastedImages = 0;
+  let pastedTexts = 0;
 
-  function addFiles(list: FileList | File[]): void {
+  /** Stage one file, or return the reason it cannot be staged. The size ceiling
+   * is the Host's, checked here so an over-cap file is refused while the user
+   * is still composing instead of failing the send. */
+  function stage(file: File, extra?: Partial<PendingFile>): PendingFile | string {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      return `"${file.name}" is too large (max 15 MB)`;
+    }
+    const mime = file.type || "application/octet-stream";
+    const kind = attachmentKind(mime);
+    return {
+      clientId: makeClientId(),
+      file,
+      name: file.name,
+      size: file.size,
+      mime,
+      kind,
+      previewUrl: kind === "image" ? URL.createObjectURL(file) : undefined,
+      ...extra,
+    };
+  }
+
+  function admit(staged: (PendingFile | string)[]): void {
     const accepted: PendingFile[] = [];
-    for (const file of Array.from(list)) {
-      if (file.size > MAX_BYTES) {
-        toast(`"${file.name}" is too large (max 15 MB)`, { variant: "error" });
-        continue;
-      }
-      const mime = file.type || "application/octet-stream";
-      const previewUrl = mime.startsWith("image/") ? URL.createObjectURL(file) : undefined;
-      accepted.push({ clientId: makeClientId(), file, name: file.name, size: file.size, mime, previewUrl });
+    for (const s of staged) {
+      if (typeof s === "string") toast(s, { variant: "error" });
+      else accepted.push(s);
     }
     if (accepted.length > 0) setFiles((f) => [...f, ...accepted]);
+  }
+
+  function addFiles(list: FileList | File[]): void {
+    admit(Array.from(list).map((file) => stage(file)));
+  }
+
+  function addPastedFiles(list: File[]): void {
+    admit(
+      list.map((file) => {
+        const named = file.type.startsWith("image/")
+          ? namePastedFile(file, ++pastedImages)
+          : file;
+        return stage(named);
+      }),
+    );
+  }
+
+  function addPastedText(text: string): void {
+    const file = pastedTextFile(text, ++pastedTexts);
+    admit([stage(file, { text, lines: countLines(text) })]);
+  }
+
+  function addFromTransfer(data: DataTransfer | null | undefined): void {
+    const { files: dropped, rejected } = extractTransferFiles(data);
+    for (const reason of new Set(rejected)) toast(reason, { variant: "error" });
+    if (dropped.length > 0) addPastedFiles(dropped);
+  }
+
+  function takeText(clientId: string): string | null {
+    const pf = files().find((x) => x.clientId === clientId);
+    if (!pf?.text) return null;
+    removeFile(clientId);
+    return pf.text;
   }
 
   function removeFile(clientId: string): void {
@@ -111,6 +188,9 @@ export function createComposerAttachments(): AttachmentsController {
   function clear(): void {
     for (const x of files()) if (x.previewUrl) URL.revokeObjectURL(x.previewUrl);
     setFiles([]);
+    // Numbering is per message, so the next one starts at pasted-image-1 again.
+    pastedImages = 0;
+    pastedTexts = 0;
     dispatch({ type: "uploads_clear" });
   }
 
@@ -118,5 +198,16 @@ export function createComposerAttachments(): AttachmentsController {
     for (const x of files()) if (x.previewUrl) URL.revokeObjectURL(x.previewUrl);
   });
 
-  return { files, addFiles, removeFile, retry, clear, uploadAll };
+  return {
+    files,
+    addFiles,
+    addPastedFiles,
+    addPastedText,
+    addFromTransfer,
+    takeText,
+    removeFile,
+    retry,
+    clear,
+    uploadAll,
+  };
 }

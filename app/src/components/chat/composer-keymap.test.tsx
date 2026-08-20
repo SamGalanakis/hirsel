@@ -36,6 +36,10 @@ function stubAttachments(): AttachmentsController {
   return {
     files: () => [],
     addFiles: () => {},
+    addPastedFiles: () => {},
+    addPastedText: () => {},
+    addFromTransfer: () => {},
+    takeText: () => null,
     removeFile: () => {},
     retry: () => {},
     clear: () => {},

@@ -13,6 +13,7 @@ import { Markdown } from "../Markdown";
 import { Timeline, TurnDetails } from "../chat/Timeline";
 import { CommittedToolCalls } from "../chat/ToolCalls";
 import { messagesForTask, taskName } from "./task-model";
+import { formatBytes } from "../../lib/format";
 
 function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: boolean }) {
   const hasContent = () => props.messages.length > 0 || props.thinking || state.turnEvents.length > 0;
@@ -34,9 +35,21 @@ function ConversationMargin(props: { messages: DisplayMessage[]; thinking?: bool
                 >
                   <Markdown>{message.body}</Markdown>
                   <Show when={message.attachments && message.attachments.length > 0}>
-                    <p class="mt-2 font-mono text-xs text-muted-foreground">
-                      {message.attachments?.map((item) => item.name).join(" · ")}
-                    </p>
+                    {/* Sent attachments stay quiet meta (DESIGN §3): a name and
+                        its weight, which is what distinguishes a screenshot
+                        from a pasted ref at a glance. Deliberately no preview —
+                        rendering the bytes needs a get_blob_url round-trip per
+                        message, which is a fetch path, not a layout tweak. */}
+                    <ul class="mt-2 flex flex-wrap gap-x-3 font-mono text-xs text-muted-foreground">
+                      <For each={message.attachments}>
+                        {(item) => (
+                          <li>
+                            {item.name}
+                            <span class="text-muted-foreground/60"> {formatBytes(item.size)}</span>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
                   </Show>
                   <Show
                     when={state.turnDetails[message.id]?.length > 0}

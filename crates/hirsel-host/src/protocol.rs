@@ -360,6 +360,21 @@ where
                 }
             }
         }
+        ClientToHost::FetchMessages {
+            client_id,
+            before_id,
+            limit,
+        } => {
+            let page = state.storage.fetch_messages(before_id, limit).await?;
+            channel
+                .send(&HostToClient::Messages {
+                    client_id,
+                    before_id,
+                    messages: page.messages,
+                    has_more: page.has_more,
+                })
+                .await?;
+        }
         ClientToHost::CancelTurn { sc } => {
             if let Some(sc) = sc {
                 state.side_chats.cancel(&sc).await?;
@@ -740,6 +755,47 @@ mod tests {
             self.sent.push(frame.clone());
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_frame_returns_a_correlated_bounded_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(crate::tests::test_config(dir.path()))
+            .await
+            .unwrap();
+        for id in 1..=3 {
+            state
+                .storage
+                .append_chat(ChatAuthor::Agent, format!("m{id}"), None)
+                .await
+                .unwrap();
+        }
+        let mut channel = TestChannel {
+            incoming: VecDeque::new(),
+            sent: Vec::new(),
+        };
+
+        handle_client_frame(
+            &state,
+            &mut channel,
+            ClientToHost::FetchMessages {
+                client_id: "history-1".to_string(),
+                before_id: 3,
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            channel.sent.as_slice(),
+            [HostToClient::Messages {
+                client_id,
+                before_id: 3,
+                messages,
+                has_more: true,
+            }] if client_id == "history-1" && messages.len() == 1 && messages[0].id == 2
+        ));
     }
 
     #[tokio::test]

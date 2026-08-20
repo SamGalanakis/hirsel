@@ -63,6 +63,76 @@ describe("D10: in-memory history cap", () => {
     expect(last.clientId).toBe("c1");
     expect(state.pendingSends).toHaveLength(1);
   });
+
+  it("prepends an id-deduped page and keeps its oldest edge", () => {
+    let state = initialState();
+    state.messages = [msg(101), msg(102), msg(103)];
+    state.hasEarlierMessages = true;
+
+    state = reduce(state, {
+      type: "messages_page",
+      placement: "earlier",
+      payload: {
+        type: "messages",
+        client_id: "history-1",
+        before_id: 101,
+        messages: [msg(99), msg(100), msg(101)],
+        has_more: true,
+      },
+    });
+
+    expect(state.messages.map((message) => message.id)).toEqual([99, 100, 101, 102, 103]);
+    expect(state.hasEarlierMessages).toBe(true);
+    expect(state.hasLaterMessages).toBe(false);
+  });
+
+  it("evicts from the newest committed edge during deep backfill", () => {
+    let state = initialState();
+    state.messages = Array.from({ length: MESSAGES_CAP }, (_, index) => msg(index + 101));
+    state.hasEarlierMessages = true;
+
+    state = reduce(state, {
+      type: "messages_page",
+      placement: "earlier",
+      payload: {
+        type: "messages",
+        client_id: "history-2",
+        before_id: 101,
+        messages: Array.from({ length: 100 }, (_, index) => msg(index + 1)),
+        has_more: false,
+      },
+    });
+
+    expect(state.messages).toHaveLength(MESSAGES_CAP);
+    expect(state.messages[0].id).toBe(1);
+    expect(state.messages.at(-1)?.id).toBe(MESSAGES_CAP);
+    expect(state.hasEarlierMessages).toBe(false);
+    expect(state.hasLaterMessages).toBe(true);
+  });
+
+  it("replaces the historical range with the true latest page on jump", () => {
+    let state = initialState();
+    state.messages = Array.from({ length: MESSAGES_CAP }, (_, index) => msg(index + 1));
+    state.hasLaterMessages = true;
+    state.lastSeenMsgId = 800;
+
+    state = reduce(state, {
+      type: "messages_page",
+      placement: "latest",
+      payload: {
+        type: "messages",
+        client_id: "history-3",
+        before_id: 801,
+        messages: Array.from({ length: 100 }, (_, index) => msg(index + 701)),
+        has_more: true,
+      },
+    });
+
+    expect(state.messages[0].id).toBe(701);
+    expect(state.messages.at(-1)?.id).toBe(800);
+    expect(state.hasEarlierMessages).toBe(true);
+    expect(state.hasLaterMessages).toBe(false);
+  });
 });
 
 describe("D10: conversation render-window slice", () => {

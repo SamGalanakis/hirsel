@@ -7,6 +7,7 @@ import type {
   HelloOkMsg,
   ModelSelection,
   ModelSnapshot,
+  MessagesMsg,
   MsgMsg,
   ProcessInfo,
   ProcessUpsertMsg,
@@ -83,6 +84,10 @@ export interface TimelineEvent {
 
 export interface AppState {
   messages: DisplayMessage[];
+  /** Whether the Host reports more committed rows before the loaded range. */
+  hasEarlierMessages: boolean;
+  /** The bounded range evicted newer rows while the Owner was reading history. */
+  hasLaterMessages: boolean;
   /** Product Tasks, carried as typed Events on the compatibility wire. Seeded
    * from `hello_ok.events` (authoritative on reconnect) and kept
    * current by `event_upsert`. Held as an ordered array so the store can
@@ -156,6 +161,7 @@ export interface AppState {
 export type Action =
   | { type: "hello_ok"; payload: HelloOkMsg }
   | { type: "msg"; payload: MsgMsg }
+  | { type: "messages_page"; payload: MessagesMsg; placement: "earlier" | "latest" }
   | { type: "msg_removed"; id: number }
   | { type: "agent_activity"; payload: { state: AgentActivityState; text: string | null } }
   | { type: "process_upsert"; payload: ProcessUpsertMsg }
@@ -198,6 +204,8 @@ export type Action =
 export function initialState(): AppState {
   return {
     messages: [],
+    hasEarlierMessages: false,
+    hasLaterMessages: false,
     events: [],
     eventDecideOverrides: [],
     eventArchiveOverrides: [],

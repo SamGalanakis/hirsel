@@ -12,6 +12,7 @@
     "test": "vitest run",
     "lint": "oxlint",
     "e2e:responsive-sweep": "node ../e2e/responsive-sweep.mjs",
+    "e2e:scrollback": "node ../e2e/scrollback-runner.mjs",
     "e2e:task-margins": "node ../e2e/task-margins-runner.mjs",
     "e2e:task-host": "node ../e2e/task-host-runner.mjs",
     "e2e:task-host-external-smoke": "node ../e2e/task-host-external-smoke.mjs",

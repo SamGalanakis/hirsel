@@ -31,6 +31,18 @@ function capMessages(messages: DisplayMessage[]): DisplayMessage[] {
   return messages.length > MESSAGES_CAP ? messages.slice(messages.length - MESSAGES_CAP) : messages;
 }
 
+/** Backfill grows at the oldest edge, where the reader is. If the bounded
+ * range fills, discard the newest committed rows instead; optimistic sends are
+ * never evicted. The range remains contiguous and `hasLaterMessages` makes the
+ * jump affordance reload the true newest page before pinning. */
+function capMessagesKeepingOldest(messages: DisplayMessage[]): DisplayMessage[] {
+  const committed = messages.filter((message) => !message.pending);
+  const pending = messages.filter((message) => message.pending);
+  const committedBudget = Math.max(1, MESSAGES_CAP - pending.length);
+  if (committed.length <= committedBudget) return messages;
+  return [...committed.slice(0, committedBudget), ...pending];
+}
+
 /** Upsert an Event by id, preserving list position for a known id (the queue
  * ordering is applied by the selector, not stored). */
 function upsertEvent(events: EventItem[], event: EventItem): EventItem[] {
@@ -157,7 +169,29 @@ function reconcileOrAppend(state: AppState, message: DisplayMessage): AppState {
     }
   }
 
-  return { ...state, messages: capMessages([...state.messages, message]) };
+  const grown = [...state.messages, message];
+  const messages = capMessages(grown);
+  return {
+    ...state,
+    messages,
+    hasEarlierMessages: state.hasEarlierMessages || messages.length < grown.length,
+  };
+}
+
+/** A live row beyond an intentionally older bounded range is acknowledged but
+ * not spliced across the gap. Owner echoes still reconcile pending sends; the
+ * latest-page jump reloads this row from the Host. */
+function reconcileBeyondLoadedRange(state: AppState, message: DisplayMessage): AppState {
+  if (message.author !== "owner") return state;
+  const pending = state.messages.find(
+    (candidate) => candidate.pending && candidate.body === message.body,
+  );
+  if (!pending) return state;
+  return {
+    ...state,
+    messages: state.messages.filter((candidate) => candidate !== pending),
+    pendingSends: state.pendingSends.filter((send) => send.clientId !== pending.clientId),
+  };
 }
 
 export function reduce(state: AppState, action: Action): AppState {
@@ -189,7 +223,7 @@ export function reduce(state: AppState, action: Action): AppState {
       // local rows).
       const known = new Map<number, DisplayMessage>();
       for (const m of state.messages) {
-        if (!m.pending && m.id < snapshotMin) known.set(m.id, m);
+        if (!state.hasLaterMessages && !m.pending && m.id < snapshotMin) known.set(m.id, m);
       }
       const newlyReplayed = snapshot.filter((m) => !localIds.has(m.id));
       for (const m of snapshot) known.set(m.id, m);
@@ -209,9 +243,13 @@ export function reduce(state: AppState, action: Action): AppState {
         pendingSends = pendingSends.filter((p) => p.clientId !== reconciled.clientId);
       }
 
+      const cappedMessages = capMessages([...merged, ...pending]);
+      const oldestCommitted = cappedMessages.find((message) => !message.pending)?.id;
       return {
         ...state,
-        messages: capMessages([...merged, ...pending]),
+        messages: cappedMessages,
+        hasEarlierMessages: oldestCommitted !== undefined && oldestCommitted > 1,
+        hasLaterMessages: false,
         // Task snapshot: the compatibility wire's Event set is
         // authoritative on reconnect — a full replace (an event resolved while
         // offline is reflected). Defensive default so a malformed
@@ -252,12 +290,48 @@ export function reduce(state: AppState, action: Action): AppState {
       };
     }
 
+    case "messages_page": {
+      const page = action.payload.messages.filter(
+        (message) => !state.removedIds.includes(message.id),
+      );
+      const pending = state.messages.filter((message) => message.pending);
+
+      if (action.placement === "latest") {
+        const known = new Map<number, DisplayMessage>();
+        for (const message of page) known.set(message.id, message);
+        const committed = Array.from(known.values()).sort((a, b) => a.id - b.id);
+        return {
+          ...state,
+          messages: capMessages([...committed, ...pending]),
+          hasEarlierMessages: action.payload.has_more,
+          hasLaterMessages: false,
+        };
+      }
+
+      const known = new Map<number, DisplayMessage>();
+      for (const message of state.messages) {
+        if (!message.pending) known.set(message.id, message);
+      }
+      for (const message of page) known.set(message.id, message);
+      const committed = Array.from(known.values()).sort((a, b) => a.id - b.id);
+      const merged = [...committed, ...pending];
+      const messages = capMessagesKeepingOldest(merged);
+      return {
+        ...state,
+        messages,
+        hasEarlierMessages: action.payload.has_more,
+        hasLaterMessages: state.hasLaterMessages || messages.length < merged.length,
+      };
+    }
+
     case "msg": {
       const message = action.payload.message;
       // A tombstoned id (cancelled queued message) must never re-materialize,
       // even if its echo arrives after the msg_removed that killed it.
       if (state.removedIds.includes(message.id)) return state;
-      const next = reconcileOrAppend(state, message);
+      const next = state.hasLaterMessages
+        ? reconcileBeyondLoadedRange(state, message)
+        : reconcileOrAppend(state, message);
 
       // A committed agent message ends the turn: freeze its live timeline into
       // session memory keyed to this message (the "turn details" affordance),
@@ -471,9 +545,12 @@ export function reduce(state: AppState, action: Action): AppState {
       if (blobs.length > 0) pendingSend.attachments = blobs.map((b) => b.id);
       if (sendMode !== "send") pendingSend.mode = sendMode;
       if (mentionIds.length > 0) pendingSend.mentions = mentionIds;
+      const grown = [...state.messages, localMessage];
       return {
         ...state,
-        messages: capMessages([...state.messages, localMessage]),
+        messages: state.hasLaterMessages
+          ? capMessagesKeepingOldest(grown)
+          : capMessages(grown),
         pendingSends: [...state.pendingSends, pendingSend],
       };
     }

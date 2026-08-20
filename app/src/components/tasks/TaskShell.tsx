@@ -18,12 +18,22 @@ import {
   clearComposerPrefill,
   clearProtocolError,
   clearTaskFocus,
+  dispatch,
   focusTask,
   reconcileTaskFocus,
+  setProtocolError,
   state,
   toggleTaskFocus,
 } from "../../store/store";
 import { isAtBottom, scrollToBottom, shouldOfferJump } from "../../lib/scroll";
+import {
+  CONVERSATION_WINDOW,
+  HISTORY_PAGE_SIZE,
+  capturePrependAnchor,
+  decideScrollback,
+  outranHistoryPrefetch,
+  restorePrependAnchor,
+} from "../../lib/scrollback";
 import { getClient } from "../../ws/client";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { ConnectionPill, connectionLabel } from "../ConnectionPill";
@@ -35,11 +45,16 @@ import { createComposerAttachments } from "../chat/useAttachments";
 import { CanvasRail, CanvasSheet } from "../views/CanvasSurface";
 import { AmbientField, TaskField } from "./TaskFields";
 import { TaskIndex } from "./TaskIndex";
-import { mostNeedingTask, taskSendContext } from "./task-model";
+import { messagesForTask, mostNeedingTask, taskSendContext } from "./task-model";
 
 export function TaskShell() {
   const attachments = createComposerAttachments();
   let taskScrollRef: HTMLDivElement | undefined;
+  const [revealed, setRevealed] = createSignal(CONVERSATION_WINDOW);
+  const [loadingEarlier, setLoadingEarlier] = createSignal(false);
+  let backfillInFlight = false;
+  let earlierLoad: Promise<void> | null = null;
+  let scrollbackMutationScheduled = false;
 
   // Follow-at-bottom. `following` is a plain mirror, deliberately NOT a signal
   // the follow effect reads: the effect must react to conversation growth only,
@@ -65,7 +80,9 @@ export function TaskShell() {
     const atBottom = isAtBottom(geometry);
     if (!atBottom && Date.now() - pinnedAt < PIN_SETTLE_MS) return;
     following = atBottom;
-    setCanJump(shouldOfferJump(geometry));
+    setCanJump(state.hasLaterMessages || shouldOfferJump(geometry));
+    setLoadingEarlier(backfillInFlight && outranHistoryPrefetch(geometry));
+    advanceScrollback(geometry);
   }
 
   function pin(instant = true): void {
@@ -82,13 +99,17 @@ export function TaskShell() {
   // Streaming appends a fresh `turnEvents` entry per delta, so its length moves
   // with the text.
   const growth = createMemo(() => {
+    const first = state.messages.find((message) => !message.pending);
     const last = state.messages[state.messages.length - 1];
     return [
       state.messages.length,
+      first?.id ?? 0,
       last?.id ?? 0,
       last?.body.length ?? 0,
       state.turnEvents.length,
       state.agentActivity.state,
+      state.hasEarlierMessages,
+      state.hasLaterMessages,
     ].join(":");
   });
 
@@ -99,6 +120,11 @@ export function TaskShell() {
   createEffect(
     on(growth, () => {
       if (!taskScrollRef) return;
+      if (state.hasLaterMessages) {
+        following = false;
+        setCanJump(true);
+        return;
+      }
       if (!following) {
         measure();
         return;
@@ -112,6 +138,10 @@ export function TaskShell() {
   const focusedTask = createMemo(() =>
     tasks().find((task) => task.id === state.focusedTaskId) ?? null
   );
+  const activeMessages = createMemo(() => {
+    const task = focusedTask();
+    return task ? messagesForTask(task, state.messages, tasks()) : state.messages;
+  });
   const taskViews = createMemo(() => {
     const task = focusedTask();
     if (!task) return [];
@@ -120,6 +150,108 @@ export function TaskShell() {
   });
 
   createEffect(() => reconcileTaskFocus(tasks().map((task) => task.id)));
+
+  function finishAnchoredMutation(anchor: ReturnType<typeof capturePrependAnchor>): void {
+    queueMicrotask(() => {
+      requestAnimationFrame(() => {
+        if (taskScrollRef) restorePrependAnchor(taskScrollRef, anchor);
+        scrollbackMutationScheduled = false;
+        measure();
+      });
+    });
+  }
+
+  function revealEarlier(count: number): void {
+    const element = taskScrollRef;
+    if (!element || count <= 0 || scrollbackMutationScheduled) return;
+    scrollbackMutationScheduled = true;
+    const anchor = capturePrependAnchor(element);
+    setRevealed((current) => current + count);
+    finishAnchoredMutation(anchor);
+  }
+
+  function requestEarlier(): void {
+    if (backfillInFlight) return;
+    const client = getClient();
+    const beforeId = state.messages.find((message) => !message.pending && message.id > 0)?.id;
+    if (!client || beforeId === undefined) return;
+
+    backfillInFlight = true;
+    if (taskScrollRef) {
+      const geometry = {
+        scrollTop: taskScrollRef.scrollTop,
+        clientHeight: taskScrollRef.clientHeight,
+        scrollHeight: taskScrollRef.scrollHeight,
+      };
+      setLoadingEarlier(outranHistoryPrefetch(geometry));
+    }
+
+    earlierLoad = client
+      .fetchMessages(beforeId, HISTORY_PAGE_SIZE)
+      .then((page) => {
+        const element = taskScrollRef;
+        const anchor = element ? capturePrependAnchor(element) : null;
+        const beforeCount = activeMessages().length;
+        dispatch({ type: "messages_page", payload: page, placement: "earlier" });
+        const added = Math.max(0, activeMessages().length - beforeCount);
+        if (added > 0) setRevealed((current) => current + Math.min(CONVERSATION_WINDOW, added));
+        if (anchor) {
+          scrollbackMutationScheduled = true;
+          finishAnchoredMutation(anchor);
+        }
+      })
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        setProtocolError(`Couldn’t load earlier messages: ${detail}`);
+      })
+      .finally(() => {
+        backfillInFlight = false;
+        setLoadingEarlier(false);
+        earlierLoad = null;
+        requestAnimationFrame(() => measure());
+      });
+  }
+
+  function advanceScrollback(geometry: {
+    scrollTop: number;
+    clientHeight: number;
+    scrollHeight: number;
+  }): void {
+    if (scrollbackMutationScheduled) return;
+    const loaded = activeMessages().length;
+    const decision = decideScrollback({
+      geometry,
+      rendered: Math.min(revealed(), loaded),
+      loaded,
+      hasEarlier: state.hasEarlierMessages,
+      backfillInFlight,
+    });
+    if (decision.reveal > 0) revealEarlier(decision.reveal);
+    else if (decision.fetchBeforeOldest) requestEarlier();
+  }
+
+  async function jumpLatest(instant = false): Promise<void> {
+    if (!state.hasLaterMessages) {
+      pin(instant);
+      return;
+    }
+    if (earlierLoad) await earlierLoad;
+    const client = getClient();
+    const latest = state.lastSeenMsgId;
+    if (!client || latest === null) {
+      pin(instant);
+      return;
+    }
+    try {
+      const page = await client.fetchMessages(latest + 1, HISTORY_PAGE_SIZE);
+      dispatch({ type: "messages_page", payload: page, placement: "latest" });
+      setRevealed(CONVERSATION_WINDOW);
+      requestAnimationFrame(() => pin(instant));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setProtocolError(`Couldn’t load the latest messages: ${detail}`);
+    }
+  }
 
   // Open focused by default. The field hydrates with the handshake (`hello_ok`
   // carries the whole Task set and is dispatched immediately before the socket
@@ -151,7 +283,8 @@ export function TaskShell() {
   // nothing left to protect by holding the field at its top — and every state
   // opens where a conversation opens, at its newest line above the composer.
   createEffect(on(() => state.focusedTaskId, (focusedId) => {
-    requestAnimationFrame(() => pin(true));
+    setRevealed(CONVERSATION_WINDOW);
+    void jumpLatest(true);
     if (focusedId === null) return;
     const chip = document.querySelector<HTMLElement>(`[data-task-id="${focusedId}"]`);
     chip?.scrollIntoView?.({ inline: "center", block: "nearest" });
@@ -254,8 +387,19 @@ export function TaskShell() {
                `min-h-full` + its internal alignment. */
             class="flex min-h-0 flex-1 flex-col overflow-y-auto [overflow-anchor:auto]"
           >
-            <Show when={focusedTask()} fallback={<AmbientField />}>
-              {(task) => <TaskField task={task()} tasks={tasks()} views={taskViews()} />}
+            <Show
+              when={focusedTask()}
+              fallback={<AmbientField revealed={revealed()} loadingEarlier={loadingEarlier()} />}
+            >
+              {(task) => (
+                <TaskField
+                  task={task()}
+                  tasks={tasks()}
+                  views={taskViews()}
+                  revealed={revealed()}
+                  loadingEarlier={loadingEarlier()}
+                />
+              )}
             </Show>
             <Show when={!focusedTask() && conversationViews(state.views).length > 0}>
               <div class="mx-auto w-full max-w-frame px-gutter pb-12">
@@ -281,7 +425,7 @@ export function TaskShell() {
                 type="button"
                 data-slot="jump-to-latest"
                 class="pointer-events-auto absolute bottom-1 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface px-3 py-1.5 text-xs text-surface-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11"
-                onClick={() => pin(false)}
+                onClick={() => void jumpLatest(false)}
               >
                 <ArrowDown class="size-3.5" aria-hidden="true" />
                 Jump to latest

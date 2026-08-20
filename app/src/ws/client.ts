@@ -2,7 +2,7 @@
 // exponential backoff, offline outgoing queue flushed on reconnect using
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
 // upload correlation and the v1.2 send-mode / cancel frames.
-import type { Blob, ClientMessage, SendMode, ServerMessage } from "../protocol";
+import type { Blob, ClientMessage, MessagesMsg, SendMode, ServerMessage } from "../protocol";
 import { httpBaseFromWs } from "../lib/endpoint";
 import { deliverPluginPush } from "../plugins/registry";
 import { dispatch, setProtocolError, state } from "../store/store";
@@ -21,6 +21,9 @@ const UPLOAD_TIMEOUT_MS = 45_000;
 /** Give up on a get_blob_url whose blob_url / error never arrives (blocks an
  * image thumbnail / download link from resolving; fail into a placeholder). */
 const BLOB_URL_TIMEOUT_MS = 20_000;
+
+/** Give up on a history page whose correlated `messages` response never arrives. */
+const HISTORY_TIMEOUT_MS = 20_000;
 
 /** WebSocket close codes the host may use to reject a bad/expired token. The
  * canonical code isn't pinned in PROTOCOL.md yet (coordinate with the backend
@@ -104,6 +107,15 @@ class HirselWsClient {
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
   /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
   private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
+  /** Exactly one history request may be in flight; repeated top-edge scroll
+   * events share its promise instead of emitting duplicate pages. */
+  private historyRequest: {
+    clientId: string;
+    promise: Promise<MessagesMsg>;
+    resolve: (page: MessagesMsg) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   /** Per-pending-send "not echoed yet" timers, keyed by client_id. */
   private failTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** True once any `hello_ok` has arrived on this client — permanently disables
@@ -243,6 +255,39 @@ class HirselWsClient {
       // reconnected (until the timeout), like upload_blob.
       this.enqueue({ type: "get_blob_url", client_id: clientId, blob_id: blobId });
     });
+  }
+
+  /** Fetch one page immediately before `beforeId`. Calls made while a page is
+   * pending share that correlated request, enforcing the single-flight guard
+   * below scroll-event frequency as well as in the component decision helper. */
+  fetchMessages(beforeId: number, limit: number): Promise<MessagesMsg> {
+    if (this.historyRequest) return this.historyRequest.promise;
+    const clientId = makeClientId();
+    let resolvePage!: (page: MessagesMsg) => void;
+    let rejectPage!: (error: Error) => void;
+    const promise = new Promise<MessagesMsg>((resolve, reject) => {
+      resolvePage = resolve;
+      rejectPage = reject;
+    });
+    const timer = setTimeout(() => {
+      if (this.historyRequest?.clientId !== clientId) return;
+      this.historyRequest = null;
+      rejectPage(new Error("history request timed out"));
+    }, HISTORY_TIMEOUT_MS);
+    this.historyRequest = {
+      clientId,
+      promise,
+      resolve: resolvePage,
+      reject: rejectPage,
+      timer,
+    };
+    this.enqueue({
+      type: "fetch_messages",
+      client_id: clientId,
+      before_id: beforeId,
+      limit,
+    });
+    return promise;
   }
 
   cancelTurn(): void {
@@ -465,6 +510,14 @@ class HirselWsClient {
         this.reconcileFailTimers();
         break;
       }
+      case "messages": {
+        const pending = this.historyRequest;
+        if (pending?.clientId !== message.client_id) break;
+        clearTimeout(pending.timer);
+        this.historyRequest = null;
+        pending.resolve(message);
+        break;
+      }
       case "msg_removed": {
         dispatch({ type: "msg_removed", id: message.id });
         this.reconcileFailTimers();
@@ -558,7 +611,13 @@ class HirselWsClient {
             blobReq.reject(new Error(message.detail));
             this.blobUrlReqs.delete(message.client_id);
           }
-          dispatch({ type: "upload_error", clientId: message.client_id });
+          const historyReq = this.historyRequest;
+          if (historyReq?.clientId === message.client_id) {
+            clearTimeout(historyReq.timer);
+            this.historyRequest = null;
+            historyReq.reject(new Error(message.detail));
+          }
+          if (pending) dispatch({ type: "upload_error", clientId: message.client_id });
         } else {
           // An uncorrelated error that arrives AFTER authentication is a runtime
           // protocol error (the pre-auth reject path returned above). Surface it

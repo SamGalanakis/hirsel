@@ -165,7 +165,12 @@ export function AmbientField() {
   return (
     <div
       data-slot="ambient-field"
-      class={`mx-auto flex min-h-full w-full max-w-frame flex-col justify-end ${FIELD_PADDING} ${FIELD_SWAP}`}
+      /* `shrink-0` is load-bearing: the scroller is a flex column, and a flex
+         item's default shrink would pin this field at the container height
+         while its content overflows out the top past `justify-end` — the
+         conversation must GROW the field so the scroller has something to
+         scroll. */
+      class={`mx-auto flex min-h-full w-full max-w-frame shrink-0 flex-col justify-end ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
       <div class="w-full max-w-measure">
         <Conversation messages={messages()} thinking={state.agentActivity.state === "thinking"} />
@@ -198,7 +203,7 @@ export function TaskField(props: { task: EventItem; tasks: EventItem[]; views: V
          container so a content-thin task still owns the field's vertical
          rhythm (card at top, room below) instead of collapsing to a strip.
          The scroll container itself carries no alignment — see TaskShell. */
-      class={`mx-auto flex min-h-full w-full max-w-frame flex-col ${FIELD_PADDING} ${FIELD_SWAP}`}
+      class={`mx-auto flex min-h-full w-full max-w-frame shrink-0 flex-col ${FIELD_PADDING} ${FIELD_SWAP}`}
     >
       {/* ONE column at the reading measure, the same one ambient uses. The task
           is a pinned context card at its top and the conversation flows below

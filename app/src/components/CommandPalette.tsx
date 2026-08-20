@@ -1,6 +1,9 @@
-// The ⌘K command palette + the `?` shortcut cheat-sheet — two summoned, never
-// standing surfaces. Both are calm Kobalte `Dialog`s (portal + scrim + focus
-// trap + Esc-to-dismiss, so they cleanly participate in `anyOverlayOpen`). The
+// The ⌘K command palette + the `?` / ⌘/ shortcut cheat-sheet — two summoned,
+// never standing surfaces. Both are calm Kobalte `Dialog`s (portal + scrim +
+// their own focus trap + Esc-to-dismiss). Kobalte's trap is internal and never
+// touches our trap stack, so each dialog joins `anyOverlayOpen` explicitly via
+// `createOverlayPresence` on its open-state prop — without that the global
+// bare-key layer keeps firing underneath the modal, and Esc double-fires. The
 // palette is a filterable command list (a combobox/listbox pattern: a search
 // field driving a `role="listbox"` with `aria-activedescendant`), styled to the
 // calm-terminal register — Inter for labels, mono only for the keyboard hints.
@@ -29,6 +32,7 @@ import { snoozeEventWithUndo } from "../lib/event-snooze";
 import { clearFinishedEventsWithUndo } from "../lib/event-sweep";
 import { snoozePresets } from "../lib/snooze-presets";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS, stopActiveTurn } from "../lib/keymap";
+import { createOverlayPresence } from "../lib/focus";
 import {
   eventUiNodes,
   finishedEvents,
@@ -96,6 +100,8 @@ export const CommandPalette: Component<{
 }> = (props) => {
   const [query, setQuery] = createSignal("");
   const [activeIndex, setActiveIndex] = createSignal(0);
+
+  createOverlayPresence(() => props.open);
 
   const thinking = () => state.agentActivity.state === "thinking";
   const iconClass = "size-4 shrink-0 text-muted-foreground";
@@ -354,6 +360,8 @@ export const ShortcutHelp: Component<{
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }> = (props) => {
+  createOverlayPresence(() => props.open);
+
   const groups = createMemo(() =>
     GROUP_ORDER.map((group) => ({
       group,

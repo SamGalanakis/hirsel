@@ -2,7 +2,7 @@
 // DOM-query based so summoned utilities can return attention without threading
 // refs through the shell. Deferred a microtask so it runs after teardown.
 
-import { createSignal, onCleanup } from "solid-js";
+import { createEffect, createSignal, onCleanup } from "solid-js";
 
 /** A reactive boolean tracking a CSS media query, kept in sync via the
  * MediaQueryList `change` event. Lets a component read a breakpoint (e.g. "is
@@ -72,12 +72,42 @@ interface LiveFocusTrap {
 // distinguish a nested-dialog handoff from a different utility taking over.
 const trapStack: LiveFocusTrap[] = [];
 
+// Overlays that bring their own focus management (Kobalte `Dialog`s: the
+// command palette and the shortcut cheat-sheet) never push a trap, so they
+// must announce themselves here or the global bare-key layer would keep
+// firing underneath them. One registry, two ways in.
+const overlayPresence = new Set<symbol>();
+
 /** Whether any modal overlay / focus trap is currently open. Callers yield Esc:
  * an Esc meant to dismiss an open overlay must not also trigger a background
  * action (e.g. the main composer stopping a live agent turn). Derived from the
- * trap stack so it stays accurate as overlays open and close. */
+ * trap stack plus the registered presences, so this is the single truth about
+ * "something owns the keyboard right now". */
 export function anyOverlayOpen(): boolean {
-  return trapStack.length > 0;
+  return trapStack.length > 0 || overlayPresence.size > 0;
+}
+
+/** Declare that an overlay owns input right now. Returns the release function;
+ * call it exactly once when the overlay closes. Prefer `createOverlayPresence`
+ * — a leaked token would silence the bare-key layer for the whole session. */
+export function registerOverlayPresence(): () => void {
+  const token = Symbol("overlay-presence");
+  overlayPresence.add(token);
+  return () => {
+    overlayPresence.delete(token);
+  };
+}
+
+/** Join `anyOverlayOpen` for as long as `isOpen()` is true. Deliberately driven
+ * by the open-state signal rather than by mount/unmount: a portaled dialog's
+ * exit animation and teardown order are the library's business, and a token
+ * released late (or never) would kill the global keyboard layer. Call inside a
+ * component's reactive scope. */
+export function createOverlayPresence(isOpen: () => boolean): void {
+  createEffect(() => {
+    if (!isOpen()) return;
+    onCleanup(registerOverlayPresence());
+  });
 }
 
 export interface FocusTrapOptions {

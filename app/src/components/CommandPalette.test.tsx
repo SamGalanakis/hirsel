@@ -3,9 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CommandPalette, ShortcutHelp } from "./CommandPalette";
 
-// `anyOverlayOpen` seam (parallel worktree) — mock so keymap's import resolves.
+// This suite is about the palette's own list/filter behaviour, so the focus
+// module is stubbed out. The real overlay-presence registry is exercised in
+// `src/lib/overlay-presence.test.tsx` instead.
 vi.mock("../lib/focus", () => ({
   anyOverlayOpen: () => false,
+  createOverlayPresence: () => {},
   focusMainComposer: () => {},
   focusTaskIndex: () => {},
 }));

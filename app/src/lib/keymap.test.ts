@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeField, installGlobalKeymap, isEditableTarget, type KeymapHandlers } from "./keymap";
 import { clearTaskFocus, dispatch, state, toggleTaskFocus } from "../store/store";
 
-// The `anyOverlayOpen` seam (created in a parallel worktree) isn't in this
-// branch; mock the module so the keymap's suppression check is drivable here.
+// Routing-level unit tests: the overlay registry is stubbed so the suppression
+// check is drivable from a flag. `src/lib/overlay-presence.test.tsx` covers the
+// real registry with the real dialogs.
 const { overlayRef } = vi.hoisted(() => ({ overlayRef: { open: false } }));
 vi.mock("./focus", () => ({
   anyOverlayOpen: () => overlayRef.open,
+  createOverlayPresence: () => {},
   focusMainComposer: () => {},
   focusTaskIndex: () => {},
 }));
@@ -72,6 +74,17 @@ describe("keymap", () => {
     expect(handlers.openPalette).toHaveBeenCalledTimes(2);
   });
 
+  it("shows the cheat-sheet on ⌘/ / Ctrl+/, even mid-type", () => {
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    const ev = press("/", { metaKey: true });
+    press("/", { ctrlKey: true }, input);
+    expect(handlers.showHelp).toHaveBeenCalledTimes(2);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(handlers.focusComposer).not.toHaveBeenCalled();
+    input.remove();
+  });
+
   it("suppresses the bare-key layer while typing in a field", () => {
     const input = document.createElement("input");
     document.body.appendChild(input);
@@ -84,8 +97,10 @@ describe("keymap", () => {
     overlayRef.open = true;
     press("/");
     press("k", { metaKey: true }); // palette must not stack over an open overlay
+    press("/", { metaKey: true }); // nor the cheat-sheet
     expect(handlers.focusComposer).not.toHaveBeenCalled();
     expect(handlers.openPalette).not.toHaveBeenCalled();
+    expect(handlers.showHelp).not.toHaveBeenCalled();
   });
 
   it("routes Esc to the ladder even while the caret is in a field", () => {

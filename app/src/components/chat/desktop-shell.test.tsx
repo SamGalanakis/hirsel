@@ -628,6 +628,28 @@ describe("Opens focused by default", () => {
     requires_response: false,
   });
 
+  it("never gives a housekeeping info event a chip, focus, or the red count", async () => {
+    const info = (id: number, name: string): EventItem => ({
+      ...task(id, name, name),
+      kind: EventKind.Info,
+      blocking: false,
+      requires_response: true,
+      status: "open",
+    });
+    const { screen, store } = await setupApp([info(1, "@session-rotated")], {
+      keepDefaultFocus: true,
+    });
+
+    const nav = screen.getByRole("navigation", { name: "Tasks" });
+    expect(within(nav).queryByRole("button", { name: /session rotated/ })).toBeNull();
+    // Nothing in the field wants the Owner, so the field stays ambient…
+    expect(store.state.focusedTaskId).toBeNull();
+    expect(document.querySelector('[data-slot="ambient-field"]')).toBeInTheDocument();
+    // …and the tab badge stays silent even though the event is open and claims
+    // to require a response.
+    expect(document.title).toBe("hirsel");
+  });
+
   it("lands on the most-needing task rather than the ambient field", async () => {
     const { screen, store } = await setupApp(
       [moving(1, "@rollout"), task(2, "@choose-direction", "Choose direction")],

@@ -91,15 +91,18 @@ describe("CommandPalette — contextual queue actions (Wave-3 ⌘K depth)", () =
         },
       ],
     };
-    const readInfo = {
+    const readSummary = {
       ...judgment,
       id: 4243,
-      kind: EventKind.Info,
+      kind: EventKind.Summary,
       requires_response: false,
       read: true,
       ui: [{ type: "status", label: "done" }],
     };
+    // Housekeeping info is not a Task, so it never joins the sweep's count.
+    const readInfo = { ...readSummary, id: 4244, kind: EventKind.Info };
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: judgment } });
+    store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: readSummary } });
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: readInfo } });
 
     render(() => <CommandPalette open onOpenChange={() => {}} />);
@@ -107,7 +110,8 @@ describe("CommandPalette — contextual queue actions (Wave-3 ⌘K depth)", () =
     expect(screen.getByText(/Decide B — Bravo/)).toBeInTheDocument();
     expect(screen.getByText(/Snooze current · This evening/)).toBeInTheDocument();
     expect(screen.getByText("Archive current")).toBeInTheDocument();
-    // The read info card is finished → the sweep offers it (count 1).
+    // The read summary card is finished → the sweep offers it (count 1); the
+    // read info card sits outside the Task set entirely and is not counted.
     expect(screen.getByText(/Clear finished \(1\)/)).toBeInTheDocument();
 
     // Clean the store so the earlier assertions in this file's other suites are

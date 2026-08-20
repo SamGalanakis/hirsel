@@ -38,7 +38,7 @@ import {
   finishedEvents,
   isOpenJudgment,
   orderedTasks,
-  visibleEvents,
+  taskEvents,
 } from "../store/selectors";
 import { cn } from "@/lib/utils";
 
@@ -71,7 +71,7 @@ function fuzzyMatch(query: string, text: string): boolean {
  * current") target: the first open judgment in Task priority
  * order (blocking first) — the one that most needs the Owner. */
 function currentJudgment(): EventItem | null {
-  const ordered = orderedTasks(visibleEvents(effectiveEvents()));
+  const ordered = orderedTasks(taskEvents(effectiveEvents()));
   return ordered.find(isOpenJudgment) ?? null;
 }
 

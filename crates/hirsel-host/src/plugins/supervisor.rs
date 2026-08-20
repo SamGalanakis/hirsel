@@ -9,12 +9,15 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use hirsel_plugin_api::{Plugin, PluginCtx};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use super::{PluginRuntime, RuntimeTable, tools::PluginToolRegistry};
 
 /// Restart policy. Test builds shorten every window; production uses the
 /// documented defaults.
@@ -37,50 +40,10 @@ impl Default for SupervisorConfig {
     }
 }
 
-/// What the host reports for a plugin, and what the management API renders as
-/// `state`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PluginState {
-    Running,
-    Disabled,
-    Errored,
+pub(crate) struct SpawnedSupervisor {
+    pub(crate) task: JoinHandle<()>,
+    pub(crate) start: oneshot::Sender<()>,
 }
-
-impl PluginState {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Disabled => "disabled",
-            Self::Errored => "errored",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PluginStatus {
-    pub(crate) state: PluginState,
-    pub(crate) error: Option<String>,
-}
-
-impl PluginStatus {
-    pub(crate) fn running() -> Self {
-        Self {
-            state: PluginState::Running,
-            error: None,
-        }
-    }
-
-    pub(crate) fn disabled() -> Self {
-        Self {
-            state: PluginState::Disabled,
-            error: None,
-        }
-    }
-}
-
-/// Shared status table: plugin id → status. The supervisor writes `errored`
-/// into it; the management API reads it.
-pub(crate) type StatusTable = Arc<Mutex<std::collections::HashMap<String, PluginStatus>>>;
 
 /// Spawn the supervised daemon for one plugin. The returned handle is aborted
 /// when the plugin is disabled, which cancels the daemon and the supervisor
@@ -88,18 +51,25 @@ pub(crate) type StatusTable = Arc<Mutex<std::collections::HashMap<String, Plugin
 pub(crate) fn spawn(
     plugin: Arc<dyn Plugin>,
     ctx: PluginCtx,
-    statuses: StatusTable,
+    runtimes: RuntimeTable,
+    tool_registry: PluginToolRegistry,
     config: SupervisorConfig,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> SpawnedSupervisor {
+    let (start, started) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        if started.await.is_err() {
+            return;
+        }
         let id = plugin.id().to_string();
         let mut crashes: VecDeque<Instant> = VecDeque::new();
         let mut attempt = 0u32;
         loop {
             let plugin_for_run = Arc::clone(&plugin);
             let ctx_for_run = ctx.clone();
-            let run = tokio::spawn(async move { plugin_for_run.run(ctx_for_run).await });
-            match run.await {
+            let mut run = AbortOnDrop(tokio::spawn(async move {
+                plugin_for_run.run(ctx_for_run).await;
+            }));
+            match (&mut run.0).await {
                 // The daemon finished on its own: nothing to supervise.
                 Ok(()) => return,
                 Err(error) if error.is_cancelled() => return,
@@ -120,7 +90,7 @@ pub(crate) fn spawn(
                             crashes = crashes.len(),
                             "plugin daemon crash-looped; parking the plugin as errored"
                         );
-                        set_errored(&statuses, &id, detail);
+                        set_errored(&runtimes, &tool_registry, &id, detail).await;
                         return;
                     }
                     let backoff = backoff_for(attempt, config);
@@ -129,7 +99,16 @@ pub(crate) fn spawn(
                 }
             }
         }
-    })
+    });
+    SpawnedSupervisor { task, start }
+}
+
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn backoff_for(attempt: u32, config: SupervisorConfig) -> Duration {
@@ -139,15 +118,22 @@ fn backoff_for(attempt: u32, config: SupervisorConfig) -> Duration {
         .min(config.max_backoff)
 }
 
-fn set_errored(statuses: &StatusTable, id: &str, error: String) {
-    let mut table = statuses.lock().unwrap_or_else(|poison| poison.into_inner());
-    table.insert(
-        id.to_string(),
-        PluginStatus {
-            state: PluginState::Errored,
-            error: Some(error),
-        },
+async fn set_errored(
+    runtimes: &RuntimeTable,
+    tool_registry: &PluginToolRegistry,
+    id: &str,
+    detail: String,
+) {
+    let supervisor_id = tokio::task::id();
+    let mut table = runtimes.lock().await;
+    let is_current = matches!(
+        table.get(id),
+        Some(PluginRuntime::Running { task }) if task.id() == supervisor_id
     );
+    if is_current {
+        tool_registry.unregister(id);
+        table.insert(id.to_string(), PluginRuntime::Errored { detail });
+    }
 }
 
 fn panic_detail(error: &tokio::task::JoinError) -> String {

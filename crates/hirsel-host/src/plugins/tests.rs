@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 
-use super::{PluginHost, PluginState, SupervisorConfig, http::masked_values};
+use super::{PluginHost, PluginStatus, SupervisorConfig, http::masked_values};
 use crate::{
     BroadcastLog,
     processes::ProcessStore,
@@ -150,9 +150,49 @@ impl Plugin for PanicPlugin {
         "Panicky"
     }
 
+    fn tools(&self) -> Vec<PluginTool> {
+        vec![PluginTool::new(
+            "echo",
+            "Echo the argument.",
+            json!({}),
+            |_ctx, args| async move { Ok(json!({ "echoed": args })) },
+        )]
+    }
+
     async fn run(&self, _ctx: PluginCtx) {
         self.runs.fetch_add(1, Ordering::SeqCst);
         panic!("plugin daemon exploded");
+    }
+}
+
+struct BlockingPlugin {
+    starts: Arc<AtomicU32>,
+    active: Arc<AtomicU32>,
+}
+
+struct ActiveRun(Arc<AtomicU32>);
+
+impl Drop for ActiveRun {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Plugin for BlockingPlugin {
+    fn id(&self) -> &'static str {
+        "blocking"
+    }
+
+    fn label(&self) -> &'static str {
+        "Blocking"
+    }
+
+    async fn run(&self, _ctx: PluginCtx) {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.active.fetch_add(1, Ordering::SeqCst);
+        let _active = ActiveRun(Arc::clone(&self.active));
+        std::future::pending::<()>().await;
     }
 }
 
@@ -382,7 +422,7 @@ async fn settings_updates_are_persisted_masked_and_delivered_to_the_watch() {
 async fn a_crash_looping_daemon_is_restarted_then_parked_as_errored() {
     let dir = tempfile::tempdir().unwrap();
     let runs = Arc::new(AtomicU32::new(0));
-    let (host, _tools, _storage, _broadcaster) = start_host(
+    let (host, tools, _storage, _broadcaster) = start_host(
         dir.path(),
         vec![PluginRegistration::new(
             Box::new(PanicPlugin {
@@ -396,7 +436,7 @@ async fn a_crash_looping_daemon_is_restarted_then_parked_as_errored() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if host.status("panicky").state == PluginState::Errored {
+        if matches!(host.status("panicky").await, PluginStatus::Errored { .. }) {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "daemon never parked");
@@ -404,9 +444,83 @@ async fn a_crash_looping_daemon_is_restarted_then_parked_as_errored() {
     }
     // Restarted after each panic until the crash limit stopped it.
     assert_eq!(runs.load(Ordering::SeqCst), 3);
-    let status = host.status("panicky");
-    assert!(status.error.is_some(), "an errored plugin reports why");
-    assert!(!host.is_running("panicky"));
+    let status = host.status("panicky").await;
+    assert!(
+        matches!(status, PluginStatus::Errored { ref detail } if !detail.is_empty()),
+        "an errored plugin reports why"
+    );
+    assert!(!host.is_running("panicky").await);
+    assert!(
+        tools.plugin_tools().names().is_empty(),
+        "an errored plugin has no dispatchable tools"
+    );
+    assert!(
+        tools
+            .plugin_tools()
+            .call("plugin__panicky__echo", json!({}))
+            .await
+            .is_none(),
+        "an errored plugin tool is absent from dispatch"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_double_enable_starts_one_supervisor_and_disable_aborts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let starts = Arc::new(AtomicU32::new(0));
+    let active = Arc::new(AtomicU32::new(0));
+    let (tools, storage, broadcaster) = test_tools(dir.path()).await;
+    storage.set_plugin_enabled("blocking", false).await.unwrap();
+    let host = PluginHost::start(
+        vec![PluginRegistration::new(
+            Box::new(BlockingPlugin {
+                starts: Arc::clone(&starts),
+                active: Arc::clone(&active),
+            }),
+            "1.0.0",
+            "plugins/blocking",
+        )],
+        storage,
+        tools,
+        broadcaster,
+        BroadcastLog::default(),
+        test_supervisor_config(),
+    )
+    .await
+    .unwrap();
+
+    let (first, second) = tokio::join!(
+        host.set_enabled("blocking", true),
+        host.set_enabled("blocking", true)
+    );
+    assert_ne!(
+        first.unwrap(),
+        second.unwrap(),
+        "exactly one enable changes state"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while active.load(Ordering::SeqCst) != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the supervisor did not start exactly one daemon"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(host.status("blocking").await, PluginStatus::Running);
+
+    assert!(host.set_enabled("blocking", false).await.unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while active.load(Ordering::SeqCst) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disabling did not abort the supervised daemon"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(starts.load(Ordering::SeqCst), 1, "no daemon leaked");
+    assert_eq!(host.status("blocking").await, PluginStatus::Disabled);
 }
 
 #[tokio::test]
@@ -421,7 +535,7 @@ async fn disabling_a_plugin_removes_its_tools_and_reenabling_restores_them() {
         )],
     )
     .await;
-    assert!(host.is_running("quiet"));
+    assert!(host.is_running("quiet").await);
     assert_eq!(tools.plugin_tools().names().len(), 1);
 
     assert!(host.set_enabled("quiet", false).await.unwrap());
@@ -430,7 +544,7 @@ async fn disabling_a_plugin_removes_its_tools_and_reenabling_restores_them() {
         "idempotent"
     );
     assert!(tools.plugin_tools().names().is_empty());
-    assert_eq!(host.status("quiet").state, PluginState::Disabled);
+    assert_eq!(host.status("quiet").await, PluginStatus::Disabled);
     assert_eq!(
         storage.plugin_enabled_flags().await.unwrap().get("quiet"),
         Some(&false)
@@ -438,7 +552,7 @@ async fn disabling_a_plugin_removes_its_tools_and_reenabling_restores_them() {
 
     assert!(host.set_enabled("quiet", true).await.unwrap());
     assert_eq!(tools.plugin_tools().names(), vec!["plugin__quiet__echo"]);
-    assert!(host.is_running("quiet"));
+    assert!(host.is_running("quiet").await);
 }
 
 #[tokio::test]
@@ -537,6 +651,50 @@ async fn an_empty_generated_registry_boots_a_clean_host() {
     assert_eq!(body["plugins"], json!([]));
 }
 
+#[tokio::test]
+async fn plugin_list_reads_the_cached_settings_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    state.plugins = PluginHost::start(
+        vec![PluginRegistration::new(
+            Box::new(QuietPlugin { id: "quiet" }),
+            "1.0.0",
+            "plugins/quiet",
+        )],
+        state.storage.clone(),
+        state.tools.clone(),
+        state.broadcaster.clone(),
+        state.broadcast_log.clone(),
+        test_supervisor_config(),
+    )
+    .await
+    .unwrap();
+
+    let mut out_of_band = Map::new();
+    out_of_band.insert("greeting".to_string(), json!("stale sqlite value"));
+    state
+        .storage
+        .merge_plugin_settings("quiet", &out_of_band)
+        .await
+        .unwrap();
+
+    let response = crate::router_from_state(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/plugins")
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = serde_json::from_slice(&read_body(response).await).unwrap();
+    assert_eq!(body["plugins"][0]["values"]["greeting"], json!("Hi"));
+}
+
 /// An installed plugin, exercised through the real router: its tool
 /// dispatches, its route runs behind the owner gate, its KV counter survives
 /// across calls, and disabling it takes both surfaces away.
@@ -565,7 +723,7 @@ async fn an_installed_plugin_works_end_to_end_in_the_real_host() {
     .unwrap();
 
     // Registered from the aggregator, enabled on first sight.
-    assert!(state.plugins.is_running("greeter"));
+    assert!(state.plugins.is_running("greeter").await);
     assert_eq!(state.plugins.tool_names(), vec!["plugin__greeter__ping"]);
 
     // Tool dispatch through the shared plugin tool table.

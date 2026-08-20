@@ -18,7 +18,7 @@ use hirsel_plugin_api::SettingKind;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::{PluginHost, PluginState};
+use super::{PluginHost, PluginStatus};
 use crate::{AppState, auth::owner_bearer_matches};
 
 /// The value a client sees in place of a stored secret, and the value it may
@@ -89,7 +89,7 @@ async fn require_running(
     request: Request,
     next: Next,
 ) -> axum::response::Response {
-    if gate.host.is_running(&gate.plugin_id) {
+    if gate.host.is_running(&gate.plugin_id).await {
         next.run(request).await
     } else {
         (
@@ -104,19 +104,18 @@ async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let host = &state.plugins;
     let mut plugins = Vec::new();
     for loaded in &host.inner.plugins {
-        let status = host.status(&loaded.id);
-        let stored = host.inner.storage.plugin_settings(&loaded.id).await?;
-        let values = super::ctx::effective_settings(&loaded.descriptors, &stored);
+        let status = host.status(&loaded.id).await;
+        let values = loaded.settings();
         let mut entry = json!({
             "id": loaded.id,
             "label": loaded.label,
             "version": loaded.version,
-            "state": status.state.as_str(),
+            "state": status.as_str(),
             "settings": loaded.descriptors,
             "values": masked_values(&loaded.descriptors, &values),
         });
-        if let (PluginState::Errored, Some(error)) = (&status.state, &status.error) {
-            entry["error"] = Value::String(error.clone());
+        if let PluginStatus::Errored { detail } = status {
+            entry["error"] = Value::String(detail);
         }
         plugins.push(entry);
     }
@@ -144,10 +143,10 @@ async fn set_enabled(
             .refresh_plugin_tools(&host.tool_names())
             .await?;
     }
-    let status = host.status(&manage.plugin_id);
+    let status = host.status(&manage.plugin_id).await;
     Ok(Json(json!({
         "id": manage.plugin_id,
-        "state": status.state.as_str(),
+        "state": status.as_str(),
     })))
 }
 

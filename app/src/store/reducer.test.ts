@@ -115,7 +115,7 @@ describe("hello_ok replay merge", () => {
       body: "never reached the host",
     });
     expect(afterReconnect.pendingSends).toEqual([
-      { clientId: "c2", body: "never reached the host", ref: null },
+      { clientId: "c2", body: "never reached the host", ref: null, attachments: [], mode: "send" as const, mentions: [] },
     ]);
   });
 
@@ -152,7 +152,7 @@ describe("hello_ok replay merge", () => {
 
     expect(afterReconnect.messages).toHaveLength(2);
     expect(afterReconnect.pendingSends).toEqual([
-      { clientId: "c1", body: "same words", ref: null },
+      { clientId: "c1", body: "same words", ref: null, attachments: [], mode: "send" as const, mentions: [] },
     ]);
   });
 
@@ -233,7 +233,9 @@ describe("optimistic-send reconciliation", () => {
       pending: true,
       clientId: "c1",
     });
-    expect(state.pendingSends).toEqual([{ clientId: "c1", body: "hello agent", ref: null }]);
+    expect(state.pendingSends).toEqual([
+      { clientId: "c1", body: "hello agent", ref: null, attachments: [], mode: "send" as const, mentions: [] },
+    ]);
   });
 
   it("replaces the oldest matching pending entry with the host-echoed msg", () => {
@@ -279,7 +281,9 @@ describe("optimistic-send reconciliation", () => {
       payload: { type: "msg", message: msg(10, "owner", "same text") },
     });
 
-    expect(afterFirstAck.pendingSends).toEqual([{ clientId: "c2", body: "same text", ref: null }]);
+    expect(afterFirstAck.pendingSends).toEqual([
+      { clientId: "c2", body: "same text", ref: null, attachments: [], mode: "send" as const, mentions: [] },
+    ]);
     expect(afterFirstAck.messages.filter((m) => m.pending)).toHaveLength(1);
     expect(afterFirstAck.messages.find((m) => m.id === 10)).toBeDefined();
   });

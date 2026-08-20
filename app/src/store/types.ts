@@ -34,38 +34,46 @@ export type DisplayMessage = ChatMessage & {
 /** An outgoing `send_message` this client has emitted but not yet seen
  * reconciled via a server `msg` echo. Kept so reconnect can resend with the
  * same `client_id` (host dedupes) and so we know what to reconcile against. */
+/**
+ * TOTAL, deliberately: every field is always present, because every field is
+ * always meaningful. `attachments: []` and `mode: "send"` are the real values of
+ * a plain message, not absences, and an optional field here only pushed a
+ * `?? []` / `?? "send"` default onto each of the three places that built the
+ * wire frame. The single frame builder (`sendMessageFrame`) owns the one wire
+ * omission there is — `mentions`, dropped when empty to keep the pre-v2.1
+ * shape — so the omission lives at the wire edge rather than in the state. */
 export interface PendingSend {
   clientId: string;
   body: string;
   ref: number | null;
-  // Omitted (not just defaulted) when empty/"send" so the common case keeps the
-  // original {clientId, body, ref} shape the store snapshots and tests encode.
-  attachments?: string[];
-  mode?: SendMode;
+  /** Blob ids for the attachments carried by this send. */
+  attachments: string[];
+  mode: SendMode;
   /** Legacy wire ids for @-mentioned Tasks, so a reconnect resend carries them
-   * too. Omitted when empty (keeps the common-case shape). */
-  mentions?: number[];
+   * too. */
+  mentions: number[];
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
 
+/** One Event's optimistic local assertions, each field the value the Owner's
+ * gesture claims the host will shortly commit. An absent field asserts nothing
+ * (the wire truth shows through). `snoozedUntil: null` is a real assertion —
+ * "not snoozed" — as distinct from the field being absent. */
+export interface EventOverride {
+  /** Asserted `status !== "open"` (decide flips it true, reopen/undo false). */
+  decided?: boolean;
+  /** Asserted `archived === true`. */
+  archived?: boolean;
+  /** Asserted `read === true` (awareness auto-read on pass). */
+  read?: boolean;
+  /** Asserted `snoozed_until` (an RFC3339 instant, or `null` for un-snoozed). */
+  snoozedUntil?: string | null;
+}
+
 export interface AgentActivity {
   state: AgentActivityState;
   text: string | null;
-}
-
-/** Per-file upload state driving the composer attachment chips (v1.1). Purely
- * the state machine + resolved blob; the raw File/preview object-URL live in
- * the Composer, keyed by the same `clientId`. */
-export type UploadState = "uploading" | "done" | "error";
-
-export interface Upload {
-  clientId: string;
-  name: string;
-  size: number;
-  mime: string;
-  state: UploadState;
-  blobId?: string; // set once blob_ok correlates
 }
 
 /** A single ordered timeline event from the running turn (v1.5), carrying its
@@ -93,20 +101,19 @@ export interface AppState {
    * current by `event_upsert`. Held as an ordered array so the store can
    * `reconcile` it keyed by `id` like messages. */
   events: EventItem[];
-  /** Event ids optimistically decided ("Marked done" / chosen) but not yet
-   * committed by the host. An event is
-   * effectively resolved if its status is done OR its id is here; on commit the
-   * host's done `event_upsert` supersedes it (the reducer prunes the id). Undo
-   * drops the id back off. Bounded. */
-  eventDecideOverrides: number[];
-  /** Event ids optimistically archived (the decided strip's / overflow's
-   * Archive) but not yet committed by the host — the archive twin of
-   * `eventDecideOverrides`. An event is effectively archived if its wire
-   * `archived` flag is true OR its id is here; on commit the host's
-   * archived `event_upsert` supersedes it (the reducer prunes the id).
-   * Unarchive drops the id back off (and flips a wire-archived event's local
-   * flag until the host echo reconciles). Bounded. */
-  eventArchiveOverrides: number[];
+  /** The ONE optimistic layer over `events`, keyed by event id (R6-1). Every
+   * local Event gesture — decide/undecide, archive/unarchive, auto-read,
+   * snooze/unsnooze — records the value it ASSERTS here; `events` itself stays
+   * the untouched wire truth so reconciliation always has something honest to
+   * reconcile against. Read through `projectEvents` (store: `effectiveEvents()`),
+   * never directly by a surface.
+   *
+   * One settle rule governs the whole record: an assertion is dropped exactly
+   * when the wire truth already carries the value it asserts — applied at write
+   * time (so a no-op gesture leaves no residue), on every `event_upsert`, and on
+   * a `hello_ok` resync (where an event the snapshot no longer carries drops its
+   * whole entry). Bounded. */
+  eventOverrides: Record<number, EventOverride>;
   agentActivity: AgentActivity;
   connection: ConnectionStatus;
   lastSeenMsgId: number | null;
@@ -124,7 +131,6 @@ export interface AppState {
    * `subagent_models_changed`. `null` on older hosts (the control hides). */
   subagentModels: SubagentModelCatalog | null;
   pendingSends: PendingSend[];
-  uploads: Upload[];
   /** v1.4: host-tracked background processes (sub-agents, monitors). Seeded by
    * hello_ok.processes and kept current by process_upsert. */
   processes: ProcessInfo[];
@@ -187,12 +193,6 @@ export type Action =
     }
   | { type: "send_failed"; clientId: string }
   | { type: "send_retry"; clientId: string }
-  | { type: "upload_start"; clientId: string; name: string; size: number; mime: string }
-  | { type: "blob_ok"; clientId: string; blob: Blob }
-  | { type: "upload_error"; clientId: string }
-  | { type: "upload_retry"; clientId: string }
-  | { type: "upload_remove"; clientId: string }
-  | { type: "uploads_clear" }
   | { type: "connection_status"; status: ConnectionStatus }
   // ---- Generative-UI tier (view templates) ----
   | { type: "view_upsert"; payload: ViewUpsertMsg }
@@ -207,8 +207,7 @@ export function initialState(): AppState {
     hasEarlierMessages: false,
     hasLaterMessages: false,
     events: [],
-    eventDecideOverrides: [],
-    eventArchiveOverrides: [],
+    eventOverrides: {},
     agentActivity: { state: "idle", text: null },
     connection: "connecting",
     lastSeenMsgId: null,
@@ -216,7 +215,6 @@ export function initialState(): AppState {
     model: null,
     subagentModels: null,
     pendingSends: [],
-    uploads: [],
     processes: [],
     turnEvents: [],
     lastTurnEvents: [],

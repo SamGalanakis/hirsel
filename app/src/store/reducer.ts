@@ -2,13 +2,14 @@
 // WebSocket concerns so it can be unit tested directly (see reducer.test.ts)
 // and reused verbatim by the Solid store.
 import type { EventItem, ProcessInfo, ViewInstance } from "../protocol";
+import { settleOverride } from "./selectors";
 import type {
   Action,
   AppState,
   DisplayMessage,
+  EventOverride,
   PendingSend,
   TimelineEvent,
-  Upload,
 } from "./types";
 
 /** Cap on retained finished-turn timelines (session memory for "turn details").
@@ -50,6 +51,72 @@ function upsertEvent(events: EventItem[], event: EventItem): EventItem[] {
   if (idx === -1) return [...events, event];
   const next = events.slice();
   next[idx] = event;
+  return next;
+}
+
+/** Cap on the optimistic Event override record. A gesture settles within a
+ * round-trip, so this only guards a pathological offline burst; the
+ * lowest-numbered (oldest) events are shed first. */
+const EVENT_OVERRIDES_LIMIT = 200;
+
+function capOverrides(
+  overrides: Record<number, EventOverride>,
+): Record<number, EventOverride> {
+  const ids = Object.keys(overrides).map(Number);
+  if (ids.length <= EVENT_OVERRIDES_LIMIT) return overrides;
+  const next = { ...overrides };
+  for (const id of ids.sort((a, b) => a - b).slice(0, ids.length - EVENT_OVERRIDES_LIMIT)) {
+    delete next[id];
+  }
+  return next;
+}
+
+/** A gesture can land before the event itself does (a decide replayed against a
+ * store the snapshot has not reached yet). Settling such an assertion against
+ * "nothing known" would drop it, so it settles against wire DEFAULTS instead —
+ * open, unarchived, unread, un-snoozed — and only a real `event_upsert` /
+ * `hello_ok` can retire it. */
+const PHANTOM_EVENT = {
+  status: "open",
+  archived: false,
+  read: false,
+  snoozed_until: null,
+} as EventItem;
+
+/** Record an optimistic assertion for one event, immediately settled against
+ * the wire truth: a gesture that only restates what `events` already says
+ * leaves no entry behind (so `unarchive` on a never-committed archive, or
+ * `read` on an already-read event, is a true no-op). */
+function assertOverride(
+  state: AppState,
+  eventId: number,
+  patch: EventOverride,
+): Record<number, EventOverride> {
+  const merged = { ...state.eventOverrides[eventId], ...patch };
+  const settled = settleOverride(
+    merged,
+    state.events.find((e) => e.id === eventId) ?? PHANTOM_EVENT,
+  );
+  const next = { ...state.eventOverrides };
+  if (settled) next[eventId] = settled;
+  else delete next[eventId];
+  return capOverrides(next);
+}
+
+/** Re-settle every pending assertion against the wire truth that just arrived.
+ * `lookup` returns the committed event for an id, or `undefined` when the new
+ * truth does not carry it at all (a resync that dropped it) — in which case the
+ * whole entry goes. */
+function settleOverrides(
+  overrides: Record<number, EventOverride>,
+  lookup: (id: number) => EventItem | undefined,
+): Record<number, EventOverride> {
+  const next: Record<number, EventOverride> = {};
+  for (const [key, override] of Object.entries(overrides)) {
+    const id = Number(key);
+    const settled = settleOverride(override, lookup(id));
+    if (settled) next[id] = settled;
+  }
   return next;
 }
 
@@ -132,10 +199,6 @@ function retainTurnDetails(
     }
   }
   return next;
-}
-
-function setUpload(uploads: Upload[], clientId: string, patch: Partial<Upload>): Upload[] {
-  return uploads.map((u) => (u.clientId === clientId ? { ...u, ...patch } : u));
 }
 
 /** Reconcile an incoming owner-authored `msg` against the oldest still-pending
@@ -255,16 +318,13 @@ export function reduce(state: AppState, action: Action): AppState {
         // offline is reflected). Defensive default so a malformed
         // frame can't white-screen the app.
         events: action.payload.events ?? [],
-        // Drop optimistic decide overrides for events the snapshot no longer
-        // carries, so a resync leaves no stale override residue.
-        eventDecideOverrides: state.eventDecideOverrides.filter((id) =>
-          (action.payload.events ?? []).some((e) => e.id === id),
-        ),
-        // Same recompute for the optimistic archive layer: an id the snapshot
-        // no longer carries (or already carries as archived — the committed
-        // truth) leaves no stale override residue behind.
-        eventArchiveOverrides: state.eventArchiveOverrides.filter((id) =>
-          (action.payload.events ?? []).some((e) => e.id === id && e.archived !== true),
+        // ONE resync rule for the whole optimistic layer: every assertion the
+        // snapshot has caught up with is dropped, and an event the snapshot no
+        // longer carries drops its entry outright. What survives is exactly what
+        // the host has not committed yet — so a decide/archive/read/snooze made
+        // just before the disconnect still holds, and nothing stale lingers.
+        eventOverrides: settleOverrides(state.eventOverrides, (id) =>
+          (action.payload.events ?? []).find((e) => e.id === id),
         ),
         lastSeenMsgId: latest_msg_id,
         // Keep the last reported host version if this frame (or an older host)
@@ -423,102 +483,70 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case "event_upsert": {
       const event = action.payload.event;
+      const pending = state.eventOverrides[event.id];
+      let eventOverrides = state.eventOverrides;
+      if (pending) {
+        // The same settle rule as a resync, applied to this one id: a committed
+        // value supersedes the assertion that predicted it, and an assertion the
+        // echo has NOT caught up with survives — an interleaved upsert (a read
+        // flip racing the archive echo, say) must not flicker the card back.
+        const settled = settleOverride(pending, event);
+        eventOverrides = { ...state.eventOverrides };
+        if (settled) eventOverrides[event.id] = settled;
+        else delete eventOverrides[event.id];
+      }
+      return { ...state, events: upsertEvent(state.events, event), eventOverrides };
+    }
+
+    // ---- The optimistic layer: six gestures, one record ----
+    //
+    // Each records the value it ASSERTS about the event; `assertOverride`
+    // settles it against the wire truth on the spot, so a gesture that merely
+    // restates what the host already says leaves nothing behind. `events` is
+    // never patched in place — the wire truth stays intact to reconcile against.
+
+    case "event_decide_local":
+      // Decide: the card renders/counts as decided at once while `event_action`
+      // is sent and a ~5s Undo window offers recovery.
+      return { ...state, eventOverrides: assertOverride(state, action.eventId, { decided: true }) };
+
+    case "event_undecide_local":
+      // Undo / Reopen: assert the event is open again (dropping the assertion
+      // outright when the wire already has it open).
+      return { ...state, eventOverrides: assertOverride(state, action.eventId, { decided: false }) };
+
+    case "event_read_local":
+      // Awareness auto-read as the scroller passes it.
+      return { ...state, eventOverrides: assertOverride(state, action.eventId, { read: true }) };
+
+    case "event_archive_local":
+      // Archive: the event leaves the resting queue at once while
+      // `event_action{archive}` is sent.
+      return { ...state, eventOverrides: assertOverride(state, action.eventId, { archived: true }) };
+
+    case "event_unarchive_local":
+      // Unarchive: assert not-archived, which returns the row to the resting
+      // queue whichever layer archived it — the wire flag or a pending assertion.
       return {
         ...state,
-        events: upsertEvent(state.events, event),
-        // A committed resolve (host `done` event_upsert) supersedes any pending
-        // optimistic decide override for this id — prune it so the wire truth and
-        // the optimistic layer never disagree once the action has landed.
-        eventDecideOverrides:
-          event.status !== "open"
-            ? state.eventDecideOverrides.filter((id) => id !== event.id)
-            : state.eventDecideOverrides,
-        // The archive twin: a committed archived event_upsert supersedes any
-        // pending optimistic archive override for this id. Only the COMMITTED
-        // archived truth prunes — an unrelated interleaved upsert (still
-        // archived=false) must not drop the override and flicker the card back
-        // before the archive echo lands (same guard as the decide prune above).
-        eventArchiveOverrides:
-          event.archived === true
-            ? state.eventArchiveOverrides.filter((id) => id !== event.id)
-            : state.eventArchiveOverrides,
+        eventOverrides: assertOverride(state, action.eventId, { archived: false }),
       };
-    }
 
-    case "event_decide_local": {
-      // Optimistic decide flip: record the id so the
-      // event renders/counts as decided at once, while `event_action` is sent to
-      // the host and a ~5s Undo window offers recovery.
-      const eventDecideOverrides = state.eventDecideOverrides.includes(action.eventId)
-        ? state.eventDecideOverrides
-        : [...state.eventDecideOverrides, action.eventId].slice(-200);
-      return { ...state, eventDecideOverrides };
-    }
-
-    case "event_undecide_local": {
-      // Undo: drop the optimistic override so the
-      // event returns to its wire status.
+    case "event_snooze_local":
+      // Durable snooze (Wave-3): the card leaves Active at once while
+      // `event_action{snooze,{until}}` is sent. The host echo carries the same
+      // instant (and later clears it at the return moment) and settles this.
       return {
         ...state,
-        eventDecideOverrides: state.eventDecideOverrides.filter((id) => id !== action.eventId),
+        eventOverrides: assertOverride(state, action.eventId, { snoozedUntil: action.until }),
       };
-    }
 
-    case "event_read_local": {
-      // Awareness auto-read as the scroller passes it:
-      // flip read=true locally; the host's event_upsert reconciles the truth.
-      const events = state.events.map((e) =>
-        e.id === action.eventId ? { ...e, read: true } : e,
-      );
-      return { ...state, events };
-    }
-
-    case "event_archive_local": {
-      // Optimistic archive flip (mirrors `event_decide_local`): record the id so
-      // the event leaves the resting queue at once, while `event_action{archive}`
-      // is sent to the host; the committed archived event_upsert reconciles.
-      const eventArchiveOverrides = state.eventArchiveOverrides.includes(action.eventId)
-        ? state.eventArchiveOverrides
-        : [...state.eventArchiveOverrides, action.eventId].slice(-200);
-      return { ...state, eventArchiveOverrides };
-    }
-
-    case "event_unarchive_local": {
-      // Optimistic unarchive: drop any pending archive override AND flip a
-      // wire-archived event's local flag (the `event_read_local` pattern), so
-      // the row returns to the resting queue at once whichever layer archived
-      // it. The host's event_upsert echo reconciles the truth.
-      const events = state.events.map((e) =>
-        e.id === action.eventId && e.archived === true ? { ...e, archived: false } : e,
-      );
+    case "event_unsnooze_local":
+      // Un-snooze: assert no return instant, so the event is back in Active now.
       return {
         ...state,
-        events,
-        eventArchiveOverrides: state.eventArchiveOverrides.filter((id) => id !== action.eventId),
+        eventOverrides: assertOverride(state, action.eventId, { snoozedUntil: null }),
       };
-    }
-
-    case "event_snooze_local": {
-      // Optimistic durable snooze (Wave-3): patch `snoozed_until` on the event
-      // itself (the `event_read_local` pattern), so it leaves Active everywhere
-      // at once while `event_action{snooze,{until}}` is sent to the host; the
-      // host's event_upsert echo (carrying the field, and later clearing it at
-      // the return instant) reconciles the truth.
-      const events = state.events.map((e) =>
-        e.id === action.eventId ? { ...e, snoozed_until: action.until } : e,
-      );
-      return { ...state, events };
-    }
-
-    case "event_unsnooze_local": {
-      // Optimistic un-snooze: clear `snoozed_until` locally so the event returns
-      // to Active at once while `event_action{unsnooze}` is sent; the host echo
-      // reconciles.
-      const events = state.events.map((e) =>
-        e.id === action.eventId ? { ...e, snoozed_until: null } : e,
-      );
-      return { ...state, events };
-    }
 
     case "send_local": {
       const { localId, clientId, body, ref, ts, attachments, mode, mentions } = action;
@@ -539,12 +567,17 @@ export function reduce(state: AppState, action: Action): AppState {
         clientId,
         mode: sendMode,
       };
-      // Keep the bare {clientId, body, ref} shape unless there is something extra
-      // to carry, so the un-adorned case matches the original wire/replay path.
-      const pendingSend: PendingSend = { clientId, body, ref };
-      if (blobs.length > 0) pendingSend.attachments = blobs.map((b) => b.id);
-      if (sendMode !== "send") pendingSend.mode = sendMode;
-      if (mentionIds.length > 0) pendingSend.mentions = mentionIds;
+      // Total: a plain message carries `[]` / "send" / `[]` as real values. The
+      // wire's one omission (empty `mentions`) is applied by `sendMessageFrame`,
+      // not encoded here.
+      const pendingSend: PendingSend = {
+        clientId,
+        body,
+        ref,
+        attachments: blobs.map((b) => b.id),
+        mode: sendMode,
+        mentions: mentionIds,
+      };
       const grown = [...state.messages, localMessage];
       return {
         ...state,
@@ -570,51 +603,6 @@ export function reduce(state: AppState, action: Action): AppState {
           m.pending && m.clientId === action.clientId ? { ...m, failed: false } : m,
         ),
       };
-
-    case "upload_start":
-      return {
-        ...state,
-        uploads: [
-          ...state.uploads.filter((u) => u.clientId !== action.clientId),
-          {
-            clientId: action.clientId,
-            name: action.name,
-            size: action.size,
-            mime: action.mime,
-            state: "uploading",
-          },
-        ],
-      };
-
-    case "blob_ok":
-      return {
-        ...state,
-        uploads: setUpload(state.uploads, action.clientId, {
-          state: "done",
-          blobId: action.blob.id,
-        }),
-      };
-
-    case "upload_error":
-      return {
-        ...state,
-        uploads: setUpload(state.uploads, action.clientId, { state: "error" }),
-      };
-
-    case "upload_retry":
-      return {
-        ...state,
-        uploads: setUpload(state.uploads, action.clientId, { state: "uploading" }),
-      };
-
-    case "upload_remove":
-      return {
-        ...state,
-        uploads: state.uploads.filter((u) => u.clientId !== action.clientId),
-      };
-
-    case "uploads_clear":
-      return { ...state, uploads: [] };
 
     case "connection_status":
       return { ...state, connection: action.status };

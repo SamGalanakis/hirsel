@@ -6,7 +6,6 @@ import { taskLabel, taskName, taskStatus, taskTone } from "./task-model";
 export function TaskIndex(props: {
   tasks: EventItem[];
   focusedId: number | null;
-  decideOverrides: number[];
   onSelect: (task: EventItem) => void;
   onClearFocus: () => void;
 }) {
@@ -44,7 +43,7 @@ export function TaskIndex(props: {
           const dimmed = () => props.focusedId !== null && !focused();
           // One status decision per chip; the word and the dot are both reads
           // of it.
-          const status = () => taskStatus(task, props.decideOverrides);
+          const status = () => taskStatus(task);
           const label = () => taskLabel(status());
           return (
             // The chip and its exit are siblings, never nested: a button inside a

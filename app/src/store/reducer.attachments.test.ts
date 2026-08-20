@@ -27,18 +27,39 @@ describe("send_local with attachments and mode", () => {
   it("carries attachments onto the optimistic message and pendingSend blob ids", () => {
     const s = reduce(initialState(), sendLocal("c1", "look", { attachments: [blob("b1")] }));
     expect(s.messages[0].attachments).toEqual([blob("b1")]);
-    expect(s.pendingSends[0]).toEqual({ clientId: "c1", body: "look", ref: null, attachments: ["b1"] });
+    expect(s.pendingSends[0]).toEqual({
+      clientId: "c1",
+      body: "look",
+      ref: null,
+      attachments: ["b1"],
+      mode: "send",
+      mentions: [],
+    });
   });
 
-  it("keeps the bare pendingSend shape for a default send (no attachments/mode)", () => {
+  it("spells a default send's empty attachments/mentions and \"send\" mode out in full", () => {
     const s = reduce(initialState(), sendLocal("c1", "hi"));
-    expect(s.pendingSends[0]).toEqual({ clientId: "c1", body: "hi", ref: null });
+    expect(s.pendingSends[0]).toEqual({
+      clientId: "c1",
+      body: "hi",
+      ref: null,
+      attachments: [],
+      mode: "send",
+      mentions: [],
+    });
     expect(s.messages[0].mode).toBe("send");
   });
 
   it("records a next_turn mode on the pendingSend", () => {
     const s = reduce(initialState(), sendLocal("c1", "later", { mode: "next_turn" }));
-    expect(s.pendingSends[0]).toEqual({ clientId: "c1", body: "later", ref: null, mode: "next_turn" });
+    expect(s.pendingSends[0]).toEqual({
+      clientId: "c1",
+      body: "later",
+      ref: null,
+      attachments: [],
+      mode: "next_turn",
+      mentions: [],
+    });
   });
 });
 
@@ -121,48 +142,5 @@ describe("failed-send + retry", () => {
     });
     const after = reduce(s1, { type: "send_failed", clientId: "whatever" });
     expect(after.messages[0].failed).toBeUndefined();
-  });
-});
-
-describe("upload chip state machine + blob_ok correlation", () => {
-  it("start -> blob_ok correlates by client_id and leaves siblings alone", () => {
-    let s = reduce(initialState(), {
-      type: "upload_start",
-      clientId: "u1",
-      name: "a.png",
-      size: 10,
-      mime: "image/png",
-    });
-    s = reduce(s, { type: "upload_start", clientId: "u2", name: "b.pdf", size: 20, mime: "application/pdf" });
-    expect(s.uploads.map((u) => u.state)).toEqual(["uploading", "uploading"]);
-
-    s = reduce(s, { type: "blob_ok", clientId: "u2", blob: blob("blob-2", "b.pdf", "application/pdf", 20) });
-    const u1 = s.uploads.find((u) => u.clientId === "u1");
-    const u2 = s.uploads.find((u) => u.clientId === "u2");
-    expect(u1?.state).toBe("uploading");
-    expect(u2?.state).toBe("done");
-    expect(u2?.blobId).toBe("blob-2");
-  });
-
-  it("error -> retry -> done, and remove/clear", () => {
-    let s = reduce(initialState(), {
-      type: "upload_start",
-      clientId: "u1",
-      name: "a.png",
-      size: 10,
-      mime: "image/png",
-    });
-    s = reduce(s, { type: "upload_error", clientId: "u1" });
-    expect(s.uploads[0].state).toBe("error");
-    s = reduce(s, { type: "upload_retry", clientId: "u1" });
-    expect(s.uploads[0].state).toBe("uploading");
-    s = reduce(s, { type: "blob_ok", clientId: "u1", blob: blob("blob-1", "a.png") });
-    expect(s.uploads[0].state).toBe("done");
-
-    const removed = reduce(s, { type: "upload_remove", clientId: "u1" });
-    expect(removed.uploads).toHaveLength(0);
-
-    const cleared = reduce(s, { type: "uploads_clear" });
-    expect(cleared.uploads).toHaveLength(0);
   });
 });

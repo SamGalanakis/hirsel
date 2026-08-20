@@ -25,7 +25,7 @@ import {
 } from "lucide-solid";
 import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import type { EventItem } from "../protocol";
-import { clearTaskFocus, state } from "../store/store";
+import { clearTaskFocus, effectiveEvents, state } from "../store/store";
 import { archiveEventWithUndo } from "../lib/event-archive";
 import { decideEventWithUndo } from "../lib/event-decide";
 import { snoozeEventWithUndo } from "../lib/event-snooze";
@@ -71,11 +71,8 @@ function fuzzyMatch(query: string, text: string): boolean {
  * current") target: the first open judgment in Task priority
  * order (blocking first) — the one that most needs the Owner. */
 function currentJudgment(): EventItem | null {
-  const ordered = orderedTasks(
-    visibleEvents(state.events, state.eventArchiveOverrides),
-    state.eventDecideOverrides,
-  );
-  return ordered.find((e) => isOpenJudgment(e, state.eventDecideOverrides)) ?? null;
+  const ordered = orderedTasks(visibleEvents(effectiveEvents()));
+  return ordered.find(isOpenJudgment) ?? null;
 }
 
 /** The letter-keyed options of a judgment's optionList, for the "Decide <key>"
@@ -205,11 +202,7 @@ export const CommandPalette: Component<{
       });
     }
 
-    const finishedIds = finishedEvents(
-      state.events,
-      state.eventArchiveOverrides,
-      state.eventDecideOverrides,
-    ).map((e) => e.id);
+    const finishedIds = finishedEvents(effectiveEvents()).map((e) => e.id);
     if (finishedIds.length > 0) {
       out.push({
         id: "clear-finished",

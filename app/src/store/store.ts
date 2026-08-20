@@ -1,6 +1,8 @@
 import { untrack } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import type { EventItem } from "../protocol";
 import { reduce } from "./reducer";
+import { projectEvents } from "./selectors";
 import { type Action, type AppState, initialState } from "./types";
 
 /** Exactly one temporary utility can cover the task world at a time. */
@@ -39,6 +41,16 @@ function initialStore(): Store {
 
 const [state, setState] = createStore<Store>(initialStore());
 
+/** The projection of `state.events` through `state.eventOverrides` (R6-1),
+ * held in its own store rather than derived in a memo for ONE reason: row
+ * identity. Every task surface renders through `<For>`, which is keyed by object
+ * reference, so a memo minting fresh objects on each override change would tear
+ * down and rebuild the row's DOM (losing focus mid-gesture). Reconciled by `id`,
+ * the row object survives an optimistic flip and only the changed field notifies.
+ * Written synchronously inside `dispatch`, so a caller reading it right after a
+ * dispatch (or right before one) always sees the settled truth. */
+const [projection, setProjection] = createStore<{ events: EventItem[] }>({ events: [] });
+
 /** Snapshot the protocol-facing slice to hand to the pure reducer. */
 function appSnapshot(): AppState {
   return {
@@ -46,8 +58,7 @@ function appSnapshot(): AppState {
     hasEarlierMessages: state.hasEarlierMessages,
     hasLaterMessages: state.hasLaterMessages,
     events: state.events,
-    eventDecideOverrides: state.eventDecideOverrides,
-    eventArchiveOverrides: state.eventArchiveOverrides,
+    eventOverrides: state.eventOverrides,
     agentActivity: state.agentActivity,
     connection: state.connection,
     lastSeenMsgId: state.lastSeenMsgId,
@@ -55,7 +66,6 @@ function appSnapshot(): AppState {
     model: state.model,
     subagentModels: state.subagentModels,
     pendingSends: state.pendingSends,
-    uploads: state.uploads,
     processes: state.processes,
     turnEvents: state.turnEvents,
     lastTurnEvents: state.lastTurnEvents,
@@ -84,11 +94,16 @@ export function dispatch(action: Action): void {
     // Task collection: reconcile typed wire Events by id so only the DOM bound to a
     // genuinely-changed event (a re-upsert / decide flip) re-renders.
     setState("events", reconcile(next.events, { key: "id" }));
-    setState("eventDecideOverrides", next.eventDecideOverrides);
-    setState("eventArchiveOverrides", next.eventArchiveOverrides);
+    // The one optimistic layer over those events. `reconcile` (rather than a
+    // plain set) keeps the per-id entries stable, so a gesture on one event
+    // never invalidates the projection of every other.
+    setState("eventOverrides", reconcile(next.eventOverrides));
+    setProjection(
+      "events",
+      reconcile(projectEvents(next.events, next.eventOverrides), { key: "id" }),
+    );
     setState("pendingSends", next.pendingSends);
     setState("removedIds", next.removedIds);
-    setState("uploads", reconcile(next.uploads, { key: "clientId" }));
     setState("processes", reconcile(next.processes, { key: "id" }));
     setState("turnEvents", next.turnEvents);
     // Never rendered directly (the parking slot for a turn whose idle boundary
@@ -110,6 +125,15 @@ export function dispatch(action: Action): void {
     // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
     setState("views", reconcile(next.views, { key: "instance_id" }));
   });
+}
+
+/** THE Event list every surface reads: the wire truth in `state.events` with
+ * the optimistic `eventOverrides` layer folded in (R6-1). Selectors, components
+ * and the action helpers all take these plain projected events, so no caller
+ * ever threads override ids around. Reactive like any store read — components
+ * track exactly the rows and fields they touch. */
+export function effectiveEvents(): EventItem[] {
+  return projection.events;
 }
 
 // ---- Task focus -------------------------------------------------------------

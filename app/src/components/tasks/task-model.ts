@@ -10,10 +10,11 @@ export function taskName(task: EventItem): string {
  * label, the status dot, and the load-time focus rule all read from. */
 export type TaskStatus = "done" | "blocked" | "needs-you" | "unseen" | "moving";
 
-/** The single decision. Evaluated once per Task; everything downstream is a
- * table lookup on the result. */
-export function taskStatus(task: EventItem, decideOverrides: number[] = []): TaskStatus {
-  if (isEventResolved(task, decideOverrides)) return "done";
+/** The single decision. Evaluated once per Task — callers hand in PROJECTED
+ * events (`effectiveEvents()`), which already fold in optimistic overrides —
+ * and everything downstream is a table lookup on the result. */
+export function taskStatus(task: EventItem): TaskStatus {
+  if (isEventResolved(task)) return "done";
   if (task.blocking) return "blocked";
   if (task.kind === "judgment") return "needs-you";
   if (task.read) return "moving";
@@ -56,15 +57,12 @@ export function taskTone(status: TaskStatus): string {
  * with the higher id as a stable final tiebreak. Pure and total — the shell
  * effect and its tests share this one rule. Returns null when nothing in the
  * field wants the Owner, which is the ambient field's cue to stay ambient. */
-export function mostNeedingTask(
-  tasks: EventItem[],
-  decideOverrides: number[] = [],
-): EventItem | null {
+export function mostNeedingTask(tasks: EventItem[]): EventItem | null {
   let best: EventItem | null = null;
   let bestRank = Number.POSITIVE_INFINITY;
   let bestTs = Number.NEGATIVE_INFINITY;
   for (const task of tasks) {
-    const rank = TASK_STATUS[taskStatus(task, decideOverrides)].rank;
+    const rank = TASK_STATUS[taskStatus(task)].rank;
     if (rank === null) continue;
     const parsed = Date.parse(task.ts);
     // An unparseable ts must never outrank a real one; it sinks to the oldest.

@@ -5,30 +5,102 @@ import type {
   ViewInstance,
   ViewSpec,
 } from "../protocol";
+import type { EventOverride } from "./types";
 // ---- Task collection (typed Events on the compatibility wire) ----
 
-/** Effective "decided/resolved" state for an Event, folding in the optimistic
- * decide override (`eventDecideOverrides`):
- * resolved when the wire status is done OR the Owner has just decided it and the
- * ~5s Undo window has not yet committed. One place so the queue partition, the
- * counts, and the card visuals all agree. */
-export function isEventResolved(event: EventItem, decideOverrides: number[]): boolean {
-  return event.status !== "open" || decideOverrides.includes(event.id);
+// ---- The optimistic override layer (one record, one projection) -------------
+
+/** Do two `snoozed_until` values name the same moment? The Owner sends an
+ * RFC3339 instant and the host round-trips it through its own clock type, so the
+ * echo can be the same moment spelled differently ("…+00:00" vs "…Z"). Compared
+ * as instants when both parse, as strings otherwise. */
+function sameInstant(a: string | null | undefined, b: string | null | undefined): boolean {
+  const left = a ?? null;
+  const right = b ?? null;
+  if (left === null || right === null) return left === right;
+  const da = Date.parse(left);
+  const db = Date.parse(right);
+  if (Number.isFinite(da) && Number.isFinite(db)) return da === db;
+  return left === right;
 }
 
-/** Effective "archived" state for an Event (archive contract v1), folding in
- * the optimistic archive override (`eventArchiveOverrides`) — the archive twin
- * of `isEventResolved`: archived when the wire flag is set OR the Owner has
- * just archived it and the host echo has not yet landed. One place so the
- * default filter, the Archived(n) count, and the archived view all agree. */
-export function isEventArchived(event: EventItem, archiveOverrides: number[]): boolean {
-  return event.archived === true || archiveOverrides.includes(event.id);
+/** THE settle rule (R6-1): drop every assertion the wire truth already carries,
+ * keeping only what is still genuinely optimistic. Returns `null` when nothing
+ * is left to assert (or when `committed` is absent — an event the snapshot no
+ * longer carries can have no pending local claim about it).
+ *
+ * The archive rule generalized: the archive override used to be pruned on a
+ * committed `archived` upsert and on resync; every field now settles the same
+ * way, on the same three occasions (write, `event_upsert`, `hello_ok`). */
+export function settleOverride(
+  override: EventOverride,
+  committed: EventItem | undefined,
+): EventOverride | null {
+  if (!committed) return null;
+  const next: EventOverride = {};
+  if (override.decided !== undefined && (committed.status !== "open") !== override.decided) {
+    next.decided = override.decided;
+  }
+  if (override.archived !== undefined && (committed.archived === true) !== override.archived) {
+    next.archived = override.archived;
+  }
+  if (override.read !== undefined && (committed.read === true) !== override.read) {
+    next.read = override.read;
+  }
+  if (
+    override.snoozedUntil !== undefined &&
+    !sameInstant(committed.snoozed_until, override.snoozedUntil)
+  ) {
+    next.snoozedUntil = override.snoozedUntil;
+  }
+  return Object.keys(next).length > 0 ? next : null;
+}
+
+/** Project one Event through its pending assertions.
+ *
+ * ALWAYS returns a fresh plain object, even for an un-overridden row. Returning
+ * `event` itself would be free, but the projection is fed into a store of its
+ * own: `reconcile` would then diff a live `state.events` proxy against itself
+ * and patch the WIRE TRUTH in place the first time an assertion appeared —
+ * exactly the optimistic layer leaking into the thing it must stay separable
+ * from. The copy is what keeps the two stores disjoint. */
+export function projectEvent(event: EventItem, override: EventOverride | undefined): EventItem {
+  const projected: EventItem = { ...event };
+  if (!override) return projected;
+  if (override.decided !== undefined) projected.status = override.decided ? "done" : "open";
+  if (override.archived !== undefined) projected.archived = override.archived;
+  if (override.read !== undefined) projected.read = override.read;
+  if (override.snoozedUntil !== undefined) projected.snoozed_until = override.snoozedUntil;
+  return projected;
+}
+
+/** The Event list every surface reads: wire truth with the optimistic layer
+ * folded in. Downstream selectors take these PLAIN projected events — no
+ * surface, selector, or component threads override ids any more. */
+export function projectEvents(
+  events: EventItem[],
+  overrides: Record<number, EventOverride>,
+): EventItem[] {
+  return events.map((event) => projectEvent(event, overrides[event.id]));
+}
+
+/** "Decided/resolved": the status is no longer open. Read off a PROJECTED
+ * event, so an optimistic decide (not yet committed) counts exactly like a
+ * committed one. One place so the queue partition, the counts, and the card
+ * visuals all agree. */
+export function isEventResolved(event: EventItem): boolean {
+  return event.status !== "open";
+}
+
+/** "Archived" (archive contract v1), read off a PROJECTED event — the archive
+ * twin of `isEventResolved`. One place so the default filter, the Archived(n)
+ * count, and the archived view all agree. */
+export function isEventArchived(event: EventItem): boolean {
+  return event.archived === true;
 }
 
 /** Effective "snoozed" state for an Event (Wave-3 durable snooze): `snoozed_until`
- * is set and still in the future. The optimistic flip lives on the event itself
- * (`event_snooze_local` patches `snoozed_until`), so — unlike archive/decide —
- * there is no separate override layer to fold in. One place so the Active filter,
+ * is set and still in the future. One place so the Active filter,
  * the needs-you count, and the "Snoozed (n)" view all agree. Once the instant
  * passes the host clears the field and re-broadcasts, so the client never needs a
  * wall-clock timer to bring a return back. */
@@ -44,47 +116,36 @@ export function isEventSnoozed(event: EventItem, now: number = Date.now()): bool
  * the phone nav badge, the needs-you count) reads through this, so an archived or
  * snoozed event vanishes everywhere at once and counts stay honest against the
  * filtered set. `now` is injectable for deterministic tests. */
-export function visibleEvents(
-  events: EventItem[],
-  archiveOverrides: number[],
-  now: number = Date.now(),
-): EventItem[] {
-  return events.filter((e) => !isEventArchived(e, archiveOverrides) && !isEventSnoozed(e, now));
+export function visibleEvents(events: EventItem[], now: number = Date.now()): EventItem[] {
+  return events.filter((e) => !isEventArchived(e) && !isEventSnoozed(e, now));
 }
 
 /** The set the "Clear finished (n)" sweep removes: finished (decided, or read
  * awareness) events still resting in the queue — never touching what is still
  * open, snoozed, or already archived. One selector so the sweep's count and the
  * ids it archives always agree. */
-export function finishedEvents(
-  events: EventItem[],
-  archiveOverrides: number[],
-  decideOverrides: number[],
-  now: number = Date.now(),
-): EventItem[] {
-  return visibleEvents(events, archiveOverrides, now).filter((e) =>
-    isEventFinished(e, decideOverrides),
-  );
+export function finishedEvents(events: EventItem[], now: number = Date.now()): EventItem[] {
+  return visibleEvents(events, now).filter(isEventFinished);
 }
 
 /** "Finished" per the archive contract: done, OR read awareness that never
  * needed a response — exactly the set `events.clear` sweeps, and the gate for
  * the card overflow's Archive action (an open judgment is archived only by the
  * host/agent, never offered the affordance here). */
-export function isEventFinished(event: EventItem, decideOverrides: number[]): boolean {
-  return isEventResolved(event, decideOverrides) || (event.read && !event.requires_response);
+export function isEventFinished(event: EventItem): boolean {
+  return isEventResolved(event) || (event.read && !event.requires_response);
 }
 
 /** A judgment still needing the Owner: kind judgment, open, not optimistically
  * decided. The highest-priority Task state. */
-export function isOpenJudgment(event: EventItem, decideOverrides: number[]): boolean {
-  return event.kind === "judgment" && !isEventResolved(event, decideOverrides);
+export function isOpenJudgment(event: EventItem): boolean {
+  return event.kind === "judgment" && !isEventResolved(event);
 }
 
 /** The ONE red on the surface (ADR-0012): the "N need you" count = open,
  * undecided judgments. Awareness never contributes. */
-export function tasksNeedingOwnerCount(events: EventItem[], decideOverrides: number[]): number {
-  return events.filter((e) => isOpenJudgment(e, decideOverrides)).length;
+export function tasksNeedingOwnerCount(events: EventItem[]): number {
+  return events.filter(isOpenJudgment).length;
 }
 
 /** Wait time drives ordering within the judgment band — oldest first is the most
@@ -103,8 +164,8 @@ function tsAsc(a: EventItem, b: EventItem): number {
  * rank sorts earlier. (Wave-3: the old client-only "snoozed to the tail" band is
  * gone — durable snooze removes an event from the resting set entirely, so it
  * never reaches this ordering.) */
-function taskPriorityRank(event: EventItem, decideOverrides: number[]): number {
-  const open = isOpenJudgment(event, decideOverrides);
+function taskPriorityRank(event: EventItem): number {
+  const open = isOpenJudgment(event);
   if (open && event.blocking) return 0;
   if (open) return 1;
   if (event.kind === "judgment") return 2; // decided judgment, kept in place
@@ -114,10 +175,10 @@ function taskPriorityRank(event: EventItem, decideOverrides: number[]): number {
 /** Order the queue for the scroller: priority band first, oldest-waited first
  * within a band, id as a stable final tiebreak. Pure + total (never throws) so
  * the scroller and its tests share one ordering. */
-export function orderedTasks(events: EventItem[], decideOverrides: number[]): EventItem[] {
+export function orderedTasks(events: EventItem[]): EventItem[] {
   return events.slice().sort((a, b) => {
-    const ra = taskPriorityRank(a, decideOverrides);
-    const rb = taskPriorityRank(b, decideOverrides);
+    const ra = taskPriorityRank(a);
+    const rb = taskPriorityRank(b);
     if (ra !== rb) return ra - rb;
     const t = tsAsc(a, b);
     if (t !== 0) return t;

@@ -19,7 +19,7 @@ import {
   tasksNeedingOwnerCount,
   visibleEvents,
 } from "./store/selectors";
-import { state } from "./store/store";
+import { effectiveEvents, state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
 const WS_URL = resolveWsUrl();
@@ -73,10 +73,7 @@ function App() {
   // favicon dot, and desktop notifications onto THIS (they read the
   // superseded legacy state before — a live bug).
   const needsYouCount = () =>
-    tasksNeedingOwnerCount(
-      visibleEvents(state.events, state.eventArchiveOverrides),
-      state.eventDecideOverrides,
-    );
+    tasksNeedingOwnerCount(visibleEvents(effectiveEvents()));
 
   // Reflect the needs-you count in document.title, so it's visible from a
   // backgrounded tab without push. (Replaces the React useTitleBadge hook.)
@@ -103,8 +100,8 @@ function App() {
   // freshly-arrived blocking judgment.
   let knownBlockingIds: Set<number> | null = null;
   createEffect(() => {
-    const blocking = visibleEvents(state.events, state.eventArchiveOverrides).filter(
-      (e) => isOpenJudgment(e, state.eventDecideOverrides) && e.blocking,
+    const blocking = visibleEvents(effectiveEvents()).filter(
+      (e) => isOpenJudgment(e) && e.blocking,
     );
     const ids = new Set(blocking.map((e) => e.id));
     if (knownBlockingIds === null) {

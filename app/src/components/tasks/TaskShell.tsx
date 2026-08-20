@@ -19,6 +19,7 @@ import {
   clearProtocolError,
   clearTaskFocus,
   dispatch,
+  effectiveEvents,
   focusTask,
   reconcileTaskFocus,
   setProtocolError,
@@ -133,8 +134,8 @@ export function TaskShell() {
     }, { defer: true }),
   );
 
-  const visible = createMemo(() => visibleEvents(state.events, state.eventArchiveOverrides));
-  const tasks = createMemo(() => orderedTasks(visible(), state.eventDecideOverrides));
+  const visible = createMemo(() => visibleEvents(effectiveEvents()));
+  const tasks = createMemo(() => orderedTasks(visible()));
   const focusedTask = createMemo(() =>
     tasks().find((task) => task.id === state.focusedTaskId) ?? null
   );
@@ -267,7 +268,7 @@ export function TaskShell() {
     if (autoFocusSettled || connection !== "connected") return;
     autoFocusSettled = true;
     if (state.focusedTaskId !== null) return; // a focus already chosen wins
-    const task = mostNeedingTask(tasks(), state.eventDecideOverrides);
+    const task = mostNeedingTask(tasks());
     if (task) focusTask(task.id);
   }));
 
@@ -347,7 +348,6 @@ export function TaskShell() {
         <TaskIndex
           tasks={tasks()}
           focusedId={state.focusedTaskId}
-          decideOverrides={state.eventDecideOverrides}
           onSelect={selectTask}
           onClearFocus={clearTaskFocus}
         />

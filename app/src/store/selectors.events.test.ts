@@ -32,16 +32,16 @@ function ev(overrides: Partial<EventItem> = {}): EventItem {
 }
 
 describe("isEventResolved / tasksNeedingOwnerCount", () => {
-  it("folds in the optimistic decide override and counts only open judgments", () => {
+  it("reads the projected status and counts only open judgments", () => {
     const a = ev({ id: 1 });
     const b = ev({ id: 2 });
     const info = ev({ id: 3, kind: "info", requires_response: false });
-    expect(isEventResolved(a, [])).toBe(false);
-    expect(isEventResolved(a, [1])).toBe(true);
-    expect(isEventResolved(ev({ id: 4, status: "done" }), [])).toBe(true);
+    expect(isEventResolved(a)).toBe(false);
+    expect(isEventResolved(ev({ id: 4, status: "done" }))).toBe(true);
     // Only open judgments contribute to the ONE red — info never does.
-    expect(tasksNeedingOwnerCount([a, b, info], [])).toBe(2);
-    expect(tasksNeedingOwnerCount([a, b, info], [1])).toBe(1);
+    expect(tasksNeedingOwnerCount([a, b, info])).toBe(2);
+    // An optimistically-decided event arrives here already projected to done.
+    expect(tasksNeedingOwnerCount([{ ...a, status: "done" }, b, info])).toBe(1);
   });
 });
 
@@ -52,54 +52,53 @@ describe("orderedTasks priority", () => {
     const newerJudgment = ev({ id: 12, ts: "2026-07-13T09:00:00Z" });
     const summary = ev({ id: 13, kind: "summary", requires_response: false, ts: "2026-07-13T06:00:00Z" });
     const info = ev({ id: 14, kind: "info", requires_response: false, ts: "2026-07-13T07:00:00Z" });
-    const ordered = orderedTasks([summary, newerJudgment, info, blocking, olderJudgment], []);
+    const ordered = orderedTasks([summary, newerJudgment, info, blocking, olderJudgment]);
     // Blocking first, then the two open judgments oldest-first, then awareness.
     expect(ordered.map((e) => e.id)).toEqual([10, 11, 12, 13, 14]);
   });
 
   it("sinks a decided judgment below open ones, awareness last (Wave-3: no session-snooze band)", () => {
-    const decided = ev({ id: 1 });
+    const decided = ev({ id: 1, status: "done" });
     const open = ev({ id: 2 });
     const other = ev({ id: 3 });
     const summary = ev({ id: 4, kind: "summary", requires_response: false });
-    const ordered = orderedTasks([decided, open, other, summary], [1]);
+    const ordered = orderedTasks([decided, open, other, summary]);
     // open (2, 3) first oldest-waited, decided judgment (1), awareness (4).
     expect(ordered.map((e) => e.id)).toEqual([2, 3, 1, 4]);
   });
 });
 
 describe("archive filter (contract v1): default-hides everywhere, counts stay honest", () => {
-  it("isEventArchived folds the wire flag and the optimistic override together", () => {
-    expect(isEventArchived(ev({ id: 1 }), [])).toBe(false);
-    expect(isEventArchived(ev({ id: 1, archived: true }), [])).toBe(true);
-    expect(isEventArchived(ev({ id: 1 }), [1])).toBe(true);
+  it("isEventArchived reads the projected archived flag", () => {
+    expect(isEventArchived(ev({ id: 1 }))).toBe(false);
+    expect(isEventArchived(ev({ id: 1, archived: true }))).toBe(true);
   });
 
-  it("visibleEvents excludes archived events (wire flag and optimistic override)", () => {
+  it("visibleEvents excludes archived events (wire flag or projected override)", () => {
     const live = ev({ id: 1 });
     const wireArchived = ev({ id: 2, status: "done", archived: true });
-    const optimistic = ev({ id: 3, status: "done" });
-    expect(visibleEvents([live, wireArchived, optimistic], [3]).map((e) => e.id)).toEqual([1]);
+    // An optimistically-archived event reaches the selector already projected.
+    const optimistic = ev({ id: 3, status: "done", archived: true });
+    expect(visibleEvents([live, wireArchived, optimistic]).map((e) => e.id)).toEqual([1]);
   });
 
   it("an archived OPEN judgment leaves the needs-you count (counts run on the filtered set)", () => {
     const a = ev({ id: 1 });
     const b = ev({ id: 2 });
-    expect(tasksNeedingOwnerCount(visibleEvents([a, b], []), [])).toBe(2);
+    expect(tasksNeedingOwnerCount(visibleEvents([a, b]))).toBe(2);
     // The host archives an open judgment (agent `events.archive`): even before
     // its auto-dismiss lands, the filtered count no longer claims it needs you.
-    expect(tasksNeedingOwnerCount(visibleEvents([ev({ id: 1, archived: true }), b], []), [])).toBe(1);
-    // Same via the optimistic layer.
-    expect(tasksNeedingOwnerCount(visibleEvents([a, b], [2]), [])).toBe(1);
+    expect(tasksNeedingOwnerCount(visibleEvents([ev({ id: 1, archived: true }), b]))).toBe(1);
+    // Same via the optimistic layer, which projects onto the very same flag.
+    expect(tasksNeedingOwnerCount(visibleEvents([a, { ...b, archived: true }]))).toBe(1);
   });
 
   it("isEventFinished matches the events.clear sweep: done OR (read AND not requires_response)", () => {
-    expect(isEventFinished(ev({ id: 1 }), [])).toBe(false); // open judgment
-    expect(isEventFinished(ev({ id: 1, status: "done" }), [])).toBe(true);
-    expect(isEventFinished(ev({ id: 1 }), [1])).toBe(true); // optimistically decided
+    expect(isEventFinished(ev({ id: 1 }))).toBe(false); // open judgment
+    expect(isEventFinished(ev({ id: 1, status: "done" }))).toBe(true);
     const info = ev({ id: 2, kind: "info", requires_response: false });
-    expect(isEventFinished(info, [])).toBe(false); // unread awareness
-    expect(isEventFinished({ ...info, read: true }, [])).toBe(true);
+    expect(isEventFinished(info)).toBe(false); // unread awareness
+    expect(isEventFinished({ ...info, read: true })).toBe(true);
   });
 });
 
@@ -119,13 +118,13 @@ describe("durable snooze (Wave-3): leaves Active everywhere, counts stay honest"
     const live = ev({ id: 1 });
     const soon = ev({ id: 2, snoozed_until: "2026-07-14T14:00:00Z" });
     const later = ev({ id: 3, snoozed_until: "2026-07-14T20:00:00Z" });
-    expect(visibleEvents([live, soon, later], [], NOW).map((e) => e.id)).toEqual([1]);
+    expect(visibleEvents([live, soon, later], NOW).map((e) => e.id)).toEqual([1]);
   });
 
   it("a snoozed OPEN judgment leaves the needs-you count", () => {
     const a = ev({ id: 1 });
     const b = ev({ id: 2, snoozed_until: future });
-    expect(tasksNeedingOwnerCount(visibleEvents([a, b], [], NOW), [])).toBe(1);
+    expect(tasksNeedingOwnerCount(visibleEvents([a, b], NOW))).toBe(1);
   });
 
   it("finishedEvents is the sweep set: finished, not archived, not snoozed", () => {
@@ -134,9 +133,10 @@ describe("durable snooze (Wave-3): leaves Active everywhere, counts stay honest"
     const readInfo = ev({ id: 3, kind: "info", requires_response: false, read: true });
     const snoozedDone = ev({ id: 4, status: "done", snoozed_until: future });
     const archivedDone = ev({ id: 5, status: "done", archived: true });
-    const ids = finishedEvents([openJudgment, decided, readInfo, snoozedDone, archivedDone], [], [], NOW).map(
-      (e) => e.id,
-    );
+    const ids = finishedEvents(
+      [openJudgment, decided, readInfo, snoozedDone, archivedDone],
+      NOW,
+    ).map((e) => e.id);
     expect(ids.sort()).toEqual([2, 3]);
   });
 });

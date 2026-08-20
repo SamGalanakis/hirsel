@@ -11,7 +11,7 @@
 
 import { reopenEvent } from "./event-decide";
 import { isEventResolved } from "../store/selectors";
-import { dispatch, state } from "../store/store";
+import { dispatch, effectiveEvents } from "../store/store";
 import { getClient } from "../ws/client";
 import { dismissToast, toast } from "./toast";
 
@@ -45,8 +45,11 @@ export function archiveEventWithUndo(
   eventId: number,
   opts?: { silent?: boolean },
 ): ArchivePayload {
-  const event = state.events.find((e) => e.id === eventId);
-  const wasOpen = event ? !isEventResolved(event, state.eventDecideOverrides) : false;
+  // Read the PROJECTED event before dispatching: the optimistic sweep below
+  // asserts `archived`, never `status`, but reading first keeps the open/finished
+  // question answered against the state the Owner actually saw.
+  const event = effectiveEvents().find((e) => e.id === eventId);
+  const wasOpen = event ? !isEventResolved(event) : false;
   dispatch({ type: "event_archive_local", eventId });
   getClient()?.sendEventAction(eventId, "archive", {});
   if (!opts?.silent) {

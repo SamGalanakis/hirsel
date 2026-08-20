@@ -25,14 +25,18 @@ describe("clearFinishedEventsWithUndo — the one-op sweep with a batch undo", (
     // One wire op — not three per-card archives.
     expect(cleared).toBe(1);
     // The whole batch is optimistically archived at once.
-    expect(store.state.eventArchiveOverrides).toEqual([1, 2, 3]);
+    expect(store.state.eventOverrides).toEqual({
+      1: { archived: true },
+      2: { archived: true },
+      3: { archived: true },
+    });
 
     // The toast reads "Cleared 3" with an Undo that unarchives exactly the batch.
     const t = toast.toasts().find((x) => /Cleared 3/.test(x.message));
     expect(t?.action?.label).toBe("Undo");
     t!.action!.onClick();
     expect(unarchived).toEqual([1, 2, 3]);
-    expect(store.state.eventArchiveOverrides).toEqual([]);
+    expect(store.state.eventOverrides).toEqual({});
   });
 
   it("is a no-op on an empty batch (no wire op, no toast)", async () => {

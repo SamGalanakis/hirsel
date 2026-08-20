@@ -20,9 +20,9 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
 
     const payload = archiveEventWithUndo(42, { silent: true });
 
-    // Optimistic archive override recorded at once — the default filter hides
+    // Optimistic archive assertion recorded at once — the default filter hides
     // the event everywhere without waiting for the host echo.
-    expect(store.state.eventArchiveOverrides).toEqual([42]);
+    expect(store.state.eventOverrides).toEqual({ 42: { archived: true } });
     // The wire envelope matches the contract shape exactly: data is `{}`, not null.
     expect(payload).toEqual({ type: "event_action", event_id: 42, action: "archive", data: {} });
     expect(sent).toEqual([{ type: "event_action", event_id: 42, action: "archive", data: {} }]);
@@ -40,10 +40,10 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     const { archiveEventWithUndo, unarchiveEvent } = await import("./event-archive");
 
     archiveEventWithUndo(7, { silent: true });
-    expect(store.state.eventArchiveOverrides).toEqual([7]);
+    expect(store.state.eventOverrides).toEqual({ 7: { archived: true } });
 
     unarchiveEvent(7);
-    expect(store.state.eventArchiveOverrides).toEqual([]);
+    expect(store.state.eventOverrides).toEqual({});
     expect(sent).toEqual([
       { action: "archive", eventId: 7, data: {} },
       { action: "unarchive", eventId: 7, data: {} },
@@ -80,7 +80,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
 
     // Archive posts the envelope and sweeps optimistically.
     archiveEventWithUndo(11);
-    expect(store.state.eventArchiveOverrides).toEqual([11]);
+    expect(store.state.eventOverrides).toEqual({ 11: { archived: true } });
 
     // Tap the "Archived" toast's Undo: because the card was still open when
     // archived (archiving auto-dismissed it host-side), Undo must restore it
@@ -93,9 +93,8 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
       { action: "unarchive", eventId: 11, data: {} },
       { action: "reopen", eventId: 11, data: null },
     ]);
-    // Both optimistic layers dropped: the event stands open in the queue again.
-    expect(store.state.eventArchiveOverrides).toEqual([]);
-    expect(store.state.eventDecideOverrides).toEqual([]);
+    // Every assertion settled away: the event stands open in the queue again.
+    expect(store.state.eventOverrides).toEqual({});
   });
 
   it("archiving a DONE event then tapping Undo unarchives only (never reopens)", async () => {
@@ -135,7 +134,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
       { action: "archive", eventId: 12, data: {} },
       { action: "unarchive", eventId: 12, data: {} },
     ]);
-    expect(store.state.eventArchiveOverrides).toEqual([]);
+    expect(store.state.eventOverrides).toEqual({});
   });
 
   it("the archive → host echo → resync flow leaves no override residue", async () => {
@@ -161,7 +160,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event } });
 
     archiveEventWithUndo(9, { silent: true });
-    expect(store.state.eventArchiveOverrides).toEqual([9]);
+    expect(store.state.eventOverrides).toEqual({ 9: { archived: true } });
 
     // The host commits and broadcasts the archived flag back: the optimistic
     // layer is pruned, the wire truth carries the archive from here on.
@@ -169,7 +168,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
       type: "event_upsert",
       payload: { type: "event_upsert", event: { ...event, archived: true } },
     });
-    expect(store.state.eventArchiveOverrides).toEqual([]);
+    expect(store.state.eventOverrides).toEqual({});
     expect(store.state.events[0].archived).toBe(true);
   });
 });

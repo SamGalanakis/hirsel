@@ -101,6 +101,64 @@ describe("ViewRenderer — graceful degradation", () => {
     expect(screen.getByText("definitely-not-a-real-type")).toBeTruthy();
   });
 
+  it("renders an unknown FIELD kind as a placeholder, like an unknown node type", () => {
+    const screen = renderSpec({
+      type: "form",
+      action: "go",
+      fields: [
+        { type: "field", name: "when", label: "When", kind: "datepicker" },
+        { type: "field", name: "who", label: "Who", kind: "text" },
+      ],
+    });
+    expect(screen.getByText(/Unsupported field kind/)).toBeTruthy();
+    expect(screen.getByText("datepicker")).toBeTruthy();
+    // The rest of the form still renders and submits.
+    expect(screen.getByLabelText(/Who/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
+  });
+
+  it("seeds an unknown field kind as an empty string", async () => {
+    const onEvent = vi.fn();
+    const screen = renderSpec(
+      {
+        type: "form",
+        action: "go",
+        fields: [{ type: "field", name: "when", label: "When", kind: "datepicker" }],
+      },
+      onEvent,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+    expect(onEvent).toHaveBeenCalledWith({
+      instanceId: "view-1",
+      action: "go",
+      data: { when: "" },
+    });
+  });
+
+  it("seeds each known kind with its own empty value", async () => {
+    const onEvent = vi.fn();
+    const screen = renderSpec(
+      {
+        type: "form",
+        action: "go",
+        fields: [
+          { type: "field", name: "t", label: "T", kind: "text" },
+          { type: "field", name: "a", label: "A", kind: "textarea" },
+          { type: "field", name: "n", label: "N", kind: "number" },
+          { type: "field", name: "g", label: "G", kind: "toggle" },
+          { type: "field", name: "s", label: "S", kind: "select", options: [] },
+        ],
+      },
+      onEvent,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+    expect(onEvent).toHaveBeenCalledWith({
+      instanceId: "view-1",
+      action: "go",
+      data: { t: "", a: "", n: null, g: false, s: "" },
+    });
+  });
+
   it("skips malformed (non-node) children instead of crashing", () => {
     const screen = renderSpec({
       type: "stack",

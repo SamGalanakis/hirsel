@@ -21,13 +21,13 @@ import {
   createSignal,
   ErrorBoundary,
   For,
-  onCleanup,
   Show,
   useContext,
 } from "solid-js";
 import type { JSX } from "solid-js";
 import type { ViewPlacement, ViewSpec } from "../protocol";
 import { cn } from "@/lib/utils";
+import { createSubmitting } from "../lib/pending";
 import { getClient } from "../ws/client";
 import {
   childNodes,
@@ -43,11 +43,11 @@ import {
 } from "./nodes";
 import { PROGRESS_FILL, toneTextClass } from "./tokens";
 
-/** How long an interactive control shows its pending/disabled state after a
- * submit. There is no direct ack — the reply returns through the normal
- * conversation/Task flow (often replacing/clearing the view), so this is a bounded
- * fallback so a no-op never freezes the control permanently. */
-const PENDING_MS = 4000;
+// An interactive control shows its pending/disabled state for a bounded window
+// after a submit: there is no direct ack — the reply returns through the normal
+// conversation/Task flow (often replacing/clearing the view) — so the timeout in
+// `createSubmitting` (../lib/pending) is what keeps a no-op from freezing the
+// control permanently.
 
 // ---- Event context: interactive components emit through here ----
 
@@ -58,20 +58,6 @@ interface ViewEmit {
 
 const ViewEmitContext = createContext<ViewEmit>({ instanceId: "", emit: () => {} });
 const useViewEmit = () => useContext(ViewEmitContext);
-
-/** A local "just submitted" flag that auto-clears after PENDING_MS (and on
- * unmount), used to disable + spin an interactive control briefly. */
-function createSubmitting() {
-  const [pending, setPending] = createSignal(false);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  onCleanup(() => clearTimeout(timer));
-  const begin = () => {
-    setPending(true);
-    clearTimeout(timer);
-    timer = setTimeout(() => setPending(false), PENDING_MS);
-  };
-  return { pending, begin };
-}
 
 // The prop accessors, the inline-text strategy, the placeholder chip and the
 // registry dispatch are shared with the event-card tier — see ./nodes.tsx.
@@ -426,6 +412,128 @@ function OptionSetNode(node: Node): JSX.Element {
   );
 }
 
+// ---- Form fields: one descriptor map, same closed-vocabulary contract as the
+// node registry above. Each kind owns its control AND the value it seeds into
+// the form map; an unrecognised kind degrades to the same quiet placeholder an
+// unknown NODE type gets, instead of rendering a labelled void. ----
+
+const CONTROL_BASE =
+  "min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60";
+
+interface FieldControlProps {
+  /** The raw field node — kind-specific extras (e.g. `options`) live here. */
+  field: Record<string, unknown>;
+  name: string;
+  placeholder: string;
+  required: boolean;
+  value: unknown;
+  disabled: boolean;
+  onChange: (name: string, value: unknown) => void;
+}
+
+function TextControl(props: FieldControlProps): JSX.Element {
+  return (
+    <input
+      type="text"
+      class={CONTROL_BASE}
+      placeholder={props.placeholder}
+      required={props.required}
+      disabled={props.disabled}
+      value={str(props.value)}
+      onInput={(e) => props.onChange(props.name, e.currentTarget.value)}
+    />
+  );
+}
+
+function TextareaControl(props: FieldControlProps): JSX.Element {
+  return (
+    <textarea
+      class={cn(CONTROL_BASE, "min-h-16 resize-y")}
+      placeholder={props.placeholder}
+      required={props.required}
+      disabled={props.disabled}
+      value={str(props.value)}
+      onInput={(e) => props.onChange(props.name, e.currentTarget.value)}
+    />
+  );
+}
+
+function NumberControl(props: FieldControlProps): JSX.Element {
+  return (
+    <input
+      type="number"
+      class={CONTROL_BASE}
+      placeholder={props.placeholder}
+      required={props.required}
+      disabled={props.disabled}
+      value={props.value === null || props.value === undefined ? "" : String(props.value)}
+      onInput={(e) => {
+        const v = e.currentTarget.value;
+        props.onChange(props.name, v === "" ? null : Number(v));
+      }}
+    />
+  );
+}
+
+function ToggleControl(props: FieldControlProps): JSX.Element {
+  return (
+    <span class="inline-flex items-center gap-2 py-0.5">
+      <input
+        type="checkbox"
+        class="size-4 accent-[var(--primary)] disabled:opacity-60"
+        required={props.required}
+        disabled={props.disabled}
+        checked={props.value === true}
+        onChange={(e) => props.onChange(props.name, e.currentTarget.checked)}
+      />
+      <span class="text-sm text-muted-foreground">{props.placeholder || "Enabled"}</span>
+    </span>
+  );
+}
+
+function SelectControl(props: FieldControlProps): JSX.Element {
+  return (
+    <select
+      class={CONTROL_BASE}
+      required={props.required}
+      disabled={props.disabled}
+      value={str(props.value)}
+      onChange={(e) => props.onChange(props.name, e.currentTarget.value)}
+    >
+      <For each={(Array.isArray(props.field.options) ? props.field.options : []) as Record<string, unknown>[]}>
+        {(opt) => <option value={scalarText(opt.value)}>{scalarText(opt.label)}</option>}
+      </For>
+    </select>
+  );
+}
+
+interface FieldKind {
+  control: (props: FieldControlProps) => JSX.Element;
+  /** What an absent/nullish declared `value` seeds into the form value map —
+   * the empty value this control round-trips (text "", number null, toggle
+   * false), so an untouched field submits what the host expects. */
+  seed: unknown;
+}
+
+const FIELD_KINDS: Record<string, FieldKind> = {
+  text: { control: TextControl, seed: "" },
+  textarea: { control: TextareaControl, seed: "" },
+  number: { control: NumberControl, seed: null },
+  toggle: { control: ToggleControl, seed: false },
+  select: { control: SelectControl, seed: "" },
+};
+
+/** The declared kind of a field node, defaulted like the wire contract. */
+const fieldKind = (field: Record<string, unknown>) => str(field.kind, "text");
+
+/** What an untouched field of this kind contributes to the submitted map. */
+function fieldSeed(field: Record<string, unknown>): unknown {
+  const declared = field.value;
+  if (declared !== null && declared !== undefined) return declared;
+  const kind = FIELD_KINDS[fieldKind(field)];
+  return kind ? kind.seed : "";
+}
+
 /** One form field, controlled by the parent <FormNode>. `value` writes back
  * into the form's value map keyed by the field `name`. */
 function FormField(props: {
@@ -434,13 +542,27 @@ function FormField(props: {
   disabled: boolean;
   onChange: (name: string, value: unknown) => void;
 }): JSX.Element {
-  const name = str(props.field.name);
   const label = str(props.field.label);
-  const kind = str(props.field.kind, "text");
-  const placeholder = str(props.field.placeholder);
+  const kind = fieldKind(props.field);
   const required = props.field.required === true;
-  const controlBase =
-    "min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60";
+  // Getters, not a snapshot: `value`/`disabled` stay reactive through the
+  // hand-off to the kind's control.
+  const controlProps: FieldControlProps = {
+    get field() {
+      return props.field;
+    },
+    name: str(props.field.name),
+    placeholder: str(props.field.placeholder),
+    required,
+    get value() {
+      return props.value;
+    },
+    get disabled() {
+      return props.disabled;
+    },
+    onChange: (name, value) => props.onChange(name, value),
+  };
+  const entry = FIELD_KINDS[kind];
 
   return (
     <label class="flex flex-col gap-1">
@@ -452,67 +574,11 @@ function FormField(props: {
           </span>
         </Show>
       </span>
-      <Show when={kind === "textarea"}>
-        <textarea
-          class={cn(controlBase, "min-h-16 resize-y")}
-          placeholder={placeholder}
-          required={required}
-          disabled={props.disabled}
-          value={str(props.value)}
-          onInput={(e) => props.onChange(name, e.currentTarget.value)}
-        />
-      </Show>
-      <Show when={kind === "text"}>
-        <input
-          type="text"
-          class={controlBase}
-          placeholder={placeholder}
-          required={required}
-          disabled={props.disabled}
-          value={str(props.value)}
-          onInput={(e) => props.onChange(name, e.currentTarget.value)}
-        />
-      </Show>
-      <Show when={kind === "number"}>
-        <input
-          type="number"
-          class={controlBase}
-          placeholder={placeholder}
-          required={required}
-          disabled={props.disabled}
-          value={props.value === null || props.value === undefined ? "" : String(props.value)}
-          onInput={(e) => {
-            const v = e.currentTarget.value;
-            props.onChange(name, v === "" ? null : Number(v));
-          }}
-        />
-      </Show>
-      <Show when={kind === "toggle"}>
-        <span class="inline-flex items-center gap-2 py-0.5">
-          <input
-            type="checkbox"
-            class="size-4 accent-[var(--primary)] disabled:opacity-60"
-            required={required}
-            disabled={props.disabled}
-            checked={props.value === true}
-            onChange={(e) => props.onChange(name, e.currentTarget.checked)}
-          />
-          <span class="text-sm text-muted-foreground">{placeholder || "Enabled"}</span>
-        </span>
-      </Show>
-      <Show when={kind === "select"}>
-        <select
-          class={controlBase}
-          required={required}
-          disabled={props.disabled}
-          value={str(props.value)}
-          onChange={(e) => props.onChange(name, e.currentTarget.value)}
-        >
-          <For each={(Array.isArray(props.field.options) ? props.field.options : []) as Record<string, unknown>[]}>
-            {(opt) => <option value={scalarText(opt.value)}>{scalarText(opt.label)}</option>}
-          </For>
-        </select>
-      </Show>
+      {entry ? (
+        entry.control(controlProps)
+      ) : (
+        <UnsupportedNode label="Unsupported field kind:" type={kind} />
+      )}
     </label>
   );
 }
@@ -524,14 +590,14 @@ function FormNode(node: Node): JSX.Element {
   const fields = (Array.isArray(node.fields) ? node.fields : []).filter(isNode);
   const submitLabel = str(node.submitLabel, "Submit");
 
-  // Seed the value map from each field's declared `value` (nullish → empty).
+  // Seed the value map from each field's declared `value` (nullish → the kind's
+  // empty value, per FIELD_KINDS).
   const seed: Record<string, unknown> = {};
   for (const f of fields) {
-    const name = str((f as Record<string, unknown>).name);
+    const rec = f as Record<string, unknown>;
+    const name = str(rec.name);
     if (!name) continue;
-    const v = (f as Record<string, unknown>).value;
-    const kind = str((f as Record<string, unknown>).kind, "text");
-    seed[name] = v ?? (kind === "toggle" ? false : kind === "number" ? null : "");
+    seed[name] = fieldSeed(rec);
   }
   const [values, setValues] = createSignal<Record<string, unknown>>(seed);
   const onChange = (name: string, value: unknown) =>

@@ -244,6 +244,7 @@ async fn build_snapshot(
         host_version: host_version(),
         model: state.model_snapshot(),
         subagent_models: Some(state.subagent_model_snapshot()),
+        prompts: Some(state.prompt_snapshot()),
         views,
     };
     Ok((hello, dedupe))
@@ -371,6 +372,15 @@ where
             state
                 .set_subagent_model(&provider, &model_id, enabled, &enabled_variants)
                 .await?;
+        }
+        ClientToHost::SetAgentPrompt { text } => {
+            state.set_agent_prompt(&text).await?;
+        }
+        ClientToHost::SetForkPrompt { text } => {
+            state.set_fork_prompt(&text).await?;
+        }
+        ClientToHost::SetForkModel { model_id, variant } => {
+            state.set_fork_model(&model_id, &variant).await?;
         }
         ClientToHost::UploadBlob {
             client_id,

@@ -278,7 +278,7 @@ The browser keeps one local exclusive `rightRegion`:
 - **Canvas** projects current `canvas` View instances. A Host-created Canvas
   View may make the utility available, but it does not replace Task selection.
 - **Settings** combines local browser preferences with Host-backed
-  `model`/`subagent_models` snapshots and their change broadcasts.
+  `model`/`subagent_models`/`prompts` snapshots and their change broadcasts.
 
 On wide screens a utility is an in-flow inspector; on phone it is a modal
 sheet. Only the active utility is mounted. Closing it returns to the same Task,
@@ -310,9 +310,29 @@ hello_ok {
   host_version
   model
   subagent_models
+  prompts
   views
 }
 ```
+
+`prompts.agent` always carries the effective editable body and an `is_default`
+flag. The Host appends its own runtime-configuration section after that body;
+the generated section is never editable or returned in `prompts.agent.text`.
+An accepted `set_agent_prompt` updates the live Lash session policy before the
+operation returns and therefore applies from the next turn, never midway
+through a running turn. Empty or whitespace-only text removes the override.
+
+`prompts.fork`, when the active provider has a selectable registry, carries the
+ephemeral incoming-event triage fork's model, available models, and effective
+prompt. `set_fork_model` is rejected unless both the model and variant belong
+to the active provider's registry. `set_fork_prompt` follows the same empty-is-
+default rule. The configuration is persisted now; the fork runtime consumes it
+in a follow-up. Any accepted prompt or fork edit broadcasts the full
+`prompts_changed { prompts }` replacement snapshot.
+
+The persisted keys are `[agent].prompt` and `[fork].model`, `[fork].variant`,
+`[fork].prompt` in `data/hirsel.toml`. The store re-reads the file before every
+snapshot and before each Agent turn, so hand edits are live without a restart.
 
 The browser treats `events`, `processes`, and `views` as authoritative snapshot
 slices. Live updates then arrive as full-record upserts. Unknown or rejected
@@ -428,6 +448,7 @@ The Rust `ClientToHost` union currently accepts:
 ```text
 hello, send_message, cancel_turn, cancel_queued,
 set_model, set_subagent_model,
+set_agent_prompt, set_fork_prompt, set_fork_model,
 upload_blob, get_blob_url,
 event_action, clear_finished_events,
 register_push_token, unregister_push_token,
@@ -443,6 +464,7 @@ paired, hello_ok, msg, msg_removed,
 agent_activity, turn_event,
 event_upsert, process_upsert,
 model_changed, subagent_models_changed,
+prompts_changed,
 blob_ok, blob_url, error,
 view_upsert, view_removed,
 plugin_push,

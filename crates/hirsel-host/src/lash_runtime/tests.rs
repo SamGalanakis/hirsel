@@ -479,13 +479,13 @@ fn owner_turn_text_expands_mentioned_ping_context() {
 }
 
 #[test]
-fn agent_guidance_references_runtime_config_and_docs_paths() {
+fn agent_host_section_references_runtime_config_and_docs_paths() {
     let dir = tempfile::tempdir().unwrap();
     let config = crate::tests::test_config(dir.path());
-    let guidance = agent_guidance(&config);
-    assert!(guidance.contains(config.config_path.to_str().unwrap()));
-    assert!(guidance.contains(config.docs_path.to_str().unwrap()));
-    assert!(guidance.contains("## Host configuration"));
+    let section = agent_host_section(&config);
+    assert!(section.contains(config.config_path.to_str().unwrap()));
+    assert!(section.contains(config.docs_path.to_str().unwrap()));
+    assert!(section.contains("## Host configuration"));
 }
 
 #[test]

@@ -258,17 +258,43 @@ async fn set_model_rejects_unknown_models_and_variants() {
     config.model = "gpt-5.6-sol".to_string();
     let state = build_state(config).await.unwrap();
 
-    // gpt-5.5 is no longer offered for the main agent — reject it, and any
-    // unknown variant, while leaving the configured selection untouched.
+    // Luna belongs only to the fork registry. Neither it nor retired models or
+    // unknown variants may dislodge the resident Agent's Sol default.
+    assert!(state.set_model("gpt-5.6-luna", "max").await.is_err());
     assert!(state.set_model("gpt-5.5", "high").await.is_err());
     assert!(state.set_model("gpt-5.6-sol", "impossible").await.is_err());
+    let snapshot = state.model_snapshot().unwrap();
     assert_eq!(
-        state.model_snapshot().unwrap().current,
+        snapshot.current,
         ModelSelection {
             id: "gpt-5.6-sol".to_string(),
             variant: "medium".to_string(),
         }
     );
+    assert_eq!(
+        snapshot
+            .available
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["gpt-5.6-sol"]
+    );
+}
+
+#[tokio::test]
+async fn accepted_no_change_prompt_op_still_broadcasts_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(test_config(dir.path())).await.unwrap();
+    let before = state.prompt_snapshot();
+    state.broadcast_log.clear();
+
+    let after = state.set_agent_prompt(" \n\t ").await.unwrap();
+
+    assert_eq!(after, before);
+    assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+        event,
+        HostToClient::PromptsChanged { prompts } if prompts == &before
+    )));
 }
 
 #[tokio::test]

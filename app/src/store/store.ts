@@ -20,6 +20,9 @@ interface UiState {
    * task tree — the Esc ladder and the ⌘K "Clear task focus" command both need
    * to leave a Task without owning the shell's internals. */
   focusedTaskId: number | null;
+  /** Increments for every prompts_changed frame, including an authoritative
+   * no-change acknowledgement whose object fields equal the store. */
+  promptsRevision: number;
 }
 
 /** A jump-to target within the Settings pane, used by callers that open
@@ -36,6 +39,7 @@ function initialStore(): Store {
     protocolError: null,
     settingsScrollTarget: null,
     focusedTaskId: null,
+    promptsRevision: 0,
   };
 }
 
@@ -65,6 +69,7 @@ function appSnapshot(): AppState {
     hostVersion: state.hostVersion,
     model: state.model,
     subagentModels: state.subagentModels,
+    prompts: state.prompts,
     pendingSends: state.pendingSends,
     processes: state.processes,
     turnEvents: state.turnEvents,
@@ -121,6 +126,10 @@ export function dispatch(action: Action): void {
     // a whole new snapshot/catalog (or null) on each change.
     setState("model", next.model);
     setState("subagentModels", next.subagentModels);
+    setState("prompts", next.prompts);
+    if (action.type === "prompts_changed") {
+      setState("promptsRevision", (revision) => revision + 1);
+    }
     // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
     // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
     setState("views", reconcile(next.views, { key: "instance_id" }));

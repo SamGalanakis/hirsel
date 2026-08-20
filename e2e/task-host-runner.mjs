@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
 import {
@@ -180,6 +180,27 @@ async function main() {
         + `cause=${error.message}`,
       );
     }
+    // Exercise the real Settings → WS op → ConfigStore → broadcast path. The
+    // reset half proves that the UI removes the override instead of persisting
+    // a copied bundled prompt.
+    const promptMarker = "Host e2e prompt override";
+    await page.locator('[data-slot="phone-overflow-trigger"]').click();
+    await page.getByRole("menuitem", { name: "Settings" }).click();
+    const promptEditor = page.getByRole("textbox", { name: "Main agent system prompt" });
+    await promptEditor.fill(promptMarker);
+    await page.getByRole("button", { name: "Save Main agent system prompt" }).click();
+    await poll("Prompt override persistence", async () =>
+      (await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes(promptMarker));
+    await page.getByRole("button", { name: "Reset Main agent system prompt to default" }).click();
+    await poll("Prompt override removal", async () =>
+      !(await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes(promptMarker));
+    await page.getByRole("button", { name: "Close Settings" }).click();
+    check(
+      "prompt edit round-trip",
+      (await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes("[agent]")
+        && !(await readFile(`${dataDir}/hirsel.toml`, "utf8")).includes(promptMarker),
+      "saved through WebSocket, broadcast back to Settings, then reset removed [agent].prompt",
+    );
     // The seeded fixture is a blocking judgment, so the load-time rule already
     // opens it focused; clicking the chip would TOGGLE that focus back off.
     const ensureFocused = async (id) => {

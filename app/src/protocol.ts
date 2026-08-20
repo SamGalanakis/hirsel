@@ -225,6 +225,29 @@ export interface ModelSnapshot {
   available: AvailableModel[];
 }
 
+/** One editable prompt as the Host actually resolves it. `is_default` means
+ * no non-empty override is stored; `text` still carries the bundled body so
+ * Settings always edits the effective value. */
+export interface PromptDoc {
+  text: string;
+  is_default: boolean;
+}
+
+/** Persisted configuration for the ephemeral incoming-event triage fork. */
+export interface ForkAgentConfig {
+  current: ModelSelection;
+  available: AvailableModel[];
+  prompt: PromptDoc;
+}
+
+/** The complete prompt surface carried on `hello_ok` and replaced wholesale
+ * by `prompts_changed`. `fork` is absent when the active provider has no
+ * runtime-selectable model registry. */
+export interface PromptSnapshot {
+  agent: PromptDoc;
+  fork?: ForkAgentConfig;
+}
+
 /** One model in the sub-agent catalog: `enabled` is the master availability
  * switch and `enabled_variants` is the independently selectable reasoning
  * allow-list. */
@@ -393,6 +416,26 @@ export interface SetSubagentModelMsg {
   enabled_variants: string[];
 }
 
+/** Replace the main Agent's editable prompt body. Empty text removes the
+ * override, restoring the bundled default from the next turn. */
+export interface SetAgentPromptMsg {
+  type: "set_agent_prompt";
+  text: string;
+}
+
+/** Replace the fork's prompt body. Empty text restores its bundled default. */
+export interface SetForkPromptMsg {
+  type: "set_fork_prompt";
+  text: string;
+}
+
+/** Select the fork model from the active provider's registry. */
+export interface SetForkModelMsg {
+  type: "set_fork_model";
+  model_id: string;
+  variant: string;
+}
+
 /** Request one bounded page immediately before a loaded conversation id. */
 export interface FetchMessagesMsg {
   type: "fetch_messages";
@@ -416,7 +459,10 @@ export type ClientMessage =
   | ClearFinishedEventsMsg
   | FetchMessagesMsg
   | SetModelMsg
-  | SetSubagentModelMsg;
+  | SetSubagentModelMsg
+  | SetAgentPromptMsg
+  | SetForkPromptMsg
+  | SetForkModelMsg;
 
 // ---- Server -> client ----
 
@@ -445,6 +491,8 @@ export interface HelloOkMsg {
   /** The sub-agent model catalog, grouped by provider. Optional on the wire;
    * older hosts omit it and the Sub-agent models control is hidden. */
   subagent_models?: SubagentModelCatalog;
+  /** Editable Agent and fork configuration. Optional for older hosts. */
+  prompts?: PromptSnapshot;
 }
 
 export interface MsgMsg {
@@ -578,6 +626,13 @@ export interface SubagentModelsChangedMsg {
   catalog: SubagentModelCatalog;
 }
 
+/** The prompt surface changed through Settings. Full replacement keeps model
+ * and prompt controls synchronized by one broadcast. */
+export interface PromptsChangedMsg {
+  type: "prompts_changed";
+  prompts: PromptSnapshot;
+}
+
 /** Plugin tier: an unsolicited push from one Host-side plugin to its own
  * browser-side UI bundle. The app never interprets `data` — it routes the frame
  * to the handlers that plugin registered for `topic` via `api.onPush` and does
@@ -607,4 +662,5 @@ export type ServerMessage =
   | ViewRemovedMsg
   | ModelChangedMsg
   | SubagentModelsChangedMsg
+  | PromptsChangedMsg
   | PluginPushMsg;

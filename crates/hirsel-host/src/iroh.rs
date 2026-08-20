@@ -16,7 +16,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use crate::{
     AppState,
     attachments::MAX_BLOB_BASE64_BYTES,
-    protocol::{IncomingFrame, ProtocolChannel, decode_json, run_protocol},
+    protocol::{IncomingFrame, Peer, ProtocolChannel, decode_json, run_protocol},
 };
 
 pub const SECRET_KEY_FILE: &str = "iroh-secret-key";
@@ -139,8 +139,9 @@ async fn handle_connection(
     run_protocol(
         &mut channel,
         state,
-        Some(remote_id.to_string()),
-        Some(remote_id.to_string()),
+        Peer::Iroh {
+            node_id: remote_id.to_string(),
+        },
     )
     .await;
     let _ = channel.close().await;

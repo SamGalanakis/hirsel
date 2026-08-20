@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use hirsel_proto::{ClientToHost, Event, HelloAuth, HostToClient, ViewInstance};
+use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 use crate::{
@@ -44,14 +45,19 @@ pub(crate) trait ProtocolChannel: Send {
     async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()>;
 }
 
-pub(crate) async fn run_protocol<C>(
-    channel: &mut C,
-    state: AppState,
-    peer_node_id: Option<String>,
-    peer_key: Option<String>,
-) where
+pub(crate) enum Peer {
+    WebSocket { addr: Option<String> },
+    Iroh { node_id: String },
+}
+
+pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer: Peer)
+where
     C: ProtocolChannel,
 {
+    let peer_key = match &peer {
+        Peer::WebSocket { addr } => addr.as_deref(),
+        Peer::Iroh { node_id } => Some(node_id.as_str()),
+    };
     let first_frame = tokio::time::timeout(
         AUTH_HANDSHAKE_TIMEOUT,
         channel.receive(PRE_AUTH_MAX_FRAME_BYTES),
@@ -60,7 +66,7 @@ pub(crate) async fn run_protocol<C>(
     let (auth, last_seen_msg_id) = match first_frame {
         Err(_) => {
             tracing::warn!(
-                peer = peer_key.as_deref().unwrap_or("unknown"),
+                peer = peer_key.unwrap_or("unknown"),
                 "auth handshake timed out"
             );
             return;
@@ -96,10 +102,10 @@ pub(crate) async fn run_protocol<C>(
         },
     };
 
-    let paired_token = match authenticate(&state, auth, peer_node_id.as_deref()).await {
+    let paired_token = match authenticate(&state, auth, &peer).await {
         Ok(token) => token,
         Err(detail) => {
-            if let Some(peer) = peer_key.as_deref() {
+            if let Some(peer) = peer_key {
                 tokio::time::sleep(state.auth_throttle.record_failure(peer)).await;
             }
             let _ = channel
@@ -111,7 +117,7 @@ pub(crate) async fn run_protocol<C>(
             return;
         }
     };
-    if let Some(peer) = peer_key.as_deref() {
+    if let Some(peer) = peer_key {
         state.auth_throttle.record_success(peer);
     }
     if let Some(device_token) = paired_token
@@ -243,20 +249,17 @@ async fn build_snapshot(
 async fn authenticate(
     state: &AppState,
     auth: HelloAuth,
-    peer_node_id: Option<&str>,
+    peer: &Peer,
 ) -> Result<Option<String>, String> {
-    match auth {
-        HelloAuth::StaticToken(token) => {
+    match (auth, peer) {
+        (HelloAuth::StaticToken(token), _) => {
             if owner_token_matches(&state.token, &token, state.debug_enabled) {
                 Ok(None)
             } else {
                 Err("invalid token".to_string())
             }
         }
-        HelloAuth::DeviceToken(token) => {
-            let Some(node_id) = peer_node_id else {
-                return Err("device-token auth requires iroh".to_string());
-            };
+        (HelloAuth::DeviceToken(token), Peer::Iroh { node_id }) => {
             state
                 .storage
                 .authenticate_device_token(&token, Some(node_id))
@@ -264,10 +267,7 @@ async fn authenticate(
                 .map_err(|_| "invalid device token".to_string())?;
             Ok(None)
         }
-        HelloAuth::PairingCode { code, device_label } => {
-            let Some(node_id) = peer_node_id else {
-                return Err("pairing-code auth requires iroh".to_string());
-            };
+        (HelloAuth::PairingCode { code, device_label }, Peer::Iroh { node_id }) => {
             let _ = state
                 .storage
                 .redeem_pairing_code(&code)
@@ -280,39 +280,48 @@ async fn authenticate(
                 .map(Some)
                 .map_err(|_| "failed to issue device token".to_string())
         }
+        (HelloAuth::DeviceToken(_), Peer::WebSocket { .. }) => {
+            Err("device-token auth requires iroh".to_string())
+        }
+        (HelloAuth::PairingCode { .. }, Peer::WebSocket { .. }) => {
+            Err("pairing-code auth requires iroh".to_string())
+        }
     }
 }
 
 struct HelloBroadcastDedupe {
     latest_msg_id: u64,
-    events: Vec<Event>,
-    views: Vec<ViewInstance>,
+    events: HashMap<u64, Event>,
+    views: HashMap<String, ViewInstance>,
 }
 
 impl HelloBroadcastDedupe {
     fn new(latest_msg_id: u64, events: Vec<Event>, views: Vec<ViewInstance>) -> Self {
         Self {
             latest_msg_id,
-            events,
-            views,
+            events: events.into_iter().map(|event| (event.id, event)).collect(),
+            views: views
+                .into_iter()
+                .map(|view| (view.instance_id.clone(), view))
+                .collect(),
         }
     }
 
-    fn should_send(&self, event: &HostToClient) -> bool {
+    fn should_send(&mut self, event: &HostToClient) -> bool {
         match event {
             HostToClient::Msg { message, sc } => sc.is_some() || message.id > self.latest_msg_id,
-            HostToClient::EventUpsert { event } => {
-                !self.events.iter().any(|snapshot| snapshot == event)
-            }
+            HostToClient::EventUpsert { event } => self
+                .events
+                .remove(&event.id)
+                .is_none_or(|snapshot| snapshot != *event),
             HostToClient::ViewUpsert {
                 instance_id,
                 placement,
                 spec,
-            } => !self.views.iter().any(|snapshot| {
-                snapshot.instance_id == *instance_id
-                    && snapshot.placement == *placement
-                    && snapshot.spec == *spec
-            }),
+            } => self
+                .views
+                .remove(instance_id)
+                .is_none_or(|snapshot| snapshot.placement != *placement || snapshot.spec != *spec),
             _ => true,
         }
     }
@@ -576,12 +585,16 @@ mod tests {
     use std::{collections::VecDeque, time::Duration};
 
     use async_trait::async_trait;
-    use hirsel_proto::{ChatAuthor, ClientToHost, EventStatus, HelloAuth, HostToClient};
+    use chrono::Utc;
+    use hirsel_proto::{
+        ChatAuthor, ClientToHost, Event, EventKind, EventSource, EventSourceKind, EventStatus,
+        HelloAuth, HostToClient, ViewInstance,
+    };
     use serde_json::json;
 
     use super::{
-        IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
-        authenticate, build_snapshot, handle_client_frame, run_protocol,
+        HelloBroadcastDedupe, IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES,
+        Peer, ProtocolChannel, authenticate, build_snapshot, handle_client_frame, run_protocol,
     };
     use crate::{
         build_state,
@@ -622,7 +635,9 @@ mod tests {
                 code,
                 device_label: "App-chosen label".to_string(),
             },
-            Some("node-a"),
+            &Peer::Iroh {
+                node_id: "node-a".to_string(),
+            },
         )
         .await
         .unwrap()
@@ -662,18 +677,57 @@ mod tests {
         .unwrap();
 
         assert!(
-            authenticate(&state, HelloAuth::StaticToken(String::new()), None)
-                .await
-                .is_err()
+            authenticate(
+                &state,
+                HelloAuth::StaticToken(String::new()),
+                &Peer::WebSocket { addr: None }
+            )
+            .await
+            .is_err()
         );
         assert!(
             authenticate(
                 &state,
                 HelloAuth::StaticToken("real-token".to_string()),
-                None
+                &Peer::WebSocket { addr: None }
             )
             .await
             .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_iroh_only_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(crate::tests::test_config(dir.path()))
+            .await
+            .unwrap();
+        let peer = Peer::WebSocket {
+            addr: Some("127.0.0.1:1234".to_string()),
+        };
+
+        assert_eq!(
+            authenticate(
+                &state,
+                HelloAuth::DeviceToken("device-token".to_string()),
+                &peer,
+            )
+            .await
+            .unwrap_err(),
+            "device-token auth requires iroh"
+        );
+        assert_eq!(
+            authenticate(
+                &state,
+                HelloAuth::PairingCode {
+                    code: "pairing-code".to_string(),
+                    device_label: "Browser".to_string(),
+                },
+                &peer,
+            )
+            .await
+            .unwrap_err(),
+            "pairing-code auth requires iroh"
         );
     }
 
@@ -732,6 +786,97 @@ mod tests {
             }
             other => panic!("unexpected resync frame: {other:?}"),
         }
+    }
+
+    fn snapshot_event(id: u64) -> Event {
+        Event {
+            id,
+            kind: EventKind::Info,
+            source: EventSource {
+                kind: EventSourceKind::Agent,
+                r#ref: None,
+            },
+            name: "Snapshot event".to_string(),
+            description: "Delivered in hello".to_string(),
+            ui: json!({}),
+            anchor: 1,
+            requires_response: false,
+            quick_replies: Vec::new(),
+            status: EventStatus::Open,
+            read: false,
+            archived: false,
+            snoozed_until: None,
+            archived_at: None,
+            fork_sc: None,
+            ts: Utc::now(),
+        }
+    }
+
+    fn event_upsert(event: Event) -> HostToClient {
+        HostToClient::EventUpsert { event }
+    }
+
+    fn view_upsert(view: &ViewInstance) -> HostToClient {
+        HostToClient::ViewUpsert {
+            instance_id: view.instance_id.clone(),
+            placement: view.placement.clone(),
+            spec: view.spec.clone(),
+        }
+    }
+
+    #[test]
+    fn hello_snapshot_event_echo_is_suppressed_once() {
+        let event = snapshot_event(1);
+        let mut dedupe = HelloBroadcastDedupe::new(0, vec![event.clone()], Vec::new());
+
+        assert!(!dedupe.should_send(&event_upsert(event.clone())));
+        assert!(dedupe.should_send(&event_upsert(event)));
+    }
+
+    #[test]
+    fn mutated_event_then_reverted_to_snapshot_is_delivered() {
+        let event = snapshot_event(1);
+        let mut changed = event.clone();
+        changed.archived = true;
+        let mut dedupe = HelloBroadcastDedupe::new(0, vec![event.clone()], Vec::new());
+
+        assert!(dedupe.should_send(&event_upsert(changed)));
+        assert!(dedupe.should_send(&event_upsert(event)));
+    }
+
+    #[test]
+    fn hello_snapshot_view_echo_is_suppressed_once() {
+        let view = ViewInstance {
+            instance_id: "view-1".to_string(),
+            placement: "canvas".to_string(),
+            spec: json!({ "type": "text", "text": "Snapshot" }),
+        };
+        let mut dedupe = HelloBroadcastDedupe::new(0, Vec::new(), vec![view.clone()]);
+
+        assert!(!dedupe.should_send(&view_upsert(&view)));
+        assert!(dedupe.should_send(&view_upsert(&view)));
+
+        let mut changed = view.clone();
+        changed.spec = json!({ "type": "text", "text": "Changed" });
+        let mut dedupe = HelloBroadcastDedupe::new(0, Vec::new(), vec![view.clone()]);
+        assert!(dedupe.should_send(&view_upsert(&changed)));
+        assert!(dedupe.should_send(&view_upsert(&view)));
+    }
+
+    #[test]
+    fn unknown_event_and_view_ids_always_pass() {
+        let mut dedupe = HelloBroadcastDedupe::new(0, Vec::new(), Vec::new());
+        let event = event_upsert(snapshot_event(99));
+        let view = view_upsert(&ViewInstance {
+            instance_id: "unknown-view".to_string(),
+            placement: "canvas".to_string(),
+            spec: json!({}),
+        });
+
+        assert!(dedupe.should_send(&event));
+        assert!(dedupe.should_send(&event));
+        assert!(dedupe.should_send(&view));
+        assert!(dedupe.should_send(&view));
     }
 
     #[test]
@@ -882,7 +1027,7 @@ mod tests {
             sent: Vec::new(),
         };
 
-        run_protocol(&mut channel, state, None, None).await;
+        run_protocol(&mut channel, state, Peer::WebSocket { addr: None }).await;
 
         assert_eq!(channel.sent.len(), 1);
         assert!(matches!(

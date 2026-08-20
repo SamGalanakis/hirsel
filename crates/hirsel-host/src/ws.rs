@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use crate::{
     AppState,
     attachments::MAX_BLOB_BASE64_BYTES,
-    protocol::{IncomingFrame, ProtocolChannel, decode_json, run_protocol},
+    protocol::{IncomingFrame, Peer, ProtocolChannel, decode_json, run_protocol},
 };
 
 const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -28,7 +28,12 @@ pub async fn ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState, peer: Option<String>) {
-    run_protocol(&mut WebSocketChannel(&mut socket), state, None, peer).await;
+    run_protocol(
+        &mut WebSocketChannel(&mut socket),
+        state,
+        Peer::WebSocket { addr: peer },
+    )
+    .await;
 }
 
 struct WebSocketChannel<'a>(&'a mut WebSocket);

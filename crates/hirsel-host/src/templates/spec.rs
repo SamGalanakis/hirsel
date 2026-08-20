@@ -2,6 +2,12 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
+use crate::json_spec::{
+    SEMANTIC_TONES, STATUS_STATES, VIEW_FIELD_KINDS, allowed, is_display_scalar, optional_bool,
+    optional_display_scalar, optional_enum, optional_integer_range, optional_string, required_bool,
+    required_display_scalar, required_enum, required_number_range, required_string,
+};
+
 pub fn validate(spec: &Value) -> anyhow::Result<()> {
     validate_node(spec, "spec")
 }
@@ -76,12 +82,7 @@ fn validate_node(node: &Value, at: &str) -> anyhow::Result<()> {
         "status" => {
             allowed(object, &["type", "label", "state"], at)?;
             required_string(object, "label", at)?;
-            required_enum(
-                object,
-                "state",
-                &["neutral", "running", "success", "warning", "danger"],
-                at,
-            )?;
+            required_enum(object, "state", &STATUS_STATES, at)?;
         }
         "progress" => {
             allowed(object, &["type", "value", "label"], at)?;
@@ -185,12 +186,7 @@ fn validate_field(object: &Map<String, Value>, at: &str) -> anyhow::Result<()> {
     )?;
     required_string(object, "name", at)?;
     required_string(object, "label", at)?;
-    let kind = required_enum(
-        object,
-        "kind",
-        &["text", "textarea", "number", "toggle", "select"],
-        at,
-    )?;
+    let kind = required_enum(object, "kind", &VIEW_FIELD_KINDS, at)?;
     optional_string(object, "placeholder", at)?;
     optional_bool(object, "required", at)?;
     if let Some(value) = object.get("value")
@@ -241,13 +237,6 @@ fn validate_form(object: &Map<String, Value>, at: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn allowed(object: &Map<String, Value>, keys: &[&str], at: &str) -> anyhow::Result<()> {
-    if let Some(key) = object.keys().find(|key| !keys.contains(&key.as_str())) {
-        anyhow::bail!("unknown property `{key}` at {at}");
-    }
-    Ok(())
-}
-
 fn children(
     object: &Map<String, Value>,
     key: &str,
@@ -292,128 +281,6 @@ where
     Ok(())
 }
 
-fn required_string<'a>(
-    object: &'a Map<String, Value>,
-    key: &str,
-    at: &str,
-) -> anyhow::Result<&'a str> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{at}.{key} must be a non-empty string"))
-}
-
-fn optional_string(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if let Some(value) = object.get(key)
-        && !value.is_string()
-    {
-        anyhow::bail!("{at}.{key} must be a string");
-    }
-    Ok(())
-}
-
-fn required_bool(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if object.get(key).and_then(Value::as_bool).is_none() {
-        anyhow::bail!("{at}.{key} must be a boolean");
-    }
-    Ok(())
-}
-
-fn optional_bool(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if let Some(value) = object.get(key)
-        && !value.is_boolean()
-    {
-        anyhow::bail!("{at}.{key} must be a boolean");
-    }
-    Ok(())
-}
-
-fn required_display_scalar(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if !object.get(key).is_some_and(is_display_scalar) {
-        anyhow::bail!("{at}.{key} must be a string, number, or boolean");
-    }
-    Ok(())
-}
-
-fn optional_display_scalar(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    if let Some(value) = object.get(key)
-        && !is_display_scalar(value)
-    {
-        anyhow::bail!("{at}.{key} must be a string, number, or boolean");
-    }
-    Ok(())
-}
-
-fn is_display_scalar(value: &Value) -> bool {
-    value.is_string() || value.is_number() || value.is_boolean()
-}
-
 fn optional_tone(object: &Map<String, Value>, key: &str, at: &str) -> anyhow::Result<()> {
-    optional_enum(
-        object,
-        key,
-        &["default", "muted", "success", "warning", "danger"],
-        at,
-    )
-}
-
-fn required_enum<'a>(
-    object: &'a Map<String, Value>,
-    key: &str,
-    choices: &[&str],
-    at: &str,
-) -> anyhow::Result<&'a str> {
-    let value = required_string(object, key, at)?;
-    if !choices.contains(&value) {
-        anyhow::bail!("{at}.{key} must be one of: {}", choices.join(", "));
-    }
-    Ok(value)
-}
-
-fn optional_enum(
-    object: &Map<String, Value>,
-    key: &str,
-    choices: &[&str],
-    at: &str,
-) -> anyhow::Result<()> {
-    if object.contains_key(key) {
-        required_enum(object, key, choices, at)?;
-    }
-    Ok(())
-}
-
-fn required_number_range(
-    object: &Map<String, Value>,
-    key: &str,
-    min: f64,
-    max: f64,
-    at: &str,
-) -> anyhow::Result<()> {
-    let value = object
-        .get(key)
-        .and_then(Value::as_f64)
-        .ok_or_else(|| anyhow::anyhow!("{at}.{key} must be a number"))?;
-    if !(min..=max).contains(&value) {
-        anyhow::bail!("{at}.{key} must be between {min} and {max}");
-    }
-    Ok(())
-}
-
-fn optional_integer_range(
-    object: &Map<String, Value>,
-    key: &str,
-    min: u64,
-    max: u64,
-    at: &str,
-) -> anyhow::Result<()> {
-    if let Some(raw) = object.get(key) {
-        let value = raw
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("{at}.{key} must be an integer"))?;
-        if !(min..=max).contains(&value) {
-            anyhow::bail!("{at}.{key} must be between {min} and {max}");
-        }
-    }
-    Ok(())
+    optional_enum(object, key, &SEMANTIC_TONES, at)
 }

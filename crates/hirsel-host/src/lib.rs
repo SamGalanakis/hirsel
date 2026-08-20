@@ -6,6 +6,7 @@ pub mod debug;
 pub mod health;
 pub mod host_config;
 pub mod iroh;
+mod json_spec;
 pub mod lash_runtime;
 pub mod model_selection;
 pub mod monitors;

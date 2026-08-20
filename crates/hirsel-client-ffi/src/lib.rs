@@ -100,17 +100,89 @@ pub struct ChatMessage {
 
 impl From<core::ChatEntry> for ChatMessage {
     fn from(value: core::ChatEntry) -> Self {
-        Self {
-            id: value.id,
-            author: value.author.into(),
-            body: value.body,
-            reply_to: value.reply_to,
-            timestamp: value.timestamp,
-            attachments: value.attachments.into_iter().map(Into::into).collect(),
-            tool_calls: value.tool_calls.into_iter().map(Into::into).collect(),
-            client_id: value.client_id,
-            pending: value.pending,
+        match value {
+            core::ChatEntry::Confirmed(message) => Self {
+                id: Some(message.id),
+                author: message.author.into(),
+                body: message.body,
+                reply_to: message.reply_to,
+                timestamp: message.timestamp,
+                attachments: message.attachments.into_iter().map(Into::into).collect(),
+                tool_calls: message.tool_calls.into_iter().map(Into::into).collect(),
+                client_id: None,
+                pending: false,
+            },
+            core::ChatEntry::Pending(send) => Self {
+                id: None,
+                author: ChatAuthor::Owner,
+                body: send.body,
+                reply_to: send.reply_to,
+                timestamp: send.timestamp,
+                attachments: Vec::new(),
+                tool_calls: Vec::new(),
+                client_id: Some(send.client_id),
+                pending: true,
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_message_tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_entry_keeps_the_flattened_ffi_shape() {
+        let flattened = ChatMessage::from(core::ChatEntry::Confirmed(core::ConfirmedMessage {
+            id: 42,
+            author: core::ChatAuthor::Agent,
+            body: "done".to_string(),
+            reply_to: Some(7),
+            timestamp: "2026-08-20T12:00:00+00:00".to_string(),
+            attachments: Vec::new(),
+            tool_calls: Vec::new(),
+        }));
+
+        assert_eq!(
+            flattened,
+            ChatMessage {
+                id: Some(42),
+                author: ChatAuthor::Agent,
+                body: "done".to_string(),
+                reply_to: Some(7),
+                timestamp: "2026-08-20T12:00:00+00:00".to_string(),
+                attachments: Vec::new(),
+                tool_calls: Vec::new(),
+                client_id: None,
+                pending: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_entry_keeps_the_flattened_ffi_shape() {
+        let flattened = ChatMessage::from(core::ChatEntry::Pending(core::PendingSend {
+            client_id: "pending-1".to_string(),
+            body: "queued".to_string(),
+            reply_to: None,
+            mentions: vec![3],
+            timestamp: "2026-08-20T12:00:00+00:00".to_string(),
+        }));
+
+        assert_eq!(
+            flattened,
+            ChatMessage {
+                id: None,
+                author: ChatAuthor::Owner,
+                body: "queued".to_string(),
+                reply_to: None,
+                timestamp: "2026-08-20T12:00:00+00:00".to_string(),
+                attachments: Vec::new(),
+                tool_calls: Vec::new(),
+                client_id: Some("pending-1".to_string()),
+                pending: true,
+            }
+        );
     }
 }
 

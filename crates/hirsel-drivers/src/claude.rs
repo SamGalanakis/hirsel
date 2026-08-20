@@ -1,10 +1,6 @@
 //! Driver for the `claude` CLI in headless stream-json mode.
 
-use std::{
-    collections::HashMap,
-    process::Stdio,
-    sync::{Arc, Mutex},
-};
+use std::{process::Stdio, sync::Arc};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -16,8 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     shared::{
-        EventHub, drain_stderr, kill_process_group, lock, short_line, start_in_process_group,
-        terminal_message, write_json_line,
+        EventHub, ProcessGroup, SessionRegistry, drain_stderr, finish_child, short_line,
+        start_in_process_group, terminal_message, write_json_line,
     },
     types::{
         AgentKind, DriverError, DriverResult, EventStream, SessionHandle, SpawnSpec,
@@ -27,25 +23,14 @@ use crate::{
 
 #[derive(Default)]
 pub struct ClaudeCodeDriver {
-    sessions: Mutex<HashMap<String, Arc<ProcessSession>>>,
+    sessions: SessionRegistry<ProcessSession>,
 }
 
 struct ProcessSession {
     events: Arc<EventHub>,
-    stdin: tokio::sync::Mutex<ChildStdin>,
-    pgid: i32,
-}
-
-impl ProcessSession {
-    fn kill_group(&self) {
-        kill_process_group(self.pgid);
-    }
-}
-
-impl Drop for ProcessSession {
-    fn drop(&mut self) {
-        kill_process_group(self.pgid);
-    }
+    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    // Field order keeps implicit teardown aligned with retire: close stdin, then kill the group.
+    process_group: ProcessGroup,
 }
 
 #[async_trait]
@@ -93,46 +78,42 @@ impl SubagentDriver for ClaudeCodeDriver {
         let events = EventHub::new(256);
         let session = Arc::new(ProcessSession {
             events: events.clone(),
-            stdin: tokio::sync::Mutex::new(stdin),
-            pgid,
+            stdin: tokio::sync::Mutex::new(Some(stdin)),
+            process_group: ProcessGroup::new(pgid),
         });
         let handle = SessionHandle {
             id: Uuid::new_v4().to_string(),
             agent: AgentKind::Claude,
         };
-        lock(&self.sessions)?.insert(handle.id.clone(), session.clone());
+        self.sessions.insert(handle.id.clone(), session.clone())?;
         tokio::spawn(drain_stderr(stderr));
         tokio::spawn(read_claude_stdout(stdout, child, events));
 
         let mut stdin = session.stdin.lock().await;
-        write_json_line(&mut stdin, &claude_user_message(&task.prompt)).await?;
+        write_json_line(
+            stdin.as_mut().ok_or(DriverError::MissingPipe("stdin"))?,
+            &claude_user_message(&task.prompt),
+        )
+        .await?;
         Ok(handle)
     }
 
     async fn prompt(&self, handle: &SessionHandle, text: String) -> DriverResult<()> {
-        let session = {
-            let sessions = lock(&self.sessions)?;
-            sessions
-                .get(&handle.id)
-                .cloned()
-                .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?
-        };
+        let session = self.sessions.get(handle)?;
         let mut stdin = session.stdin.lock().await;
-        write_json_line(&mut stdin, &claude_user_message(&text)).await
+        write_json_line(
+            stdin.as_mut().ok_or(DriverError::MissingPipe("stdin"))?,
+            &claude_user_message(&text),
+        )
+        .await
     }
 
     async fn interrupt(&self, handle: &SessionHandle) -> DriverResult<()> {
-        let session = {
-            let sessions = lock(&self.sessions)?;
-            sessions
-                .get(&handle.id)
-                .cloned()
-                .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?
-        };
+        let session = self.sessions.get(handle)?;
         let request_id = format!("hirsel-interrupt-{}", Uuid::new_v4());
         let mut stdin = session.stdin.lock().await;
         write_json_line(
-            &mut stdin,
+            stdin.as_mut().ok_or(DriverError::MissingPipe("stdin"))?,
             &json!({
                 "type": "control_request",
                 "request_id": request_id,
@@ -143,17 +124,15 @@ impl SubagentDriver for ClaudeCodeDriver {
     }
 
     async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
-        if let Some(session) = lock(&self.sessions)?.remove(&handle.id) {
-            session.kill_group();
+        if let Some(session) = self.sessions.remove(handle)? {
+            drop(session.stdin.lock().await.take());
+            session.process_group.kill_group();
         }
         Ok(())
     }
 
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream> {
-        let sessions = lock(&self.sessions)?;
-        let session = sessions
-            .get(&handle.id)
-            .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
+        let session = self.sessions.get(handle)?;
         session.events.stream()
     }
 }
@@ -168,7 +147,7 @@ fn claude_user_message(text: &str) -> Value {
     })
 }
 
-async fn read_claude_stdout(stdout: ChildStdout, mut child: Child, events: Arc<EventHub>) {
+async fn read_claude_stdout(stdout: ChildStdout, child: Child, events: Arc<EventHub>) {
     let mut terminal_sent = false;
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -201,24 +180,7 @@ async fn read_claude_stdout(stdout: ChildStdout, mut child: Child, events: Arc<E
         }
     }
 
-    match child.wait().await {
-        Ok(status) if terminal_sent || status.success() => {}
-        Ok(status) => {
-            let _ = events.emit(SubagentEvent::Terminal {
-                outcome: TerminalOutcome::Failed {
-                    reason: format!("claude exited without terminal result: {status}"),
-                },
-            });
-        }
-        Err(error) if !terminal_sent => {
-            let _ = events.emit(SubagentEvent::Terminal {
-                outcome: TerminalOutcome::Failed {
-                    reason: format!("claude wait failed: {error}"),
-                },
-            });
-        }
-        Err(_) => {}
-    }
+    finish_child(child, terminal_sent, &events, "claude", "terminal result").await;
 }
 
 fn claude_events(value: &Value) -> Vec<SubagentEvent> {

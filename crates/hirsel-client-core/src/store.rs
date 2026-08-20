@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use chrono::Utc;
 use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, Ping, ProcessInfo, ToolCallSummary,
@@ -14,32 +12,86 @@ pub enum ConnectionState {
     Offline,
 }
 
-/// A confirmed or optimistic chat row. All fields are owned for FFI conversion.
+/// A chat row whose state determines which fields can exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatEntry {
-    pub id: Option<u64>,
+pub enum ChatEntry {
+    Confirmed(ConfirmedMessage),
+    Pending(PendingSend),
+}
+
+impl ChatEntry {
+    pub fn id(&self) -> Option<u64> {
+        match self {
+            Self::Confirmed(message) => Some(message.id),
+            Self::Pending(_) => None,
+        }
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        match self {
+            Self::Confirmed(_) => None,
+            Self::Pending(send) => Some(&send.client_id),
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedMessage {
+    pub id: u64,
     pub author: ChatAuthor,
     pub body: String,
     pub reply_to: Option<u64>,
     pub timestamp: String,
     pub attachments: Vec<Blob>,
     pub tool_calls: Vec<ToolCallSummary>,
-    pub client_id: Option<String>,
-    pub pending: bool,
 }
 
-impl From<ChatMessage> for ChatEntry {
+impl From<ChatMessage> for ConfirmedMessage {
     fn from(message: ChatMessage) -> Self {
         Self {
-            id: Some(message.id),
+            id: message.id,
             author: message.author,
             body: message.body,
             reply_to: message.r#ref,
             timestamp: message.ts.to_rfc3339(),
             attachments: message.attachments,
             tool_calls: message.tool_calls,
-            client_id: None,
-            pending: false,
+        }
+    }
+}
+
+impl From<ChatMessage> for ChatEntry {
+    fn from(message: ChatMessage) -> Self {
+        Self::Confirmed(message.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSend {
+    pub client_id: String,
+    pub body: String,
+    pub reply_to: Option<u64>,
+    pub mentions: Vec<u64>,
+    pub timestamp: String,
+}
+
+impl PendingSend {
+    pub(crate) fn new(
+        client_id: String,
+        body: String,
+        reply_to: Option<u64>,
+        mentions: Vec<u64>,
+    ) -> Self {
+        Self {
+            client_id,
+            body,
+            reply_to,
+            mentions,
+            timestamp: Utc::now().to_rfc3339(),
         }
     }
 }
@@ -74,14 +126,6 @@ pub struct ClientSnapshot {
     pub host_version: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingSend {
-    pub client_id: String,
-    pub body: String,
-    pub reply_to: Option<u64>,
-    pub mentions: Vec<u64>,
-}
-
 pub(crate) struct LocalStore {
     pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
@@ -90,7 +134,6 @@ pub(crate) struct LocalStore {
     pub agent_activity: AgentActivity,
     pub last_seen_msg_id: Option<u64>,
     pub host_version: Option<String>,
-    pub pending_sends: VecDeque<PendingSend>,
 }
 
 impl Default for LocalStore {
@@ -103,7 +146,6 @@ impl Default for LocalStore {
             agent_activity: AgentActivity::default(),
             last_seen_msg_id: None,
             host_version: None,
-            pending_sends: VecDeque::new(),
         }
     }
 }
@@ -122,18 +164,14 @@ impl LocalStore {
     }
 
     pub fn add_optimistic_send(&mut self, pending: PendingSend) {
-        self.messages.push(ChatEntry {
-            id: None,
-            author: ChatAuthor::Owner,
-            body: pending.body.clone(),
-            reply_to: pending.reply_to,
-            timestamp: Utc::now().to_rfc3339(),
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-            client_id: Some(pending.client_id.clone()),
-            pending: true,
-        });
-        self.pending_sends.push_back(pending);
+        self.messages.push(ChatEntry::Pending(pending));
+    }
+
+    pub fn pending_sends(&self) -> impl Iterator<Item = &PendingSend> {
+        self.messages.iter().filter_map(|entry| match entry {
+            ChatEntry::Confirmed(_) => None,
+            ChatEntry::Pending(send) => Some(send),
+        })
     }
 
     pub fn apply_hello_ok(
@@ -149,7 +187,7 @@ impl LocalStore {
         if !host_version.is_empty() {
             self.host_version = Some(host_version);
         }
-        let known_ids: Vec<u64> = self.messages.iter().filter_map(|entry| entry.id).collect();
+        let known_ids: Vec<u64> = self.messages.iter().filter_map(ChatEntry::id).collect();
         let newly_replayed: Vec<ChatMessage> = messages
             .iter()
             .filter(|message| !known_ids.contains(&message.id))
@@ -159,21 +197,27 @@ impl LocalStore {
         let mut confirmed: Vec<ChatEntry> = self
             .messages
             .iter()
-            .filter(|entry| !entry.pending)
-            .cloned()
+            .filter_map(|entry| match entry {
+                ChatEntry::Confirmed(_) => Some(entry.clone()),
+                ChatEntry::Pending(_) => None,
+            })
             .collect();
         for message in messages {
-            confirmed.retain(|entry| entry.id != Some(message.id));
+            confirmed.retain(|entry| entry.id() != Some(message.id));
             confirmed.push(message.into());
         }
-        confirmed.sort_by_key(|entry| entry.id);
+        confirmed.sort_by_key(ChatEntry::id);
 
         for message in newly_replayed {
             if message.author == ChatAuthor::Owner {
                 self.reconcile_pending_body(&message.body);
             }
         }
-        let pending = self.messages.iter().filter(|entry| entry.pending).cloned();
+        let pending = self
+            .messages
+            .iter()
+            .filter(|entry| entry.is_pending())
+            .cloned();
         confirmed.extend(pending);
         self.messages = confirmed;
         self.pings = pings;
@@ -185,24 +229,18 @@ impl LocalStore {
         if self
             .messages
             .iter()
-            .any(|entry| !entry.pending && entry.id == Some(message.id))
+            .any(|entry| entry.id() == Some(message.id))
         {
             return;
         }
 
         self.bump_last_seen(message.id);
         if message.author == ChatAuthor::Owner
-            && let Some(index) = self
-                .messages
-                .iter()
-                .position(|entry| entry.pending && entry.body == message.body)
+            && let Some(index) = self.messages.iter().position(
+                |entry| matches!(entry, ChatEntry::Pending(send) if send.body == message.body),
+            )
         {
-            let client_id = self.messages[index].client_id.clone();
             self.messages[index] = message.into();
-            if let Some(client_id) = client_id {
-                self.pending_sends
-                    .retain(|pending| pending.client_id != client_id);
-            }
             return;
         }
 
@@ -229,14 +267,10 @@ impl LocalStore {
         let Some(index) = self
             .messages
             .iter()
-            .position(|entry| entry.pending && entry.body == body)
+            .position(|entry| matches!(entry, ChatEntry::Pending(send) if send.body == body))
         else {
             return;
         };
-        if let Some(client_id) = self.messages[index].client_id.as_deref() {
-            self.pending_sends
-                .retain(|pending| pending.client_id != client_id);
-        }
         self.messages.remove(index);
     }
 
@@ -264,12 +298,7 @@ mod tests {
     }
 
     fn pending(client_id: &str, body: &str) -> PendingSend {
-        PendingSend {
-            client_id: client_id.into(),
-            body: body.into(),
-            reply_to: None,
-            mentions: Vec::new(),
-        }
+        PendingSend::new(client_id.into(), body.into(), None, Vec::new())
     }
 
     #[test]
@@ -284,7 +313,61 @@ mod tests {
             vec![],
             "0.1.0 (test)".to_string(),
         );
-        assert_eq!(store.pending_sends.len(), 1);
-        assert!(store.messages.last().unwrap().pending);
+        assert_eq!(store.pending_sends().count(), 1);
+        assert!(store.messages.last().unwrap().is_pending());
+    }
+
+    #[test]
+    fn live_confirmation_replaces_pending_and_updates_resend_derivation() {
+        let mut store = LocalStore::default();
+        store.add_optimistic_send(pending("first", "one"));
+        store.add_optimistic_send(pending("second", "two"));
+
+        store.apply_message(message(7, ChatAuthor::Owner, "one"));
+
+        assert!(matches!(
+            &store.messages[0],
+            ChatEntry::Confirmed(message) if message.id == 7 && message.body == "one"
+        ));
+        assert!(matches!(
+            &store.messages[1],
+            ChatEntry::Pending(send) if send.client_id == "second"
+        ));
+        assert_eq!(
+            store
+                .pending_sends()
+                .map(|send| send.client_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second"]
+        );
+    }
+
+    #[test]
+    fn hello_keeps_sorted_confirmed_rows_before_fifo_pending_rows() {
+        let mut store = LocalStore::default();
+        store.apply_message(message(3, ChatAuthor::Agent, "three"));
+        store.add_optimistic_send(pending("first", "pending one"));
+        store.add_optimistic_send(pending("second", "pending two"));
+
+        store.apply_hello_ok(
+            3,
+            vec![
+                message(2, ChatAuthor::Agent, "two"),
+                message(1, ChatAuthor::Owner, "one"),
+            ],
+            vec![],
+            vec![],
+            String::new(),
+        );
+
+        assert!(matches!(&store.messages[0], ChatEntry::Confirmed(row) if row.id == 1));
+        assert!(matches!(&store.messages[1], ChatEntry::Confirmed(row) if row.id == 2));
+        assert!(matches!(&store.messages[2], ChatEntry::Confirmed(row) if row.id == 3));
+        assert!(
+            matches!(&store.messages[3], ChatEntry::Pending(send) if send.client_id == "first")
+        );
+        assert!(
+            matches!(&store.messages[4], ChatEntry::Pending(send) if send.client_id == "second")
+        );
     }
 }

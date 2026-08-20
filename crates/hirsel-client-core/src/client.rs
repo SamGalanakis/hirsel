@@ -186,12 +186,14 @@ impl Client {
 
     pub fn send_message(&self, request: SendMessageRequest) -> SendReceipt {
         let client_id = Uuid::new_v4().to_string();
-        self.inner.write_store().add_optimistic_send(PendingSend {
-            client_id: client_id.clone(),
-            body: request.body,
-            reply_to: request.reply_to,
-            mentions: request.mentions,
-        });
+        self.inner
+            .write_store()
+            .add_optimistic_send(PendingSend::new(
+                client_id.clone(),
+                request.body,
+                request.reply_to,
+                request.mentions,
+            ));
         self.inner.notify_snapshot();
         if let Some(sender) = self
             .inner

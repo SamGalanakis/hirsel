@@ -257,7 +257,7 @@ async fn flush_pending(
             .unwrap_or_else(|error| error.into_inner());
         std::mem::take(&mut *pending)
     };
-    let pending: Vec<_> = client.read_store().pending_sends.iter().cloned().collect();
+    let pending: Vec<_> = client.read_store().pending_sends().cloned().collect();
     drop(client);
 
     let mut frames = frames.into_iter();

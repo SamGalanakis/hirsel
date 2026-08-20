@@ -16,7 +16,9 @@ pub use client::{Client, ClientError, SendMessageRequest, SendReceipt};
 pub use config::{ClientConfig, ConfigError, ReconnectPolicy};
 pub use identity::generate_iroh_identity;
 pub use observer::{ClientObserver, LifecycleEvent};
-pub use store::{AgentActivity, ChatEntry, ClientSnapshot, ConnectionState};
+pub use store::{
+    AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, ConnectionState, PendingSend,
+};
 
 pub use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, HelloAuth, Ping, PingStatus, ProcessInfo,

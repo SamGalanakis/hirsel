@@ -314,9 +314,9 @@ async fn optimistic_send_reconciles_with_owner_echo() {
     let receipt = client.send_message(SendMessageRequest::new("queued thought".into()));
     let optimistic = client.snapshot();
     assert_eq!(optimistic.messages.len(), 1);
-    assert!(optimistic.messages[0].pending);
+    assert!(optimistic.messages[0].is_pending());
     assert_eq!(
-        optimistic.messages[0].client_id.as_deref(),
+        optimistic.messages[0].client_id(),
         Some(receipt.client_id.as_str())
     );
 
@@ -324,12 +324,12 @@ async fn optimistic_send_reconciles_with_owner_echo() {
         state
             .messages
             .first()
-            .is_some_and(|message| message.id == Some(42))
+            .is_some_and(|message| message.id() == Some(42))
     })
     .await;
     assert_eq!(reconciled.messages.len(), 1);
-    assert!(!reconciled.messages[0].pending);
-    assert_eq!(reconciled.messages[0].client_id, None);
+    assert!(!reconciled.messages[0].is_pending());
+    assert_eq!(reconciled.messages[0].client_id(), None);
     assert_eq!(reconciled.last_seen_msg_id, Some(42));
 
     client.disconnect().await;
@@ -392,7 +392,7 @@ async fn offline_queue_flushes_in_order_and_reconnect_resumes_last_seen() {
             .iter()
             .rev()
             .take(2)
-            .all(|row| row.pending)
+            .all(|row| row.is_pending())
     );
 
     let (resume, first_send, second_send) = timeout(Duration::from_secs(5), result_rx)

@@ -1,11 +1,8 @@
 //! Fixture-driven driver used by tests and offline runs.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
@@ -14,16 +11,16 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::{
-    shared::{EventHub, lock, short_line},
+    shared::{EventHub, SessionRegistry, lock, short_line},
     types::{
-        DriverError, DriverResult, EventStream, SessionHandle, SpawnSpec, SubagentDriver,
-        SubagentEvent, TerminalOutcome,
+        DriverResult, EventStream, SessionHandle, SpawnSpec, SubagentDriver, SubagentEvent,
+        TerminalOutcome,
     },
 };
 
 #[derive(Default)]
 pub struct FakeDriver {
-    sessions: Mutex<HashMap<String, Arc<FakeSession>>>,
+    sessions: SessionRegistry<FakeSession>,
     spawned: Mutex<Vec<SpawnSpec>>,
 }
 
@@ -91,7 +88,7 @@ impl SubagentDriver for FakeDriver {
             interrupted: AtomicBool::new(false),
             terminal_sent: AtomicBool::new(false),
         });
-        lock(&self.sessions)?.insert(handle.id.clone(), session.clone());
+        self.sessions.insert(handle.id.clone(), session.clone())?;
 
         tokio::spawn(async move {
             let _ = events.emit(SubagentEvent::Started {
@@ -133,10 +130,7 @@ impl SubagentDriver for FakeDriver {
     }
 
     async fn prompt(&self, handle: &SessionHandle, text: String) -> DriverResult<()> {
-        let sessions = lock(&self.sessions)?;
-        let session = sessions
-            .get(&handle.id)
-            .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
+        let session = self.sessions.get(handle)?;
         let _ = session.events.emit(SubagentEvent::Progress {
             summary: short_line(format!("prompt: {text}")),
         });
@@ -144,10 +138,7 @@ impl SubagentDriver for FakeDriver {
     }
 
     async fn interrupt(&self, handle: &SessionHandle) -> DriverResult<()> {
-        let sessions = lock(&self.sessions)?;
-        let session = sessions
-            .get(&handle.id)
-            .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
+        let session = self.sessions.get(handle)?;
         session.interrupted.store(true, Ordering::SeqCst);
         if !session.terminal_sent.swap(true, Ordering::SeqCst) {
             let _ = session.events.emit(SubagentEvent::Terminal {
@@ -158,15 +149,12 @@ impl SubagentDriver for FakeDriver {
     }
 
     async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
-        lock(&self.sessions)?.remove(&handle.id);
+        self.sessions.remove(handle)?;
         Ok(())
     }
 
     fn events(&self, handle: &SessionHandle) -> DriverResult<EventStream> {
-        let sessions = lock(&self.sessions)?;
-        let session = sessions
-            .get(&handle.id)
-            .ok_or_else(|| DriverError::SessionNotFound(handle.id.clone()))?;
+        let session = self.sessions.get(handle)?;
         session.events.stream()
     }
 }

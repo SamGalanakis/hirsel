@@ -4,8 +4,8 @@ use std::{
 };
 
 use hirsel_client_core::{
-    Client, ClientConfig, ClientObserver, ClientSnapshot, ConnectionState, LifecycleEvent,
-    ReconnectPolicy, SendMessageRequest, generate_iroh_identity,
+    ChatEntry, Client, ClientConfig, ClientObserver, ClientSnapshot, ConnectionState,
+    LifecycleEvent, ReconnectPolicy, SendMessageRequest, generate_iroh_identity,
 };
 use hirsel_host::{
     build_state,
@@ -148,12 +148,9 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
         snapshot.connection == ConnectionState::Online
     })
     .await;
-    assert!(
-        reconnected
-            .messages
-            .iter()
-            .any(|message| message.body == "iroh proof anchor")
-    );
+    assert!(reconnected.messages.iter().any(|entry| {
+        matches!(entry, ChatEntry::Confirmed(message) if message.body == "iroh proof anchor")
+    }));
     assert!(reconnected.pings.iter().any(|item| item.id == ping.id));
 
     reconnected_client.send_message(SendMessageRequest::new(ROUND_TRIP_BODY.to_owned()));
@@ -178,11 +175,12 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     .expect("host did not persist the iroh owner message");
 
     let round_tripped = wait_for_snapshot(&reconnected_client, |snapshot| {
-        snapshot.messages.iter().any(|message| {
-            message.author == ChatAuthor::Owner
-                && message.body == ROUND_TRIP_BODY
-                && message.id.is_some()
-                && !message.pending
+        snapshot.messages.iter().any(|entry| {
+            matches!(
+                entry,
+                ChatEntry::Confirmed(message)
+                    if message.author == ChatAuthor::Owner && message.body == ROUND_TRIP_BODY
+            )
         })
     })
     .await;

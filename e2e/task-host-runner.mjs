@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
 import {
+  appReady,
   PORTS,
   pollReady,
   recordCheck,
@@ -166,7 +167,7 @@ async function main() {
     page.on("websocket", (socket) => websocketUrls.push(socket.url()));
     await page.goto(origin, { waitUntil: "domcontentloaded" });
     try {
-      await page.locator('[aria-label="connected"]').waitFor();
+      await appReady(page);
     } catch (error) {
       const diagnostic = await page.evaluate(() => ({
         token_present: Boolean(localStorage.getItem("hirsel.token")),
@@ -220,7 +221,7 @@ async function main() {
     check("terminal action settles authoritatively", settled.status === "done", `Host status=${settled.status}`);
 
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.locator('[aria-label="connected"]').waitFor();
+    await appReady(page);
     await page.locator(`[data-task-id="${seeded.id}"]`).click();
     await page.getByText("Task decided").waitFor();
     await page.getByRole("button", { name: "Reopen" }).click();

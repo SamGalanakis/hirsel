@@ -124,6 +124,12 @@ const probeGeometry = () => {
     card: rect('[data-slot="task-card"]'),
     column: rect('[data-slot="task-column"]'),
     conversation: rect('[data-slot="conversation"]'),
+    // The reading column itself — the flow the prose is laid out in. Everything
+    // standing at the bottom of the field has to share its two edges.
+    prose: rect('[data-slot="conversation"] > div'),
+    jump: rect('[data-slot="jump-to-latest"]'),
+    banner: rect('[data-slot="protocol-error"]'),
+    toaster: rect('[data-slot="toaster"]'),
     firstChip: rect("[data-task-id]"),
   };
 };
@@ -177,7 +183,11 @@ async function main() {
       await page.locator('[data-composer="main"]').fill(
         "| alpha column | beta column | gamma column | delta column |\n| --- | --- | --- | --- |\n| 1111111111 | 2222222222 | 3333333333 | 4444444444 |\n\n```\nnpm run some::extremely::long::command --with-a-flag=/very/long/path/that/never/wraps/at/all\n```",
       );
-      await page.locator('[aria-label="Send"]').click();
+      // The Send button exists only on a coarse pointer — a fine pointer sends
+      // on Enter and carries no button at all, so the send route follows the
+      // context's own pointer type.
+      if (w < 900) await page.locator('[aria-label="Send"]').click();
+      else await page.locator('[data-composer="main"]').press("Control+Enter");
       await page.waitForTimeout(900);
       const wide = await page.evaluate(probeGeometry);
       if (shot) await page.screenshot({ path: `${reportDir}/sweep-${tag}-${w}x${h}-wide.png` });

@@ -426,12 +426,18 @@ export function TaskShell() {
               self-effacing: it exists exactly while there is somewhere to jump
               to, sits in the field rather than over the composer, and says
               where it goes rather than shouting for attention. */}
+          {/* It centres on the READING COLUMN, not on the pane: the same
+              `max-w-frame` + `px-gutter` box the field and the composer use, so
+              the pill sits over the middle of the text it belongs to at every
+              width. Centred on the pane it drifted right of the column and
+              landed on the prose. `bottom-3` keeps honest air above the capsule
+              instead of touching its rim. */}
           <Show when={canJump()}>
-            <div class="pointer-events-none relative z-10 flex justify-center">
+            <div class="pointer-events-none relative z-10 mx-auto flex w-full max-w-frame justify-center px-gutter">
               <button
                 type="button"
                 data-slot="jump-to-latest"
-                class="pointer-events-auto absolute bottom-1 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface px-3 py-1.5 text-xs text-surface-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11"
+                class="pointer-events-auto absolute bottom-3 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface px-3 py-1.5 text-xs text-surface-foreground shadow-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(pointer:coarse)]:min-h-11"
                 onClick={() => void jumpLatest(false)}
               >
                 <ArrowDown class="size-3.5" aria-hidden="true" />
@@ -440,17 +446,25 @@ export function TaskShell() {
             </div>
           </Show>
 
+          {/* The banner is part of the column, not a pane-wide bar: same frame,
+              same gutter, so its edges are the composer's edges below it. */}
           <Show when={state.protocolError}>
-            <div role="alert" class="mx-gutter mb-2 flex items-center gap-3 rounded-lg bg-muted px-3 text-sm text-foreground">
-              <span class="min-w-0 flex-1 py-3">{state.protocolError}</span>
-              <button
-                type="button"
-                class="grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
-                aria-label="Dismiss connection error"
-                onClick={clearProtocolError}
-              >
-                <X class="size-4" aria-hidden="true" />
-              </button>
+            <div
+              role="alert"
+              data-slot="protocol-error"
+              class="mx-auto mb-2 flex w-full max-w-frame items-center gap-3 px-gutter text-sm text-foreground"
+            >
+              <div class="flex w-full items-center gap-3 rounded-lg bg-muted px-3">
+                <span class="min-w-0 flex-1 py-3">{state.protocolError}</span>
+                <button
+                  type="button"
+                  class="grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
+                  aria-label="Dismiss connection error"
+                  onClick={clearProtocolError}
+                >
+                  <X class="size-4" aria-hidden="true" />
+                </button>
+              </div>
             </div>
           </Show>
 

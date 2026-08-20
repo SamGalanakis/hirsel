@@ -3,10 +3,16 @@ import { For, Show } from "solid-js";
 import { cn } from "@/lib/utils";
 import { dismissToast, pauseToast, resumeToast, toasts } from "../lib/toast";
 
-/** Fixed bottom-center toast stack. Phone-first: sits above the safe area. */
+/** Fixed bottom-center toast stack. Phone-first: sits above the safe area — and
+ * above the standing composer, which owns the bottom of every screen: at a 1rem
+ * inset a toast landed ON the capsule, covering the field the Owner was told to
+ * retry in. 5rem clears the resting capsule and its own bottom inset. */
 export function Toaster() {
   return (
-    <div class="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+1rem)] z-50 flex flex-col items-center gap-2 px-4">
+    <div
+      data-slot="toaster"
+      class="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-50 flex flex-col items-center gap-2 px-4"
+    >
       <For each={toasts()}>
         {(t) => (
           // Pause-on-hover/focus lives on the toast surface itself (a live

@@ -53,7 +53,11 @@ function Conversation(props: ConversationProps) {
   return (
     <Show when={hasContent()}>
       <div data-slot="conversation" class="min-w-0 py-4 rail:py-10">
-        <div class="flex max-w-[42rem] flex-col gap-6">
+        {/* No second cap here. The reading measure IS this column now
+            (`--container-measure`), so a `max-w-[42rem]` inside it only made the
+            prose narrower than the card and the composer it sits between — the
+            overhang the Owner saw under the last line of text. */}
+        <div class="flex flex-col gap-6">
           <Show when={props.loadingEarlier}>
             <div
               data-slot="loading-earlier"
@@ -69,7 +73,7 @@ function Conversation(props: ConversationProps) {
                 <article
                   aria-label={message.author === "owner" ? "You" : "Hirsel"}
                   data-message-id={message.id}
-                  class="max-w-[42rem]"
+                  class="min-w-0"
                   classList={{
                     "ml-4 border-l border-border/50 pl-4 text-foreground":
                       message.author === "owner",
@@ -112,7 +116,7 @@ function Conversation(props: ConversationProps) {
             {(() => {
               const split = createMemo(() => splitStreamingReply(state.turnEvents));
               return (
-                <div class="max-w-[42rem] text-muted-foreground">
+                <div class="min-w-0 text-muted-foreground">
                   {/* The thinking marker is suppressed once a reply is actually
                       streaming: the arriving text IS the liveness signal, and a
                       spinner above it just competes with the words. */}
@@ -135,7 +139,7 @@ function Conversation(props: ConversationProps) {
                       aria-label="Hirsel"
                       data-slot="streaming-reply"
                       aria-busy="true"
-                      class="max-w-[42rem] pr-4 text-muted-foreground"
+                      class="min-w-0 pr-4 text-muted-foreground"
                       classList={{ "mt-3": split().activity.length > 0 }}
                     >
                       <Markdown>{split().reply}</Markdown>

@@ -216,29 +216,51 @@ async function main() {
         && (await page.locator('[data-slot="task-scope"]').count()) === 0,
       `selected task row, pinned ${dive.cardPosition} card, and composer tone carry focus without a mode label`,
     );
-    // One column at the reading measure in BOTH states: the card, the
-    // conversation under it and the standing composer share edges, and the
-    // composer does not move when focus clears.
+    // ONE column at the reading measure in BOTH states, and the composer is
+    // that column's floor: card, conversation, the prose inside it and the
+    // capsule share BOTH edges exactly — no ~150px overhang past the last line
+    // of text — and the column is centred in the pane rather than pinned left.
+    const MEASURE = 672; // --container-measure: 42rem at the 16px root size
     const columnGeometry = await page.evaluate(() => {
       const box = (selector) => {
         const element = document.querySelector(selector);
         if (!element) return null;
         const rect = element.getBoundingClientRect();
-        return { left: Math.round(rect.left), width: Math.round(rect.width) };
+        return {
+          left: Math.round(rect.left),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          top: Math.round(rect.top),
+        };
       };
+      const pane = document.querySelector('[data-slot="task-scroll"]')?.parentElement;
       return {
         card: box('[data-slot="task-card"]'),
         conversation: box('[data-slot="task-conversation"]'),
+        // The actual reading column: the flow the messages are laid out in.
+        // This is the edge the Owner sees the text end on.
+        prose: box('[data-slot="conversation"] > div'),
         composer: box('[data-slot="composer-shell"]'),
+        paneCentre: pane ? Math.round(pane.getBoundingClientRect().left + pane.getBoundingClientRect().width / 2) : null,
       };
     });
+    const columnParts = [columnGeometry.card, columnGeometry.conversation, columnGeometry.prose, columnGeometry.composer];
     check(
       "one measure-wide column",
-      columnGeometry.card.left === columnGeometry.conversation.left
-        && columnGeometry.card.width === columnGeometry.conversation.width
-        && columnGeometry.card.width <= 820
-        && columnGeometry.composer.width <= 820,
+      columnParts.every((part) => part && part.left === columnGeometry.card.left)
+        && columnParts.every((part) => part.width === MEASURE)
+        // Centred in the pane: the column used to sit at the frame's left edge
+        // with ~360px of dead space beside it, which is what "not centered"
+        // meant. Half-pixel rounding is the only slack allowed.
+        && Math.abs(columnGeometry.composer.left + columnGeometry.composer.width / 2 - columnGeometry.paneCentre) <= 1,
       JSON.stringify(columnGeometry),
+    );
+    // A touch context, so the capsule keeps its 44px row and its Send button:
+    // one text row plus the capsule's own padding, never the old 60px slab.
+    check(
+      "capsule rests one row high",
+      columnGeometry.composer.height === 52,
+      `resting composer height ${columnGeometry.composer.height}px (touch context: 44px row + py-1)`,
     );
     startFrame = sentFrames.length;
     await textarea.fill("What would make this unsafe?");
@@ -251,7 +273,12 @@ async function main() {
     await deploy.click();
     const ambientComposer = await composerShell.evaluate((element) => {
       const rect = element.getBoundingClientRect();
-      return { left: Math.round(rect.left), width: Math.round(rect.width) };
+      return {
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        top: Math.round(rect.top),
+      };
     });
     check(
       "focus clears to ambient",
@@ -261,7 +288,9 @@ async function main() {
         && await composerShell.getAttribute("data-focused") === "false"
         && await deploy.getAttribute("aria-pressed") === "false"
         && ambientComposer.left === columnGeometry.composer.left
-        && ambientComposer.width === columnGeometry.composer.width,
+        && ambientComposer.width === columnGeometry.composer.width
+        && ambientComposer.height === columnGeometry.composer.height
+        && ambientComposer.top === columnGeometry.composer.top,
       `activating the focused task removes focus without naming a mode or moving the composer (${JSON.stringify(ambientComposer)})`,
     );
     startFrame = sentFrames.length;
@@ -277,6 +306,7 @@ async function main() {
         && await composerShell.getAttribute("data-focused") === "true",
       "same task is one action away from the ambient whole",
     );
+
 
     const deployMargin = page.locator('[data-slot="conversation"]');
     const deployAttribution = {
@@ -650,27 +680,43 @@ async function main() {
         send: 'button[aria-label="Send"]',
         overflow: '[data-slot="phone-overflow-trigger"]',
         attach: 'button[aria-label="Attach files"]',
-        sendOptions: 'button[aria-label="More send options"]',
       };
       return Object.fromEntries(Object.entries(selectors).map(([name, selector]) => {
         const elements = [...document.querySelectorAll(selector)];
         return [name, elements.map((element) => Math.min(element.getBoundingClientRect().width, element.getBoundingClientRect().height))];
       }));
     });
-    const targetsPass = Object.values(touchTargets).flat().every((size) => size >= 44) && (closeProcessBox?.height ?? 0) >= 44;
+    const targetsPass = Object.values(touchTargets).flat().every((size) => size >= 44)
+      && touchTargets.send.length === 1 && touchTargets.attach.length === 1
+      && (closeProcessBox?.height ?? 0) >= 44;
     check("all named 44px targets", targetsPass, JSON.stringify({ ...touchTargets, utilityClose: closeProcessBox?.height ?? 0 }));
+    // The send-options caret is gone on every pointer type: it opened a menu
+    // whose two rows are Enter/Tab on desktop and tap/long-press here, and it
+    // was `disabled` — a silent no-op — whenever the draft was empty.
+    check(
+      "no send-options caret on touch",
+      (await page.locator('button[aria-label="More send options"]').count()) === 0
+        && (await page.getByRole("menuitem", { name: "Queue for next turn" }).count()) === 0,
+      "queueing is the Send long-press here and Tab on desktop; both are printed in the ⌘/ sheet",
+    );
     const phoneContainment = await page.evaluate(() => {
       const strip = document.querySelector('[data-slot="task-index"]');
       const conversation = document.querySelector('[data-slot="task-conversation"]');
       const card = document.querySelector('[data-slot="task-card"]');
+      const composer = document.querySelector('[data-slot="composer-shell"]');
+      const round = (node, side) => (node ? Math.round(node.getBoundingClientRect()[side]) : null);
       return {
         viewport: innerWidth,
         document: document.documentElement.scrollWidth,
         stripLeft: strip?.getBoundingClientRect().left,
         stripRight: strip?.getBoundingClientRect().right,
         columns: conversation ? getComputedStyle(conversation).gridTemplateColumns : "missing",
-        cardWidth: card ? Math.round(card.getBoundingClientRect().width) : null,
-        conversationWidth: conversation ? Math.round(conversation.getBoundingClientRect().width) : null,
+        cardWidth: round(card, "width"),
+        conversationWidth: round(conversation, "width"),
+        composerWidth: round(composer, "width"),
+        cardLeft: round(card, "left"),
+        conversationLeft: round(conversation, "left"),
+        composerLeft: round(composer, "left"),
       };
     });
     check(
@@ -678,7 +724,14 @@ async function main() {
       phoneContainment.document <= phoneContainment.viewport
         && phoneContainment.stripLeft >= 0 && phoneContainment.stripRight <= 390
         && !phoneContainment.columns.includes(" ")
-        && phoneContainment.cardWidth === phoneContainment.conversationWidth,
+        // The same one column the desktop gate pins, narrowed to the phone:
+        // card, conversation and capsule on the same two edges, below the
+        // measure because the viewport is.
+        && phoneContainment.cardWidth === phoneContainment.conversationWidth
+        && phoneContainment.composerWidth === phoneContainment.cardWidth
+        && phoneContainment.composerLeft === phoneContainment.cardLeft
+        && phoneContainment.conversationLeft === phoneContainment.cardLeft
+        && phoneContainment.cardWidth < MEASURE,
       JSON.stringify(phoneContainment),
     );
     const phoneTask = await taskField.getAttribute("data-task");
@@ -710,6 +763,10 @@ async function main() {
         inputScroll: input?.scrollHeight,
         inputClient: input?.clientHeight,
         composerRight: composer?.getBoundingClientRect().right,
+        composerLeft: composer ? Math.round(composer.getBoundingClientRect().left) : null,
+        composerWidth: composer ? Math.round(composer.getBoundingClientRect().width) : null,
+        cardLeft: card ? Math.round(card.getBoundingClientRect().left) : null,
+        cardWidth: card ? Math.round(card.getBoundingClientRect().width) : null,
         stripScroll: strip?.scrollWidth,
         stripClient: strip?.clientWidth,
         identityCount: document.querySelectorAll('[data-slot="task-field"] h2').length,
@@ -731,7 +788,10 @@ async function main() {
     check(
       "180-char 320px draft containment",
       narrow.document <= narrow.viewport && narrow.composerRight <= 320
-        && narrow.inputScroll >= narrow.inputClient && narrow.stripScroll > narrow.stripClient,
+        && narrow.inputScroll >= narrow.inputClient && narrow.stripScroll > narrow.stripClient
+        // Still one column at 320: the grown capsule holds the card's edges.
+        && narrow.composerLeft === narrow.cardLeft
+        && narrow.composerWidth === narrow.cardWidth,
       JSON.stringify(narrow),
     );
     check(
@@ -769,6 +829,112 @@ async function main() {
         && afterEscapeClose.focused === beforeEscapeClose.focused,
       `before ${JSON.stringify(beforeEscapeClose)}; after ${JSON.stringify(afterEscapeClose)}`,
     );
+    // The fine-pointer capsule, in its own context — `hasTouch` is a context
+    // option, so a desktop pointer cannot be reached from the touch one above.
+    // Enter is the send there, so the capsule carries no Send button and no
+    // send-options caret, and it rests at one text row: 44px, not the 60px
+    // slab that overhung the prose.
+    const fineContext = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      hasTouch: false,
+      serviceWorkers: "block",
+      colorScheme: "light",
+      reducedMotion: "reduce",
+    });
+    await fineContext.addInitScript((value) => localStorage.setItem("hirsel.token", value), token);
+    const finePage = await fineContext.newPage();
+    finePage.on("console", (message) => {
+      if (message.type() === "error") browserErrors.push(`fine-pointer: ${message.text()}`);
+    });
+    finePage.on("pageerror", (error) => browserErrors.push(`fine-pointer: ${error.message}`));
+    const fineFrames = [];
+    finePage.on("websocket", (socket) => {
+      socket.on("framesent", (event) => {
+        try { fineFrames.push(JSON.parse(String(event.payload))); } catch { /* non-JSON */ }
+      });
+    });
+    await finePage.goto(origin, { waitUntil: "domcontentloaded" });
+    await appReady(finePage);
+    const fineComposer = finePage.getByRole("textbox", { name: "Message Hirsel" });
+    await fineComposer.fill("Enter is the send on a fine pointer");
+    await fineComposer.press("Enter");
+    const fineSent = await poll("fine-pointer send frame", async () =>
+      fineFrames.find((frame) => frame.type === "send_message" && frame.body === "Enter is the send on a fine pointer"));
+    const fineGeometry = await finePage.evaluate(() => {
+      const box = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        return { left: Math.round(rect.left), width: Math.round(rect.width), height: Math.round(rect.height) };
+      };
+      return {
+        composer: box('[data-slot="composer-shell"]'),
+        prose: box('[data-slot="conversation"] > div'),
+        sendButtons: document.querySelectorAll('button[aria-label="Send"]').length,
+        carets: document.querySelectorAll('button[aria-label="More send options"]').length,
+        attach: document.querySelectorAll('button[aria-label="Attach files"]').length,
+      };
+    });
+    check(
+      "fine pointer: no send cluster, one-row capsule, same edges as the prose",
+      fineSent.ref !== undefined
+        && fineGeometry.sendButtons === 0 && fineGeometry.carets === 0
+        && fineGeometry.attach === 1
+        && fineGeometry.composer.height === 44
+        && fineGeometry.composer.width === MEASURE
+        && fineGeometry.prose.left === fineGeometry.composer.left
+        && fineGeometry.prose.width === fineGeometry.composer.width,
+      JSON.stringify(fineGeometry),
+    );
+
+    // "Jump to latest" belongs to the reading column, not to the pane: centred
+    // on the pane it drifted right of the column and landed on the prose, and
+    // at `bottom-1` it touched the capsule's rim. Long sends here (rather than
+    // in the shared page) are what make the field scrollable enough to offer
+    // it, without disturbing the attribution gates above.
+    for (let index = 0; index < 4; index += 1) {
+      await fineComposer.fill(`paragraph ${index} ${"scrollable ".repeat(60)}`);
+      await fineComposer.press("Enter");
+      await poll(`fine-pointer long send ${index}`, async () =>
+        fineFrames.find((frame) => frame.type === "send_message" && frame.body.startsWith(`paragraph ${index}`)));
+    }
+    const fineScroll = finePage.locator('[data-slot="task-scroll"]');
+    const jump = finePage.locator('[data-slot="jump-to-latest"]');
+    // A programmatic pin suppresses the affordance for its settle window, so
+    // keep nudging the scroller to the top until the pill is actually offered
+    // rather than racing that window once.
+    await poll("jump-to-latest offered", async () => {
+      // Re-scroll from a non-zero offset every attempt: parking at 0 twice in a
+      // row emits no scroll event at all, so a single nudge that lands inside
+      // the pin's settle window would never be re-measured.
+      await fineScroll.evaluate((element) => { element.scrollTop = 40; });
+      await fineScroll.evaluate((element) => { element.scrollTop = 0; });
+      return (await jump.count()) === 1 ? true : null;
+    });
+    const jumpGeometry = await finePage.evaluate(() => {
+      const rect = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return null;
+        const r = element.getBoundingClientRect();
+        return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) };
+      };
+      return { pill: rect('[data-slot="jump-to-latest"]'), composer: rect('[data-slot="composer-shell"]') };
+    });
+    const jumpCentre = (jumpGeometry.pill.left + jumpGeometry.pill.right) / 2;
+    const columnCentre = (jumpGeometry.composer.left + jumpGeometry.composer.right) / 2;
+    check(
+      "jump-to-latest centres on the column, clear of the capsule",
+      Math.abs(jumpCentre - columnCentre) <= 1
+        && jumpGeometry.pill.left >= jumpGeometry.composer.left
+        && jumpGeometry.pill.right <= jumpGeometry.composer.right
+        // Honest air above the capsule rather than resting on its rim.
+        && jumpGeometry.composer.top - jumpGeometry.pill.bottom >= 8,
+      JSON.stringify({ ...jumpGeometry, jumpCentre, columnCentre }),
+    );
+    await jump.click();
+    await jump.waitFor({ state: "detached" });
+    await fineContext.close();
+
     check("browser console and requests", browserErrors.length === 0 && requestErrors.length === 0, [...browserErrors, ...requestErrors].join("; ") || "no console, page, response, or request failures");
     await context.close();
   } finally {

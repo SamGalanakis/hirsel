@@ -105,6 +105,10 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: ["Enter"], label: "Send message", group: "Hirsel" },
   { keys: ["⇧", "Enter"], label: "New line", group: "Hirsel" },
   { keys: ["Tab"], label: "Queue for next turn", group: "Hirsel" },
+  // The composer carries no queue button any more, so the sheet is where BOTH
+  // routes to a queued turn are written down — the desktop key and the touch
+  // gesture, which is the only one a phone can reach.
+  { keys: ["Hold Send"], label: "Queue for next turn (touch)", group: "Hirsel" },
   { keys: ["Esc"], label: "Stop the active turn", group: "Hirsel" },
   { keys: ["@"], label: "Mention a task", group: "Hirsel" },
   { keys: ["g", "t"], label: "Focus tasks", group: "Focus" },

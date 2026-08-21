@@ -69,6 +69,7 @@ impl ProcessEngine for HirselSubagentEngine {
 pub(super) struct HirselMonitorEngine {
     pub(super) tools: ToolSuite,
     pub(super) notify: Arc<Notify>,
+    pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
 }
 
 impl HirselMonitorEngine {
@@ -157,7 +158,9 @@ impl ProcessEngine for HirselMonitorEngine {
             if !tick.wake {
                 continue;
             }
-            if let Err(error) = append_monitor_wake(&processes, &updated, &tick, &self.notify).await
+            if let Err(error) =
+                append_monitor_wake(&processes, &updated, &tick, &self.notify, &self.fork_wake)
+                    .await
             {
                 tracing::warn!(%error, monitor_id = %payload.monitor_id, "failed to append monitor wake event");
             }
@@ -305,26 +308,45 @@ pub(super) fn monitor_start_request(
 }
 
 pub(super) fn monitor_event_types() -> Vec<ProcessEventType> {
-    vec![ProcessEventType {
-        name: MONITOR_WAKE_EVENT.to_string(),
-        payload_schema: LashSchema::new(json!({
-            "type": "object",
-            "additionalProperties": true,
-            "required": ["text", "label", "output_tail"],
-            "properties": {
-                "text": { "type": "string" },
-                "label": { "type": "string" },
-                "output_tail": { "type": "string" }
-            }
-        })),
-        semantics: ProcessEventSemanticsSpec {
-            terminal: None,
-            wake: Some(ProcessWakeSpec {
-                when: None,
-                input: ProcessValueSelector::Pointer("/text".to_string()),
-            }),
+    vec![
+        ProcessEventType {
+            name: MONITOR_WAKE_EVENT.to_string(),
+            payload_schema: monitor_wake_schema(),
+            semantics: ProcessEventSemanticsSpec {
+                terminal: None,
+                // No wake spec (ADR-0015): a monitor firing must not turn the
+                // main Agent directly. `append_monitor_wake` dispatches a
+                // triage fork instead, and only its Escalate exit reaches the
+                // main queue.
+                wake: None,
+            },
         },
-    }]
+        ProcessEventType {
+            name: MONITOR_WAKE_DIRECT_EVENT.to_string(),
+            payload_schema: monitor_wake_schema(),
+            semantics: ProcessEventSemanticsSpec {
+                terminal: None,
+                // The pre-ADR behaviour, kept for the no-dispatcher case only.
+                wake: Some(ProcessWakeSpec {
+                    when: None,
+                    input: ProcessValueSelector::Pointer("/text".to_string()),
+                }),
+            },
+        },
+    ]
+}
+
+fn monitor_wake_schema() -> LashSchema {
+    LashSchema::new(json!({
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["text", "label", "output_tail"],
+        "properties": {
+            "text": { "type": "string" },
+            "label": { "type": "string" },
+            "output_tail": { "type": "string" }
+        }
+    }))
 }
 
 /// Append a monitor wake event through the running process's own context,
@@ -335,6 +357,7 @@ pub(super) async fn append_monitor_wake(
     record: &MonitorRecord,
     tick: &crate::monitors::MonitorTick,
     notify: &Notify,
+    fork_wake: &crate::fork_wake::ForkWakeHandle,
 ) -> anyhow::Result<()> {
     let text = tick.wake_text.clone().unwrap_or_else(|| {
         format!(
@@ -347,18 +370,52 @@ pub(super) async fn append_monitor_wake(
         .last_run_ts
         .map(|ts| ts.timestamp_millis().to_string())
         .unwrap_or_else(|| Utc::now().timestamp_millis().to_string());
+    // Decide once, before the append, which kind of wake this is: the event
+    // type's semantics are what carry the text to the main session, so picking
+    // the wrong one cannot be corrected afterwards. `ForkWakeHandle` is backed
+    // by a `OnceLock`, so "installed" never becomes "uninstalled" between this
+    // check and the dispatch below.
+    let triage = fork_wake.is_installed();
+    let event_type = if triage {
+        MONITOR_WAKE_EVENT
+    } else {
+        MONITOR_WAKE_DIRECT_EVENT
+    };
     let request = ProcessEventAppendRequest::new(
-        MONITOR_WAKE_EVENT,
+        event_type,
         json!({
-            "text": text,
+            "text": text.clone(),
             "label": record.label,
             "output_tail": output_tail(&tick.probe.output, 4 * 1024),
         }),
     )
     .with_replay_key(format!("hirsel-monitor:{}:{run_key}", record.id));
     processes.emit(request).await?;
+    // The event itself is still durable process history; what changed under
+    // ADR-0015 is who reads it. A monitor firing is a non-owner message, so it
+    // goes to a triage fork, and the triage event type carries no wake spec.
+    if triage && fork_wake.dispatch(monitor_wake_message(record, text)) {
+        return Ok(());
+    }
+    // No dispatcher: the direct event type appended above carries the wake and
+    // its text exactly as it did before ADR-0015, so all that is left is to
+    // nudge the pump.
     notify.notify_one();
     Ok(())
+}
+
+pub(super) fn monitor_wake_message(
+    record: &MonitorRecord,
+    text: String,
+) -> crate::fork_wake::WakeMessage {
+    crate::fork_wake::WakeMessage::new(
+        crate::fork_wake::WakeSource::Monitor {
+            monitor_id: record.id.clone(),
+            label: record.label.clone(),
+        },
+        text,
+        format!("monitor:{}", record.id),
+    )
 }
 
 pub(super) fn terminal_event_type(name: &str, status: ProcessStatus) -> ProcessEventType {

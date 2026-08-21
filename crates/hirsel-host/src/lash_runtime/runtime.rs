@@ -211,11 +211,41 @@ impl AgentRuntime {
         }
     }
 
+    /// Deliver a standalone monitor wake.
+    ///
+    /// On the Lash backend this is a non-owner message, so ADR-0015 routes it
+    /// to a triage fork rather than the main Agent's queue; only the fork's
+    /// Escalate exit reaches the Agent. The other backends have no fork
+    /// dispatcher and keep their pre-ADR delivery.
     pub async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
         match self.backend.as_ref() {
             AgentBackend::Scripted(runtime) => runtime.deliver_monitor_wake(text).await,
-            AgentBackend::Lash(runtime) => runtime.enqueue_monitor_wake(text).await,
+            AgentBackend::Lash(runtime) => {
+                let message = crate::fork_wake::WakeMessage::new(
+                    crate::fork_wake::WakeSource::Monitor {
+                        monitor_id: "standalone".to_string(),
+                        label: "standalone monitor".to_string(),
+                    },
+                    text,
+                    format!("monitor:standalone:{}", Uuid::new_v4()),
+                );
+                if !runtime.fork_wake.dispatch(message) {
+                    anyhow::bail!("fork-wake dispatch is not installed");
+                }
+                Ok(())
+            }
             AgentBackend::Degraded(runtime) => runtime.deliver_monitor_wake(text).await,
+        }
+    }
+
+    /// Route one non-owner message to a triage fork, for host surfaces that
+    /// have one to deliver (the debug smoke lever, and any future ingress).
+    /// Returns `false` when the backend has no fork dispatcher.
+    #[must_use]
+    pub fn dispatch_fork_wake(&self, message: crate::fork_wake::WakeMessage) -> bool {
+        match self.backend.as_ref() {
+            AgentBackend::Lash(runtime) => runtime.fork_wake.dispatch(message),
+            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => false,
         }
     }
 }
@@ -262,6 +292,9 @@ pub(super) enum LashStartup {
 
 pub(super) struct LashAgentRuntime {
     pub(super) core: lash::LashCore,
+    /// Kept so an ephemeral triage fork can open on the same transport the
+    /// main session rides (ADR-0015); the fork differs in model, not provider.
+    pub(super) provider: ProviderHandle,
     pub(super) session: lash::LashSession,
     pub(super) session_id: String,
     pub(super) tools: ToolSuite,
@@ -281,6 +314,10 @@ pub(super) struct LashAgentRuntime {
     /// rebuild the session guidance without dropping the seed the rotation
     /// carried over.
     pub(super) handoff_seed: Option<String>,
+    /// ADR-0015's one mechanical dispatch. Handed to the wake sites while the
+    /// core is still being built and filled in once the runtime exists; an
+    /// uninstalled handle means the wake site keeps its pre-ADR behaviour.
+    pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
 }
 
 #[derive(Debug, Clone)]

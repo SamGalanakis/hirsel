@@ -174,6 +174,13 @@ pub struct JudgmentOptionInput {
 }
 
 impl ToolSuite {
+    /// The store the suite writes through. Exposed for the fork-wake
+    /// dispatcher, which reads the same slice the Agent's tools do to build a
+    /// triage context pack.
+    pub(crate) fn storage(&self) -> Storage {
+        self.storage.clone()
+    }
+
     pub fn new(
         config: ToolsConfig,
         storage: Storage,

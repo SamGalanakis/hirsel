@@ -124,6 +124,19 @@ impl LashAgentRuntime {
         });
     }
 
+    /// Sub-agent terminal events: the single largest source of non-owner
+    /// wakes.
+    ///
+    /// The terminal event is still appended — it is what completes the process
+    /// row and unblocks `subagents_wait`. What changed under ADR-0015 is the
+    /// *wake*: instead of enqueueing the process wake onto the main session's
+    /// queued work (which turned the resident Agent for every worker that
+    /// finished), the host spawns one triage fork with the terminal text. Only
+    /// the fork's Escalate exit puts a turn on the main queue.
+    ///
+    /// If no fork dispatcher is installed — the scripted and degraded backends
+    /// have no lash session to fork from — the old process wake is enqueued
+    /// exactly as before, so the message is never lost.
     pub(super) fn spawn_process_terminal_bridge(
         self: &Arc<Self>,
         process_registry: Arc<dyn lash::process::ProcessRegistry>,
@@ -131,11 +144,17 @@ impl LashAgentRuntime {
     ) {
         let mut events = self.tools.terminal_events();
         let notify = Arc::clone(&self.notify);
+        let fork_wake = self.fork_wake.clone();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(event) => {
                         let (event_type, payload) = terminal_event_payload(&event.outcome);
+                        let wake_text = payload
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or(event_type)
+                            .to_string();
                         let request =
                             ProcessEventAppendRequest::new(event_type, payload).with_replay_key(
                                 format!("hirsel-subagent:{}:{event_type}", event.process_id),
@@ -145,6 +164,13 @@ impl LashAgentRuntime {
                             .await
                         {
                             Ok(result) => {
+                                if fork_wake.dispatch(subagent_wake_message(
+                                    &event.process_id,
+                                    event_type,
+                                    wake_text,
+                                )) {
+                                    continue;
+                                }
                                 if let Err(error) = enqueue_process_wake(
                                     store_factory.as_ref(),
                                     result.wake_delivery,
@@ -316,6 +342,21 @@ mod control_bridge_tests {
         assert_eq!(state.pending_control("process", false, true), None);
         assert_eq!(state.pending_control("process", true, false), None);
     }
+}
+
+/// The non-owner message a Sub-agent terminal event becomes.
+pub(super) fn subagent_wake_message(
+    process_id: &str,
+    event_type: &str,
+    text: String,
+) -> crate::fork_wake::WakeMessage {
+    crate::fork_wake::WakeMessage::new(
+        crate::fork_wake::WakeSource::Subagent {
+            process_id: process_id.to_string(),
+        },
+        text,
+        format!("subagent:{process_id}:{event_type}"),
+    )
 }
 
 pub(super) async fn enqueue_process_wake(

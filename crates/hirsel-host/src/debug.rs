@@ -41,6 +41,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/event-action", post(event_action))
         .route("/debug/seed-adaptive-task", post(seed_adaptive_task))
         .route("/debug/trigger-digest", post(trigger_digest))
+        .route("/debug/fork-wake", post(fork_wake))
         .route("/debug/taste", get(taste))
         .route("/debug/register-push-token", post(register_push_token))
         .route("/debug/unregister-push-token", post(unregister_push_token))
@@ -632,6 +633,40 @@ async fn trigger_digest(
             .emit_scheduled_digest(request.job_id, request.text, request.status)
             .await?,
     ))
+}
+
+#[derive(Deserialize)]
+struct ForkWakeRequest {
+    /// The non-owner message to triage, verbatim.
+    text: String,
+    /// Where it came from, for the pack's attribution line.
+    #[serde(default = "default_fork_origin")]
+    origin: String,
+}
+
+fn default_fork_origin() -> String {
+    "debug".to_string()
+}
+
+/// Inject one synthetic non-owner message into the ADR-0015 dispatch.
+///
+/// This is the smoke lever for fork triage: it takes exactly the path a
+/// Sub-agent completion or a monitor firing takes, so a real fork runs against
+/// the live `[fork]` model and its exit is observable in the log and on the
+/// event/queue surfaces.
+async fn fork_wake(
+    State(state): State<AppState>,
+    Json(request): Json<ForkWakeRequest>,
+) -> Result<Json<serde_json::Value>, DebugError> {
+    let message = crate::fork_wake::WakeMessage::new(
+        crate::fork_wake::WakeSource::External {
+            origin: request.origin,
+        },
+        request.text,
+        format!("debug:{}", Uuid::new_v4()),
+    );
+    let dispatched = state.agent.dispatch_fork_wake(message);
+    Ok(Json(serde_json::json!({ "dispatched": dispatched })))
 }
 
 async fn taste(State(state): State<AppState>) -> Result<Json<TasteResponse>, DebugError> {

@@ -85,6 +85,22 @@ const SUBAGENT_FAILED: &str = "subagent.failed";
 const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
 const SUBAGENT_ABANDONED: &str = "subagent.abandoned";
 const MONITOR_WAKE_EVENT: &str = "monitor.wake";
+/// The pre-ADR-0015 monitor wake: same payload, but it still carries a
+/// `ProcessWakeSpec`, so appending it turns the main Agent directly.
+///
+/// It exists for exactly one case — a monitor firing while no fork dispatcher
+/// is installed — because the triage event type deliberately carries no wake
+/// spec, and appending *that* with no fork to read it would drop the text on
+/// the floor. Two event types rather than one conditional spec: an event
+/// type's semantics are registered when the process starts and are durable
+/// from then on, so the choice has to be made per append, not per process.
+const MONITOR_WAKE_DIRECT_EVENT: &str = "monitor.wake.direct";
+/// Prefix stamped on every queued turn a triage fork escalates (ADR-0015).
+///
+/// Escalation rides the same `enqueue_turn_input` path an Owner queued turn
+/// takes, so the marker is what lets the main prompt — and anything reading the
+/// timeline — tell a distilled brief apart from something the Owner said.
+const FORK_BRIEF_MARKER: &str = "[fork brief]";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;

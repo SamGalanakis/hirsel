@@ -95,11 +95,16 @@ impl LashAgentRuntime {
         let anchors = executor.anchors.clone();
         let tool_provider = Arc::new(HirselToolProvider { executor });
         let notify = Arc::new(Notify::new());
+        // ADR-0015's dispatcher cannot exist yet — it escalates into a runtime
+        // that is built below, and the monitor engine that feeds it is
+        // registered while the core is still under construction. The handle
+        // closes that loop; it is installed at the end of this function.
+        let fork_wake = crate::fork_wake::ForkWakeHandle::default();
         let queued_work_driver = QueuedWorkDriver::new(Arc::new(HirselQueuedWorkNotifier {
             notify: Arc::clone(&notify),
         }));
         let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, rlm_factory)
-            .provider(provider)
+            .provider(provider.clone())
             .model(model_spec)
             .store_factory(store_factory.clone())
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
@@ -113,6 +118,7 @@ impl LashAgentRuntime {
             .plugin(Arc::new(HirselProcessPluginFactory {
                 tools: tools.clone(),
                 notify: Arc::clone(&notify),
+                fork_wake: fork_wake.clone(),
             }))
             .queued_work_driver(queued_work_driver)
             // lash's documented recommended starting point (1 MiB / 512 nodes),
@@ -155,6 +161,7 @@ impl LashAgentRuntime {
 
         let runtime = Arc::new(Self {
             core: core.clone(),
+            provider,
             session,
             session_id: session_bootstrap.session_id,
             tools: tools.clone(),
@@ -174,7 +181,9 @@ impl LashAgentRuntime {
             model_selection,
             prompts: config.prompts.clone(),
             handoff_seed: session_bootstrap.handoff_seed,
+            fork_wake: fork_wake.clone(),
         });
+        fork_wake.install(runtime.build_fork_wake());
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
         runtime.spawn_process_terminal_bridge(process_registry.clone(), store_factory.clone());
@@ -473,17 +482,29 @@ impl LashAgentRuntime {
             ProcessEventAppendRequest::new(SUBAGENT_ABANDONED, subagent_abandoned_payload())
                 .with_replay_key(format!("hirsel-subagent:{process_id}:{SUBAGENT_ABANDONED}"));
         match process_registry.append_event(process_id, request).await {
-            Ok(result) => match enqueue_process_wake(store_factory, result.wake_delivery).await {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        process_id = %process_id,
-                        "failed to enqueue abandoned Sub-agent process wake"
-                    );
-                    false
+            Ok(result) => {
+                // Same cutover as the live terminal bridge: an abandonment is
+                // a non-owner message, so it is triaged rather than turning
+                // the main Agent at boot.
+                if self.fork_wake.dispatch(subagent_wake_message(
+                    process_id,
+                    SUBAGENT_ABANDONED,
+                    "Sub-agent was abandoned after host restart.".to_string(),
+                )) {
+                    return false;
                 }
-            },
+                match enqueue_process_wake(store_factory, result.wake_delivery).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            process_id = %process_id,
+                            "failed to enqueue abandoned Sub-agent process wake"
+                        );
+                        false
+                    }
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -749,10 +770,51 @@ impl LashAgentRuntime {
         }
     }
 
-    pub(super) async fn enqueue_monitor_wake(&self, text: String) -> anyhow::Result<()> {
+    /// Build the ADR-0015 dispatcher for this runtime.
+    ///
+    /// The sink holds a [`std::sync::Weak`] back to the runtime: the runtime
+    /// owns the handle that owns the dispatcher that owns the sink, so a strong
+    /// reference here would be a cycle that never drops.
+    pub(super) fn build_fork_wake(self: &Arc<Self>) -> Arc<crate::fork_wake::ForkWake> {
+        crate::fork_wake::ForkWake::new(
+            crate::fork_wake::LashForkRunner::new(
+                self.core.clone(),
+                self.provider.clone(),
+                self.prompts.clone(),
+                self.session_id.clone(),
+            ),
+            Arc::new(MainSessionBriefSink {
+                runtime: Arc::downgrade(self),
+            }),
+            self.tools.clone(),
+            self.tools.storage(),
+        )
+    }
+
+    /// Put one distilled fork brief on the main Agent's queue.
+    ///
+    /// This is the *only* way a non-owner message reaches the main session
+    /// after ADR-0015, and it deliberately reuses the Owner queued-turn path
+    /// (`enqueue` → the pump's `queued_turn` drain) rather than inventing a
+    /// second one. The brief is marked so both the main prompt and the client
+    /// can tell a fork brief from something the Owner said: the text opens
+    /// with [`FORK_BRIEF_MARKER`], and the enqueue's source key names the
+    /// triggering message.
+    pub(super) async fn enqueue_fork_brief(
+        &self,
+        message: &crate::fork_wake::WakeMessage,
+        brief: &str,
+    ) -> anyhow::Result<()> {
+        let text = format!(
+            "{FORK_BRIEF_MARKER} (triage fork, source: {})\n\n{brief}",
+            message.source.label()
+        );
         self.session
             .enqueue(TurnInput::text(text))
-            .id(format!("monitor-wake-{}", Uuid::new_v4()))
+            // lash derives the pending input's source key from this id, so it
+            // carries the triggering message: a queued brief is traceable back
+            // to the event that produced it without a side table.
+            .id(format!("fork-brief:{}:{}", message.key, Uuid::new_v4()))
             .ingress(TurnInputIngress::next_turn())
             .send()
             .await?;
@@ -828,4 +890,28 @@ pub(super) fn inline_trigger_scope(
         lash_core::ExecutionScope::runtime_operation(scope_id.into()),
     )
     .expect("inline timer trigger occurrence execution scope")
+}
+
+/// The Escalate exit, bound to the live main session.
+///
+/// This is the only edge from fork-land back into the resident Agent, which is
+/// why it is a single small type rather than a general capability handed to the
+/// fork's tools.
+pub(super) struct MainSessionBriefSink {
+    runtime: std::sync::Weak<LashAgentRuntime>,
+}
+
+#[async_trait]
+impl crate::fork_wake::BriefSink for MainSessionBriefSink {
+    async fn inject(
+        &self,
+        message: &crate::fork_wake::WakeMessage,
+        brief: &str,
+    ) -> anyhow::Result<()> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("the main-agent runtime is gone"))?;
+        runtime.enqueue_fork_brief(message, brief).await
+    }
 }

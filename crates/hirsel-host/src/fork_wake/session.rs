@@ -40,14 +40,10 @@ use lash::{
 };
 
 use super::{
-    dispatch::{TriageRequest, TriageRunner},
-    tools::ForkToolProvider,
+    dispatch::{FORK_TURN_TIMEOUT, TriageRequest, TriageRunner},
+    tools::{ForkToolProvider, fork_tool_definitions},
 };
 use crate::prompt_config::PromptConfig;
-
-/// Every fork tool id starts with this, which is how the narrowing pass below
-/// tells the fork's exits from the main Agent's catalog.
-const FORK_TOOL_ID_PREFIX: &str = "hirsel.fork";
 
 /// A triage fork gets two turns, not one: one to read the pack and call its
 /// exit, and one to observe the tool result and stop. One would truncate a
@@ -116,8 +112,21 @@ impl TriageRunner for LashForkRunner {
             .await
             .context("open an ephemeral triage fork session")?;
 
-        let outcome = run_one_triage_turn(&session, request).await;
-        // Close regardless: a fork that failed still must not linger.
+        // The timeout lives here, inside the runner, rather than around the
+        // whole call: cancelling the outer future would drop this one before
+        // `close()` ran and leave a live child session behind for every fork
+        // that overran. Bounding the turn alone keeps the close on the path.
+        let outcome =
+            match tokio::time::timeout(FORK_TURN_TIMEOUT, run_one_triage_turn(&session, request))
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => Err(anyhow::anyhow!(
+                    "the triage turn exceeded {}s",
+                    FORK_TURN_TIMEOUT.as_secs()
+                )),
+            };
+        // Close regardless: a fork that failed or overran still must not linger.
         if let Err(error) = session.close().await {
             tracing::warn!(%error, %session_id, "failed to close a triage fork session");
         }
@@ -153,7 +162,17 @@ async fn run_one_triage_turn(
 /// `pings_send`, `shell_run`, plugin tools — to every session it opens. A fork
 /// must see none of it, and "must not" here is capability: membership is
 /// lash's execution gate, so a non-member is neither advertised nor callable.
+///
+/// The keep-set is an exact allowlist built from the fork's own definitions,
+/// never a name prefix. A prefix is a standing invitation for something else to
+/// land inside it — `hirsel.fork_decide` (the side-chat fork tool) already
+/// would — and a tool that leaks into a triage fork by resembling one is
+/// exactly the failure this narrowing exists to prevent.
 async fn narrow_to_fork_exits(session: &lash::LashSession) -> anyhow::Result<()> {
+    let allowed = fork_tool_definitions()
+        .iter()
+        .map(|definition| definition.id().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
     let state = session
         .tools()
         .state()
@@ -161,7 +180,7 @@ async fn narrow_to_fork_exits(session: &lash::LashSession) -> anyhow::Result<()>
         .context("read the fork's tool state")?;
     let drops = state
         .iter()
-        .filter(|(id, _)| !id.as_str().starts_with(FORK_TOOL_ID_PREFIX))
+        .filter(|(id, _)| !allowed.contains(id.as_str()))
         .map(|(id, _)| (ToolId::new(id.as_str()), false))
         .collect::<Vec<_>>();
     if drops.is_empty() {

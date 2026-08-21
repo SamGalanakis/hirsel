@@ -16,9 +16,20 @@ use crate::storage::TasteDecision;
 #[derive(Default)]
 struct RecordingSink {
     briefs: Mutex<Vec<(String, String)>>,
+    /// Refuse this many injections before accepting any. Models a main session
+    /// whose queue rejects the fork's brief (a dead runtime, an enqueue error)
+    /// while leaving the dispatcher's own fail-open injection able to land.
+    refuse_first: AtomicUsize,
 }
 
 impl RecordingSink {
+    fn refusing(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            refuse_first: AtomicUsize::new(count),
+            ..Self::default()
+        })
+    }
+
     async fn briefs(&self) -> Vec<(String, String)> {
         self.briefs.lock().await.clone()
     }
@@ -27,6 +38,15 @@ impl RecordingSink {
 #[async_trait]
 impl BriefSink for RecordingSink {
     async fn inject(&self, message: &WakeMessage, brief: &str) -> anyhow::Result<()> {
+        if self
+            .refuse_first
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            anyhow::bail!("the main-agent runtime is gone");
+        }
         self.briefs
             .lock()
             .await
@@ -53,6 +73,10 @@ enum Behaviour {
     Fail,
     /// Hold the permit long enough for a burst to overlap.
     Slow,
+    /// Try to record, which is where a storage failure lives.
+    RecordTask(u64),
+    /// Panic mid-triage.
+    Panic,
 }
 
 impl FakeRunner {
@@ -91,6 +115,10 @@ impl TriageRunner for FakeRunner {
                 tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                 request.tools.drop_message("slow drop").await.map(|_| ())
             }
+            Behaviour::RecordTask(event_id) => {
+                request.tools.record_task_status(event_id).await.map(|_| ())
+            }
+            Behaviour::Panic => panic!("a triage fork fell over"),
         };
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         result
@@ -295,7 +323,7 @@ async fn a_fork_gets_exactly_one_exit() {
         state.tools.clone(),
         Arc::clone(&sink) as Arc<dyn BriefSink>,
         subagent_message(),
-        1,
+        Some(1),
     );
 
     tools.drop_message("already handled").await.unwrap();
@@ -364,7 +392,7 @@ async fn a_recording_fork_writes_the_event_itself_and_never_wakes_main() {
         state.tools.clone(),
         Arc::clone(&sink) as Arc<dyn BriefSink>,
         subagent_message(),
-        anchor.id,
+        Some(anchor.id),
     );
 
     tools
@@ -522,4 +550,125 @@ async fn owner_messages_bypass_forks_entirely() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert_eq!(runner.started.load(Ordering::SeqCst), 3);
+}
+
+// --------------------------------------------- an exit is only taken once it lands
+
+#[tokio::test]
+async fn an_escalation_the_queue_refuses_is_not_an_exit() {
+    // The failure this pins: claiming the exit *before* injecting made a
+    // refused brief look like a completed Escalate, so the dispatcher skipped
+    // its fail-open path and the message vanished.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let runner = FakeRunner::new(Behaviour::Escalate);
+    let sink = RecordingSink::refusing(1);
+    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+
+    fork.dispatch_now(subagent_message()).await;
+
+    let briefs = sink.briefs().await;
+    assert_eq!(briefs.len(), 1, "the message must still reach the queue");
+    assert!(
+        briefs[0].1.contains("Triage unavailable"),
+        "the surviving brief is the fail-open one, not the refused escalation"
+    );
+    assert!(
+        briefs[0]
+            .1
+            .contains("Sub-agent completed: the migration landed on main.")
+    );
+}
+
+#[tokio::test]
+async fn a_record_the_store_refuses_is_not_an_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    state
+        .storage
+        .append_chat(ChatAuthor::Owner, "ship it".to_string(), None)
+        .await
+        .unwrap();
+    // Archiving an event that does not exist is a real storage-side refusal.
+    let runner = FakeRunner::new(Behaviour::RecordTask(4242));
+    let sink = Arc::new(RecordingSink::default());
+    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+
+    fork.dispatch_now(subagent_message()).await;
+
+    let briefs = sink.briefs().await;
+    assert_eq!(briefs.len(), 1);
+    assert!(briefs[0].1.contains("Triage unavailable"));
+}
+
+#[tokio::test]
+async fn a_panicking_fork_still_escalates_its_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let runner = FakeRunner::new(Behaviour::Panic);
+    let sink = Arc::new(RecordingSink::default());
+    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+
+    fork.dispatch(subagent_message());
+
+    for _ in 0..400 {
+        if !sink.briefs().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let briefs = sink.briefs().await;
+    assert_eq!(briefs.len(), 1, "a panic must not swallow the message");
+    assert!(briefs[0].1.contains("panicked"));
+}
+
+#[tokio::test]
+async fn a_fork_never_mints_a_chat_line_to_anchor_a_record() {
+    // Empty transcript: the fork wants to record, but writing the anchor would
+    // be the fork speaking to the Owner. It escalates the content instead.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let sink = Arc::new(RecordingSink::default());
+    let tools = ForkTools::new(
+        state.tools.clone(),
+        Arc::clone(&sink) as Arc<dyn BriefSink>,
+        subagent_message(),
+        None,
+    );
+
+    let result = tools
+        .record_info(
+            "docs-index",
+            "The docs index was rebuilt.",
+            Some("42 pages".to_string()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["status"], "escalated");
+    assert!(matches!(
+        tools.exit().await,
+        Some(ForkExit::Escalated { .. })
+    ));
+    let briefs = sink.briefs().await;
+    assert_eq!(briefs.len(), 1);
+    assert!(briefs[0].1.contains("docs-index"));
+    assert!(briefs[0].1.contains("42 pages"));
+    // Nothing was written to the Owner's transcript.
+    assert!(state.storage.recent_chat(10).await.unwrap().is_empty());
+}
+
+#[test]
+fn the_fork_keep_set_is_exact_ids_not_a_name_prefix() {
+    // `hirsel.fork_decide` (the side-chat fork tool) shares the `hirsel.fork`
+    // prefix without being one of the triage fork's exits. A prefix test would
+    // have let it through.
+    let ids = fork_tool_definitions()
+        .iter()
+        .map(|definition| definition.id().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(ids.iter().all(|id| id.starts_with("hirsel.fork")));
+    assert!(!ids.iter().any(|id| id == "hirsel.fork_decide"));
+    assert_eq!(ids.len(), 5);
 }

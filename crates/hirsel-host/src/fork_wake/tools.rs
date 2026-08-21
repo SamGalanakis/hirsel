@@ -67,10 +67,29 @@ pub struct ForkTools {
     tools: ToolSuite,
     sink: Arc<dyn BriefSink>,
     message: WakeMessage,
-    /// The chat message a recorded event anchors to. Resolved once at dispatch
-    /// so a Record exit never has to invent Owner-facing chat noise.
-    anchor: u64,
-    exit: Mutex<Option<ForkExit>>,
+    /// The chat message a recorded event anchors to, when the transcript has
+    /// one. `None` means the transcript is empty: see [`ForkTools::record`] —
+    /// the fork records nothing and escalates instead, because minting an
+    /// anchor line would be the fork speaking to the Owner.
+    anchor: Option<u64>,
+    exit: Mutex<ExitSlot>,
+}
+
+/// The exit slot's three states.
+///
+/// `Claimed` is the load-bearing one. An exit is only *taken* once its side
+/// effect has landed, so the window while a storage write or a queue injection
+/// is in flight needs its own state: it must refuse a second exit (a fork gets
+/// one) without yet counting as an exit to the dispatcher (whose fail-open path
+/// keys on "no exit taken"). Committing after the effect is what makes ruling 2
+/// hold — a failed effect rolls the slot back to `Open`, the dispatcher sees no
+/// exit, and the message is escalated undistilled rather than lost.
+#[derive(Debug, Default)]
+enum ExitSlot {
+    #[default]
+    Open,
+    Claimed,
+    Taken(ForkExit),
 }
 
 impl ForkTools {
@@ -78,34 +97,55 @@ impl ForkTools {
         tools: ToolSuite,
         sink: Arc<dyn BriefSink>,
         message: WakeMessage,
-        anchor: u64,
+        anchor: Option<u64>,
     ) -> Self {
         Self {
             tools,
             sink,
             message,
             anchor,
-            exit: Mutex::new(None),
+            exit: Mutex::new(ExitSlot::Open),
         }
     }
 
-    /// The exit this fork took, if it took one.
+    /// The exit this fork took, if it took one. An exit whose side effect
+    /// failed is deliberately not one.
     pub async fn exit(&self) -> Option<ForkExit> {
-        self.exit.lock().await.clone()
+        match &*self.exit.lock().await {
+            ExitSlot::Taken(exit) => Some(exit.clone()),
+            ExitSlot::Open | ExitSlot::Claimed => None,
+        }
     }
 
-    /// Record the first exit taken. A fork gets one exit: a second call is a
-    /// tool error, not a silent overwrite.
-    async fn claim(&self, exit: ForkExit) -> anyhow::Result<()> {
+    /// Claim the right to take an exit, before performing its side effect.
+    /// A fork gets one exit: a second claim is a tool error, not a silent
+    /// overwrite.
+    async fn claim(&self) -> anyhow::Result<()> {
         let mut slot = self.exit.lock().await;
-        if let Some(existing) = slot.as_ref() {
-            anyhow::bail!(
+        match &*slot {
+            ExitSlot::Open => {
+                *slot = ExitSlot::Claimed;
+                Ok(())
+            }
+            ExitSlot::Claimed => {
+                anyhow::bail!("this fork is already taking an exit; end the turn now")
+            }
+            ExitSlot::Taken(existing) => anyhow::bail!(
                 "this fork already took its one exit ({}); end the turn now",
                 exit_name(existing)
-            );
+            ),
         }
-        *slot = Some(exit);
-        Ok(())
+    }
+
+    /// The side effect landed: the exit is now taken.
+    async fn commit(&self, exit: ForkExit) {
+        *self.exit.lock().await = ExitSlot::Taken(exit);
+    }
+
+    /// The side effect failed. Release the claim so the dispatcher sees an
+    /// exitless fork and escalates the original message (ruling 2).
+    async fn release(&self) {
+        *self.exit.lock().await = ExitSlot::Open;
     }
 
     pub async fn record_info(
@@ -114,15 +154,29 @@ impl ForkTools {
         description: &str,
         content_md: Option<String>,
     ) -> anyhow::Result<Value> {
-        self.claim(ForkExit::Recorded {
-            what: format!("info {name}"),
-        })
-        .await?;
-        let event = self
+        let Some(anchor) = self.anchor else {
+            return self
+                .escalate_unanchored_record("info", name, description, content_md.as_deref())
+                .await;
+        };
+        self.claim().await?;
+        match self
             .tools
-            .events_notify(name, description, content_md, self.anchor)
-            .await?;
-        Ok(json!({ "event_id": event.id, "status": "recorded" }))
+            .events_notify(name, description, content_md, anchor)
+            .await
+        {
+            Ok(event) => {
+                self.commit(ForkExit::Recorded {
+                    what: format!("info {name}"),
+                })
+                .await;
+                Ok(json!({ "event_id": event.id, "status": "recorded" }))
+            }
+            Err(error) => {
+                self.release().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn record_summary(
@@ -131,28 +185,50 @@ impl ForkTools {
         description: &str,
         content_md: Option<String>,
     ) -> anyhow::Result<Value> {
-        self.claim(ForkExit::Recorded {
-            what: format!("summary {name}"),
-        })
-        .await?;
-        let event = self
+        let Some(anchor) = self.anchor else {
+            return self
+                .escalate_unanchored_record("summary", name, description, content_md.as_deref())
+                .await;
+        };
+        self.claim().await?;
+        match self
             .tools
-            .events_summary(name, description, content_md, None, self.anchor)
-            .await?;
-        Ok(json!({ "event_id": event.id, "status": "recorded" }))
+            .events_summary(name, description, content_md, None, anchor)
+            .await
+        {
+            Ok(event) => {
+                self.commit(ForkExit::Recorded {
+                    what: format!("summary {name}"),
+                })
+                .await;
+                Ok(json!({ "event_id": event.id, "status": "recorded" }))
+            }
+            Err(error) => {
+                self.release().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn record_task_status(&self, event_id: u64) -> anyhow::Result<Value> {
-        self.claim(ForkExit::Recorded {
-            what: format!("archived task {event_id}"),
-        })
-        .await?;
-        let event = self
-            .tools
-            .events_archive(event_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("event not found: {event_id}"))?;
-        Ok(json!({ "event_id": event.id, "status": "archived" }))
+        self.claim().await?;
+        match self.tools.events_archive(event_id).await {
+            Ok(Some(event)) => {
+                self.commit(ForkExit::Recorded {
+                    what: format!("archived task {event_id}"),
+                })
+                .await;
+                Ok(json!({ "event_id": event.id, "status": "archived" }))
+            }
+            Ok(None) => {
+                self.release().await;
+                anyhow::bail!("event not found: {event_id}")
+            }
+            Err(error) => {
+                self.release().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn escalate(&self, brief: &str) -> anyhow::Result<Value> {
@@ -160,20 +236,64 @@ impl ForkTools {
         if brief.is_empty() {
             anyhow::bail!("fork_escalate requires a non-empty brief");
         }
-        self.claim(ForkExit::Escalated {
-            brief: brief.to_string(),
-        })
-        .await?;
-        self.sink.inject(&self.message, brief).await?;
-        Ok(json!({ "status": "escalated" }))
+        self.claim().await?;
+        self.inject_claimed(brief).await
     }
 
     pub async fn drop_message(&self, reason: &str) -> anyhow::Result<Value> {
-        self.claim(ForkExit::Dropped {
+        self.claim().await?;
+        self.commit(ForkExit::Dropped {
             reason: reason.trim().to_string(),
         })
-        .await?;
+        .await;
         Ok(json!({ "status": "dropped" }))
+    }
+
+    /// Inject an already-claimed brief, committing only once the main Agent's
+    /// queue has actually accepted it.
+    async fn inject_claimed(&self, brief: &str) -> anyhow::Result<Value> {
+        match self.sink.inject(&self.message, brief).await {
+            Ok(()) => {
+                self.commit(ForkExit::Escalated {
+                    brief: brief.to_string(),
+                })
+                .await;
+                Ok(json!({ "status": "escalated" }))
+            }
+            Err(error) => {
+                // The brief never reached the queue, so no exit was taken and
+                // the dispatcher will escalate the original message itself.
+                self.release().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// A Record exit with nothing to anchor to.
+    ///
+    /// Events need an anchor chat message, and on a brand-new host the
+    /// transcript is empty. The host does not mint one: a fork writing a chat
+    /// line is a fork speaking to the Owner, which ADR-0015 forbids outright.
+    /// So the record fails toward the main queue instead — the would-be record
+    /// is escalated as a brief, and the Agent (who may speak to the Owner)
+    /// decides what to write.
+    async fn escalate_unanchored_record(
+        &self,
+        kind: &str,
+        name: &str,
+        description: &str,
+        content_md: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        self.claim().await?;
+        let mut brief = format!(
+            "A triage fork wanted to record this as {kind} but the transcript has no message to \
+             anchor it to, so it is yours to write.\n\n{name}: {description}"
+        );
+        if let Some(content) = content_md.map(str::trim).filter(|text| !text.is_empty()) {
+            brief.push_str("\n\n");
+            brief.push_str(content);
+        }
+        self.inject_claimed(&brief).await
     }
 }
 

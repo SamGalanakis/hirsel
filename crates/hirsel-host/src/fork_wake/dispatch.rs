@@ -40,8 +40,16 @@ use crate::{storage::Storage, tools::ToolSuite};
 pub const MAX_CONCURRENT_FORKS: usize = 4;
 
 /// How long a single triage turn may take before it is abandoned and the
-/// message is escalated by the fail-open path.
+/// message is escalated by the fail-open path. Enforced inside the runner, so
+/// the fork's session is still closed when it fires.
 pub const FORK_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Backstop for the whole dispatch, in case a runner hangs somewhere other
+/// than the turn it bounds itself. Deliberately longer than
+/// [`FORK_TURN_TIMEOUT`] so the runner's own timeout is what normally fires —
+/// this one cancels the runner mid-flight, which is a session leak, and is a
+/// last resort rather than the design.
+const FORK_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Everything a triage fork needs to run one turn.
 pub struct TriageRequest {
@@ -96,7 +104,17 @@ impl ForkWake {
     pub fn dispatch(self: &Arc<Self>, message: WakeMessage) {
         let fork = Arc::clone(self);
         tokio::spawn(async move {
-            fork.dispatch_now(message).await;
+            // A panic anywhere in the dispatch body would otherwise take the
+            // message with it: the task dies, nobody observes the join handle,
+            // and a Sub-agent completion silently never happened. Catching it
+            // here means even a bug in triage degrades to the fail-open brief.
+            let trigger = message.clone();
+            let body = std::panic::AssertUnwindSafe(fork.dispatch_now(message));
+            if futures_util::FutureExt::catch_unwind(body).await.is_err() {
+                tracing::error!(key = %trigger.key, "triage fork dispatch panicked");
+                fork.fallback(&trigger, "the triage fork dispatch panicked")
+                    .await;
+            }
         });
     }
 
@@ -121,15 +139,7 @@ impl ForkWake {
         );
 
         let context = self.pack_context().await;
-        let anchor = match self.anchor(&context).await {
-            Ok(anchor) => anchor,
-            Err(error) => {
-                tracing::warn!(%error, key = %message.key, "failed to resolve a fork record anchor");
-                self.fallback(&message, "the host could not prepare fork context")
-                    .await;
-                return;
-            }
-        };
+        let anchor = anchor(&context);
         let pack = build_pack(&message, &context);
         let tools = Arc::new(ForkTools::new(
             self.tools.clone(),
@@ -144,7 +154,7 @@ impl ForkWake {
         };
 
         let outcome =
-            tokio::time::timeout(FORK_TURN_TIMEOUT, self.runner.run_triage(request)).await;
+            tokio::time::timeout(FORK_DISPATCH_TIMEOUT, self.runner.run_triage(request)).await;
         match outcome {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -157,8 +167,8 @@ impl ForkWake {
             Err(_) => {
                 tracing::warn!(
                     key = %message.key,
-                    timeout_secs = FORK_TURN_TIMEOUT.as_secs(),
-                    "triage fork timed out"
+                    timeout_secs = FORK_DISPATCH_TIMEOUT.as_secs(),
+                    "triage fork dispatch hit its backstop timeout"
                 );
             }
         }
@@ -209,28 +219,6 @@ impl ForkWake {
             recent_chat,
             rules,
         }
-    }
-
-    /// The chat message a recorded event hangs off.
-    ///
-    /// Events need an anchor, and a fork has no Owner turn to anchor to. It
-    /// reuses the latest chat message rather than writing an Owner-facing line
-    /// of its own — a fork must never speak to the Owner, and an anchor
-    /// message would be exactly that. Only an empty transcript forces the host
-    /// to mint one.
-    async fn anchor(&self, context: &PackContext) -> anyhow::Result<u64> {
-        if let Some(latest) = context.recent_chat.last() {
-            return Ok(latest.id);
-        }
-        Ok(self
-            .storage
-            .append_chat(
-                hirsel_proto::ChatAuthor::Agent,
-                "Session started.".to_string(),
-                None,
-            )
-            .await?
-            .id)
     }
 
     /// The fail-open path (ruling 2). Injects a minimal brief that names the
@@ -299,6 +287,19 @@ impl ForkWakeHandle {
             None => false,
         }
     }
+}
+
+/// The chat message a recorded event hangs off, if the transcript has one.
+///
+/// Events need an anchor, and a fork has no Owner turn to anchor to, so it
+/// reuses the latest chat message. On an empty transcript the answer is `None`
+/// and stays `None`: minting a chat line here would be the fork speaking to the
+/// Owner, which ADR-0015 forbids outright — and "a fork wrote 'Session
+/// started.' into the Owner's transcript" is a worse outcome than any record it
+/// was about to make. [`ForkTools`] handles the `None` case by failing toward
+/// the main queue: the would-be record is escalated as a brief instead.
+fn anchor(context: &PackContext) -> Option<u64> {
+    context.recent_chat.last().map(|message| message.id)
 }
 
 fn exit_label(exit: &ForkExit) -> &'static str {

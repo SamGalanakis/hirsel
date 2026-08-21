@@ -37,6 +37,7 @@ export type SettingsTab =
   | "providers"
   | "connection"
   | "notifications"
+  | "guide"
   | "about"
   | "plugins";
 

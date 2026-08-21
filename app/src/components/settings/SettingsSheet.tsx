@@ -19,6 +19,7 @@ import { AboutSection } from "./AboutSection";
 import { AgentsSection } from "./AgentsSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { ConfirmForgetDialog, ConnectionSection } from "./ConnectionSection";
+import { GuideSection } from "./GuideSection";
 import { IdentitySection } from "./IdentitySection";
 import { NotificationsSection } from "./NotificationsSection";
 import { PluginsSection } from "./PluginsSection";
@@ -199,6 +200,9 @@ function SettingsPanel() {
               <Match when={tab() === "notifications"}>
                 <NotificationsSection />
               </Match>
+              <Match when={tab() === "guide"}>
+                <GuideSection />
+              </Match>
               <Match when={tab() === "about"}>
                 <AboutSection
                   debug={debug()}
@@ -228,9 +232,9 @@ function SettingsPanel() {
 }
 
 /** Settings surface (single-owner right region): a full-viewport modal overlay
- * at every width, summoned from the standing ⋯ or `g s`. Seven side tabs —
- * Appearance, Agents, Providers, Connection & devices, Notifications, About &
- * debug, Plugins — each in its own module beside this one, and only the active
+ * at every width, summoned from the standing ⋯ or `g s`. Eight side tabs —
+ * Appearance, Agents, Providers, Connection & devices, Notifications, Guide,
+ * About & debug, Plugins — each in its own module beside this one, and only the active
  * one mounted. It owns the right region enum like the docked panes do (so
  * summoning it still evicts Processes or Canvas), but it takes no room in that
  * row: it is `fixed`, over the whole world. */

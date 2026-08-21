@@ -381,6 +381,19 @@ fn available_from_registry(entries: &[RegistryEntry]) -> Vec<AvailableModel> {
         .collect()
 }
 
+/// The lash spec for an already-validated selection under a resolved mode.
+///
+/// The main agent reaches its spec through [`ModelSelectionState`], which owns
+/// the persisted `[model]` selection. The fork has no such state — its
+/// selection is resolved by `PromptConfig` from `[fork]` — so it needs this
+/// last conversion step on its own.
+pub fn spec_for(
+    mode: &SelectionMode,
+    selection: &ModelSelection,
+) -> anyhow::Result<lash::ModelSpec> {
+    model_spec_in(mode, selection)
+}
+
 fn model_spec_in(
     mode: &SelectionMode,
     selection: &ModelSelection,

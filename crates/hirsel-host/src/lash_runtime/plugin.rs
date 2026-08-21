@@ -4,6 +4,9 @@ use super::*;
 pub(super) struct HirselProcessPluginFactory {
     pub(super) tools: ToolSuite,
     pub(super) notify: Arc<Notify>,
+    /// Handed to the monitor engine so a monitor wake is triaged by a fork
+    /// instead of turning the main Agent (ADR-0015).
+    pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
 }
 
 impl PluginFactory for HirselProcessPluginFactory {
@@ -35,6 +38,7 @@ impl PluginFactory for HirselProcessPluginFactory {
             Arc::new(HirselMonitorEngine {
                 tools: self.tools.clone(),
                 notify: Arc::clone(&self.notify),
+                fork_wake: self.fork_wake.clone(),
             }),
         ])
     }

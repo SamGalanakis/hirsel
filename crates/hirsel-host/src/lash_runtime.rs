@@ -85,6 +85,12 @@ const SUBAGENT_FAILED: &str = "subagent.failed";
 const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
 const SUBAGENT_ABANDONED: &str = "subagent.abandoned";
 const MONITOR_WAKE_EVENT: &str = "monitor.wake";
+/// Prefix stamped on every queued turn a triage fork escalates (ADR-0015).
+///
+/// Escalation rides the same `enqueue_turn_input` path an Owner queued turn
+/// takes, so the marker is what lets the main prompt — and anything reading the
+/// timeline — tell a distilled brief apart from something the Owner said.
+const FORK_BRIEF_MARKER: &str = "[fork brief]";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;

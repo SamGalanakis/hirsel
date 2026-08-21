@@ -115,6 +115,18 @@ impl PromptConfig {
         })
     }
 
+    /// The lash model spec a triage fork opens on.
+    ///
+    /// An error here is a fail-open condition, not a boot failure: the wake
+    /// dispatcher escalates the message undistilled rather than losing it.
+    pub fn fork_model_spec(&self) -> anyhow::Result<lash::ModelSpec> {
+        let mode = self.fork_mode();
+        let selection = self
+            .fork_model_in(&mode)
+            .ok_or_else(|| anyhow::anyhow!("the booted provider offers no fork model selection"))?;
+        crate::model_selection::spec_for(&mode, &selection)
+    }
+
     pub fn snapshot(&self) -> PromptSnapshot {
         PromptSnapshot {
             agent: self.agent_prompt(),

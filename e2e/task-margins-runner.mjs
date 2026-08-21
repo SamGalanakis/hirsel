@@ -835,6 +835,7 @@ async function main() {
       "Providers",
       "Connection & devices",
       "Notifications",
+      "Guide",
       "About & debug",
       "Plugins",
     ];
@@ -1151,7 +1152,7 @@ async function main() {
       (await selectedTab()) === "Agents" ? "Agents" : null, 5_000);
     check(
       "settings tab strip is horizontal on phone",
-      phoneStrip?.direction === "row" && phoneStrip.tabs === 7 && phoneStrip.beside === true
+      phoneStrip?.direction === "row" && phoneStrip.tabs === TAB_NAMES.length && phoneStrip.beside === true
         && phoneStrip.selected === "Appearance" && phoneAfterArrow === "Agents",
       JSON.stringify({ ...phoneStrip, phoneAfterArrow }),
     );

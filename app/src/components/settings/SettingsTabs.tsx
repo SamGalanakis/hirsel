@@ -15,6 +15,7 @@ export const SETTINGS_TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "providers", label: "Providers" },
   { id: "connection", label: "Connection & devices" },
   { id: "notifications", label: "Notifications" },
+  { id: "guide", label: "Guide" },
   { id: "about", label: "About & debug" },
   { id: "plugins", label: "Plugins" },
 ];

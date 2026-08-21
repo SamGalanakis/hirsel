@@ -50,6 +50,7 @@ const TAB_LABELS = [
   "Providers",
   "Connection & devices",
   "Notifications",
+  "Guide",
   "About & debug",
   "Plugins",
 ];
@@ -143,6 +144,35 @@ describe("Settings: side-tab navigation", () => {
     const { getByRole, getByText } = await mount("providers");
     expect(getByRole("tab", { name: "Providers" }).getAttribute("aria-selected")).toBe("true");
     expect(getByText("Codex")).toBeTruthy();
+  });
+});
+
+describe("Settings: Guide", () => {
+  /** The concepts the page promises, in the order it explains them. */
+  const HEADINGS = [
+    "What hirsel is",
+    "The home screen",
+    "Tasks",
+    "Talking to it",
+    "The agents",
+    "Keyboard, on a desktop",
+    "Where to poke around",
+  ];
+
+  it("explains every concept, in order, with no wire calls", async () => {
+    const { getAllByRole } = await mount("guide");
+    const headings = getAllByRole("heading").map((h) => h.textContent);
+    expect(headings).toEqual(HEADINGS);
+  });
+
+  it("spells the keyboard shortcuts as key chips", async () => {
+    const { container, getByText } = await mount("guide");
+    const keys = [...container.querySelectorAll("kbd")].map((k) => k.textContent);
+    expect(keys).toContain("⌘/Ctrl");
+    expect(keys).toContain("Esc");
+    // The `g` chords render as two chips joined by "then".
+    expect(keys.filter((k) => k === "g")).toHaveLength(4);
+    expect(getByText("Open Settings.")).toBeTruthy();
   });
 });
 

@@ -16,7 +16,7 @@
 //! the key the handle needs and is never rendered; every notice and warning
 //! names an instance id and a reason only.
 
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use crate::{
     config::ProviderMode,
@@ -37,7 +37,7 @@ pub struct BootProvider {
 }
 
 /// How the main agent's provider handle is built.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum BootPlan {
     /// Legacy env mode, unchanged behaviour: the keys come from
     /// `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` as they always have.
@@ -51,6 +51,32 @@ pub enum BootPlan {
         base_url: String,
         api_key: String,
     },
+}
+
+impl BootPlan {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Env(ProviderMode::Anthropic) => "anthropic",
+            Self::Env(ProviderMode::Codex) | Self::Codex => "codex",
+            Self::Env(ProviderMode::OpenRouter) => "openrouter",
+            Self::OpenAiCompatible { id, .. } => id,
+        }
+    }
+}
+
+impl fmt::Debug for BootPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Env(mode) => formatter.debug_tuple("Env").field(mode).finish(),
+            Self::Codex => formatter.write_str("Codex"),
+            Self::OpenAiCompatible { id, base_url, .. } => formatter
+                .debug_struct("OpenAiCompatible")
+                .field("id", id)
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl BootProvider {
@@ -166,6 +192,20 @@ mod tests {
     use crate::host_config::{EnvBootstrap, StoredProvider};
 
     const FAKE_KEY: &str = "sk-boot-fake-key-tail";
+
+    #[test]
+    fn boot_plan_debug_redacts_openai_compatible_api_key() {
+        let plan = BootPlan::OpenAiCompatible {
+            id: "acme".to_string(),
+            base_url: "https://acme.invalid/v1".to_string(),
+            api_key: "test-key-do-not-log".to_string(),
+        };
+
+        let debug = format!("{plan:?}");
+
+        assert!(!debug.contains("test-key-do-not-log"), "{debug}");
+        assert!(debug.contains("acme"), "{debug}");
+    }
 
     async fn store(dir: &tempfile::TempDir) -> ConfigStore {
         ConfigStore::load(

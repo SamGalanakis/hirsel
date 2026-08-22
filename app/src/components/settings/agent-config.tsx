@@ -432,6 +432,11 @@ export function PromptEditor(props: {
   const [expanded, setExpanded] = createSignal(false);
   let serverText = props.doc().text;
 
+  // A changed server body replaces the draft. That is right for the Owner's own
+  // accepted save, and blunt for a body that changed underneath them — another
+  // device, or a hand edit of `hirsel.toml` — which discards whatever they were
+  // typing. Pre-existing and left alone deliberately: the honest fix is a
+  // conflict affordance, not a silently diverging local copy.
   createEffect(() => {
     const next = props.doc().text;
     if (next !== serverText) {

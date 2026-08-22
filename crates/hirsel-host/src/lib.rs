@@ -151,6 +151,15 @@ impl AppState {
         self.agent.model_snapshot()
     }
 
+    /// Select the main Agent's model + variant.
+    ///
+    /// This takes the model lock and `set_agent_provider` takes the provider
+    /// lock, so a concurrent pair can persist a selection validated against a
+    /// provider the other op has since moved off. Benign by construction: the
+    /// stored `[model]` section is re-validated against the stored provider on
+    /// every read (`ModelSelectionState::selection_in`), so the loser of that
+    /// race degrades to the new provider's default instead of being served as
+    /// an id that provider does not have.
     pub async fn set_model(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
         let _guard = self.model_change_lock.lock().await;
         let previous = self.model_snapshot();
@@ -303,6 +312,10 @@ impl AppState {
         self.broadcast_providers().await
     }
 
+    /// Edit one instance. Editing the instance a resident agent points at can
+    /// reshape that agent's model surface — a new `default_model` is the model
+    /// a free-text agent falls back to — so both agent surfaces are re-derived
+    /// and published alongside the roster.
     pub async fn update_provider(
         &self,
         id: &str,
@@ -312,15 +325,29 @@ impl AppState {
         default_model: Option<&str>,
     ) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
+        let surfaces = self.agent_surfaces();
         self.providers_roster
             .update(id, label, base_url, api_key, default_model)
             .await?;
+        self.broadcast_agent_surfaces(surfaces);
         self.broadcast_providers().await
     }
 
+    /// Remove an instance the Owner added.
+    ///
+    /// There is deliberately no in-use guard: a stale `[model].provider` or
+    /// `[fork].provider` is a warning and a fallback to the booted provider,
+    /// never a boot error (see `ProviderRosterState::agent_provider`), so an
+    /// Owner is never trapped by a provider they no longer want. That fallback
+    /// is a real change of shape though — a curated registry where there was a
+    /// free-text id, a different `current` — so removing the instance an agent
+    /// points at republishes that agent's surface too, exactly as moving the
+    /// agent off it would.
     pub async fn remove_provider(&self, id: &str) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
+        let surfaces = self.agent_surfaces();
         self.providers_roster.remove(id).await?;
+        self.broadcast_agent_surfaces(surfaces);
         self.broadcast_providers().await
     }
 
@@ -370,6 +397,25 @@ impl AppState {
         self.broadcast(HostToClient::PromptsChanged {
             prompts: snapshot.clone(),
         });
+    }
+
+    /// Both resident agents' Owner-visible surfaces, captured before a roster
+    /// edit so the edit can publish whichever of them it actually moved.
+    fn agent_surfaces(&self) -> (Option<ModelSnapshot>, PromptSnapshot) {
+        (self.model_snapshot(), self.prompt_snapshot())
+    }
+
+    /// Publish whichever agent surface a roster edit reshaped. Both are derived
+    /// from the roster's stored choices, so an edit to an instance an agent
+    /// points at moves them without any agent op being sent; a client that only
+    /// heard `providers_changed` would keep rendering the old control.
+    fn broadcast_agent_surfaces(&self, previous: (Option<ModelSnapshot>, PromptSnapshot)) {
+        let (previous_model, previous_prompts) = previous;
+        self.broadcast_model_snapshot(previous_model);
+        let prompts = self.prompt_snapshot();
+        if prompts != previous_prompts {
+            self.broadcast_prompts(&prompts);
+        }
     }
 
     pub async fn submit_owner_message(

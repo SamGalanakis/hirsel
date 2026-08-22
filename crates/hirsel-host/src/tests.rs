@@ -1153,6 +1153,112 @@ async fn current_host_starts_without_legacy_side_session_runtime() {
     assert!(!state.side_chats.reaper_started());
 }
 
+/// Removing the instance an agent points at is the same reshape as moving the
+/// agent off it: the stored choice falls back to the booted provider, so both
+/// agent surfaces have to go out with the roster.
+#[tokio::test]
+async fn removing_the_provider_an_agent_points_at_republishes_its_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+    state
+        .add_provider(
+            "router",
+            "Router",
+            "https://example.invalid/v1",
+            "sk-fake-router-key",
+            "some/model",
+        )
+        .await
+        .unwrap();
+    for agent in [AgentSlot::Main, AgentSlot::Fork] {
+        state.set_agent_provider(agent, "router").await.unwrap();
+    }
+    assert!(state.model_snapshot().unwrap().free_text_model);
+    state.broadcast_log.clear();
+
+    state.remove_provider("router").await.unwrap();
+
+    // Both agents are back on the booted provider's curated registry...
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
+    assert!(!snapshot.free_text_model);
+    assert_eq!(snapshot.current.id, "gpt-5.6-sol");
+    let fork = state.prompt_snapshot().fork.unwrap();
+    assert_eq!(fork.provider_id.as_deref(), Some("codex"));
+    assert_eq!(fork.current.id, "gpt-5.6-luna");
+
+    // ...and every client was told, not just about the roster.
+    let broadcasts = state.broadcast_log.recent();
+    assert!(broadcasts.iter().any(|event| matches!(
+        event,
+        HostToClient::ModelChanged { model } if model == &snapshot
+    )));
+    assert!(broadcasts.iter().any(|event| matches!(
+        event,
+        HostToClient::PromptsChanged { prompts } if prompts.fork.as_ref() == Some(&fork)
+    )));
+    assert!(
+        broadcasts
+            .iter()
+            .any(|event| matches!(event, HostToClient::ProvidersChanged { .. }))
+    );
+    let encoded = serde_json::to_string(&broadcasts).unwrap();
+    assert!(!encoded.contains("sk-fake-router-key"), "{encoded}");
+}
+
+/// Editing the pointed-at instance's `default_model` moves what an agent with
+/// no stored selection of its own falls back to, so the same republish applies.
+#[tokio::test]
+async fn changing_the_pointed_at_default_model_republishes_the_model_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    // A `[model]` naming the instance but no id/variant — a hand-edited config,
+    // or one written before the Owner ever picked a model — so the served
+    // selection IS the instance's `default_model`.
+    tokio::fs::write(
+        dir.path().join("hirsel.toml"),
+        "[providers.router]\nkind = \"openai_compatible\"\nlabel = \"Router\"\n\
+         base_url = \"https://example.invalid/v1\"\napi_key = \"sk-fake-router-key\"\n\
+         default_model = \"some/model\"\n\n[model]\nprovider = \"router\"\n",
+    )
+    .await
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+    assert_eq!(state.model_snapshot().unwrap().current.id, "some/model");
+    state.broadcast_log.clear();
+
+    state
+        .update_provider("router", None, None, None, Some("vendor/next-model"))
+        .await
+        .unwrap();
+
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.current.id, "vendor/next-model");
+    assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+        event,
+        HostToClient::ModelChanged { model } if model.current.id == "vendor/next-model"
+    )));
+
+    // A label-only edit moves nothing an agent renders, so nothing is claimed.
+    state.broadcast_log.clear();
+    state
+        .update_provider("router", Some("Router II"), None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !state
+            .broadcast_log
+            .recent()
+            .iter()
+            .any(|event| matches!(event, HostToClient::ModelChanged { .. }))
+    );
+}
+
 /// The field-observed defect: a host booted on OpenRouter, the Owner moves the
 /// main Agent to Codex, and the Model row must become the curated Codex model
 /// plus its reasoning ladder immediately — not stay the booted provider's

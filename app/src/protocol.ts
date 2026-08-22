@@ -721,12 +721,14 @@ export interface ViewRemovedMsg {
   instance_id: string;
 }
 
-/** The main agent's model selection changed (in response to a `set_model`, or
- * a host-side change). Carries only the new `current`; the `available` list is
- * unchanged and stays as last seen in the `ModelSnapshot`. */
+/** The main agent's model surface changed (in response to a `set_model` or a
+ * `set_agent_provider`, or a host-side change). Carries the FULL replacement
+ * snapshot, because a provider change reshapes the control itself: a curated
+ * registry with a reasoning ladder and a free-text model id are two different
+ * questions, and neither can be derived from a bare selection. */
 export interface ModelChangedMsg {
   type: "model_changed";
-  current: ModelSelection;
+  model: ModelSnapshot;
 }
 
 /** The sub-agent model catalog changed (in response to a `set_subagent_model`,

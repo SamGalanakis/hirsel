@@ -623,16 +623,11 @@ export function reduce(state: AppState, action: Action): AppState {
         views: state.views.filter((v) => v.instance_id !== action.payload.instance_id),
       };
 
-    case "model_changed": {
-      // Patch only `current`; the `available` list is unchanged. Ignore
-      // gracefully if no snapshot has been seeded yet (a stray broadcast on an
-      // older host that never sent `hello_ok.model` must not synthesize one).
-      if (!state.model) return state;
-      return {
-        ...state,
-        model: { ...state.model, current: action.current },
-      };
-    }
+    case "model_changed":
+      // Replace the snapshot wholesale, like `prompts_changed` does: a provider
+      // move changes `available`, `free_text_model` and `provider_id` together,
+      // and the host is the authority for all four at once.
+      return { ...state, model: action.model };
 
     case "subagent_models_changed":
       // Replace the catalog wholesale with the new one.

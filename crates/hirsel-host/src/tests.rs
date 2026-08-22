@@ -245,8 +245,8 @@ async fn set_model_changes_the_next_turn_model_spec() {
     assert_eq!(spec.variant.effort(), Some("high"));
     assert!(state.broadcast_log.recent().iter().any(|event| matches!(
         event,
-        HostToClient::ModelChanged { current }
-            if current.id == "gpt-5.6-sol" && current.variant == "high"
+        HostToClient::ModelChanged { model }
+            if model.current.id == "gpt-5.6-sol" && model.current.variant == "high"
     )));
 }
 
@@ -1153,6 +1153,176 @@ async fn current_host_starts_without_legacy_side_session_runtime() {
     assert!(!state.side_chats.reaper_started());
 }
 
+/// Removing the instance an agent points at is the same reshape as moving the
+/// agent off it: the stored choice falls back to the booted provider, so both
+/// agent surfaces have to go out with the roster.
+#[tokio::test]
+async fn removing_the_provider_an_agent_points_at_republishes_its_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+    state
+        .add_provider(
+            "router",
+            "Router",
+            "https://example.invalid/v1",
+            "sk-fake-router-key",
+            "some/model",
+        )
+        .await
+        .unwrap();
+    for agent in [AgentSlot::Main, AgentSlot::Fork] {
+        state.set_agent_provider(agent, "router").await.unwrap();
+    }
+    assert!(state.model_snapshot().unwrap().free_text_model);
+    state.broadcast_log.clear();
+
+    state.remove_provider("router").await.unwrap();
+
+    // Both agents are back on the booted provider's curated registry...
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
+    assert!(!snapshot.free_text_model);
+    assert_eq!(snapshot.current.id, "gpt-5.6-sol");
+    let fork = state.prompt_snapshot().fork.unwrap();
+    assert_eq!(fork.provider_id.as_deref(), Some("codex"));
+    assert_eq!(fork.current.id, "gpt-5.6-luna");
+
+    // ...and every client was told, not just about the roster.
+    let broadcasts = state.broadcast_log.recent();
+    assert!(broadcasts.iter().any(|event| matches!(
+        event,
+        HostToClient::ModelChanged { model } if model == &snapshot
+    )));
+    assert!(broadcasts.iter().any(|event| matches!(
+        event,
+        HostToClient::PromptsChanged { prompts } if prompts.fork.as_ref() == Some(&fork)
+    )));
+    assert!(
+        broadcasts
+            .iter()
+            .any(|event| matches!(event, HostToClient::ProvidersChanged { .. }))
+    );
+    let encoded = serde_json::to_string(&broadcasts).unwrap();
+    assert!(!encoded.contains("sk-fake-router-key"), "{encoded}");
+}
+
+/// Editing the pointed-at instance's `default_model` moves what an agent with
+/// no stored selection of its own falls back to, so the same republish applies.
+#[tokio::test]
+async fn changing_the_pointed_at_default_model_republishes_the_model_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    // A `[model]` naming the instance but no id/variant — a hand-edited config,
+    // or one written before the Owner ever picked a model — so the served
+    // selection IS the instance's `default_model`.
+    tokio::fs::write(
+        dir.path().join("hirsel.toml"),
+        "[providers.router]\nkind = \"openai_compatible\"\nlabel = \"Router\"\n\
+         base_url = \"https://example.invalid/v1\"\napi_key = \"sk-fake-router-key\"\n\
+         default_model = \"some/model\"\n\n[model]\nprovider = \"router\"\n",
+    )
+    .await
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::Codex;
+    config.model = "gpt-5.6-sol".to_string();
+    let state = build_state(config).await.unwrap();
+    assert_eq!(state.model_snapshot().unwrap().current.id, "some/model");
+    state.broadcast_log.clear();
+
+    state
+        .update_provider("router", None, None, None, Some("vendor/next-model"))
+        .await
+        .unwrap();
+
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.current.id, "vendor/next-model");
+    assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+        event,
+        HostToClient::ModelChanged { model } if model.current.id == "vendor/next-model"
+    )));
+
+    // A label-only edit moves nothing an agent renders, so nothing is claimed.
+    state.broadcast_log.clear();
+    state
+        .update_provider("router", Some("Router II"), None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !state
+            .broadcast_log
+            .recent()
+            .iter()
+            .any(|event| matches!(event, HostToClient::ModelChanged { .. }))
+    );
+}
+
+/// The field-observed defect: a host booted on OpenRouter, the Owner moves the
+/// main Agent to Codex, and the Model row must become the curated Codex model
+/// plus its reasoning ladder immediately — not stay the booted provider's
+/// free-of-effort shape until a restart.
+#[tokio::test]
+async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.provider = ProviderMode::OpenRouter;
+    config.openrouter_api_key = Some("sk-fake-openrouter-key".to_string());
+    config.model = "google/gemini-3.7-flash".to_string();
+    let state = build_state(config).await.unwrap();
+    // Booted shape: OpenRouter is an OpenAI-compatible endpoint, so the Model
+    // row is one free-text id with no reasoning ladder at all.
+    let booted = state.model_snapshot().unwrap();
+    assert_eq!(booted.provider_id.as_deref(), Some("openrouter"));
+    assert!(booted.free_text_model);
+    assert!(booted.available.is_empty());
+    state.broadcast_log.clear();
+
+    state
+        .set_agent_provider(AgentSlot::Main, "codex")
+        .await
+        .unwrap();
+
+    let snapshot = state.model_snapshot().unwrap();
+    assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
+    assert!(!snapshot.free_text_model);
+    assert_eq!(snapshot.current.id, "gpt-5.6-sol");
+    assert_eq!(
+        snapshot.available[0].variants,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    // The whole reshaped snapshot goes out, so a connected client renders the
+    // reasoning select without waiting for a reconnect.
+    let broadcast = state
+        .broadcast_log
+        .recent()
+        .into_iter()
+        .find_map(|event| match event {
+            HostToClient::ModelChanged { model } => Some(model),
+            _ => None,
+        })
+        .expect("a provider move must broadcast the whole model snapshot");
+    assert_eq!(broadcast, snapshot);
+
+    // An effort chosen now persists and is reported, while the session the host
+    // actually booted keeps running OpenRouter's own spec until a restart.
+    let selected = state.set_model("gpt-5.6-sol", "xhigh").await.unwrap();
+    assert_eq!(selected.variant, "xhigh");
+    assert_eq!(state.model_snapshot().unwrap().current.variant, "xhigh");
+    let spec = state
+        .agent
+        .next_turn_model_spec()
+        .expect("OpenRouter runtime has a selectable model");
+    assert_eq!(spec.id, "google/gemini-3.7-flash");
+
+    // ...and a fresh hello serves the reshaped snapshot too.
+    assert_eq!(
+        state.model_snapshot().unwrap().provider_id.as_deref(),
+        Some("codex")
+    );
+}
+
 #[tokio::test]
 async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     let dir = tempfile::tempdir().unwrap();
@@ -1184,7 +1354,9 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     assert_eq!(snapshot.current.id, "some/model");
     assert!(snapshot.free_text_model);
     assert!(snapshot.available.is_empty());
-    // ...and both the roster and the model chip are told.
+    // ...and both the roster and the model surface are told — the WHOLE
+    // snapshot, so the client learns the control's new shape and not just a
+    // selection it cannot render.
     assert!(state.broadcast_log.recent().iter().any(|event| matches!(
         event,
         HostToClient::ProvidersChanged { roster }
@@ -1192,7 +1364,11 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     )));
     assert!(state.broadcast_log.recent().iter().any(|event| matches!(
         event,
-        HostToClient::ModelChanged { current } if current.id == "some/model"
+        HostToClient::ModelChanged { model }
+            if model.current.id == "some/model"
+                && model.free_text_model
+                && model.available.is_empty()
+                && model.provider_id.as_deref() == Some("router")
     )));
     // The key never rides along on any broadcast.
     let broadcasts = serde_json::to_string(&state.broadcast_log.recent()).unwrap();

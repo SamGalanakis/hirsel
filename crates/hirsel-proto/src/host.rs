@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::{Blob, ChatMessage};
 use crate::event::Event;
-use crate::models::{ModelSelection, ModelSnapshot, PromptSnapshot, SubagentModelCatalog};
+use crate::models::{ModelSnapshot, PromptSnapshot, SubagentModelCatalog};
 use crate::process::{ProcessInfo, SideChatSummary};
 use crate::providers::ProviderRoster;
 use crate::turn::{AgentActivityState, TurnEventKind};
@@ -80,8 +80,12 @@ pub enum HostToClient {
     EventUpsert {
         event: Event,
     },
+    /// The main agent's model surface after an accepted edit — the WHOLE
+    /// snapshot, because a provider change reshapes it: a curated registry and
+    /// a free-text id are two different controls, and the client cannot derive
+    /// one from a bare selection.
     ModelChanged {
-        current: ModelSelection,
+        model: ModelSnapshot,
     },
     SubagentModelsChanged {
         catalog: SubagentModelCatalog,

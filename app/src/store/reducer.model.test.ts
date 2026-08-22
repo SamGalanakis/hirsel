@@ -91,23 +91,41 @@ describe("model config: hello_ok seeding", () => {
 });
 
 describe("model config: model_changed", () => {
-  it("patches current and leaves available intact", () => {
+  it("replaces the whole snapshot", () => {
     const seeded = helloOk({ model: MODEL });
     const changed = reduce(seeded, {
       type: "model_changed",
-      current: { id: "gpt-5.6-sol", variant: "high" },
+      model: { ...MODEL, current: { id: "gpt-5.6-sol", variant: "high" } },
     });
     expect(changed.model?.current).toEqual({ id: "gpt-5.6-sol", variant: "high" });
     expect(changed.model?.available).toEqual(MODEL.available);
   });
 
-  it("ignores gracefully when no model snapshot has been seeded", () => {
-    const base = helloOk({});
-    const changed = reduce(base, {
-      type: "model_changed",
-      current: { id: "gpt-5.6-sol", variant: "high" },
+  // The field-observed defect: the host's snapshot follows the STORED provider,
+  // so a move to a curated provider must arrive as a whole new control shape —
+  // registry, reasoning ladder, provider id — not a patched selection.
+  it("reshapes free-text into a curated registry when the provider moves", () => {
+    const seeded = helloOk({
+      model: {
+        current: { id: "google/gemini-3.7-flash", variant: "default" },
+        available: [],
+        provider_id: "openrouter",
+        free_text_model: true,
+      },
     });
-    expect(changed.model).toBeNull();
+    const changed = reduce(seeded, {
+      type: "model_changed",
+      model: { ...MODEL, provider_id: "codex", free_text_model: false },
+    });
+    expect(changed.model?.free_text_model).toBe(false);
+    expect(changed.model?.provider_id).toBe("codex");
+    expect(changed.model?.available).toEqual(MODEL.available);
+  });
+
+  it("seeds the snapshot even when hello_ok carried none", () => {
+    const base = helloOk({});
+    const changed = reduce(base, { type: "model_changed", model: MODEL });
+    expect(changed.model).toEqual(MODEL);
   });
 });
 
@@ -151,10 +169,7 @@ describe("model config: defensiveness", () => {
 
   it("does not throw on a model_changed with no prior snapshot", () => {
     expect(() =>
-      reduce(initialState(), {
-        type: "model_changed",
-        current: { id: "x", variant: "y" },
-      }),
+      reduce(initialState(), { type: "model_changed", model: MODEL }),
     ).not.toThrow();
   });
 

@@ -902,16 +902,36 @@ fn model_selection_frames_use_snake_case_protocol_names() {
     );
 
     let event = HostToClient::ModelChanged {
-        current: ModelSelection {
-            id: "gpt-5.6-sol".to_string(),
-            variant: "high".to_string(),
+        model: ModelSnapshot {
+            current: ModelSelection {
+                id: "gpt-5.6-sol".to_string(),
+                variant: "high".to_string(),
+            },
+            available: vec![AvailableModel {
+                id: "gpt-5.6-sol".to_string(),
+                label: "GPT-5.6 Sol".to_string(),
+                variants: vec!["low".to_string(), "high".to_string()],
+                default_variant: "low".to_string(),
+            }],
+            provider_id: Some("codex".to_string()),
+            free_text_model: false,
         },
     };
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
             "type": "model_changed",
-            "current": { "id": "gpt-5.6-sol", "variant": "high" }
+            "model": {
+                "current": { "id": "gpt-5.6-sol", "variant": "high" },
+                "available": [{
+                    "id": "gpt-5.6-sol",
+                    "label": "GPT-5.6 Sol",
+                    "variants": ["low", "high"],
+                    "default_variant": "low"
+                }],
+                "provider_id": "codex",
+                "free_text_model": false
+            }
         })
     );
 

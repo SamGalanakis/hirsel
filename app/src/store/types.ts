@@ -5,7 +5,6 @@ import type {
   EventItem,
   EventUpsertMsg,
   HelloOkMsg,
-  ModelSelection,
   ModelSnapshot,
   MessagesMsg,
   MsgMsg,
@@ -124,9 +123,11 @@ export interface AppState {
    * (older hosts omit the field; About shows "Not reported"). */
   hostVersion: string | null;
   /** The main agent's model snapshot (current selection + everything
-   * selectable). Seeded from `hello_ok.model`; `current` is patched by
-   * `model_changed`. `null` until a host that reports it connects (older hosts
-   * omit the field; the Models control hides itself). */
+   * selectable + the provider it is stored against). Seeded from
+   * `hello_ok.model` and replaced wholesale by `model_changed`, because a
+   * provider move reshapes the control and not just the selection. `null` until
+   * a host that reports it connects (older hosts omit the field; the Models
+   * control hides itself). */
   model: ModelSnapshot | null;
   /** The sub-agent model catalog, grouped by provider. Seeded from
    * `hello_ok.subagent_models` and replaced wholesale by
@@ -208,7 +209,7 @@ export type Action =
   | { type: "view_upsert"; payload: ViewUpsertMsg }
   | { type: "view_removed"; payload: ViewRemovedMsg }
   // ---- Model configuration ----
-  | { type: "model_changed"; current: ModelSelection }
+  | { type: "model_changed"; model: ModelSnapshot }
   | { type: "subagent_models_changed"; catalog: SubagentModelCatalog }
   | { type: "prompts_changed"; prompts: PromptSnapshot }
   | { type: "providers_changed"; roster: ProviderRoster };

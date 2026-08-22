@@ -56,6 +56,23 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals());
 
+/** jsdom reports no client rects for anything, and the focus trap only treats
+ * elements with a real box as focusable. Give one control an honest box so a
+ * restoration assertion measures the trap's contract rather than jsdom's
+ * layout engine (same shim as lib/focus.test.ts). */
+function visibleBox(element: HTMLElement): HTMLElement {
+  Object.defineProperty(element, "getClientRects", {
+    configurable: true,
+    value: () => [{ width: 44, height: 44 }],
+  });
+  return element;
+}
+
+/** The INLINE editor, addressed by its own id so the expanded dialog — which is
+ * labelled by the same prompt name — can never stand in for it. */
+const inlineEditor = (container: HTMLElement) =>
+  container.querySelector<HTMLTextAreaElement>("#agent-prompt-editor");
+
 async function mount(prompts?: PromptSnapshot) {
   const store = await import("../../store/store");
   store.dispatch({
@@ -171,6 +188,89 @@ describe("Settings → Prompt", () => {
     fireEvent.input(editor, { target: { value: "Triage this event." } });
     fireEvent.click(getByLabelText("Save Fork agent prompt"));
     expect(setForkPrompt).toHaveBeenCalledWith("Triage this event.");
+  });
+
+  it("expands a prompt to the full viewport carrying the unsaved draft", async () => {
+    const { getByLabelText, getByText, container } = await mount(PROMPTS);
+    fireEvent.input(inlineEditor(container)!, { target: { value: "Half-written override" } });
+
+    fireEvent.click(getByLabelText("Expand Main agent system prompt"));
+
+    const expanded = getByLabelText(
+      "Main agent system prompt (expanded)",
+    ) as HTMLTextAreaElement;
+    expect(expanded.value).toBe("Half-written override");
+    // One editor at a time: the inline row stands down while the overlay is up.
+    expect(inlineEditor(container)).toBeNull();
+    // A true modal over Settings, with the one honest timing line.
+    const panel = expanded.closest('[data-slot="prompt-editor-panel"]') as HTMLElement;
+    expect(panel.getAttribute("role")).toBe("dialog");
+    expect(panel.getAttribute("aria-modal")).toBe("true");
+    expect(getByText(/Applies from the Agent's next turn\./)).toBeTruthy();
+    expect(setAgentPrompt).not.toHaveBeenCalled();
+  });
+
+  it("Escape collapses the expanded editor, keeping the draft and restoring focus", async () => {
+    const { getByLabelText, container } = await mount(PROMPTS);
+    visibleBox(getByLabelText("Expand Main agent system prompt"));
+    fireEvent.input(inlineEditor(container)!, {
+      target: { value: "Kept across the round trip" },
+    });
+    fireEvent.click(getByLabelText("Expand Main agent system prompt"));
+    fireEvent.input(getByLabelText("Main agent system prompt (expanded)"), {
+      target: { value: "Edited while expanded" },
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    // Back to the inline row with the draft intact — and nothing was sent.
+    expect(inlineEditor(container)?.value).toBe("Edited while expanded");
+    expect(setAgentPrompt).not.toHaveBeenCalled();
+    // Escape dismissed the editor and NOT Settings underneath it, and focus
+    // came back to the control that opened it.
+    expect(container.querySelector('[data-slot="settings-panel"]')).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        visibleBox(getByLabelText("Expand Main agent system prompt")),
+      ),
+    );
+  });
+
+  it("saves from the expanded editor and settles on the prompts broadcast", async () => {
+    const { getByLabelText, store, container } = await mount(PROMPTS);
+    fireEvent.click(getByLabelText("Expand Main agent system prompt"));
+    const expanded = getByLabelText(
+      "Main agent system prompt (expanded)",
+    ) as HTMLTextAreaElement;
+    fireEvent.input(expanded, { target: { value: "Written in the expanded editor" } });
+    fireEvent.click(getByLabelText("Save Main agent system prompt"));
+
+    expect(setAgentPrompt).toHaveBeenCalledWith("Written in the expanded editor");
+    expect(expanded).toBeDisabled();
+
+    store.dispatch({
+      type: "prompts_changed",
+      prompts: { ...PROMPTS, agent: { text: "Written in the expanded editor", is_default: false } },
+    });
+
+    await waitFor(() => expect(expanded).not.toBeDisabled());
+    expect(expanded.value).toBe("Written in the expanded editor");
+    expect((getByLabelText("Save Main agent system prompt") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    // The editor stays open — saving is not leaving.
+    expect(inlineEditor(container)).toBeNull();
+  });
+
+  it("expands the fork prompt on its own, with its own caption", async () => {
+    const { getByLabelText, getByText, container } = await mount(PROMPTS);
+    fireEvent.click(getByLabelText("Expand Fork agent prompt"));
+    expect(
+      (getByLabelText("Fork agent prompt (expanded)") as HTMLTextAreaElement).value,
+    ).toBe("Bundled fork prompt");
+    expect(getByText("Stored for the fork runtime. The running Agent is unaffected.")).toBeTruthy();
+    // The main agent's editor is untouched by the fork's expansion.
+    expect(inlineEditor(container)).toBeTruthy();
   });
 
   it("hides the prompt editors for an older host with no prompt snapshot", async () => {

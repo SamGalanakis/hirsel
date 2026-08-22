@@ -310,6 +310,16 @@ impl ModelSelectionState {
         validate_in_mode(&self.mode(), false, model_id, variant)
     }
 
+    /// Whether the stored choice is the one the live session actually runs on.
+    ///
+    /// False means the Owner has pointed the main Agent at some other provider:
+    /// the selection is still stored and reported, but nothing about it may
+    /// reach the running session — its `ProviderHandle` was baked in at boot
+    /// and a model id from the new provider's registry means nothing there.
+    pub fn applies_to_live_session(&self) -> bool {
+        self.mode().provider_id() == self.roster.booted_provider_id()
+    }
+
     pub async fn persist_and_select(&self, selection: ModelSelection) -> anyhow::Result<()> {
         self.config_store
             .set_model_selection(&selection.id, &selection.variant)
@@ -807,6 +817,9 @@ mod tests {
         let spec = elsewhere.model_spec().unwrap();
         assert_eq!(spec.id, "gpt-5.6-sol");
         assert_eq!(spec.variant.effort(), Some("medium"));
+        // ...which is exactly what `applies_to_live_session` reports, so a model
+        // edit knows to persist without reconfiguring the running session.
+        assert!(!elsewhere.applies_to_live_session());
 
         // An agent still on the booted provider runs exactly what it selected.
         let booted_dir = tempfile::tempdir().unwrap();
@@ -819,6 +832,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(booted.model_spec().unwrap().variant.effort(), Some("xhigh"));
+        assert!(booted.applies_to_live_session());
     }
 
     #[test]

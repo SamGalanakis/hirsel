@@ -338,6 +338,21 @@ the agent runs on: `provider_id` (the instance id, absent on older hosts) and
 `free_text_model` (true when that provider takes any model id it recognises, in
 which case `available` is empty and `current.id` is whatever the Owner typed).
 
+Both snapshots are derived from the agent's **stored** provider choice, not from
+the provider the Host booted on, and both are served fresh on every `hello_ok`.
+Because a provider move reshapes the model control itself — a curated registry
+with a reasoning ladder is a different question from one free-text id —
+`model_changed { model }` carries the whole `ModelSnapshot` as a replacement,
+exactly as `prompts_changed` carries the whole prompt surface. It is emitted for
+an accepted `set_model` and for an accepted `set_agent_provider` on the main
+slot, and only when the snapshot actually changed.
+
+When the stored choice is not the booted provider, an accepted `set_model` is
+persisted and broadcast but never applied to the running session: that session's
+provider handle was built at boot, so the new selection takes effect at the next
+Host restart. A client can tell the two apart by comparing `model.provider_id`
+with `providers.booted_provider_id`.
+
 The persisted keys are `[agent].prompt` and `[fork].model`, `[fork].variant`,
 `[fork].prompt` in `data/hirsel.toml`. The store re-reads the file before every
 snapshot and before each Agent turn, so hand edits are live without a restart.

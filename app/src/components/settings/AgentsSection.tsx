@@ -113,8 +113,14 @@ function MainAgent() {
                   onFreeText={(modelId) => select({ id: modelId, variant: selection().variant })}
                 />
               </div>
+              {/* One caption, honest about which clock this edit is on: the
+                  model reaches the live session only while the stored provider
+                  IS the booted one. Otherwise it is stored for the restart,
+                  exactly like the provider choice above it. */}
               <p class="pb-3 text-xs leading-snug text-muted-foreground">
-                Applies from the Agent's next turn.
+                {bootedElsewhere()
+                  ? "Takes effect when the host restarts."
+                  : "Applies from the Agent's next turn."}
               </p>
             </div>
           )}
@@ -130,6 +136,7 @@ function MainAgent() {
               doc={() => state.prompts?.agent ?? EMPTY_PROMPT}
               pending={pending}
               pendingKey="agent-prompt"
+              caption="Applies from the Agent's next turn. Host configuration is appended automatically and is not part of this field."
               onSave={(text) => getClient()?.setAgentPrompt(text)}
             />
           </div>

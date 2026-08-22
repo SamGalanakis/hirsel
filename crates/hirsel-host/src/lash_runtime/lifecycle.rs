@@ -203,7 +203,8 @@ impl LashAgentRuntime {
         tracing::info!(
             model = %runtime.session.policy_snapshot().model.id,
             variant = ?runtime.session.policy_snapshot().model.variant,
-            provider = ?config.provider_mode,
+            provider = config.boot_plan.label(),
+            env_mode = ?config.provider_mode,
             data_dir = %config.data_dir.display(),
             session_id = %runtime.session_id,
             "Lash Agent runtime opened session"

@@ -439,6 +439,44 @@ describe("Settings → Agents: providers", () => {
     ).toBeTruthy();
   });
 
+  // The field-observed defect: booted on OpenRouter, the Owner picks Codex, and
+  // the Model row stayed a free-text input with no Reasoning select and no
+  // restart notice. The host now broadcasts the whole reshaped snapshot, so the
+  // curated controls have to appear on that frame alone — no reconnect.
+  it("reshapes the model row when model_changed moves the stored provider", async () => {
+    const { getByLabelText, getByText, queryByLabelText } = await mount({
+      model: {
+        current: { id: "z-ai/glm-5", variant: "default" },
+        available: [],
+        provider_id: "openrouter",
+        free_text_model: true,
+      },
+      providers: { ...ROSTER, booted_provider_id: "openrouter" },
+    });
+    expect(getByLabelText("Main agent model id")).toBeTruthy();
+    expect(queryByLabelText("Main agent reasoning variant")).toBeNull();
+    expect(getByText("Applies from the Agent's next turn.")).toBeTruthy();
+
+    const store = await import("../../store/store");
+    store.dispatch({
+      type: "model_changed",
+      model: { ...MODEL, provider_id: "codex", free_text_model: false },
+    });
+
+    await waitFor(() =>
+      expect(getByLabelText("Main agent reasoning variant")).toBeTruthy(),
+    );
+    expect(queryByLabelText("Main agent model id")).toBeNull();
+    expect((getByLabelText("Main agent model") as HTMLSelectElement).value).toBe(
+      "gpt-5.6-sol",
+    );
+    // ...and both captions now tell the truth about the restart.
+    expect(
+      getByText("Saved. The running Agent stays on OpenRouter until the host restarts."),
+    ).toBeTruthy();
+    expect(getByText("Takes effect when the host restarts.")).toBeTruthy();
+  });
+
   it("takes a free-text model id, refusing a blank one without sending", async () => {
     const { getByLabelText, getByText, queryByLabelText } = await mount({
       model: {

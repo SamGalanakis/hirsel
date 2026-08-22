@@ -124,6 +124,13 @@ impl AgentRuntime {
         })?;
         let selection = state.validate(model_id, variant)?;
         state.persist_and_select(selection.clone()).await?;
+        // Stored-only when the main Agent has been pointed at a provider the
+        // host did not boot on: persist and report, but leave the running
+        // session strictly alone — it is on another provider's handle and takes
+        // the new selection at the next host restart.
+        if !state.applies_to_live_session() {
+            return Ok(selection);
+        }
         if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
             runtime.apply_selected_model().await?;
         }

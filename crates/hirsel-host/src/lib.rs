@@ -153,14 +153,24 @@ impl AppState {
 
     pub async fn set_model(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
         let _guard = self.model_change_lock.lock().await;
-        let previous = self.model_snapshot().map(|snapshot| snapshot.current);
+        let previous = self.model_snapshot();
         let current = self.agent.set_model(model_id, variant).await?;
-        if previous.as_ref() != Some(&current) {
-            self.broadcast(HostToClient::ModelChanged {
-                current: current.clone(),
-            });
-        }
+        self.broadcast_model_snapshot(previous);
         Ok(current)
+    }
+
+    /// Publish the main agent's model surface when it actually moved. The whole
+    /// snapshot goes out, not just the selection: a provider change swaps the
+    /// control's shape (curated registry vs free-text id) and the client has no
+    /// way to derive that from a bare `ModelSelection`.
+    fn broadcast_model_snapshot(&self, previous: Option<ModelSnapshot>) {
+        let Some(model) = self.model_snapshot() else {
+            return;
+        };
+        if previous.as_ref() == Some(&model) {
+            return;
+        }
+        self.broadcast(HostToClient::ModelChanged { model });
     }
 
     pub fn subagent_model_snapshot(&self) -> SubagentModelCatalog {
@@ -257,15 +267,19 @@ impl AppState {
         }
         let choice = self.providers_roster.selection_for(provider_id)?;
         let seed = self.seed_selection(agent, &choice)?;
+        let previous_model = match agent {
+            AgentSlot::Main => self.model_snapshot(),
+            AgentSlot::Fork => None,
+        };
         self.providers_roster
             .point_agent_at(agent, &choice, &seed)
             .await?;
         match agent {
-            AgentSlot::Main => {
-                if let Some(current) = self.model_snapshot().map(|snapshot| snapshot.current) {
-                    self.broadcast(HostToClient::ModelChanged { current });
-                }
-            }
+            // The snapshot is derived from the roster's stored choice, so it is
+            // already the new shape by now — but only a full broadcast tells the
+            // client that, and choosing a reasoning effort has to be possible
+            // the moment the provider that offers one is chosen.
+            AgentSlot::Main => self.broadcast_model_snapshot(previous_model),
             AgentSlot::Fork => {
                 let snapshot = self.prompt_snapshot();
                 self.broadcast_prompts(&snapshot);

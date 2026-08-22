@@ -625,7 +625,7 @@ class HirselWsClient {
         break;
       }
       case "model_changed": {
-        dispatch({ type: "model_changed", current: message.current });
+        dispatch({ type: "model_changed", model: message.model });
         break;
       }
       case "plugin_push": {

@@ -29,7 +29,7 @@ post_json debug/reset '{}' >/dev/null
 post_json debug/set-model '{"model_id":"gpt-5.6-sol","variant":"high"}' \
   | jq -e '.id=="gpt-5.6-sol" and .variant=="high"' >/dev/null
 wait_jq debug/broadcasts \
-  '.events[] | select(.type=="model_changed" and .current.id=="gpt-5.6-sol" and .current.variant=="high")' 10 >/dev/null
+  '.events[] | select(.type=="model_changed" and .model.current.id=="gpt-5.6-sol" and .model.current.variant=="high")' 10 >/dev/null
 HELLO="$(hello_snapshot)"
 printf '%s' "$HELLO" | jq -e \
   '.model.current.id=="gpt-5.6-sol" and .model.current.variant=="high"' >/dev/null

@@ -2,8 +2,9 @@
 // roster, the model control in whichever of its two shapes the chosen provider
 // takes, and the prompt editor. Written once here so Main agent and Fork agent
 // cannot drift apart — they are the same three questions asked of two slots.
-import { LoaderCircle } from "lucide-solid";
-import { createEffect, createSignal, Show, untrack } from "solid-js";
+import { LoaderCircle, Maximize2, SquarePen } from "lucide-solid";
+import { createEffect, createSignal, onMount, Show, untrack } from "solid-js";
+import { createFocusTrap } from "../../lib/focus";
 import { createPendingKeys, type PendingKeys } from "../../lib/pending";
 import type {
   AgentSlot,
@@ -16,6 +17,7 @@ import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { PaneHeader } from "../ui/PaneHeader";
 import { titleCase } from "./prefs";
 import { Select } from "./rows";
 
@@ -281,17 +283,153 @@ export function AgentModelRows(props: {
   );
 }
 
+/** The two actions a prompt draft has, written once so the inline row and the
+ * expanded editor cannot drift apart. `Reset to default` clears the override
+ * (one op, no pasting the bundled text back); on an already-default prompt with
+ * local edits it just discards the draft, which needs no round trip. */
+function PromptActions(props: {
+  label: string;
+  doc: () => PromptDoc;
+  dirty: () => boolean;
+  busy: () => boolean;
+  onSave: () => void;
+  onReset: () => void;
+  class?: string;
+}) {
+  return (
+    <div class={`flex items-center gap-2 ${props.class ?? ""}`}>
+      <Button
+        size="sm"
+        class="h-9"
+        aria-label={`Save ${props.label}`}
+        disabled={props.busy() || !props.dirty()}
+        onClick={props.onSave}
+      >
+        Save
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        class="h-9"
+        aria-label={`Reset ${props.label} to default`}
+        disabled={props.busy() || (props.doc().is_default && !props.dirty())}
+        onClick={props.onReset}
+      >
+        Reset to default
+      </Button>
+      <Show when={props.doc().is_default}>
+        <span class="text-xs text-muted-foreground">Bundled default</span>
+      </Show>
+    </div>
+  );
+}
+
+/** The expanded prompt: the SAME draft, given the whole viewport.
+ *
+ * Deliberately the Settings modal's own pattern rather than a second one —
+ * `fixed inset-0` over Settings, a focus trap whose Escape hands the Owner back
+ * to the row they expanded from, and one PaneHeader with a ×. A prompt body is
+ * the longest text in the product and a twelve-row box is not where it is
+ * written; nothing about the draft changes on the way in or out, so expanding
+ * mid-edit and collapsing again is free. */
+function ExpandedPromptEditor(props: {
+  label: string;
+  doc: () => PromptDoc;
+  draft: () => string;
+  setDraft: (text: string) => void;
+  dirty: () => boolean;
+  busy: () => boolean;
+  caption?: string;
+  editorId: string;
+  onSave: () => void;
+  onReset: () => void;
+  onClose: () => void;
+  restoreTo: () => HTMLElement | null;
+}) {
+  let panelRef: HTMLDivElement | undefined;
+  const titleId = `${props.editorId}-title`;
+
+  onMount(() => {
+    // Nested inside Settings' own trap: the stack hands Tab and Escape to this
+    // one while it is open and gives them straight back on close, with focus
+    // landing on the Expand control that summoned it.
+    createFocusTrap(() => panelRef, {
+      onEscape: props.onClose,
+      restoreTo: props.restoreTo,
+    });
+  });
+
+  return (
+    <div
+      ref={(node) => {
+        panelRef = node;
+      }}
+      tabindex={-1}
+      data-slot="prompt-editor-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      /* Above Settings (`z-40`), the one surface it can ever open over. */
+      class="fixed inset-0 z-50 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
+        motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+    >
+      <PaneHeader
+        icon={<SquarePen class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+        title={props.label}
+        titleId={titleId}
+        onClose={props.onClose}
+        closeLabel={`Close ${props.label}`}
+        contentClass="mx-auto w-full max-w-frame px-gutter"
+        badge={
+          <Show when={props.busy()}>
+            <LoaderCircle class="size-4 animate-spin text-muted-foreground" aria-label="Saving" />
+          </Show>
+        }
+      />
+      <div class="mx-auto flex min-h-0 w-full max-w-frame flex-1 flex-col px-gutter pt-4 pb-4">
+        <textarea
+          id={props.editorId}
+          aria-label={`${props.label} (expanded)`}
+          disabled={props.busy()}
+          value={props.draft()}
+          onInput={(event) => props.setDraft(event.currentTarget.value)}
+          class="thin-scrollbar min-h-0 w-full flex-1 resize-none rounded-lg border border-border bg-surface px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
+        />
+        <PromptActions
+          class="mt-3"
+          label={props.label}
+          doc={props.doc}
+          dirty={props.dirty}
+          busy={props.busy}
+          onSave={props.onSave}
+          onReset={props.onReset}
+        />
+        <Show when={props.caption}>
+          <p class="mt-2 text-xs leading-snug text-muted-foreground">{props.caption}</p>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
 /** One editable prompt: a local draft until Save or Reset, then settled by the
- * authoritative `prompts_changed` frame. */
+ * authoritative `prompts_changed` frame. The inline row is the glance; Expand
+ * gives the same draft the whole viewport. ONE state backs both, so a draft
+ * survives every expand and collapse and a Save from either place settles the
+ * same way. */
 export function PromptEditor(props: {
   label: string;
   doc: () => PromptDoc;
   pending: PendingKeys;
   pendingKey: string;
   onSave: (text: string) => void;
+  /** The one honest line about when this prompt takes effect, shown in the
+   * expanded editor (the inline row already sits under its section's copy). */
+  caption?: string;
   rows?: number;
 }) {
   const [draft, setDraft] = createSignal(props.doc().text);
+  const [expanded, setExpanded] = createSignal(false);
   let serverText = props.doc().text;
 
   createEffect(() => {
@@ -318,49 +456,78 @@ export function PromptEditor(props: {
     save("");
   }
 
+  const expandSlot = `prompt-expand-${props.pendingKey}`;
+
   return (
     <div class="py-3">
-      <div class="mb-2 flex items-center justify-between gap-3">
-        <label class="text-sm text-foreground" for={`${props.pendingKey}-editor`}>
-          {props.label}
-        </label>
-        <Show when={busy()}>
-          <LoaderCircle class="size-3.5 animate-spin text-muted-foreground" aria-label="Saving" />
-        </Show>
-      </div>
-      <textarea
-        id={`${props.pendingKey}-editor`}
-        aria-label={props.label}
-        rows={props.rows ?? 12}
-        disabled={busy()}
-        value={draft()}
-        onInput={(event) => setDraft(event.currentTarget.value)}
-        class="thin-scrollbar w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
-      />
-      <div class="mt-2 flex items-center gap-2">
-        <Button
-          size="sm"
-          class="h-9"
-          aria-label={`Save ${props.label}`}
-          disabled={busy() || !dirty()}
-          onClick={() => save(draft())}
-        >
-          Save
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          class="h-9"
-          aria-label={`Reset ${props.label} to default`}
-          disabled={busy() || (props.doc().is_default && !dirty())}
-          onClick={reset}
-        >
-          Reset to default
-        </Button>
-        <Show when={props.doc().is_default}>
-          <span class="text-xs text-muted-foreground">Bundled default</span>
-        </Show>
-      </div>
+      {/* The inline row stands down entirely while the expanded editor is open:
+          the overlay covers it anyway, and one editor at a time means one Save
+          control, one label, and no duplicate ids for anything — assistive tech
+          or test — to disambiguate. The draft lives out here, so standing the
+          row down costs nothing. */}
+      <Show
+        when={!expanded()}
+        fallback={
+          <ExpandedPromptEditor
+            label={props.label}
+            doc={props.doc}
+            draft={draft}
+            setDraft={setDraft}
+            dirty={dirty}
+            busy={busy}
+            caption={props.caption}
+            editorId={`${props.pendingKey}-expanded-editor`}
+            onSave={() => save(draft())}
+            onReset={reset}
+            onClose={() => setExpanded(false)}
+            // Resolved by query AFTER the overlay unmounts, so it names the
+            // Expand control that has just come back rather than the detached
+            // node this component held while collapsed.
+            restoreTo={() => document.querySelector<HTMLElement>(`[data-slot="${expandSlot}"]`)}
+          />
+        }
+      >
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <label class="text-sm text-foreground" for={`${props.pendingKey}-editor`}>
+            {props.label}
+          </label>
+          <div class="flex shrink-0 items-center gap-2">
+            <Show when={busy()}>
+              <LoaderCircle
+                class="size-3.5 animate-spin text-muted-foreground"
+                aria-label="Saving"
+              />
+            </Show>
+            <button
+              type="button"
+              data-slot={expandSlot}
+              aria-label={`Expand ${props.label}`}
+              onClick={() => setExpanded(true)}
+              class="grid size-8 place-items-center rounded text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:size-11"
+            >
+              <Maximize2 class="size-4" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        <textarea
+          id={`${props.pendingKey}-editor`}
+          aria-label={props.label}
+          rows={props.rows ?? 12}
+          disabled={busy()}
+          value={draft()}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+          class="thin-scrollbar w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
+        />
+        <PromptActions
+          class="mt-2"
+          label={props.label}
+          doc={props.doc}
+          dirty={dirty}
+          busy={busy}
+          onSave={() => save(draft())}
+          onReset={reset}
+        />
+      </Show>
     </div>
   );
 }

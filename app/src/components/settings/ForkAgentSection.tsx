@@ -61,6 +61,7 @@ export function ForkAgentSection(props: { fork: () => ForkAgentConfig }): JSX.El
           doc={() => props.fork().prompt}
           pending={pending}
           pendingKey="fork-prompt"
+          caption="Stored for the fork runtime. The running Agent is unaffected."
           rows={10}
           onSave={(text) => getClient()?.setForkPrompt(text)}
         />

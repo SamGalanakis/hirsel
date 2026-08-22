@@ -136,6 +136,7 @@ function MainAgent() {
               doc={() => state.prompts?.agent ?? EMPTY_PROMPT}
               pending={pending}
               pendingKey="agent-prompt"
+              caption="Applies from the Agent's next turn. Host configuration is appended automatically and is not part of this field."
               onSave={(text) => getClient()?.setAgentPrompt(text)}
             />
           </div>

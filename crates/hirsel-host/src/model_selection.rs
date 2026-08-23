@@ -447,6 +447,7 @@ fn model_spec(
     selection: &ModelSelection,
 ) -> anyhow::Result<lash::ModelSpec> {
     let entry = registry_entry(provider, &selection.id)
+        .or_else(|| fork_registry_entry(provider, &selection.id))
         .ok_or_else(|| anyhow!("unknown model: {}", selection.id))?;
     // A provider-default model advertises no reasoning capability: the host has
     // nothing to encode on the wire, and claiming an effort ladder the endpoint
@@ -864,6 +865,21 @@ mod tests {
                 .efforts
                 .contains(&"high".to_string())
         );
+    }
+
+    #[test]
+    fn codex_fork_model_spec_accepts_the_default_luna_lane() {
+        let spec = model_spec(
+            ProviderMode::Codex,
+            &ModelSelection {
+                id: "gpt-5.6-luna".to_string(),
+                variant: "max".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spec.id, "gpt-5.6-luna");
+        assert_eq!(spec.variant.effort(), Some("max"));
     }
 
     #[test]

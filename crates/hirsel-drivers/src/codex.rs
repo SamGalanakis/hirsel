@@ -1,6 +1,7 @@
 //! Driver for the `codex app-server` JSON-RPC protocol.
 
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -48,6 +49,7 @@ struct CodexSession {
 #[async_trait]
 impl SubagentDriver for CodexDriver {
     async fn spawn(&self, task: SpawnSpec) -> DriverResult<SessionHandle> {
+        let disabled_mcp_servers = codex_mcp_disable_names();
         let mut command = Command::new("codex");
         command.arg("app-server").arg("--stdio");
         if let Some(model) = task.model.as_deref() {
@@ -58,8 +60,10 @@ impl SubagentDriver for CodexDriver {
                 .arg("-c")
                 .arg(format!("model_reasoning_effort={variant}"));
         }
-        for (key, value) in codex_mcp_disable_flags() {
-            command.arg("-c").arg(format!("{key}={value}"));
+        for name in &disabled_mcp_servers {
+            command
+                .arg("-c")
+                .arg(format!("mcp_servers.{name}.enabled=false"));
         }
         command
             .current_dir(&task.cwd)
@@ -86,7 +90,11 @@ impl SubagentDriver for CodexDriver {
         let events = EventHub::new(256);
 
         write_json_line(&mut stdin, &codex_initialize_request(1)).await?;
-        write_json_line(&mut stdin, &codex_thread_start_request(2, &task.cwd)).await?;
+        write_json_line(
+            &mut stdin,
+            &codex_thread_start_request(2, &task.cwd, &disabled_mcp_servers),
+        )
+        .await?;
         let thread_id = timeout(
             Duration::from_secs(30),
             read_codex_thread_id(&mut lines, events.clone()),
@@ -172,16 +180,58 @@ impl SubagentDriver for CodexDriver {
     }
 }
 
-fn codex_mcp_disable_flags() -> [(&'static str, &'static str); 7] {
-    [
-        ("mcp_servers.figments.enabled", "false"),
-        ("mcp_servers.playwright.enabled", "false"),
-        ("mcp_servers.runpod.enabled", "false"),
-        ("mcp_servers.openaiDeveloperDocs.enabled", "false"),
-        ("mcp_servers.runpod-docs.enabled", "false"),
-        ("mcp_servers.wandb.enabled", "false"),
-        ("mcp_servers.linear.enabled", "false"),
-    ]
+fn codex_mcp_disable_names() -> Vec<String> {
+    let Some(config_path) = codex_config_path() else {
+        return Vec::new();
+    };
+    let Ok(config_text) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    mcp_disable_names(&config_text)
+}
+
+fn codex_config_path() -> Option<PathBuf> {
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(codex_home).join("config.toml"));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex/config.toml"))
+}
+
+pub(crate) fn mcp_disable_names(config_text: &str) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for line in config_text.lines() {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix("[mcp_servers.") else {
+            continue;
+        };
+        let Some(name) = mcp_server_name(rest) else {
+            continue;
+        };
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn mcp_server_name(rest: &str) -> Option<&str> {
+    let (name, tail) = match rest.as_bytes().first().copied() {
+        Some(b'"') | Some(b'\'') => {
+            let quote = rest.as_bytes()[0] as char;
+            let end = rest[1..].find(quote)? + 1;
+            (&rest[1..end], &rest[end + 1..])
+        }
+        Some(_) => {
+            let end = rest.find(['.', ']'])?;
+            (&rest[..end], &rest[end..])
+        }
+        None => return None,
+    };
+    let tail = tail.trim_start();
+    if !tail.starts_with('.') && !tail.starts_with(']') {
+        return None;
+    }
+    Some(name.trim())
 }
 
 fn codex_initialize_request(id: u64) -> Value {
@@ -196,7 +246,15 @@ fn codex_initialize_request(id: u64) -> Value {
     })
 }
 
-fn codex_thread_start_request(id: u64, cwd: &std::path::Path) -> Value {
+fn codex_thread_start_request(
+    id: u64,
+    cwd: &std::path::Path,
+    disabled_mcp_servers: &[String],
+) -> Value {
+    let mcp_servers = disabled_mcp_servers
+        .iter()
+        .map(|name| (name.clone(), json!({ "enabled": false })))
+        .collect::<serde_json::Map<_, _>>();
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -208,15 +266,7 @@ fn codex_thread_start_request(id: u64, cwd: &std::path::Path) -> Value {
             "sandbox": "danger-full-access",
             "threadSource": "hirsel",
             "config": {
-                "mcp_servers": {
-                    "figments": { "enabled": false },
-                    "playwright": { "enabled": false },
-                    "runpod": { "enabled": false },
-                    "openaiDeveloperDocs": { "enabled": false },
-                    "runpod-docs": { "enabled": false },
-                    "wandb": { "enabled": false },
-                    "linear": { "enabled": false }
-                }
+                "mcp_servers": mcp_servers
             }
         }
     })
@@ -401,5 +451,61 @@ pub(crate) fn codex_terminal_outcome(
         _ => Some(TerminalOutcome::Done {
             summary: terminal_message(last_agent_message.unwrap_or("codex turn completed")),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_disable_names;
+
+    #[test]
+    fn mcp_discovery_finds_server_headers_and_quoted_names() {
+        let config = r#"
+[mcp_servers.figments]
+command = "bun"
+
+[mcp_servers."openaiDeveloperDocs"]
+url = "https://example.invalid"
+
+[mcp_servers.'runpod-docs']
+url = "https://example.invalid"
+"#;
+
+        assert_eq!(
+            mcp_disable_names(config),
+            vec![
+                "figments".to_string(),
+                "openaiDeveloperDocs".to_string(),
+                "runpod-docs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_discovery_uses_first_path_segment_and_skips_subtables() {
+        let config = r#"
+[mcp_servers.linear]
+command = "linear"
+
+[mcp_servers.linear.env]
+TOKEN = "redacted"
+
+[mcp_servers.linear.tools.search]
+enabled = true
+
+[mcp_servers.linear.http_headers]
+Authorization = "redacted"
+
+[other_servers.linear]
+enabled = true
+"#;
+
+        assert_eq!(mcp_disable_names(config), vec!["linear".to_string()]);
+    }
+
+    #[test]
+    fn mcp_discovery_returns_empty_for_empty_or_unrelated_config() {
+        assert!(mcp_disable_names("").is_empty());
+        assert!(mcp_disable_names("# no MCP servers\n[provider]\nname = \"codex\"\n").is_empty());
     }
 }

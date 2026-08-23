@@ -36,7 +36,7 @@ post_json debug/reset '{}' >/dev/null
 pass_gate "debug reset"
 
 BODY="$(cat <<EOF
-Start one Sub-agent now using subagents.spawn with agent "codex", explicit model "gpt-5.5", and cwd "$WORK". The task may be long. Do not start any sibling Sub-agent. Reply after spawning; do not wait for terminal completion.
+Start one Sub-agent now using subagents.spawn with agent "codex", explicit model "gpt-5.6-sol", and cwd "$WORK". The task may be long. Do not start any sibling Sub-agent. Reply after spawning; do not wait for terminal completion.
 EOF
 )"
 REQ="$(jq -nc --arg body "$BODY" '{client_id:"abandoned-start",body:$body,ref:null}')"

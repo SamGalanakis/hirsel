@@ -14,7 +14,7 @@ WebSocket from any neutral cwd.
 ## Execute
 
 ```bash
-/workspace/code/hirsel-rbcov/e2e/protocol-compatibility/model-selection/run.sh
+bash e2e/protocol-compatibility/model-selection/run.sh
 ```
 
 ## Gate 1: main-model wire state
@@ -25,9 +25,9 @@ WebSocket from any neutral cwd.
 
 ## Gate 2: Sub-agent catalog wire state
 
-Toggle the existing `claude-opus-5` row to `enabled:false` with `default_variant:"high"` through
-`POST /debug/subagent-models`. Require the returned catalog and a `subagent_models_changed`
-broadcast to carry that row.
+Toggle the existing `claude-opus-5` row to `enabled:false` with `enabled_variants:["high"]`
+through `POST /debug/subagent-models`. Require the returned catalog and a
+`subagent_models_changed` broadcast to carry that row.
 
 ## Gate 3: one invalid selection
 

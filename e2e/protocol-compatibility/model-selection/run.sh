@@ -37,11 +37,11 @@ pass_gate "Gate 1: model_changed selected gpt-5.6-sol/high and fresh hello_ok.mo
 
 # ---- Gate 2: a Sub-agent catalog row toggles and broadcasts wholesale ----
 post_json debug/subagent-models \
-  '{"provider":"claude","model_id":"claude-sonnet-5","enabled":false,"default_variant":"low"}' \
-  | jq -e '.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-sonnet-5" and .enabled==false and .default_variant=="low")' >/dev/null
+  '{"provider":"claude","model_id":"claude-opus-5","enabled":false,"enabled_variants":["high"]}' \
+  | jq -e '.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-opus-5" and .enabled==false and .enabled_variants==["high"])' >/dev/null
 wait_jq debug/broadcasts \
-  '.events[] | select(.type=="subagent_models_changed") | .catalog.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-sonnet-5" and .enabled==false and .default_variant=="low")' 10 >/dev/null
-pass_gate "Gate 2: subagent_models_changed disabled claude-sonnet-5 and changed its default variant to low"
+  '.events[] | select(.type=="subagent_models_changed") | .catalog.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-opus-5" and .enabled==false and .enabled_variants==["high"])' 10 >/dev/null
+pass_gate "Gate 2: subagent_models_changed disabled claude-opus-5 with enabled_variants [high]"
 
 # ---- Gate 3: one invalid main-model id returns an objective error and changes nothing ----
 INVALID_BODY="/tmp/hirsel-e2e-model-selection-invalid.json"
@@ -61,12 +61,12 @@ restart_hirsel_host
 get_json debug/health | jq -e \
   '.model.id=="gpt-5.6-sol" and .model.variant=="high"' >/dev/null
 get_json debug/subagent-models | jq -e \
-  '.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-sonnet-5" and .enabled==false and .default_variant=="low")' >/dev/null
+  '.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-opus-5" and .enabled==false and .enabled_variants==["high"])' >/dev/null
 HELLO_AFTER="$(hello_snapshot)"
 printf '%s' "$HELLO_AFTER" | jq -e \
   '.model.current.id=="gpt-5.6-sol" and .model.current.variant=="high"' >/dev/null
 printf '%s' "$HELLO_AFTER" | jq -e \
-  '.subagent_models.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-sonnet-5" and .enabled==false and .default_variant=="low")' >/dev/null
+  '.subagent_models.providers[] | select(.provider=="claude") | .models[] | select(.id=="claude-opus-5" and .enabled==false and .enabled_variants==["high"])' >/dev/null
 pass_gate "Gate 4: main and Sub-agent selections survived SIGTERM+reboot and replayed in hello_ok"
 
 debug_snapshot /tmp/hirsel-e2e-model-selection-final

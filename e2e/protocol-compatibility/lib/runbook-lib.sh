@@ -11,7 +11,7 @@ BASE=""
 repo_root() {
   local lib_dir
   lib_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-  cd -- "$lib_dir/../.." && pwd
+  cd -- "$lib_dir/../../.." && pwd
 }
 
 build_host() {

@@ -34,8 +34,13 @@ pass_gate "Ping $PING_ID has name, description, Quick Reply, and Anchor $ANCHOR_
 
 REPLY_JSON="$(post_json debug/owner-message "$(jq -nc --arg body "$QUICK_REPLY" --argjson ref "$ANCHOR_ID" '{client_id:"delegation-quick-reply",body:$body,ref:$ref}')")"
 REPLY_ID="$(printf '%s' "$REPLY_JSON" | jq -r '.message.id')"
-wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
-pass_gate "Quick Reply $REPLY_ID auto-resolved Ping $PING_ID"
+wait_jq debug/chat '.messages[] | select(.id == '"$REPLY_ID"' and .author == "owner" and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
+wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "open")' 10 >/dev/null
+pass_gate "Quick Reply $REPLY_ID preserved open Ping $PING_ID"
 wait_agent_message_after "$REPLY_ID" '(.body | contains("Acknowledged"))' 30
 pass_gate "Agent acknowledged the Ping reply"
+
+post_json debug/event-action "$(jq -nc --argjson event_id "$PING_ID" '{event_id:$event_id,action:"dismiss",data:{}}')" | jq -e '.status == "done"' >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
+pass_gate "explicit Event dismiss settled Ping $PING_ID"
 debug_snapshot /tmp/hirsel-e2e-delegation-loop-scripted-final

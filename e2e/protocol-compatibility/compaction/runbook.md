@@ -34,7 +34,8 @@ Owner sends `GREEN-742` as an exact fact to remember; an Agent turn completes ag
 
 ### Gate 2: the Owner asks the Agent to compact immediately
 
-Owner instructs `control.continue_as` now, with the seed required to preserve `GREEN-742`.
+Owner supplies the exact TypeScript `control.continue_as` tail call, with the seed required to
+preserve `GREEN-742`, and explicitly forbids the current frame from merely replying `COMPACTED`.
 
 ### Gate 3 (mechanical, hard): a control/compaction tool event is visible
 

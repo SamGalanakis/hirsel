@@ -61,7 +61,7 @@ wait_jq debug/chat '.messages[] | select(.id=='"$INTERACTION_ID"' and .author=="
 wait_agent_message_after "$INTERACTION_ID" 'true' 180
 pass_gate "Gate 3: view_event routed canvas interaction as Owner message $INTERACTION_ID and completed its turn"
 
-# ---- Gate 4: ping placement resolves to the Event anchor ----
+# ---- Gate 4: ping placement resolves to the Event anchor without settling ----
 SUMMARY="$(post_json debug/trigger-digest \
   '{"job_id":"views-anchor-probe","text":"Anchor routing probe.","status":"ready"}')"
 PING_ID="$(printf '%s' "$SUMMARY" | jq -r '.id')"
@@ -74,9 +74,13 @@ ANCHORED_EVENT="$(post_json debug/view-event \
 ANCHORED_MESSAGE_ID="$(printf '%s' "$ANCHORED_EVENT" | jq -r '.message.id')"
 printf '%s' "$ANCHORED_EVENT" | jq -e \
   '.message.author=="owner" and .message.ref=='"$ANCHOR_ID"'' >/dev/null
-wait_jq debug/events '.events[] | select(.id=='"$PING_ID"' and .status=="done")' 15 >/dev/null
+wait_jq debug/events '.events[] | select(.id=='"$PING_ID"' and .status=="open")' 15 >/dev/null
 wait_agent_message_after "$ANCHORED_MESSAGE_ID" 'true' 180
-pass_gate "Gate 4: ping:$PING_ID view event resolved anchor $ANCHOR_ID and completed its Event/turn"
+pass_gate "Gate 4: ping:$PING_ID view event used anchor $ANCHOR_ID and preserved its open Event"
+
+post_json debug/event-action "$(jq -nc --argjson event_id "$PING_ID" '{event_id:$event_id,action:"dismiss",data:{}}')" | jq -e '.status == "done"' >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type=="event_upsert" and .event.id=='"$PING_ID"' and .event.status=="done")' 10 >/dev/null
+pass_gate "Gate 4: explicit Event dismiss settled $PING_ID"
 
 # ---- Gate 5: active views replay in a fresh hello_ok.views ----
 HELLO="$(hello_views)"

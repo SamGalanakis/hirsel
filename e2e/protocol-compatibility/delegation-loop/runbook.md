@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Prove slice 1's loop with the debug HTTP surface: Owner message -> Agent delegates to a Sub-agent -> Sub-agent terminal event is observable -> Agent sends a named requires-response Ping with a Quick Reply -> Owner sends the Quick Reply as an Anchor-refed Chat message -> the host resolves the Ping -> Agent acknowledges in Chat.
+Prove slice 1's loop with the debug HTTP surface: Owner message -> Agent delegates to a Sub-agent -> Sub-agent terminal event is observable -> Agent sends a named requires-response Ping with a Quick Reply -> Owner sends the Quick Reply as an Anchor-refed Chat message without settling the Ping -> Agent acknowledges in Chat -> an explicit Event action settles the Ping.
 
 ## Scenario A: Scripted Test Double
 
@@ -67,9 +67,11 @@ curl -sS -X POST "$BASE/debug/owner-message" \
 
 Replace `ANCHOR_ID` with the Ping's `anchor`.
 
-7. Poll `/debug/pings` until the Ping is `status: "done"` and `/debug/broadcasts` contains its done `ping_upsert`; the host performs this transition before the Agent turn, with no `pings.resolve` call.
+7. Poll `/debug/pings` until the Ping is still `status: "open"`; the Anchor-refed reply is lifecycle-neutral.
 
 8. Poll `/debug/chat` until an Agent-authored message appears after the Quick Reply acknowledging the Ping reply.
+
+9. Send an explicit `dismiss` Event action, then require `status: "done"` and its done `event_upsert` broadcast.
 
 ## Scenario B: Real RLM Agent With Codex
 

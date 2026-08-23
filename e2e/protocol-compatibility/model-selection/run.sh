@@ -26,7 +26,7 @@ start_hirsel_host fresh
 post_json debug/reset '{}' >/dev/null
 
 # ---- Gate 1: main model selection broadcasts and appears on a fresh hello ----
-post_json debug/set-model '{"model_id":"gpt-5.6-sol","variant":"high"}' \
+post_json debug/set-model '{"provider_id":"codex","model_id":"gpt-5.6-sol","variant":"high"}' \
   | jq -e '.id=="gpt-5.6-sol" and .variant=="high"' >/dev/null
 wait_jq debug/broadcasts \
   '.events[] | select(.type=="model_changed" and .model.current.id=="gpt-5.6-sol" and .model.current.variant=="high")' 10 >/dev/null
@@ -48,7 +48,7 @@ INVALID_BODY="/tmp/hirsel-e2e-model-selection-invalid.json"
 INVALID_STATUS="$(curl -sS -o "$INVALID_BODY" -w '%{http_code}' -X POST \
   "$BASE/debug/set-model" -H "authorization: Bearer $HIRSEL_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"model_id":"not-a-model","variant":"high"}')"
+  -d '{"provider_id":"codex","model_id":"not-a-model","variant":"high"}')"
 [[ "$INVALID_STATUS" == 500 ]] \
   || { fail_gate "Gate 3: invalid model returned HTTP $INVALID_STATUS"; exit 1; }
 jq -e '.error | contains("unknown model: not-a-model")' "$INVALID_BODY" >/dev/null

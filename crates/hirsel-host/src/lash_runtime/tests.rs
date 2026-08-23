@@ -56,7 +56,7 @@ fn test_turn_output(
         result: lash::TurnReport {
             state: lash_core::SessionSnapshot::new(SessionPolicy::new(lash::TurnBudget::Unbounded)),
             outcome,
-            cancellation: None,
+            acceptance: None,
             assistant_output: lash::turn::AssistantOutput {
                 safe_text: safe_text.to_string(),
                 raw_text: safe_text.to_string(),
@@ -245,7 +245,9 @@ fn failed_code_block_summary_is_condensed() {
 #[test]
 fn cancelled_turn_materializes_checkpointed_chat_and_completed_tools() {
     let output = test_turn_output(
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled),
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled {
+            evidence: lash::TurnCancellationEvidence::internal("test"),
+        }),
         "I checked the durable state.",
         vec![
             lash_core::ToolCallRecord {
@@ -785,7 +787,9 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     let (executor, storage, broadcast_log, _dir) = test_event_executor().await;
     broadcast_log.clear();
     let output = test_turn_output(
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled),
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled {
+            evidence: lash::TurnCancellationEvidence::internal("test"),
+        }),
         "The completed check passed.",
         vec![lash_core::ToolCallRecord {
             call_id: Some("completed".to_string()),

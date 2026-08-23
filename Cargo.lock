@@ -502,16 +502,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstr"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
-dependencies = [
- "memchr",
- "serde_core",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -841,16 +831,6 @@ version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
 dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-deque"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
-dependencies = [
- "crossbeam-epoch",
  "crossbeam-utils",
 ]
 
@@ -1462,19 +1442,6 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
-
-[[package]]
-name = "globset"
-version = "0.4.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
-dependencies = [
- "aho-corasick",
- "bstr",
- "log",
- "regex-automata",
- "regex-syntax",
-]
 
 [[package]]
 name = "gloo-timers"
@@ -2096,22 +2063,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ignore"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
-dependencies = [
- "crossbeam-deque",
- "globset",
- "log",
- "memchr",
- "regex-automata",
- "same-file",
- "walkdir",
- "winapi-util",
-]
-
-[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2508,7 +2459,7 @@ dependencies = [
 [[package]]
 name = "lash-core"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2534,7 +2485,7 @@ dependencies = [
 [[package]]
 name = "lash-http-transport"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2548,7 +2499,7 @@ dependencies = [
 [[package]]
 name = "lash-lashlang-runtime"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2570,7 +2521,7 @@ dependencies = [
 [[package]]
 name = "lash-llm-transport"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2584,7 +2535,7 @@ dependencies = [
 [[package]]
 name = "lash-plugin-tool-output-budget"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "lash-core",
  "serde",
@@ -2595,7 +2546,7 @@ dependencies = [
 [[package]]
 name = "lash-protocol-rlm"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2610,7 +2561,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -2619,7 +2569,7 @@ dependencies = [
 [[package]]
 name = "lash-protocol-standard"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2631,7 +2581,7 @@ dependencies = [
 [[package]]
 name = "lash-provider-anthropic"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "base64",
@@ -2647,14 +2597,13 @@ dependencies = [
 [[package]]
 name = "lash-provider-auth"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "base64",
  "form_urlencoded",
  "lash-core",
  "lash-sansio",
- "percent-encoding",
  "reqwest 0.13.4",
  "serde_json",
  "sha2 0.10.9",
@@ -2666,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "lash-provider-openai"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "base64",
@@ -2688,7 +2637,7 @@ dependencies = [
 [[package]]
 name = "lash-remote-protocol"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "base64",
  "lash-core",
@@ -2702,7 +2651,7 @@ dependencies = [
 [[package]]
 name = "lash-rlm-types"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "lash-sansio",
  "serde",
@@ -2712,7 +2661,7 @@ dependencies = [
 [[package]]
 name = "lash-runtime"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2739,7 +2688,7 @@ dependencies = [
 [[package]]
 name = "lash-sansio"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "jsonschema",
  "schemars",
@@ -2751,12 +2700,11 @@ dependencies = [
 [[package]]
 name = "lash-sqlite-store"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "flate2",
  "futures-executor",
- "hmac",
  "lash-core",
  "lash-sansio",
  "lashlang",
@@ -2776,23 +2724,18 @@ dependencies = [
 [[package]]
 name = "lash-tool-support"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
- "ignore",
  "lash-core",
  "lash-lashlang-runtime",
- "schemars",
- "serde",
  "serde_json",
- "similar",
- "tokio",
 ]
 
 [[package]]
 name = "lash-trace"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "chrono",
  "lash-sansio",
@@ -2806,22 +2749,20 @@ dependencies = [
 [[package]]
 name = "lash-typescript"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "lashlang",
- "regress",
  "ryu-js",
  "serde_json",
  "swc_common",
  "swc_ecma_ast",
  "swc_ecma_parser",
- "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "lashlang"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "async-trait",
  "compact_str 0.9.1",
@@ -4052,7 +3993,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "regress"
 version = "0.11.1"
-source = "git+https://github.com/Ascending-AI/lash?rev=7e095fe36fc06362dedaa6ab6e469dfe91959fe8#7e095fe36fc06362dedaa6ab6e469dfe91959fe8"
+source = "git+https://github.com/Ascending-AI/lash?rev=1d33a2c7c1b38d7d05542222e05da967eb3f53e5#1d33a2c7c1b38d7d05542222e05da967eb3f53e5"
 dependencies = [
  "hashbrown 0.16.1",
  "memchr",
@@ -4638,12 +4579,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simple-dns"

@@ -327,7 +327,7 @@ pub(super) fn turn_chat_payload(
                 .unwrap_or_default();
             (!text.trim().is_empty() || !tool_calls.is_empty()).then_some((text, tool_calls))
         }
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => {
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => {
             // Lash recovers checkpointed assistant prose here; raw provider
             // deltas remain activity-only and are intentionally not materialized.
             let text = output.result.assistant_output.safe_text.trim_end();

@@ -19,6 +19,7 @@ Scenario A:
 
 - `/debug/health` reports `ok: true`.
 - A throwaway `/tmp` git repo starts with a failing `python3 -m unittest -v`.
+- The Owner request follows the interactive delegation contract: spawn, finish the turn immediately, and let the terminal event trigger later reporting.
 - The Agent uses `subagents.spawn`; `/debug/processes` shows `kind: "subagent"`, `agent: "codex"`, and `model: "gpt-5.6-sol"`.
 - `/debug/broadcasts` accumulates multiple `process_upsert` events for the same process.
 - The process reaches `state: "done"`.

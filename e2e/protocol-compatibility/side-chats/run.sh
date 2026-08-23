@@ -50,10 +50,14 @@ pass_gate "Conclusion draft was not persisted in the transcript"
 CONFIRM_BEFORE="$(max_chat_id)"
 post_json debug/confirm-conclusion "$(jq -nc --arg sc "$SC" '{sc:$sc,text:"Ship it after the final check."}')" >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "owner" and .body == "Ship it after the final check." and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
-wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
+wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "open")' 10 >/dev/null
 wait_jq debug/side-chats 'all(.side_chats[]; .sc != "'"$SC"'")' 10 >/dev/null
 wait_agent_message_after "$CONFIRM_BEFORE" 'true' 30
-pass_gate "Confirmed Conclusion auto-resolved Ping $PING_ID, closed $SC, and woke the main Agent"
+pass_gate "Confirmed Conclusion preserved Ping $PING_ID, closed $SC, and woke the main Agent"
+
+post_json debug/event-action "$(jq -nc --argjson event_id "$PING_ID" '{event_id:$event_id,action:"dismiss",data:{}}')" | jq -e '.status == "done"' >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
+pass_gate "explicit Event dismiss settled Ping $PING_ID after conclusion"
 
 post_json debug/owner-message '{"client_id":"side-seed-2","body":"Please delegate another trivial repo fix, then ask me before applying the result.","ref":null}' >/dev/null
 PING2_JSON="$(wait_jq debug/pings '.pings[] | select(.status == "open" and .id != '"$PING_ID"')' 60)"

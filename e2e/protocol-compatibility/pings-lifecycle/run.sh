@@ -31,11 +31,14 @@ REPLY_JSON="$(post_json debug/owner-message "$(jq -nc --argjson ref "$ANCHOR_ID"
 REPLY_ID="$(printf '%s' "$REPLY_JSON" | jq -r '.message.id')"
 wait_jq debug/chat '.messages[] | select(.id == '"$REPLY_ID"' and .author == "owner" and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
 pass_gate "Owner reply is anchor-refed to $ANCHOR_ID"
-wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
-wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
-pass_gate "anchor-refed Owner reply auto-resolved Ping $PING_ID without an Agent resolve call"
+wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "open")' 10 >/dev/null
+pass_gate "anchor-refed Owner reply left Ping $PING_ID open"
 wait_agent_message_after "$REPLY_ID" '(.body | contains("Acknowledged"))' 30
 pass_gate "Agent acknowledged anchor-refed Ping reply"
+
+post_json debug/event-action "$(jq -nc --argjson event_id "$PING_ID" '{event_id:$event_id,action:"dismiss",data:{}}')" | jq -e '.status == "done"' >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
+pass_gate "explicit Event dismiss moved Ping $PING_ID to done"
 
 post_json debug/owner-message '{"client_id":"pings-life-delegate-2","body":"Please delegate another trivial repo fix to a Sub-agent, then ask me before applying the result.","ref":null}' >/dev/null
 PING2_JSON="$(wait_jq debug/pings '.pings[] | select(.status == "open" and .requires_response == true and .id != '"$PING_ID"')' 60)"
@@ -63,10 +66,10 @@ start_hirsel_host fresh
 post_json debug/reset '{}' >/dev/null
 pass_gate "real Agent debug reset"
 
-BODY='Use pings.send to send one requires_response Ping with name "moot-question", description "Decide whether to continue", content_md exactly "Moot question: continue?", and one quick reply with value "stop" and label "Stop". End the turn with no chat text.'
+BODY='Use pings.send to send one requires_response Ping with name "moot-question", description "Decide whether to continue", content_md exactly "Moot question: continue?", and two quick replies: value "stop" with label "Stop", and value "continue" with label "Continue". End the turn with no chat text.'
 post_json debug/owner-message "$(jq -nc --arg body "$BODY" '{client_id:"pings-life-real-send",body:$body,ref:null}')" >/dev/null
-REAL_PING_JSON="$(wait_jq debug/pings '.pings[] | select(.status == "open" and .requires_response == true and (.content | contains("Moot question: continue?")) and (.name | length > 0) and (.description | length > 0))' 180)"
-REAL_PING_ID="$(printf '%s' "$REAL_PING_JSON" | jq -r '.pings[] | select(.status == "open" and (.content | contains("Moot question: continue?"))) | .id' | tail -1)"
+REAL_PING_JSON="$(wait_jq debug/pings '.pings[] | select(.status == "open" and .requires_response == true and (.ui | tostring | contains("Moot question: continue?")) and (.name | length > 0) and (.description | length > 0))' 180)"
+REAL_PING_ID="$(printf '%s' "$REAL_PING_JSON" | jq -r '.pings[] | select(.status == "open" and (.ui | tostring | contains("Moot question: continue?"))) | .id' | tail -1)"
 REAL_PING_NAME="$(printf '%s' "$REAL_PING_JSON" | jq -r '.pings[] | select(.id == '"$REAL_PING_ID"') | .name')"
 pass_gate "real Agent sent named Ping: $REAL_PING_ID @$REAL_PING_NAME with description"
 wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .state == "idle")' 180 >/dev/null

@@ -40,7 +40,7 @@ post_json debug/reset '{}' >/dev/null
 pass_gate "debug reset"
 
 BODY="$(cat <<EOF
-Delegate this repo fix to a Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5.6-sol", and cwd "$FIX_REPO". The Sub-agent task is: run python3 -m unittest -v, fix the implementation, and leave the tests passing. After spawning, wait for the Sub-agent to finish, then report the outcome in Chat or a Ping according to your conventions.
+Delegate this repo fix to a Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5.6-sol", and cwd "$FIX_REPO". The Sub-agent task is: run python3 -m unittest -v, fix the implementation, and leave the tests passing. Finish this turn immediately after spawning; do not wait or poll. The terminal event will wake you to report the outcome in Chat or a Ping according to your conventions.
 EOF
 )"
 REQ="$(jq -nc --arg body "$BODY" '{client_id:"real-subagent-fix",body:$body,ref:null}')"

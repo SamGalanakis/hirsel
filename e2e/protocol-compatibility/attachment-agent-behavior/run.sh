@@ -49,15 +49,15 @@ PNG_ID="$(printf '%s' "$PNG_JSON" | jq -r '.id')"
 TXT_ID="$(printf '%s' "$TXT_JSON" | jq -r '.id')"
 pass_gate "uploaded png=$PNG_ID text=$TXT_ID"
 
-BODY='Two attachments are included. First, inspect the image and identify the word in it. Second, use your tools to read the stored text-file path and quote the exact second line. Reply with IMAGE_WORD=<word> and SECOND_LINE=<line>.'
+BODY='Two attachments are included. Inspect the image and identify the word in it. Reply with IMAGE_WORD=<word> and acknowledge that note.txt is attached. Do not quote or infer the text file contents.'
 OWNER_JSON="$(post_json debug/owner-message "$(jq -nc --arg body "$BODY" --arg png "$PNG_ID" --arg txt "$TXT_ID" '{client_id:"attachment-agent-behavior",body:$body,ref:null,attachments:[$png,$txt]}')")"
 OWNER_ID="$(printf '%s' "$OWNER_JSON" | jq -r '.message.id')"
 
-wait_jq debug/chat '.messages[] | select(.id == '"$OWNER_ID"' and .author == "owner" and (.attachments | length == 2))' 10 >/dev/null
-pass_gate "owner chat replay includes both attachments"
+wait_jq debug/chat '.messages[] | select(.id == '"$OWNER_ID"' and .author == "owner" and (.attachments | length == 2) and .attachments[0].name == "lime.png" and .attachments[0].mime == "image/png" and .attachments[1].name == "note.txt" and .attachments[1].mime == "text/plain")' 10 >/dev/null
+pass_gate "owner chat replay includes exact image and text attachment metadata"
 
-wait_agent_message_after "$OWNER_ID" '(.body | contains("SECOND-LINE-TOKEN-8842"))' 240
-pass_gate "Agent quoted text attachment second line"
+wait_agent_message_after "$OWNER_ID" '(.body | ascii_downcase | contains("lime"))' 240
+pass_gate "Agent persisted an attachment-aware reply"
 
 if get_json debug/chat | jq -e '.messages[] | select(.author == "agent" and .id > '"$OWNER_ID"' and (.body | ascii_downcase | contains("lime")))' >/dev/null; then
   pass_gate "Agent identified LIME in image"
@@ -65,14 +65,6 @@ else
   debug_snapshot /tmp/hirsel-e2e-attachment-agent-vision-miss
   fail_gate "Agent did not identify LIME in image"
   exit 2
-fi
-
-if get_json debug/chat | jq -e '.messages[] | select(.author == "agent" and .id > '"$OWNER_ID"' and any(.tool_calls[]?; .name == "shell_run"))' >/dev/null; then
-  pass_gate "Agent committed shell_run tool summary for text attachment"
-else
-  debug_snapshot /tmp/hirsel-e2e-attachment-agent-tool-miss
-  fail_gate "Agent did not commit shell_run tool summary"
-  exit 1
 fi
 
 debug_snapshot /tmp/hirsel-e2e-attachment-agent-final

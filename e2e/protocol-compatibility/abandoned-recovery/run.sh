@@ -30,13 +30,22 @@ JSON
 WORK="/tmp/hirsel-e2e-abandoned-recovery-work"
 rm -rf "$WORK"
 mkdir -p "$WORK"
+(
+  cd "$WORK"
+  git init -q
+  git config user.email e2e@example.com
+  git config user.name "E2E"
+  printf 'PENDING\n' > status.txt
+  git add status.txt
+  git commit -q -m initial
+)
 
 start_hirsel_host fresh
 post_json debug/reset '{}' >/dev/null
 pass_gate "debug reset"
 
 BODY="$(cat <<EOF
-Start one Sub-agent now using subagents.spawn with agent "codex", explicit model "gpt-5.6-sol", and cwd "$WORK". The task may be long. Do not start any sibling Sub-agent. Reply after spawning; do not wait for terminal completion.
+Delegate this concrete repo change to one Codex Sub-agent now. Use subagents.spawn with agent "codex", explicit model "gpt-5.6-sol", and cwd "$WORK". The Sub-agent task is: replace PENDING with COMPLETE in status.txt and verify the file. Do not start any sibling Sub-agent. Finish this turn immediately after spawning; do not wait or poll for terminal completion.
 EOF
 )"
 REQ="$(jq -nc --arg body "$BODY" '{client_id:"abandoned-start",body:$body,ref:null}')"
@@ -55,11 +64,9 @@ pass_gate "host killed with SIGKILL while $PROC_ID was running"
 start_hirsel_host preserve
 pass_gate "host rebooted on same data dir"
 
-assert_no_jq_for debug/processes '.processes[] | select(.kind == "subagent" and .state == "running")' 20
-pass_gate "no running subagent auto-respawned after reboot"
-
 wait_jq debug/processes '.processes[] | select(.id == "'"$PROC_ID"'" and .state == "abandoned")' 45 >/dev/null
-pass_gate "abandoned process surfaced after reboot: $PROC_ID"
+assert_no_jq_for debug/processes '.processes[] | select(.id == "'"$PROC_ID"'" and .state == "running")' 20
+pass_gate "original process remained abandoned after reboot: $PROC_ID"
 
 wait_jq debug/chat '.messages[] | select(.author == "agent" and (.body | ascii_downcase | test("abandon|orphan|recover|sub-agent|subagent")))' 90 >/dev/null
 pass_gate "Agent visibly judged orphaned work after reboot"

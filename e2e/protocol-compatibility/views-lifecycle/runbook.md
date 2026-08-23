@@ -43,8 +43,8 @@ normal Owner Chat message containing the structured action data.
 
 The test actor invokes the digest producer once to obtain a real Event and anchor—no standing
 schedule is created. Show another View at `ping:<event-id>`, submit its `view_event`, and require the
-resulting Owner message's `ref` to equal the Event anchor. The anchor-refed ingress must resolve the
-Event to done.
+resulting Owner message's `ref` to equal the Event anchor while the Event remains open. Then send an
+explicit `dismiss` Event action and require the Event to become done.
 
 ## Gate 5: reconnect replay
 
@@ -62,7 +62,7 @@ Ask the Agent to call `views.clear` exactly once for the canvas instance. Requir
 - Gate 1: show → resolved `/debug/views` row + `view_upsert`.
 - Gate 2: update in place → changed spec + second `view_upsert`.
 - Gate 3: canvas `view_event` → persisted Owner interaction.
-- Gate 4: `ping:<id>` interaction → anchor-refed Owner ingress + resolved Event.
+- Gate 4: `ping:<id>` interaction → anchor-refed Owner ingress + open Event, then explicit settlement.
 - Gate 5: active Views replay exactly in fresh `hello_ok.views`.
 - Gate 6: clear → `view_removed` + dropped active row.
 

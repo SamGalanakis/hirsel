@@ -82,8 +82,8 @@ names in scenario titles and descriptions are wire spellings only.
 - `attachment-agent-behavior` - real Codex Agent behavior over image/text attachments.
 - `abandoned-recovery` - ADR-0004 abandoned Sub-agent recovery after SIGKILL/reboot.
 - `compaction` - Agent-initiated context compaction via `continue_as` and post-compaction recall.
-- `delegation-loop` - fake-driver delegation, terminal event, Ping question, Quick Reply, auto-resolution, and acknowledgement.
-- `pings-lifecycle` - named/described Pings, reply auto-resolution, neutral mentions, and explicit Owner/Agent resolution.
+- `delegation-loop` - fake-driver delegation, terminal event, lifecycle-neutral Ping question and Quick Reply, acknowledgement, and explicit settlement.
+- `pings-lifecycle` - named/described Pings, reply neutrality, neutral mentions, and explicit Owner/Agent resolution.
 - `ping-read` - Ping read-state round trip and restart persistence.
 - `monitors` - monitor creation, process visibility, wake, and restart survival.
 - `multi-turn-memory` - real Codex conversation recall before and after host restart.

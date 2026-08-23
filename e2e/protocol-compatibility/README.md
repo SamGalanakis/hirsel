@@ -31,9 +31,9 @@ top-level `e2e/<scenario>` locations.
 ## Historical Ping, Event, View, and side-session contracts
 
 - [`delegation-loop`](delegation-loop/runbook.md) — fake-driver delegation,
-  terminal event, Ping/Quick Reply, auto-resolution, and acknowledgement.
+  terminal event, lifecycle-neutral Ping/Quick Reply, acknowledgement, and explicit settlement.
 - [`pings-lifecycle`](pings-lifecycle/runbook.md) — named Pings, reply
-  auto-resolution, neutral mentions, and explicit resolution.
+  neutrality, neutral mentions, and explicit resolution.
 - [`ping-read`](ping-read/runbook.md) — read-state round trip and restart
   persistence.
 - [`side-chats`](side-chats/runbook.md) — retained scoped-session and

@@ -129,9 +129,7 @@ Confirm with OWNER-EDITED text (not the draft verbatim — the edit surviving to
 CONFIRM_BEFORE="$(max_chat_id)"
 post_json debug/confirm-conclusion '{"sc":"'"$SC"'","text":"Ship it after the final check."}' >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "owner" and .body == "Ship it after the final check." and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
-wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
-# Post-cutover the host broadcasts event_upsert (events generalize pings; same id space).
-wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
+wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "open")' 10 >/dev/null
 wait_jq debug/side-chats 'all(.side_chats[]; .sc != "'"$SC"'")' 10 >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "side_chat_closed" and .sc == "'"$SC"'")' 10 >/dev/null
 ```
@@ -142,6 +140,13 @@ The confirmed conclusion goes through the normal owner-message ingress, so the m
 
 ```bash
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > '"$CONFIRM_BEFORE"')' 30 >/dev/null
+```
+
+The Owner then explicitly settles the Task:
+
+```bash
+post_json debug/event-action '{"event_id":'"$PING_ID"',"action":"dismiss","data":{}}' | jq -e '.status == "done"' >/dev/null
+wait_jq debug/broadcasts '.events[] | select(.type == "event_upsert" and .event.id == '"$PING_ID"' and .event.status == "done")' 10 >/dev/null
 ```
 
 ### Gate 7: resolve-the-Ping-mid-side-chat, then conclude — idempotent
@@ -159,7 +164,7 @@ wait_jq debug/side-chats '.side_chats[] | select(.sc == "'"$SC2"'") | .messages 
 post_json debug/resolve-ping '{"ping_id":'"$PING2_ID"'}' | jq -e '.status == "done"' >/dev/null
 wait_jq debug/pings '.pings[] | select(.id == '"$PING2_ID"' and .status == "done")' 10 >/dev/null
 
-# Conclude + confirm must still work; reply auto-resolution is a no-op for the already-done Ping.
+# Conclude + confirm must still work and preserve the already-done Ping.
 post_json debug/conclude '{"sc":"'"$SC2"'"}' | jq -e '.text | length > 0'
 post_json debug/confirm-conclusion '{"sc":"'"$SC2"'","text":"Already done, still concluded."}' | jq -e '.ok == true'
 wait_jq debug/chat '.messages[] | select(.author == "owner" and .body == "Already done, still concluded." and .ref == '"$ANCHOR2_ID"')' 10 >/dev/null
@@ -213,7 +218,7 @@ wait_jq debug/broadcasts '.events[] | select(.type == "agent_activity" and .sc =
 test "$(max_chat_id)" = "$MAIN_BEFORE"
 ```
 
-### Gate B3: conclude → draft → confirm edited → main-chat reply + resolution + teardown + reaction
+### Gate B3: conclude → draft → confirm edited → open Task + teardown + reaction
 
 ```bash
 post_json debug/side-message '{"sc":"'"$SC"'","body":"Recommend pdf, monthly cadence."}' >/dev/null
@@ -223,13 +228,14 @@ test -n "$DRAFT"
 CONFIRM_BEFORE="$(max_chat_id)"
 post_json debug/confirm-conclusion "$(jq -nc --arg sc "$SC" --arg text "EDITED: $DRAFT" '{sc:$sc,text:$text}')" >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "owner" and (.body | startswith("EDITED: ")) and .ref == '"$ANCHOR_ID"')' 10 >/dev/null
-wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "done")' 10 >/dev/null
+wait_jq debug/pings '.pings[] | select(.id == '"$PING_ID"' and .status == "open")' 10 >/dev/null
 wait_jq debug/side-chats 'all(.side_chats[]; .sc != "'"$SC"'")' 10 >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "side_chat_closed" and .sc == "'"$SC"'")' 10 >/dev/null
 wait_jq debug/chat '.messages[] | select(.author == "agent" and .id > '"$CONFIRM_BEFORE"')' 120 >/dev/null
 ```
 
 The final agent message is the main Agent reacting to the conclusion; whether its wording references the conclusion content is a model-behavior observation — report it.
+Settle the Task afterward with an explicit `event_action` as in Scenario A.
 
 ### Gate B4: resolve-mid-side-chat idempotency (mechanical — must pass)
 

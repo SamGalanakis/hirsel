@@ -25,7 +25,7 @@ wait_agent_message_after "$before" 'true' 180
 pass_gate "pre-compaction fact turn completed"
 
 before="$(max_chat_id)"
-post_json debug/owner-message "$(jq -nc --arg body 'Compact your context now using control.continue_as. Your seed must preserve GREEN-742. Then confirm exactly COMPACTED.' '{client_id:"compact-now",body:$body,ref:null}')" >/dev/null
+post_json debug/owner-message "$(jq -nc --arg body 'Compact your context now. Your next action must be a TypeScript code cell whose final meaningful statement is exactly: await control.continue_as({ task: "Reply exactly COMPACTED, then wait for the next Owner message.", seed: { fact: "GREEN-742" } }); Do not reply COMPACTED from the current frame and do not call finish after continue_as.' '{client_id:"compact-now",body:$body,ref:null}')" >/dev/null
 wait_jq debug/broadcasts '.events[] | select(.type == "turn_event" and .event.kind == "tool_done" and (.event.name | test("continue_as|continue|control|compact"; "i")) and .event.ok == true)' 180 >/dev/null
 pass_gate "continue_as/control tool_done visible in broadcasts"
 

@@ -33,6 +33,7 @@ const PROMPTS: PromptSnapshot = {
       },
     ],
     prompt: { text: "Bundled fork prompt", is_default: true },
+    provider_id: "codex",
   },
 };
 
@@ -155,7 +156,7 @@ describe("Settings → Prompt", () => {
     fireEvent.change(getByLabelText("Fork agent model"), {
       target: { value: "gpt-5.6-sol" },
     });
-    expect(setForkModel).toHaveBeenCalledWith("gpt-5.6-sol", "medium");
+    expect(setForkModel).toHaveBeenCalledWith("codex", "gpt-5.6-sol", "medium");
 
     // The full authoritative frame settles all fork controls.
     store.dispatch({
@@ -172,7 +173,7 @@ describe("Settings → Prompt", () => {
     fireEvent.change(getByLabelText("Fork agent reasoning variant"), {
       target: { value: "high" },
     });
-    expect(setForkModel).toHaveBeenLastCalledWith("gpt-5.6-sol", "high");
+    expect(setForkModel).toHaveBeenLastCalledWith("codex", "gpt-5.6-sol", "high");
 
     store.dispatch({
       type: "prompts_changed",

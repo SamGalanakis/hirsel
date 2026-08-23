@@ -360,8 +360,8 @@ class HirselWsClient {
    * as the socket blips still lands once reconnected; the UI shows a brief
    * pending state and settles on the `model_changed` broadcast (no permanent
    * optimistic divergence — the store is only written by the broadcast). */
-  setModel(modelId: string, variant: string): void {
-    this.enqueue({ type: "set_model", model_id: modelId, variant });
+  setModel(providerId: string, modelId: string, variant: string): void {
+    this.enqueue({ type: "set_model", provider_id: providerId, model_id: modelId, variant });
   }
 
   /** Update one sub-agent catalog model's full row state (master enabled flag +
@@ -392,8 +392,13 @@ class HirselWsClient {
   }
 
   /** Select the incoming-event fork's model + reasoning variant. */
-  setForkModel(modelId: string, variant: string): void {
-    this.enqueue({ type: "set_fork_model", model_id: modelId, variant });
+  setForkModel(providerId: string, modelId: string, variant: string): void {
+    this.enqueue({
+      type: "set_fork_model",
+      provider_id: providerId,
+      model_id: modelId,
+      variant,
+    });
   }
 
   // ---- Provider roster ----

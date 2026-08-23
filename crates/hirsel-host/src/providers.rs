@@ -19,14 +19,14 @@ use std::path::PathBuf;
 use anyhow::anyhow;
 use hirsel_proto::{
     AgentSlot, DetectionStatus, MaskedSecret, ModelSelection, ProviderInstance, ProviderKind,
-    ProviderRoster,
+    ProviderRoster, ProviderSelection,
 };
 
 use crate::{
     boot_provider::BootProvider,
     config::ProviderMode,
     host_config::{ConfigStore, EnvBootstrap, StoredProvider},
-    provider_detect,
+    model_selection, provider_detect,
 };
 
 /// The built-in Codex instance's id — reserved, never stored, never removed.
@@ -288,6 +288,7 @@ impl ProviderRosterState {
             default_model: CODEX_DEFAULT_MODEL.to_string(),
             detection: Some(self.detect(ProviderKind::Codex).await),
             agent_selectable: true,
+            selection: Some(model_selection::codex_provider_selection()),
             removable: false,
         }
     }
@@ -302,6 +303,7 @@ impl ProviderRosterState {
             default_model: String::new(),
             detection: Some(self.detect(ProviderKind::Claude).await),
             agent_selectable: false,
+            selection: None,
             removable: false,
         }
     }
@@ -371,6 +373,7 @@ fn instance_from_stored(stored: &StoredProvider) -> ProviderInstance {
         default_model: stored.default_model.clone(),
         detection: None,
         agent_selectable: true,
+        selection: Some(ProviderSelection::FreeText),
         removable: true,
     }
 }
@@ -627,6 +630,50 @@ mod tests {
         );
         assert!(state.redetect("nope").is_err());
         assert!(state.redetect(CLAUDE_ID).is_ok());
+    }
+
+    #[tokio::test]
+    async fn roster_entries_carry_provider_scoped_model_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = roster(&dir, ProviderMode::Codex).await;
+        state
+            .add(
+                "router",
+                "Router",
+                "https://example.invalid/v1",
+                FAKE_KEY,
+                "google/gemini-3.7-flash",
+            )
+            .await
+            .unwrap();
+        let snapshot = state.snapshot().await;
+
+        let codex = instance(&snapshot, CODEX_ID);
+        let Some(ProviderSelection::Curated { main, fork }) = codex.selection.as_ref() else {
+            panic!("Codex must carry curated model selection");
+        };
+        assert_eq!(
+            main.iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.6-sol"]
+        );
+        assert_eq!(
+            fork.iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.6-luna", "gpt-5.6-sol"]
+        );
+        assert!(
+            main.iter()
+                .chain(fork)
+                .all(|model| !model.id.contains("gemini"))
+        );
+        assert_eq!(
+            instance(&snapshot, "router").selection,
+            Some(ProviderSelection::FreeText)
+        );
+        assert_eq!(instance(&snapshot, CLAUDE_ID).selection, None);
     }
 
     #[tokio::test]

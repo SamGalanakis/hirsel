@@ -226,14 +226,17 @@ async fn mentioning_a_ping_never_resolves_it() {
 }
 
 #[tokio::test]
-async fn set_model_changes_the_next_turn_model_spec() {
+async fn set_agent_model_changes_the_next_turn_model_spec() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = test_config(dir.path());
     config.provider = ProviderMode::Codex;
     config.model = "gpt-5.6-sol".to_string();
     let state = build_state(config).await.unwrap();
 
-    let selected = state.set_model("gpt-5.6-sol", "high").await.unwrap();
+    let selected = state
+        .set_agent_model("codex", "gpt-5.6-sol", "high")
+        .await
+        .unwrap();
     let spec = state
         .agent
         .next_turn_model_spec()
@@ -251,7 +254,7 @@ async fn set_model_changes_the_next_turn_model_spec() {
 }
 
 #[tokio::test]
-async fn set_model_rejects_unknown_models_and_variants() {
+async fn set_agent_model_rejects_cross_provider_models_and_variants() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = test_config(dir.path());
     config.provider = ProviderMode::Codex;
@@ -260,9 +263,36 @@ async fn set_model_rejects_unknown_models_and_variants() {
 
     // Luna belongs only to the fork registry. Neither it nor retired models or
     // unknown variants may dislodge the resident Agent's Sol default.
-    assert!(state.set_model("gpt-5.6-luna", "max").await.is_err());
-    assert!(state.set_model("gpt-5.5", "high").await.is_err());
-    assert!(state.set_model("gpt-5.6-sol", "impossible").await.is_err());
+    assert!(
+        state
+            .set_agent_model("codex", "gpt-5.6-luna", "max")
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .set_agent_model("codex", "google/gemini-3.7-flash", "default")
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .set_agent_model("codex", "gpt-5.5", "high")
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .set_agent_model("codex", "gpt-5.6-sol", "impossible")
+            .await
+            .is_err()
+    );
+    let error = state
+        .set_agent_model("openrouter", "gpt-5.6-sol", "high")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("configured for `codex`"), "{error}");
     let snapshot = state.model_snapshot().unwrap();
     assert_eq!(
         snapshot.current,
@@ -1307,7 +1337,10 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
 
     // An effort chosen now persists and is reported, while the session the host
     // actually booted keeps running OpenRouter's own spec until a restart.
-    let selected = state.set_model("gpt-5.6-sol", "xhigh").await.unwrap();
+    let selected = state
+        .set_agent_model("codex", "gpt-5.6-sol", "xhigh")
+        .await
+        .unwrap();
     assert_eq!(selected.variant, "xhigh");
     assert_eq!(state.model_snapshot().unwrap().current.variant, "xhigh");
     let spec = state
@@ -1383,6 +1416,18 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     assert_eq!(fork.provider_id.as_deref(), Some("codex"));
     assert_eq!(fork.current.id, "gpt-5.6-luna");
     assert_eq!(fork.current.variant, "max");
+    let error = state
+        .set_fork_model("router", "some/model", "default")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("configured for `codex`"), "{error}");
+    assert!(
+        state
+            .set_fork_model("codex", "google/gemini-3.7-flash", "default")
+            .await
+            .is_err()
+    );
 }
 
 /// A `hirsel.toml` naming a stored instance as the main Agent's provider, with

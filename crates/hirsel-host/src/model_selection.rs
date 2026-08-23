@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use hirsel_proto::{AgentSlot, AvailableModel, ModelSelection, ModelSnapshot};
+use hirsel_proto::{AgentSlot, AvailableModel, ModelSelection, ModelSnapshot, ProviderSelection};
 use lash::provider::{ModelCapability, ReasoningCapability, ReasoningEncoding, ReasoningSelection};
 
 use crate::{config::ProviderMode, host_config::ConfigStore, providers::ProviderRosterState};
@@ -373,6 +373,15 @@ pub fn available_models(provider: ProviderMode) -> Vec<AvailableModel> {
 
 pub fn available_fork_models(provider: ProviderMode) -> Vec<AvailableModel> {
     available_from_registry(fork_registry(provider))
+}
+
+/// The complete model-selection surface broadcast for the built-in Codex
+/// provider. OpenAI-compatible providers use `FreeText` directly in the roster.
+pub fn codex_provider_selection() -> ProviderSelection {
+    ProviderSelection::Curated {
+        main: available_models(ProviderMode::Codex),
+        fork: available_fork_models(ProviderMode::Codex),
+    }
 }
 
 fn available_from_registry(entries: &[RegistryEntry]) -> Vec<AvailableModel> {

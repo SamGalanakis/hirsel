@@ -188,6 +188,7 @@ struct CreateMonitorRequest {
 
 #[derive(Debug, Deserialize)]
 struct SetModelRequest {
+    provider_id: String,
     model_id: String,
     variant: String,
 }
@@ -722,7 +723,9 @@ async fn set_model(
     Json(request): Json<SetModelRequest>,
 ) -> Result<Json<ModelSelection>, DebugError> {
     Ok(Json(
-        state.set_model(&request.model_id, &request.variant).await?,
+        state
+            .set_agent_model(&request.provider_id, &request.model_id, &request.variant)
+            .await?,
     ))
 }
 

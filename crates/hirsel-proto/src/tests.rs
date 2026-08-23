@@ -596,6 +596,15 @@ fn hello_ok_round_trips_chat_and_pings() {
                     detail: None,
                 }),
                 agent_selectable: true,
+                selection: Some(ProviderSelection::Curated {
+                    main: vec![AvailableModel {
+                        id: "gpt-5.6-sol".to_string(),
+                        label: "GPT-5.6 Sol".to_string(),
+                        variants: vec!["low".to_string(), "high".to_string()],
+                        default_variant: "low".to_string(),
+                    }],
+                    fork: Vec::new(),
+                }),
                 removable: false,
             }],
             booted_provider_id: Some("codex".to_string()),
@@ -889,6 +898,7 @@ fn hello_ok_defaults_side_chats() {
 #[test]
 fn model_selection_frames_use_snake_case_protocol_names() {
     let command = ClientToHost::SetModel {
+        provider_id: "codex".to_string(),
         model_id: "gpt-5.6-sol".to_string(),
         variant: "high".to_string(),
     };
@@ -896,8 +906,24 @@ fn model_selection_frames_use_snake_case_protocol_names() {
         serde_json::to_value(&command).unwrap(),
         json!({
             "type": "set_model",
+            "provider_id": "codex",
             "model_id": "gpt-5.6-sol",
             "variant": "high"
+        })
+    );
+
+    let fork_command = ClientToHost::SetForkModel {
+        provider_id: "codex".to_string(),
+        model_id: "gpt-5.6-luna".to_string(),
+        variant: "max".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&fork_command).unwrap(),
+        json!({
+            "type": "set_fork_model",
+            "provider_id": "codex",
+            "model_id": "gpt-5.6-luna",
+            "variant": "max"
         })
     );
 
@@ -1098,6 +1124,23 @@ fn provider_kinds_serialize_to_the_documented_literals() {
 }
 
 #[test]
+fn provider_selection_is_tagged_and_optional_for_older_hosts() {
+    assert_eq!(
+        serde_json::to_value(ProviderSelection::FreeText).unwrap(),
+        json!({ "mode": "free_text" })
+    );
+    let older: ProviderInstance = serde_json::from_value(json!({
+        "id": "codex",
+        "kind": "codex",
+        "label": "Codex",
+        "agent_selectable": true,
+        "removable": false
+    }))
+    .unwrap();
+    assert_eq!(older.selection, None);
+}
+
+#[test]
 fn provider_ops_use_snake_case_protocol_names() {
     assert_eq!(
         serde_json::to_value(ClientToHost::SetAgentProvider {
@@ -1180,6 +1223,7 @@ fn providers_changed_round_trips_and_masks_stay_masked() {
                     detail: Some("no credentials file".to_string()),
                 }),
                 agent_selectable: false,
+                selection: None,
                 removable: false,
             },
             ProviderInstance {
@@ -1194,6 +1238,7 @@ fn providers_changed_round_trips_and_masks_stay_masked() {
                 default_model: "google/gemini-3.7-flash".to_string(),
                 detection: None,
                 agent_selectable: true,
+                selection: Some(ProviderSelection::FreeText),
                 removable: true,
             },
         ],

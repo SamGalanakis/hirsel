@@ -29,6 +29,7 @@ pub use models::{
 pub use process::{ProcessInfo, ProcessKind, ProcessState, SideChatSummary};
 pub use providers::{
     DetectionStatus, MaskedSecret, ProviderInstance, ProviderKind, ProviderRoster,
+    ProviderSelection,
 };
 pub use turn::{AgentActivityState, TurnEvent, TurnEventKind};
 pub use view::ViewInstance;

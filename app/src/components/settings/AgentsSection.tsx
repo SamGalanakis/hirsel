@@ -12,6 +12,7 @@ import { getClient } from "../../ws/client";
 import {
   AgentModelRows,
   AgentProviderRow,
+  agentModelView,
   createAgentPending,
   PromptEditor,
   providerLabel,
@@ -34,8 +35,23 @@ function MainAgent() {
   const snapshot = () => state.model;
   const current = () => snapshot()?.current;
   const providerId = () => snapshot()?.provider_id;
-  const placeholder = () =>
-    state.providers?.instances.find((instance) => instance.id === providerId())?.default_model;
+  const [selectedProviderId, setSelectedProviderId] = createSignal(providerId());
+  createEffect(() => {
+    const stored = providerId();
+    if (!pending.isPending("main-provider")) setSelectedProviderId(stored);
+  });
+  const modelView = () => {
+    const stored = current();
+    if (!stored) return null;
+    return agentModelView(
+      "main",
+      selectedProviderId(),
+      providerId(),
+      stored,
+      snapshot()?.available ?? [],
+      snapshot()?.free_text_model === true,
+    );
+  };
 
   // Which selection we're awaiting, so a settled control is settled by the
   // truth rather than by the send. Bounded: a matching broadcast, an error
@@ -63,8 +79,10 @@ function MainAgent() {
   });
 
   function select(selection: ModelSelection) {
+    const selectedProvider = selectedProviderId();
+    if (!selectedProvider) return;
     setAwaited(selection);
-    getClient()?.setModel(selection.id, selection.variant);
+    getClient()?.setModel(selectedProvider, selection.id, selection.variant);
   }
 
   /** The running session boots on one provider and stays there. When the stored
@@ -85,7 +103,9 @@ function MainAgent() {
               slot="main"
               name="Main agent"
               providerId={providerId()}
+              selectedProviderId={selectedProviderId()}
               pending={pending}
+              onProviderChange={setSelectedProviderId}
             />
             <Show when={bootedElsewhere()}>
               {(booted) => (
@@ -96,21 +116,23 @@ function MainAgent() {
             </Show>
           </div>
         </Show>
-        <Show when={current()}>
-          {(selection) => (
+        <Show when={modelView()}>
+          {(view) => (
             <div>
               <div class="divide-y divide-border">
                 <AgentModelRows
                   name="Main agent"
-                  freeText={snapshot()?.free_text_model === true}
-                  current={selection()}
-                  available={snapshot()?.available ?? []}
-                  placeholder={placeholder()}
+                  freeText={view().freeText}
+                  current={view().current}
+                  available={view().available}
+                  placeholder={view().placeholder}
                   pending={pending}
                   modelKey="model"
                   variantKey="variant"
                   onSelect={select}
-                  onFreeText={(modelId) => select({ id: modelId, variant: selection().variant })}
+                  onFreeText={(modelId) =>
+                    select({ id: modelId, variant: view().current.variant })
+                  }
                 />
               </div>
               {/* One caption, honest about which clock this edit is on: the

@@ -46,7 +46,7 @@ Run scenarios only with `HIRSEL_DEBUG=1`; debug routes must be bound on `127.0.0
 - `POST /debug/cancel-turn` cooperatively interrupts the active Agent turn and broadcasts `agent_activity` idle.
 - `POST /debug/cancel-queued { "client_id": "..." }` cancels an unclaimed queued Owner message, deletes its Chat row, and broadcasts `msg_removed`; if it was already claimed, the endpoint returns an error.
 - `POST /debug/create-monitor { "cmd": "...", "every_secs": 30, "wake_on": "changed" | "exit_zero" | "exit_nonzero" | "regex", "pattern": "...", "label": "..." }` creates a persisted monitor for deterministic monitor runbooks.
-- `POST /debug/set-model { "model_id": "...", "variant": "..." }` validates, persists, and selects the main-Agent model.
+- `POST /debug/set-model { "provider_id": "...", "model_id": "...", "variant": "..." }` validates, persists, and selects the main-Agent model.
 - `GET /debug/subagent-models` returns the Sub-agent model catalog; `POST` with `{ "provider": "...", "model_id": "...", "enabled": bool, "default_variant": "..." }` updates one catalog row.
 - `POST /debug/show-view { "template_id": "..." | null, "spec": {...} | null, "params": {...} | null, "placement": "canvas" | "chat" | "ping:<id>" }` creates an active View and returns its resolved instance.
 - `GET /debug/views` returns active View instances.

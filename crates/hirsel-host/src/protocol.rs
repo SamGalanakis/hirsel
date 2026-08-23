@@ -361,8 +361,14 @@ where
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
         }
-        ClientToHost::SetModel { model_id, variant } => {
-            state.set_model(&model_id, &variant).await?;
+        ClientToHost::SetModel {
+            provider_id,
+            model_id,
+            variant,
+        } => {
+            state
+                .set_agent_model(&provider_id, &model_id, &variant)
+                .await?;
         }
         ClientToHost::SetSubagentModel {
             provider,
@@ -380,8 +386,14 @@ where
         ClientToHost::SetForkPrompt { text } => {
             state.set_fork_prompt(&text).await?;
         }
-        ClientToHost::SetForkModel { model_id, variant } => {
-            state.set_fork_model(&model_id, &variant).await?;
+        ClientToHost::SetForkModel {
+            provider_id,
+            model_id,
+            variant,
+        } => {
+            state
+                .set_fork_model(&provider_id, &model_id, &variant)
+                .await?;
         }
         ClientToHost::SetAgentProvider { agent, provider_id } => {
             state.set_agent_provider(agent, &provider_id).await?;

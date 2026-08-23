@@ -290,6 +290,11 @@ export interface SubagentModelCatalog {
  * instance is an OpenAI-compatible endpoint with a base URL and an API key. */
 export type ProviderKind = "codex" | "claude" | "openai_compatible";
 
+/** The model controls an agent-selectable provider offers. */
+export type ProviderSelection =
+  | { mode: "curated"; main: AvailableModel[]; fork: AvailableModel[] }
+  | { mode: "free_text" };
+
 /** A stored secret as the wire is allowed to describe it. The full key never
  * leaves the host — presence and a short tail are the whole vocabulary. */
 export interface MaskedSecret {
@@ -316,6 +321,9 @@ export interface ProviderInstance {
   detection?: DetectionStatus;
   /** Whether the main Agent and the fork may select it. Claude is false. */
   agent_selectable: boolean;
+  /** The provider-specific model controls. Absent on older hosts and on
+   * providers that resident agents cannot select. */
+  selection?: ProviderSelection;
   /** Built-in instances (codex, claude) are configured, never removed. */
   removable: boolean;
 }
@@ -462,6 +470,7 @@ export interface ClearFinishedEventsMsg {
  * broadcasts the truth back as `model_changed`. */
 export interface SetModelMsg {
   type: "set_model";
+  provider_id: string;
   model_id: string;
   variant: string;
 }
@@ -493,6 +502,7 @@ export interface SetForkPromptMsg {
 /** Select the fork model from the active provider's registry. */
 export interface SetForkModelMsg {
   type: "set_fork_model";
+  provider_id: string;
   model_id: string;
   variant: string;
 }

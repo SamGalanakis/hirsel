@@ -1,13 +1,14 @@
 // Settings → Agents → Fork agent: the provider, model and prompt of the
 // ephemeral fork spawned once per incoming event (ADR-0015). Stored
 // configuration — the running Agent is untouched by any of it.
-import { createEffect, type JSX } from "solid-js";
+import { createEffect, createSignal, type JSX } from "solid-js";
 import type { ForkAgentConfig } from "../../protocol";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import {
   AgentModelRows,
   AgentProviderRow,
+  agentModelView,
   createAgentPending,
   PromptEditor,
 } from "./agent-config";
@@ -17,8 +18,20 @@ export function ForkAgentSection(props: { fork: () => ForkAgentConfig }): JSX.El
   const pending = createAgentPending();
   const current = () => props.fork().current;
   const providerId = () => props.fork().provider_id;
-  const placeholder = () =>
-    state.providers?.instances.find((instance) => instance.id === providerId())?.default_model;
+  const [selectedProviderId, setSelectedProviderId] = createSignal(providerId());
+  createEffect(() => {
+    const stored = providerId();
+    if (!pending.isPending("fork-provider")) setSelectedProviderId(stored);
+  });
+  const modelView = () =>
+    agentModelView(
+      "fork",
+      selectedProviderId(),
+      providerId(),
+      current(),
+      props.fork().available,
+      props.fork().free_text_model === true,
+    );
 
   // Every fork control settles from the authoritative prompts frame. Equal
   // snapshots are still acknowledgements, so the revision counter is part of
@@ -43,18 +56,31 @@ export function ForkAgentSection(props: { fork: () => ForkAgentConfig }): JSX.El
         the fork runtime and do not affect the current Agent.
       </p>
       <Group class="divide-y divide-border">
-        <AgentProviderRow slot="fork" name="Fork agent" providerId={providerId()} pending={pending} />
+        <AgentProviderRow
+          slot="fork"
+          name="Fork agent"
+          providerId={providerId()}
+          selectedProviderId={selectedProviderId()}
+          pending={pending}
+          onProviderChange={setSelectedProviderId}
+        />
         <AgentModelRows
           name="Fork agent"
-          freeText={props.fork().free_text_model === true}
-          current={current()}
-          available={props.fork().available}
-          placeholder={placeholder()}
+          freeText={modelView().freeText}
+          current={modelView().current}
+          available={modelView().available}
+          placeholder={modelView().placeholder}
           pending={pending}
           modelKey="fork-model"
           variantKey="fork-variant"
-          onSelect={(selection) => getClient()?.setForkModel(selection.id, selection.variant)}
-          onFreeText={(modelId) => getClient()?.setForkModel(modelId, current().variant)}
+          onSelect={(selection) => {
+            const provider = selectedProviderId();
+            if (provider) getClient()?.setForkModel(provider, selection.id, selection.variant);
+          }}
+          onFreeText={(modelId) => {
+            const provider = selectedProviderId();
+            if (provider) getClient()?.setForkModel(provider, modelId, modelView().current.variant);
+          }}
         />
         <PromptEditor
           label="Fork agent prompt"

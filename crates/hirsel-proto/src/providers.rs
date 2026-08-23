@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::AvailableModel;
+
 /// How a provider instance authenticates, and what shape its model choice takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +49,22 @@ pub struct DetectionStatus {
     pub detail: Option<String>,
 }
 
+/// How a provider shapes model selection for each resident-agent slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum ProviderSelection {
+    /// A closed registry whose model ids and reasoning variants the host
+    /// validates. Main and fork have deliberately distinct registries.
+    Curated {
+        #[serde(default)]
+        main: Vec<AvailableModel>,
+        #[serde(default)]
+        fork: Vec<AvailableModel>,
+    },
+    /// An OpenAI-compatible endpoint with an open model-id namespace.
+    FreeText,
+}
+
 /// One configured provider instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderInstance {
@@ -64,6 +82,10 @@ pub struct ProviderInstance {
     pub detection: Option<DetectionStatus>,
     /// Whether the main Agent and the fork may select it. Claude is `false`.
     pub agent_selectable: bool,
+    /// The model controls this provider offers. Absent on older hosts and on
+    /// providers that resident agents cannot select.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ProviderSelection>,
     /// Built-in instances (`codex`, `claude`) are configured, never removed.
     pub removable: bool,
 }

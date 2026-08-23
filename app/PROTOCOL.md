@@ -447,6 +447,25 @@ on, and any accepted roster edit broadcasts the whole thing back:
           "account_hint": "owner@example.com"
         },
         "agent_selectable": true,
+        "selection": {
+          "mode": "curated",
+          "main": [
+            {
+              "id": "gpt-5.6-sol",
+              "label": "GPT-5.6 Sol",
+              "variants": ["low", "medium", "high", "xhigh", "max"],
+              "default_variant": "medium"
+            }
+          ],
+          "fork": [
+            {
+              "id": "gpt-5.6-luna",
+              "label": "GPT-5.6 Luna",
+              "variants": ["low", "medium", "high", "xhigh", "max"],
+              "default_variant": "max"
+            }
+          ]
+        },
         "removable": false
       },
       {
@@ -457,6 +476,7 @@ on, and any accepted roster edit broadcasts the whole thing back:
         "api_key": { "present": true, "tail": "9f2c" },
         "default_model": "z-ai/glm-5",
         "agent_selectable": true,
+        "selection": { "mode": "free_text" },
         "removable": true
       }
     ],
@@ -476,6 +496,13 @@ OpenAI-compatible endpoint the Owner configures.
 Claude is `false` (ADR-0015: the Claude driver is a Sub-agent lane only), so it
 never appears in the main-agent or fork provider select. `removable` is `false`
 for the two built-ins.
+
+`selection` lets Settings reshape model controls from the locally selected
+provider without waiting for a Host round trip. `curated` carries separate
+`main` and `fork` registries because Codex deliberately offers Sol only to the
+main Agent and Luna plus Sol to the fork. `free_text` means the provider has an
+open model-id namespace and offers no host-owned Reasoning select. The field is
+absent on older hosts and on Claude, which resident agents cannot select.
 
 `booted_provider_id` is the provider the resident main-agent session actually
 booted on: the stored `[model].provider`, when the Host could honour it, and
@@ -514,9 +541,22 @@ empty omits `api_key` entirely. Instance ids match
 `^[a-z0-9][a-z0-9_-]{0,31}$`; `codex` and `claude` are reserved. Rejections come
 back as `error { detail }` and broadcast nothing.
 
+Model writes name the provider whose controls produced them:
+
+```text
+set_model      { provider_id, model_id, variant }
+set_fork_model { provider_id, model_id, variant }
+```
+
+The Host serializes these with provider changes and rejects a frame whose
+`provider_id` is no longer the configured provider for that slot. It then
+validates Codex ids and variants against the slot's curated registry, while an
+OpenAI-compatible provider accepts any non-empty, whitespace-trimmed model id.
+
 **Older-client and older-host tolerance.** `providers` is optional on
-`hello_ok`, and `provider_id` / `free_text_model` are optional on the model and
-fork snapshots: a host without them leaves the client with no roster (the
+`hello_ok`, `provider_id` / `free_text_model` are optional on the model and
+fork snapshots, and `selection` is optional on each provider instance. A host
+without them leaves the client with no roster (the
 Providers tab says so, and the agent provider controls do not render), and a
 client without them ignores the extra fields. A host that sends
 `providers_changed` to a client that does not know the frame is likewise

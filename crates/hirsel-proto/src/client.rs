@@ -107,6 +107,7 @@ pub enum ClientToHost {
         client_id: String,
     },
     SetModel {
+        provider_id: String,
         model_id: String,
         variant: String,
     },
@@ -125,9 +126,10 @@ pub enum ClientToHost {
     SetForkPrompt {
         text: String,
     },
-    /// Select the fork agent's model + reasoning variant from the booted
-    /// provider's registry.
+    /// Select the fork agent's model + reasoning variant for the named
+    /// provider. Naming it makes concurrent provider/model changes race-free.
     SetForkModel {
+        provider_id: String,
         model_id: String,
         variant: String,
     },

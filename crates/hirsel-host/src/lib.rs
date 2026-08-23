@@ -151,17 +151,19 @@ impl AppState {
         self.agent.model_snapshot()
     }
 
-    /// Select the main Agent's model + variant.
-    ///
-    /// This takes the model lock and `set_agent_provider` takes the provider
-    /// lock, so a concurrent pair can persist a selection validated against a
-    /// provider the other op has since moved off. Benign by construction: the
-    /// stored `[model]` section is re-validated against the stored provider on
-    /// every read (`ModelSelectionState::selection_in`), so the loser of that
-    /// race degrades to the new provider's default instead of being served as
-    /// an id that provider does not have.
-    pub async fn set_model(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
-        let _guard = self.model_change_lock.lock().await;
+    /// Select the main Agent's model + variant for its named provider.
+    pub async fn set_agent_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        variant: &str,
+    ) -> anyhow::Result<ModelSelection> {
+        // Provider changes and model changes share the provider lock. The frame
+        // names the provider it was rendered for, so a delayed model frame can
+        // never be validated against a newer provider choice.
+        let _provider_guard = self.provider_change_lock.lock().await;
+        let _model_guard = self.model_change_lock.lock().await;
+        self.ensure_selection_provider(AgentSlot::Main, provider_id)?;
         let previous = self.model_snapshot();
         let current = self.agent.set_model(model_id, variant).await?;
         self.broadcast_model_snapshot(previous);
@@ -237,13 +239,16 @@ impl AppState {
         Ok(snapshot)
     }
 
-    /// Select the fork agent's model from the booted provider's registry.
+    /// Select the fork agent's model for its named provider.
     pub async fn set_fork_model(
         &self,
+        provider_id: &str,
         model_id: &str,
         variant: &str,
     ) -> anyhow::Result<PromptSnapshot> {
-        let _guard = self.prompt_change_lock.lock().await;
+        let _provider_guard = self.provider_change_lock.lock().await;
+        let _prompt_guard = self.prompt_change_lock.lock().await;
+        self.ensure_selection_provider(AgentSlot::Fork, provider_id)?;
         self.prompts.set_fork_model(model_id, variant).await?;
         let snapshot = self.prompt_snapshot();
         self.broadcast_prompts(&snapshot);
@@ -383,6 +388,29 @@ impl AppState {
                 choice.id
             )
         })
+    }
+
+    /// Reject a model frame rendered for any provider other than the one the
+    /// named agent is currently configured to use.
+    fn ensure_selection_provider(&self, agent: AgentSlot, provider_id: &str) -> anyhow::Result<()> {
+        let configured = match agent {
+            AgentSlot::Main => self
+                .model_snapshot()
+                .and_then(|snapshot| snapshot.provider_id),
+            AgentSlot::Fork => self
+                .prompt_snapshot()
+                .fork
+                .and_then(|fork| fork.provider_id),
+        };
+        match configured.as_deref() {
+            Some(configured) if configured == provider_id => Ok(()),
+            Some(configured) => anyhow::bail!(
+                "model selection is for provider `{provider_id}`, but the {agent:?} agent is configured for `{configured}`"
+            ),
+            None => {
+                anyhow::bail!("the {agent:?} agent has no selectable provider for model selection")
+            }
+        }
     }
 
     async fn broadcast_providers(&self) -> anyhow::Result<ProviderRoster> {

@@ -31,6 +31,8 @@ const MODEL: ModelSnapshot = {
       default_variant: "medium",
     },
   ],
+  provider_id: "codex",
+  free_text_model: false,
 };
 
 const CATALOG: SubagentModelCatalog = {
@@ -103,6 +105,24 @@ const ROSTER: ProviderRoster = {
       default_model: "gpt-5.6-sol",
       detection: { detected: true, path: "/home/owner/.codex/auth.json" },
       agent_selectable: true,
+      selection: {
+        mode: "curated",
+        main: MODEL.available,
+        fork: [
+          {
+            id: "gpt-5.6-luna",
+            label: "GPT-5.6 Luna",
+            variants: ["low", "medium", "high", "xhigh", "max"],
+            default_variant: "max",
+          },
+          {
+            id: "gpt-5.6-sol",
+            label: "GPT-5.6 Sol",
+            variants: ["low", "medium", "high", "xhigh", "max"],
+            default_variant: "medium",
+          },
+        ],
+      },
       removable: false,
     },
     {
@@ -121,6 +141,7 @@ const ROSTER: ProviderRoster = {
       api_key: { present: true, tail: "9f2c" },
       default_model: "z-ai/glm-5",
       agent_selectable: true,
+      selection: { mode: "free_text" },
       removable: true,
     },
   ],
@@ -147,6 +168,7 @@ const PROMPTS: PromptSnapshot = {
 const setModel = vi.fn();
 const setSubagentModel = vi.fn();
 const setAgentProvider = vi.fn();
+const setForkModel = vi.fn();
 
 beforeEach(() => {
   vi.resetModules();
@@ -154,6 +176,7 @@ beforeEach(() => {
   setModel.mockReset();
   setSubagentModel.mockReset();
   setAgentProvider.mockReset();
+  setForkModel.mockReset();
   vi.stubGlobal("localStorage", memLocalStorage);
   // SettingsSheet uses getClient() to send model commands; mock the module so
   // the sends are observable without a real socket. (clearStoredToken/
@@ -161,7 +184,7 @@ beforeEach(() => {
   vi.doMock("../../ws/client", () => ({
     clearStoredToken: vi.fn(),
     getStoredToken: () => "tok-abcd",
-    getClient: () => ({ setModel, setSubagentModel, setAgentProvider }),
+    getClient: () => ({ setModel, setSubagentModel, setAgentProvider, setForkModel }),
   }));
 });
 
@@ -204,7 +227,7 @@ describe("Settings → Agents: main agent", () => {
     const { getByLabelText } = await mount({ model: MODEL });
     const variantSelect = getByLabelText("Main agent reasoning variant") as HTMLSelectElement;
     fireEvent.change(variantSelect, { target: { value: "high" } });
-    expect(setModel).toHaveBeenCalledWith("gpt-5.6-sol", "high");
+    expect(setModel).toHaveBeenCalledWith("codex", "gpt-5.6-sol", "high");
   });
 
   // The host broadcasts `model_changed` ONLY when the value actually changed,
@@ -218,7 +241,7 @@ describe("Settings → Agents: main agent", () => {
     vi.useFakeTimers();
     try {
       fireEvent.change(variantSelect, { target: { value: "high" } });
-      expect(setModel).toHaveBeenCalledWith("gpt-5.6-sol", "high");
+      expect(setModel).toHaveBeenCalledWith("codex", "gpt-5.6-sol", "high");
       expect(variantSelect.disabled).toBe(true);
       expect(modelSelect.disabled).toBe(true);
 
@@ -232,7 +255,7 @@ describe("Settings → Agents: main agent", () => {
 
     // …and the settled control still works.
     fireEvent.change(variantSelect, { target: { value: "max" } });
-    expect(setModel).toHaveBeenLastCalledWith("gpt-5.6-sol", "max");
+    expect(setModel).toHaveBeenLastCalledWith("codex", "gpt-5.6-sol", "max");
   });
 
   it("settles the pending controls when the host answers with an error frame", async () => {
@@ -421,6 +444,71 @@ describe("Settings → Agents: providers", () => {
     expect(setAgentProvider).toHaveBeenLastCalledWith("fork", "openrouter");
   });
 
+  it("switches both agents to free-text rows immediately for an OpenAI-compatible provider", async () => {
+    const { getByLabelText, queryByLabelText } = await mount({
+      model: { ...MODEL, provider_id: "codex" },
+      prompts: PROMPTS,
+      providers: ROSTER,
+    });
+
+    fireEvent.change(getByLabelText("Main agent provider"), {
+      target: { value: "openrouter" },
+    });
+    expect(getByLabelText("Main agent model id")).toBeTruthy();
+    expect(queryByLabelText("Main agent model")).toBeNull();
+    expect(queryByLabelText("Main agent reasoning variant")).toBeNull();
+
+    fireEvent.change(getByLabelText("Fork agent provider"), {
+      target: { value: "openrouter" },
+    });
+    expect(getByLabelText("Fork agent model id")).toBeTruthy();
+    expect(queryByLabelText("Fork agent model")).toBeNull();
+    expect(queryByLabelText("Fork agent reasoning variant")).toBeNull();
+  });
+
+  it("switches both agents to their Codex registries immediately", async () => {
+    const openrouterModel: ModelSnapshot = {
+      current: { id: "z-ai/glm-5", variant: "default" },
+      available: [],
+      provider_id: "openrouter",
+      free_text_model: true,
+    };
+    const openrouterPrompts: PromptSnapshot = {
+      ...PROMPTS,
+      fork: {
+        ...PROMPTS.fork!,
+        current: { id: "z-ai/glm-5", variant: "default" },
+        available: [],
+        provider_id: "openrouter",
+        free_text_model: true,
+      },
+    };
+    const { getByLabelText, queryByLabelText } = await mount({
+      model: openrouterModel,
+      prompts: openrouterPrompts,
+      providers: { ...ROSTER, booted_provider_id: "openrouter" },
+    });
+
+    fireEvent.change(getByLabelText("Main agent provider"), {
+      target: { value: "codex" },
+    });
+    expect(queryByLabelText("Main agent model id")).toBeNull();
+    expect((getByLabelText("Main agent model") as HTMLSelectElement).value).toBe("gpt-5.6-sol");
+    expect(getByLabelText("Main agent reasoning variant")).toBeTruthy();
+
+    fireEvent.change(getByLabelText("Fork agent provider"), {
+      target: { value: "codex" },
+    });
+    expect(queryByLabelText("Fork agent model id")).toBeNull();
+    const forkModel = getByLabelText("Fork agent model") as HTMLSelectElement;
+    expect(forkModel.value).toBe("gpt-5.6-luna");
+    expect([...forkModel.options].map((option) => option.value)).toEqual([
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+    ]);
+    expect(getByLabelText("Fork agent reasoning variant")).toBeTruthy();
+  });
+
   it("says nothing while the chosen provider is the one the host booted on", async () => {
     const { queryByText } = await mount({
       model: { ...MODEL, provider_id: "codex" },
@@ -500,7 +588,7 @@ describe("Settings → Agents: providers", () => {
 
     fireEvent.input(field, { target: { value: "  moonshot/kimi-k3  " } });
     fireEvent.click(getByLabelText("Save Main agent model id"));
-    expect(setModel).toHaveBeenCalledWith("moonshot/kimi-k3", "medium");
+    expect(setModel).toHaveBeenCalledWith("openrouter", "moonshot/kimi-k3", "medium");
   });
 
   it("keeps both prompt editors under their exact accessible names", async () => {

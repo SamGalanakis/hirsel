@@ -61,7 +61,9 @@ export function AgentProviderRow(props: {
   /** The aria-name prefix — "Main agent" / "Fork agent". */
   name: string;
   providerId?: string;
+  selectedProviderId?: string;
   pending: PendingKeys;
+  onProviderChange?: (providerId: string) => void;
 }) {
   const key = `${props.slot}-provider`;
   const [awaited, setAwaited] = createSignal<string | null>(null);
@@ -78,6 +80,7 @@ export function AgentProviderRow(props: {
     if (id === props.providerId) return;
     setAwaited(id);
     props.pending.begin(key);
+    props.onProviderChange?.(id);
     getClient()?.setAgentProvider(props.slot, id);
   }
 
@@ -96,7 +99,7 @@ export function AgentProviderRow(props: {
         ariaLabel={`${props.name} provider`}
         class="w-[10.5rem] shrink-0"
         disabled={props.pending.any()}
-        value={props.providerId ?? ""}
+        value={props.selectedProviderId ?? props.providerId ?? ""}
         onChange={change}
         options={agentProviders().map((instance) => ({
           value: instance.id,
@@ -105,6 +108,72 @@ export function AgentProviderRow(props: {
       />
     </div>
   );
+}
+
+export interface AgentModelView {
+  current: ModelSelection;
+  available: AvailableModel[];
+  freeText: boolean;
+  placeholder?: string;
+}
+
+/** Resolve model rows from the provider selected in the local dropdown. Older
+ * hosts omit `selection`, in which case the stored snapshot remains the only
+ * model metadata available and preserves the previous client behavior. */
+export function agentModelView(
+  slot: AgentSlot,
+  selectedProviderId: string | undefined,
+  storedProviderId: string | undefined,
+  storedCurrent: ModelSelection,
+  storedAvailable: AvailableModel[],
+  storedFreeText: boolean,
+): AgentModelView {
+  const provider = state.providers?.instances.find(
+    (instance) => instance.id === selectedProviderId,
+  );
+  const descriptor = provider?.selection;
+  if (!descriptor) {
+    return {
+      current: storedCurrent,
+      available: storedAvailable,
+      freeText: storedFreeText,
+      placeholder: provider?.default_model,
+    };
+  }
+  if (descriptor.mode === "free_text") {
+    return {
+      current:
+        selectedProviderId === storedProviderId
+          ? storedCurrent
+          : { id: provider.default_model ?? "", variant: "default" },
+      available: [],
+      freeText: true,
+      placeholder: provider.default_model,
+    };
+  }
+
+  const available = descriptor[slot];
+  const model =
+    available.find((candidate) => candidate.id === storedCurrent.id) ?? available.at(0);
+  if (!model) {
+    return {
+      current: storedCurrent,
+      available,
+      freeText: false,
+      placeholder: provider.default_model,
+    };
+  }
+  return {
+    current: {
+      id: model.id,
+      variant: model.variants.includes(storedCurrent.variant)
+        ? storedCurrent.variant
+        : model.default_variant,
+    },
+    available,
+    freeText: false,
+    placeholder: provider.default_model,
+  };
 }
 
 /** The free-text shape of the model question: the provider takes any model id
@@ -130,7 +199,7 @@ function FreeTextModelRow(props: {
     }
   });
 
-  const busy = () => props.pending.isPending(props.pendingKey);
+  const busy = () => props.pending.any();
 
   function save() {
     const trimmed = draft().trim();

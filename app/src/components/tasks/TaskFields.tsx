@@ -13,7 +13,7 @@ import { EventCardRenderer } from "../../views/EventCardRenderer";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { Markdown } from "../Markdown";
 import { Timeline, TurnDetails } from "../chat/Timeline";
-import { splitStreamingReply } from "../chat/timeline";
+import { isReasoningTail, splitStreamingReply } from "../chat/timeline";
 import { CommittedToolCalls } from "../chat/ToolCalls";
 import { messagesForTask, taskName } from "./task-model";
 import { formatBytes } from "../../lib/format";
@@ -119,17 +119,29 @@ function Conversation(props: ConversationProps) {
               const split = createMemo(() => splitStreamingReply(state.turnEvents));
               return (
                 <div class="min-w-0 text-muted-foreground">
-                  {/* The thinking marker is suppressed once a reply is actually
-                      streaming: the arriving text IS the liveness signal, and a
-                      spinner above it just competes with the words. */}
-                  <Show when={props.thinking && !split().reply}>
+                  {/* The thinking marker is suppressed once the turn has
+                      something better to show — a reply streaming in, or a
+                      reasoning block streaming open in the timeline below.
+                      Either IS the liveness signal, and the marker is worse
+                      than redundant against them: the Host feeds its text the
+                      latest line of those same deltas, so it renders a couple
+                      of racing words of text the reader is already reading.
+                      It stays for the phases with genuinely nothing to show —
+                      the wait before the first delta, a tool grinding away. */}
+                  <Show
+                    when={props.thinking && !split().reply && !isReasoningTail(split().activity)}
+                  >
                     <div class="mb-3 flex items-center gap-2 text-sm">
                       <LoaderCircle class="size-3.5 motion-safe:animate-spin" aria-hidden="true" />
                       {state.agentActivity.text ?? "Thinking…"}
                     </div>
                   </Show>
                   <Show when={split().activity.length > 0}>
-                    <Timeline events={split().activity} />
+                    {/* `live` while the turn is running: the trailing reasoning
+                        run renders as an open block. It falls back to the quiet
+                        collapsed row the moment the turn goes idle, which is
+                        the same frame the committed bubble takes over. */}
+                    <Timeline events={split().activity} live={props.thinking} />
                   </Show>
                   {/* The reply being written, in the same typography as the
                       committed agent row it becomes — so the commit swaps the

@@ -12,7 +12,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  *   1. Send `timeline` → a prose block is visible BEFORE the tool row.
  *   2. The tool row shows a spinner, then a check with a clean summary (no `{"`).
  *   3. A second prose block appears AFTER the tool.
- *   4. The reasoning row is collapsed until clicked, then reveals its text.
+ *   4. A live-tail reasoning run renders OPEN as a block; a manual collapse
+ *      sticks, and the committed copy is collapsed again.
  *   5. Commit collapses the timeline into the committed message.
  *   6. "turn details" expands to show the same sequence.
  */
@@ -206,7 +207,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       expect(kinds2).toEqual(["timeline-prose", "timeline-tool"]);
       checklist.push("prose after the tool opened a new in-flight reply, work log unchanged");
 
-      // 4. Reasoning row: collapsed until clicked.
+      // 4. Reasoning run: open as a block while it is the live tail.
       host.push({
         type: "turn_event",
         seq: 5,
@@ -224,13 +225,18 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
         "timeline-prose",
         "timeline-reasoning",
       ]);
+      // The run is the live tail, so it reads as an open block of thought —
+      // not a couple of racing words in the thinking marker — and the marker
+      // steps aside for it.
       const rToggle = within(reasoning()!).getByRole("button");
-      expect(rToggle.getAttribute("aria-expanded")).toBe("false");
-      expect(screen.queryByText("seq keeps the tool between the two prose blocks.")).toBeNull();
-      fireEvent.click(rToggle);
       expect(rToggle.getAttribute("aria-expanded")).toBe("true");
       await screen.findByText("seq keeps the tool between the two prose blocks.");
-      checklist.push("reasoning row collapsed by default, expands to its text on click");
+      expect(screen.queryByText("Thinking…")).toBeNull();
+      // Clicking is a pin, and the reader's collapse survives further deltas.
+      fireEvent.click(rToggle);
+      expect(rToggle.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("seq keeps the tool between the two prose blocks.")).toBeNull();
+      checklist.push("live tail reasoning renders as an open block, manual collapse respected");
 
       // 5. Commit: idle + an agent message collapses the live timeline. The
       // real Host publishes the idle boundary from the observation bridge the

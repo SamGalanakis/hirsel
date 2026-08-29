@@ -1,5 +1,33 @@
 use super::*;
 
+pub(super) async fn reconcile_opened_session_provider(
+    session: &lash::LashSession,
+    provider: &ProviderHandle,
+    model: &lash::ModelSpec,
+) -> anyhow::Result<()> {
+    let old_provider_id = session.policy_snapshot().recorded_provider_id().to_string();
+    let new_provider_id = provider.kind();
+    if old_provider_id == new_provider_id {
+        return Ok(());
+    }
+
+    session
+        .configure(lash::SessionConfigPatch {
+            provider: Some(provider.clone()),
+            model: Some(model.clone()),
+            ..lash::SessionConfigPatch::default()
+        })
+        .await
+        .context("rebind reopened main-agent Lash session to the booted provider")?;
+    tracing::info!(
+        session_id = %session.session_id(),
+        old_provider = %old_provider_id,
+        new_provider = %new_provider_id,
+        "Lash Agent session provider rebound"
+    );
+    Ok(())
+}
+
 impl LashAgentRuntime {
     pub(super) async fn start(
         config: RuntimeConfig,
@@ -105,7 +133,7 @@ impl LashAgentRuntime {
         }));
         let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, rlm_factory)
             .provider(provider.clone())
-            .model(model_spec)
+            .model(model_spec.clone())
             .store_factory(store_factory.clone())
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 lash_dir.join("attachments"),
@@ -158,6 +186,7 @@ impl LashAgentRuntime {
             ))
             .open()
             .await?;
+        reconcile_opened_session_provider(&session, &provider, &model_spec).await?;
 
         let runtime = Arc::new(Self {
             core: core.clone(),

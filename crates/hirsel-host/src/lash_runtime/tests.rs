@@ -545,6 +545,86 @@ fn tool_surface_fingerprint_uses_names_not_argument_schemas() {
     );
 }
 
+fn provider_rebind_test_core(
+    provider: ProviderHandle,
+    model: lash::ModelSpec,
+    store_factory: Arc<lash_core::facade_support::InMemorySessionStoreFactory>,
+    incarnation: &str,
+) -> lash::LashCore {
+    lash::LashCore::standard_builder(lash::TurnBudget::Unbounded)
+        .provider(provider)
+        .model(model)
+        .store_factory(store_factory)
+        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .build(lash_core::LeaseOwnerIdentity::opaque(
+            "hirsel-provider-rebind-test",
+            incarnation,
+        ))
+        .unwrap()
+}
+
+fn provider_rebind_test_model(id: &str) -> lash::ModelSpec {
+    lash::ModelSpec::builder(id)
+        .variant(ReasoningSelection::ProviderDefault)
+        .context_window_tokens(200_000)
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reopened_agent_session_rebinds_provider_and_model_at_open() {
+    let store_factory = Arc::new(lash_core::facade_support::InMemorySessionStoreFactory::new());
+    let old_provider = ProviderHandle::new(
+        lash_provider_anthropic::AnthropicProvider::new("old-test-key").into_components(),
+    );
+    let old_provider_id = old_provider.kind().to_string();
+    let old_model = provider_rebind_test_model("old-provider-model");
+    let first_core = provider_rebind_test_core(
+        old_provider,
+        old_model.clone(),
+        Arc::clone(&store_factory),
+        "first-boot",
+    );
+    let first_session = first_core.session("agent-g2").open().await.unwrap();
+    assert_eq!(
+        first_session.policy_snapshot().recorded_provider_id(),
+        old_provider_id
+    );
+    first_session.close().await.unwrap();
+    drop(first_core);
+
+    let booted_provider = ProviderHandle::new(
+        lash_provider_openai::OpenAiCompatibleProvider::new(
+            "new-test-key",
+            "https://example.invalid/v1",
+        )
+        .into_components(),
+    );
+    let booted_provider_id = booted_provider.kind().to_string();
+    let selected_model = provider_rebind_test_model("new-provider-model");
+    let reopened_core = provider_rebind_test_core(
+        booted_provider.clone(),
+        old_model,
+        store_factory,
+        "second-boot",
+    );
+    let reopened = reopened_core.session("agent-g2").open().await.unwrap();
+
+    reconcile_opened_session_provider(&reopened, &booted_provider, &selected_model)
+        .await
+        .unwrap();
+
+    let policy = reopened.policy_snapshot();
+    assert_eq!(policy.recorded_provider_id(), booted_provider_id);
+    assert_eq!(policy.model, selected_model);
+}
+
 #[tokio::test]
 async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
     let dir = tempfile::tempdir().unwrap();

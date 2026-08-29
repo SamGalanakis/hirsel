@@ -12,8 +12,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  *   1. Send `timeline` → a prose block is visible BEFORE the tool row.
  *   2. The tool row shows a spinner, then a check with a clean summary (no `{"`).
  *   3. A second prose block appears AFTER the tool.
- *   4. A live-tail reasoning run renders OPEN as a block; a manual collapse
- *      sticks, and the committed copy is collapsed again.
+ *   4. A live-tail reasoning run streams INLINE as bare dim text — no
+ *      disclosure row, no label — and folds into the collapsed row once
+ *      committed.
  *   5. Commit collapses the timeline into the committed message.
  *   6. "turn details" expands to show the same sequence.
  */
@@ -207,7 +208,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       expect(kinds2).toEqual(["timeline-prose", "timeline-tool"]);
       checklist.push("prose after the tool opened a new in-flight reply, work log unchanged");
 
-      // 4. Reasoning run: open as a block while it is the live tail.
+      // 4. Reasoning run: bare inline text while it is the live tail.
       host.push({
         type: "turn_event",
         seq: 5,
@@ -215,28 +216,26 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
       });
       // Reasoning likewise closes the reply, so by now the log holds the whole
       // prose ↔ tool ↔ prose ↔ reasoning sequence and nothing is in flight.
+      const reasoningStream = () =>
+        timeline()!.querySelector('[data-slot="timeline-reasoning-stream"]') as HTMLElement | null;
       const reasoning = () =>
         timeline()!.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement | null;
-      await waitFor(() => expect(reasoning()).toBeTruthy());
+      await waitFor(() => expect(reasoningStream()).toBeTruthy());
       expect(reply()).toBeNull();
       expect(Array.from(timeline()!.children).map((c) => c.getAttribute("data-slot"))).toEqual([
         "timeline-prose",
         "timeline-tool",
         "timeline-prose",
-        "timeline-reasoning",
+        "timeline-reasoning-stream",
       ]);
-      // The run is the live tail, so it reads as an open block of thought —
-      // not a couple of racing words in the thinking marker — and the marker
-      // steps aside for it.
-      const rToggle = within(reasoning()!).getByRole("button");
-      expect(rToggle.getAttribute("aria-expanded")).toBe("true");
+      // The live tail streams as plain dim text — no disclosure row to click,
+      // no "reasoning" label — and the thinking marker steps aside for it
+      // rather than echoing the same words back as a ticker.
       await screen.findByText("seq keeps the tool between the two prose blocks.");
+      expect(reasoning()).toBeNull();
+      expect(within(reasoningStream()!).queryByRole("button")).toBeNull();
       expect(screen.queryByText("Thinking…")).toBeNull();
-      // Clicking is a pin, and the reader's collapse survives further deltas.
-      fireEvent.click(rToggle);
-      expect(rToggle.getAttribute("aria-expanded")).toBe("false");
-      expect(screen.queryByText("seq keeps the tool between the two prose blocks.")).toBeNull();
-      checklist.push("live tail reasoning renders as an open block, manual collapse respected");
+      checklist.push("live tail reasoning streams inline as bare text, no row chrome, no marker");
 
       // 5. Commit: idle + an agent message collapses the live timeline. The
       // real Host publishes the idle boundary from the observation bridge the

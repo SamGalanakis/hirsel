@@ -1,10 +1,11 @@
 import { fireEvent, render, within } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "../../protocol";
 import type { TimelineEvent } from "../../store/types";
 import { setShowAgentCode } from "../../lib/prefs";
 import { Timeline, TurnDetails } from "./Timeline";
-import { buildTimeline } from "./timeline";
+import { buildTimeline, isReasoningTail } from "./timeline";
 
 function evs(...events: TurnEvent[]): TimelineEvent[] {
   return events.map((event, i) => ({ seq: i + 1, event }));
@@ -274,5 +275,101 @@ describe("committed turn details: agent code cells", () => {
     } finally {
       setShowAgentCode(false);
     }
+  });
+});
+
+describe("streaming reasoning block", () => {
+  const thinking = { kind: "reasoning", text: "Checking the resolve path first." } as const;
+
+  it("renders the live tail reasoning run as an open block", () => {
+    const { container, getByText } = render(() => <Timeline events={evs(thinking)} live />);
+    const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
+    expect(within(row).getByRole("button").getAttribute("aria-expanded")).toBe("true");
+    expect(getByText("Checking the resolve path first.")).toBeTruthy();
+  });
+
+  it("clamps the streaming block's height and keeps its tail in view", () => {
+    const { container } = render(() => <Timeline events={evs(thinking)} live />);
+    const block = container.querySelector('[data-slot="reasoning-text"]') as HTMLElement;
+    // Bottom-anchored (`flex-col-reverse`) so overflow spills off the top —
+    // the newest text stays visible as the run grows.
+    expect(block.className).toContain("flex-col-reverse");
+    expect(block.className).toContain("overflow-hidden");
+    expect(block.className).toContain("max-h-[9.75em]");
+  });
+
+  it("collapses a reasoning run that is no longer the live tail", () => {
+    const { container, queryByText } = render(() => (
+      <Timeline
+        events={evs(thinking, { kind: "tool_start", id: "t1", name: "grep", summary: "resolve" })}
+        live
+      />
+    ));
+    const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
+    expect(within(row).getByRole("button").getAttribute("aria-expanded")).toBe("false");
+    expect(queryByText("Checking the resolve path first.")).toBeNull();
+  });
+
+  it("settles into the collapsed row when the turn stops being live", () => {
+    const [live, setLive] = createSignal(true);
+    const { container, queryByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
+    const toggle = () =>
+      within(container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement).getByRole(
+        "button",
+      );
+    expect(toggle().getAttribute("aria-expanded")).toBe("true");
+    setLive(false);
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(queryByText("Checking the resolve path first.")).toBeNull();
+  });
+
+  it("respects a manual collapse mid-stream and never forces the block back open", () => {
+    const [live, setLive] = createSignal(true);
+    const { container, queryByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
+    const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
+    const toggle = within(row).getByRole("button");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(queryByText("Checking the resolve path first.")).toBeNull();
+    // Still streaming: the reader's choice outlives further deltas.
+    setLive(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps a manually opened run open after the stream settles", () => {
+    const [live, setLive] = createSignal(false);
+    const { container, getByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
+    const toggle = within(
+      container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement,
+    ).getByRole("button");
+    fireEvent.click(toggle);
+    setLive(true);
+    setLive(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(getByText("Checking the resolve path first.")).toBeTruthy();
+  });
+
+  it("leaves committed turn details collapsed (no live tail in history)", () => {
+    const { container, queryByText } = render(() => (
+      <TurnDetails events={evs(thinking)} expanded={true} />
+    ));
+    const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
+    expect(within(row).getByRole("button").getAttribute("aria-expanded")).toBe("false");
+    expect(queryByText("Checking the resolve path first.")).toBeNull();
+  });
+});
+
+describe("isReasoningTail (thinking-marker gate)", () => {
+  it("is true when the turn's last act is a reasoning delta", () => {
+    expect(isReasoningTail(evs({ kind: "prose", text: "ok" }, { kind: "reasoning", text: "hm" }))).toBe(true);
+  });
+
+  it("is false for a tool tail, and for an empty turn", () => {
+    expect(
+      isReasoningTail(
+        evs({ kind: "reasoning", text: "hm" }, { kind: "tool_start", id: "t1", name: "grep", summary: "x" }),
+      ),
+    ).toBe(false);
+    expect(isReasoningTail([])).toBe(false);
   });
 });

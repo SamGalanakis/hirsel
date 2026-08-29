@@ -103,6 +103,20 @@ export function splitStreamingReply(events: TimelineEvent[]): StreamingSplit {
 }
 
 /**
+ * Is the turn's last act a reasoning delta — i.e. is `Timeline`'s trailing item
+ * a reasoning run still being written?
+ *
+ * The same rule `Timeline` applies to its folded items, stated at the event
+ * level so the thinking marker can ask it without folding twice. The two agree
+ * by construction: only a prose or reasoning delta can APPEND a trailing block,
+ * and `splitStreamingReply` has already taken the trailing prose away, so a
+ * reasoning event at the tail is exactly a reasoning item at the tail.
+ */
+export function isReasoningTail(events: TimelineEvent[]): boolean {
+  return events[events.length - 1]?.event.kind === "reasoning";
+}
+
+/**
  * One start/done pairing, over its OWN id namespace.
  *
  * Tools and code cells stream independent id spaces, so each fold gets its own

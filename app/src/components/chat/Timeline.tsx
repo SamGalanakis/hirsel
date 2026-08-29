@@ -27,17 +27,38 @@ function formatDuration(ms: number): string {
   return `${m}m${Math.round(s % 60)}s`;
 }
 
-/** A collapsed reasoning run: a thin, dim "reasoning" row that expands to the
- * dim italic text. Kept deliberately quieter than prose — never a headline. */
-function ReasoningRow(props: { text: string }) {
-  const [open, setOpen] = createSignal(false);
+/** The live reasoning block's ceiling: six lines at its own italic measure
+ * (`leading-relaxed` = 1.625em a line). Enough that streaming thought reads as a
+ * block of text rather than a ticker, never enough for a long chain to push the
+ * reply — or the composer — off screen.
+ *
+ * `flex-col-reverse` is what keeps the TAIL in view as the run grows: the child
+ * is laid out from the bottom edge, so overflow spills off the TOP, which is the
+ * text already read. The gradient mask softens that cut so the block fades into
+ * the rail instead of being guillotined mid-line. */
+const LIVE_REASONING_BLOCK =
+  "flex max-h-[9.75em] flex-col-reverse overflow-hidden [mask-image:linear-gradient(to_bottom,transparent,#000_1.25rem)]";
+
+/** A reasoning run. At rest: a thin, dim "reasoning" row that expands to the dim
+ * italic text — deliberately quieter than prose, never a headline. While it is
+ * the live tail of a running turn it renders as an open, height-clamped block in
+ * that same quiet typography, because a couple of racing words in the thinking
+ * marker is not a legible signal of what the Agent is doing. */
+function ReasoningRow(props: { text: string; streaming?: boolean }) {
+  // `null` = the reader has expressed no preference, so the run follows the
+  // stream: open while it is being written, collapsed the instant it settles.
+  // A click pins it and outlives the stream in both directions — a reader who
+  // closes a chain of thought mid-flight must not have it reopened under them.
+  const [choice, setChoice] = createSignal<boolean | null>(null);
+  const streaming = () => props.streaming === true;
+  const open = () => choice() ?? streaming();
   return (
-    <li class="flex flex-col gap-1" data-slot="timeline-reasoning">
+    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-reasoning">
       <button
         type="button"
         class="inline-flex w-fit items-center gap-1 text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
         aria-expanded={open()}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setChoice(!open())}
       >
         <ChevronRight
           class="size-3 shrink-0 transition-transform"
@@ -48,9 +69,11 @@ function ReasoningRow(props: { text: string }) {
         <span class="italic">reasoning</span>
       </button>
       <Show when={open()}>
-        <p class="whitespace-pre-wrap pl-4 text-meta italic leading-relaxed text-muted-foreground/60">
-          {renderInline(props.text)}
-        </p>
+        <div class={streaming() ? `pl-4 ${LIVE_REASONING_BLOCK}` : "pl-4"} data-slot="reasoning-text">
+          <p class="whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground/60">
+            {renderInline(props.text)}
+          </p>
+        </div>
       </Show>
     </li>
   );
@@ -246,12 +269,24 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
  * blocks interleaved with tool rows and collapsed reasoning, in exact seq order.
  * Prose is muted vs committed bubbles so the live turn reads as provisional.
  * Drives both the live view under the thinking marker and the committed "turn
- * details" panel.
+ * details" panel — `live` is what tells the two apart, and defaults off so a
+ * committed turn is unchanged.
  */
-export function Timeline(props: { events: TimelineEvent[] }) {
+export function Timeline(props: { events: TimelineEvent[]; live?: boolean }) {
   // Durations (tool_done.at − tool_start.at) come out of the fold on each row's
   // status, measured within that row's own id namespace.
   const items = createMemo(() => buildTimeline(props.events, showAgentCode()));
+  // Only the LAST item of a live turn is still being written. A reasoning run
+  // there is the Agent thinking at this instant, so it reads as an open block;
+  // the moment anything follows it (or the turn goes idle) it is history, and
+  // history is quiet. Keyed rather than indexed so the flag follows the run
+  // itself through the fold's in-place growth.
+  const streamingKey = createMemo(() => {
+    if (!props.live) return null;
+    const rows = items();
+    const last = rows[rows.length - 1];
+    return last?.kind === "reasoning" ? last.key : null;
+  });
   return (
     <ul
       class="ml-1 flex min-w-0 flex-col gap-2 border-l border-border/60 pl-3"
@@ -268,7 +303,10 @@ export function Timeline(props: { events: TimelineEvent[] }) {
               </li>
             </Match>
             <Match when={item.kind === "reasoning"}>
-              <ReasoningRow text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text} />
+              <ReasoningRow
+                text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text}
+                streaming={item.key === streamingKey()}
+              />
             </Match>
             <Match when={item.kind === "tool"}>
               <ToolRow item={item as Extract<TimelineItem, { kind: "tool" }>} />

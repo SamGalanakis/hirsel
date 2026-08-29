@@ -39,26 +39,42 @@ function formatDuration(ms: number): string {
 const LIVE_REASONING_BLOCK =
   "flex max-h-[9.75em] flex-col-reverse overflow-hidden [mask-image:linear-gradient(to_bottom,transparent,#000_1.25rem)]";
 
-/** A reasoning run. At rest: a thin, dim "reasoning" row that expands to the dim
- * italic text — deliberately quieter than prose, never a headline. While it is
- * the live tail of a running turn it renders as an open, height-clamped block in
- * that same quiet typography, because a couple of racing words in the thinking
- * marker is not a legible signal of what the Agent is doing. */
-function ReasoningRow(props: { text: string; streaming?: boolean }) {
-  // `null` = the reader has expressed no preference, so the run follows the
-  // stream: open while it is being written, collapsed the instant it settles.
-  // A click pins it and outlives the stream in both directions — a reader who
-  // closes a chain of thought mid-flight must not have it reopened under them.
-  const [choice, setChoice] = createSignal<boolean | null>(null);
-  const streaming = () => props.streaming === true;
-  const open = () => choice() ?? streaming();
+/** The reasoning run the Agent is writing right now: bare dim-italic text in the
+ * timeline, with none of the settled row's chrome — no disclosure chevron, no
+ * glyph, no "reasoning" label, no indent. There is nothing to disclose while the
+ * text is arriving, and a label plus a toggle around three lines of live thought
+ * is furniture around the only thing worth reading. Height-clamped and
+ * tail-anchored so a long chain never dominates the screen.
+ *
+ * It is deliberately a different component from `ReasoningRow` rather than a
+ * mode of it: swapping components on settle is what gives the folded row a fresh
+ * collapsed toggle, with no live-phase state to carry across. */
+function StreamingReasoning(props: { text: string }) {
   return (
-    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-reasoning">
+    <li
+      class={`min-w-0 ${LIVE_REASONING_BLOCK}`}
+      data-slot="timeline-reasoning-stream"
+      aria-busy="true"
+    >
+      <p class="whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground/60">
+        {renderInline(props.text)}
+      </p>
+    </li>
+  );
+}
+
+/** A settled reasoning run: a thin, dim "reasoning" row that expands to the dim
+ * italic text. Kept deliberately quieter than prose — never a headline. This is
+ * what a live run folds into the moment anything follows it. */
+function ReasoningRow(props: { text: string }) {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <li class="flex flex-col gap-1" data-slot="timeline-reasoning">
       <button
         type="button"
         class="inline-flex w-fit items-center gap-1 text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
         aria-expanded={open()}
-        onClick={() => setChoice(!open())}
+        onClick={() => setOpen((v) => !v)}
       >
         <ChevronRight
           class="size-3 shrink-0 transition-transform"
@@ -69,11 +85,9 @@ function ReasoningRow(props: { text: string; streaming?: boolean }) {
         <span class="italic">reasoning</span>
       </button>
       <Show when={open()}>
-        <div class={streaming() ? `pl-4 ${LIVE_REASONING_BLOCK}` : "pl-4"} data-slot="reasoning-text">
-          <p class="whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground/60">
-            {renderInline(props.text)}
-          </p>
-        </div>
+        <p class="whitespace-pre-wrap pl-4 text-meta italic leading-relaxed text-muted-foreground/60">
+          {renderInline(props.text)}
+        </p>
       </Show>
     </li>
   );
@@ -303,10 +317,20 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean }) {
               </li>
             </Match>
             <Match when={item.kind === "reasoning"}>
-              <ReasoningRow
-                text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text}
-                streaming={item.key === streamingKey()}
-              />
+              {/* Live tail: bare streaming text. Settled: the collapsed row.
+                  Swapping components (rather than toggling a mode) is what
+                  makes the fold a clean handover — the row mounts with its own
+                  fresh, collapsed toggle. */}
+              <Show
+                when={item.key === streamingKey()}
+                fallback={
+                  <ReasoningRow text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text} />
+                }
+              >
+                <StreamingReasoning
+                  text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text}
+                />
+              </Show>
             </Match>
             <Match when={item.kind === "tool"}>
               <ToolRow item={item as Extract<TimelineItem, { kind: "tool" }>} />

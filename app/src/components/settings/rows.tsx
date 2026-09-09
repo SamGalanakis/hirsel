@@ -2,8 +2,9 @@
 // composes from (card surface, section/sub headings, the text column of a row,
 // and the three controls: segmented, toggle, select) plus the copyable value
 // field. Kept in one module so the sections stay about their own subject.
-import { ChevronDown, Copy } from "lucide-solid";
-import { For, type JSX, Show } from "solid-js";
+import { ChevronDown, Copy } from "@/components/ui/icons";
+import { For, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { cn } from "../../lib/utils";
 import { copyText } from "./prefs";
 
@@ -78,15 +79,15 @@ export function SegmentedControl<T extends string>(props: {
             <button
               type="button"
               role="radio"
-              aria-checked={selected()}
-              class="flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring rail:flex-none rail:px-6 [@media(pointer:coarse)]:min-h-11"
-              classList={{
+              aria-checked={selected() ? "true" : "false"}
+              class={["flex-1 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring rail:flex-none rail:px-6 [@media(pointer:coarse)]:min-h-11", {
                 // `shadow-raised` — the theme-adaptive lift token. The literal
                 // `rgb(0 0 0/0.06)` this replaces was invisible on the dark
                 // canvas, so a chosen segment lost its lift in the resting theme.
                 "bg-card font-medium text-foreground shadow-raised": selected(),
                 "text-muted-foreground hover:text-foreground": !selected(),
-              }}
+              }]}
+
               onClick={() => props.onChange(opt.value)}
             >
               {opt.label}
@@ -111,7 +112,7 @@ export function Toggle(props: {
     <button
       type="button"
       role="switch"
-      aria-checked={props.checked}
+      aria-checked={props.checked ? "true" : "false"}
       aria-label={props.ariaLabel}
       disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
@@ -124,18 +125,18 @@ export function Toggle(props: {
           the switch the eye sees. */}
       <span
         aria-hidden="true"
-        class="relative flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors group-focus-visible:ring-2 group-focus-visible:ring-ring"
-        classList={{
+        class={["relative flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors group-focus-visible:ring-2 group-focus-visible:ring-ring", {
           "border-primary bg-primary": props.checked,
           "border-input bg-secondary": !props.checked,
-        }}
+        }]}
+
       >
         <span
-          class="pointer-events-none ml-0.5 size-3.5 rounded-full transition-transform"
-          classList={{
+          class={["pointer-events-none ml-0.5 size-3.5 rounded-full transition-transform", {
             "translate-x-4 bg-primary-foreground": props.checked,
             "translate-x-0 bg-muted-foreground": !props.checked,
-          }}
+          }]}
+
         />
       </span>
     </button>
@@ -191,8 +192,8 @@ export function CopyRow(props: { value: string; label: string; mono?: boolean })
       aria-label={`Copy ${props.label}`}
     >
       <span
-        class="min-w-0 flex-1 truncate text-sm text-foreground"
-        classList={{ "font-mono": props.mono }}
+        class={["min-w-0 flex-1 truncate text-sm text-foreground", { "font-mono": !!props.mono }]}
+
       >
         {props.value}
       </span>

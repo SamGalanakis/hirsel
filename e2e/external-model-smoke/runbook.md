@@ -1,3 +1,5 @@
+> Historical Event/Task protocol runbook. For the current Thread product gate, see [E2E rules](../RULES.md). The old npm runner commands below are retired.
+
 # Optional External-Model Host Smoke
 
 > This is a manual, cost-bearing supplement. The credential-free real-Host proof in

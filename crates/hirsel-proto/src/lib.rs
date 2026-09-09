@@ -5,6 +5,9 @@
 //! types stay re-exported at the crate root (`hirsel_proto::TypeName`), which
 //! is the path every consumer uses.
 
+mod artifact;
+pub use artifact::{Artifact, ArtifactKind, ArtifactSummary};
+
 mod chat;
 mod client;
 mod event;
@@ -12,6 +15,7 @@ mod host;
 mod models;
 mod process;
 mod providers;
+mod thread;
 mod turn;
 mod view;
 
@@ -38,3 +42,7 @@ pub const IROH_OWNER_ALPN: &[u8] = b"hirsel/owner/1";
 
 #[cfg(test)]
 mod tests;
+
+pub use thread::{
+    Thread, ThreadActivity, ThreadAttention, ThreadDetail, ThreadTurn, ThreadTurnState,
+};

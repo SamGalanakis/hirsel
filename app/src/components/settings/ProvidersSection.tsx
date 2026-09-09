@@ -13,8 +13,9 @@
 // as a value, or held in the store. The only key material client-side is the
 // transient contents of the password input during one edit, cleared on save or
 // cancel.
-import { LoaderCircle } from "lucide-solid";
-import { createEffect, createSignal, For, type JSX, onMount, Show } from "solid-js";
+import { LoaderCircle } from "@/components/ui/icons";
+import { createEffect, createSignal, For, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { createFocusTrap } from "../../lib/focus";
 import { createPendingKeys } from "../../lib/pending";
 import type { ProviderInstance } from "../../protocol";
@@ -86,9 +87,7 @@ function ConfirmRemoveDialog(props: {
   onCancel: () => void;
 }) {
   let dialogRef: HTMLDivElement | undefined;
-  onMount(() => {
-    createFocusTrap(() => dialogRef, { onEscape: () => props.onCancel() });
-  });
+  createFocusTrap(() => dialogRef, { onEscape: () => props.onCancel() });
 
   return (
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
@@ -149,11 +148,11 @@ function OpenAiRow(props: {
 
   // Re-seed the draft whenever the editor opens, so a cancelled edit leaves no
   // residue and the key field starts empty every time.
-  createEffect(() => {
-    if (!props.editing) return;
-    setLabel(props.instance.label);
-    setBaseUrl(props.instance.base_url ?? "");
-    setDefaultModel(props.instance.default_model ?? "");
+  createEffect(() => ({ editing: props.editing, label: props.instance.label, baseUrl: props.instance.base_url ?? "", defaultModel: props.instance.default_model ?? "" }), (draft) => {
+    if (!draft.editing) return;
+    setLabel(draft.label);
+    setBaseUrl(draft.baseUrl);
+    setDefaultModel(draft.defaultModel);
     setApiKey("");
     setRefusal(null);
   });
@@ -176,6 +175,7 @@ function OpenAiRow(props: {
       default_model: nextModel,
       ...(key.length > 0 ? { api_key: key } : {}),
     });
+
   }
 
   function cancel() {
@@ -473,8 +473,7 @@ export function ProvidersSection(): JSX.Element {
   // acknowledgements, so the revision counter is what this tracks.
   const pending = createPendingKeys();
   let awaitingFrame = false;
-  createEffect(() => {
-    void state.providersRevision;
+  createEffect(() => state.providersRevision, () => {
     if (awaitingFrame) {
       awaitingFrame = false;
       setEditing(null);

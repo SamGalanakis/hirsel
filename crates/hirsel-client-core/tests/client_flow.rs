@@ -5,8 +5,8 @@ use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hirsel_client_core::{
     AgentActivityState, ChatAuthor, ChatMessage, Client, ClientConfig, ClientObserver,
-    ClientSnapshot, ConnectionState, LifecycleEvent, Ping, PingStatus, ProcessInfo, ProcessKind,
-    ProcessState, ReconnectPolicy, SendMessageRequest,
+    ClientSnapshot, ConnectionState, LifecycleEvent, ProcessInfo, ProcessKind, ProcessState,
+    ReconnectPolicy, SendMessageRequest, Thread, ThreadAttention,
 };
 use hirsel_proto::{ClientToHost, HelloAuth, HostToClient};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,6 +18,10 @@ type ServerSocket = WebSocketStream<TcpStream>;
 
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
+        artifact_ids: Vec::new(),
+        thread_id: 0,
+        client_id: None,
+        mentions: vec![],
         id,
         author,
         body: body.into(),
@@ -28,30 +32,24 @@ fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     }
 }
 
-fn ping(id: u64, read: bool, status: PingStatus) -> Ping {
-    Ping {
+fn thread(id: u64, read: bool, settled: bool) -> Thread {
+    Thread {
         id,
-        kind: hirsel_proto::EventKind::Judgment,
-        source: hirsel_proto::EventSource {
-            kind: hirsel_proto::EventSourceKind::Agent,
-            r#ref: None,
-        },
-        name: format!("ping-{id}"),
-        description: "Needs attention".into(),
-        ui: serde_json::json!({
-            "type": "card",
-            "children": [{ "type": "text", "text": "Check this" }]
-        }),
-        anchor: 1,
-        requires_response: true,
-        quick_replies: Vec::new(),
-        status,
-        read,
-        archived: false,
-        snoozed_until: None,
+        title: format!("thread-{id}"),
+        description: "Work".into(),
+        instrument: serde_json::json!({"type":"card","children":[]}),
+        attention: ThreadAttention::Quiet,
+        settled_at: settled.then(Utc::now),
         archived_at: None,
-        fork_sc: None,
-        ts: Utc.timestamp_opt(id as i64, 0).unwrap(),
+        snoozed_until: None,
+        read,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        revision: if read { 2 } else { 1 },
+        running_turn: None,
+        queued_turn_count: 0,
+        last_finished_turn: None,
+        last_activity_at: Utc::now(),
     }
 }
 
@@ -72,13 +70,14 @@ fn process(id: &str, state: ProcessState) -> ProcessInfo {
 fn hello_ok(
     latest_msg_id: u64,
     messages: Vec<ChatMessage>,
-    pings: Vec<Ping>,
+    threads: Vec<Thread>,
     processes: Vec<ProcessInfo>,
 ) -> HostToClient {
     HostToClient::HelloOk {
         latest_msg_id,
         messages,
-        events: pings,
+        events: vec![],
+        threads,
         processes,
         side_chats: Vec::new(),
         host_version: "0.1.0 (test)".to_string(),
@@ -179,7 +178,7 @@ async fn connect_loads_state_and_observer_sees_online() {
                     chat(1, ChatAuthor::Owner, "hello"),
                     chat(2, ChatAuthor::Agent, "hi"),
                 ],
-                vec![ping(3, false, PingStatus::Open)],
+                vec![thread(3, false, false)],
                 vec![process("process-1", ProcessState::Running)],
             ),
         )
@@ -195,7 +194,7 @@ async fn connect_loads_state_and_observer_sees_online() {
     let snapshot =
         wait_for_snapshot(&client, |state| state.connection == ConnectionState::Online).await;
     assert_eq!(snapshot.messages.len(), 2);
-    assert_eq!(snapshot.pings.len(), 1);
+    assert_eq!(snapshot.threads.len(), 1);
     assert_eq!(snapshot.processes.len(), 1);
     assert_eq!(snapshot.last_seen_msg_id, Some(2));
     assert!(
@@ -220,7 +219,7 @@ async fn connect_loads_state_and_observer_sees_online() {
 }
 
 #[tokio::test]
-async fn ping_and_process_upserts_replace_existing_rows() {
+async fn thread_and_process_upserts_replace_existing_rows() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (push_tx, push_rx) = oneshot::channel();
@@ -233,7 +232,7 @@ async fn ping_and_process_upserts_replace_existing_rows() {
             &hello_ok(
                 0,
                 vec![],
-                vec![ping(9, false, PingStatus::Open)],
+                vec![thread(9, false, false)],
                 vec![process("p", ProcessState::Running)],
             ),
         )
@@ -241,8 +240,8 @@ async fn ping_and_process_upserts_replace_existing_rows() {
         let _ = push_rx.await;
         send_server(
             &mut socket,
-            &HostToClient::EventUpsert {
-                event: ping(9, true, PingStatus::Done),
+            &HostToClient::ThreadUpsert {
+                thread: thread(9, true, true),
             },
         )
         .await;
@@ -256,6 +255,8 @@ async fn ping_and_process_upserts_replace_existing_rows() {
         send_server(
             &mut socket,
             &HostToClient::AgentActivity {
+                thread_id: Some(9),
+                turn_id: Some(1),
                 state: AgentActivityState::Thinking,
                 text: Some("working".into()),
                 sc: None,
@@ -270,16 +271,19 @@ async fn ping_and_process_upserts_replace_existing_rows() {
     wait_for_snapshot(&client, |state| state.connection == ConnectionState::Online).await;
     push_tx.send(()).unwrap();
     let snapshot = wait_for_snapshot(&client, |state| {
-        state.pings.first().is_some_and(|item| item.read)
+        state.threads.first().is_some_and(|item| item.read)
             && state
                 .processes
                 .first()
                 .is_some_and(|item| item.state == ProcessState::Done)
-            && state.agent_activity.state == AgentActivityState::Thinking
+            && state
+                .streams
+                .first()
+                .is_some_and(|s| s.activity.state == AgentActivityState::Thinking)
     })
     .await;
-    assert_eq!(snapshot.pings.len(), 1);
-    assert_eq!(snapshot.pings[0].status, PingStatus::Done);
+    assert_eq!(snapshot.threads.len(), 1);
+    assert!(snapshot.threads[0].settled_at.is_some());
     assert_eq!(snapshot.processes.len(), 1);
 
     client.disconnect().await;
@@ -296,13 +300,24 @@ async fn optimistic_send_reconciles_with_owner_echo() {
         let _hello = receive_client(&mut socket).await;
         send_server(&mut socket, &hello_ok(0, vec![], vec![], vec![])).await;
         let sent = receive_client(&mut socket).await;
-        let ClientToHost::SendMessage { body, .. } = sent else {
+        let ClientToHost::SendThreadMessage {
+            body,
+            client_id,
+            thread_id,
+            ..
+        } = sent
+        else {
             panic!("expected send_message");
         };
         send_server(
             &mut socket,
             &HostToClient::Msg {
-                message: chat(42, ChatAuthor::Owner, &body),
+                message: ChatMessage {
+                    artifact_ids: Vec::new(),
+                    client_id: Some(client_id),
+                    thread_id,
+                    ..chat(42, ChatAuthor::Owner, &body)
+                },
                 sc: None,
             },
         )
@@ -331,7 +346,10 @@ async fn optimistic_send_reconciles_with_owner_echo() {
     .await;
     assert_eq!(reconciled.messages.len(), 1);
     assert!(!reconciled.messages[0].is_pending());
-    assert_eq!(reconciled.messages[0].client_id(), None);
+    assert_eq!(
+        reconciled.messages[0].client_id(),
+        Some(receipt.client_id.as_str())
+    );
     assert_eq!(reconciled.last_seen_msg_id, Some(42));
 
     client.disconnect().await;
@@ -408,7 +426,7 @@ async fn offline_queue_flushes_in_order_and_reconnect_resumes_last_seen() {
             last_seen_msg_id: Some(7),
         }
     );
-    let ClientToHost::SendMessage {
+    let ClientToHost::SendThreadMessage {
         client_id, body, ..
     } = first_send
     else {
@@ -416,7 +434,7 @@ async fn offline_queue_flushes_in_order_and_reconnect_resumes_last_seen() {
     };
     assert_eq!(client_id, first_receipt.client_id);
     assert_eq!(body, "first offline");
-    let ClientToHost::SendMessage {
+    let ClientToHost::SendThreadMessage {
         client_id, body, ..
     } = second_send
     else {
@@ -474,4 +492,167 @@ fn push_token_registration_validates_input() {
             .register_push_token("android".into(), "  ".into())
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn native_thread_commands_roundtrip_revision_and_ownership() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        receive_client(&mut socket).await;
+        send_server(&mut socket, &hello_ok(0, vec![], vec![], vec![])).await;
+        let ClientToHost::CreateThread { client_id, title } = receive_client(&mut socket).await
+        else {
+            panic!("create");
+        };
+        assert_eq!(title, "Groceries");
+        send_server(
+            &mut socket,
+            &HostToClient::ThreadCreated {
+                client_id,
+                thread: thread(5, false, false),
+            },
+        )
+        .await;
+        let ClientToHost::OpenThread {
+            client_id,
+            thread_id,
+            before_id,
+        } = receive_client(&mut socket).await
+        else {
+            panic!("open");
+        };
+        assert_eq!(thread_id, 5);
+        assert_eq!(before_id, None);
+        send_server(
+            &mut socket,
+            &HostToClient::ThreadOpened {
+                client_id,
+                detail: hirsel_proto::ThreadDetail {
+                    thread: thread(5, false, false),
+                    messages: vec![ChatMessage {
+                        artifact_ids: Vec::new(),
+                        thread_id: 5,
+                        ..chat(1, ChatAuthor::Agent, "Milk")
+                    }],
+                    turns: vec![],
+                    activities: vec![],
+                    has_more: false,
+                },
+            },
+        )
+        .await;
+        let action = receive_client(&mut socket).await;
+        assert_eq!(
+            action,
+            ClientToHost::ThreadAction {
+                thread_id: 5,
+                action: "choose".into(),
+                data: serde_json::json!({"choice":"milk","label":"Milk"}),
+                expected_revision: Some(1)
+            }
+        );
+        assert_eq!(
+            receive_client(&mut socket).await,
+            ClientToHost::ThreadAction {
+                thread_id: 5,
+                action: "read".into(),
+                data: serde_json::json!({}),
+                expected_revision: None
+            }
+        );
+        assert_eq!(
+            receive_client(&mut socket).await,
+            ClientToHost::CancelTurn {
+                thread_id: Some(5),
+                sc: None
+            }
+        );
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.await;
+    });
+    let client = Client::new(test_config(address)).unwrap();
+    client.connect().await.unwrap();
+    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    let created = client.create_thread("Groceries".into());
+    let snapshot = wait_for_snapshot(&client, |s| {
+        s.created_threads
+            .iter()
+            .any(|t| t.client_id == created.client_id)
+    })
+    .await;
+    assert_eq!(snapshot.threads[0].id, 5);
+    client.open_thread(5, None);
+    wait_for_snapshot(&client, |s| s.opened_threads.contains(&5)).await;
+    client.thread_action(
+        5,
+        "choose".into(),
+        serde_json::json!({"choice":"milk","label":"Milk"}),
+        Some(1),
+    );
+    client.thread_action(5, "read".into(), serde_json::json!({}), None);
+    client.cancel_turn(5);
+    timeout(Duration::from_secs(3), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = client.snapshot();
+    assert!(snapshot.threads[0].settled_at.is_none());
+    assert!(
+        matches!(&snapshot.messages[0],hirsel_client_core::ChatEntry::Confirmed(m) if m.thread_id==5)
+    );
+    release_tx.send(()).unwrap();
+    client.disconnect().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn lost_create_ack_retries_same_identity_after_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut first = accept_async(stream).await.unwrap();
+        receive_client(&mut first).await;
+        send_server(&mut first, &hello_ok(0, vec![], vec![], vec![])).await;
+        let create = receive_client(&mut first).await;
+        first.close(None).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut second = accept_async(stream).await.unwrap();
+        receive_client(&mut second).await;
+        send_server(&mut second, &hello_ok(0, vec![], vec![], vec![])).await;
+        let retry = receive_client(&mut second).await;
+        assert_eq!(create, retry);
+        let ClientToHost::CreateThread { client_id, .. } = retry else {
+            panic!("create retry")
+        };
+        send_server(
+            &mut second,
+            &HostToClient::ThreadCreated {
+                client_id,
+                thread: thread(5, false, false),
+            },
+        )
+        .await;
+        let _ = release_rx.await;
+    });
+    let client = Client::new(test_config(address)).unwrap();
+    client.connect().await.unwrap();
+    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    let receipt = client.create_thread("Groceries".into());
+    let snapshot = wait_for_snapshot(&client, |s| {
+        s.created_threads
+            .iter()
+            .any(|c| c.client_id == receipt.client_id)
+    })
+    .await;
+    assert_eq!(snapshot.threads.len(), 1);
+    release_tx.send(()).unwrap();
+    client.disconnect().await;
+    server.await.unwrap();
 }

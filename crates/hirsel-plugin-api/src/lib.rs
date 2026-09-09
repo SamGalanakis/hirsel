@@ -32,8 +32,8 @@ mod settings;
 mod tools;
 
 pub use ctx::{
-    EventOption, NewEvent, PluginCtx, PluginEvents, PluginKv, PluginLog, PluginPush,
-    PluginSettingsAccess, SettingsSnapshot,
+    ActivityReceipt, NewActivity, NewThread, PluginCtx, PluginKv, PluginLog, PluginPush,
+    PluginSettingsAccess, PluginThreads, SettingsSnapshot,
 };
 pub use settings::{SettingDescriptor, SettingKind};
 pub use tools::{PluginTool, PluginToolFuture, PluginToolHandler};

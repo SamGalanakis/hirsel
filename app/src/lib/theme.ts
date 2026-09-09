@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 
+
 // The light/dark theme system. Three modes — System / Light / Dark — default
 // System (follow the OS via `prefers-color-scheme`). Light/Dark force the
 // scheme. The choice is persisted in localStorage (`hirsel.theme`) and applied

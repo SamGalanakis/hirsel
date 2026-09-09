@@ -2,7 +2,7 @@
 // `api` object an in-repo UI module is handed. Kept free of imports from the
 // rest of the app so a plugin author can read this one file and know the whole
 // contract.
-import type { JSX } from "solid-js";
+import type { JSX } from "@solidjs/web";
 
 /** The mount points a plugin may render into. A slot is a promise about
  * placement AND about the `ctx` its components receive — adding one means

@@ -1,3 +1,5 @@
+import { attachArtifactTransport, disconnectArtifacts, handleArtifactMessage } from "../artifacts/store";
+import { attachThreadTransport, disconnectThreads, handleThreadMessage } from "../threads/store";
 // Single WebSocket client module: connect, hello/hello_ok, reconnect with
 // exponential backoff, offline outgoing queue flushed on reconnect using
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
@@ -164,6 +166,8 @@ class HirselWsClient {
 
   close(): void {
     this.closedByClient = true;
+    disconnectThreads();
+    disconnectArtifacts();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     for (const t of this.failTimers.values()) clearTimeout(t);
     this.failTimers.clear();
@@ -307,8 +311,8 @@ class HirselWsClient {
     return promise;
   }
 
-  cancelTurn(): void {
-    this.sendFrame({ type: "cancel_turn" });
+  cancelTurn(threadId?: number): void {
+    this.sendFrame({ type: "cancel_turn", ...(threadId === undefined ? {} : { thread_id: threadId }) });
   }
 
   cancelQueued(clientId: string): void {
@@ -507,6 +511,8 @@ class HirselWsClient {
 
     socket.addEventListener("close", (event) => {
       this.socket = null;
+      disconnectThreads();
+    disconnectArtifacts();
       if (this.closedByClient) return;
       // The precise, instant auth-reject signal is the pre-auth `error` frame
       // (handled in handleServerMessage); this close-side check is the FALLBACK
@@ -539,7 +545,9 @@ class HirselWsClient {
    * message for the socket-just-dropped heuristic path. */
   private handleAuthReject(detail?: string): void {
     if (this.closedByClient) return; // already torn down (e.g. error then close)
-    this.closedByClient = true; // suppress any in-flight reconnect/close paths
+    this.closedByClient = true;
+    disconnectThreads();
+    disconnectArtifacts(); // suppress any in-flight reconnect/close paths
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -567,6 +575,12 @@ class HirselWsClient {
   }
 
   private handleServerMessage(message: ServerMessage): void {
+    if (message.type === "hello_ok") {
+      attachThreadTransport(frame => this.sendFrame(frame));
+      attachArtifactTransport(frame => this.sendFrame(frame));
+    }
+    handleArtifactMessage(message);
+    handleThreadMessage(message);
     switch (message.type) {
       case "hello_ok": {
         // The token authenticated: retire the bad-token heuristic for the rest

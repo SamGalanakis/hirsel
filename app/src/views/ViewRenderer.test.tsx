@@ -1,6 +1,8 @@
+import { flush } from "solid-js";
 import { render, within } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { createSignal } from "solid-js";
+
 import { describe, expect, it, vi } from "vitest";
 import type { ViewSpec } from "../protocol";
 import { ViewRenderer } from "./ViewRenderer";
@@ -334,7 +336,7 @@ describe("ViewRenderer — update in place", () => {
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("20");
     expect(screen.getByText("Step 1")).toBeTruthy();
 
-    setSpec({ type: "progress", value: 0.75, label: "Step 3" });
+    flush(() => setSpec({ type: "progress", value: 0.75, label: "Step 3" }));
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("75");
     expect(screen.getByText("Step 3")).toBeTruthy();
   });
@@ -345,7 +347,7 @@ describe("ViewRenderer — update in place", () => {
       <ViewRenderer spec={spec()} instanceId="view-1" placement="canvas" />
     ));
     expect(screen.getByText("before")).toBeTruthy();
-    setSpec({ type: "badge", label: "after", tone: "success" });
+    flush(() => setSpec({ type: "badge", label: "after", tone: "success" }));
     expect(screen.getByText("after")).toBeTruthy();
     expect(screen.queryByText("before")).toBeNull();
   });

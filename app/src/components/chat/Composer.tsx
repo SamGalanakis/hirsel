@@ -1,3 +1,4 @@
+import type { RefTarget } from "../../lib/task-ref";
 import {
   ArrowUp,
   CornerDownLeft,
@@ -8,9 +9,10 @@ import {
   RotateCcw,
   Square,
   X,
-} from "lucide-solid";
+} from "@/components/ui/icons";
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type { Blob, EventItem, SendMode } from "../../protocol";
+
+import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
 import { anyOverlayOpen } from "../../lib/focus";
 import { formatBytes } from "../../lib/format";
@@ -40,6 +42,8 @@ import { createFileDrop } from "./useFileDrop";
 const MAX_HEIGHT_PX = 112;
 const LONG_PRESS_MS = 450;
 interface Props {
+  ariaLabel?: string;
+  draftKey?: string;
   attachments: AttachmentsController;
   thinking: boolean;
   /** One-shot composer pre-fill (v1.4 "Ask Hirsel to stop"); consumed once then cleared. */
@@ -58,26 +62,21 @@ interface Props {
   focused?: boolean;
   /** The citable field: every resting Task, in queue order. The `#` picker
    * offers these and the send resolves refs against them. */
-  tasks?: EventItem[];
+  tasks?: RefTarget[];
 }
 
 /** Composer anchored at the bottom of the task world. CLI-grade keyboard map on fine-pointer
- * devices (Enter send · Shift+Enter newline · Tab queue next-turn · Esc cancel
+ * devices (Enter send · Shift+Enter newline · Cmd/Ctrl+Shift+Enter queue next-turn · Esc cancel
  * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
  * (long-press = queue). Handles attachment staging (paperclip + paste).
  *
- * A fine pointer gets NO send button: Enter is the send, so a button beside it
- * was a second way to do the same thing taking permanent space. A coarse
- * pointer keeps it, because there Enter is a newline and the button is the only
- * send — long-press still queues. Nothing else stands in the capsule: the caret
- * that used to sit beside Send opened a "Send now / Queue for next turn" menu
- * and was `disabled` whenever the draft was empty, so the affordance the Owner
- * reached for did nothing most of the time. Queueing lives on Tab (desktop) and
- * on the long-press (touch), and both are printed in the ⌘/ sheet. */
+ * Send stays visible for both pointer types. Enter sends on desktop; touch keeps
+ * Enter as a newline. Queueing uses Ctrl/Cmd+Shift+Enter or a long press of Send.
+ */
 export function Composer(props: Props) {
   // Shared input mechanics (value signal, coarse-pointer detection, auto-grow)
   // with any future constrained compact input.
-  const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, "main");
+  const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, props.draftKey ?? "main");
   const [sending, setSending] = createSignal(false);
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
@@ -96,8 +95,7 @@ export function Composer(props: Props) {
 
   // Consume a one-shot pre-fill (v1.4 "Ask Hirsel to stop"): drop the text into the
   // draft, move the caret to the end, focus, then clear so it fires once.
-  createEffect(() => {
-    const pre = props.prefill;
+  createEffect(() => props.prefill, (pre) => {
     if (!pre) return;
     setValue(pre);
     focus();
@@ -155,6 +153,7 @@ export function Composer(props: Props) {
         value,
         coarse,
         onSend: () => void submit("send"),
+        onQueue: () => void submit("next_turn"),
         recallLast: props.getLastOwnerBody,
         onRecall: (text) => {
           setValue(text);
@@ -164,12 +163,7 @@ export function Composer(props: Props) {
     ) {
       return;
     }
-    // Tab with a non-empty composer queues a next-turn message (desktop only);
-    // empty Tab keeps normal focus movement.
-    if (!coarse() && e.key === "Tab" && !e.shiftKey && value().trim().length > 0) {
-      e.preventDefault();
-      void submit("next_turn");
-    }
+
   }
 
   // Clipboard routing, in priority order: files (screenshots, copied images)
@@ -247,32 +241,21 @@ export function Composer(props: Props) {
     // edges land on the conversation's two edges at every width — that shared
     // column is what makes it read as the floor of the screen rather than a
     // floating bar.
-    <div class="mx-auto w-full max-w-frame flex-shrink-0 px-gutter pb-3 rail:pb-4">
-    {/* One persistent organic capsule: the sole surface allowed the full pill
-        signature because it is the stable transition between global and task.
-        It has ONE width in every state — the reading measure it shares with the
-        instrument and the conversation above it (DESIGN §4). Focus changes its
-        tone only. The capsule used to narrow on focus, which moved it and its
-        Send button ~300px sideways on every toggle; continuity of the one
-        standing element beats the width distinction. It also used to be a
-        820px-wide slab under a 672px column of text — the measure now IS the
-        text column, so the capsule ends where the reading ends. It keeps a
-        visible hairline at rest so the floor is legible before it is touched,
-        and it rests at one textarea line high: a taller pill only advertised
-        itself. */}
+    <div class="mx-auto w-full max-w-frame flex-shrink-0 px-3 sm:px-gutter pb-3 rail:pb-4">
+    {/* The same compact composer stays within the conversation's reading measure. */}
     <div
       data-slot="composer-shell"
       data-focused={props.focused ? "true" : "false"}
       data-dropping={dragging() ? "true" : "false"}
-      class="w-full rounded-full px-2 py-1 ring-1 transition-[background-color,box-shadow] duration-200 ease-out"
-      classList={{
+      class={["w-full rounded-xl px-2 py-1 ring-1 transition-[background-color,box-shadow] duration-200 ease-out", {
         // The drop state overrides both resting tones: while a file is in the
         // air the capsule is the one thing on screen that must read as a
         // target, so it takes the full mint ring regardless of focus.
         "ring-primary bg-primary/10": dragging(),
-        "bg-primary/[0.035] ring-primary/25": props.focused && !dragging(),
+        "bg-primary/[0.035] ring-primary/25": !!props.focused && !dragging(),
         "bg-card/95 ring-border": !props.focused && !dragging(),
-      }}
+      }]}
+
     >
       <div class="w-full">
 
@@ -359,8 +342,8 @@ export function Composer(props: Props) {
           type="button"
           variant="ghost"
           size="icon-sm"
-          class="shrink-0 rounded-full text-muted-foreground"
-          classList={{ "size-11": coarse() }}
+          class={["shrink-0 rounded-full text-muted-foreground", { "size-11": coarse() }]}
+
           aria-label="Attach files"
           onClick={() => fileInputRef?.click()}
         >
@@ -378,8 +361,8 @@ export function Composer(props: Props) {
              pointer keeps the 44px one, so the capsule stays thumb-sized where
              thumbs use it. */
           class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 leading-snug shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
-          aria-label="Message Hirsel"
-          aria-expanded={picker.open() ? true : undefined}
+          aria-label={props.ariaLabel ?? "Message Hirsel"}
+          aria-expanded={(picker.open() ? true : undefined) ? "true" : "false"}
           aria-controls={picker.open() ? TASK_REF_PICKER_ID : undefined}
           aria-activedescendant={
             picker.open() && picker.activeIndex() >= 0
@@ -414,42 +397,33 @@ export function Composer(props: Props) {
             type="button"
             variant="secondary"
             size="icon-sm"
-            class="shrink-0 rounded-full"
-            classList={{ "size-11": coarse() }}
+            class="size-11 shrink-0 rounded-full"
+
             aria-label="Stop the agent"
             onClick={() => props.onStop()}
           >
             <Square class={`fill-current ${coarse() ? "size-4" : "size-3.5"}`} />
           </Button>
         </Show>
-        {/* Touch only: there, Enter is a newline, so this round Send is the only
-            way to send at all (tap = send, long-press = queue for next turn).
-            A fine pointer has Enter and needs no button. */}
-        <Show when={coarse()}>
-          <Button
-            type="button"
-            size="icon"
-            class="size-11 shrink-0 rounded-full"
-            onPointerDown={onSendPointerDown}
-            onPointerUp={onSendPointerUp}
-            onPointerLeave={onSendPointerUp}
-            onClick={onSendClick}
-            disabled={!canSend() || sending()}
-            aria-label="Send"
-          >
-            <Show when={sending()} fallback={<ArrowUp class="size-5" />}>
-              <LoaderCircle class="size-5 animate-spin" />
-            </Show>
-          </Button>
-        </Show>
-        {/* Attachments upload before the message leaves, which on a slow link is
-            a visible pause. With no Send button to spin, a fine pointer needs
-            its own mark that the send is in flight — read-only, not a target. */}
-        <Show when={!coarse() && sending()}>
-          <span class="grid size-8 shrink-0 place-items-center" role="status" aria-label="Sending">
-            <LoaderCircle class="size-4 animate-spin text-muted-foreground" />
-          </span>
-        </Show>
+        {/* Send stays visible on every pointer type. Enter remains the desktop
+            shortcut; holding Send on touch queues the next turn. Stop remains
+            alongside it while the Agent is working. */}
+        <Button
+          type="button"
+          size="icon-sm"
+          class="size-11 shrink-0 rounded-full"
+          onPointerDown={onSendPointerDown}
+          onPointerUp={onSendPointerUp}
+          onPointerLeave={onSendPointerUp}
+          onClick={onSendClick}
+          disabled={!canSend() || sending()}
+          aria-label="Send"
+          title={coarse() ? "Send · hold to queue for next turn" : "Send · Ctrl/Cmd+Shift+Enter to queue for next turn"}
+        >
+          <Show when={sending()} fallback={<ArrowUp class="size-5" />}>
+            <LoaderCircle class="size-5 animate-spin" />
+          </Show>
+        </Button>
       </div>
 
       {/* Bottom cue row: no standing keyboard-hint teaching (those keys live in

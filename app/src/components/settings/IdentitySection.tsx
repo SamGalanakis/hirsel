@@ -1,7 +1,8 @@
 // Settings → Device label & identity: the local display name for this browser
 // and the one-way fingerprint of its access token. Both are browser-local — the
 // web client sends neither to the Host.
-import { createSignal, type JSX } from "solid-js";
+import { createSignal } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Group, CopyRow, Field, SectionHeader } from "./rows";

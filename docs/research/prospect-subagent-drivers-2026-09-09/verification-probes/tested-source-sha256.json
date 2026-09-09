@@ -1,0 +1,11 @@
+{
+  "crates/hirsel-drivers/src/claude.rs": "b18f40cfbb12e651a98c0e0b2b94eef89a80ee88ceccf19381508d08cea72ec3",
+  "crates/hirsel-drivers/src/codex.rs": "490dd842a53ee7745890bb11f769a66da9b4ae58ba3183502799287df7611880",
+  "crates/hirsel-drivers/src/fake.rs": "886bceb320a38566b97f2a68b12b72a306bb86db44c32d02aa2ec1ce390af920",
+  "crates/hirsel-drivers/src/lib.rs": "97ce22a0d94f5752cc36429eb6a529f78b624d830777ea0ed23812a22aab77e6",
+  "crates/hirsel-drivers/src/shared.rs": "0f72e52866922ec9e6face10cd2b6575e4481b13213c5213c8b5cf3acdca825a",
+  "crates/hirsel-drivers/src/tests.rs": "6e26554c918e263d13c5f9a5d8cf084781e7af6542ef528c7a54ae5d9572b901",
+  "crates/hirsel-drivers/src/types.rs": "67c971bd5e82e6817de2b7871772aa131ec8cdd73dc1a50f94b54097fed566f9",
+  "extracted TerminalEventBus and TerminalEventReceiver": "3750ce1cd0aa83a6b342c6bdc734b7c2907aea1e533d0c3abe662d92777e0ddf",
+  "t3code:apps/server/src/provider/testFixtures/codexMultiAgentWire.json": "83fc42b07d8f08263117487ee188b68b563ce6b957488e1c19dbbe9cfbede99d"
+}

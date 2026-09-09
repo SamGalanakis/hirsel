@@ -145,7 +145,7 @@ impl PluginHost {
             let plugin_ctx = PluginCtx::new(
                 id.clone(),
                 label.clone(),
-                Arc::new(ctx::HostEvents {
+                Arc::new(ctx::HostThreads {
                     plugin_id: id.clone(),
                     label: label.clone(),
                     tools: tools.clone(),

@@ -212,7 +212,10 @@ fn fetch_messages_and_correlated_page_round_trip() {
 
 #[test]
 fn cancel_frames_round_trip() {
-    let cancel_turn = ClientToHost::CancelTurn { sc: None };
+    let cancel_turn = ClientToHost::CancelTurn {
+        thread_id: None,
+        sc: None,
+    };
     let encoded = serde_json::to_string(&cancel_turn).unwrap();
     assert_eq!(encoded, r#"{"type":"cancel_turn"}"#);
     let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
@@ -469,6 +472,10 @@ fn msg_removed_round_trips() {
 fn hello_ok_round_trips_chat_and_pings() {
     let ts = Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap();
     let message = ChatMessage {
+        artifact_ids: Vec::new(),
+        client_id: None,
+        thread_id: 0,
+        mentions: Vec::new(),
         id: 1,
         author: ChatAuthor::Agent,
         body: "pong".to_string(),
@@ -524,6 +531,7 @@ fn hello_ok_round_trips_chat_and_pings() {
         summary: Some("working".to_string()),
     };
     let response = HostToClient::HelloOk {
+        threads: Vec::new(),
         latest_msg_id: 1,
         messages: vec![message],
         events: vec![ping],
@@ -669,6 +677,8 @@ fn turn_event_prose_round_trips() {
         },
     };
     let encoded = serde_json::to_string(&HostToClient::TurnEvent {
+        turn_id: None,
+        thread_id: None,
         seq: event.seq,
         event: event.event.clone(),
         sc: None,
@@ -682,6 +692,8 @@ fn turn_event_prose_round_trips() {
     assert_eq!(
         decoded,
         HostToClient::TurnEvent {
+            turn_id: None,
+            thread_id: None,
             seq: 1,
             event: event.event,
             sc: None,
@@ -692,6 +704,8 @@ fn turn_event_prose_round_trips() {
 #[test]
 fn turn_event_tool_start_round_trips() {
     let event = HostToClient::TurnEvent {
+        turn_id: None,
+        thread_id: None,
         seq: 2,
         event: TurnEventKind::ToolStart {
             id: "call-1".to_string(),
@@ -713,6 +727,8 @@ fn turn_event_tool_start_round_trips() {
 #[test]
 fn turn_event_tool_done_round_trips() {
     let event = HostToClient::TurnEvent {
+        turn_id: None,
+        thread_id: None,
         seq: 3,
         event: TurnEventKind::ToolDone {
             id: "call-1".to_string(),
@@ -771,6 +787,7 @@ fn side_chat_client_frames_round_trip() {
             sc: "side:abc".to_string(),
         },
         ClientToHost::CancelTurn {
+            thread_id: None,
             sc: Some("side:abc".to_string()),
         },
     ];
@@ -880,6 +897,7 @@ fn hello_ok_defaults_side_chats() {
     assert_eq!(
         parsed,
         HostToClient::HelloOk {
+            threads: Vec::new(),
             latest_msg_id: 0,
             messages: Vec::new(),
             events: Vec::new(),
@@ -1034,6 +1052,10 @@ fn scoped_server_frames_round_trip() {
     let frames = [
         HostToClient::Msg {
             message: ChatMessage {
+                artifact_ids: Vec::new(),
+                client_id: None,
+                thread_id: 0,
+                mentions: Vec::new(),
                 id: 1,
                 author: ChatAuthor::Agent,
                 body: "hello".to_string(),
@@ -1045,6 +1067,8 @@ fn scoped_server_frames_round_trip() {
             sc: Some("abc".to_string()),
         },
         HostToClient::TurnEvent {
+            turn_id: None,
+            thread_id: None,
             seq: 1,
             event: TurnEventKind::Prose {
                 text: "hello".to_string(),
@@ -1052,6 +1076,8 @@ fn scoped_server_frames_round_trip() {
             sc: Some("abc".to_string()),
         },
         HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Thinking,
             text: Some("thinking".to_string()),
             sc: Some("abc".to_string()),
@@ -1072,6 +1098,10 @@ fn main_scope_frames_omit_sc() {
     let frames = [
         HostToClient::Msg {
             message: ChatMessage {
+                artifact_ids: Vec::new(),
+                client_id: None,
+                thread_id: 0,
+                mentions: Vec::new(),
                 id: 1,
                 author: ChatAuthor::Agent,
                 body: "hello".to_string(),
@@ -1083,6 +1113,8 @@ fn main_scope_frames_omit_sc() {
             sc: None,
         },
         HostToClient::TurnEvent {
+            turn_id: None,
+            thread_id: None,
             seq: 1,
             event: TurnEventKind::Prose {
                 text: "hello".to_string(),
@@ -1090,6 +1122,8 @@ fn main_scope_frames_omit_sc() {
             sc: None,
         },
         HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: None,
@@ -1300,4 +1334,25 @@ fn model_snapshot_provider_fields_default_for_older_hosts() {
     .unwrap();
     assert_eq!(parsed.provider_id, None);
     assert!(!parsed.free_text_model);
+}
+
+#[test]
+fn artifact_content_frames_and_optional_message_references_round_trip() {
+    let value = json!({"type":"artifact_opened","client_id":"open-1","artifact":{"id":7,"title":"Result","kind":"solid","mime":"text/jsx","filename":null,"created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[0,2],"content":"export default function App(){return <p>Hello</p>}"}});
+    let frame: HostToClient = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(frame).unwrap(), value);
+    let list: ClientToHost =
+        serde_json::from_value(json!({"type":"list_artifacts","client_id":"all"})).unwrap();
+    assert!(matches!(
+        list,
+        ClientToHost::ListArtifacts {
+            thread_id: None,
+            ..
+        }
+    ));
+    let message: ChatMessage = serde_json::from_value(
+        json!({"id":1,"author":"agent","body":"old","ref":null,"ts":"2026-09-09T00:00:00Z"}),
+    )
+    .unwrap();
+    assert!(message.artifact_ids.is_empty());
 }

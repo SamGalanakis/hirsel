@@ -1,8 +1,9 @@
 import type { PhrasingContent, RootContent, Table } from "mdast";
-import { createMemo, For, Show, type JSX } from "solid-js";
-import { Dynamic } from "solid-js/web";
+import { createMemo, For, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
+import { Dynamic } from "@solidjs/web";
 import { CodeBlock } from "./markdown/CodeBlock";
-import { TaskRefText } from "./tasks/TaskRefTag";
+import { ThreadRefText } from "../threads/ThreadRef";
 import { mdastToString, parseMarkdown, parseStreamingMarkdown } from "./markdown/parse";
 
 // CommonMark + GFM rendering for task conversation content. The source is
@@ -42,7 +43,7 @@ function renderPhrasing(nodes: readonly PhrasingContent[], noRefs = false): JSX.
         // cheap `includes` keeps every ordinary line on the plain-string path.
         out.push(
           !noRefs && node.value.includes("#")
-            ? <TaskRefText value={node.value} />
+            ? <ThreadRefText value={node.value} />
             : node.value,
         );
         break;

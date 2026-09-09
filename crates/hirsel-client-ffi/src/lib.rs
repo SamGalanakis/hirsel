@@ -1,3 +1,6 @@
+mod threads;
+pub use threads::*;
+
 use std::sync::{Arc, Mutex};
 
 use hirsel_client_core as core;
@@ -32,21 +35,6 @@ impl From<core::ChatAuthor> for ChatAuthor {
         match value {
             core::ChatAuthor::Owner => Self::Owner,
             core::ChatAuthor::Agent => Self::Agent,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum PingStatus {
-    Open,
-    Done,
-}
-
-impl From<core::PingStatus> for PingStatus {
-    fn from(value: core::PingStatus) -> Self {
-        match value {
-            core::PingStatus::Open => Self::Open,
-            core::PingStatus::Done => Self::Done,
         }
     }
 }
@@ -87,6 +75,9 @@ impl From<core::ToolCallSummary> for ToolCall {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChatMessage {
+    pub error: Option<String>,
+    pub thread_id: u64,
+    pub mentions: Vec<u64>,
     pub id: Option<u64>,
     pub author: ChatAuthor,
     pub body: String,
@@ -102,18 +93,24 @@ impl From<core::ChatEntry> for ChatMessage {
     fn from(value: core::ChatEntry) -> Self {
         match value {
             core::ChatEntry::Confirmed(message) => Self {
+                error: None,
                 id: Some(message.id),
+                thread_id: message.thread_id,
+                mentions: message.mentions,
                 author: message.author.into(),
                 body: message.body,
                 reply_to: message.reply_to,
                 timestamp: message.timestamp,
                 attachments: message.attachments.into_iter().map(Into::into).collect(),
                 tool_calls: message.tool_calls.into_iter().map(Into::into).collect(),
-                client_id: None,
+                client_id: message.client_id,
                 pending: false,
             },
             core::ChatEntry::Pending(send) => Self {
+                error: send.error,
                 id: None,
+                thread_id: send.thread_id,
+                mentions: send.mentions,
                 author: ChatAuthor::Owner,
                 body: send.body,
                 reply_to: send.reply_to,
@@ -123,120 +120,6 @@ impl From<core::ChatEntry> for ChatMessage {
                 client_id: Some(send.client_id),
                 pending: true,
             },
-        }
-    }
-}
-
-#[cfg(test)]
-mod chat_message_tests {
-    use super::*;
-
-    #[test]
-    fn confirmed_entry_keeps_the_flattened_ffi_shape() {
-        let flattened = ChatMessage::from(core::ChatEntry::Confirmed(core::ConfirmedMessage {
-            id: 42,
-            author: core::ChatAuthor::Agent,
-            body: "done".to_string(),
-            reply_to: Some(7),
-            timestamp: "2026-08-20T12:00:00+00:00".to_string(),
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-        }));
-
-        assert_eq!(
-            flattened,
-            ChatMessage {
-                id: Some(42),
-                author: ChatAuthor::Agent,
-                body: "done".to_string(),
-                reply_to: Some(7),
-                timestamp: "2026-08-20T12:00:00+00:00".to_string(),
-                attachments: Vec::new(),
-                tool_calls: Vec::new(),
-                client_id: None,
-                pending: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pending_entry_keeps_the_flattened_ffi_shape() {
-        let flattened = ChatMessage::from(core::ChatEntry::Pending(core::PendingSend {
-            client_id: "pending-1".to_string(),
-            body: "queued".to_string(),
-            reply_to: None,
-            mentions: vec![3],
-            timestamp: "2026-08-20T12:00:00+00:00".to_string(),
-        }));
-
-        assert_eq!(
-            flattened,
-            ChatMessage {
-                id: None,
-                author: ChatAuthor::Owner,
-                body: "queued".to_string(),
-                reply_to: None,
-                timestamp: "2026-08-20T12:00:00+00:00".to_string(),
-                attachments: Vec::new(),
-                tool_calls: Vec::new(),
-                client_id: Some("pending-1".to_string()),
-                pending: true,
-            }
-        );
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct QuickReply {
-    pub value: String,
-    pub label: String,
-}
-
-impl From<core::QuickReply> for QuickReply {
-    fn from(value: core::QuickReply) -> Self {
-        Self {
-            value: value.value,
-            label: value.label,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct Ping {
-    pub id: u64,
-    pub name: String,
-    pub description: String,
-    pub content: String,
-    pub anchor: u64,
-    pub requires_response: bool,
-    pub quick_replies: Vec<QuickReply>,
-    pub status: PingStatus,
-    pub read: bool,
-    pub timestamp: String,
-}
-
-impl From<core::Ping> for Ping {
-    fn from(value: core::Ping) -> Self {
-        let content = value
-            .ui
-            .get("children")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|node| node.get("text").and_then(|value| value.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Self {
-            id: value.id,
-            name: value.name,
-            description: value.description,
-            content,
-            anchor: value.anchor,
-            requires_response: value.requires_response,
-            quick_replies: value.quick_replies.into_iter().map(Into::into).collect(),
-            status: value.status.into(),
-            read: value.read,
-            timestamp: value.ts.to_rfc3339(),
         }
     }
 }
@@ -275,8 +158,13 @@ impl From<core::AgentActivity> for AgentActivity {
 pub struct ClientSnapshot {
     pub connection: ConnectionState,
     pub messages: Vec<ChatMessage>,
-    pub pings: Vec<Ping>,
-    pub agent_activity: AgentActivity,
+    pub threads: Vec<Thread>,
+    pub turns: Vec<ThreadTurn>,
+    pub activities: Vec<ThreadActivity>,
+    pub streams: Vec<ThreadStream>,
+    pub opened_threads: Vec<u64>,
+    pub history_has_more: Vec<u64>,
+    pub created_threads: Vec<CreatedThread>,
     pub last_seen_msg_id: Option<u64>,
     /// Host build identity from the last `hello_ok`; `None` until reported.
     pub host_version: Option<String>,
@@ -287,8 +175,13 @@ impl From<core::ClientSnapshot> for ClientSnapshot {
         Self {
             connection: value.connection.into(),
             messages: value.messages.into_iter().map(Into::into).collect(),
-            pings: value.pings.into_iter().map(Into::into).collect(),
-            agent_activity: value.agent_activity.into(),
+            threads: value.threads.into_iter().map(Into::into).collect(),
+            turns: value.turns.into_iter().map(Into::into).collect(),
+            activities: value.activities.into_iter().map(Into::into).collect(),
+            streams: value.streams.into_iter().map(Into::into).collect(),
+            opened_threads: value.opened_threads,
+            history_has_more: value.history_has_more,
+            created_threads: value.created_threads.into_iter().map(Into::into).collect(),
             last_seen_msg_id: value.last_seen_msg_id,
             host_version: value.host_version,
         }
@@ -321,6 +214,8 @@ pub struct SendReceipt {
 
 #[derive(Debug, Error, uniffi::Error)]
 pub enum ClientError {
+    #[error("invalid thread action: {detail}")]
+    InvalidAction { detail: String },
     #[error("invalid client configuration: {detail}")]
     InvalidConfig { detail: String },
     #[error("client connection manager is already running")]
@@ -436,6 +331,58 @@ impl Client {
         SendReceipt {
             client_id: receipt.client_id,
         }
+    }
+
+    pub fn retry_send(&self, client_id: String) {
+        self.core.retry_send(client_id);
+    }
+
+    pub fn create_thread(&self, title: String) -> SendReceipt {
+        SendReceipt {
+            client_id: self.core.create_thread(title).client_id,
+        }
+    }
+
+    pub fn open_thread(&self, thread_id: u64, before_id: Option<u64>) -> SendReceipt {
+        SendReceipt {
+            client_id: self.core.open_thread(thread_id, before_id).client_id,
+        }
+    }
+
+    pub fn send_thread_message(
+        &self,
+        thread_id: u64,
+        body: String,
+        attachments: Vec<String>,
+        mentions: Vec<u64>,
+    ) -> SendReceipt {
+        let mut request = core::SendMessageRequest::new(body);
+        request.thread_id = thread_id;
+        request.attachments = attachments;
+        request.mentions = mentions;
+        SendReceipt {
+            client_id: self.core.send_message(request).client_id,
+        }
+    }
+
+    pub fn thread_action(
+        &self,
+        thread_id: u64,
+        action: String,
+        data_json: String,
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let data =
+            serde_json::from_str(&data_json).map_err(|error| ClientError::InvalidAction {
+                detail: error.to_string(),
+            })?;
+        self.core
+            .thread_action(thread_id, action, data, expected_revision);
+        Ok(())
+    }
+
+    pub fn cancel_turn(&self, thread_id: u64) {
+        self.core.cancel_turn(thread_id);
     }
 
     pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {

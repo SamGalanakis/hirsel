@@ -41,6 +41,7 @@ pub struct PromptConfig {
     /// configuration paths and the enabled plugins' skills. Not editable, and
     /// not part of what Settings shows as the prompt.
     host_section: std::sync::Arc<str>,
+    skills: crate::skills::Skills,
 }
 
 impl PromptConfig {
@@ -55,7 +56,17 @@ impl PromptConfig {
             config_store,
             roster,
             host_section: host_section.into(),
+            skills: crate::skills::Skills::default(),
         }
+    }
+
+    pub fn with_skills(mut self, skills: crate::skills::Skills) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    pub fn expand_skill(&self, body: &str) -> anyhow::Result<String> {
+        self.skills.expand(body)
     }
 
     /// How the fork's selected provider shapes its model choice.
@@ -71,7 +82,12 @@ impl PromptConfig {
     /// What the Agent's Lash session is actually prompted with: the effective
     /// body plus the host-generated configuration section.
     pub fn agent_guidance(&self) -> String {
-        format!("{}{}", self.agent_prompt().text, self.host_section)
+        format!(
+            "{}{}{}",
+            self.agent_prompt().text,
+            self.host_section,
+            self.skills.guidance()
+        )
     }
 
     /// The fork's model selection, or `None` in a provider mode with no

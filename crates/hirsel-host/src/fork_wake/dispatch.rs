@@ -194,10 +194,14 @@ impl ForkWake {
     /// slice rather than aborting the fork: a fork with a thin pack still
     /// beats a lost message.
     async fn pack_context(&self) -> PackContext {
-        let events = self.storage.ping_snapshot().await.unwrap_or_else(|error| {
-            tracing::warn!(%error, "failed to read the live event inventory for a fork pack");
-            Vec::new()
-        });
+        let threads = self
+            .storage
+            .thread_snapshot()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to read the Thread inventory for a fork pack");
+                Vec::new()
+            });
         let recent_chat = self
             .storage
             .recent_chat(super::pack::PACK_CHAT_LIMIT as u64)
@@ -215,7 +219,7 @@ impl ForkWake {
                 Vec::new()
             });
         PackContext {
-            events,
+            threads,
             recent_chat,
             rules,
         }

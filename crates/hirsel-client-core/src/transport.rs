@@ -65,7 +65,7 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
                         set_offline(&inner, None);
                         return;
                     }
-                    Some(Command::SendPending) => {}
+                    Some(Command::SendPending | Command::Retry(_)) => {}
                 }
             }
         };
@@ -103,7 +103,7 @@ pub(crate) async fn run(inner: Weak<ClientInner>, mut commands: mpsc::UnboundedR
                 () = &mut sleep => break,
                 command = commands.recv() => match command {
                     Some(Command::Stop) | None => return,
-                    Some(Command::SendPending) => {}
+                    Some(Command::SendPending | Command::Retry(_)) => {}
                 }
             }
         }
@@ -188,6 +188,12 @@ async fn run_session(
                     }
                 }
                 Some(Command::SendPending) => {}
+                Some(Command::Retry(client_id)) => {
+                    sent_this_connection.remove(&client_id);
+                    if online && let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
+                        return SessionEnd::Disconnected { reason: error, became_online: online };
+                    }
+                }
             },
             frame = channel.receive() => match frame {
                 Ok(ServerFrame::Message(message)) => {
@@ -257,6 +263,7 @@ async fn flush_pending(
             .unwrap_or_else(|error| error.into_inner());
         std::mem::take(&mut *pending)
     };
+    let creates = client.read_store().pending_creates.clone();
     let pending: Vec<_> = client.read_store().pending_sends().cloned().collect();
     drop(client);
 
@@ -274,6 +281,13 @@ async fn flush_pending(
                 *pending = unsent;
             }
             return Err(error);
+        }
+    }
+    for (client_id, title) in creates {
+        if sent_this_connection.insert(client_id.clone()) {
+            channel
+                .send(&hirsel_proto::ClientToHost::CreateThread { client_id, title })
+                .await?;
         }
     }
     for send in pending {
@@ -294,39 +308,112 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
             HostToClient::HelloOk {
                 latest_msg_id,
                 messages,
-                events,
+                threads,
                 processes,
                 host_version,
                 ..
             } => {
-                store.apply_hello_ok(latest_msg_id, messages, events, processes, host_version);
+                store.apply_hello_ok(latest_msg_id, messages, threads, processes, host_version);
+                let mut reopen = store.opened_threads.clone();
+                reopen.extend(store.requests.iter().map(|(_, id)| *id));
+                reopen.sort_unstable();
+                reopen.dedup();
+                store.requests.clear();
+                let mut frames = client
+                    .pending_frames
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                frames.retain(|frame| {
+                    !matches!(frame, hirsel_proto::ClientToHost::OpenThread { .. })
+                });
+                for thread_id in reopen {
+                    let client_id = uuid::Uuid::new_v4().to_string();
+                    store.requests.push((client_id.clone(), thread_id));
+                    frames.push_back(hirsel_proto::ClientToHost::OpenThread {
+                        client_id,
+                        thread_id,
+                        before_id: None,
+                    });
+                }
                 true
             }
             HostToClient::Msg { message, sc: None } => {
                 store.apply_message(message);
                 true
             }
+            HostToClient::MsgRemoved { id } => {
+                store.remove_message(id);
+                true
+            }
             HostToClient::AgentActivity {
                 state,
                 text,
                 sc: None,
+                thread_id: Some(thread_id),
+                turn_id: Some(turn_id),
             } => {
-                store.agent_activity.state = state;
-                store.agent_activity.text = text;
+                if let Some(stream) = store.stream(thread_id, turn_id) {
+                    stream.activity = crate::AgentActivity { state, text };
+                }
                 true
             }
-            HostToClient::EventUpsert { event } => {
-                store.upsert_ping(event);
+            HostToClient::TurnEvent {
+                thread_id: Some(thread_id),
+                turn_id: Some(turn_id),
+                seq,
+                event,
+                sc: None,
+            } => {
+                store.apply_delta(thread_id, turn_id, seq, event);
+                true
+            }
+            HostToClient::ThreadUpsert { thread } => {
+                store.upsert_thread(thread);
+                true
+            }
+            HostToClient::ThreadCreated { client_id, thread } => {
+                store.pending_creates.retain(|(id, _)| *id != client_id);
+                store
+                    .created_threads
+                    .retain(|created| created.client_id != client_id);
+                store.created_threads.push(crate::store::CreatedThread {
+                    client_id,
+                    thread_id: thread.id,
+                });
+                store.upsert_thread(thread);
+                true
+            }
+            HostToClient::ThreadOpened { client_id, detail } => {
+                store.apply_detail(&client_id, detail);
+                true
+            }
+            HostToClient::ThreadActivity { activity } => {
+                store.upsert_activity(activity);
+                true
+            }
+            HostToClient::ThreadTurn { turn } => {
+                store.upsert_turn(turn);
                 true
             }
             HostToClient::ProcessUpsert { process } => {
                 store.upsert_process(process);
                 true
             }
-            HostToClient::Error { detail, .. } => {
+            HostToClient::Error { detail, client_id } => {
+                if let Some(client_id) = client_id {
+                    store.pending_creates.retain(|(id, _)| *id != client_id);
+                    store.requests.retain(|(id, _)| *id != client_id);
+                    for entry in &mut store.messages {
+                        if let crate::ChatEntry::Pending(send) = entry
+                            && send.client_id == client_id
+                        {
+                            send.error = Some(detail.clone());
+                        }
+                    }
+                }
                 drop(store);
                 client.notify_lifecycle(LifecycleEvent::ProtocolError { detail });
-                false
+                true
             }
             _ => false,
         }

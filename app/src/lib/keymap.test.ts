@@ -1,6 +1,9 @@
+import { flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeField, installGlobalKeymap, isEditableTarget, type KeymapHandlers } from "./keymap";
-import { clearTaskFocus, dispatch, state, toggleTaskFocus } from "../store/store";
+import { setThreadState, threadState } from "../threads/store";
+const clearTaskFocus = () => flush(() => setThreadState(draft => { draft["focusedId"] = 0; }));
+const toggleTaskFocus = (id: number) => flush(() => setThreadState(draft => { draft["focusedId"] = id; }));
 
 // Routing-level unit tests: the overlay registry is stubbed so the suppression
 // check is drivable from a flag. `src/lib/overlay-presence.test.tsx` covers the
@@ -10,7 +13,6 @@ vi.mock("./focus", () => ({
   anyOverlayOpen: () => overlayRef.open,
   createOverlayPresence: () => {},
   focusMainComposer: () => {},
-  focusTaskIndex: () => {},
 }));
 
 function makeHandlers(): KeymapHandlers {
@@ -26,7 +28,7 @@ function makeHandlers(): KeymapHandlers {
 
 function press(key: string, init: KeyboardEventInit = {}, target?: EventTarget) {
   const ev = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
-  (target ?? window).dispatchEvent(ev);
+  flush(() => (target ?? window).dispatchEvent(ev));
   return ev;
 }
 
@@ -56,7 +58,7 @@ describe("keymap", () => {
     expect(handlers.goPane).toHaveBeenCalledWith("composer");
     press("g");
     press("t");
-    expect(handlers.goPane).toHaveBeenCalledWith("tasks");
+    expect(handlers.goPane).toHaveBeenCalledWith("threads");
     // `c` alone (no leader) is still focus-composer, not a pane switch.
     expect(handlers.focusComposer).toHaveBeenCalledTimes(0);
   });
@@ -133,35 +135,35 @@ describe("keymap", () => {
 });
 
 describe("Esc ladder", () => {
-  const idle = () =>
-    dispatch({ type: "agent_activity", payload: { state: "idle", text: null } });
-  const thinking = () =>
-    dispatch({ type: "agent_activity", payload: { state: "thinking", text: null } });
+  const idle = () => flush(() => setThreadState(draft => { draft["histories"] = {}; }));
+  const thinking = () => flush(() => setThreadState(draft => { draft["histories"][7] = { messages: [], activities: [], loaded: true, hasMore: false, turns: [{ id: 1, thread_id: 7, state: "running", owner_message_id: null, agent_message_id: null, started_at: "2026-09-09T10:00:00Z", finished_at: null }] }; }));
 
   beforeEach(() => {
     overlayRef.open = false;
-    clearTaskFocus();
+    flush(() => clearTaskFocus());
     idle();
   });
 
   it("clears task focus when nothing above it owns Esc", () => {
-    toggleTaskFocus(7);
-    expect(escapeField()).toBe(true);
-    expect(state.focusedTaskId).toBeNull();
+    flush(() => toggleTaskFocus(7));
+    const handled = escapeField();
+    flush();
+    expect(handled).toBe(true);
+    expect(threadState.focusedId).toBe(0);
   });
 
   it("yields to a running turn so Esc stops it instead of leaving the task", () => {
-    toggleTaskFocus(7);
+    flush(() => toggleTaskFocus(7));
     thinking();
     expect(escapeField()).toBe(false);
-    expect(state.focusedTaskId).toBe(7);
+    expect(threadState.focusedId).toBe(7);
   });
 
   it("yields to an open overlay's focus trap", () => {
-    toggleTaskFocus(7);
+    flush(() => toggleTaskFocus(7));
     overlayRef.open = true;
     expect(escapeField()).toBe(false);
-    expect(state.focusedTaskId).toBe(7);
+    expect(threadState.focusedId).toBe(7);
   });
 
   it("does nothing in the ambient field", () => {

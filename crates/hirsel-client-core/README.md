@@ -1,19 +1,18 @@
 # hirsel-client-core
 
-Pure-Rust client foundation for Hirsel's mobile and desktop skins. It owns the
-WebSocket connection, reconnect/resume behavior, ordered offline sends,
-conversation reconciliation, the protocol-facing Task/message/process store,
-and observer notifications.
+Shared Rust transport and state for Hirsel clients. Durable Threads own messages,
+turns and activity. Citations (`mentions`) navigate to other Threads and never
+change message ownership. Thread 0 is the globally aware Orchestrator.
 
-The product contract above this core is Task Margins: one global conversation,
-one flat Task inventory, Task-scoped messages through Anchor + mention, and
-temporary utilities. Protocol records still contain legacy `chat`/`ping`
-spellings; those are compatibility names, not native navigation concepts.
+The core preserves complete Thread instruments and independent lifecycle,
+attention and read state. Open responses are request-correlated and filtered by
+message ownership; reconnect refreshes opened histories. Message echoes reconcile
+by client ID and Thread ID, including offline retries and attachment IDs. Streams
+use durable turn IDs and sequence numbers to reject late or duplicate deltas.
 
-This slice intentionally defers running-turn `turn_event` timelines,
-attachments/blob transfer, alternate send modes, and turn/queued-send
-cancellation. Legacy side-session decoding, where retained, is compatibility
-only and must not become a native Side Chat surface. The public records use
-owned values, the `Client` handle is cheaply cloneable through `Arc`, and
-`ClientObserver` is object-safe so UniFFI can wrap it without moving transport
-or reducer logic.
+Native commands create/open Threads, send owned messages, submit revision-bound
+instrument actions, settle/reopen/read/snooze/archive, and stop an addressed turn.
+UniFFI exposes the same state without interpreting instrument semantics. Android
+renders the constrained text, metadata, form and choice catalog; embedded custom
+views explicitly require the web app. Blob uploading remains a separate transport
+capability; received attachment metadata and outbound attachment IDs are retained.

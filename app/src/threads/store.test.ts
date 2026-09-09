@@ -1,0 +1,124 @@
+import { flush } from "solid-js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChatMessage } from "../protocol";
+import type { ThreadClientMessage, ThreadDetail } from "./types";
+import { makeThread } from "./fixtures";
+import { attachThreadTransport, createThread, disconnectThreads, handleThreadMessage, openThread, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
+const sent: ThreadClientMessage[] = [];
+beforeEach(() => { sent.length = 0; flush(() => setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
+afterEach(() => { disconnectThreads(); vi.useRealTimers(); });
+const detail = (id: number): ThreadDetail => ({ thread: makeThread(id), messages: [], turns: [], activities: [], has_more: false });
+describe("thread transport projection", () => {
+  it("creates a visible thread before any message and accepts its duplicate broadcast once", async () => {
+    const promise = createThread("Buy groceries");
+    const frame = sent[0];
+    if (frame.type !== "create_thread") throw new Error("wrong command");
+    flush(() => handleThreadMessage({ type: "thread_created", client_id: frame.client_id, thread: makeThread() }));
+    await expect(promise).resolves.toMatchObject({ id: 1 });
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread() }));
+    expect(threadState.threads).toHaveLength(1);
+  });
+  it("isolates late open responses from the currently selected thread", async () => {
+    const first = openThread(1);
+    const second = openThread(2);
+    flush(() => setThreadState(draft => { draft["focusedId"] = 2; }));
+    const frames = sent.filter(f => f.type === "open_thread");
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: frames[1].client_id, detail: detail(2) }));
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: frames[0].client_id, detail: detail(1) }));
+    await Promise.all([first, second]);
+    expect(threadState.focusedId).toBe(2);
+    expect(threadState.histories[1].loaded).toBe(true);
+    expect(threadState.histories[2].loaded).toBe(true);
+  });
+  it("correlates identical outgoing text by client id and preserves ownership across replay", () => {
+    flush(() => sendThreadMessage(1, "same", "send", [], [2]));
+    flush(() => sendThreadMessage(2, "same", "send", [], [1]));
+    const second = threadState.pending[1].clientId;
+    flush(() => handleThreadMessage({ type: "msg", message: { id: 5, thread_id: 2, client_id: second, author: "owner", body: "same", ref: null, ts: "2026-09-09T10:00:00Z", mentions: [1] } }));
+    expect(threadState.pending.map(p => p.threadId)).toEqual([1]);
+    expect(threadState.histories[1]).toBeUndefined();
+    expect(threadState.histories[2].messages).toHaveLength(1);
+  });
+  it("fails a missing acknowledgement and retries the same identity without duplicating content", () => {
+    vi.useFakeTimers();
+    flush(() => sendThreadMessage(1, "Buy groceries", "send", [], [2]));
+    const clientId = threadState.pending[0].clientId;
+    flush(() => vi.advanceTimersByTime(20_000));
+    expect(threadState.pending[0].failed).toBe(true);
+    flush(() => retryThreadMessage(clientId));
+    expect(threadState.pending[0].failed).toBe(false);
+    expect(sent[1]).toEqual(sent[0]);
+    flush(() => handleThreadMessage({ type: "msg", message: { id: 7, thread_id: 1, client_id: clientId, author: "owner", body: "Buy groceries", ref: null, ts: "2026-09-09T10:00:00Z" } }));
+    flush(() => vi.advanceTimersByTime(20_000));
+    expect(threadState.pending).toEqual([]);
+    expect(threadState.histories[1].messages).toHaveLength(1);
+  });
+  it("preserves back-to-back protocol records before the reactive microtask commits", () => {
+    handleThreadMessage({ type: "thread_upsert", thread: makeThread(1) });
+    handleThreadMessage({ type: "thread_upsert", thread: makeThread(2) });
+    handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 1, event: { kind: "prose", text: "old" } });
+    handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 11, seq: 1, event: { kind: "prose", text: "new" } });
+    handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 11, seq: 2, event: { kind: "prose", text: " next" } });
+    flush();
+    expect(threadState.threads.map(thread => thread.id).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(threadState.streams[1].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }, { kind: "prose", text: " next" }]);
+    expect(threadState.streamTurnIds[1]).toBe(11);
+  });
+  it("routes live timeline events only to their owning thread and binds instrument revision", () => {
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 2, seq: 1, event: { kind: "prose", text: "working" } }));
+    expect(threadState.streams[1]).toBeUndefined();
+    expect(threadState.streams[2]).toHaveLength(1);
+    flush(() => threadAction(2, "choose", { choice: "a" }, 7));
+    expect(sent[0]).toEqual({ type: "thread_action", thread_id: 2, action: "choose", data: { choice: "a" }, expected_revision: 7 });
+  });
+  it("resets sequence on a new turn and rejects late events or completion from the previous turn", () => {
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 1, event: { kind: "prose", text: "old" } }));
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 11, seq: 1, event: { kind: "prose", text: "new" } }));
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 2, event: { kind: "prose", text: "late" } }));
+    flush(() => handleThreadMessage({ type: "thread_turn", turn: { id: 10, thread_id: 1, owner_message_id: 1, agent_message_id: 2, state: "completed", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:01Z" } }));
+    expect(threadState.streams[1].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }]);
+    expect(threadState.streamTurnIds[1]).toBe(11);
+  });
+  it("removes cancelled messages and rejects delayed echoes, open pages and reconnect snapshots", async () => {
+    const cancelled: ChatMessage = { id: 9, thread_id: 1, author: "owner", body: "Cancelled work", ref: null, ts: "2026-09-09T10:00:00Z" };
+    const retained: ChatMessage = { ...cancelled, id: 10, thread_id: 2, body: "Other work" };
+    flush(() => handleThreadMessage({ type: "msg", message: cancelled }));
+    flush(() => handleThreadMessage({ type: "msg", message: retained }));
+    flush(() => setThreadState(draft => { draft["turnDetails"][cancelled.id] = [{ seq: 1, event: { kind: "prose", text: "old detail" } }]; }));
+    const opening = openThread(1);
+    const oldOpen = sent.at(-1);
+    if (oldOpen?.type !== "open_thread") throw new Error("expected open command");
+    flush(() => handleThreadMessage({ type: "msg_removed", id: cancelled.id }));
+    expect(threadState.histories[1].messages).toEqual([]);
+    expect(threadState.histories[2].messages).toEqual([retained]);
+    expect(threadState.turnDetails[cancelled.id]).toBeUndefined();
+    flush(() => handleThreadMessage({ type: "msg", message: cancelled }));
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: oldOpen.client_id, detail: { ...detail(1), messages: [cancelled] } }));
+    await opening;
+    expect(threadState.histories[1].messages).toEqual([]);
+    disconnectThreads();
+    attachThreadTransport(frame => sent.push(frame));
+    flush(() => setThreadState(draft => { draft["focusedId"] = 1; }));
+    flush(() => handleThreadMessage({ type: "hello_ok", latest_msg_id: 10, messages: [cancelled, retained], pings: [], threads: [makeThread(1), makeThread(2)] }));
+    const reconnectOpen = sent.at(-1);
+    if (reconnectOpen?.type !== "open_thread") throw new Error("expected reconnect open command");
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: reconnectOpen.client_id, detail: { ...detail(1), messages: [cancelled] } }));
+    expect(threadState.histories[1].messages).toEqual([]);
+    expect(threadState.histories[2].messages).toEqual([retained]);
+  });
+  it("remembers a tombstone received before a message and acknowledges its delayed owner echo", () => {
+    flush(() => sendThreadMessage(1, "Cancelled before echo", "next_turn", [], []));
+    const clientId = threadState.pending[0].clientId;
+    flush(() => handleThreadMessage({ type: "msg_removed", id: 12 }));
+    flush(() => handleThreadMessage({ type: "msg", message: { id: 12, thread_id: 1, client_id: clientId, author: "owner", body: "Cancelled before echo", ref: null, ts: "2026-09-09T10:00:00Z" } }));
+    expect(threadState.histories[1]?.messages ?? []).toEqual([]);
+    expect(threadState.pending).toEqual([]);
+  });
+  it("rejects disconnected requests and lets retry errors remain visible", async () => {
+    const promise = openThread(1);
+    disconnectThreads();
+    await expect(promise).rejects.toThrow("Connection interrupted");
+    flush(() => threadAction(1, "settle"));
+    expect(threadState.error?.detail).toMatch(/Reconnect/);
+  });
+});

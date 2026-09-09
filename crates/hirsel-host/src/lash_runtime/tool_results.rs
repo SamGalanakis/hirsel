@@ -1,46 +1,7 @@
 use super::*;
 
-pub(super) fn event_send_result(event: &hirsel_proto::Event) -> Value {
-    json!({
-        "event_id": event.id,
-        "anchor": event.anchor,
-        "kind": event.kind,
-    })
-}
-
-pub(super) fn event_archive_result(event: &hirsel_proto::Event) -> Value {
-    json!({
-        "event_id": event.id,
-        "status": event.status,
-        "archived": event.archived,
-    })
-}
-
-pub(super) fn events_clear_result(count: usize) -> Value {
-    json!({ "count": count })
-}
-
-pub(super) fn pings_send_result(ping: &hirsel_proto::Ping) -> Value {
-    json!({
-        "ping_id": ping.id,
-        "anchor": ping.anchor,
-        "requires_response": ping.requires_response,
-    })
-}
-
-pub(super) fn pings_resolve_result(ping: Option<&hirsel_proto::Ping>) -> Result<Value, String> {
-    let ping = ping.map(ping_result).transpose()?;
-    Ok(json!({ "ping": ping }))
-}
-
 pub(super) fn view_instance_result(view: &hirsel_proto::ViewInstance) -> Value {
     json!({ "instance_id": view.instance_id })
-}
-
-pub(super) fn ping_result(ping: &hirsel_proto::Ping) -> Result<Value, String> {
-    let mut value = serde_json::to_value(ping).map_err(|error| error.to_string())?;
-    rename_result_id(&mut value, "ping_id")?;
-    Ok(value)
 }
 
 pub(super) fn subagent_spawn_result(process_id: &str) -> Value {
@@ -84,11 +45,33 @@ pub(super) fn subagents_wait_result(
     process_id: &str,
     outcome: &ProcessAwaitOutput,
 ) -> Result<Value, String> {
-    serde_json::to_value(json!({
-        "process_id": process_id,
-        "outcome": outcome,
-    }))
-    .map_err(|error| error.to_string())
+    // Hirsel's tool contract is plain JSON; Lash's durable representation
+    // carries trust envelopes and control metadata that are not model output.
+    let outcome = match outcome {
+        ProcessAwaitOutput::Settled { output } => match &output.outcome {
+            lash_core::ToolCallOutcome::Success(value) => json!({
+                "type": "success", "value": value.to_json_value(),
+            }),
+            lash_core::ToolCallOutcome::Failure(failure) => json!({
+                "type": "failure", "class": failure.class, "code": failure.code,
+                "message": failure.message, "raw": failure.raw.as_ref().map(lash_core::ToolValue::to_json_value),
+            }),
+            lash_core::ToolCallOutcome::Cancelled(cancellation) => json!({
+                "type": "cancelled", "message": cancellation.message,
+                "raw": cancellation.raw.as_ref().map(lash_core::ToolValue::to_json_value),
+            }),
+        },
+        ProcessAwaitOutput::Abandoned { evidence, .. } => json!({
+            "type": "abandoned", "evidence": { "writer": evidence.writer, "epoch_ms": evidence.epoch_ms },
+        }),
+        ProcessAwaitOutput::NoLongerRetained {
+            terminal_label,
+            pruned_at_ms,
+        } => json!({
+            "type": "no_longer_retained", "terminal_label": terminal_label, "pruned_at_ms": pruned_at_ms,
+        }),
+    };
+    Ok(json!({ "process_id": process_id, "outcome": outcome }))
 }
 
 pub(super) fn shell_run_result(output: &crate::tools::ShellRunOutput) -> Result<Value, String> {

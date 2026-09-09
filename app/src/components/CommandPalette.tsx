@@ -1,45 +1,22 @@
-// The ⌘K command palette + the `?` / ⌘/ shortcut cheat-sheet — two summoned,
-// never standing surfaces. Both are calm Kobalte `Dialog`s (portal + scrim +
-// their own focus trap + Esc-to-dismiss). Kobalte's trap is internal and never
-// touches our trap stack, so each dialog joins `anyOverlayOpen` explicitly via
-// `createOverlayPresence` on its open-state prop — without that the global
-// bare-key layer keeps firing underneath the modal, and Esc double-fires. The
-// palette is a filterable command list (a combobox/listbox pattern: a search
-// field driving a `role="listbox"` with `aria-activedescendant`), styled to the
-// calm-terminal register — Inter for labels, mono only for the keyboard hints.
+// Summoned command and shortcut dialogs. Native modal isolation and the shared
+// focus stack keep keyboard shortcuts from firing behind the open surface.
 
-import * as Dialog from "@kobalte/core/dialog";
 import {
   Activity,
-  Archive,
   ArrowDownToLine,
-  CircleStop,
-  Clock,
   Layers,
   MessagesSquare,
   Minimize2,
-  Scale,
   Search,
   Settings,
-  Trash2,
-} from "lucide-solid";
-import { type Component, createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
-import type { EventItem } from "../protocol";
-import { clearTaskFocus, effectiveEvents, state } from "../store/store";
-import { archiveEventWithUndo } from "../lib/event-archive";
-import { decideEventWithUndo } from "../lib/event-decide";
-import { snoozeEventWithUndo } from "../lib/event-snooze";
-import { clearFinishedEventsWithUndo } from "../lib/event-sweep";
-import { snoozePresets } from "../lib/snooze-presets";
-import { focusComposer, goPane, jumpToLatest, SHORTCUTS, stopActiveTurn } from "../lib/keymap";
-import { createOverlayPresence } from "../lib/focus";
-import {
-  eventUiNodes,
-  finishedEvents,
-  isOpenJudgment,
-  orderedTasks,
-  taskEvents,
-} from "../store/selectors";
+} from "@/components/ui/icons";
+import { type Component, createEffect, createMemo, createSignal, For, Show, onSettled } from "solid-js";
+import { type JSX, Portal } from "@solidjs/web";
+import { focusThread, threadState } from "../threads/store";
+import { threadActions } from "../threads/actions";
+import { ThreadActionSymbol } from "../threads/ThreadActions";
+import { focusComposer, goPane, jumpToLatest, SHORTCUTS } from "../lib/keymap";
+import { createFocusTrap } from "../lib/focus";
 import { cn } from "@/lib/utils";
 
 interface Command {
@@ -67,28 +44,6 @@ function fuzzyMatch(query: string, text: string): boolean {
   return i === q.length;
 }
 
-/** The judgment the contextual actions ("Decide …", "Snooze current", "Archive
- * current") target: the first open judgment in Task priority
- * order (blocking first) — the one that most needs the Owner. */
-function currentJudgment(): EventItem | null {
-  const ordered = orderedTasks(taskEvents(effectiveEvents()));
-  return ordered.find(isOpenJudgment) ?? null;
-}
-
-/** The letter-keyed options of a judgment's optionList, for the "Decide <key>"
- * entries. */
-function judgmentOptions(ev: EventItem): { action: string; key: string; label: string }[] {
-  const list = eventUiNodes(ev.ui).find((n) => n.type === "optionList");
-  if (!list) return [];
-  const action = typeof list.action === "string" ? list.action : "choose";
-  const options = (Array.isArray(list.options) ? list.options : []) as Record<string, unknown>[];
-  return options.map((o) => ({
-    action,
-    key: String(o.key ?? ""),
-    label: String(o.label ?? "").replace(/`/g, ""),
-  }));
-}
-
 // ---- Palette ----------------------------------------------------------------
 
 export const CommandPalette: Component<{
@@ -98,9 +53,7 @@ export const CommandPalette: Component<{
   const [query, setQuery] = createSignal("");
   const [activeIndex, setActiveIndex] = createSignal(0);
 
-  createOverlayPresence(() => props.open);
 
-  const thinking = () => state.agentActivity.state === "thinking";
   const iconClass = "size-4 shrink-0 text-muted-foreground";
 
   // The full command set, rebuilt reactively so the current task actions and
@@ -116,12 +69,12 @@ export const CommandPalette: Component<{
         run: focusComposer,
       },
       {
-        id: "go-tasks",
-        label: "Focus tasks",
+        id: "go-threads",
+        label: "Open threads",
         hint: ["g", "t"],
-        keywords: "tasks work judgments needs you",
+        keywords: "threads work needs you",
         icon: <Layers class={iconClass} aria-hidden="true" />,
-        run: () => goPane("tasks"),
+        run: () => goPane("threads"),
       },
       {
         id: "go-processes",
@@ -151,67 +104,19 @@ export const CommandPalette: Component<{
 
     // The exit from a focused Task, mirroring the Esc ladder's last rung. Only
     // offered while there is a focus to leave.
-    if (state.focusedTaskId !== null) {
+    if (threadState.focusedId !== 0) {
       out.push({
         id: "clear-focus",
-        label: "Clear task focus",
+        label: "Open Hirsel",
         hint: ["Esc"],
         keywords: "ambient leave exit close unfocus back",
         icon: <Minimize2 class={iconClass} aria-hidden="true" />,
-        run: clearTaskFocus,
+        run: () => focusThread(0),
       });
     }
 
-    if (thinking()) {
-      out.push({
-        id: "stop-turn",
-        label: "Stop the active turn",
-        keywords: "cancel halt interrupt",
-        icon: <CircleStop class={iconClass} aria-hidden="true" />,
-        run: stopActiveTurn,
-      });
-    }
-
-    // Contextual task actions stay flat so the palette remains fast.
-    const ev = currentJudgment();
-    if (ev) {
-      for (const opt of judgmentOptions(ev)) {
-        out.push({
-          id: `decide-${ev.id}-${opt.key}`,
-          label: `Decide ${opt.key} — ${opt.label}`,
-          keywords: `choose answer ${ev.name} ${ev.description}`,
-          icon: <Scale class={iconClass} aria-hidden="true" />,
-          run: () => decideEventWithUndo(ev.id, opt.action, { choice: opt.key, label: opt.label }, opt.label),
-        });
-      }
-      for (const preset of snoozePresets()) {
-        out.push({
-          id: `snooze-${ev.id}-${preset.key}`,
-          label: `Snooze current · ${preset.label}`,
-          keywords: `defer later ${ev.name}`,
-          icon: <Clock class={iconClass} aria-hidden="true" />,
-          run: () => snoozeEventWithUndo(ev.id, preset.until, preset.label),
-        });
-      }
-      out.push({
-        id: `archive-${ev.id}`,
-        label: "Archive current",
-        keywords: `dismiss ${ev.name}`,
-        icon: <Archive class={iconClass} aria-hidden="true" />,
-        run: () => archiveEventWithUndo(ev.id),
-      });
-    }
-
-    const finishedIds = finishedEvents(effectiveEvents()).map((e) => e.id);
-    if (finishedIds.length > 0) {
-      out.push({
-        id: "clear-finished",
-        label: `Clear finished (${finishedIds.length})`,
-        keywords: "sweep archive done",
-        icon: <Trash2 class={iconClass} aria-hidden="true" />,
-        run: () => clearFinishedEventsWithUndo(finishedIds),
-      });
-    }
+    const thread = threadState.threads.find(t => t.id === threadState.focusedId);
+    if (thread) for (const action of threadActions(thread)) out.push({ id: `${action.id}-thread`, label: action.label, icon: <ThreadActionSymbol name={action.icon} />, run: action.run });
 
     return out;
   });
@@ -224,15 +129,14 @@ export const CommandPalette: Component<{
 
   // Reset the surface each time it is summoned, and keep the active row in range
   // as the filter narrows.
-  createEffect(() => {
-    if (props.open) {
+  createEffect(() => props.open, (open) => {
+    if (open) {
       setQuery("");
       setActiveIndex(0);
     }
   });
-  createEffect(() => {
-    const n = filtered().length;
-    if (activeIndex() >= n) setActiveIndex(n > 0 ? n - 1 : 0);
+  createEffect(() => ({ n: filtered().length, index: activeIndex() }), ({ n, index }) => {
+    if (index >= n) setActiveIndex(n > 0 ? n - 1 : 0);
   });
 
   function runCommand(cmd: Command) {
@@ -263,25 +167,13 @@ export const CommandPalette: Component<{
         runCommand(cmd);
       }
     }
-    // Escape is left to Kobalte's Dialog to dismiss.
+    // The modal focus stack owns Escape.
   }
 
   return (
-    <Dialog.Root open={props.open} onOpenChange={props.onOpenChange} modal>
-      <Dialog.Portal>
-        <Dialog.Overlay class="fixed inset-0 z-50 bg-black/50 data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0" />
-        {/* Dynamic viewport units, not `vh`: the palette is a text-entry
-            surface, so the on-screen keyboard is up whenever it is used, and
-            `14vh + 60vh` measured against the large viewport pushed the bottom
-            of the result list under the keyboard on a phone. */}
-        <div class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[14dvh]">
-          <Dialog.Content
-            class={cn(
-              "flex max-h-[60dvh] w-full max-w-[560px] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-lg outline-none",
-              "data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0 data-[expanded]:zoom-in-95",
-            )}
-          >
-            <Dialog.Title class="sr-only">Command palette</Dialog.Title>
+    <ModalSurface open={props.open} onClose={() => props.onOpenChange(false)} label="Command palette"
+      class="flex max-h-[60dvh] max-w-[560px] flex-col overflow-hidden">
+            <h2 class="sr-only">Command palette</h2>
 
             {/* Search field — the combobox input. */}
             <div class="flex items-center gap-2 border-b border-border px-3">
@@ -289,6 +181,7 @@ export const CommandPalette: Component<{
               <input
                 type="text"
                 role="combobox"
+                aria-label="Search commands"
                 aria-expanded="true"
                 aria-controls="command-palette-list"
                 aria-activedescendant={filtered()[activeIndex()]?.id}
@@ -320,7 +213,8 @@ export const CommandPalette: Component<{
                       type="button"
                       id={cmd.id}
                       role="option"
-                      aria-selected={i() === activeIndex()}
+                      tabindex={-1}
+                      aria-selected={i() === activeIndex() ? "true" : "false"}
                       class={cn(
                         "flex w-full cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground",
                         i() === activeIndex() && "bg-muted",
@@ -338,22 +232,18 @@ export const CommandPalette: Component<{
                 </For>
               </Show>
             </div>
-          </Dialog.Content>
-        </div>
-      </Dialog.Portal>
-    </Dialog.Root>
+    </ModalSurface>
   );
 };
 
 // ---- Shortcut cheat-sheet (`?`) --------------------------------------------
 
-const GROUP_ORDER = ["General", "Tasks", "Focus", "Hirsel"] as const;
+const GROUP_ORDER = ["General", "Threads", "Focus", "Hirsel"] satisfies Array<(typeof SHORTCUTS)[number]["group"]>;
 
 export const ShortcutHelp: Component<{
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }> = (props) => {
-  createOverlayPresence(() => props.open);
 
   const groups = createMemo(() =>
     GROUP_ORDER.map((group) => ({
@@ -363,19 +253,12 @@ export const ShortcutHelp: Component<{
   );
 
   return (
-    <Dialog.Root open={props.open} onOpenChange={props.onOpenChange} modal>
-      <Dialog.Portal>
-        <Dialog.Overlay class="fixed inset-0 z-50 bg-black/50 data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0" />
-        <div class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[14vh]">
-          <Dialog.Content
-            class={cn(
-              "w-full max-w-[420px] overflow-hidden rounded-xl border border-border bg-card p-4 shadow-lg outline-none",
-              "data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0 data-[expanded]:zoom-in-95",
-            )}
-          >
-            <Dialog.Title class="m-0 mb-3 text-base font-semibold tracking-[0.01em]">
-              Keyboard shortcuts
-            </Dialog.Title>
+    <ModalSurface open={props.open} onClose={() => props.onOpenChange(false)} label="Keyboard shortcuts"
+      class="max-h-[72dvh] max-w-[420px] overflow-y-auto p-4">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <h2 class="m-0 text-base font-semibold tracking-[0.01em]">Keyboard shortcuts</h2>
+              <button type="button" class="rounded px-2 py-1 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" onClick={() => props.onOpenChange(false)}>Close</button>
+            </div>
             <div class="flex flex-col gap-4">
               <For each={groups()}>
                 {(g) => (
@@ -397,10 +280,7 @@ export const ShortcutHelp: Component<{
                 )}
               </For>
             </div>
-          </Dialog.Content>
-        </div>
-      </Dialog.Portal>
-    </Dialog.Root>
+    </ModalSurface>
   );
 };
 
@@ -419,3 +299,25 @@ const KeyHint: Component<{ keys: string[] }> = (props) => (
     </For>
   </span>
 );
+
+function ModalSurface(props: {open: boolean; onClose: () => void; label: string; class: string; children: JSX.Element}) {
+  return <Show when={props.open}><Portal><ModalPanel {...props} /></Portal></Show>;
+}
+function ModalPanel(props: {onClose: () => void; label: string; class: string; children: JSX.Element}) {
+  let panel!: HTMLDialogElement;
+  createFocusTrap(() => panel, {onEscape: props.onClose});
+  onSettled(() => {
+    if (typeof panel.showModal === "function") panel.showModal();
+    else panel.setAttribute("open", "");
+  });
+  return <dialog ref={node => { panel = node; }} aria-label={props.label} aria-modal="true"
+    class={cn("fixed inset-x-0 top-[14dvh] bottom-auto mx-auto my-0 w-[calc(100%_-_2rem)] rounded-xl border border-border bg-card text-foreground shadow-lg outline-none backdrop:bg-black/50", props.class)}
+    onCancel={(event) => { event.preventDefault(); props.onClose(); }}
+    onPointerDown={(event) => {
+      if (event.target !== panel) return;
+      const bounds = panel.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) props.onClose();
+    }}>
+    {props.children}
+  </dialog>;
+}

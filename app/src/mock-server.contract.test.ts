@@ -4,6 +4,8 @@ import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import type WebSocketType from "ws";
 import type { RawData } from "ws";
+import type { Thread, ThreadDetail } from "./threads/types";
+import type { ChatMessage } from "./protocol";
 
 const require = createRequire(import.meta.url);
 // Bypass Vite's browser-condition alias for `ws`: this test exercises a real
@@ -96,12 +98,12 @@ async function expectActionError(
   expect(await rejected).toMatchObject({ type: "error" });
 }
 
-describe("dev mock task contract", () => {
-  it("isolates tokens while replaying each token's actions and messages", async () => {
+describe("dev mock Thread contract", () => {
+  it("isolates tokens while replaying owned histories and explicit lifecycle", async () => {
     const port = await freePort();
     child = spawn(process.execPath, ["tools/mock-server.mjs"], {
       cwd: process.cwd(),
-      env: { ...process.env, MOCK_PORT: String(port), MOCK_REPLY_MS: "5000" },
+      env: { ...process.env, MOCK_PORT: String(port), MOCK_REPLY_MS: "10" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     await new Promise<void>((resolve, reject) => {
@@ -113,163 +115,76 @@ describe("dev mock task contract", () => {
       });
       child?.once("exit", (code) => reject(new Error(`mock server exited early (${code})`)));
     });
-
     let connection = await hello(port);
-    const first = connection.frame;
-    expect(first.pings).toEqual([]);
-    expect(first.events).toHaveLength(3);
-    expect(first.model).toMatchObject({ current: { id: "gpt-5.6-sol", variant: "medium" } });
-    expect(first.processes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "subagent", state: "running" }),
-      ]),
-    );
-
-    const historyPage = waitForFrame(
-      connection.ws,
-      (frame) => frame.type === "messages" && frame.client_id === "history-contract",
-    );
-    connection.ws.send(JSON.stringify({
-      type: "fetch_messages",
-      client_id: "history-contract",
-      before_id: 10_000,
-      limit: 2,
-    }));
-    expect(await historyPage).toMatchObject({
-      type: "messages",
-      client_id: "history-contract",
-      before_id: 10_000,
-      has_more: true,
-    });
-    expect((await historyPage).messages).toHaveLength(2);
-
-    const seededEvents = first.events as Array<Record<string, unknown>>;
-    const deploy = seededEvents.find((event) => event.name === "deploy-4821");
-    const auth = seededEvents.find((event) => event.name === "auth-pr");
-    expect(deploy).toMatchObject({ kind: "judgment", status: "open", read: false });
-    expect(auth).toMatchObject({ kind: "judgment", status: "open" });
-
-    const echoed = waitForFrame(
-      connection.ws,
-      (frame) => frame.type === "msg" && (frame.message as { body?: string })?.body === "keep investigating",
-    );
-    connection.ws.send(JSON.stringify({
-      type: "send_message",
-      client_id: "contract-message",
-      body: "keep investigating",
-      ref: deploy?.anchor,
-      mentions: [deploy?.id],
-      attachments: [],
-      mode: "send",
-    }));
-    expect((await echoed).message).toMatchObject({
-      body: "keep investigating",
-      ref: deploy?.anchor,
-      mentions: [deploy?.id],
-    });
-    await close(connection.ws);
-
-    connection = await hello(port);
-    expect((connection.frame.events as Array<Record<string, unknown>>).find((event) => event.id === deploy?.id))
-      .toMatchObject({ status: "open" });
-    expect(connection.frame.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({ body: "keep investigating", ref: deploy?.anchor, mentions: [deploy?.id] }),
+    expect(connection.frame.threads).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 0 }),
+      expect.objectContaining({ id: 1, title: "Buy groceries", attention: "quiet", settled_at: null }),
     ]));
-
-    const advanced = waitForFrame(
-      connection.ws,
-      (frame) => frame.type === "event_upsert" && (frame.event as { id?: number })?.id === deploy?.id,
-    );
-    connection.ws.send(JSON.stringify({
-      type: "event_action",
-      event_id: deploy?.id,
-      action: "advance",
-      data: { choice: "A" },
-    }));
-    const canary = (await advanced).event as Record<string, unknown>;
-    expect(canary).toMatchObject({
-      id: deploy?.id,
-      anchor: deploy?.anchor,
-      name: "deploy-4821",
-      status: "open",
-    });
-    expect(canary.ui).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "heading", text: "Canary is healthy. Promote production?" }),
-      expect.objectContaining({ type: "status", state: "success" }),
-    ]));
-
-    const chosen = waitForFrame(
-      connection.ws,
-      (frame) => frame.type === "event_upsert" && (frame.event as { id?: number })?.id === deploy?.id,
-    );
-    await expectActionError(connection.ws, {
-      type: "event_action",
-      event_id: deploy?.id,
-      action: "choose",
-      data: { choice: "A", label: "Wrong release" },
-    }, "does not match choice");
-    connection.ws.send(JSON.stringify({
-      type: "event_action",
-      event_id: deploy?.id,
-      action: "choose",
-      data: { choice: "A" },
-    }));
-    expect((await chosen).event).toMatchObject({ status: "done", id: deploy?.id, anchor: deploy?.anchor });
+    const request = async (command: Record<string, unknown>, type: string) => {
+      const response = waitForFrame(connection.ws, frame => frame.type === type);
+      connection.ws.send(JSON.stringify(command));
+      return response;
+    };
+    const created = (await request({ type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread as Thread;
+    expect(created.attention).toBe("quiet");
+    expect((await request({ type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread).toEqual(created);
+    const completed = waitForFrame(connection.ws, frame => frame.type === "thread_turn" && (frame.turn as { state?: string }).state === "completed");
+    const command = { type: "send_thread_message", thread_id: created.id, client_id: "message", body: "keep investigating", mentions: [1], attachments: [] };
+    const owner = (await request(command, "msg")).message as ChatMessage;
+    expect(owner).toMatchObject({ thread_id: created.id, mentions: [1], client_id: "message" });
+    await completed;
+    expect((await request(command, "msg")).message).toEqual(owner);
+    await expectActionError(connection.ws, { ...command, body: "conflicting retry" }, "different content");
+    const detail = (await request({ type: "open_thread", client_id: "open", thread_id: created.id }, "thread_opened")).detail as ThreadDetail;
+    expect(detail.messages).toHaveLength(2);
+    expect(detail.messages.every(message => message.thread_id === created.id)).toBe(true);
+    expect(detail.turns).toHaveLength(1);
+    const earlier = (await request({ type: "open_thread", client_id: "earlier", thread_id: created.id, before_id: detail.messages[1].id }, "thread_opened")).detail as ThreadDetail;
+    expect(earlier.messages).toEqual([owner]);
+    expect(earlier.has_more).toBe(false);
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "invented", expected_revision: 0 }, "changed");
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "invented", expected_revision: created.revision }, "no generated action");
+    expect((await request({ type: "thread_action", thread_id: created.id, action: "read" }, "thread_upsert")).thread).toMatchObject({ id: created.id, read: true, settled_at: null });
+    const settled = (await request({ type: "thread_action", thread_id: created.id, action: "settle" }, "thread_upsert")).thread as Thread;
+    expect(settled.settled_at).not.toBeNull();
     await close(connection.ws);
-
     const isolated = await hello(port, "parallel-runbook");
-    const isolatedEvents = isolated.frame.events as Array<Record<string, unknown>>;
-    expect(isolatedEvents.find((event) => event.name === "deploy-4821"))
-      .toMatchObject({ status: "open" });
-    expect(isolated.frame.messages).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ body: "keep investigating" }),
-    ]));
+    expect((isolated.frame.threads as Thread[]).some(thread => thread.id === created.id)).toBe(false);
+    expect(isolated.frame.messages).toEqual([]);
     await close(isolated.ws);
-
     connection = await hello(port);
-    expect((connection.frame.events as Array<Record<string, unknown>>).find((event) => event.id === deploy?.id))
-      .toMatchObject({ status: "done" });
-    const reopened = waitForFrame(
-      connection.ws,
-      (frame) => frame.type === "event_upsert" && (frame.event as { id?: number })?.id === deploy?.id,
-    );
-    connection.ws.send(JSON.stringify({ type: "event_action", event_id: deploy?.id, action: "reopen", data: {} }));
-    const reopenedEvent = (await reopened).event as Record<string, unknown>;
-    expect(reopenedEvent).toMatchObject({ status: "open", id: deploy?.id, anchor: deploy?.anchor });
-    expect(reopenedEvent.ui).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "heading", text: "Canary is healthy. Promote production?" }),
-    ]));
-
-    for (const [data, detail] of [
-      [{}, "requires data.reviewer"],
-      [{ reviewer: 42 }, "must be a string"],
-      [{ reviewer: "sam", injected: true }, "unknown Task action data field"],
-      [{ reviewer: "x".repeat(9_000) }, "exceeds 8192 bytes"],
-    ] as const) {
-      await expectActionError(connection.ws, {
-        type: "event_action",
-        event_id: auth?.id,
-        action: "submit",
-        data,
-      }, detail);
-    }
-    const submitted = waitForFrame(
-      connection.ws,
-      (frame) => frame.type === "event_upsert" && (frame.event as { id?: number })?.id === auth?.id,
-    );
-    connection.ws.send(JSON.stringify({
-      type: "event_action",
-      event_id: auth?.id,
-      action: "submit",
-      data: { reviewer: "sam" },
-    }));
-    expect((await submitted).event).toMatchObject({ status: "done" });
+    expect((connection.frame.threads as Thread[]).find(thread => thread.id === created.id)).toEqual(settled);
+    expect(connection.frame.messages).toEqual([]);
+    const replay = (await request({ type: "open_thread", client_id: "replay", thread_id: created.id }, "thread_opened")).detail as ThreadDetail;
+    expect(replay.messages).toEqual(detail.messages);
+    expect((await request({ type: "thread_action", thread_id: created.id, action: "reopen" }, "thread_upsert")).thread).toMatchObject({ id: created.id, settled_at: null, read: true });
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: 0, action: "settle" }, "orchestrator");
+    const publish = async (body: Record<string, unknown>) => {
+      const response = await fetch(`http://127.0.0.1:${port}/debug/publish-artifact`, { method:"POST", headers:{ Authorization:"Bearer dev", "Content-Type":"application/json" }, body:JSON.stringify(body) });
+      expect(response.status).toBe(200);
+      return response.json() as Promise<{id:number;content:string;thread_ids:number[]}>;
+    };
+    const draft = {title:"Architecture",kind:"html",mime:"text/html",content:"<p>First</p>"};
+    const artifact = await publish({operation_id:"artifact-create",thread_id:created.id,draft});
+    await publish({operation_id:"artifact-show",thread_id:1,artifact_id:artifact.id});
+    await publish({operation_id:"artifact-edit",thread_id:created.id,artifact_id:artifact.id,draft:{...draft,content:"<p>Latest</p>"}});
+    const artifactReplay=await publish({operation_id:"artifact-create",thread_id:created.id,draft});
+    expect(artifactReplay.content).toBe("<p>Latest</p>");
+    expect(artifactReplay.thread_ids).toEqual([1,created.id]);
+    const artifacts = await request({type:"list_artifacts",client_id:"list-results",thread_id:1},"artifacts_listed");
+    expect(artifacts.artifacts).toEqual([expect.objectContaining({id:artifact.id})]);
+    const opened=await request({type:"open_artifact",client_id:"open-result",artifact_id:artifact.id},"artifact_opened");
+    expect(opened.artifact).toMatchObject({id:artifact.id,content:"<p>Latest</p>"});
     await close(connection.ws);
+    connection=await hello(port);
+    const withCards=(await request({type:"open_thread",client_id:"card-replay",thread_id:created.id},"thread_opened")).detail as ThreadDetail;
+    expect(withCards.messages.filter(message=>message.artifact_ids?.includes(artifact.id))).toHaveLength(2);
+    const other=await hello(port,"isolated-artifacts");
+    const otherList=waitForFrame(other.ws,frame=>frame.type==="artifacts_listed");
+    other.ws.send(JSON.stringify({type:"list_artifacts",client_id:"empty"}));
+    expect((await otherList).artifacts).toEqual([]);
+    await close(other.ws);
 
-    connection = await hello(port);
-    const finalEvents = connection.frame.events as Array<Record<string, unknown>>;
-    expect(finalEvents.find((event) => event.id === deploy?.id)).toMatchObject({ status: "open" });
-    expect(finalEvents.find((event) => event.id === auth?.id)).toMatchObject({ status: "done" });
     await close(connection.ws);
   });
 });

@@ -16,15 +16,9 @@
 // that into an `event_action` frame (see lib/event-decide.ts). optionList emits
 // `choose {choice, label}`; submit collects the card's field values and emits
 // `{…fields}`. This mirrors ViewRenderer's emit context, scoped to one card.
-import {
-  createContext,
-  createSignal,
-  ErrorBoundary,
-  For,
-  Show,
-  useContext,
-} from "solid-js";
-import type { JSX } from "solid-js";
+import { createContext, createSignal, Errored, For, Show, useContext } from "solid-js";
+
+import type { JSX } from "@solidjs/web";
 import type { ViewSpec } from "../protocol";
 import { eventUiNodes } from "../store/selectors";
 import { cn } from "@/lib/utils";
@@ -196,7 +190,7 @@ function FieldNode(node: Node): JSX.Element {
         class="min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
         placeholder={placeholder}
         aria-label={label || placeholder || name}
-        aria-required={required || undefined}
+        aria-required={(required || undefined) ? "true" : "false"}
         required={required}
         disabled={emit.disabled}
         value={str(emit.fields()[name])}
@@ -375,7 +369,7 @@ export interface EventCardRendererProps {
 }
 
 /** Render one event card's `ui` tree. The whole tree is wrapped in an
- * ErrorBoundary so a malformed spec degrades to a quiet notice instead of
+ * Errored so a malformed spec degrades to a quiet notice instead of
  * white-screening ("never throws"). */
 export function EventCardRenderer(props: EventCardRendererProps): JSX.Element {
   const [values, setValues] = createSignal<Record<string, unknown>>({});
@@ -388,14 +382,14 @@ export function EventCardRenderer(props: EventCardRendererProps): JSX.Element {
     setField: (name, value) => setValues((prev) => ({ ...prev, [name]: value })),
   };
   return (
-    <ErrorBoundary
+    <Errored
       fallback={<Notice>This card couldn't be displayed.</Notice>}
     >
-      <EventEmitContext.Provider value={emit}>
-        <CardMetaContext.Provider value={{ get eyebrowAge() { return props.eyebrowAge; } }}>
+      <EventEmitContext value={emit}>
+        <CardMetaContext value={{ get eyebrowAge() { return props.eyebrowAge; } }}>
           <NodeList nodes={eventUiNodes(props.ui)} rhythm />
-        </CardMetaContext.Provider>
-      </EventEmitContext.Provider>
-    </ErrorBoundary>
+        </CardMetaContext>
+      </EventEmitContext>
+    </Errored>
   );
 }

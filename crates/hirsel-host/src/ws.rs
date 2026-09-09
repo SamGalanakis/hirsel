@@ -121,6 +121,7 @@ mod tests {
 
         match response {
             HostToClient::HelloOk {
+                threads,
                 latest_msg_id,
                 messages,
                 events,
@@ -133,6 +134,8 @@ mod tests {
                 providers,
                 views,
             } => {
+                assert_eq!(threads.len(), 1);
+                assert_eq!(threads[0].id, 0);
                 assert_eq!(latest_msg_id, 1);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].author, ChatAuthor::Agent);

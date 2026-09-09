@@ -15,68 +15,77 @@ use tokio::sync::watch;
 /// happens at the management API boundary, not here).
 pub type SettingsSnapshot = Arc<Map<String, Value>>;
 
-/// A typed Event the plugin wants to raise in Sam's feed.
+/// A durable thread a plugin wants to create, independently of attention.
 #[derive(Debug, Clone)]
-pub struct NewEvent {
-    /// Short handle, e.g. `"build-failed"`.
-    pub name: String,
-    /// The card heading — for a judgment, the question.
+pub struct NewThread {
+    pub title: String,
     pub description: String,
-    /// Optional markdown body. It must add information beyond the heading.
-    pub content_md: Option<String>,
+    /// Constrained semantic UI, validated by the same host catalog as Agent instruments.
+    pub instrument: Value,
+    pub needs_owner: bool,
 }
 
-impl NewEvent {
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+impl NewThread {
+    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
+            title: title.into(),
             description: description.into(),
-            content_md: None,
+            instrument: Value::Null,
+            needs_owner: false,
         }
     }
 
-    pub fn with_content(mut self, content_md: impl Into<String>) -> Self {
-        self.content_md = Some(content_md.into());
+    pub fn with_instrument(mut self, instrument: Value) -> Self {
+        self.instrument = instrument;
+        self
+    }
+
+    pub fn needs_owner(mut self) -> Self {
+        self.needs_owner = true;
         self
     }
 }
 
-/// One choice on a judgment Event.
+/// Activity is an occurrence within an existing thread, never a new work item.
 #[derive(Debug, Clone)]
-pub struct EventOption {
-    pub label: String,
-    pub detail: String,
-    pub recommended: bool,
+pub struct NewActivity {
+    pub thread_id: u64,
+    pub kind: String,
+    pub data: Value,
 }
 
-impl EventOption {
-    pub fn new(label: impl Into<String>, detail: impl Into<String>) -> Self {
+impl NewActivity {
+    /// Record informational activity in the global orchestrator conversation.
+    pub fn new(kind: impl Into<String>, data: Value) -> Self {
         Self {
-            label: label.into(),
-            detail: detail.into(),
-            recommended: false,
+            thread_id: 0,
+            kind: kind.into(),
+            data,
         }
     }
 
-    pub fn recommended(mut self) -> Self {
-        self.recommended = true;
+    pub fn in_thread(mut self, thread_id: u64) -> Self {
+        self.thread_id = thread_id;
         self
     }
 }
 
-/// Create and resolve typed Events. These mirror the host's own
-/// `events.notify` / `events.summary` / `events.judgment` tools; a plugin Event
-/// lands in the same feed with the same lifecycle.
+/// Explicitly distinguishes an activity identity from its owning thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityReceipt {
+    pub activity_id: u64,
+    pub thread_id: u64,
+}
+
+/// Durable work and activity use separate operations and identities.
 #[async_trait]
-pub trait PluginEvents: Send + Sync {
-    /// A quiet FYI. Returns the new Event id.
-    async fn notify(&self, event: NewEvent) -> Result<u64, String>;
-    /// A digest-shaped Event.
-    async fn summary(&self, event: NewEvent) -> Result<u64, String>;
-    /// A decision that needs Sam. Supply 2–4 options.
-    async fn judgment(&self, event: NewEvent, options: Vec<EventOption>) -> Result<u64, String>;
-    /// Settle an Event this plugin raised.
-    async fn resolve(&self, event_id: u64) -> Result<(), String>;
+pub trait PluginThreads: Send + Sync {
+    /// Create visible work. Returns its Thread id; no decision is required.
+    async fn create(&self, thread: NewThread) -> Result<u64, String>;
+    /// Append informational activity with host-stamped plugin provenance.
+    async fn append_activity(&self, activity: NewActivity) -> Result<ActivityReceipt, String>;
+    /// Explicitly settle or reopen a Thread. Reading activity never settles it.
+    async fn settle(&self, thread_id: u64, settled: bool) -> Result<(), String>;
 }
 
 /// Durable per-plugin key/value storage. Keys live in a namespace private to
@@ -106,7 +115,7 @@ pub trait PluginPush: Send + Sync {
 struct CtxInner {
     id: String,
     label: String,
-    events: Arc<dyn PluginEvents>,
+    threads: Arc<dyn PluginThreads>,
     kv: Arc<dyn PluginKv>,
     settings: Arc<dyn PluginSettingsAccess>,
     push: Arc<dyn PluginPush>,
@@ -123,7 +132,7 @@ impl PluginCtx {
     pub fn new(
         id: impl Into<String>,
         label: impl Into<String>,
-        events: Arc<dyn PluginEvents>,
+        threads: Arc<dyn PluginThreads>,
         kv: Arc<dyn PluginKv>,
         settings: Arc<dyn PluginSettingsAccess>,
         push: Arc<dyn PluginPush>,
@@ -132,7 +141,7 @@ impl PluginCtx {
             inner: Arc::new(CtxInner {
                 id: id.into(),
                 label: label.into(),
-                events,
+                threads,
                 kv,
                 settings,
                 push,
@@ -148,8 +157,8 @@ impl PluginCtx {
         &self.inner.label
     }
 
-    pub fn events(&self) -> &dyn PluginEvents {
-        self.inner.events.as_ref()
+    pub fn threads(&self) -> &dyn PluginThreads {
+        self.inner.threads.as_ref()
     }
 
     pub fn kv(&self) -> &dyn PluginKv {

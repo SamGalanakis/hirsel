@@ -1,10 +1,6 @@
-use chrono::Utc;
-use hirsel_proto::{
-    ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, HostToClient,
-    ToolCallSummary,
-};
+use hirsel_proto::{ChatAuthor, ChatMessage, ToolCallSummary};
 
-use super::{AgentSessionBootstrap, ToolSuite, info_ui};
+use super::{AgentSessionBootstrap, ToolSuite};
 
 impl ToolSuite {
     pub(crate) async fn prepare_agent_session(
@@ -34,13 +30,7 @@ impl ToolSuite {
 
     async fn session_handoff_seed(&self, added_tools: &[String]) -> anyhow::Result<String> {
         let messages = self.storage.recent_chat(30).await?;
-        let events = self
-            .storage
-            .all_pings()
-            .await?
-            .into_iter()
-            .filter(|event| crate::storage::Storage::is_live(event, Utc::now()))
-            .collect::<Vec<_>>();
+        let threads = self.storage.thread_snapshot().await?;
         let added_tools = display_added_tools(added_tools);
         let mut seed = format!(
             "Session rotated by the host to pick up new tools: {added_tools}. Prior conversation summary follows.\n\n## Recent chat\n"
@@ -54,24 +44,28 @@ impl ToolSuite {
                     ChatAuthor::Agent => "agent",
                 };
                 seed.push_str(&format!(
-                    "- {author}: {}\n",
+                    "- Thread #{} {author}: {}\n",
+                    message.thread_id,
                     indent_continuation_lines(&message.body)
                 ));
             }
         }
-        seed.push_str("\n## Open events\n");
-        if events.is_empty() {
-            seed.push_str("(none)\n");
-        } else {
-            for event in events {
-                seed.push_str(&format!(
-                    "- [{}] {}: {}\n",
-                    event_kind_name(event.kind),
-                    event.name,
-                    indent_continuation_lines(&event.description)
-                ));
-            }
+        seed.push_str("\n## Threads\n");
+        for thread in threads {
+            seed.push_str(&format!(
+                "- #{} {} [{}; attention={:?}]: {}\n",
+                thread.id,
+                thread.title,
+                if thread.settled_at.is_some() {
+                    "settled"
+                } else {
+                    "open"
+                },
+                thread.attention,
+                indent_continuation_lines(&thread.description)
+            ));
         }
+        seed.push_str("\nEach Thread owns its messages. Use threads.read for exact history. This cross-thread summary is coordination context, not a merged conversation.\n");
         Ok(seed)
     }
 
@@ -79,40 +73,18 @@ impl ToolSuite {
         &self,
         session_id: &str,
         added_tools: &[String],
-    ) -> anyhow::Result<Event> {
-        let added_tools = display_added_tools(added_tools);
-        let description = format!(
-            "Opened {session_id} after the tool surface changed. New tools: {added_tools}."
-        );
-        let anchor = self
+    ) -> anyhow::Result<()> {
+        let activity = self
             .storage
-            .append_chat(
-                ChatAuthor::Agent,
-                format!("Host rotated the Agent session to `{session_id}`."),
+            .append_thread_activity(
+                0,
                 None,
-            )
-            .await?
-            .id;
-        let event = self
-            .storage
-            .create_event(
-                EventKind::Info,
-                EventSource {
-                    kind: EventSourceKind::Scheduled,
-                    r#ref: Some(session_id.to_string()),
-                },
-                "session-rotated",
-                &description,
-                info_ui(&description),
-                anchor,
-                false,
-                Vec::new(),
+                "session_rotated",
+                &serde_json::json!({"session_id":session_id,"added_tools":added_tools}),
             )
             .await?;
-        self.broadcast(HostToClient::EventUpsert {
-            event: event.clone(),
-        });
-        Ok(event)
+        self.publish_thread_activity(activity).await;
+        Ok(())
     }
 
     pub async fn restore_subagent_processes_after_restart(&self) -> anyhow::Result<Vec<String>> {
@@ -148,10 +120,7 @@ impl ToolSuite {
             .storage
             .append_chat_with_tool_calls(ChatAuthor::Agent, body_md.into(), anchor, tool_calls)
             .await?;
-        self.broadcast(HostToClient::Msg {
-            message: message.clone(),
-            sc: None,
-        });
+        self.publish_thread_message(message.clone()).await;
         Ok(message)
     }
 }
@@ -166,12 +135,4 @@ fn display_added_tools(added_tools: &[String]) -> String {
 
 fn indent_continuation_lines(value: &str) -> String {
     value.replace('\n', "\n  ")
-}
-
-fn event_kind_name(kind: EventKind) -> &'static str {
-    match kind {
-        EventKind::Judgment => "judgment",
-        EventKind::Info => "info",
-        EventKind::Summary => "summary",
-    }
 }

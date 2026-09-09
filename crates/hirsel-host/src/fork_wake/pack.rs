@@ -22,7 +22,7 @@
 //! deliberate — the pack is the product of this feature, so it has to be
 //! assertable in a unit test without a provider or a lash session.
 
-use hirsel_proto::{ChatAuthor, ChatMessage, Event, EventStatus};
+use hirsel_proto::{ChatAuthor, ChatMessage, Thread};
 
 use crate::storage::TasteDecision;
 
@@ -96,7 +96,7 @@ impl WakeMessage {
 /// so the builder itself stays pure.
 #[derive(Debug, Clone, Default)]
 pub struct PackContext {
-    pub events: Vec<Event>,
+    pub threads: Vec<Thread>,
     pub recent_chat: Vec<ChatMessage>,
     pub rules: Vec<TasteDecision>,
 }
@@ -111,25 +111,28 @@ pub fn build_pack(message: &WakeMessage, context: &PackContext) -> String {
     pack.push_str(&truncate(message.text.trim(), TRIGGER_CHARS));
     pack.push_str("\n```\n");
 
-    pack.push_str("\n## Live Tasks and events\n\n");
-    let events = context
-        .events
+    pack.push_str("\n## Threads\n\n");
+    let threads = context
+        .threads
         .iter()
         .take(PACK_EVENT_LIMIT)
         .collect::<Vec<_>>();
-    if events.is_empty() {
+    if threads.is_empty() {
         pack.push_str("(none open)\n");
-    } else {
-        for event in events {
-            pack.push_str(&format!(
-                "- [{}] #{} {} — {} ({})\n",
-                kind_name(event),
-                event.id,
-                event.name,
-                truncate(&one_line(&event.description), PACK_LINE_CHARS),
-                status_name(event.status),
-            ));
-        }
+    }
+    for thread in threads {
+        pack.push_str(&format!(
+            "- #{} {} — {} ({}; attention={:?})\n",
+            thread.id,
+            thread.title,
+            truncate(&one_line(&thread.description), PACK_LINE_CHARS),
+            if thread.settled_at.is_some() {
+                "settled"
+            } else {
+                "open"
+            },
+            thread.attention
+        ));
     }
 
     pack.push_str("\n## Recent conversation\n\n");
@@ -144,7 +147,8 @@ pub fn build_pack(message: &WakeMessage, context: &PackContext) -> String {
     } else {
         for message in chat.into_iter().rev() {
             pack.push_str(&format!(
-                "- {}: {}\n",
+                "- Thread #{} {}: {}\n",
+                message.thread_id,
                 author_name(message.author),
                 truncate(&one_line(&message.body), PACK_LINE_CHARS),
             ));
@@ -171,21 +175,6 @@ pub fn build_pack(message: &WakeMessage, context: &PackContext) -> String {
     }
 
     pack
-}
-
-fn kind_name(event: &Event) -> &'static str {
-    match event.kind {
-        hirsel_proto::EventKind::Judgment => "judgment",
-        hirsel_proto::EventKind::Summary => "summary",
-        hirsel_proto::EventKind::Info => "info",
-    }
-}
-
-fn status_name(status: EventStatus) -> &'static str {
-    match status {
-        EventStatus::Open => "open",
-        EventStatus::Done => "done",
-    }
 }
 
 fn author_name(author: ChatAuthor) -> &'static str {

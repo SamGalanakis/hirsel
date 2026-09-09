@@ -1,7 +1,9 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use futures_util::StreamExt;
-use hirsel_drivers::{AgentKind, SessionHandle, SpawnSpec, SubagentEvent};
+use hirsel_drivers::{
+    AgentKind, SessionHandle, SpawnSpec, SubagentDriver, SubagentEvent, TerminalOutcome,
+};
 
 use super::{ProcessTerminal, SpawnedProcess, ToolSuite, publish_process_upsert};
 
@@ -34,32 +36,67 @@ impl ToolSuite {
         let model = Some(resolved.model_id);
         let variant = Some(resolved.variant);
         let prompt = prompt.into();
-        let driver = self.driver_for(agent);
-        let handle = driver
-            .spawn(SpawnSpec {
+        self.spawn_subagent_with_driver(
+            self.driver_for(agent),
+            SpawnSpec {
                 agent,
-                model: model.clone(),
+                model,
                 variant,
-                prompt: prompt.clone(),
-                cwd: cwd.clone(),
+                prompt,
+                cwd,
                 fake_fixture: self.config.fake_fixture.clone(),
-            })
-            .await?;
-        let process_id = self.processes.insert_with_id(
+            },
             process_id,
-            agent,
-            model.clone(),
-            handle.clone(),
-            prompt,
-            cwd.to_string_lossy().into_owned(),
-        )?;
-        if let Some(record) = self.processes.get(&process_id)? {
-            self.storage.upsert_subagent_process(&record).await?;
+        )
+        .await
+    }
+
+    async fn spawn_subagent_with_driver(
+        &self,
+        driver: Arc<dyn SubagentDriver>,
+        spec: SpawnSpec,
+        process_id: String,
+    ) -> anyhow::Result<SpawnedProcess> {
+        let handle = driver.spawn(spec.clone()).await?;
+        let mut startup = SubagentStartup {
+            tools: self.clone(),
+            driver: Arc::clone(&driver),
+            handle: Some(handle.clone()),
+            process_id: None,
+        };
+        let prepare = async {
+            // Subscribe before publishing any host record. A provider that
+            // finished during spawn is replayed by the driver's event hub.
+            let events = driver.events(&handle)?;
+            self.processes.insert_with_id(
+                process_id.clone(),
+                spec.agent,
+                spec.model.clone(),
+                handle.clone(),
+                spec.prompt,
+                spec.cwd.to_string_lossy().into_owned(),
+            )?;
+            startup.process_id = Some(process_id.clone());
+            if let Some(record) = self.processes.get(&process_id)? {
+                self.storage.upsert_subagent_process(&record).await?;
+            }
+            if let Some(process) = self.processes.info(&process_id)? {
+                self.broadcast_process_upsert(process);
+            }
+            Ok::<_, anyhow::Error>(events)
         }
-        if let Some(process) = self.processes.info(&process_id)? {
-            self.broadcast_process_upsert(process);
-        }
-        let mut events = driver.events(&handle)?;
+        .await;
+        let mut events = match prepare {
+            Ok(events) => events,
+            Err(error) => {
+                if let Some(cleanup) =
+                    startup.rollback(format!("Sub-agent startup failed: {error}"))
+                {
+                    let _ = cleanup.await;
+                }
+                return Err(error);
+            }
+        };
         let processes = self.processes.clone();
         let storage = self.storage.clone();
         let broadcaster = self.broadcaster.clone();
@@ -99,9 +136,12 @@ impl ToolSuite {
                 }
             }
         });
+        // The pump now owns retirement; no await separates installation from
+        // disarming startup rollback.
+        startup.handle.take();
         Ok(SpawnedProcess {
             process_id,
-            model,
+            model: spec.model,
             handle,
         })
     }
@@ -174,3 +214,55 @@ impl ToolSuite {
         self.processes.get(process_id)
     }
 }
+
+/// Acquired driver ownership lasts through every fallible host handoff step.
+/// Cancellation uses the same rollback as an ordinary error; its cleanup task
+/// is independent of the cancelled caller so retirement can finish.
+struct SubagentStartup {
+    tools: ToolSuite,
+    driver: Arc<dyn SubagentDriver>,
+    handle: Option<SessionHandle>,
+    process_id: Option<String>,
+}
+
+impl SubagentStartup {
+    fn rollback(&mut self, reason: String) -> Option<tokio::task::JoinHandle<()>> {
+        let handle = self.handle.take()?;
+        let driver = Arc::clone(&self.driver);
+        let tools = self.tools.clone();
+        let update = self.process_id.as_deref().and_then(|process_id| {
+            match tools.processes.push_event(process_id, SubagentEvent::Terminal {
+                outcome: TerminalOutcome::Failed { reason },
+            }) {
+                Ok(update) => update,
+                Err(error) => {
+                    tracing::warn!(%error, process_id, "failed to record Sub-agent startup rollback");
+                    None
+                }
+            }
+        });
+        if let Some(update) = &update {
+            tools.broadcast_process_upsert(update.info.clone());
+        }
+        Some(tokio::spawn(async move {
+            if let Err(error) = driver.retire(&handle).await {
+                tracing::warn!(%error, handle_id = %handle.id, "failed to retire Sub-agent after startup failure");
+            }
+            if let Some(update) = update
+                && let Err(error) = tools.storage.upsert_subagent_process(&update.record).await
+            {
+                tracing::warn!(%error, "failed to persist Sub-agent startup rollback");
+            }
+        }))
+    }
+}
+
+impl Drop for SubagentStartup {
+    fn drop(&mut self) {
+        self.rollback("Sub-agent startup was cancelled before host handoff".into());
+    }
+}
+
+#[cfg(test)]
+#[path = "subagent_handoff_tests.rs"]
+mod handoff_tests;

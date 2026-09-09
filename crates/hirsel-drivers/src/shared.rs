@@ -10,13 +10,11 @@ use async_stream::stream;
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, ChildStderr, ChildStdin, Command},
+    process::{ChildStderr, ChildStdin, Command},
     sync::broadcast,
 };
 
-use crate::types::{
-    DriverError, DriverResult, EventStream, SessionHandle, SubagentEvent, TerminalOutcome,
-};
+use crate::types::{DriverError, DriverResult, EventStream, SessionHandle, SubagentEvent};
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> DriverResult<MutexGuard<'_, T>> {
     mutex.lock().map_err(|_| DriverError::StatePoisoned)
@@ -67,9 +65,19 @@ impl EventHub {
     }
 
     pub(crate) fn emit(&self, event: SubagentEvent) -> DriverResult<()> {
-        lock(&self.events)?.push(event.clone());
+        let mut events = lock(&self.events)?;
+        if matches!(events.last(), Some(SubagentEvent::Terminal { .. })) {
+            return Ok(());
+        }
+        events.push(event.clone());
         let _ = self.tx.send(event);
         Ok(())
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.events
+            .lock()
+            .is_ok_and(|events| matches!(events.last(), Some(SubagentEvent::Terminal { .. })))
     }
 
     pub(crate) fn stream(self: &Arc<Self>) -> DriverResult<EventStream> {
@@ -80,12 +88,18 @@ impl EventHub {
         };
         Ok(Box::pin(stream! {
             for event in backlog {
+                let terminal = matches!(event, SubagentEvent::Terminal { .. });
                 yield event;
+                if terminal { return; }
             }
             let mut rx = rx;
             loop {
                 match rx.recv().await {
-                    Ok(event) => yield event,
+                    Ok(event) => {
+                        let terminal = matches!(event, SubagentEvent::Terminal { .. });
+                        yield event;
+                        if terminal { return; }
+                    },
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -134,6 +148,7 @@ pub(crate) async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Dr
 }
 
 pub(crate) fn start_in_process_group(command: &mut Command) {
+    command.kill_on_drop(true);
     // A Sub-agent Driver owns the whole CLI process tree; setsid lets hard cleanup target the group.
     unsafe {
         command.pre_exec(|| {
@@ -167,34 +182,6 @@ impl Drop for ProcessGroup {
     fn drop(&mut self) {
         self.kill_group();
     }
-}
-
-pub(crate) async fn finish_child(
-    mut child: Child,
-    terminal_sent: bool,
-    events: &EventHub,
-    driver_name: &str,
-    terminal_description: &str,
-) {
-    match child.wait().await {
-        Ok(status) if terminal_sent || status.success() => {}
-        Ok(status) => {
-            emit_child_failure(
-                events,
-                format!("{driver_name} exited without {terminal_description}: {status}"),
-            );
-        }
-        Err(error) if !terminal_sent => {
-            emit_child_failure(events, format!("{driver_name} wait failed: {error}"));
-        }
-        Err(_) => {}
-    }
-}
-
-fn emit_child_failure(events: &EventHub, reason: String) {
-    let _ = events.emit(SubagentEvent::Terminal {
-        outcome: TerminalOutcome::Failed { reason },
-    });
 }
 
 pub(crate) async fn drain_stderr(mut stderr: ChildStderr) {

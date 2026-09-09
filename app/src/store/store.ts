@@ -1,5 +1,7 @@
 import { untrack } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+
+import { createStore, reconcile } from "solid-js";
+
 import type { EventItem } from "../protocol";
 import { reduce } from "./reducer";
 import { projectEvents } from "./selectors";
@@ -105,53 +107,50 @@ function appSnapshot(): AppState {
  * internal `appSnapshot()` reads must NOT subscribe that caller to the store,
  * or the subsequent writes here would re-trigger it in an infinite loop. */
 export function dispatch(action: Action): void {
-  untrack(() => {
+  untrack(() => setState(() => {
     const next = reduce(appSnapshot(), action);
-    setState("messages", reconcile(next.messages, { key: "id" }));
-    setState("hasEarlierMessages", next.hasEarlierMessages);
-    setState("hasLaterMessages", next.hasLaterMessages);
+    setState(draft => { reconcile(next.messages, "id")(draft["messages"]); });
+    setState(draft => { draft["hasEarlierMessages"] = next.hasEarlierMessages; });
+    setState(draft => { draft["hasLaterMessages"] = next.hasLaterMessages; });
     // Task collection: reconcile typed wire Events by id so only the DOM bound to a
     // genuinely-changed event (a re-upsert / decide flip) re-renders.
-    setState("events", reconcile(next.events, { key: "id" }));
+    setState(draft => { reconcile(next.events, "id")(draft["events"]); });
     // The one optimistic layer over those events. `reconcile` (rather than a
     // plain set) keeps the per-id entries stable, so a gesture on one event
     // never invalidates the projection of every other.
-    setState("eventOverrides", reconcile(next.eventOverrides));
-    setProjection(
-      "events",
-      reconcile(projectEvents(next.events, next.eventOverrides), { key: "id" }),
-    );
-    setState("pendingSends", next.pendingSends);
-    setState("removedIds", next.removedIds);
-    setState("processes", reconcile(next.processes, { key: "id" }));
-    setState("turnEvents", next.turnEvents);
+    setState(draft => { reconcile(next.eventOverrides)(draft["eventOverrides"]); });
+    setProjection(draft => { reconcile(projectEvents(next.events, next.eventOverrides), "id")(draft["events"]); });
+    setState(draft => { draft["pendingSends"] = next.pendingSends; });
+    setState(draft => { draft["removedIds"] = next.removedIds; });
+    setState(draft => { reconcile(next.processes, "id")(draft["processes"]); });
+    setState(draft => { draft["turnEvents"] = next.turnEvents; });
     // Never rendered directly (the parking slot for a turn whose idle boundary
     // beat its committing message) — a plain set, no reconcile needed.
-    setState("lastTurnEvents", next.lastTurnEvents);
+    setState(draft => { draft["lastTurnEvents"] = next.lastTurnEvents; });
     // A plain set of this Record-of-arrays can retain live proxy references;
     // reconcile applies the structural diff safely. See retainTurnDetails.
-    setState("turnDetails", reconcile(next.turnDetails));
-    setState("agentActivity", next.agentActivity);
-    setState("connection", next.connection);
-    setState("lastSeenMsgId", next.lastSeenMsgId);
-    setState("hostVersion", next.hostVersion);
+    setState(draft => { reconcile(next.turnDetails)(draft["turnDetails"]); });
+    setState(draft => { draft["agentActivity"] = next.agentActivity; });
+    setState(draft => { draft["connection"] = next.connection; });
+    setState(draft => { draft["lastSeenMsgId"] = next.lastSeenMsgId; });
+    setState(draft => { draft["hostVersion"] = next.hostVersion; });
     // Nullable object slices: a plain set (like hostVersion/agentActivity), not
     // `reconcile`, since reconcile is for arrays/keyed objects and these swap to
     // a whole new snapshot/catalog (or null) on each change.
-    setState("model", next.model);
-    setState("subagentModels", next.subagentModels);
-    setState("prompts", next.prompts);
+    setState(draft => { draft["model"] = next.model; });
+    setState(draft => { draft["subagentModels"] = next.subagentModels; });
+    setState(draft => { draft["prompts"] = next.prompts; });
     if (action.type === "prompts_changed") {
-      setState("promptsRevision", (revision) => revision + 1);
+      setState(draft => { draft["promptsRevision"] = ((revision) => revision + 1)(draft["promptsRevision"]); });
     }
-    setState("providers", next.providers);
+    setState(draft => { draft["providers"] = next.providers; });
     if (action.type === "providers_changed") {
-      setState("providersRevision", (revision) => revision + 1);
+      setState(draft => { draft["providersRevision"] = ((revision) => revision + 1)(draft["providersRevision"]); });
     }
     // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
     // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
-    setState("views", reconcile(next.views, { key: "instance_id" }));
-  });
+    setState(draft => { reconcile(next.views, "instance_id")(draft["views"]); });
+  }));
 }
 
 /** THE Event list every surface reads: the wire truth in `state.events` with
@@ -168,14 +167,14 @@ export function effectiveEvents(): EventItem[] {
 /** Focus a Task, or return to ambient when it is already the focused one —
  * selecting the focused task again clears focus (DESIGN §4). */
 export function toggleTaskFocus(id: number): void {
-  setState("focusedTaskId", (current) => (current === id ? null : id));
+  setState(draft => { draft["focusedTaskId"] = ((current) => (current === id ? null : id))(draft["focusedTaskId"]); });
 }
 
 /** Focus a Task unconditionally. Distinct from `toggleTaskFocus` for callers
  * that are not a selection gesture — the load-time auto-focus in particular,
  * where "toggle" would be the wrong contract. */
 export function focusTask(id: number): void {
-  setState("focusedTaskId", id);
+  setState(draft => { draft["focusedTaskId"] = id; });
 }
 
 /** Leave the focused Task for the ambient field. The exit path behind Esc and
@@ -183,7 +182,7 @@ export function focusTask(id: number): void {
  * activating the open chip clears it, which is what its accessible name
  * promises. */
 export function clearTaskFocus(): void {
-  setState("focusedTaskId", null);
+  setState(draft => { draft["focusedTaskId"] = null; });
 }
 
 /** Drop focus when the focused Task is no longer in the visible field (archived,
@@ -192,7 +191,7 @@ export function clearTaskFocus(): void {
 export function reconcileTaskFocus(visibleIds: number[]): void {
   untrack(() => {
     const focused = state.focusedTaskId;
-    if (focused !== null && !visibleIds.includes(focused)) setState("focusedTaskId", null);
+    if (focused !== null && !visibleIds.includes(focused)) setState(draft => { draft["focusedTaskId"] = null; });
   });
 }
 
@@ -200,53 +199,53 @@ export function reconcileTaskFocus(visibleIds: number[]): void {
  * helper below routes through this so "one pane owns the region" holds by
  * construction — setting a region is all it takes to unmount whatever held it. */
 export function setRightRegion(region: RightRegion): void {
-  setState("rightRegion", region);
+  setState(draft => { draft["rightRegion"] = region; });
 }
 
 /** Close whatever pane owns the right region, back to the `none` resting state. */
 export function closeRightRegion(): void {
-  setState("rightRegion", "none");
+  setState(draft => { draft["rightRegion"] = "none"; });
 }
 
 /** Dock the Processes inspector into the task world's utility region. */
 export function openProcesses(): void {
-  setState("rightRegion", "processes");
+  setState(draft => { draft["rightRegion"] = "processes"; });
 }
 
 /** Summon Settings, optionally on a named tab (`openSettings("providers")`).
  * Omitted opens on Appearance, the first tab. */
 export function openSettings(tab?: SettingsTab): void {
-  setState({ rightRegion: "settings", settingsTab: tab ?? null });
+  setState(draft => { Object.assign(draft, { rightRegion: "settings", settingsTab: tab ?? null }); });
 }
 
 /** Consume the one-shot Settings tab target: the panel reads it on mount to
  * choose its landing tab, then clears it so a later open starts at the top of
  * the rail again. */
 export function clearSettingsTab(): void {
-  setState("settingsTab", null);
+  setState(draft => { draft["settingsTab"] = null; });
 }
 
 /** Surface the Canvas view in the right region. */
 export function showCanvas(): void {
-  setState("rightRegion", "canvas");
+  setState(draft => { draft["rightRegion"] = "canvas"; });
 }
 
 /** Surface a post-auth protocol `error` as a visible inline banner. */
 export function setProtocolError(detail: string): void {
-  setState("protocolError", detail);
+  setState(draft => { draft["protocolError"] = detail; });
 }
 
 export function clearProtocolError(): void {
-  setState("protocolError", null);
+  setState(draft => { draft["protocolError"] = null; });
 }
 
 export function clearComposerPrefill(): void {
-  setState("composerPrefill", null);
+  setState(draft => { draft["composerPrefill"] = null; });
 }
 
 /** Seed the always-mounted Hirsel composer without changing its task subject. */
 export function prefillComposer(text: string): void {
-  setState("composerPrefill", text);
+  setState(draft => { draft["composerPrefill"] = text; });
 }
 
 /** The reactive store proxy: components read `state.messages`, `state.connection`,

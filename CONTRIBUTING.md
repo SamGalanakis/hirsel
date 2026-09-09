@@ -1,5 +1,13 @@
 # Contributing
 
+## Way of working
+
+Use [GitHub issues in SamGalanakis/hirsel](https://github.com/SamGalanakis/hirsel/issues)
+as the source of truth for Hirsel task tracking. Track bugs, planned improvements,
+and follow-up work there. Check existing issues before proposing or filing new
+work, and link pull requests to the issues they address. Linear is not Hirsel's
+task tracker.
+
 Hirsel uses trunk-based development. Create a short-lived branch from an
 up-to-date `main`, make a focused change, and open a pull request. The CI
 workflow must pass before the branch is merged back to `main`; do not keep
@@ -21,14 +29,14 @@ prek install --hook-type pre-commit
 prek install --hook-type pre-push
 ```
 
-The pre-commit stage runs generic file checks, the sensitive-path guard,
-`cargo fmt`, oxlint, and TypeScript. The slower workspace-wide clippy check
-runs on pre-push. Run the complete pre-commit set manually before opening a
-pull request:
+The hooks run generic file checks, the sensitive-path guard, and
+`scripts/check-static.sh`: source-size and plugin-sync checks, Rust formatting
+and workspace clippy, web lint, and TypeScript. Run the checks and Rust tests
+before opening a pull request:
 
 ```bash
 prek run --all-files
-prek run cargo-clippy --all-files --stage pre-push
+cargo test --workspace
 ```
 
 ## Releases

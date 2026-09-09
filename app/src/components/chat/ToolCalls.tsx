@@ -1,5 +1,6 @@
-import { Check, ChevronRight, Settings2, X } from "lucide-solid";
+import { Check, ChevronRight, Settings2, X } from "@/components/ui/icons";
 import { createSignal, For, Show } from "solid-js";
+
 import type { ToolCall } from "../../protocol";
 
 /** Committed tool-call chip (v1.4) in an agent bubble's footer: a collapsed
@@ -15,13 +16,13 @@ export function CommittedToolCalls(props: { toolCalls: ToolCall[] }) {
         <button
           type="button"
           class="-ml-1 inline-flex w-fit items-center gap-1 rounded px-1 py-px text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-          aria-expanded={expanded()}
+          aria-expanded={(expanded()) ? "true" : "false"}
           aria-label={`${count()} tool call${count() === 1 ? "" : "s"}`}
           onClick={() => setExpanded((v) => !v)}
         >
           <ChevronRight
-            class="size-3 shrink-0 transition-transform"
-            classList={{ "rotate-90": expanded() }}
+            class={["size-3 shrink-0 transition-transform", { "rotate-90": expanded() }]}
+
             aria-hidden="true"
           />
           <Settings2 class="size-3 shrink-0" aria-hidden="true" />

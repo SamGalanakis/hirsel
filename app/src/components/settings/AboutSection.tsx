@@ -1,7 +1,7 @@
 // Settings → About & debug: the app/host versions, the two debug preferences
 // (verbose logging, "Show agent code"), and the copyable diagnostics blob.
-import { Copy } from "lucide-solid";
-import type { JSX } from "solid-js";
+import { Copy } from "@/components/ui/icons";
+import type { JSX } from "@solidjs/web";
 import { setShowAgentCode, showAgentCode } from "../../lib/prefs";
 import { APP_VERSION } from "../../lib/version";
 import { state } from "../../store/store";

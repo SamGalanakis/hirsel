@@ -7,13 +7,12 @@
 //! tool are not "forbidden by the prompt": they do not exist in the fork's
 //! catalog, and naming one is an invalid tool call.
 //!
-//! The five tools here map onto the three exits:
+//! The four tools here map onto the three exits:
 //!
 //! | tool                   | exit     |
 //! |------------------------|----------|
 //! | `fork_record_info`     | record   |
 //! | `fork_record_summary`  | record   |
-//! | `fork_close_task`      | record (Task status) |
 //! | `fork_escalate`        | escalate |
 //! | `fork_drop`            | drop     |
 //!
@@ -31,7 +30,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
 use async_trait::async_trait;
 use lash::tools::{
     ToolBinding, ToolCall, ToolContract, ToolDefinition, ToolDefinitionBindingExt, ToolManifest,
@@ -71,7 +69,6 @@ pub struct ForkTools {
     /// one. `None` means the transcript is empty: see [`ForkTools::record`] —
     /// the fork records nothing and escalates instead, because minting an
     /// anchor line would be the fork speaking to the Owner.
-    anchor: Option<u64>,
     exit: Mutex<ExitSlot>,
 }
 
@@ -97,13 +94,12 @@ impl ForkTools {
         tools: ToolSuite,
         sink: Arc<dyn BriefSink>,
         message: WakeMessage,
-        anchor: Option<u64>,
+        _anchor: Option<u64>,
     ) -> Self {
         Self {
             tools,
             sink,
             message,
-            anchor,
             exit: Mutex::new(ExitSlot::Open),
         }
     }
@@ -154,29 +150,8 @@ impl ForkTools {
         description: &str,
         content_md: Option<String>,
     ) -> anyhow::Result<Value> {
-        let Some(anchor) = self.anchor else {
-            return self
-                .escalate_unanchored_record("info", name, description, content_md.as_deref())
-                .await;
-        };
-        self.claim().await?;
-        match self
-            .tools
-            .events_notify(name, description, content_md, anchor)
+        self.record_activity("info", name, description, content_md)
             .await
-        {
-            Ok(event) => {
-                self.commit(ForkExit::Recorded {
-                    what: format!("info {name}"),
-                })
-                .await;
-                Ok(json!({ "event_id": event.id, "status": "recorded" }))
-            }
-            Err(error) => {
-                self.release().await;
-                Err(error)
-            }
-        }
     }
 
     pub async fn record_summary(
@@ -185,44 +160,31 @@ impl ForkTools {
         description: &str,
         content_md: Option<String>,
     ) -> anyhow::Result<Value> {
-        let Some(anchor) = self.anchor else {
-            return self
-                .escalate_unanchored_record("summary", name, description, content_md.as_deref())
-                .await;
-        };
-        self.claim().await?;
-        match self
-            .tools
-            .events_summary(name, description, content_md, None, anchor)
+        self.record_activity("summary", name, description, content_md)
             .await
-        {
-            Ok(event) => {
-                self.commit(ForkExit::Recorded {
-                    what: format!("summary {name}"),
-                })
-                .await;
-                Ok(json!({ "event_id": event.id, "status": "recorded" }))
-            }
-            Err(error) => {
-                self.release().await;
-                Err(error)
-            }
-        }
     }
 
-    pub async fn record_task_status(&self, event_id: u64) -> anyhow::Result<Value> {
+    async fn record_activity(
+        &self,
+        kind: &str,
+        name: &str,
+        description: &str,
+        content_md: Option<String>,
+    ) -> anyhow::Result<Value> {
         self.claim().await?;
-        match self.tools.events_archive(event_id).await {
-            Ok(Some(event)) => {
+        // A global transcript tail is not evidence of Thread ownership. Fork
+        // outcomes without an explicit addressed source go to coordination.
+        let result = self.tools.storage().append_thread_activity(0,None,kind,&json!({"name":name,"description":description,"content_md":content_md,"source":self.message.key})).await;
+        match result {
+            Ok(activity) => {
+                self.tools.publish_thread_activity(activity.clone()).await;
                 self.commit(ForkExit::Recorded {
-                    what: format!("archived task {event_id}"),
+                    what: format!("{kind} {name}"),
                 })
                 .await;
-                Ok(json!({ "event_id": event.id, "status": "archived" }))
-            }
-            Ok(None) => {
-                self.release().await;
-                anyhow::bail!("event not found: {event_id}")
+                Ok(
+                    json!({"activity_id":activity.id,"thread_id":activity.thread_id,"status":"recorded"}),
+                )
             }
             Err(error) => {
                 self.release().await;
@@ -268,33 +230,6 @@ impl ForkTools {
             }
         }
     }
-
-    /// A Record exit with nothing to anchor to.
-    ///
-    /// Events need an anchor chat message, and on a brand-new host the
-    /// transcript is empty. The host does not mint one: a fork writing a chat
-    /// line is a fork speaking to the Owner, which ADR-0015 forbids outright.
-    /// So the record fails toward the main queue instead — the would-be record
-    /// is escalated as a brief, and the Agent (who may speak to the Owner)
-    /// decides what to write.
-    async fn escalate_unanchored_record(
-        &self,
-        kind: &str,
-        name: &str,
-        description: &str,
-        content_md: Option<&str>,
-    ) -> anyhow::Result<Value> {
-        self.claim().await?;
-        let mut brief = format!(
-            "A triage fork wanted to record this as {kind} but the transcript has no message to \
-             anchor it to, so it is yours to write.\n\n{name}: {description}"
-        );
-        if let Some(content) = content_md.map(str::trim).filter(|text| !text.is_empty()) {
-            brief.push_str("\n\n");
-            brief.push_str(content);
-        }
-        self.inject_claimed(&brief).await
-    }
 }
 
 fn exit_name(exit: &ForkExit) -> &'static str {
@@ -322,9 +257,9 @@ impl ForkToolProvider {
 pub fn fork_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::raw(
-            "hirsel.fork_events_notify",
+            "hirsel.fork_activity_info",
             "fork_record_info",
-            "RECORD exit. Write one quiet info event stating the outcome in the Owner's terms. Never paste raw logs.",
+            "RECORD exit. Append quiet coordinator activity stating the outcome in the Owner's terms. Never paste raw logs.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -338,18 +273,19 @@ pub fn fork_tool_definitions() -> Vec<ToolDefinition> {
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["event_id", "status"],
+                "required": ["activity_id", "thread_id", "status"],
                 "properties": {
-                    "event_id": { "type": "integer" },
+                    "activity_id": { "type": "integer" },
+                    "thread_id": { "type": "integer" },
                     "status": { "const": "recorded" }
                 }
             }),
         )
         .with_tool_binding(ToolBinding::new(["fork"], "record_info")),
         ToolDefinition::raw(
-            "hirsel.fork_events_summary",
+            "hirsel.fork_activity_summary",
             "fork_record_summary",
-            "RECORD exit. Write one digest summarising a settled outcome.",
+            "RECORD exit. Append a factual coordinator digest. Never settle work.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -363,35 +299,15 @@ pub fn fork_tool_definitions() -> Vec<ToolDefinition> {
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["event_id", "status"],
+                "required": ["activity_id", "thread_id", "status"],
                 "properties": {
-                    "event_id": { "type": "integer" },
+                    "activity_id": { "type": "integer" },
+                    "thread_id": { "type": "integer" },
                     "status": { "const": "recorded" }
                 }
             }),
         )
         .with_tool_binding(ToolBinding::new(["fork"], "record_summary")),
-        ToolDefinition::raw(
-            "hirsel.fork_events_archive",
-            "fork_close_task",
-            "RECORD exit. Close out a live Task or event this message settles. Pass an id from the live inventory in your context pack.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["event_id"],
-                "properties": { "event_id": { "type": "integer" } }
-            }),
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["event_id", "status"],
-                "properties": {
-                    "event_id": { "type": "integer" },
-                    "status": { "const": "archived" }
-                }
-            }),
-        )
-        .with_tool_binding(ToolBinding::new(["fork"], "close_task")),
         ToolDefinition::raw(
             "hirsel.fork_escalate",
             "fork_escalate",
@@ -476,13 +392,6 @@ impl ForkToolProvider {
                         optional_str(args, "content_md"),
                     )
                     .await
-            }
-            "fork_close_task" => {
-                let event_id = args
-                    .get("event_id")
-                    .and_then(Value::as_u64)
-                    .context("fork_close_task requires an integer `event_id`")?;
-                self.tools.record_task_status(event_id).await
             }
             "fork_escalate" => self.tools.escalate(&required_str(args, "brief")?).await,
             "fork_drop" => {

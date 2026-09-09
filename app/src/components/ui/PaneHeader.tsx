@@ -1,5 +1,6 @@
-import { X } from "lucide-solid";
-import { type JSX, Show } from "solid-js";
+import { X } from "@/components/ui/icons";
+import { Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { cn } from "@/lib/utils";
 
 // The one header the exclusive right region wears at EVERY width, so its panes

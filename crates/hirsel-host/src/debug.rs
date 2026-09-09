@@ -1,3 +1,5 @@
+mod artifacts;
+
 use std::time::{Duration, UNIX_EPOCH};
 
 use axum::{
@@ -9,8 +11,8 @@ use axum::{
     routing::{get, post},
 };
 use hirsel_proto::{
-    Blob, ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind, HostToClient,
-    ModelSelection, Ping, PushPlatform, SendMode, ViewInstance,
+    Blob, ChatMessage, Event, HostToClient, ModelSelection, Ping, PushPlatform, SendMode, Thread,
+    ThreadAttention, ViewInstance,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -39,7 +41,8 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/resolve-ping", post(resolve_ping))
         .route("/debug/reopen-ping", post(reopen_ping))
         .route("/debug/event-action", post(event_action))
-        .route("/debug/seed-adaptive-task", post(seed_adaptive_task))
+        .route("/debug/seed-adaptive-thread", post(seed_adaptive_thread))
+        .route("/debug/publish-artifact", post(artifacts::publish_artifact))
         .route("/debug/trigger-digest", post(trigger_digest))
         .route("/debug/fork-wake", post(fork_wake))
         .route("/debug/taste", get(taste))
@@ -360,49 +363,33 @@ async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn seed_adaptive_task(State(state): State<AppState>) -> Result<Json<Event>, DebugError> {
-    let anchor = state
+async fn seed_adaptive_thread(State(state): State<AppState>) -> Result<Json<Thread>, DebugError> {
+    if !state.agent.is_scripted() {
+        return Err(anyhow::anyhow!("adaptive fixture requires the scripted Agent").into());
+    }
+    let instrument = serde_json::json!({
+        "type": "card",
+        "children": [
+            { "type": "heading", "text": "A Thread that changes with the work", "level": 2 },
+            { "type": "text", "text": "Continue invokes the orchestrator and updates this Thread's instrument." },
+            { "type": "field", "name": "confirmation", "kind": "text", "label": "Confirmation", "placeholder": "Type ready", "required": true },
+            { "type": "submit", "action": "advance", "label": "Continue", "settles": false }
+        ]
+    });
+    let (thread, _) = state
         .storage
-        .append_chat(
-            ChatAuthor::Agent,
-            "A deterministic adaptive Task is ready.",
-            None,
+        .create_thread(
+            &format!("debug-adaptive-thread:{}", Uuid::new_v4()),
+            "Adaptive host proof",
+            "Advance this Thread through the real Host action contract",
+            &instrument,
+            ThreadAttention::NeedsOwner,
         )
         .await?;
-    let event = state
-        .storage
-        .create_event(
-            EventKind::Judgment,
-            EventSource {
-                kind: EventSourceKind::Agent,
-                r#ref: Some("debug-adaptive-task".to_string()),
-            },
-            "adaptive-host-proof",
-            "Advance this Task through the real Host action contract",
-            serde_json::json!({
-                "type": "card",
-                "children": [
-                    { "type": "eyebrow", "text": "Host-backed fixture", "tone": "accent" },
-                    { "type": "heading", "text": "A Task that changes with the work", "level": 2 },
-                    { "type": "text", "text": "Continue routes through the global orchestrator and returns a new instrument in place.", "tone": "muted" },
-                    { "type": "field", "name": "confirmation", "kind": "text", "label": "Confirmation", "placeholder": "Type ready", "required": true },
-                    { "type": "submit", "action": "advance", "label": "Continue", "settles": false }
-                ]
-            }),
-            anchor.id,
-            true,
-            Vec::new(),
-        )
-        .await?;
-    crate::task_ui::validate(&event.ui)?;
-    state.broadcast(HostToClient::Msg {
-        message: anchor,
-        sc: None,
+    state.broadcast(HostToClient::ThreadUpsert {
+        thread: thread.clone(),
     });
-    state.broadcast(HostToClient::EventUpsert {
-        event: event.clone(),
-    });
-    Ok(Json(event))
+    Ok(Json(thread))
 }
 
 async fn show_view(

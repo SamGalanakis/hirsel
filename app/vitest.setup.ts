@@ -1,7 +1,11 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@solidjs/testing-library";
+import { cleanup, configure } from "@solidjs/testing-library";
+import { flush } from "solid-js";
 import { afterEach } from "vitest";
 import { startPlugins } from "./src/plugins/loader";
+
+// Solid 2 batches event writes; DOM assertions observe the committed event.
+configure({ eventWrapper: callback => flush(callback) });
 
 // Shell tests simulate socket auth, which kicks off the once-per-load plugin
 // roster fetch — in jsdom that fetch fails seconds later and its console.warn
@@ -45,6 +49,14 @@ if (!("ResizeObserver" in globalThis)) {
     disconnect() {}
   }
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
+}
+
+// jsdom has the dialog element but not its browser-managed open/close methods.
+// Real focus traversal and iframe navigation are covered by browser smoke tests.
+if (!HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  HTMLDialogElement.prototype.show = function () { this.open = true; };
+  HTMLDialogElement.prototype.close = function () { this.open = false; };
 }
 
 afterEach(() => cleanup());

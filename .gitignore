@@ -87,3 +87,6 @@ GoogleService-Info.plist
 # Local report/critique output
 e2e/reports/
 .impeccable/critique/
+
+# Local Impeccable verification captures
+.impeccable/review/

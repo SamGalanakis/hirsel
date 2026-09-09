@@ -1,5 +1,6 @@
-import { Activity } from "lucide-solid";
-import { onMount, Show } from "solid-js";
+import { Activity } from "@/components/ui/icons";
+import { Show } from "solid-js";
+
 import {
   createFocusTrap,
   createMediaFlag,
@@ -22,15 +23,14 @@ function ProcessesPanel() {
   let panelRef: HTMLDivElement | undefined;
   const phone = createMediaFlag("(max-width: 1099.98px)");
 
-  onMount(() => {
-    createFocusTrap(() => panelRef, {
+  createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
       // Resolve this again on teardown: Processes may have opened from a
       // shortcut as a desktop inspector and become a phone sheet while open.
       restoreTo: () => phone() ? processesRestoreTarget() : undefined,
     });
-  });
+
 
   return (
     // Phone: a full-screen `fixed` modal sheet. Desktop
@@ -49,7 +49,7 @@ function ProcessesPanel() {
       tabindex={-1}
       data-slot="processes-panel"
       role={phone() ? "dialog" : "complementary"}
-      aria-modal={phone() ? "true" : undefined}
+      aria-modal={(phone() ? "true" : undefined) ? "true" : "false"}
       aria-labelledby="processes-pane-title"
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)]
         rail:relative rail:inset-auto rail:z-auto rail:min-h-0 rail:w-[clamp(340px,38vw,440px)] rail:shrink-0 rail:border-l rail:border-border rail:pb-0

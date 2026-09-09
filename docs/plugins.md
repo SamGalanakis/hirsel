@@ -96,7 +96,7 @@ Cheap to clone; hand it around freely.
 
 | Capability | Use |
 | --- | --- |
-| `ctx.events()` | `notify` / `summary` / `judgment` / `resolve` — typed Events in Sam's feed |
+| `ctx.threads()` | `create(NewThread)` returns a durable Thread id; `append_activity(NewActivity)` returns an ActivityReceipt; `settle(id, bool)` explicitly settles or reopens work |
 | `ctx.kv()` | `get` / `set` / `delete` / `entries` in a namespace private to the plugin |
 | `ctx.setting_str(k)`, `ctx.setting_bool(k)`, `ctx.watch_settings()` | current settings, and a `watch` that fires on save |
 | `ctx.push(topic, data)` | a `plugin_push` frame to every connected client |
@@ -125,3 +125,7 @@ Adding a folder under `plugins/` also makes it a workspace member (the root
 Copy the folder into another hirsel checkout and run `just sync-plugins`. That
 is the whole distribution story, and it is proportionate to a system with one
 user.
+
+Plugin FYIs use `NewActivity::new(kind, data)` and belong to the orchestrator (Thread 0) by default. Use `.in_thread(thread_id)` for activity about existing work. The host stamps plugin identity on every activity. Creating activity never creates or settles a Thread, and its `activity_id` must not be used as a Thread id. Use `NewThread::new(title, description)` when the plugin actually creates durable work; it appears in the same inventory as Owner and Agent-created Threads.
+
+A decision is still a Thread: `.with_instrument(semantic_json).needs_owner()` attaches validated controls and requests attention when creating it. It uses the same generated action contract as any other Thread. This does not change settlement.

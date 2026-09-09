@@ -1,5 +1,7 @@
+import { flush } from "solid-js";
 import { fireEvent, render, within } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
+
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "../../protocol";
 import type { TimelineEvent } from "../../store/types";
@@ -200,7 +202,7 @@ describe("Timeline component", () => {
   });
 
   it("renders the full program in a collapsed cell once the preference is on", () => {
-    setShowAgentCode(true);
+    flush(() => setShowAgentCode(true));
     try {
       const source = "const out = await shell.run({ cmd: \"true\" });\nfinish(out);";
       const { container, getByRole, queryByText } = render(() => (
@@ -221,7 +223,7 @@ describe("Timeline component", () => {
       fireEvent.click(getByRole("button", { name: /show source/ }));
       expect(row.textContent).toContain("finish(out);");
     } finally {
-      setShowAgentCode(false);
+      flush(() => setShowAgentCode(false));
     }
   });
 });
@@ -245,7 +247,7 @@ describe("committed turn details: agent code cells", () => {
   );
 
   it("shows the code cell in a committed turn when the preference is on", () => {
-    setShowAgentCode(true);
+    flush(() => setShowAgentCode(true));
     try {
       const { container, getByRole } = render(() => <TurnDetails events={frozen} expanded={true} />);
       const cell = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
@@ -254,7 +256,7 @@ describe("committed turn details: agent code cells", () => {
       fireEvent.click(getByRole("button", { name: /show source/ }));
       expect(cell.textContent).toContain("subagents_list()");
     } finally {
-      setShowAgentCode(false);
+      flush(() => setShowAgentCode(false));
     }
   });
 
@@ -268,12 +270,12 @@ describe("committed turn details: agent code cells", () => {
     const { container } = render(() => <TurnDetails events={frozen} expanded={true} />);
     expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
     try {
-      setShowAgentCode(true);
+      flush(() => setShowAgentCode(true));
       expect(container.querySelector('[data-slot="timeline-code"]')).toBeTruthy();
-      setShowAgentCode(false);
+      flush(() => setShowAgentCode(false));
       expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
     } finally {
-      setShowAgentCode(false);
+      flush(() => setShowAgentCode(false));
     }
   });
 });
@@ -322,7 +324,7 @@ describe("streaming reasoning block", () => {
     const [live, setLive] = createSignal(true);
     const { container, queryByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
     expect(stream(container)).toBeTruthy();
-    setLive(false);
+    flush(() => setLive(false));
     expect(stream(container)).toBeNull();
     expect(within(row(container) as HTMLElement).getByRole("button").getAttribute("aria-expanded"))
       .toBe("false");
@@ -332,7 +334,7 @@ describe("streaming reasoning block", () => {
   it("reveals the same text through the folded row's toggle", () => {
     const [live, setLive] = createSignal(true);
     const { container, getByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
-    setLive(false);
+    flush(() => setLive(false));
     const toggle = within(row(container) as HTMLElement).getByRole("button");
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");

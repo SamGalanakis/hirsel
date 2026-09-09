@@ -168,3 +168,10 @@ enabled_variants = ["high"]
 ```
 
 Generative-UI templates live in the templates directory; see `templates/CATALOG.md`.
+
+## Filesystem skills
+
+See [skills.md](skills.md) for `SKILL.md` discovery and `/skill:name` invocation.
+`HIRSEL_SKILL_DIRS` adds skill roots in path-list order before the defaults;
+the Host also scans its data directory's `skills`, its working directory's
+`.agents/skills`, and `~/.agents/skills`.

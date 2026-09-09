@@ -1,5 +1,8 @@
 # Personal Preferences
 
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) for Hirsel's way of working, including
+GitHub issues as the task tracker.
+
 ## General preferences
 
 - If asked to do too much work at once, stop and state that clearly.

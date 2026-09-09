@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
-import solid from "vite-plugin-solid";
+import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vitest/config";
+import { artifactRuntimePlugin } from "./src/artifacts/runtime-plugin";
 import { VitePWA } from "vite-plugin-pwa";
 
 // Plugin UI modules are compiled from <repo-root>/plugins/<id>/ui, OUTSIDE this
@@ -45,6 +46,7 @@ export default defineConfig({
   plugins: [
     resolvePluginUiImports(),
     solid(),
+    artifactRuntimePlugin(),
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
@@ -52,6 +54,16 @@ export default defineConfig({
       // sync (see docs/SCOPE.md) - keep the service worker boring.
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,woff2}"],
+        // The local JSX compiler is lazy-loaded; cache it for offline previews.
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        manifestTransforms: [entries => {
+          for (const entry of entries) {
+            if (entry.size > 2 * 1024 * 1024 && !/^assets\/compiler\.worker-[\w-]+\.js$/.test(entry.url)) {
+              throw new Error(`Precache asset exceeds 2 MiB: ${entry.url}`);
+            }
+          }
+          return { manifest: entries, warnings: [] };
+        }],
       },
       manifest: {
         name: "hirsel",
@@ -72,6 +84,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
+      assert: "assert/",
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },

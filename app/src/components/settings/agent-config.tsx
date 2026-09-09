@@ -2,8 +2,9 @@
 // roster, the model control in whichever of its two shapes the chosen provider
 // takes, and the prompt editor. Written once here so Main agent and Fork agent
 // cannot drift apart — they are the same three questions asked of two slots.
-import { LoaderCircle, Maximize2, SquarePen } from "lucide-solid";
-import { createEffect, createSignal, onMount, Show, untrack } from "solid-js";
+import { LoaderCircle, Maximize2, SquarePen } from "@/components/ui/icons";
+import { createEffect, createSignal, onSettled, Show, untrack } from "solid-js";
+
 import { createFocusTrap } from "../../lib/focus";
 import { createPendingKeys, type PendingKeys } from "../../lib/pending";
 import type {
@@ -31,8 +32,7 @@ import { Select } from "./rows";
  * echo, or a dropped frame.) */
 export function settleOnProtocolError(pending: PendingKeys): void {
   let seen = untrack(() => state.protocolError);
-  createEffect(() => {
-    const error = state.protocolError;
+  createEffect(() => state.protocolError, (error) => {
     if (error === seen) return;
     seen = error;
     if (error !== null) pending.settleAll();
@@ -68,9 +68,8 @@ export function AgentProviderRow(props: {
   const key = `${props.slot}-provider`;
   const [awaited, setAwaited] = createSignal<string | null>(null);
 
-  createEffect(() => {
-    const want = awaited();
-    if (want !== null && props.providerId === want) {
+  createEffect(() => ({ want: awaited(), providerId: props.providerId }), ({ want, providerId }) => {
+    if (want !== null && providerId === want) {
       setAwaited(null);
       props.pending.settle(key);
     }
@@ -191,8 +190,7 @@ function FreeTextModelRow(props: {
   const [refusal, setRefusal] = createSignal<string | null>(null);
   let settled = props.current.id;
 
-  createEffect(() => {
-    const next = props.current.id;
+  createEffect(() => props.current.id, (next) => {
     if (next !== settled) {
       settled = next;
       setDraft(next);
@@ -418,14 +416,16 @@ function ExpandedPromptEditor(props: {
   let panelRef: HTMLDivElement | undefined;
   const titleId = `${props.editorId}-title`;
 
-  onMount(() => {
-    // Nested inside Settings' own trap: the stack hands Tab and Escape to this
-    // one while it is open and gives them straight back on close, with focus
-    // landing on the Expand control that summoned it.
-    createFocusTrap(() => panelRef, {
+  createFocusTrap(() => panelRef, {
       onEscape: props.onClose,
       restoreTo: props.restoreTo,
     });
+
+  onSettled(() => {
+    // Nested inside Settings' own trap: the stack hands Tab and Escape to this
+    // one while it is open and gives them straight back on close, with focus
+    // landing on the Expand control that summoned it.
+
   });
 
   return (
@@ -506,8 +506,7 @@ export function PromptEditor(props: {
   // device, or a hand edit of `hirsel.toml` — which discards whatever they were
   // typing. Pre-existing and left alone deliberately: the honest fix is a
   // conflict affordance, not a silently diverging local copy.
-  createEffect(() => {
-    const next = props.doc().text;
+  createEffect(() => props.doc().text, (next) => {
     if (next !== serverText) {
       serverText = next;
       setDraft(next);

@@ -1,13 +1,19 @@
 use super::*;
 
+#[path = "thread_action.rs"]
+mod thread_action;
+pub use thread_action::ThreadActionSnapshot;
+
 #[derive(Clone)]
 pub struct AgentRuntime {
     pub(super) backend: Arc<AgentBackend>,
     pub(super) model_selection: Option<ModelSelectionState>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct OwnerTurn {
+    pub thread_id: u64,
+    pub thread_action: Option<ThreadActionContext>,
     pub message_id: u64,
     pub client_id: String,
     pub body: String,
@@ -18,9 +24,16 @@ pub struct OwnerTurn {
     pub task_action: Option<TaskActionContext>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskActionContext {
     pub event: Event,
+    pub action: String,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ThreadActionContext {
+    pub thread: ThreadActionSnapshot,
     pub action: String,
     pub data: Value,
 }
@@ -45,6 +58,10 @@ impl AgentRuntime {
         }
     }
 
+    pub fn is_scripted(&self) -> bool {
+        matches!(self.backend.as_ref(), AgentBackend::Scripted(_))
+    }
+
     pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
         match self.backend.as_ref() {
             AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
@@ -64,6 +81,9 @@ impl AgentRuntime {
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
     ) -> anyhow::Result<Self> {
+        for turn in tools.storage().interrupt_unfinished_thread_turns().await? {
+            tools.publish_thread_turn(turn).await;
+        }
         let model_selection = match config.provider_mode {
             provider @ (ProviderMode::Codex | ProviderMode::OpenRouter) => Some(
                 ModelSelectionState::load(
@@ -182,6 +202,23 @@ impl AgentRuntime {
             AgentBackend::Lash(runtime) => runtime.enqueue_inner(turn).await,
             AgentBackend::Degraded(runtime) => runtime.enqueue(turn).await,
         }
+    }
+
+    pub async fn cancel_thread_turn(&self, thread_id: u64) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Scripted(runtime) => {
+                let state = runtime.state.lock().await;
+                let active = state
+                    .active
+                    .as_ref()
+                    .filter(|a| a.thread_id == thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("Thread #{thread_id} has no running turn"))?;
+                active.cancel.cancel();
+            }
+            AgentBackend::Lash(runtime) => runtime.cancel_owned_turn(Some(thread_id)).await?,
+            AgentBackend::Degraded(_) => anyhow::bail!("Thread #{thread_id} has no running turn"),
+        }
+        Ok(())
     }
 
     pub async fn cancel_turn(&self) -> anyhow::Result<()> {
@@ -309,6 +346,7 @@ pub(super) struct LashAgentRuntime {
     pub(super) broadcast_log: BroadcastLog,
     pub(super) notify: Arc<Notify>,
     pub(super) pump_lock: Mutex<()>,
+    pub(super) request_lock: Mutex<()>,
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
     pub(super) active_turn_id: Arc<Mutex<Option<String>>>,
     pub(super) drain_seq: AtomicU64,
@@ -329,12 +367,13 @@ pub(super) struct LashAgentRuntime {
 
 #[derive(Debug, Clone)]
 pub(super) struct TurnAnchors {
+    pub(super) request_id: Option<String>,
+    pub(super) thread_id: u64,
+    pub(super) thread_turn_id: Option<u64>,
     pub(super) owner_message_id: u64,
-    pub(super) task_action_event_id: Option<u64>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct TurnAnchorState {
-    pub(super) pending_by_source_key: HashMap<String, TurnAnchors>,
     pub(super) active: Option<TurnAnchors>,
 }

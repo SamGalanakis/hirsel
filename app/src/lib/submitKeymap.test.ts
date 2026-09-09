@@ -41,6 +41,13 @@ describe("handleSubmitKeys", () => {
     expect(onSend).toHaveBeenCalledOnce();
   });
 
+  it.each(["ctrlKey", "metaKey"])("%s+Shift+Enter queues without sending", modifier => {
+    const onSend = vi.fn(), onQueue = vi.fn();
+    expect(handleSubmitKeys(keyEvent({ key: "Enter", shiftKey: true, [modifier]: true }), handlers({ onSend, onQueue }))).toBe(true);
+    expect(onQueue).toHaveBeenCalledOnce();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("plain Enter sends on fine pointers, but Shift+Enter is a newline", () => {
     const onSend = vi.fn();
     const h = handlers({ onSend });

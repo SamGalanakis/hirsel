@@ -109,7 +109,7 @@ async fn scripted_cancel_turn_interrupts_slow_turn_without_reply() {
 }
 
 #[tokio::test]
-async fn owner_message_enqueue_failure_deletes_message_without_broadcast() {
+async fn owner_message_enqueue_failure_deletes_message_without_message_broadcast() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(test_config(dir.path())).await.unwrap();
     let mut broadcasts = state.broadcaster.subscribe();
@@ -129,9 +129,23 @@ async fn owner_message_enqueue_failure_deletes_message_without_broadcast() {
     assert!(error.to_string().contains("scripted enqueue failed"));
     assert!(state.storage.all_chat().await.unwrap().is_empty());
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), broadcasts.recv())
+        state
+            .storage
+            .pending_thread_requests()
             .await
-            .is_err(),
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if matches!(broadcasts.recv().await.unwrap(), HostToClient::Msg { .. }) {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_err(),
         "failed enqueue must not publish a sent message"
     );
 }

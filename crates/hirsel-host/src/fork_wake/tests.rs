@@ -5,7 +5,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use hirsel_proto::{ChatAuthor, ChatMessage, Event, EventKind, EventSource, EventSourceKind};
+use hirsel_proto::{ChatAuthor, ChatMessage};
 use tokio::sync::Mutex;
 
 use super::*;
@@ -73,8 +73,6 @@ enum Behaviour {
     Fail,
     /// Hold the permit long enough for a burst to overlap.
     Slow,
-    /// Try to record, which is where a storage failure lives.
-    RecordTask(u64),
     /// Panic mid-triage.
     Panic,
 }
@@ -115,9 +113,6 @@ impl TriageRunner for FakeRunner {
                 tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                 request.tools.drop_message("slow drop").await.map(|_| ())
             }
-            Behaviour::RecordTask(event_id) => {
-                request.tools.record_task_status(event_id).await.map(|_| ())
-            }
             Behaviour::Panic => panic!("a triage fork fell over"),
         };
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -127,32 +122,33 @@ impl TriageRunner for FakeRunner {
 
 // ------------------------------------------------------------------- fixtures
 
-fn event(id: u64, name: &str, description: &str) -> Event {
-    Event {
+fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
+    hirsel_proto::Thread {
         id,
-        kind: EventKind::Judgment,
-        source: EventSource {
-            kind: EventSourceKind::Agent,
-            r#ref: None,
-        },
-        name: name.to_string(),
-        description: description.to_string(),
-        ui: serde_json::json!({ "type": "text", "text": "secret ui payload" }),
-        anchor: 1,
-        requires_response: true,
-        quick_replies: Vec::new(),
-        status: hirsel_proto::EventStatus::Open,
-        read: false,
-        archived: false,
-        snoozed_until: None,
+        title: name.into(),
+        description: description.into(),
+        instrument: serde_json::Value::Null,
+        attention: hirsel_proto::ThreadAttention::NeedsOwner,
+        settled_at: None,
         archived_at: None,
-        fork_sc: None,
-        ts: Utc::now(),
+        snoozed_until: None,
+        read: false,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        revision: 1,
+        running_turn: None,
+        queued_turn_count: 0,
+        last_finished_turn: None,
+        last_activity_at: Utc::now(),
     }
 }
 
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
+        artifact_ids: Vec::new(),
+        thread_id: 0,
+        client_id: None,
+        mentions: Vec::new(),
         id,
         author,
         body: body.to_string(),
@@ -193,7 +189,7 @@ fn fork_wake(
 fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
     let message = subagent_message();
     let context = PackContext {
-        events: vec![event(11, "release-channel", "Choose stable or beta")],
+        threads: vec![event(11, "release-channel", "Choose stable or beta")],
         recent_chat: vec![
             chat(1, ChatAuthor::Owner, "ship the migration"),
             chat(2, ChatAuthor::Agent, "started a worker on it"),
@@ -213,7 +209,9 @@ fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
     assert!(pack.contains("sub-agent proc-7"));
     assert!(pack.contains("Sub-agent completed: the migration landed on main."));
     // 2. the live inventory, by id and one line
-    assert!(pack.contains("#11 release-channel — Choose stable or beta (open)"));
+    assert!(
+        pack.contains("#11 release-channel — Choose stable or beta (open; attention=NeedsOwner)")
+    );
     // ... but never the UI payload
     assert!(!pack.contains("secret ui payload"));
     // 3. the conversation tail, oldest first
@@ -235,7 +233,7 @@ fn the_pack_bounds_every_section_and_never_dumps_history() {
         "monitor:mon-1:1",
     );
     let context = PackContext {
-        events: (0..80)
+        threads: (0..80)
             .map(|id| event(id, &format!("task-{id}"), "a task"))
             .collect(),
         recent_chat: (0..200)
@@ -254,8 +252,11 @@ fn the_pack_bounds_every_section_and_never_dumps_history() {
 
     let pack = build_pack(&message, &context);
 
-    assert_eq!(pack.matches("] #").count(), pack::PACK_EVENT_LIMIT);
-    assert_eq!(pack.matches("- owner: ").count(), pack::PACK_CHAT_LIMIT);
+    assert_eq!(
+        pack.matches("; attention=NeedsOwner)").count(),
+        pack::PACK_EVENT_LIMIT
+    );
+    assert_eq!(pack.matches(" owner: ").count(), pack::PACK_CHAT_LIMIT);
     assert_eq!(pack.matches("(from event #").count(), pack::PACK_RULE_LIMIT);
     // The oldest chat rows are the ones dropped: a tail, not a transcript.
     assert!(!pack.contains("message 0\n"));
@@ -270,7 +271,7 @@ fn an_empty_host_still_renders_every_pack_section() {
     let pack = build_pack(&subagent_message(), &PackContext::default());
 
     assert!(pack.contains("## Incoming event"));
-    assert!(pack.contains("## Live Tasks and events\n\n(none open)"));
+    assert!(pack.contains("## Threads\n\n(none open)"));
     assert!(pack.contains("## Recent conversation\n\n(none)"));
     assert!(pack.contains("## Recorded rules\n\n(none)"));
 }
@@ -289,7 +290,6 @@ fn the_fork_tool_surface_is_exactly_its_three_exits() {
         vec![
             "fork_record_info",
             "fork_record_summary",
-            "fork_close_task",
             "fork_escalate",
             "fork_drop",
         ]
@@ -379,7 +379,7 @@ async fn an_escalating_fork_injects_exactly_one_brief() {
 }
 
 #[tokio::test]
-async fn a_recording_fork_writes_the_event_itself_and_never_wakes_main() {
+async fn a_recording_fork_appends_activity_without_creating_work_or_waking_main() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     let sink = Arc::new(RecordingSink::default());
@@ -400,12 +400,14 @@ async fn a_recording_fork_writes_the_event_itself_and_never_wakes_main() {
         .await
         .unwrap();
 
-    let events = state.storage.ping_snapshot().await.unwrap();
+    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
     assert!(
-        events
+        detail
+            .activities
             .iter()
-            .any(|event| event.name == "migration-landed" && event.kind == EventKind::Info)
+            .any(|a| a.kind == "info" && a.data["name"] == "migration-landed")
     );
+    assert!(state.storage.all_pings().await.unwrap().is_empty());
     assert!(sink.briefs().await.is_empty());
 }
 
@@ -581,27 +583,6 @@ async fn an_escalation_the_queue_refuses_is_not_an_exit() {
 }
 
 #[tokio::test]
-async fn a_record_the_store_refuses_is_not_an_exit() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = test_state(dir.path()).await;
-    state
-        .storage
-        .append_chat(ChatAuthor::Owner, "ship it".to_string(), None)
-        .await
-        .unwrap();
-    // Archiving an event that does not exist is a real storage-side refusal.
-    let runner = FakeRunner::new(Behaviour::RecordTask(4242));
-    let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, runner, Arc::clone(&sink));
-
-    fork.dispatch_now(subagent_message()).await;
-
-    let briefs = sink.briefs().await;
-    assert_eq!(briefs.len(), 1);
-    assert!(briefs[0].1.contains("Triage unavailable"));
-}
-
-#[tokio::test]
 async fn a_panicking_fork_still_escalates_its_message() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
@@ -645,15 +626,12 @@ async fn a_fork_never_mints_a_chat_line_to_anchor_a_record() {
         .await
         .unwrap();
 
-    assert_eq!(result["status"], "escalated");
+    assert_eq!(result["status"], "recorded");
     assert!(matches!(
         tools.exit().await,
-        Some(ForkExit::Escalated { .. })
+        Some(ForkExit::Recorded { .. })
     ));
-    let briefs = sink.briefs().await;
-    assert_eq!(briefs.len(), 1);
-    assert!(briefs[0].1.contains("docs-index"));
-    assert!(briefs[0].1.contains("42 pages"));
+    assert!(sink.briefs().await.is_empty());
     // Nothing was written to the Owner's transcript.
     assert!(state.storage.recent_chat(10).await.unwrap().is_empty());
 }
@@ -670,5 +648,5 @@ fn the_fork_keep_set_is_exact_ids_not_a_name_prefix() {
 
     assert!(ids.iter().all(|id| id.starts_with("hirsel.fork")));
     assert!(!ids.iter().any(|id| id == "hirsel.fork_decide"));
-    assert_eq!(ids.len(), 5);
+    assert_eq!(ids.len(), 4);
 }

@@ -139,6 +139,7 @@ async fn run_one_triage_turn(
     request: TriageRequest,
 ) -> anyhow::Result<()> {
     session
+        .admin()
         .tools()
         .add_provider(Arc::new(ForkToolProvider::new(Arc::clone(&request.tools))))
         .await
@@ -174,6 +175,7 @@ async fn narrow_to_fork_exits(session: &lash::LashSession) -> anyhow::Result<()>
         .map(|definition| definition.id().to_string())
         .collect::<std::collections::BTreeSet<_>>();
     let state = session
+        .admin()
         .tools()
         .state()
         .await
@@ -187,6 +189,7 @@ async fn narrow_to_fork_exits(session: &lash::LashSession) -> anyhow::Result<()>
         return Ok(());
     }
     session
+        .admin()
         .tools()
         .set_membership_many(&drops)
         .await

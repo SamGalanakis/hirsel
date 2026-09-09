@@ -1,12 +1,14 @@
 import { cva, type VariantProps } from "class-variance-authority";
-import type { ComponentProps } from "solid-js";
-import { splitProps } from "solid-js";
+import type { ComponentProps } from "@solidjs/web";
+import { omit } from "solid-js";
+
 import { cn } from "@/lib/utils";
 
 type EmptyProps = ComponentProps<"div">;
 
 const Empty = (props: EmptyProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
 
   return (
     <div
@@ -23,7 +25,8 @@ const Empty = (props: EmptyProps) => {
 type EmptyHeaderProps = ComponentProps<"div">;
 
 const EmptyHeader = (props: EmptyHeaderProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
 
   return (
     <div
@@ -52,7 +55,8 @@ const emptyMediaVariants = cva(
 type EmptyMediaProps = ComponentProps<"div"> & VariantProps<typeof emptyMediaVariants>;
 
 const EmptyMedia = (props: EmptyMediaProps) => {
-  const [local, others] = splitProps(props, ["class", "variant"]);
+  const local = props;
+  const others = omit(local, "class", "variant");
 
   return (
     <div
@@ -67,7 +71,8 @@ const EmptyMedia = (props: EmptyMediaProps) => {
 type EmptyTitleProps = ComponentProps<"div">;
 
 const EmptyTitle = (props: EmptyTitleProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
 
   return <div data-slot="empty-title" class={cn("z-empty-title", local.class)} {...others} />;
 };
@@ -75,7 +80,8 @@ const EmptyTitle = (props: EmptyTitleProps) => {
 type EmptyDescriptionProps = ComponentProps<"p">;
 
 const EmptyDescription = (props: EmptyDescriptionProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
 
   return (
     <div
@@ -92,7 +98,8 @@ const EmptyDescription = (props: EmptyDescriptionProps) => {
 type EmptyContentProps = ComponentProps<"div">;
 
 const EmptyContent = (props: EmptyContentProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
 
   return (
     <div

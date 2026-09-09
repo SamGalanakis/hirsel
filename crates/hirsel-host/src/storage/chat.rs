@@ -30,6 +30,10 @@ impl Storage {
         )?;
         let id = conn.last_insert_rowid() as u64;
         Ok(ChatMessage {
+            artifact_ids: Vec::new(),
+            client_id: None,
+            thread_id: 0,
+            mentions: Vec::new(),
             id,
             author,
             body,
@@ -47,33 +51,12 @@ impl Storage {
         anchor: Option<u64>,
         tool_calls: Vec<ToolCallSummary>,
     ) -> anyhow::Result<ChatMessage> {
-        let body = body.into();
-        let ts = Utc::now();
-        let encoded_tool_calls = serde_json::to_string(&tool_calls)?;
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "
-            INSERT INTO chat_messages (author, body, ref, ts, tool_calls)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            ",
-            params![
-                author_to_str(author),
-                body,
-                anchor,
-                ts.to_rfc3339(),
-                encoded_tool_calls
-            ],
-        )?;
-        let id = conn.last_insert_rowid() as u64;
-        Ok(ChatMessage {
-            id,
-            author,
-            body,
-            r#ref: anchor,
-            ts,
-            attachments: Vec::new(),
-            tool_calls,
-        })
+        let thread_id = match anchor {
+            Some(id) => self.chat_message(id).await?.map_or(0, |m| m.thread_id),
+            None => 0,
+        };
+        self.append_thread_chat(thread_id, author, body, anchor, tool_calls)
+            .await
     }
 
     pub async fn append_owner_message(
@@ -83,7 +66,37 @@ impl Storage {
         anchor: Option<u64>,
         attachments: &[String],
     ) -> anyhow::Result<(ChatMessage, bool)> {
-        let body = body.into();
+        self.append_owner_record(client_id, body.into(), anchor, attachments, None)
+            .await
+    }
+
+    pub async fn append_owner_request(
+        &self,
+        client_id: &str,
+        body: String,
+        anchor: Option<u64>,
+        attachments: &[String],
+        request: &serde_json::Value,
+    ) -> anyhow::Result<(ChatMessage, bool)> {
+        anyhow::ensure!(
+            request.is_object()
+                && request
+                    .get("body")
+                    .is_some_and(serde_json::Value::is_string),
+            "owner request requires a text body"
+        );
+        self.append_owner_record(client_id, body, anchor, attachments, Some(request))
+            .await
+    }
+
+    async fn append_owner_record(
+        &self,
+        client_id: &str,
+        body: String,
+        anchor: Option<u64>,
+        attachments: &[String],
+        request: Option<&serde_json::Value>,
+    ) -> anyhow::Result<(ChatMessage, bool)> {
         let ts = Utc::now();
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
@@ -119,6 +132,19 @@ impl Storage {
             )?;
         }
         let message = get_chat_message(&tx, id)?;
+        if let Some(request) = request {
+            let mut request = request.clone();
+            request["message_id"] = serde_json::json!(id);
+            request["thread_id"] = serde_json::json!(message.thread_id);
+            request["client_id"] = serde_json::json!(client_id);
+            request["anchor"] = serde_json::json!(anchor);
+            request["attachments"] =
+                serde_json::to_value(super::blobs::message_attachments(&tx, id)?)?;
+            tx.execute(
+                "INSERT INTO thread_requests(client_id,payload) VALUES(?1,?2)",
+                params![client_id, serde_json::to_string(&request)?],
+            )?;
+        }
         tx.commit()?;
         Ok((message, true))
     }
@@ -146,6 +172,10 @@ impl Storage {
     pub async fn delete_chat_message(&self, id: u64) -> anyhow::Result<bool> {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM thread_requests WHERE client_id IN (SELECT client_id FROM client_messages WHERE msg_id = ?1)",
+            params![id],
+        )?;
         tx.execute(
             "DELETE FROM message_attachments WHERE message_id = ?1",
             params![id],
@@ -183,11 +213,13 @@ impl Storage {
         let effective_cursor = last_seen_msg_id.filter(|cursor| *cursor <= db_max);
         let messages = replay_messages_from_conn(&tx, effective_cursor)?;
         let events = ping_snapshot_from_conn(&tx)?;
+        let threads = super::threads::snapshot(&tx)?;
         tx.commit()?;
         Ok(HelloSnapshot {
             latest_msg_id: db_max,
             messages,
             events,
+            threads,
         })
     }
 
@@ -207,7 +239,7 @@ impl Storage {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "
-            SELECT id, author, body, ref, ts, tool_calls
+            SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
             FROM chat_messages
             ORDER BY id ASC
             ",
@@ -222,9 +254,9 @@ impl Storage {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "
-            SELECT id, author, body, ref, ts, tool_calls
+            SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
             FROM (
-                SELECT id, author, body, ref, ts, tool_calls
+                SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
                 FROM chat_messages
                 ORDER BY id DESC
                 LIMIT ?1
@@ -253,6 +285,7 @@ pub struct HelloSnapshot {
     pub latest_msg_id: u64,
     pub messages: Vec<ChatMessage>,
     pub events: Vec<Event>,
+    pub threads: Vec<hirsel_proto::Thread>,
 }
 
 /// The newest-N conversation window every `hello_ok` carries, whatever cursor
@@ -279,9 +312,9 @@ fn fetch_messages_from_conn(
     let before_id = before_id.min(i64::MAX as u64);
     let mut stmt = conn.prepare(
         "
-        SELECT id, author, body, ref, ts, tool_calls
+        SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
         FROM (
-            SELECT id, author, body, ref, ts, tool_calls
+            SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
             FROM chat_messages
             WHERE id < ?1
             ORDER BY id DESC
@@ -338,7 +371,7 @@ fn replay_messages_from_conn(
 
     let mut stmt = conn.prepare(
         "
-        SELECT id, author, body, ref, ts, tool_calls
+        SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
         FROM chat_messages
         WHERE id > ?1
         ORDER BY id ASC
@@ -350,16 +383,24 @@ fn replay_messages_from_conn(
     Ok(messages)
 }
 
-fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage> {
+pub(super) fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage> {
     let mut message = conn.query_row(
         "
-        SELECT id, author, body, ref, ts, tool_calls
+        SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
         FROM chat_messages
         WHERE id = ?1
         ",
         params![id],
         chat_message_from_row,
     )?;
+    message.client_id = conn
+        .query_row(
+            "SELECT client_id FROM client_messages WHERE msg_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    message.artifact_ids = super::artifacts::message_artifacts(conn, id)?;
     message.attachments = message_attachments(conn, id)?
         .into_iter()
         .map(|stored| stored.blob)
@@ -367,11 +408,19 @@ fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage>
     Ok(message)
 }
 
-fn load_attachments_for_messages(
+pub(super) fn load_attachments_for_messages(
     conn: &Connection,
     messages: &mut [ChatMessage],
 ) -> rusqlite::Result<()> {
     for message in messages {
+        message.client_id = conn
+            .query_row(
+                "SELECT client_id FROM client_messages WHERE msg_id=?1",
+                [message.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        message.artifact_ids = super::artifacts::message_artifacts(conn, message.id)?;
         message.attachments = message_attachments(conn, message.id)?
             .into_iter()
             .map(|stored| stored.blob)
@@ -380,11 +429,16 @@ fn load_attachments_for_messages(
     Ok(())
 }
 
-fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+pub(super) fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     let author: String = row.get(1)?;
     let ts: String = row.get(4)?;
     let tool_calls: String = row.get(5)?;
     Ok(ChatMessage {
+        artifact_ids: Vec::new(),
+        client_id: None,
+        thread_id: row.get(6)?,
+        mentions: serde_json::from_str(&row.get::<_, String>(7)?)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(e)))?,
         id: row.get(0)?,
         author: author_from_str(&author)?,
         body: row.get(2)?,

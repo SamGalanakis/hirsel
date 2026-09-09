@@ -1,11 +1,13 @@
-import { type ComponentProps, splitProps } from "solid-js";
+import { omit } from "solid-js";
+import { type ComponentProps } from "@solidjs/web";
 
 import { cn } from "@/lib/utils";
 
 type InputProps = ComponentProps<"input">;
 
 const Input = (props: InputProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <input
       data-slot="input"

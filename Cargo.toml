@@ -30,14 +30,14 @@ hirsel-plugins = { path = "crates/hirsel-plugins" }
 hirsel-proto = { path = "crates/hirsel-proto" }
 iroh = "=1.0.2"
 iroh-tickets = "=1.0.0"
-lash-core = { git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5" }
-lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5", features = ["rlm"] }
-lash-provider-anthropic = { git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5" }
-lash-provider-openai = { git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5" }
-lash-protocol-rlm = { git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5" }
-lash-sqlite-store = { git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5" }
+lash-core = { package = "lash-internal-core", git = "https://github.com/Ascending-AI/lash", rev = "10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec" }
+lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash", rev = "10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec", features = ["rlm"] }
+lash-provider-anthropic = { package = "lash-internal-provider-anthropic", git = "https://github.com/Ascending-AI/lash", rev = "10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec" }
+lash-provider-openai = { package = "lash-internal-provider-openai", git = "https://github.com/Ascending-AI/lash", rev = "10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec" }
+lash-protocol-rlm = { package = "lash-internal-protocol-rlm", git = "https://github.com/Ascending-AI/lash", rev = "10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec" }
+lash-sqlite-store = { package = "lash-internal-sqlite-store", git = "https://github.com/Ascending-AI/lash", rev = "10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec" }
 libc = "0.2.177"
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tempfile = "3.23.0"
@@ -47,11 +47,3 @@ tokio-util = { version = "0.7.18", features = ["codec"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
-
-# lash's lashlang VM needs the fuel/step-budget instrumentation in its vendored
-# regress fork (`vendor/regress` in the lash repo, published nowhere). lash
-# applies this patch in its own workspace root, and a `[patch]` from a
-# dependency never reaches its consumers, so hirsel has to restate it against
-# the same rev or `regress::MatchError` is missing at compile time.
-[patch.crates-io]
-regress = { git = "https://github.com/Ascending-AI/lash", rev = "1d33a2c7c1b38d7d05542222e05da967eb3f53e5" }

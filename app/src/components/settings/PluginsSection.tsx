@@ -6,8 +6,9 @@
 // `values`, and every write is followed by a re-read instead of an optimistic
 // guess. The section self-hides when the Host reports no plugins (or has no
 // plugin surface at all), so an older Host collapses it to nothing.
-import { LoaderCircle } from "lucide-solid";
-import { createSignal, For, type JSX, onMount, Show } from "solid-js";
+import { LoaderCircle } from "@/components/ui/icons";
+import { createSignal, For, onSettled, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { fetchPlugins, savePluginSettings, setPluginEnabled } from "../../plugins/host";
 import { loadFailures } from "../../plugins/registry";
 import {
@@ -28,12 +29,12 @@ function StateBadge(props: { state: PluginInfo["state"] }) {
     props.state === "running" ? "Running" : props.state === "disabled" ? "Off" : "Error";
   return (
     <span
-      class="shrink-0 text-xs font-medium"
-      classList={{
+      class={["shrink-0 text-xs font-medium", {
         "text-status-success": props.state === "running",
         "text-muted-foreground": props.state === "disabled",
         "text-destructive": props.state === "errored",
-      }}
+      }]}
+
     >
       {text()}
     </span>
@@ -211,7 +212,7 @@ export function PluginsSection(): JSX.Element {
     }
   }
 
-  onMount(() => void refresh());
+  onSettled(() => void refresh());
 
   return (
     <Show when={(plugins()?.length ?? 0) > 0}>

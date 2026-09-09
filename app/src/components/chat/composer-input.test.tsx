@@ -1,5 +1,7 @@
+import { flush } from "solid-js";
 import { fireEvent, render } from "@solidjs/testing-library";
 import { createRoot } from "solid-js";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Blob } from "../../protocol";
 import { LARGE_PASTE_CHARS } from "./paste";
@@ -64,7 +66,7 @@ async function renderComposer() {
 function paste(el: Element, data: DataTransfer) {
   const event = new Event("paste", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "clipboardData", { value: data });
-  el.dispatchEvent(event);
+  flush(() => el.dispatchEvent(event));
   return event;
 }
 

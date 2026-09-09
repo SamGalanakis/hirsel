@@ -1,3 +1,5 @@
+import { openThreadNavigation } from "../threads/navigation";
+import { focusedThreadRunning, focusThread, threadState } from "../threads/store";
 // The global keyboard layer — hirsel's CLI-lineage "shortcuts are features"
 // surface (Linear/Superhuman). A single window-level keydown listener routes
 // bare keys and `g`-prefixed chords to app actions, and is deliberately quiet:
@@ -5,23 +7,24 @@
 // owns input, so it never steals a keystroke from the composer or a dialog.
 //
 // Esc is the one key this layer shares: it owns only the LAST rung of the Esc
-// ladder (leave the focused Task). The rungs above it — an open overlay's focus
+// ladder (leave the focused Thread). The rungs above it — an open overlay's focus
 // trap, and the composer stopping a live turn — keep Esc for themselves, and
 // `escapeField` yields to both rather than fighting them.
 
 import { createSignal } from "solid-js";
+
 import { scrollToBottom } from "./scroll";
-import { clearTaskFocus, openProcesses, openSettings, state } from "../store/store";
+import { openProcesses, openSettings } from "../store/store";
 import { getClient } from "../ws/client";
-// True while a modal/overlay owns input — focus traps and the Kobalte dialogs
+// True while a modal/overlay owns input — focus traps and the native dialogs
 // that register their own presence both feed it. Used to suppress the bare-key
 // layer so summoned surfaces keep the keyboard.
-import { anyOverlayOpen, focusMainComposer, focusTaskIndex } from "./focus";
+import { anyOverlayOpen, focusMainComposer } from "./focus";
 
 /** Max gap (ms) between the `g` leader and its second key for a chord to count. */
 const CHORD_MS = 900;
 
-export type PaneTarget = "tasks" | "composer" | "processes" | "settings";
+export type PaneTarget = "threads" | "composer" | "processes" | "settings";
 
 // ---- Summoned-overlay visibility (module singletons; one app instance) -------
 // The command palette and the shortcut cheat-sheet are summoned, never standing,
@@ -37,14 +40,14 @@ export function focusComposer(): void {
   focusMainComposer();
 }
 
-/** Focus one of the two standing surfaces, or summon a utility. */
+/** Open the Thread drawer, focus the composer, or summon a utility. */
 export function goPane(target: PaneTarget): void {
   switch (target) {
     case "composer":
       focusMainComposer();
       break;
-    case "tasks":
-      focusTaskIndex();
+    case "threads":
+      openThreadNavigation();
       break;
     case "processes":
       openProcesses();
@@ -57,7 +60,7 @@ export function goPane(target: PaneTarget): void {
 
 /** Jump to the newest task-context material in the current field. */
 export function jumpToLatest(): void {
-  const element = document.querySelector<HTMLElement>('[data-slot="task-scroll"]');
+  const element = document.querySelector<HTMLElement>('[data-slot="thread-scroll"]');
   // Shares the conversation's own bottom-pinning helper, so the keyboard route
   // and the "jump to latest" affordance land in the same place and both go
   // instant under `prefers-reduced-motion` (DESIGN §5).
@@ -66,20 +69,20 @@ export function jumpToLatest(): void {
 
 /** Best-effort cancel of the live turn — a no-op when the agent is idle. */
 export function stopActiveTurn(): void {
-  getClient()?.cancelTurn();
+  getClient()?.cancelTurn(threadState.focusedId);
 }
 
 /** The Esc ladder, in priority order:
  *   1. an overlay/dialog is open  → its focus trap owns Esc (yield);
  *   2. an agent turn is running   → the composer's stop owns Esc (yield);
- *   3. a Task is focused          → leave it for the ambient field.
+ *   3. a Thread is focused          → leave it for the ambient field.
  * Returns true when this layer consumed the key, so the caller can
  * `preventDefault` only on the rung it actually acted on. */
 export function escapeField(): boolean {
   if (anyOverlayOpen()) return false;
-  if (state.agentActivity.state === "thinking") return false;
-  if (state.focusedTaskId === null) return false;
-  clearTaskFocus();
+  if (focusedThreadRunning()) return false;
+  if (threadState.focusedId === 0) return false;
+  focusThread(0);
   return true;
 }
 
@@ -90,7 +93,7 @@ export interface Shortcut {
    * a chord (`g` then `t`); a comma in a single token means "or". */
   keys: string[];
   label: string;
-  group: "Tasks" | "General" | "Focus" | "Hirsel";
+  group: "Threads" | "General" | "Focus" | "Hirsel";
 }
 
 export const SHORTCUTS: Shortcut[] = [
@@ -99,19 +102,19 @@ export const SHORTCUTS: Shortcut[] = [
   // `?` is the bare-key one you find by accident.
   { keys: ["⌘", "/"], label: "Keyboard shortcuts", group: "General" },
   { keys: ["?"], label: "Keyboard shortcuts", group: "General" },
-  { keys: ["Esc"], label: "Clear task focus", group: "Tasks" },
+  { keys: ["Esc"], label: "Open Hirsel", group: "Threads" },
   { keys: ["/"], label: "Focus Hirsel", group: "Hirsel" },
   { keys: ["G"], label: "Jump to latest", group: "Hirsel" },
   { keys: ["Enter"], label: "Send message", group: "Hirsel" },
   { keys: ["⇧", "Enter"], label: "New line", group: "Hirsel" },
-  { keys: ["Tab"], label: "Queue for next turn", group: "Hirsel" },
+  { keys: ["⌘/Ctrl", "Shift", "Enter"], label: "Queue for next turn", group: "Hirsel" },
   // The composer carries no queue button any more, so the sheet is where BOTH
   // routes to a queued turn are written down — the desktop key and the touch
   // gesture, which is the only one a phone can reach.
   { keys: ["Hold Send"], label: "Queue for next turn (touch)", group: "Hirsel" },
   { keys: ["Esc"], label: "Stop the active turn", group: "Hirsel" },
-  { keys: ["#"], label: "Cite a task", group: "Hirsel" },
-  { keys: ["g", "t"], label: "Focus tasks", group: "Focus" },
+  { keys: ["#"], label: "Cite a thread", group: "Hirsel" },
+  { keys: ["g", "t"], label: "Open threads", group: "Focus" },
   { keys: ["g", "h"], label: "Focus Hirsel", group: "Focus" },
   { keys: ["g", "p"], label: "Processes", group: "Focus" },
   { keys: ["g", "s"], label: "Settings", group: "Focus" },
@@ -152,7 +155,7 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 
 const CHORD_PANES: Record<string, PaneTarget> = {
   h: "composer",
-  t: "tasks",
+  t: "threads",
   p: "processes",
   s: "settings",
 };

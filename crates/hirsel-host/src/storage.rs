@@ -3,6 +3,7 @@
 //! The `Storage` handle is defined here; its methods live in per-domain
 //! submodules that each carry their own row mapping and tests.
 
+mod artifacts;
 mod blobs;
 mod chat;
 mod common;
@@ -16,6 +17,12 @@ mod schema;
 mod side_chat;
 mod subagents;
 mod taste;
+mod thread_activity;
+mod thread_messages;
+mod thread_requests;
+mod thread_schema;
+mod thread_summary;
+mod threads;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -28,6 +35,7 @@ use tokio::sync::Mutex;
 use common::absolute_path;
 use devices::PairingCodes;
 
+pub(crate) use artifacts::ArtifactDraft;
 pub use blobs::StoredBlob;
 pub use chat::HelloSnapshot;
 pub use devices::Device;
@@ -64,6 +72,7 @@ impl Storage {
         tokio::fs::create_dir_all(&blobs_dir).await?;
         let db_path = data_dir.join("hirsel.sqlite");
         let conn = Connection::open(db_path)?;
+        thread_summary::register_timestamp_function(&conn)?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             blobs_dir: Arc::new(blobs_dir),
@@ -79,6 +88,14 @@ impl Storage {
             let conn = self.conn.lock().await;
             conn.execute_batch(
                 "
+                DELETE FROM artifact_operations;
+                DELETE FROM message_artifacts;
+                DELETE FROM artifacts;
+                DELETE FROM thread_action_receipts;
+                DELETE FROM thread_requests;
+                DELETE FROM thread_activity_keys;
+                DELETE FROM thread_activities;
+                DELETE FROM thread_turns;
                 DELETE FROM message_attachments;
                 DELETE FROM client_blobs;
                 DELETE FROM blobs;
@@ -90,6 +107,7 @@ impl Storage {
                 DELETE FROM push_tokens;
                 DELETE FROM taste_decisions;
                 DELETE FROM chat_messages;
+                DELETE FROM threads WHERE id != 0;
                 DELETE FROM sqlite_sequence
                 WHERE name IN ('chat_messages', 'pings', 'side_chat_messages');
                 ",
@@ -104,3 +122,6 @@ impl Storage {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod threads_tests;

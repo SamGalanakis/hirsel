@@ -1,5 +1,6 @@
-import { Settings as SettingsIcon } from "lucide-solid";
-import { createSignal, Match, onMount, Show, Switch } from "solid-js";
+import { Settings as SettingsIcon } from "@/components/ui/icons";
+import { createSignal, Match, onSettled, Show, Switch } from "solid-js";
+
 import { resolveWsUrl } from "../../lib/endpoint";
 import { createFocusTrap, phoneUtilityRestoreTarget } from "../../lib/focus";
 import { showAgentCode } from "../../lib/prefs";
@@ -57,7 +58,12 @@ function SettingsPanel() {
 
   let panelRef: HTMLDivElement | undefined;
 
-  onMount(() => {
+  createFocusTrap(() => panelRef, {
+      onEscape: closeRightRegion,
+      restoreTo: phoneUtilityRestoreTarget,
+    });
+
+  onSettled(() => {
     void computeFingerprint(getStoredToken()).then(setFingerprint);
     // ONE focus contract at every width now that Settings is full-viewport
     // everywhere: a true modal — Tab trapped so the task world behind it stays
@@ -68,10 +74,7 @@ function SettingsPanel() {
     // deliberate rather than "whatever was focused": the menu item that opened
     // Settings has unmounted by the time the panel closes, so the captured
     // element is a detached node and focus would land nowhere at all.
-    createFocusTrap(() => panelRef, {
-      onEscape: closeRightRegion,
-      restoreTo: phoneUtilityRestoreTarget,
-    });
+
     // The tab target is a one-shot: consumed here so a later open starts at
     // the top of the rail again.
     clearSettingsTab();

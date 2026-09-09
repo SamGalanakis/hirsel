@@ -1,6 +1,7 @@
 import type { Element as HastElement, Root as HastRoot, RootContent } from "hast";
-import { Check, Copy } from "lucide-solid";
-import { createResource, createSignal, For, Show, type JSX } from "solid-js";
+import { Check, Copy } from "@/components/ui/icons";
+import { createMemo, createSignal, For, Show, Loading } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { resolveLanguage } from "./highlight";
 
 function hastClass(node: HastElement): string | undefined {
@@ -54,14 +55,13 @@ function CopyButton(props: { text: string }) {
  * highlighter chunk resolves, so nothing blocks the message.
  */
 export function CodeBlock(props: { code: string; lang?: string | null }) {
-  const [tree] = createResource(
-    () => ({ code: props.code, lang: props.lang ?? null }),
-    async (input): Promise<HastRoot | null> => {
-      if (!resolveLanguage(input.lang)) return null;
-      const { highlight } = await import("./highlight");
-      return highlight(input.code, input.lang);
-    },
-  );
+  const tree = createMemo(async (): Promise<HastRoot | null> => {
+    const code = props.code;
+    const lang = props.lang ?? null;
+    if (!resolveLanguage(lang)) return null;
+    const { highlight } = await import("./highlight");
+    return highlight(code, lang);
+  });
 
   return (
     <div class="group relative flex flex-col gap-1">
@@ -71,9 +71,9 @@ export function CodeBlock(props: { code: string; lang?: string | null }) {
       </div>
       <pre class="overflow-x-auto rounded-md border border-border/60 px-2.5 py-2 text-xs leading-5">
         <code class="font-mono">
-          <Show when={tree()} fallback={props.code}>
+          <Loading fallback={props.code}><Show when={tree()} fallback={props.code}>
             {(highlighted) => <For each={highlighted().children}>{(node) => renderHast([node])}</For>}
-          </Show>
+          </Show></Loading>
         </code>
       </pre>
     </div>

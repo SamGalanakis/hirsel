@@ -23,6 +23,12 @@ pub enum DriverError {
     MissingPipe(&'static str),
     #[error("CLI did not return an external id before timeout")]
     MissingExternalId,
+    #[error("provider protocol error: {0}")]
+    Protocol(String),
+    #[error("provider request timed out: {0}")]
+    RequestTimeout(String),
+    #[error("sub-agent session is closed")]
+    SessionClosed,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]

@@ -17,6 +17,8 @@ pub(super) const TURN_EVENT_CODE_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
 pub(super) struct TurnTimelineBridge {
+    pub(super) turn_id: Option<u64>,
+    pub(super) thread_id: Option<u64>,
     pub(super) seq: u64,
     pub(super) in_turn: bool,
     pub(super) pending: Option<PendingTimelineText>,
@@ -107,7 +109,7 @@ impl TurnTimelineBridge {
                                 ok: *success,
                                 summary: code_done_summary(
                                     *success,
-                                    error.as_deref(),
+                                    error.as_ref().map(|failure| failure.message.as_str()),
                                     *duration_ms,
                                 ),
                             },
@@ -270,6 +272,8 @@ impl TurnTimelineBridge {
             broadcast_log,
             broadcaster,
             HostToClient::TurnEvent {
+                turn_id: self.turn_id,
+                thread_id: self.thread_id,
                 seq: self.seq,
                 event,
                 sc: None,
@@ -343,6 +347,7 @@ pub(super) fn turn_chat_payload(
     }
 }
 
+#[cfg(test)]
 pub(super) async fn materialize_turn_chat(
     tools: &ToolSuite,
     output: &lash::TurnOutput,
@@ -350,8 +355,40 @@ pub(super) async fn materialize_turn_chat(
     let Some((text, tool_calls)) = turn_chat_payload(output) else {
         return Ok(false);
     };
-    tools
-        .chat_send_with_tool_calls(text, None, tool_calls)
-        .await?;
+    tools.thread_chat_send(0, text, None, tool_calls).await?;
     Ok(true)
+}
+
+pub(super) async fn materialize_thread_turn_chat(
+    tools: &ToolSuite,
+    output: &lash::TurnOutput,
+    thread_id: u64,
+    anchor: u64,
+) -> anyhow::Result<Option<u64>> {
+    let Some((text, calls)) = turn_chat_payload(output) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        tools
+            .thread_chat_send(thread_id, text, Some(anchor), calls)
+            .await?
+            .id,
+    ))
+}
+
+pub(super) async fn materialize_thread_turn_reply(
+    tools: &ToolSuite,
+    output: &lash::TurnOutput,
+    turn_id: u64,
+    anchor: Option<u64>,
+) -> anyhow::Result<Option<u64>> {
+    let Some((text, calls)) = turn_chat_payload(output) else {
+        return Ok(None);
+    };
+    let message = tools
+        .storage()
+        .materialize_thread_reply(turn_id, text, anchor, calls)
+        .await?;
+    tools.publish_thread_message(message.clone()).await;
+    Ok(Some(message.id))
 }

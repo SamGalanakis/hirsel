@@ -23,6 +23,10 @@ impl Storage {
         )?;
         let id = conn.last_insert_rowid() as u64;
         Ok(ChatMessage {
+            artifact_ids: Vec::new(),
+            client_id: None,
+            thread_id: 0,
+            mentions: Vec::new(),
             id,
             author,
             body: body.to_string(),
@@ -58,6 +62,10 @@ fn side_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatM
     let author: String = row.get(1)?;
     let ts: String = row.get(3)?;
     Ok(ChatMessage {
+        artifact_ids: Vec::new(),
+        client_id: None,
+        thread_id: 0,
+        mentions: Vec::new(),
         id: row.get(0)?,
         author: author_from_str(&author)?,
         body: row.get(2)?,

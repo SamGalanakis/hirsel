@@ -1,0 +1,16 @@
+use std::{collections::{HashMap,HashSet,VecDeque},sync::{Arc,Mutex}};
+use tokio::sync::broadcast;
+#[derive(Clone)] struct ProcessTerminal {process_id:String}
+// INSERT_CURRENT_TERMINAL_BUS_HERE
+
+#[tokio::main] async fn main() {
+ let bus=TerminalEventBus::new(4);
+ let mut rx=bus.subscribe();
+ bus.publish(ProcessTerminal{process_id:"proc-a".into()});
+ assert_eq!(rx.recv().await.unwrap().process_id,"proc-a");
+ // A failed append has no acknowledgement API to return this delivery.
+ bus.publish(ProcessTerminal{process_id:"proc-a".into()});
+ assert!(tokio::time::timeout(tokio::time::Duration::from_millis(200),rx.recv()).await.is_err());
+ assert_eq!(bus.subscribe().recv().await.unwrap().process_id,"proc-a");
+ println!("CONFIRMED actual extracted TerminalEventReceiver suppresses redelivery of failed handling; new subscriber can replay");
+}

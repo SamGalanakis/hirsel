@@ -1,8 +1,11 @@
+import { threadNavigationOpen, setThreadNavigationOpen } from "../threads/navigation";
+import { flush } from "solid-js";
 import { render, screen, waitFor } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CommandPalette, ShortcutHelp } from "./CommandPalette";
-import { EventKind } from "../protocol";
+import { makeThread } from "../threads/fixtures";
+import { setThreadState, threadState } from "../threads/store";
 
 // This suite is about the palette's own list/filter behaviour, so the focus
 // module is stubbed out. The real overlay-presence registry is exercised in
@@ -10,8 +13,8 @@ import { EventKind } from "../protocol";
 vi.mock("../lib/focus", () => ({
   anyOverlayOpen: () => false,
   createOverlayPresence: () => {},
+  createFocusTrap: () => {},
   focusMainComposer: () => {},
-  focusTaskIndex: () => {},
 }));
 
 describe("CommandPalette", () => {
@@ -19,8 +22,18 @@ describe("CommandPalette", () => {
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
     expect(screen.getAllByText("Focus Hirsel").length).toBeGreaterThan(0);
-    expect(screen.getByText("Focus tasks")).toBeInTheDocument();
+    expect(screen.getByText("Open threads")).toBeInTheDocument();
     expect(screen.getByText("Open Processes")).toBeInTheDocument();
+  });
+
+  it("opens the shared Thread drawer through its navigation command", async () => {
+    flush(() => setThreadNavigationOpen(false));
+    const onOpenChange = vi.fn();
+    render(() => <CommandPalette open onOpenChange={onOpenChange} />);
+    await userEvent.setup().click(await screen.findByText("Open threads"));
+    await waitFor(() => expect(threadNavigationOpen()).toBe(true));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    flush(() => setThreadNavigationOpen(false));
   });
 
   it("filters commands by query", async () => {
@@ -45,17 +58,16 @@ describe("CommandPalette", () => {
   });
 
   it("offers the focus exit only while a task is focused", async () => {
-    const store = await import("../store/store");
     const { unmount } = render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
-    expect(screen.queryByText("Clear task focus")).toBeNull();
+    expect(screen.queryByText("Open Hirsel")).toBeNull();
     unmount();
 
-    store.toggleTaskFocus(11);
+    flush(() => setThreadState(draft => { draft["focusedId"] = 11; }));
     render(() => <CommandPalette open onOpenChange={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Clear task focus")).toBeInTheDocument());
-    await userEvent.setup().click(screen.getByText("Clear task focus"));
-    await waitFor(() => expect(store.state.focusedTaskId).toBeNull());
+    await waitFor(() => expect(screen.getByText("Open Hirsel")).toBeInTheDocument());
+    await userEvent.setup().click(screen.getByText("Open Hirsel"));
+    await waitFor(() => expect(threadState.focusedId).toBe(0));
   });
 
   it("does not invent a hidden search destination for an unmatched query", async () => {
@@ -67,59 +79,13 @@ describe("CommandPalette", () => {
   });
 });
 
-describe("CommandPalette — contextual queue actions (Wave-3 ⌘K depth)", () => {
-  it("surfaces Decide / Snooze / Clear-finished for the current queue", async () => {
-    const store = await import("../store/store");
-    const judgment = {
-      id: 4242,
-      kind: EventKind.Judgment,
-      source: { kind: "agent" as const, ref: "host" },
-      name: "@ctx",
-      description: "context judgment",
-      requires_response: true,
-      quick_replies: [],
-      status: "open" as const,
-      read: false,
-      anchor: 0,
-      ts: "2026-07-14T09:00:00Z",
-      ui: [
-        { type: "heading", text: "Ctx" },
-        {
-          type: "optionList",
-          action: "choose",
-          options: [{ key: "A", label: "Alpha" }, { key: "B", label: "Bravo" }],
-        },
-      ],
-    };
-    const readSummary = {
-      ...judgment,
-      id: 4243,
-      kind: EventKind.Summary,
-      requires_response: false,
-      read: true,
-      ui: [{ type: "status", label: "done" }],
-    };
-    // Housekeeping info is not a Task, so it never joins the sweep's count.
-    const readInfo = { ...readSummary, id: 4244, kind: EventKind.Info };
-    store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: judgment } });
-    store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: readSummary } });
-    store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: readInfo } });
-
+describe("Thread lifecycle commands", () => {
+  it("offers explicit settlement without deriving completion from read", async () => {
+    flush(() => setThreadState(draft => { Object.assign(draft, { threads: [makeThread(11, { read: true })], focusedId: 11 }); }));
     render(() => <CommandPalette open onOpenChange={() => {}} />);
-    await waitFor(() => expect(screen.getByText(/Decide A — Alpha/)).toBeInTheDocument());
-    expect(screen.getByText(/Decide B — Bravo/)).toBeInTheDocument();
-    expect(screen.getByText(/Snooze current · This evening/)).toBeInTheDocument();
-    expect(screen.getByText("Archive current")).toBeInTheDocument();
-    // The read summary card is finished → the sweep offers it (count 1); the
-    // read info card sits outside the Task set entirely and is not counted.
-    expect(screen.getByText(/Clear finished \(1\)/)).toBeInTheDocument();
-
-    // Clean the store so the earlier assertions in this file's other suites are
-    // unaffected by ordering (the singleton persists across tests).
-    store.dispatch({
-      type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], events: [] },
-    });
+    await waitFor(() => expect(screen.getByText("Settle thread")).toBeInTheDocument());
+    expect(screen.queryByText(/Clear finished/)).toBeNull();
+    flush(() => setThreadState(draft => { Object.assign(draft, { threads: [], focusedId: 0 }); }));
   });
 });
 
@@ -132,8 +98,8 @@ describe("ShortcutHelp", () => {
     expect(screen.getByText("Command palette")).toBeInTheDocument();
     expect(screen.getAllByText("Focus Hirsel").length).toBeGreaterThan(0);
     expect(screen.getByText("Jump to latest")).toBeInTheDocument();
-    // The Tasks group is no longer an empty heading the sheet silently drops.
-    expect(screen.getByText("Tasks")).toBeInTheDocument();
-    expect(screen.getByText("Clear task focus")).toBeInTheDocument();
+    // The Threads group is no longer an empty heading the sheet silently drops.
+    expect(screen.getByText("Threads")).toBeInTheDocument();
+    expect(screen.getByText("Open Hirsel")).toBeInTheDocument();
   });
 });

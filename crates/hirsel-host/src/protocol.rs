@@ -161,6 +161,7 @@ where
             frame = channel.receive(POST_AUTH_MAX_FRAME_BYTES) => {
                 match frame {
                     Ok(Some(IncomingFrame::Message { frame, client_id })) => {
+                        dedupe.before_request(&frame);
                         if let Err(error) = handle_client_frame(&state, channel, frame).await {
                             let response = HostToClient::Error {
                                 detail: error.to_string(),
@@ -188,6 +189,16 @@ where
             event = broadcasts.recv() => {
                 match event {
                     Ok(event) => {
+                        // A queued upsert may predate hello or a detail response.
+                        // Execution changes share the instrument revision, so
+                        // deliver the current projection before deduplicating.
+                        let event = match refresh_thread_upsert(&state, event).await {
+                            Ok(event) => event,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to refresh Thread broadcast");
+                                break;
+                            }
+                        };
                         if !dedupe.should_send(&event) {
                             continue;
                         }
@@ -218,6 +229,22 @@ where
     }
 }
 
+async fn refresh_thread_upsert(
+    state: &AppState,
+    event: HostToClient,
+) -> anyhow::Result<HostToClient> {
+    if let HostToClient::ThreadUpsert { thread } = event {
+        let thread = state
+            .storage
+            .thread(thread.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing Thread {} for broadcast", thread.id))?;
+        Ok(HostToClient::ThreadUpsert { thread })
+    } else {
+        Ok(event)
+    }
+}
+
 /// Host build identity reported to clients in `hello_ok` (Settings → About).
 /// Combines the crate version with the git sha embedded at build time.
 pub fn host_version() -> String {
@@ -230,12 +257,14 @@ async fn build_snapshot(
 ) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
     let snapshot = state.storage.hello_snapshot(last_seen_msg_id).await?;
     let views = state.views.snapshot().await;
-    let dedupe = HelloBroadcastDedupe::new(
+    let mut dedupe = HelloBroadcastDedupe::new(
         snapshot.latest_msg_id,
         snapshot.events.clone(),
         views.clone(),
     );
+    dedupe.include_threads(&snapshot.threads);
     let hello = HostToClient::HelloOk {
+        threads: snapshot.threads,
         latest_msg_id: snapshot.latest_msg_id,
         messages: snapshot.messages,
         events: snapshot.events,
@@ -311,6 +340,93 @@ where
                 })
                 .await?;
         }
+        ClientToHost::ListArtifacts {
+            client_id,
+            thread_id,
+        } => {
+            let artifacts = state.storage.artifacts(thread_id).await?;
+            channel
+                .send(&HostToClient::ArtifactsListed {
+                    client_id,
+                    artifacts,
+                })
+                .await?;
+        }
+        ClientToHost::OpenArtifact {
+            client_id,
+            artifact_id,
+        } => {
+            let artifact = state.storage.artifact(artifact_id).await?;
+            channel
+                .send(&HostToClient::ArtifactOpened {
+                    client_id,
+                    artifact,
+                })
+                .await?;
+        }
+        ClientToHost::CreateThread { client_id, title } => {
+            let (thread, inserted) = state
+                .storage
+                .create_thread(
+                    &client_id,
+                    &title,
+                    "",
+                    &serde_json::json!({}),
+                    hirsel_proto::ThreadAttention::Quiet,
+                )
+                .await?;
+            if inserted {
+                state.broadcast(HostToClient::ThreadUpsert {
+                    thread: thread.clone(),
+                });
+            }
+            channel
+                .send(&HostToClient::ThreadCreated { client_id, thread })
+                .await?;
+        }
+        ClientToHost::OpenThread {
+            client_id,
+            thread_id,
+            before_id,
+        } => {
+            let detail = state
+                .storage
+                .thread_detail(thread_id, before_id, 100)
+                .await?;
+            channel
+                .send(&HostToClient::ThreadOpened { client_id, detail })
+                .await?;
+        }
+        ClientToHost::SendThreadMessage {
+            client_id,
+            thread_id,
+            body,
+            attachments,
+            mentions,
+            mode,
+        } => {
+            let submission = state
+                .submit_thread_message(client_id, thread_id, body, attachments, mentions, mode)
+                .await?;
+            if !submission.inserted {
+                channel
+                    .send(&HostToClient::Msg {
+                        message: submission.message,
+                        sc: None,
+                    })
+                    .await?;
+            }
+        }
+        ClientToHost::ThreadAction {
+            thread_id,
+            action,
+            data,
+            expected_revision,
+        } => {
+            state
+                .handle_thread_action(thread_id, action, data, expected_revision)
+                .await?;
+        }
         ClientToHost::SendMessage {
             client_id,
             body,
@@ -351,11 +467,15 @@ where
                 })
                 .await?;
         }
-        ClientToHost::CancelTurn { sc } => {
+        ClientToHost::CancelTurn { sc, thread_id } => {
             if let Some(sc) = sc {
                 state.side_chats.cancel(&sc).await?;
             } else {
-                state.cancel_turn().await?;
+                if let Some(thread_id) = thread_id {
+                    state.agent.cancel_thread_turn(thread_id).await?;
+                } else {
+                    state.cancel_turn().await?;
+                }
             }
         }
         ClientToHost::CancelQueued { client_id } => {
@@ -606,363 +726,4 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{collections::VecDeque, time::Duration};
-
-    use async_trait::async_trait;
-    use hirsel_proto::{ChatAuthor, ClientToHost, EventStatus, HelloAuth, HostToClient};
-    use serde_json::json;
-
-    use super::{
-        IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, Peer, ProtocolChannel,
-        authenticate, build_snapshot, handle_client_frame, run_protocol,
-    };
-    use crate::{
-        build_state,
-        config::{AgentMode, Config, DriverMode, ProviderMode},
-    };
-
-    #[tokio::test]
-    async fn pairing_uses_the_apps_device_label() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(Config {
-            token: "test-token".to_string(),
-            agent: AgentMode::Scripted,
-            provider: ProviderMode::Anthropic,
-            anthropic_api_key: None,
-            openrouter_api_key: None,
-            model: "test-model".to_string(),
-            data_dir: dir.path().to_path_buf(),
-            config_path: dir.path().join("hirsel.toml"),
-            docs_path: crate::templates::bundled_docs_path(),
-            templates_dir: crate::templates::bundled_templates_dir(),
-            driver: DriverMode::Fake,
-            fake_fixture: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            debug: true,
-            compat_side_session_ttl_secs: Some(86_400),
-        })
-        .await
-        .unwrap();
-        let code = state
-            .storage
-            .mint_pairing_code("Mint-time label", Duration::from_secs(60))
-            .await
-            .unwrap();
-
-        let device_token = authenticate(
-            &state,
-            HelloAuth::PairingCode {
-                code,
-                device_label: "App-chosen label".to_string(),
-            },
-            &Peer::Iroh {
-                node_id: "node-a".to_string(),
-            },
-        )
-        .await
-        .unwrap()
-        .expect("pairing should issue a device token");
-
-        state
-            .storage
-            .authenticate_device_token(&device_token, Some("node-a"))
-            .await
-            .unwrap();
-        let devices = state.storage.list_devices().await.unwrap();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].device_label, "App-chosen label");
-    }
-
-    #[tokio::test]
-    async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(Config {
-            token: "real-token".to_string(),
-            agent: AgentMode::Scripted,
-            provider: ProviderMode::Anthropic,
-            anthropic_api_key: None,
-            openrouter_api_key: None,
-            model: "test-model".to_string(),
-            data_dir: dir.path().to_path_buf(),
-            config_path: dir.path().join("hirsel.toml"),
-            docs_path: crate::templates::bundled_docs_path(),
-            templates_dir: crate::templates::bundled_templates_dir(),
-            driver: DriverMode::Fake,
-            fake_fixture: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            debug: false,
-            compat_side_session_ttl_secs: Some(86_400),
-        })
-        .await
-        .unwrap();
-
-        assert!(
-            authenticate(
-                &state,
-                HelloAuth::StaticToken(String::new()),
-                &Peer::WebSocket { addr: None }
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            authenticate(
-                &state,
-                HelloAuth::StaticToken("real-token".to_string()),
-                &Peer::WebSocket { addr: None }
-            )
-            .await
-            .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn websocket_rejects_iroh_only_auth() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(crate::tests::test_config(dir.path()))
-            .await
-            .unwrap();
-        let peer = Peer::WebSocket {
-            addr: Some("127.0.0.1:1234".to_string()),
-        };
-
-        assert_eq!(
-            authenticate(
-                &state,
-                HelloAuth::DeviceToken("device-token".to_string()),
-                &peer,
-            )
-            .await
-            .unwrap_err(),
-            "device-token auth requires iroh"
-        );
-        assert_eq!(
-            authenticate(
-                &state,
-                HelloAuth::PairingCode {
-                    code: "pairing-code".to_string(),
-                    device_label: "Browser".to_string(),
-                },
-                &peer,
-            )
-            .await
-            .unwrap_err(),
-            "pairing-code auth requires iroh"
-        );
-    }
-
-    #[tokio::test]
-    async fn full_resync_snapshot_replays_all_chat() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(Config {
-            token: "test-token".to_string(),
-            agent: AgentMode::Scripted,
-            provider: ProviderMode::Anthropic,
-            anthropic_api_key: None,
-            openrouter_api_key: None,
-            model: "test-model".to_string(),
-            data_dir: dir.path().to_path_buf(),
-            config_path: dir.path().join("hirsel.toml"),
-            docs_path: crate::templates::bundled_docs_path(),
-            templates_dir: crate::templates::bundled_templates_dir(),
-            driver: DriverMode::Fake,
-            fake_fixture: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            debug: false,
-            compat_side_session_ttl_secs: Some(86_400),
-        })
-        .await
-        .unwrap();
-        state
-            .storage
-            .append_chat(ChatAuthor::Agent, "missed", None)
-            .await
-            .unwrap();
-        state
-            .views
-            .show(
-                None,
-                Some(json!({ "type": "text", "text": "Still active" })),
-                None,
-                Some("view-reconnect".to_string()),
-                "chat".to_string(),
-            )
-            .await
-            .unwrap();
-
-        let (frame, _) = build_snapshot(&state, None).await.unwrap();
-        match frame {
-            HostToClient::HelloOk {
-                latest_msg_id,
-                messages,
-                views,
-                ..
-            } => {
-                assert_eq!(latest_msg_id, 1);
-                assert_eq!(messages.len(), 1);
-                assert_eq!(messages[0].body, "missed");
-                assert_eq!(views.len(), 1);
-                assert_eq!(views[0].instance_id, "view-reconnect");
-            }
-            other => panic!("unexpected resync frame: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pre_auth_frames_have_a_stricter_limit() {
-        assert_eq!(PRE_AUTH_MAX_FRAME_BYTES, 8 * 1024);
-        const { assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES) };
-    }
-
-    struct TestChannel {
-        incoming: VecDeque<IncomingFrame>,
-        sent: Vec<HostToClient>,
-    }
-
-    #[async_trait]
-    impl ProtocolChannel for TestChannel {
-        async fn receive(&mut self, _max_bytes: usize) -> anyhow::Result<Option<IncomingFrame>> {
-            Ok(self.incoming.pop_front())
-        }
-
-        async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()> {
-            self.sent.push(frame.clone());
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn fetch_messages_frame_returns_a_correlated_bounded_page() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(crate::tests::test_config(dir.path()))
-            .await
-            .unwrap();
-        for id in 1..=3 {
-            state
-                .storage
-                .append_chat(ChatAuthor::Agent, format!("m{id}"), None)
-                .await
-                .unwrap();
-        }
-        let mut channel = TestChannel {
-            incoming: VecDeque::new(),
-            sent: Vec::new(),
-        };
-
-        handle_client_frame(
-            &state,
-            &mut channel,
-            ClientToHost::FetchMessages {
-                client_id: "history-1".to_string(),
-                before_id: 3,
-                limit: 1,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(
-            channel.sent.as_slice(),
-            [HostToClient::Messages {
-                client_id,
-                before_id: 3,
-                messages,
-                has_more: true,
-            }] if client_id == "history-1" && messages.len() == 1 && messages[0].id == 2
-        ));
-    }
-
-    #[tokio::test]
-    async fn clear_finished_events_archives_with_timestamp_and_broadcasts_upsert() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(crate::tests::test_config(dir.path()))
-            .await
-            .unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "Finished", None)
-            .await
-            .unwrap();
-        let finished = state
-            .storage
-            .create_ping(
-                "finished",
-                "Finished",
-                "Finished",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        state.storage.resolve_ping(finished.id).await.unwrap();
-        let open = state
-            .storage
-            .create_ping("open", "Open", "Open", anchor.id, true, Vec::new())
-            .await
-            .unwrap();
-        let mut channel = TestChannel {
-            incoming: VecDeque::new(),
-            sent: Vec::new(),
-        };
-
-        handle_client_frame(&state, &mut channel, ClientToHost::ClearFinishedEvents {})
-            .await
-            .unwrap();
-
-        let finished = state.storage.ping(finished.id).await.unwrap().unwrap();
-        assert_eq!(finished.status, EventStatus::Done);
-        assert!(finished.archived);
-        assert!(finished.archived_at.is_some());
-        assert!(!state.storage.ping(open.id).await.unwrap().unwrap().archived);
-        assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
-            frame,
-            HostToClient::EventUpsert { event }
-                if event.id == finished.id && event.archived_at.is_some()
-        )));
-    }
-
-    #[tokio::test]
-    async fn snapshot_failure_sends_error_instead_of_empty_hello() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(Config {
-            token: "test-token".to_string(),
-            agent: AgentMode::Scripted,
-            provider: ProviderMode::Anthropic,
-            anthropic_api_key: None,
-            openrouter_api_key: None,
-            model: "test-model".to_string(),
-            data_dir: dir.path().to_path_buf(),
-            config_path: dir.path().join("hirsel.toml"),
-            docs_path: crate::templates::bundled_docs_path(),
-            templates_dir: crate::templates::bundled_templates_dir(),
-            driver: DriverMode::Fake,
-            fake_fixture: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            debug: false,
-            compat_side_session_ttl_secs: Some(86_400),
-        })
-        .await
-        .unwrap();
-        state.storage.force_hello_snapshot_error().await;
-        let mut channel = TestChannel {
-            incoming: VecDeque::from([IncomingFrame::Message {
-                frame: ClientToHost::Hello {
-                    auth: HelloAuth::StaticToken("test-token".to_string()),
-                    last_seen_msg_id: None,
-                },
-                client_id: None,
-            }]),
-            sent: Vec::new(),
-        };
-
-        run_protocol(&mut channel, state, Peer::WebSocket { addr: None }).await;
-
-        assert_eq!(channel.sent.len(), 1);
-        assert!(matches!(
-            &channel.sent[0],
-            HostToClient::Error { detail, .. } if detail.starts_with("hello snapshot failed:")
-        ));
-    }
-}
+mod tests;

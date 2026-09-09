@@ -1,4 +1,5 @@
 import { createRoot } from "solid-js";
+
 import { afterEach, describe, expect, it } from "vitest";
 import { createFocusTrap } from "./focus";
 

@@ -1,0 +1,6 @@
+#!/usr/bin/python3
+import json,os,sys
+open(os.environ['VERIFY_PID'],'w').write(str(os.getpid()))
+sys.stdin.readline()
+print(json.dumps({'type':'system','subtype':'init','session_id':'fake'}),flush=True)
+sys.exit(0)

@@ -1,4 +1,5 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createSignal, onCleanup, onSettled } from "solid-js";
+
 
 /** Window-scoped file drag tracking with one drop sink.
  *
@@ -40,7 +41,7 @@ export function createFileDrop(onDrop: (data: DataTransfer | null) => void) {
     onDrop(e.dataTransfer);
   };
 
-  onMount(() => {
+  onSettled(() => {
     window.addEventListener("dragenter", onDragEnter);
     window.addEventListener("dragleave", onDragLeave);
     window.addEventListener("dragover", onDragOver);

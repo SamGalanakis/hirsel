@@ -92,3 +92,26 @@ compatibility must be assessed before rollback.
 This service replaces the `just dev`/`entr` loop in production. That loop is
 still appropriate for local development, but it runs from a mutable checkout
 and restarts on source changes; production executes only the promoted release.
+
+## Lash storage upgrades
+
+The 2026-09-09 update pins Lash to
+`10af7f410ee54a6b7f2d9d8bffbbed8ceafd04ec` (upstream `main` at the time of
+upgrade), replacing `1d33a2c7c1b38d7d05542222e05da967eb3f53e5`. These are Git
+revisions; the upstream workspace reports `0.0.0-dev`.
+
+This crosses incompatible SQLite formats: durable-core schema 38 → 52,
+process registry 24 → 31, and trigger store 6 → 8. Lash rejects older databases
+and provides no automatic migration. New sessions share the factory's
+`lash/sessions/durable-core.db`, explicitly linked to `lash/processes.db`.
+
+Before deploying over an existing installation, stop Hirsel and back up the
+entire `HIRSEL_DATA_DIR`, including SQLite sidecars. Archive the existing
+`HIRSEL_DATA_DIR/lash` directory outside the active data path, then start the
+new binary with a fresh `lash` directory. This resets the Agent's Lash
+transcript, queued work, triggers, and runtime process state. Hirsel's own
+application database, chat, events, settings, and blobs outside that directory
+must be preserved. Active work must be settled before this cutover; do not
+carry in-flight work across it. Keep the complete backup and old binary
+together for rollback. Changing the dependency does not perform this data
+reset or restart a running host.

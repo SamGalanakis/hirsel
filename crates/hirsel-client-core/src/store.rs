@@ -1,7 +1,9 @@
 use chrono::Utc;
 use hirsel_proto::{
-    AgentActivityState, Blob, ChatAuthor, ChatMessage, Ping, ProcessInfo, ToolCallSummary,
+    AgentActivityState, Blob, ChatAuthor, ChatMessage, ProcessInfo, Thread, ThreadActivity,
+    ThreadTurn, ThreadTurnState, ToolCallSummary, TurnEventKind,
 };
+use std::collections::HashSet;
 
 /// Connection state exposed to client UIs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,7 +31,7 @@ impl ChatEntry {
 
     pub fn client_id(&self) -> Option<&str> {
         match self {
-            Self::Confirmed(_) => None,
+            Self::Confirmed(message) => message.client_id.as_deref(),
             Self::Pending(send) => Some(&send.client_id),
         }
     }
@@ -41,6 +43,9 @@ impl ChatEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedMessage {
+    pub thread_id: u64,
+    pub client_id: Option<String>,
+    pub mentions: Vec<u64>,
     pub id: u64,
     pub author: ChatAuthor,
     pub body: String,
@@ -54,6 +59,9 @@ impl From<ChatMessage> for ConfirmedMessage {
     fn from(message: ChatMessage) -> Self {
         Self {
             id: message.id,
+            thread_id: message.thread_id,
+            client_id: message.client_id,
+            mentions: message.mentions,
             author: message.author,
             body: message.body,
             reply_to: message.r#ref,
@@ -72,6 +80,9 @@ impl From<ChatMessage> for ChatEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSend {
+    pub error: Option<String>,
+    pub thread_id: u64,
+    pub attachments: Vec<String>,
     pub client_id: String,
     pub body: String,
     pub reply_to: Option<u64>,
@@ -81,12 +92,17 @@ pub struct PendingSend {
 
 impl PendingSend {
     pub(crate) fn new(
+        thread_id: u64,
+        attachments: Vec<String>,
         client_id: String,
         body: String,
         reply_to: Option<u64>,
         mentions: Vec<u64>,
     ) -> Self {
         Self {
+            error: None,
+            thread_id,
+            attachments,
             client_id,
             body,
             reply_to,
@@ -96,7 +112,7 @@ impl PendingSend {
     }
 }
 
-/// Ephemeral main-session activity.
+/// Ephemeral activity associated with an addressed durable turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentActivity {
     pub state: AgentActivityState,
@@ -117,9 +133,14 @@ impl Default for AgentActivity {
 pub struct ClientSnapshot {
     pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
-    pub pings: Vec<Ping>,
+    pub threads: Vec<Thread>,
+    pub turns: Vec<ThreadTurn>,
+    pub activities: Vec<ThreadActivity>,
+    pub streams: Vec<ThreadStream>,
+    pub opened_threads: Vec<u64>,
+    pub created_threads: Vec<CreatedThread>,
+    pub history_has_more: Vec<u64>,
     pub processes: Vec<ProcessInfo>,
-    pub agent_activity: AgentActivity,
     pub last_seen_msg_id: Option<u64>,
     /// Host build identity from the last `hello_ok`; `None` until a host that
     /// reports it connects (Settings → About shows "Not reported" then).
@@ -127,11 +148,19 @@ pub struct ClientSnapshot {
 }
 
 pub(crate) struct LocalStore {
+    removed_message_ids: HashSet<u64>,
     pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
-    pub pings: Vec<Ping>,
+    pub threads: Vec<Thread>,
+    pub turns: Vec<ThreadTurn>,
+    pub activities: Vec<ThreadActivity>,
+    pub streams: Vec<ThreadStream>,
+    pub opened_threads: Vec<u64>,
+    pub created_threads: Vec<CreatedThread>,
+    pub requests: Vec<(String, u64)>,
+    pub history_has_more: Vec<u64>,
+    pub pending_creates: Vec<(String, String)>,
     pub processes: Vec<ProcessInfo>,
-    pub agent_activity: AgentActivity,
     pub last_seen_msg_id: Option<u64>,
     pub host_version: Option<String>,
 }
@@ -139,11 +168,19 @@ pub(crate) struct LocalStore {
 impl Default for LocalStore {
     fn default() -> Self {
         Self {
+            removed_message_ids: HashSet::new(),
             connection: ConnectionState::Offline,
             messages: Vec::new(),
-            pings: Vec::new(),
+            threads: Vec::new(),
+            turns: Vec::new(),
+            activities: Vec::new(),
+            streams: Vec::new(),
+            opened_threads: Vec::new(),
+            created_threads: Vec::new(),
+            requests: Vec::new(),
+            history_has_more: Vec::new(),
+            pending_creates: Vec::new(),
             processes: Vec::new(),
-            agent_activity: AgentActivity::default(),
             last_seen_msg_id: None,
             host_version: None,
         }
@@ -155,9 +192,14 @@ impl LocalStore {
         ClientSnapshot {
             connection: self.connection,
             messages: self.messages.clone(),
-            pings: self.pings.clone(),
+            threads: self.threads.clone(),
+            turns: self.turns.clone(),
+            activities: self.activities.clone(),
+            streams: self.streams.clone(),
+            opened_threads: self.opened_threads.clone(),
+            created_threads: self.created_threads.clone(),
+            history_has_more: self.history_has_more.clone(),
             processes: self.processes.clone(),
-            agent_activity: self.agent_activity.clone(),
             last_seen_msg_id: self.last_seen_msg_id,
             host_version: self.host_version.clone(),
         }
@@ -170,7 +212,8 @@ impl LocalStore {
     pub fn pending_sends(&self) -> impl Iterator<Item = &PendingSend> {
         self.messages.iter().filter_map(|entry| match entry {
             ChatEntry::Confirmed(_) => None,
-            ChatEntry::Pending(send) => Some(send),
+            ChatEntry::Pending(send) if send.error.is_none() => Some(send),
+            ChatEntry::Pending(_) => None,
         })
     }
 
@@ -178,7 +221,7 @@ impl LocalStore {
         &mut self,
         latest_msg_id: u64,
         messages: Vec<ChatMessage>,
-        pings: Vec<Ping>,
+        threads: Vec<Thread>,
         processes: Vec<ProcessInfo>,
         host_version: String,
     ) {
@@ -187,45 +230,23 @@ impl LocalStore {
         if !host_version.is_empty() {
             self.host_version = Some(host_version);
         }
-        let known_ids: Vec<u64> = self.messages.iter().filter_map(ChatEntry::id).collect();
-        let newly_replayed: Vec<ChatMessage> = messages
-            .iter()
-            .filter(|message| !known_ids.contains(&message.id))
-            .cloned()
-            .collect();
-
-        let mut confirmed: Vec<ChatEntry> = self
-            .messages
-            .iter()
-            .filter_map(|entry| match entry {
-                ChatEntry::Confirmed(_) => Some(entry.clone()),
-                ChatEntry::Pending(_) => None,
-            })
-            .collect();
         for message in messages {
-            confirmed.retain(|entry| entry.id() != Some(message.id));
-            confirmed.push(message.into());
+            self.apply_message(message);
         }
-        confirmed.sort_by_key(ChatEntry::id);
-
-        for message in newly_replayed {
-            if message.author == ChatAuthor::Owner {
-                self.reconcile_pending_body(&message.body);
-            }
-        }
-        let pending = self
-            .messages
-            .iter()
-            .filter(|entry| entry.is_pending())
-            .cloned();
-        confirmed.extend(pending);
-        self.messages = confirmed;
-        self.pings = pings;
+        self.messages
+            .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
+        self.threads = threads;
         self.processes = processes;
         self.bump_last_seen(latest_msg_id);
     }
 
     pub fn apply_message(&mut self, message: ChatMessage) {
+        if let Some(client_id) = &message.client_id {
+            self.messages.retain(|entry| !matches!(entry, ChatEntry::Pending(send) if send.client_id == *client_id && send.thread_id == message.thread_id));
+        }
+        if self.removed_message_ids.contains(&message.id) {
+            return;
+        }
         if self
             .messages
             .iter()
@@ -235,23 +256,126 @@ impl LocalStore {
         }
 
         self.bump_last_seen(message.id);
-        if message.author == ChatAuthor::Owner
-            && let Some(index) = self.messages.iter().position(
-                |entry| matches!(entry, ChatEntry::Pending(send) if send.body == message.body),
-            )
-        {
-            self.messages[index] = message.into();
-            return;
-        }
-
         self.messages.push(message.into());
     }
 
-    pub fn upsert_ping(&mut self, ping: Ping) {
-        if let Some(existing) = self.pings.iter_mut().find(|item| item.id == ping.id) {
-            *existing = ping;
+    pub fn remove_message(&mut self, id: u64) {
+        self.removed_message_ids.insert(id);
+        self.messages.retain(|message| message.id() != Some(id));
+    }
+
+    pub fn upsert_thread(&mut self, thread: Thread) {
+        if let Some(existing) = self.threads.iter_mut().find(|item| item.id == thread.id) {
+            // Execution and activity projections can change without an instrument revision.
+            if thread.revision >= existing.revision {
+                *existing = thread;
+            }
         } else {
-            self.pings.push(ping);
+            self.threads.push(thread);
+        }
+    }
+
+    pub fn apply_detail(&mut self, client_id: &str, detail: hirsel_proto::ThreadDetail) {
+        let Some(index) = self
+            .requests
+            .iter()
+            .position(|(id, thread)| id == client_id && *thread == detail.thread.id)
+        else {
+            return;
+        };
+        self.requests.remove(index);
+        let thread_id = detail.thread.id;
+        if !self.opened_threads.contains(&thread_id) {
+            self.opened_threads.push(thread_id);
+        }
+        self.history_has_more.retain(|id| *id != thread_id);
+        if detail.has_more {
+            self.history_has_more.push(thread_id);
+        }
+        self.upsert_thread(detail.thread);
+        for message in detail
+            .messages
+            .into_iter()
+            .filter(|m| m.thread_id == thread_id)
+        {
+            self.apply_message(message);
+        }
+        for turn in detail
+            .turns
+            .into_iter()
+            .filter(|t| t.thread_id == thread_id)
+        {
+            self.upsert_turn(turn);
+        }
+        for activity in detail
+            .activities
+            .into_iter()
+            .filter(|a| a.thread_id == thread_id)
+        {
+            self.upsert_activity(activity);
+        }
+        self.messages
+            .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
+    }
+
+    pub fn upsert_activity(&mut self, activity: ThreadActivity) {
+        if !self.activities.iter().any(|a| a.id == activity.id) {
+            self.activities.push(activity);
+        }
+    }
+
+    pub fn upsert_turn(&mut self, turn: ThreadTurn) {
+        if let Some(old) = self.turns.iter_mut().find(|t| t.id == turn.id) {
+            if old.finished_at.is_some() {
+                return;
+            }
+            *old = turn.clone();
+        } else {
+            self.turns.push(turn.clone());
+        }
+        if let Some(stream) = self
+            .streams
+            .iter_mut()
+            .find(|s| s.thread_id == turn.thread_id && s.turn_id == turn.id)
+        {
+            stream.finished = !matches!(
+                turn.state,
+                ThreadTurnState::Queued | ThreadTurnState::Running
+            );
+        }
+    }
+
+    pub fn stream(&mut self, thread_id: u64, turn_id: u64) -> Option<&mut ThreadStream> {
+        if self
+            .turns
+            .iter()
+            .any(|t| t.id == turn_id && t.finished_at.is_some())
+        {
+            return None;
+        }
+        if let Some(index) = self.streams.iter().position(|s| s.thread_id == thread_id) {
+            if self.streams[index].turn_id > turn_id {
+                return None;
+            }
+            if self.streams[index].turn_id < turn_id {
+                self.streams[index] = ThreadStream::new(thread_id, turn_id);
+            }
+            if self.streams[index].finished {
+                return None;
+            }
+            return Some(&mut self.streams[index]);
+        }
+        self.streams.push(ThreadStream::new(thread_id, turn_id));
+        self.streams.last_mut()
+    }
+
+    pub fn apply_delta(&mut self, thread_id: u64, turn_id: u64, seq: u64, event: TurnEventKind) {
+        if let Some(stream) = self.stream(thread_id, turn_id) {
+            if stream.last_seq.is_some_and(|last| seq <= last) {
+                return;
+            }
+            stream.last_seq = Some(seq);
+            stream.events.push(event);
         }
     }
 
@@ -263,111 +387,35 @@ impl LocalStore {
         }
     }
 
-    fn reconcile_pending_body(&mut self, body: &str) {
-        let Some(index) = self
-            .messages
-            .iter()
-            .position(|entry| matches!(entry, ChatEntry::Pending(send) if send.body == body))
-        else {
-            return;
-        };
-        self.messages.remove(index);
-    }
-
     fn bump_last_seen(&mut self, id: u64) {
         self.last_seen_msg_id = Some(self.last_seen_msg_id.map_or(id, |seen| seen.max(id)));
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use chrono::TimeZone;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedThread {
+    pub client_id: String,
+    pub thread_id: u64,
+}
 
-    use super::*;
-
-    fn message(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
-        ChatMessage {
-            id,
-            author,
-            body: body.into(),
-            r#ref: None,
-            ts: Utc.timestamp_opt(id as i64, 0).unwrap(),
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadStream {
+    pub thread_id: u64,
+    pub turn_id: u64,
+    pub last_seq: Option<u64>,
+    pub events: Vec<TurnEventKind>,
+    pub activity: AgentActivity,
+    pub finished: bool,
+}
+impl ThreadStream {
+    fn new(thread_id: u64, turn_id: u64) -> Self {
+        Self {
+            thread_id,
+            turn_id,
+            last_seq: None,
+            events: Vec::new(),
+            activity: AgentActivity::default(),
+            finished: false,
         }
-    }
-
-    fn pending(client_id: &str, body: &str) -> PendingSend {
-        PendingSend::new(client_id.into(), body.into(), None, Vec::new())
-    }
-
-    #[test]
-    fn replay_reconciles_only_new_owner_messages() {
-        let mut store = LocalStore::default();
-        store.apply_message(message(1, ChatAuthor::Owner, "same"));
-        store.add_optimistic_send(pending("new", "same"));
-        store.apply_hello_ok(
-            1,
-            vec![message(1, ChatAuthor::Owner, "same")],
-            vec![],
-            vec![],
-            "0.1.0 (test)".to_string(),
-        );
-        assert_eq!(store.pending_sends().count(), 1);
-        assert!(store.messages.last().unwrap().is_pending());
-    }
-
-    #[test]
-    fn live_confirmation_replaces_pending_and_updates_resend_derivation() {
-        let mut store = LocalStore::default();
-        store.add_optimistic_send(pending("first", "one"));
-        store.add_optimistic_send(pending("second", "two"));
-
-        store.apply_message(message(7, ChatAuthor::Owner, "one"));
-
-        assert!(matches!(
-            &store.messages[0],
-            ChatEntry::Confirmed(message) if message.id == 7 && message.body == "one"
-        ));
-        assert!(matches!(
-            &store.messages[1],
-            ChatEntry::Pending(send) if send.client_id == "second"
-        ));
-        assert_eq!(
-            store
-                .pending_sends()
-                .map(|send| send.client_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["second"]
-        );
-    }
-
-    #[test]
-    fn hello_keeps_sorted_confirmed_rows_before_fifo_pending_rows() {
-        let mut store = LocalStore::default();
-        store.apply_message(message(3, ChatAuthor::Agent, "three"));
-        store.add_optimistic_send(pending("first", "pending one"));
-        store.add_optimistic_send(pending("second", "pending two"));
-
-        store.apply_hello_ok(
-            3,
-            vec![
-                message(2, ChatAuthor::Agent, "two"),
-                message(1, ChatAuthor::Owner, "one"),
-            ],
-            vec![],
-            vec![],
-            String::new(),
-        );
-
-        assert!(matches!(&store.messages[0], ChatEntry::Confirmed(row) if row.id == 1));
-        assert!(matches!(&store.messages[1], ChatEntry::Confirmed(row) if row.id == 2));
-        assert!(matches!(&store.messages[2], ChatEntry::Confirmed(row) if row.id == 3));
-        assert!(
-            matches!(&store.messages[3], ChatEntry::Pending(send) if send.client_id == "first")
-        );
-        assert!(
-            matches!(&store.messages[4], ChatEntry::Pending(send) if send.client_id == "second")
-        );
     }
 }

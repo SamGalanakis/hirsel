@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventKind } from "../protocol";
 
@@ -20,6 +21,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     const { archiveEventWithUndo } = await import("./event-archive");
 
     const payload = archiveEventWithUndo(42, { silent: true });
+    flush();
 
     // Optimistic archive assertion recorded at once — the default filter hides
     // the event everywhere without waiting for the host echo.
@@ -41,9 +43,11 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     const { archiveEventWithUndo, unarchiveEvent } = await import("./event-archive");
 
     archiveEventWithUndo(7, { silent: true });
+    flush();
     expect(store.state.eventOverrides).toEqual({ 7: { archived: true } });
 
     unarchiveEvent(7);
+    flush();
     expect(store.state.eventOverrides).toEqual({});
     expect(sent).toEqual([
       { action: "archive", eventId: 7, data: {} },
@@ -81,6 +85,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
 
     // Archive posts the envelope and sweeps optimistically.
     archiveEventWithUndo(11);
+    flush();
     expect(store.state.eventOverrides).toEqual({ 11: { archived: true } });
 
     // Tap the "Archived" toast's Undo: because the card was still open when
@@ -88,6 +93,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     // fully — unarchive AND reopen.
     const t = toast.toasts().find((x) => x.message === "Archived");
     t!.action!.onClick();
+    flush();
 
     expect(sent).toEqual([
       { action: "archive", eventId: 11, data: {} },
@@ -127,8 +133,10 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event: doneEvent } });
 
     archiveEventWithUndo(12);
+    flush();
     const t = toast.toasts().find((x) => x.message === "Archived");
     t!.action!.onClick();
+    flush();
 
     // A finished card was never auto-dismissed, so its Undo unarchives only.
     expect(sent).toEqual([
@@ -161,6 +169,7 @@ describe("archiveEventWithUndo — the event_action archive round-trip", () => {
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event } });
 
     archiveEventWithUndo(9, { silent: true });
+    flush();
     expect(store.state.eventOverrides).toEqual({ 9: { archived: true } });
 
     // The host commits and broadcasts the archived flag back: the optimistic

@@ -1,11 +1,13 @@
-import { type ComponentProps, splitProps } from "solid-js";
+import { omit } from "solid-js";
+import { type ComponentProps } from "@solidjs/web";
 
 import { cn } from "@/lib/utils";
 
 type TextareaProps = ComponentProps<"textarea">;
 
 const Textarea = (props: TextareaProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <textarea
       data-slot="textarea"

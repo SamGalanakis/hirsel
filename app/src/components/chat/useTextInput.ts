@@ -1,4 +1,5 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createSignal, onSettled } from "solid-js";
+
 
 const DRAFT_KEY_PREFIX = "hirsel.draft.";
 
@@ -39,17 +40,16 @@ export function useTextInput(maxHeightPx: number, persistKey?: string) {
   const [coarse, setCoarse] = createSignal(false);
   let el: HTMLTextAreaElement | undefined;
 
-  onMount(() => {
+  onSettled(() => {
     const mq = window.matchMedia("(pointer: coarse)");
     setCoarse(mq.matches);
     const onChange = (e: MediaQueryListEvent) => setCoarse(e.matches);
     mq.addEventListener?.("change", onChange);
-    onCleanup(() => mq.removeEventListener?.("change", onChange));
+    return () => mq.removeEventListener?.("change", onChange);
   });
 
   // Auto-grow the textarea up to a cap whenever the draft changes.
-  createEffect(() => {
-    value();
+  createEffect(value, () => {
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, maxHeightPx)}px`;
@@ -58,8 +58,8 @@ export function useTextInput(maxHeightPx: number, persistKey?: string) {
   // Persist the draft per surface. Runs immediately with the restored value
   // (a harmless write-back), then on every subsequent keystroke.
   if (persistKey) {
-    createEffect(() => {
-      writeDraft(persistKey, value());
+    createEffect(value, (draft) => {
+      writeDraft(persistKey, draft);
     });
   }
 
@@ -76,7 +76,7 @@ export function useTextInput(maxHeightPx: number, persistKey?: string) {
 
   // Land the caret at the end of a restored draft once the textarea exists, so
   // reopening a surface drops the Owner back where they left off.
-  onMount(() => {
+  onSettled(() => {
     if (persistKey && value().length > 0) caretToEnd();
   });
 

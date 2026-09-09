@@ -60,13 +60,15 @@ async function startScriptedHost(): Promise<ScriptedHost> {
         });
         return;
       }
-      if (frame.type === "send_message") {
+      if (frame.type === "send_thread_message") {
         send({
           type: "msg",
           message: {
             id: idSeq++,
             author: "owner",
             body: frame.body,
+            thread_id: frame.thread_id,
+            client_id: frame.client_id,
             ref: frame.ref ?? null,
             ts: now(),
             attachments: [],
@@ -150,7 +152,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
 
       // --- Stream the turn timeline ---
       host.push({ type: "agent_activity", state: "thinking", text: "Working through it…" });
-      host.push({ type: "turn_event", seq: 1, event: { kind: "prose", text: "First I'll read the reducer." } });
+      host.push({ type: "turn_event", thread_id: 0, seq: 1, event: { kind: "prose", text: "First I'll read the reducer." } });
 
       // 1. The opening prose is the reply being WRITTEN: the trailing prose run
       // streams into the margin as a reply in committed typography, not as a
@@ -166,7 +168,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
 
       // 2. Tool starts → spinner (running), no result yet.
       host.push({
-        type: "turn_event",
+        type: "turn_event", thread_id: 0,
         seq: 2,
         event: { kind: "tool_start", id: "t1", name: "read_file", summary: "src/store/reducer.ts" },
       });
@@ -183,7 +185,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
 
       // tool_done → spinner becomes a check, clean summary (no raw JSON).
       host.push({
-        type: "turn_event",
+        type: "turn_event", thread_id: 0,
         seq: 3,
         event: { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 142 lines" },
       });
@@ -195,7 +197,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
 
       // 3. Second prose block after the tool.
       host.push({
-        type: "turn_event",
+        type: "turn_event", thread_id: 0,
         seq: 4,
         event: { kind: "prose", text: "The handler is wired correctly." },
       });
@@ -210,7 +212,7 @@ describe("Headless scenario: running-turn timeline (v1.5)", () => {
 
       // 4. Reasoning run: bare inline text while it is the live tail.
       host.push({
-        type: "turn_event",
+        type: "turn_event", thread_id: 0,
         seq: 5,
         event: { kind: "reasoning", text: "seq keeps the tool between the two prose blocks." },
       });

@@ -344,7 +344,7 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
         }
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -354,7 +354,7 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    // Start 
+    // Start
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -703,17 +703,29 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_hirsel_client_ffi_checksum_func_generate_iroh_identity(
     ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_cancel_turn(
+    ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_connect(
+    ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_create_thread(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_disconnect(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_issued_device_token(
     ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_open_thread(
+    ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_register_push_token(
+    ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_retry_send(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_send_message(
     ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_send_thread_message(
+    ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_snapshot(
+    ): Int
+    external fun uniffi_hirsel_client_ffi_checksum_method_client_thread_action(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_constructor_client_new(
     ): Int
@@ -728,55 +740,67 @@ internal object IntegrityCheckingUniffiLib {
     external fun ffi_hirsel_client_ffi_uniffi_contract_version(
     ): Int
 
-        
+
 }
 
 internal object UniffiLib {
-    
+
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
-    
+
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "hirsel_client_ffi"))
         uniffiCallbackInterfaceClientObserver.register(this)
-        
+
     }
-    external fun uniffi_hirsel_client_ffi_fn_clone_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_clone_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_free_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_free_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new(`host`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new(`host`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(`ticket`: RustBuffer.ByValue,`deviceToken`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(`ticket`: RustBuffer.ByValue,`deviceToken`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`deviceLabel`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`deviceLabel`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(`ptr`: Long,`threadId`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_send_message(`ptr`: Long,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_method_client_open_thread(`ptr`: Long,`threadId`: Long,`beforeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
+    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+    external fun uniffi_hirsel_client_ffi_fn_method_client_retry_send(`ptr`: Long,`clientId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+    external fun uniffi_hirsel_client_ffi_fn_method_client_send_message(`ptr`: Long,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(`ptr`: Long,`threadId`: Long,`body`: RustBuffer.ByValue,`attachments`: RustBuffer.ByValue,`mentions`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_hirsel_client_ffi_fn_method_client_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_hirsel_client_ffi_fn_method_client_thread_action(`ptr`: Long,`threadId`: Long,`action`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,`expectedRevision`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
     external fun uniffi_hirsel_client_ffi_fn_init_callback_vtable_clientobserver(`vtable`: UniffiVTableCallbackInterfaceClientObserver,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_func_generate_iroh_identity(uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_hirsel_client_ffi_fn_func_generate_iroh_identity(uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun ffi_hirsel_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun ffi_hirsel_client_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun ffi_hirsel_client_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun ffi_hirsel_client_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -784,7 +808,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u8(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -792,7 +816,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i8(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
     external fun ffi_hirsel_client_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -800,7 +824,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u16(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -808,7 +832,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i16(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Short
     external fun ffi_hirsel_client_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -816,7 +840,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u32(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -824,7 +848,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i32(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -832,7 +856,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u64(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
     external fun ffi_hirsel_client_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -840,7 +864,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i64(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
     external fun ffi_hirsel_client_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -848,7 +872,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_f32(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Float
     external fun ffi_hirsel_client_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -856,7 +880,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_f64(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Double
     external fun ffi_hirsel_client_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -864,7 +888,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_rust_buffer(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun ffi_hirsel_client_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -872,10 +896,10 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_void(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_hirsel_client_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
-        
+
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -892,7 +916,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_func_generate_iroh_identity() != 33696) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_cancel_turn() != 42345) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_connect() != 45376) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_create_thread() != 40177) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_disconnect() != 57486) {
@@ -901,13 +931,25 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_issued_device_token() != 11286) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_open_thread() != 43043) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_register_push_token() != 11929) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_retry_send() != 25402) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_send_message() != 59325) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_send_thread_message() != 47786) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_snapshot() != 20352) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_thread_action() != 54436) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new() != 16526) {
@@ -1000,7 +1042,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/** 
+/**
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
  *
  * This is the first argument for interface constructors that input a raw handle. It exists is that
@@ -1011,7 +1053,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * */
 object UniffiWithHandle
 
-/** 
+/**
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1336,11 +1378,15 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 
 
 public interface ClientInterface {
-    
+
+    fun `cancelTurn`(`threadId`: kotlin.ULong)
+
     fun `connect`()
-    
+
+    fun `createThread`(`title`: kotlin.String): SendReceipt
+
     fun `disconnect`()
-    
+
     /**
      * Returns the device token issued by a successful pairing handshake.
      *
@@ -1348,13 +1394,21 @@ public interface ClientInterface {
      * use `new_iroh` for later connections.
      */
     fun `issuedDeviceToken`(): kotlin.String?
-    
+
+    fun `openThread`(`threadId`: kotlin.ULong, `beforeId`: kotlin.ULong?): SendReceipt
+
     fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
-    
+
+    fun `retrySend`(`clientId`: kotlin.String)
+
     fun `sendMessage`(`body`: kotlin.String): SendReceipt
-    
+
+    fun `sendThreadMessage`(`threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>): SendReceipt
+
     fun `snapshot`(): ClientSnapshot
-    
+
+    fun `threadAction`(`threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?)
+
     companion object
 }
 
@@ -1383,11 +1437,11 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         this.cleanable = null
     }
     constructor(`host`: kotlin.String, `token`: kotlin.String, `observer`: ClientObserver) :
-        this(UniffiWithHandle, 
+        this(UniffiWithHandle,
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new(
-    
-        
+
+
         FfiConverterString.lower(`host`),
         FfiConverterString.lower(`token`),
         FfiConverterTypeClientObserver.lower(`observer`),_status)
@@ -1470,9 +1524,22 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         }
     }
 
-    
+    override fun `cancelTurn`(`threadId`: kotlin.ULong)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(
+        it,
+
+        FfiConverterULong.lower(`threadId`),_status)
+}
+    }
+
+
+
+
     @Throws(ClientException::class)override fun `connect`()
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_connect(
@@ -1480,12 +1547,26 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         _status)
 }
     }
-    
-    
 
-    
+
+
+    override fun `createThread`(`title`: kotlin.String): SendReceipt {
+            return FfiConverterTypeSendReceipt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_create_thread(
+        it,
+
+        FfiConverterString.lower(`title`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(ClientException::class)override fun `disconnect`()
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_disconnect(
@@ -1493,10 +1574,10 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         _status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Returns the device token issued by a successful pairing handshake.
      *
@@ -1513,22 +1594,50 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-    
 
-    
+
+    override fun `openThread`(`threadId`: kotlin.ULong, `beforeId`: kotlin.ULong?): SendReceipt {
+            return FfiConverterTypeSendReceipt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_open_thread(
+        it,
+
+        FfiConverterULong.lower(`threadId`),
+        FfiConverterOptionalULong.lower(`beforeId`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(ClientException::class)override fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_register_push_token(
         it,
-        
+
         FfiConverterString.lower(`platform`),
         FfiConverterString.lower(`token`),_status)
 }
     }
-    
-    
+
+
+
+    override fun `retrySend`(`clientId`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_retry_send(
+        it,
+
+        FfiConverterString.lower(`clientId`),_status)
+}
+    }
+
+
 
     override fun `sendMessage`(`body`: kotlin.String): SendReceipt {
             return FfiConverterTypeSendReceipt.lift(
@@ -1536,13 +1645,30 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_send_message(
         it,
-        
+
         FfiConverterString.lower(`body`),_status)
 }
     }
     )
     }
-    
+
+
+    override fun `sendThreadMessage`(`threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>): SendReceipt {
+            return FfiConverterTypeSendReceipt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(
+        it,
+
+        FfiConverterULong.lower(`threadId`),
+        FfiConverterString.lower(`body`),
+        FfiConverterSequenceString.lower(`attachments`),
+        FfiConverterSequenceULong.lower(`mentions`),_status)
+}
+    }
+    )
+    }
+
 
     override fun `snapshot`(): ClientSnapshot {
             return FfiConverterTypeClientSnapshot.lift(
@@ -1555,16 +1681,33 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-    
-
-    
-
-    
 
 
-    
+
+    @Throws(ClientException::class)override fun `threadAction`(`threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(ClientException) { _status ->
+    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_thread_action(
+        it,
+
+        FfiConverterULong.lower(`threadId`),
+        FfiConverterString.lower(`action`),
+        FfiConverterString.lower(`dataJson`),
+        FfiConverterOptionalULong.lower(`expectedRevision`),_status)
+}
+    }
+
+
+
+
+
+
+
+
+
     companion object {
-        
+
     /**
      * Creates an iroh client authenticated by a previously issued device token.
      */
@@ -1572,8 +1715,8 @@ open class Client: Disposable, AutoCloseable, ClientInterface
             return FfiConverterTypeClient.lift(
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(
-    
-        
+
+
         FfiConverterString.lower(`ticket`),
         FfiConverterString.lower(`deviceToken`),
         FfiConverterString.lower(`irohSecretKey`),
@@ -1581,9 +1724,9 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 }
     )
     }
-    
 
-        
+
+
     /**
      * Creates an iroh client that redeems a one-time pairing code.
      */
@@ -1591,8 +1734,8 @@ open class Client: Disposable, AutoCloseable, ClientInterface
             return FfiConverterTypeClient.lift(
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(
-    
-        
+
+
         FfiConverterString.lower(`ticket`),
         FfiConverterString.lower(`code`),
         FfiConverterString.lower(`deviceLabel`),
@@ -1601,11 +1744,11 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 }
     )
     }
-    
 
-        
+
+
     }
-    
+
 }
 
 
@@ -1636,15 +1779,15 @@ public object FfiConverterTypeClient: FfiConverter<Client, Long> {
 
 data class AgentActivity (
     var `state`: AgentActivityState
-    , 
+    ,
     var `text`: kotlin.String?
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -1674,19 +1817,19 @@ public object FfiConverterTypeAgentActivity: FfiConverterRustBuffer<AgentActivit
 
 data class Blob (
     var `id`: kotlin.String
-    , 
+    ,
     var `name`: kotlin.String
-    , 
+    ,
     var `mime`: kotlin.String
-    , 
+    ,
     var `size`: kotlin.ULong
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -1721,30 +1864,36 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 
 data class ChatMessage (
+    var `error`: kotlin.String?
+    ,
+    var `threadId`: kotlin.ULong
+    ,
+    var `mentions`: List<kotlin.ULong>
+    ,
     var `id`: kotlin.ULong?
-    , 
+    ,
     var `author`: ChatAuthor
-    , 
+    ,
     var `body`: kotlin.String
-    , 
+    ,
     var `replyTo`: kotlin.ULong?
-    , 
+    ,
     var `timestamp`: kotlin.String
-    , 
+    ,
     var `attachments`: List<Blob>
-    , 
+    ,
     var `toolCalls`: List<ToolCall>
-    , 
+    ,
     var `clientId`: kotlin.String?
-    , 
+    ,
     var `pending`: kotlin.Boolean
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -1754,6 +1903,9 @@ data class ChatMessage (
 public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
     override fun read(buf: ByteBuffer): ChatMessage {
         return ChatMessage(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterSequenceULong.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterTypeChatAuthor.read(buf),
             FfiConverterString.read(buf),
@@ -1767,6 +1919,9 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
     }
 
     override fun allocationSize(value: ChatMessage) = (
+            FfiConverterOptionalString.allocationSize(value.`error`) +
+            FfiConverterULong.allocationSize(value.`threadId`) +
+            FfiConverterSequenceULong.allocationSize(value.`mentions`) +
             FfiConverterOptionalULong.allocationSize(value.`id`) +
             FfiConverterTypeChatAuthor.allocationSize(value.`author`) +
             FfiConverterString.allocationSize(value.`body`) +
@@ -1779,6 +1934,9 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
     )
 
     override fun write(value: ChatMessage, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`error`, buf)
+            FfiConverterULong.write(value.`threadId`, buf)
+            FfiConverterSequenceULong.write(value.`mentions`, buf)
             FfiConverterOptionalULong.write(value.`id`, buf)
             FfiConverterTypeChatAuthor.write(value.`author`, buf)
             FfiConverterString.write(value.`body`, buf)
@@ -1795,26 +1953,36 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
 
 data class ClientSnapshot (
     var `connection`: ConnectionState
-    , 
+    ,
     var `messages`: List<ChatMessage>
-    , 
-    var `pings`: List<Ping>
-    , 
-    var `agentActivity`: AgentActivity
-    , 
+    ,
+    var `threads`: List<Thread>
+    ,
+    var `turns`: List<ThreadTurn>
+    ,
+    var `activities`: List<ThreadActivity>
+    ,
+    var `streams`: List<ThreadStream>
+    ,
+    var `openedThreads`: List<kotlin.ULong>
+    ,
+    var `historyHasMore`: List<kotlin.ULong>
+    ,
+    var `createdThreads`: List<CreatedThread>
+    ,
     var `lastSeenMsgId`: kotlin.ULong?
-    , 
+    ,
     /**
      * Host build identity from the last `hello_ok`; `None` until reported.
      */
     var `hostVersion`: kotlin.String?
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -1826,8 +1994,13 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
         return ClientSnapshot(
             FfiConverterTypeConnectionState.read(buf),
             FfiConverterSequenceTypeChatMessage.read(buf),
-            FfiConverterSequenceTypePing.read(buf),
-            FfiConverterTypeAgentActivity.read(buf),
+            FfiConverterSequenceTypeThread.read(buf),
+            FfiConverterSequenceTypeThreadTurn.read(buf),
+            FfiConverterSequenceTypeThreadActivity.read(buf),
+            FfiConverterSequenceTypeThreadStream.read(buf),
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterSequenceTypeCreatedThread.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalString.read(buf),
         )
@@ -1836,8 +2009,13 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
     override fun allocationSize(value: ClientSnapshot) = (
             FfiConverterTypeConnectionState.allocationSize(value.`connection`) +
             FfiConverterSequenceTypeChatMessage.allocationSize(value.`messages`) +
-            FfiConverterSequenceTypePing.allocationSize(value.`pings`) +
-            FfiConverterTypeAgentActivity.allocationSize(value.`agentActivity`) +
+            FfiConverterSequenceTypeThread.allocationSize(value.`threads`) +
+            FfiConverterSequenceTypeThreadTurn.allocationSize(value.`turns`) +
+            FfiConverterSequenceTypeThreadActivity.allocationSize(value.`activities`) +
+            FfiConverterSequenceTypeThreadStream.allocationSize(value.`streams`) +
+            FfiConverterSequenceULong.allocationSize(value.`openedThreads`) +
+            FfiConverterSequenceULong.allocationSize(value.`historyHasMore`) +
+            FfiConverterSequenceTypeCreatedThread.allocationSize(value.`createdThreads`) +
             FfiConverterOptionalULong.allocationSize(value.`lastSeenMsgId`) +
             FfiConverterOptionalString.allocationSize(value.`hostVersion`)
     )
@@ -1845,8 +2023,13 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
     override fun write(value: ClientSnapshot, buf: ByteBuffer) {
             FfiConverterTypeConnectionState.write(value.`connection`, buf)
             FfiConverterSequenceTypeChatMessage.write(value.`messages`, buf)
-            FfiConverterSequenceTypePing.write(value.`pings`, buf)
-            FfiConverterTypeAgentActivity.write(value.`agentActivity`, buf)
+            FfiConverterSequenceTypeThread.write(value.`threads`, buf)
+            FfiConverterSequenceTypeThreadTurn.write(value.`turns`, buf)
+            FfiConverterSequenceTypeThreadActivity.write(value.`activities`, buf)
+            FfiConverterSequenceTypeThreadStream.write(value.`streams`, buf)
+            FfiConverterSequenceULong.write(value.`openedThreads`, buf)
+            FfiConverterSequenceULong.write(value.`historyHasMore`, buf)
+            FfiConverterSequenceTypeCreatedThread.write(value.`createdThreads`, buf)
             FfiConverterOptionalULong.write(value.`lastSeenMsgId`, buf)
             FfiConverterOptionalString.write(value.`hostVersion`, buf)
     }
@@ -1854,117 +2037,39 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
 
 
 
-data class Ping (
-    var `id`: kotlin.ULong
-    , 
-    var `name`: kotlin.String
-    , 
-    var `description`: kotlin.String
-    , 
-    var `content`: kotlin.String
-    , 
-    var `anchor`: kotlin.ULong
-    , 
-    var `requiresResponse`: kotlin.Boolean
-    , 
-    var `quickReplies`: List<QuickReply>
-    , 
-    var `status`: PingStatus
-    , 
-    var `read`: kotlin.Boolean
-    , 
-    var `timestamp`: kotlin.String
-    
+data class CreatedThread (
+    var `clientId`: kotlin.String
+    ,
+    var `threadId`: kotlin.ULong
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypePing: FfiConverterRustBuffer<Ping> {
-    override fun read(buf: ByteBuffer): Ping {
-        return Ping(
-            FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+public object FfiConverterTypeCreatedThread: FfiConverterRustBuffer<CreatedThread> {
+    override fun read(buf: ByteBuffer): CreatedThread {
+        return CreatedThread(
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterSequenceTypeQuickReply.read(buf),
-            FfiConverterTypePingStatus.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterString.read(buf),
         )
     }
 
-    override fun allocationSize(value: Ping) = (
-            FfiConverterULong.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`name`) +
-            FfiConverterString.allocationSize(value.`description`) +
-            FfiConverterString.allocationSize(value.`content`) +
-            FfiConverterULong.allocationSize(value.`anchor`) +
-            FfiConverterBoolean.allocationSize(value.`requiresResponse`) +
-            FfiConverterSequenceTypeQuickReply.allocationSize(value.`quickReplies`) +
-            FfiConverterTypePingStatus.allocationSize(value.`status`) +
-            FfiConverterBoolean.allocationSize(value.`read`) +
-            FfiConverterString.allocationSize(value.`timestamp`)
+    override fun allocationSize(value: CreatedThread) = (
+            FfiConverterString.allocationSize(value.`clientId`) +
+            FfiConverterULong.allocationSize(value.`threadId`)
     )
 
-    override fun write(value: Ping, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`id`, buf)
-            FfiConverterString.write(value.`name`, buf)
-            FfiConverterString.write(value.`description`, buf)
-            FfiConverterString.write(value.`content`, buf)
-            FfiConverterULong.write(value.`anchor`, buf)
-            FfiConverterBoolean.write(value.`requiresResponse`, buf)
-            FfiConverterSequenceTypeQuickReply.write(value.`quickReplies`, buf)
-            FfiConverterTypePingStatus.write(value.`status`, buf)
-            FfiConverterBoolean.write(value.`read`, buf)
-            FfiConverterString.write(value.`timestamp`, buf)
-    }
-}
-
-
-
-data class QuickReply (
-    var `value`: kotlin.String
-    , 
-    var `label`: kotlin.String
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeQuickReply: FfiConverterRustBuffer<QuickReply> {
-    override fun read(buf: ByteBuffer): QuickReply {
-        return QuickReply(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: QuickReply) = (
-            FfiConverterString.allocationSize(value.`value`) +
-            FfiConverterString.allocationSize(value.`label`)
-    )
-
-    override fun write(value: QuickReply, buf: ByteBuffer) {
-            FfiConverterString.write(value.`value`, buf)
-            FfiConverterString.write(value.`label`, buf)
+    override fun write(value: CreatedThread, buf: ByteBuffer) {
+            FfiConverterString.write(value.`clientId`, buf)
+            FfiConverterULong.write(value.`threadId`, buf)
     }
 }
 
@@ -1972,13 +2077,13 @@ public object FfiConverterTypeQuickReply: FfiConverterRustBuffer<QuickReply> {
 
 data class SendReceipt (
     var `clientId`: kotlin.String
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2003,17 +2108,299 @@ public object FfiConverterTypeSendReceipt: FfiConverterRustBuffer<SendReceipt> {
 
 
 
+data class Thread (
+    var `id`: kotlin.ULong
+    ,
+    var `title`: kotlin.String
+    ,
+    var `description`: kotlin.String
+    ,
+    var `instrumentJson`: kotlin.String
+    ,
+    var `needsOwner`: kotlin.Boolean
+    ,
+    var `settledAt`: kotlin.String?
+    ,
+    var `archivedAt`: kotlin.String?
+    ,
+    var `snoozedUntil`: kotlin.String?
+    ,
+    var `read`: kotlin.Boolean
+    ,
+    var `createdAt`: kotlin.String
+    ,
+    var `updatedAt`: kotlin.String
+    ,
+    var `revision`: kotlin.ULong
+    ,
+    var `runningTurn`: ThreadTurn?
+    ,
+    var `queuedTurnCount`: kotlin.ULong
+    ,
+    var `lastFinishedTurn`: ThreadTurn?
+    ,
+    var `lastActivityAt`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
+    override fun read(buf: ByteBuffer): Thread {
+        return Thread(
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalTypeThreadTurn.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalTypeThreadTurn.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Thread) = (
+            FfiConverterULong.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`description`) +
+            FfiConverterString.allocationSize(value.`instrumentJson`) +
+            FfiConverterBoolean.allocationSize(value.`needsOwner`) +
+            FfiConverterOptionalString.allocationSize(value.`settledAt`) +
+            FfiConverterOptionalString.allocationSize(value.`archivedAt`) +
+            FfiConverterOptionalString.allocationSize(value.`snoozedUntil`) +
+            FfiConverterBoolean.allocationSize(value.`read`) +
+            FfiConverterString.allocationSize(value.`createdAt`) +
+            FfiConverterString.allocationSize(value.`updatedAt`) +
+            FfiConverterULong.allocationSize(value.`revision`) +
+            FfiConverterOptionalTypeThreadTurn.allocationSize(value.`runningTurn`) +
+            FfiConverterULong.allocationSize(value.`queuedTurnCount`) +
+            FfiConverterOptionalTypeThreadTurn.allocationSize(value.`lastFinishedTurn`) +
+            FfiConverterString.allocationSize(value.`lastActivityAt`)
+    )
+
+    override fun write(value: Thread, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`id`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`description`, buf)
+            FfiConverterString.write(value.`instrumentJson`, buf)
+            FfiConverterBoolean.write(value.`needsOwner`, buf)
+            FfiConverterOptionalString.write(value.`settledAt`, buf)
+            FfiConverterOptionalString.write(value.`archivedAt`, buf)
+            FfiConverterOptionalString.write(value.`snoozedUntil`, buf)
+            FfiConverterBoolean.write(value.`read`, buf)
+            FfiConverterString.write(value.`createdAt`, buf)
+            FfiConverterString.write(value.`updatedAt`, buf)
+            FfiConverterULong.write(value.`revision`, buf)
+            FfiConverterOptionalTypeThreadTurn.write(value.`runningTurn`, buf)
+            FfiConverterULong.write(value.`queuedTurnCount`, buf)
+            FfiConverterOptionalTypeThreadTurn.write(value.`lastFinishedTurn`, buf)
+            FfiConverterString.write(value.`lastActivityAt`, buf)
+    }
+}
+
+
+
+data class ThreadActivity (
+    var `id`: kotlin.ULong
+    ,
+    var `threadId`: kotlin.ULong
+    ,
+    var `turnId`: kotlin.ULong?
+    ,
+    var `kind`: kotlin.String
+    ,
+    var `dataJson`: kotlin.String
+    ,
+    var `timestamp`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadActivity: FfiConverterRustBuffer<ThreadActivity> {
+    override fun read(buf: ByteBuffer): ThreadActivity {
+        return ThreadActivity(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ThreadActivity) = (
+            FfiConverterULong.allocationSize(value.`id`) +
+            FfiConverterULong.allocationSize(value.`threadId`) +
+            FfiConverterOptionalULong.allocationSize(value.`turnId`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`dataJson`) +
+            FfiConverterString.allocationSize(value.`timestamp`)
+    )
+
+    override fun write(value: ThreadActivity, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`id`, buf)
+            FfiConverterULong.write(value.`threadId`, buf)
+            FfiConverterOptionalULong.write(value.`turnId`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterString.write(value.`dataJson`, buf)
+            FfiConverterString.write(value.`timestamp`, buf)
+    }
+}
+
+
+
+data class ThreadStream (
+    var `threadId`: kotlin.ULong
+    ,
+    var `turnId`: kotlin.ULong
+    ,
+    var `eventsJson`: kotlin.String
+    ,
+    var `activity`: AgentActivity
+    ,
+    var `finished`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadStream: FfiConverterRustBuffer<ThreadStream> {
+    override fun read(buf: ByteBuffer): ThreadStream {
+        return ThreadStream(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeAgentActivity.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ThreadStream) = (
+            FfiConverterULong.allocationSize(value.`threadId`) +
+            FfiConverterULong.allocationSize(value.`turnId`) +
+            FfiConverterString.allocationSize(value.`eventsJson`) +
+            FfiConverterTypeAgentActivity.allocationSize(value.`activity`) +
+            FfiConverterBoolean.allocationSize(value.`finished`)
+    )
+
+    override fun write(value: ThreadStream, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`threadId`, buf)
+            FfiConverterULong.write(value.`turnId`, buf)
+            FfiConverterString.write(value.`eventsJson`, buf)
+            FfiConverterTypeAgentActivity.write(value.`activity`, buf)
+            FfiConverterBoolean.write(value.`finished`, buf)
+    }
+}
+
+
+
+data class ThreadTurn (
+    var `id`: kotlin.ULong
+    ,
+    var `threadId`: kotlin.ULong
+    ,
+    var `ownerMessageId`: kotlin.ULong?
+    ,
+    var `agentMessageId`: kotlin.ULong?
+    ,
+    var `state`: kotlin.String
+    ,
+    var `startedAt`: kotlin.String
+    ,
+    var `finishedAt`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
+    override fun read(buf: ByteBuffer): ThreadTurn {
+        return ThreadTurn(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ThreadTurn) = (
+            FfiConverterULong.allocationSize(value.`id`) +
+            FfiConverterULong.allocationSize(value.`threadId`) +
+            FfiConverterOptionalULong.allocationSize(value.`ownerMessageId`) +
+            FfiConverterOptionalULong.allocationSize(value.`agentMessageId`) +
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterString.allocationSize(value.`startedAt`) +
+            FfiConverterOptionalString.allocationSize(value.`finishedAt`)
+    )
+
+    override fun write(value: ThreadTurn, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`id`, buf)
+            FfiConverterULong.write(value.`threadId`, buf)
+            FfiConverterOptionalULong.write(value.`ownerMessageId`, buf)
+            FfiConverterOptionalULong.write(value.`agentMessageId`, buf)
+            FfiConverterString.write(value.`state`, buf)
+            FfiConverterString.write(value.`startedAt`, buf)
+            FfiConverterOptionalString.write(value.`finishedAt`, buf)
+    }
+}
+
+
+
 data class ToolCall (
     var `name`: kotlin.String
-    , 
+    ,
     var `ok`: kotlin.Boolean
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2043,11 +2430,11 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
 
 
 enum class AgentActivityState {
-    
+
     THINKING,
     IDLE;
 
-    
+
 
 
     companion object
@@ -2077,11 +2464,11 @@ public object FfiConverterTypeAgentActivityState: FfiConverterRustBuffer<AgentAc
 
 
 enum class ChatAuthor {
-    
+
     OWNER,
     AGENT;
 
-    
+
 
 
     companion object
@@ -2112,52 +2499,60 @@ public object FfiConverterTypeChatAuthor: FfiConverterRustBuffer<ChatAuthor> {
 
 
 sealed class ClientException: kotlin.Exception() {
-    
-    class InvalidConfig(
-        
+
+    class InvalidAction(
+
         val `detail`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "detail=${ `detail` }"
     }
-    
+
+    class InvalidConfig(
+
+        val `detail`: kotlin.String
+        ) : ClientException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
     class AlreadyRunning(
         ) : ClientException() {
         override val message
             get() = ""
     }
-    
+
     class UnsupportedPushPlatform(
-        
+
         val `platform`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "platform=${ `platform` }"
     }
-    
+
     class EmptyPushToken(
         ) : ClientException() {
         override val message
             get() = ""
     }
-    
+
     class Runtime(
-        
+
         val `detail`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "detail=${ `detail` }"
     }
-    
 
-    
+
+
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<ClientException> {
         override fun lift(error_buf: RustBuffer.ByValue): ClientException = FfiConverterTypeClientError.lift(error_buf)
     }
 
-    
+
 }
 
 /**
@@ -2165,18 +2560,21 @@ sealed class ClientException: kotlin.Exception() {
  */
 public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientException> {
     override fun read(buf: ByteBuffer): ClientException {
-        
+
 
         return when(buf.getInt()) {
-            1 -> ClientException.InvalidConfig(
+            1 -> ClientException.InvalidAction(
                 FfiConverterString.read(buf),
                 )
-            2 -> ClientException.AlreadyRunning()
-            3 -> ClientException.UnsupportedPushPlatform(
+            2 -> ClientException.InvalidConfig(
                 FfiConverterString.read(buf),
                 )
-            4 -> ClientException.EmptyPushToken()
-            5 -> ClientException.Runtime(
+            3 -> ClientException.AlreadyRunning()
+            4 -> ClientException.UnsupportedPushPlatform(
+                FfiConverterString.read(buf),
+                )
+            5 -> ClientException.EmptyPushToken()
+            6 -> ClientException.Runtime(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -2185,6 +2583,11 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
 
     override fun allocationSize(value: ClientException): ULong {
         return when(value) {
+            is ClientException.InvalidAction -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
             is ClientException.InvalidConfig -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
@@ -2213,26 +2616,31 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
 
     override fun write(value: ClientException, buf: ByteBuffer) {
         when(value) {
-            is ClientException.InvalidConfig -> {
+            is ClientException.InvalidAction -> {
                 buf.putInt(1)
                 FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
-            is ClientException.AlreadyRunning -> {
+            is ClientException.InvalidConfig -> {
                 buf.putInt(2)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is ClientException.AlreadyRunning -> {
+                buf.putInt(3)
                 Unit
             }
             is ClientException.UnsupportedPushPlatform -> {
-                buf.putInt(3)
+                buf.putInt(4)
                 FfiConverterString.write(value.`platform`, buf)
                 Unit
             }
             is ClientException.EmptyPushToken -> {
-                buf.putInt(4)
+                buf.putInt(5)
                 Unit
             }
             is ClientException.Runtime -> {
-                buf.putInt(5)
+                buf.putInt(6)
                 FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
@@ -2245,12 +2653,12 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
 
 
 enum class ConnectionState {
-    
+
     CONNECTING,
     ONLINE,
     OFFLINE;
 
-    
+
 
 
     companion object
@@ -2279,42 +2687,42 @@ public object FfiConverterTypeConnectionState: FfiConverterRustBuffer<Connection
 
 
 sealed class LifecycleEvent {
-    
+
     data class Connecting(
         val `attempt`: kotlin.UInt) : LifecycleEvent()
-        
+
     {
-        
+
 
         companion object
     }
-    
+
     object Online : LifecycleEvent()
-    
-    
+
+
     data class Offline(
         val `reason`: kotlin.String?) : LifecycleEvent()
-        
+
     {
-        
+
 
         companion object
     }
-    
+
     data class ProtocolError(
         val `detail`: kotlin.String) : LifecycleEvent()
-        
+
     {
-        
+
 
         companion object
     }
-    
 
-    
 
-    
-    
+
+
+
+
 
 
     companion object
@@ -2400,47 +2808,13 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
 
 
 
-enum class PingStatus {
-    
-    OPEN,
-    DONE;
-
-    
-
-
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypePingStatus: FfiConverterRustBuffer<PingStatus> {
-    override fun read(buf: ByteBuffer) = try {
-        PingStatus.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: PingStatus) = 4UL
-
-    override fun write(value: PingStatus, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
 
 public interface ClientObserver {
-    
+
     fun `onStateChanged`(`snapshot`: ClientSnapshot)
-    
+
     fun `onLifecycleEvent`(`event`: LifecycleEvent)
-    
+
     companion object
 }
 
@@ -2576,6 +2950,94 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn?> {
+    override fun read(buf: ByteBuffer): ThreadTurn? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeThreadTurn.read(buf)
+    }
+
+    override fun allocationSize(value: ThreadTurn?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeThreadTurn.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ThreadTurn?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeThreadTurn.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceULong: FfiConverterRustBuffer<List<kotlin.ULong>> {
+    override fun read(buf: ByteBuffer): List<kotlin.ULong> {
+        val len = buf.getInt()
+        return List<kotlin.ULong>(len) {
+            FfiConverterULong.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.ULong>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterULong.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.ULong>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterULong.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeBlob: FfiConverterRustBuffer<List<Blob>> {
     override fun read(buf: ByteBuffer): List<Blob> {
         val len = buf.getInt()
@@ -2632,24 +3094,24 @@ public object FfiConverterSequenceTypeChatMessage: FfiConverterRustBuffer<List<C
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypePing: FfiConverterRustBuffer<List<Ping>> {
-    override fun read(buf: ByteBuffer): List<Ping> {
+public object FfiConverterSequenceTypeCreatedThread: FfiConverterRustBuffer<List<CreatedThread>> {
+    override fun read(buf: ByteBuffer): List<CreatedThread> {
         val len = buf.getInt()
-        return List<Ping>(len) {
-            FfiConverterTypePing.read(buf)
+        return List<CreatedThread>(len) {
+            FfiConverterTypeCreatedThread.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<Ping>): ULong {
+    override fun allocationSize(value: List<CreatedThread>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypePing.allocationSize(it) }.sum()
+        val sizeForItems = value.map { FfiConverterTypeCreatedThread.allocationSize(it) }.sum()
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<Ping>, buf: ByteBuffer) {
+    override fun write(value: List<CreatedThread>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypePing.write(it, buf)
+            FfiConverterTypeCreatedThread.write(it, buf)
         }
     }
 }
@@ -2660,24 +3122,108 @@ public object FfiConverterSequenceTypePing: FfiConverterRustBuffer<List<Ping>> {
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeQuickReply: FfiConverterRustBuffer<List<QuickReply>> {
-    override fun read(buf: ByteBuffer): List<QuickReply> {
+public object FfiConverterSequenceTypeThread: FfiConverterRustBuffer<List<Thread>> {
+    override fun read(buf: ByteBuffer): List<Thread> {
         val len = buf.getInt()
-        return List<QuickReply>(len) {
-            FfiConverterTypeQuickReply.read(buf)
+        return List<Thread>(len) {
+            FfiConverterTypeThread.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<QuickReply>): ULong {
+    override fun allocationSize(value: List<Thread>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeQuickReply.allocationSize(it) }.sum()
+        val sizeForItems = value.map { FfiConverterTypeThread.allocationSize(it) }.sum()
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<QuickReply>, buf: ByteBuffer) {
+    override fun write(value: List<Thread>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeQuickReply.write(it, buf)
+            FfiConverterTypeThread.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeThreadActivity: FfiConverterRustBuffer<List<ThreadActivity>> {
+    override fun read(buf: ByteBuffer): List<ThreadActivity> {
+        val len = buf.getInt()
+        return List<ThreadActivity>(len) {
+            FfiConverterTypeThreadActivity.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ThreadActivity>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeThreadActivity.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ThreadActivity>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeThreadActivity.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeThreadStream: FfiConverterRustBuffer<List<ThreadStream>> {
+    override fun read(buf: ByteBuffer): List<ThreadStream> {
+        val len = buf.getInt()
+        return List<ThreadStream>(len) {
+            FfiConverterTypeThreadStream.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ThreadStream>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeThreadStream.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ThreadStream>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeThreadStream.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeThreadTurn: FfiConverterRustBuffer<List<ThreadTurn>> {
+    override fun read(buf: ByteBuffer): List<ThreadTurn> {
+        val len = buf.getInt()
+        return List<ThreadTurn>(len) {
+            FfiConverterTypeThreadTurn.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ThreadTurn>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeThreadTurn.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ThreadTurn>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeThreadTurn.write(it, buf)
         }
     }
 }
@@ -2715,11 +3261,11 @@ public object FfiConverterSequenceTypeToolCall: FfiConverterRustBuffer<List<Tool
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_func_generate_iroh_identity(
-    
+
         _status)
 }
     )
     }
-    
+
 
 

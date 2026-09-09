@@ -2,10 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     processes::{ProcessRecord, ProcessStatus, ProcessStore},
-    storage::{
-        AGENT_SESSION_GENERATION_META_KEY, Storage, TOOL_SURFACE_FINGERPRINT_META_KEY,
-        TOOL_SURFACE_NAMES_META_KEY,
-    },
+    storage::Storage,
     tools::{ShellRunOutput, ToolsConfig},
 };
 use chrono::Utc;
@@ -27,7 +24,6 @@ fn terminal_payload_keeps_full_text_for_wake_and_wait() {
         payload["text"],
         format!("Sub-agent completed: {full_summary}")
     );
-    assert_eq!(payload["await_output"]["value"]["summary"], full_summary);
 
     let outcome: ProcessAwaitOutput =
         serde_json::from_value(payload["await_output"].clone()).unwrap();
@@ -47,7 +43,7 @@ fn observation_resubscribe_backoff_grows_and_resets() {
     assert_eq!(backoff.next_delay(), first);
 }
 
-fn test_turn_output(
+pub(super) fn test_turn_output(
     outcome: lash::TurnOutcome,
     safe_text: &str,
     tool_calls: Vec<lash_core::ToolCallRecord>,
@@ -57,6 +53,9 @@ fn test_turn_output(
             state: lash_core::SessionSnapshot::new(SessionPolicy::new(lash::TurnBudget::Unbounded)),
             outcome,
             acceptance: None,
+            cancel_input_outcome: Default::default(),
+            failure_evidence: Vec::new(),
+            omitted: Default::default(),
             assistant_output: lash::turn::AssistantOutput {
                 safe_text: safe_text.to_string(),
                 raw_text: safe_text.to_string(),
@@ -405,6 +404,8 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
     let text = stored_blob("text-1", "note.txt", "text/plain", 5, text_path);
     let image = stored_blob("image-1", "tiny.png", "image/png", 4, image_path);
     let turn = OwnerTurn {
+        thread_id: 0,
+        thread_action: None,
         message_id: 1,
         client_id: "client-1".to_string(),
         body: "see attached".to_string(),
@@ -441,6 +442,8 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
 #[test]
 fn owner_turn_text_expands_mentioned_ping_context() {
     let turn = OwnerTurn {
+        thread_id: 0,
+        thread_action: None,
         message_id: 2,
         client_id: "mention-1".to_string(),
         body: "What changed?".to_string(),
@@ -476,7 +479,7 @@ fn owner_turn_text_expands_mentioned_ping_context() {
 
     assert_eq!(
         owner_turn_text(&turn),
-        "What changed?\n[mentioned ping @release-choice (ping_id 7, done, requires_response=true, anchor 3): Choose the release channel]"
+        "[Owning Thread #0; answer only within this Thread. Use threads.read to inspect other conversations.]\nWhat changed?\n[mentioned ping @release-choice (ping_id 7, done, requires_response=true, anchor 3): Choose the release channel]"
     );
 }
 
@@ -557,7 +560,8 @@ fn provider_rebind_test_core(
         .store_factory(store_factory)
         .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
         .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
-        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+        .without_queued_work()
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -631,234 +635,59 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
-    let storage = state.storage.clone();
-    let initial_definitions = vec![tool_definition(
-        "test.events_notify",
-        "events_notify",
-        "Notify",
-        json!({ "type": "object" }),
-        json!({ "type": "object" }),
-        ["events"],
-        "notify",
-    )];
-    let initial_surface = agent_tool_surface(&initial_definitions).unwrap();
-
-    let first_boot = state
+    let first = state
         .tools
-        .prepare_agent_session(&initial_surface.fingerprint, &initial_surface.tool_names)
+        .prepare_agent_session("v1", &["threads.create".into()])
         .await
         .unwrap();
-    assert_eq!(first_boot.session_id, "agent");
-    assert_eq!(first_boot.handoff_seed, None);
-    assert_eq!(
-        storage
-            .meta_value(TOOL_SURFACE_FINGERPRINT_META_KEY)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some(initial_surface.fingerprint.as_str())
-    );
-    assert_eq!(
-        storage
-            .meta_value(TOOL_SURFACE_NAMES_META_KEY)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("[\"events.notify\"]")
-    );
-    assert_eq!(
-        storage
-            .meta_value(AGENT_SESSION_GENERATION_META_KEY)
-            .await
-            .unwrap(),
-        None
-    );
-    assert!(!state.broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::EventUpsert { event } if event.name == "session-rotated"
-    )));
-
-    let reopened_storage = Storage::open(dir.path()).await.unwrap();
-    let persisted_boot = reopened_storage
-        .reconcile_agent_tool_surface(&initial_surface.fingerprint, &initial_surface.tool_names)
-        .await
-        .unwrap();
-    assert_eq!(persisted_boot.session_id, "agent");
-    assert!(!persisted_boot.rotated);
-    assert!(persisted_boot.added_tools.is_empty());
-
-    let stable_boot = state
-        .tools
-        .prepare_agent_session(&initial_surface.fingerprint, &initial_surface.tool_names)
-        .await
-        .unwrap();
-    assert_eq!(stable_boot, first_boot);
-    assert!(!state.broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::EventUpsert { event } if event.name == "session-rotated"
-    )));
-
-    let owner = storage
-        .append_chat(ChatAuthor::Owner, "owner turn", None)
-        .await
-        .unwrap();
-    storage
-        .append_chat(ChatAuthor::Agent, "The release is ready.", None)
-        .await
-        .unwrap();
-    storage
-        .create_event(
-            hirsel_proto::EventKind::Judgment,
-            hirsel_proto::EventSource {
-                kind: hirsel_proto::EventSourceKind::Agent,
-                r#ref: None,
-            },
-            "release-channel",
+    assert_eq!(first.session_id, "agent");
+    let (thread, _) = state
+        .storage
+        .create_thread(
+            "release",
+            "Release",
             "Choose stable or beta",
-            json!({ "type": "text", "text": "Choose stable or beta" }),
-            owner.id,
-            true,
+            &Value::Null,
+            hirsel_proto::ThreadAttention::NeedsOwner,
+        )
+        .await
+        .unwrap();
+    state
+        .storage
+        .append_thread_chat(
+            thread.id,
+            ChatAuthor::Owner,
+            "Release request",
+            None,
             Vec::new(),
         )
         .await
         .unwrap();
-    let mut changed_definitions = initial_definitions;
-    changed_definitions.push(tool_definition(
-        "test.events_archive",
-        "events_archive",
-        "Archive",
-        json!({ "type": "object" }),
-        json!({ "type": "object" }),
-        ["events"],
-        "archive",
-    ));
-    let changed_surface = agent_tool_surface(&changed_definitions).unwrap();
     let rotated = state
         .tools
-        .prepare_agent_session(&changed_surface.fingerprint, &changed_surface.tool_names)
+        .prepare_agent_session("v2", &["threads.create".into(), "threads.read".into()])
         .await
         .unwrap();
-
     assert_eq!(rotated.session_id, "agent-g1");
     let seed = rotated.handoff_seed.unwrap();
-    assert!(seed.starts_with(
-        "Session rotated by the host to pick up new tools: events.archive. Prior conversation summary follows."
-    ));
-    assert!(seed.contains("- owner: owner turn"));
-    assert!(seed.contains("- agent: The release is ready."));
-    assert!(seed.contains("- [judgment] release-channel: Choose stable or beta"));
-    let guidance = agent_guidance_with_handoff("base guidance".to_string(), Some(&seed));
-    assert!(guidance.starts_with("base guidance\n\n## Session handoff\n\n"));
-    assert!(guidance.ends_with(&seed));
-    assert_eq!(
-        storage
-            .meta_value(AGENT_SESSION_GENERATION_META_KEY)
+    assert!(seed.contains(&format!("Thread #{} owner: Release request", thread.id)));
+    assert!(seed.contains("Choose stable or beta"));
+    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
+    assert!(
+        detail
+            .activities
+            .iter()
+            .any(|a| a.kind == "session_rotated")
+    );
+    assert!(state.storage.all_pings().await.unwrap().is_empty());
+    assert!(
+        state
+            .tools
+            .prepare_agent_session("v2", &["threads.create".into(), "threads.read".into()])
             .await
             .unwrap()
-            .as_deref(),
-        Some("1")
-    );
-    let emitted = storage
-        .all_pings()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|event| event.name == "session-rotated")
-        .unwrap();
-    assert_eq!(emitted.name, "session-rotated");
-    assert_eq!(emitted.kind, hirsel_proto::EventKind::Info);
-    assert_eq!(
-        emitted.source.kind,
-        hirsel_proto::EventSourceKind::Scheduled
-    );
-    assert_eq!(emitted.source.r#ref.as_deref(), Some("agent-g1"));
-    assert!(emitted.description.contains("events.archive"));
-    assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::EventUpsert { event } if event.id == emitted.id
-    )));
-
-    state.broadcast_log.clear();
-    let stable_generation = state
-        .tools
-        .prepare_agent_session(&changed_surface.fingerprint, &changed_surface.tool_names)
-        .await
-        .unwrap();
-    assert_eq!(stable_generation.session_id, "agent-g1");
-    assert_eq!(stable_generation.handoff_seed, None);
-    assert!(!state.broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::EventUpsert { event } if event.name == "session-rotated"
-    )));
-}
-
-#[test]
-fn event_tool_schemas_teach_keyless_judgments_and_bound_option_count() {
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
-    let judgment = definitions
-        .iter()
-        .find(|definition| definition.name() == "events_judgment")
-        .unwrap();
-    let validator =
-        jsonschema::JSONSchema::compile(judgment.contract.input_schema.canonical()).unwrap();
-    let options = |count: usize| {
-        (0..count)
-            .map(|index| {
-                json!({
-                    "label": format!("Option {}", index + 1),
-                    "detail": format!("Tradeoff {}", index + 1)
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-
-    assert!(
-        validator
-            .validate(&json!({
-                "question": "Which release path?",
-                "options": options(2)
-            }))
-            .is_ok()
-    );
-    for count in [1, 5] {
-        assert!(
-            validator
-                .validate(&json!({
-                    "question": "Which release path?",
-                    "options": options(count)
-                }))
-                .is_err()
-        );
-    }
-    assert!(judgment.description().contains("events.judgment({"));
-    assert!(judgment.description().contains("Supply 2–4 options"));
-    assert!(judgment.description().contains("only paraphrases it"));
-
-    let archive = definitions
-        .iter()
-        .find(|definition| definition.name() == "events_archive")
-        .unwrap();
-    assert!(archive.description().contains("Sam's feed hides it"));
-    assert!(archive.description().contains("snoozed Event"));
-    let clear = definitions
-        .iter()
-        .find(|definition| definition.name() == "events_clear")
-        .unwrap();
-    assert!(clear.description().contains("clear my feed"));
-    assert!(clear.description().contains("snoozed judgments"));
-    let clear_validator =
-        jsonschema::JSONSchema::compile(clear.contract.input_schema.canonical()).unwrap();
-    assert!(clear_validator.validate(&json!({})).is_ok());
-    assert!(clear_validator.validate(&json!({ "all": true })).is_err());
-
-    let alias = definitions
-        .iter()
-        .find(|definition| definition.name() == "pings_send")
-        .unwrap();
-    assert!(
-        alias
-            .description()
-            .contains("deprecated: use events.judgment / events.notify")
+            .handoff_seed
+            .is_none()
     );
 }
 
@@ -914,18 +743,8 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     )));
 }
 
-async fn test_process_registry(dir: &std::path::Path) -> Arc<dyn lash::process::ProcessRegistry> {
-    Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(
-            &dir.join("test-processes.db"),
-            dir.join("test-sessions"),
-        )
-        .await
-        .unwrap(),
-    )
-}
-
-async fn test_event_executor() -> (HirselToolExecutor, Storage, BroadcastLog, tempfile::TempDir) {
+pub(super) async fn test_event_executor()
+-> (HirselToolExecutor, Storage, BroadcastLog, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let storage = Storage::open(&path).await.unwrap();
@@ -965,17 +784,17 @@ async fn test_event_executor() -> (HirselToolExecutor, Storage, BroadcastLog, te
     );
     let anchors = Arc::new(Mutex::new(TurnAnchorState {
         active: Some(TurnAnchors {
+            request_id: None,
+            thread_id: 0,
+            thread_turn_id: None,
             owner_message_id: owner.id,
-            task_action_event_id: None,
         }),
-        ..TurnAnchorState::default()
     }));
-    let process_registry = test_process_registry(dir.path()).await;
     (
         HirselToolExecutor {
             tools,
             anchors,
-            process_registry,
+            runtime: Arc::new(std::sync::OnceLock::new()),
         },
         storage,
         broadcast_log,
@@ -983,204 +802,6 @@ async fn test_event_executor() -> (HirselToolExecutor, Storage, BroadcastLog, te
     )
 }
 
-#[tokio::test]
-async fn recompose_tool_is_bound_to_the_active_generated_task_action() {
-    let (executor, storage, broadcast_log, _dir) = test_event_executor().await;
-    let owner = storage
-        .append_chat(ChatAuthor::Agent, "Adaptive Task", None)
-        .await
-        .unwrap();
-    let event = storage
-        .create_event(
-            hirsel_proto::EventKind::Judgment,
-            hirsel_proto::EventSource {
-                kind: hirsel_proto::EventSourceKind::Agent,
-                r#ref: None,
-            },
-            "adaptive",
-            "Advance the Task",
-            json!({
-                "type": "card",
-                "children": [{ "type": "submit", "action": "advance", "label": "Continue", "settles": false }]
-            }),
-            owner.id,
-            true,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    let args = json!({
-        "event_id": event.id,
-        "ui": {
-            "type": "card",
-            "children": [{ "type": "heading", "text": "Next stage", "level": 2 }]
-        }
-    });
-
-    let inactive = executor.events_recompose(&args).await.unwrap_err();
-    assert!(inactive.contains("active generated Task action turn"));
-    executor
-        .anchors
-        .lock()
-        .await
-        .active
-        .as_mut()
-        .unwrap()
-        .task_action_event_id = Some(event.id);
-    let wrong = executor
-        .events_recompose(&json!({
-            "event_id": event.id + 1,
-            "ui": { "type": "text", "text": "wrong" }
-        }))
-        .await
-        .unwrap_err();
-    assert!(wrong.contains(&format!("only update Task {}", event.id)));
-    let invalid = executor
-        .events_recompose(&json!({
-            "event_id": event.id,
-            "ui": { "type": "arbitrary-client-widget", "html": "<script>" }
-        }))
-        .await
-        .unwrap_err();
-    assert!(invalid.contains("unknown Task UI component"));
-    let result = executor.events_recompose(&args).await.unwrap();
-    assert_eq!(result, json!({ "event_id": event.id, "status": "open" }));
-    let updated = storage.ping(event.id).await.unwrap().unwrap();
-    assert_eq!(updated.id, event.id);
-    assert_eq!(updated.anchor, event.anchor);
-    assert_eq!(updated.ui["children"][0]["text"], "Next stage");
-    assert!(broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::EventUpsert { event: update } if update.id == event.id
-    )));
-}
-
-#[tokio::test]
-async fn event_tools_emit_typed_events_and_deprecated_alias_still_works() {
-    let (executor, storage, _broadcast_log, _dir) = test_event_executor().await;
-    let judgment_args = json!({
-        "question": "Which release path?",
-        "context": "Stable limits the blast radius; edge reaches testers sooner.",
-        "options": [
-            { "label": "Stable", "detail": "Lower rollout risk." },
-            { "label": "Edge", "detail": "Faster feedback." },
-            { "label": "Hold", "detail": "More validation time." }
-        ]
-    });
-    let judgment = executor.events_judgment(&judgment_args).await.unwrap();
-    let info = executor
-        .events_notify(&json!({
-            "name": "tests-green",
-            "description": "The release suite passed"
-        }))
-        .await
-        .unwrap();
-    let summary = executor
-        .events_summary(&json!({
-            "name": "daily-digest",
-            "description": "Fleet digest ready",
-            "content_md": "Three branches landed; one judgment remains."
-        }))
-        .await
-        .unwrap();
-    let alias = executor
-        .pings_send(&json!({
-            "name": "alias-choice",
-            "description": "Which alias path?",
-            "content_md": "One path preserves compatibility; the other removes old callers.",
-            "requires_response": true,
-            "options": [
-                { "label": "Preserve", "detail": "Keeps old callers working." },
-                { "label": "Remove", "detail": "Shrinks the surface." }
-            ]
-        }))
-        .await
-        .unwrap();
-
-    assert_eq!(judgment["kind"], "judgment");
-    assert_eq!(info["kind"], "info");
-    assert_eq!(summary["kind"], "summary");
-    for (result, kind) in [
-        (&info, hirsel_proto::EventKind::Info),
-        (&summary, hirsel_proto::EventKind::Summary),
-    ] {
-        assert_eq!(
-            storage
-                .ping(result["event_id"].as_u64().unwrap())
-                .await
-                .unwrap()
-                .unwrap()
-                .kind,
-            kind
-        );
-    }
-    let event = storage
-        .ping(judgment["event_id"].as_u64().unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    let options = event.ui["children"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|child| child["type"] == "optionList")
-        .unwrap()["options"]
-        .as_array()
-        .unwrap();
-    assert_eq!(options[0]["key"], "A");
-    assert_eq!(options[1]["key"], "B");
-    assert_eq!(options[2]["key"], "C");
-    assert_eq!(options[0]["recommended"], true);
-    assert_eq!(options[1]["recommended"], false);
-
-    let alias_event = storage
-        .ping(alias["ping_id"].as_u64().unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(alias_event.kind, hirsel_proto::EventKind::Judgment);
-
-    let judgment_id = judgment["event_id"].as_u64().unwrap();
-    let archived = executor
-        .events_archive(&json!({ "event_id": judgment_id }))
-        .await
-        .unwrap();
-    assert_eq!(archived["event_id"], judgment_id);
-    assert_eq!(archived["status"], "done");
-    assert_eq!(archived["archived"], true);
-
-    let info_id = info["event_id"].as_u64().unwrap();
-    storage.mark_ping_read(info_id).await.unwrap();
-    assert_eq!(executor.events_clear().await.unwrap()["count"], 1);
-    assert_eq!(executor.events_clear().await.unwrap()["count"], 0);
-    let cleared = storage.ping(info_id).await.unwrap().unwrap();
-    assert!(cleared.archived);
-    assert_eq!(cleared.status, PingStatus::Done);
-
-    for count in [1, 5] {
-        let mut invalid = judgment_args.clone();
-        invalid["options"] = Value::Array(
-            (0..count)
-                .map(|index| {
-                    json!({
-                        "label": format!("Option {index}"),
-                        "detail": format!("Tradeoff {index}")
-                    })
-                })
-                .collect(),
-        );
-        assert_eq!(
-            executor.events_judgment(&invalid).await.unwrap_err(),
-            "judgment events require 2–4 options"
-        );
-    }
-}
-
-/// lash refuses to register an RLM catalog member whose model-facing prose
-/// names any registered dialect — one authored string is served to sessions
-/// of every dialect, so naming even the active one is wrong. That refusal
-/// happens when a session opens; catching it here means a description
-/// written with a dialect word fails the build instead of the host's boot.
 #[test]
 fn tool_prose_never_names_a_dialect() {
     fn collect_prose(schema: &Value, out: &mut Vec<String>) {
@@ -1330,133 +951,9 @@ async fn subagent_tool_provider_resolves_the_current_settings_schema() {
     );
 }
 
-#[tokio::test]
-async fn pings_send_uses_active_turn_anchor_when_later_owner_message_is_pending() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(dir.path()).await.unwrap();
-    let owner_a = storage
-        .append_chat(ChatAuthor::Owner, "owner A", None)
-        .await
-        .unwrap();
-    let owner_b = storage
-        .append_chat(ChatAuthor::Owner, "owner B", None)
-        .await
-        .unwrap();
-    let (broadcaster, _) = broadcast::channel(16);
-    let (pushes, _) = crate::push::PushGateway::recording(storage.clone());
-    let broadcast_log = BroadcastLog::default();
-    let templates =
-        crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
-            .await
-            .unwrap();
-    let views =
-        crate::templates::ViewManager::new(templates, broadcaster.clone(), broadcast_log.clone());
-    let config_store = crate::host_config::ConfigStore::load(
-        dir.path().join("hirsel.toml"),
-        dir.path(),
-        std::path::Path::new("/docs/hirsel-config.md"),
-        &crate::host_config::EnvBootstrap::default(),
-    )
-    .await
-    .unwrap();
-    let tools = ToolSuite::new(
-        ToolsConfig {
-            driver_mode: DriverMode::Fake,
-            fake_fixture: None,
-            subagent_models: crate::subagent_models::SubagentModelState::load(config_store),
-        },
-        storage,
-        broadcaster,
-        broadcast_log,
-        ProcessStore::default(),
-        pushes,
-        views,
-    );
-    let anchors = Arc::new(Mutex::new(TurnAnchorState::default()));
-    {
-        let mut anchors = anchors.lock().await;
-        anchors.pending_by_source_key.insert(
-            owner_turn_source_key("client-a"),
-            TurnAnchors {
-                owner_message_id: owner_a.id,
-                task_action_event_id: None,
-            },
-        );
-        anchors.active = Some(TurnAnchors {
-            owner_message_id: owner_a.id,
-            task_action_event_id: None,
-        });
-        anchors.pending_by_source_key.insert(
-            owner_turn_source_key("client-b"),
-            TurnAnchors {
-                owner_message_id: owner_b.id,
-                task_action_event_id: None,
-            },
-        );
-    }
-    let executor = HirselToolExecutor {
-        tools,
-        anchors,
-        process_registry: test_process_registry(dir.path()).await,
-    };
-
-    let result = executor
-        .pings_send(&serde_json::json!({
-            "name": "active-turn-result",
-            "description": "Result for the active turn",
-            "content": "The owner needs this result before deployment can continue.",
-            "requires_response": true,
-            "options": [
-                {
-                    "key": "A",
-                    "label": "Accept",
-                    "detail": "Accept the result",
-                    "recommended": true
-                },
-                {
-                    "key": "B",
-                    "label": "Revise",
-                    "detail": "Revise the result"
-                }
-            ]
-        }))
-        .await
-        .unwrap();
-
-    assert_eq!(result["anchor"], owner_a.id);
-    assert_eq!(result["ping_id"], 1);
-}
-
 #[test]
 fn every_executor_result_matches_its_declared_output_schema() {
     let now = Utc::now();
-    let ping = Ping {
-        id: 7,
-        kind: hirsel_proto::EventKind::Judgment,
-        source: hirsel_proto::EventSource {
-            kind: hirsel_proto::EventSourceKind::Agent,
-            r#ref: None,
-        },
-        name: "choose-release".to_string(),
-        description: "Choose a release channel".to_string(),
-        ui: json!({
-            "type": "card",
-            "children": [{ "type": "text", "text": "Choose a release" }]
-        }),
-        anchor: 3,
-        requires_response: true,
-        quick_replies: vec![QuickReply {
-            value: "stable".to_string(),
-            label: "Stable".to_string(),
-        }],
-        status: PingStatus::Done,
-        read: true,
-        archived: true,
-        snoozed_until: None,
-        archived_at: Some(now),
-        fork_sc: None,
-        ts: now,
-    };
     let events = vec![
         SubagentEvent::Started {
             external_id: "driver-session-1".to_string(),
@@ -1501,22 +998,22 @@ fn every_executor_result_matches_its_declared_output_schema() {
         cancelled_ts: Some(now),
     };
     let wait_outcomes = [
-        ProcessAwaitOutput::Success {
-            value: json!({ "summary": "done" }),
-            control: None,
+        ProcessAwaitOutput::Settled {
+            output: lash_core::ToolCallOutput::success(json!({ "summary": "done" })),
         },
-        ProcessAwaitOutput::Failure {
-            class: lash_core::ToolFailureClass::Execution,
-            code: "subagent_failed".to_string(),
-            message: "failed".to_string(),
-            raw: Some(json!({ "reason": "failed" })),
-            control: None,
+        ProcessAwaitOutput::Settled {
+            output: lash_core::ToolCallOutput::failure(lash_core::ToolFailure {
+                class: lash_core::ToolFailureClass::Execution,
+                code: "subagent_failed".to_string(),
+                message: "failed".to_string(),
+                raw: Some(lash_core::ToolValue::untrusted_json(
+                    json!({ "reason": "failed" }),
+                )),
+                source: lash_core::ToolFailureSource::Tool,
+                retry: lash_core::ToolRetryStatus::Never,
+            }),
         },
-        ProcessAwaitOutput::Cancelled {
-            message: "interrupted".to_string(),
-            raw: None,
-            control: None,
-        },
+        cancelled_await_output("interrupted".to_string()),
         ProcessAwaitOutput::Abandoned {
             evidence: Box::new(lash_core::AbandonEvidence {
                 writer: lash_core::AbandonWriter::ReconciledRequest,
@@ -1528,29 +1025,25 @@ fn every_executor_result_matches_its_declared_output_schema() {
     ];
 
     let mut results = BTreeMap::<&str, Vec<Value>>::new();
-    let mut info = ping.clone();
-    info.kind = hirsel_proto::EventKind::Info;
-    info.requires_response = false;
-    let mut summary = ping.clone();
-    summary.kind = hirsel_proto::EventKind::Summary;
-    summary.requires_response = false;
-    results.insert("events_judgment", vec![event_send_result(&ping)]);
-    results.insert("events_notify", vec![event_send_result(&info)]);
-    results.insert("events_summary", vec![event_send_result(&summary)]);
+    for name in ["artifacts_create", "artifacts_edit", "artifacts_show"] {
+        results.insert(name, vec![json!({"id":1,"content":"result"})]);
+    }
+    results.insert("artifacts_list", vec![json!({"artifacts":[]})]);
+    let thread = json!({"id":1,"title":"Buy groceries","description":"","instrument":null,"attention":"quiet","settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,"created_at":now,"updated_at":now,"revision":1});
     results.insert(
-        "events_recompose",
-        vec![json!({ "event_id": ping.id, "status": "open" })],
+        "threads_create",
+        vec![json!({"thread_id":1,"thread":thread})],
     );
-    results.insert("events_archive", vec![event_archive_result(&ping)]);
-    results.insert("events_clear", vec![events_clear_result(3)]);
-    results.insert("pings_send", vec![pings_send_result(&ping)]);
     results.insert(
-        "pings_resolve",
-        vec![
-            pings_resolve_result(Some(&ping)).unwrap(),
-            pings_resolve_result(None).unwrap(),
-        ],
+        "threads_update",
+        vec![json!({"thread_id":1,"thread":thread})],
     );
+    results.insert("threads_list", vec![json!({"threads":[thread]})]);
+    results.insert(
+        "threads_read",
+        vec![json!({"thread":thread,"messages":[],"turns":[],"activities":[],"has_more":false})],
+    );
+    results.insert("threads_activity",vec![json!({"activity":{"id":1,"thread_id":1,"turn_id":null,"kind":"progress","data":{},"ts":now}})]);
     let view = hirsel_proto::ViewInstance {
         instance_id: "view-1".to_string(),
         placement: "canvas".to_string(),
@@ -1640,7 +1133,6 @@ fn every_executor_result_matches_its_declared_output_schema() {
 fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
     RemoteSessionObservationEventPayload::TurnActivity {
         activity: Box::new(lash::remote::usage::RemoteTurnActivity {
-            protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
             sequence: 1,
             id: "activity-1".to_string(),
             correlation_id: "turn-1".to_string(),

@@ -352,6 +352,8 @@ async fn scoped_cancel_stops_only_the_active_side_turn() {
         if matches!(
             event,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Thinking,
                 sc: Some(ref scope),
                 ..

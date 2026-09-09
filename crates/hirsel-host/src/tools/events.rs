@@ -317,6 +317,7 @@ impl ToolSuite {
             )
             .await?
             .id;
+        self.publish_thread_summary(0).await;
         let event = self
             .storage
             .create_event(

@@ -21,11 +21,13 @@ pub mod provider_detect;
 pub mod providers;
 pub mod push;
 pub mod side_chat;
+pub mod skills;
 pub mod storage;
 pub mod subagent_models;
 pub mod task_ui;
 pub mod templates;
 mod text;
+mod thread_commands;
 pub mod tools;
 pub mod ws;
 
@@ -470,19 +472,28 @@ impl AppState {
         mode: SendMode,
         task_action: Option<TaskActionContext>,
     ) -> anyhow::Result<OwnerSubmission> {
+        let agent_body = self
+            .owner_input_body(&client_id, &body, task_action.is_some())
+            .await?;
         let mentioned_pings = self.storage.mentioned_pings(&mentions).await?;
+        let request = serde_json::json!({
+            "body": agent_body, "mode": mode, "mentioned_pings": mentioned_pings,
+            "task_action": task_action, "thread_action": null,
+        });
         let (message, inserted) = self
             .storage
-            .append_owner_message(&client_id, body, anchor, &attachments)
+            .append_owner_request(&client_id, body, anchor, &attachments, &request)
             .await?;
         if inserted {
             let stored_attachments = self.storage.blobs_for_message(message.id).await?;
             if let Err(error) = self
                 .agent
                 .enqueue(OwnerTurn {
+                    thread_id: message.thread_id,
+                    thread_action: None,
                     message_id: message.id,
                     client_id: client_id.clone(),
-                    body: message.body.clone(),
+                    body: agent_body,
                     anchor: message.r#ref,
                     attachments: stored_attachments,
                     mentioned_pings,
@@ -498,12 +509,10 @@ impl AppState {
                         "failed to delete owner message after Agent enqueue failed"
                     );
                 }
+                self.tools.publish_thread_summary(message.thread_id).await;
                 return Err(error);
             }
-            self.broadcast(HostToClient::Msg {
-                message: message.clone(),
-                sc: None,
-            });
+            self.tools.publish_thread_message(message.clone()).await;
         }
         Ok(OwnerSubmission {
             client_id,
@@ -515,6 +524,8 @@ impl AppState {
     pub async fn cancel_turn(&self) -> anyhow::Result<()> {
         self.agent.cancel_turn().await?;
         self.broadcast(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: None,
@@ -526,10 +537,18 @@ impl AppState {
         let Some(message_id) = self.storage.message_id_for_client_id(client_id).await? else {
             anyhow::bail!("already claimed");
         };
+        let thread_id = self
+            .storage
+            .chat_message(message_id)
+            .await?
+            .map(|m| m.thread_id);
         match self.agent.cancel_queued(client_id).await? {
             CancelQueuedResult::Cancelled => {
                 self.storage.delete_chat_message(message_id).await?;
                 self.broadcast(HostToClient::MsgRemoved { id: message_id });
+                if let Some(thread_id) = thread_id {
+                    self.tools.publish_thread_summary(thread_id).await;
+                }
                 Ok(message_id)
             }
             CancelQueuedResult::AlreadyClaimed => anyhow::bail!("already claimed"),
@@ -876,7 +895,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             lash_runtime::agent_host_section(&config),
             plugin_host.skills_prompt()
         ),
-    );
+    )
+    .with_skills(skills::Skills::for_host(&config.data_dir)?);
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
             agent_mode: config.agent,

@@ -94,12 +94,50 @@ pub enum ClientToHost {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<u64>,
     },
+    ListArtifacts {
+        client_id: String,
+        thread_id: Option<u64>,
+    },
+    OpenArtifact {
+        client_id: String,
+        artifact_id: u64,
+    },
+    CreateThread {
+        client_id: String,
+        title: String,
+    },
+    OpenThread {
+        client_id: String,
+        thread_id: u64,
+        before_id: Option<u64>,
+    },
+    SendThreadMessage {
+        client_id: String,
+        thread_id: u64,
+        body: String,
+        #[serde(default)]
+        attachments: Vec<String>,
+        #[serde(default)]
+        mentions: Vec<u64>,
+        #[serde(default)]
+        mode: SendMode,
+    },
+    ThreadAction {
+        thread_id: u64,
+        action: String,
+        #[serde(default)]
+        data: serde_json::Value,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
     FetchMessages {
         client_id: String,
         before_id: u64,
         limit: u64,
     },
     CancelTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,
     },

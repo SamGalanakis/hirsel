@@ -3,8 +3,9 @@ import {
   MoreHorizontal,
   PanelRight,
   Settings as SettingsIcon,
-} from "lucide-solid";
+} from "@/components/ui/icons";
 import { Show } from "solid-js";
+
 import { canvasViews, runningProcessCount } from "../store/selectors";
 import { openProcesses, openSettings, showCanvas, state } from "../store/store";
 import {

@@ -244,6 +244,7 @@ async fn terminal_events_are_retained_for_late_subscribers() {
     let event = late.recv().await.unwrap();
     assert_eq!(event.process_id, "proc-finished");
     assert!(matches!(event.outcome, TerminalOutcome::Done { .. }));
+    late.acknowledge(&event.process_id);
 }
 
 #[tokio::test]

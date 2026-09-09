@@ -1,9 +1,10 @@
 // Settings → Guide: one page explaining what hirsel is and how to drive it.
 // Static prose — no wire calls, no state, nothing to save. Every claim here is
 // checked against the code that implements it (keymap.ts, Composer.tsx,
-// task-ref.ts, TaskShell.tsx, PhoneOverflowMenu.tsx); when the app changes, this
+// task-ref.ts, ThreadShell.tsx, ThreadNavigation.tsx); when the app changes, this
 // page changes with it.
-import { For, type JSX } from "solid-js";
+import { For } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { Group, SectionHeader } from "./rows";
 
 /** A paragraph of guide prose, at the body measure the rest of Settings reads
@@ -56,33 +57,48 @@ export function GuideSection(): JSX.Element {
 
         <SectionHeader>The home screen</SectionHeader>
         <P>
-          Home is your tasks and one conversation, nothing else. Tasks sit in a strip across the top
-          on a phone and down the left on a wide screen; whichever one most needs you opens focused
-          when the app loads. Work that is blocked on you comes before work that just needs a look,
-          which comes before work that is only moving along. A task that arrives later never steals
-          your place.
+          Home is your global conversation with Hirsel. The icon rail opens Threads, creates a
+          new Thread, lists all artifacts, and opens Processes or Settings. The Thread drawer is
+          closed until you need it. Opening a Thread gives its conversation a frame and a compact
+          context strip; the Home button in the rail returns to your global conversation.
         </P>
 
-        <SectionHeader>Tasks</SectionHeader>
+        <SectionHeader>Threads</SectionHeader>
         <P>
-          A task is the one thing hirsel keeps for you: a piece of work with its own state, its own
-          small generated interface, and the conversation that shaped it. Select a task to focus it —
-          its card pins to the top and the conversation below narrows to that task. Select it again,
-          or press Escape, to step back out to the ambient view where hirsel is aware of everything.
-          Every task has a short ref like <span class="font-mono">#12</span>; type{" "}
-          <span class="font-mono">#</span> in the composer to pick one and cite it.
+          Each Thread has its own conversation, state and any generated interface needed for the
+          work. Messages go to the Thread named in the context strip. Opening a Thread marks it
+          read; settling it is a separate action in its menu. Unread activity, work that needs your
+          input, and active execution are independent signals in the drawer. Every Thread has a
+          short reference such as <span class="font-mono">#12</span>; type{" "}
+          <span class="font-mono">#</span> in a message to cite another Thread without moving your conversation.
         </P>
 
+        <P>
+          Thread rows show working time, queued work and the latest turn outcome. Turn finished does not settle a Thread. Use its check button or action menu to settle explicitly; the menu also offers snooze, archive and a Thread link.
+        </P>
         <SectionHeader>Talking to it</SectionHeader>
         <P>
-          The composer at the bottom is always there, in every state. Just type — on a desktop Enter
-          sends, so there is no send button competing with the key. Paste a screenshot, or a block of
-          text over 2500 characters or 30 lines, and it becomes an attachment instead of a wall in
-          your message.
+          Type in the composer and select Send. On desktop, Enter also sends and Shift+Enter adds a
+          line; on touch, Enter adds a line. Paste a screenshot, or text over 2500 characters or
+          30 lines, to stage it as an attachment. Drafts stay with their Thread when you switch views.
         </P>
         <P>
-          If hirsel is mid-turn and you would rather not land on top of it, you can queue the message
-          for the next one: hold the round send button on a touch screen, or press Tab on a desktop.
+          Send remains available while Hirsel is working, alongside Stop. To queue a message for
+          the next turn, hold Send on touch or press Ctrl/Cmd+Shift+Enter. Stop interrupts
+          the active turn in the addressed Thread.
+        </P>
+
+        <SectionHeader>Artifacts and execution</SectionHeader>
+        <P>
+          Hirsel can create interactive previews, pages and files as artifacts. Open a reference in
+          the conversation or use the document button for that Thread's artifacts. The grid button
+          in the rail lists all artifacts while keeping your current conversation addressed. Threads
+          can reference the same artifact; each reference opens its current content.
+        </P>
+        <P>
+          An artifact opens beside your conversation on desktop and full-screen on phone. Close it
+          to return to your draft. Detailed tool activity stays under Inspect execution, with useful
+          updates and results in the conversation.
         </P>
 
         <SectionHeader>The agents</SectionHeader>
@@ -104,7 +120,7 @@ export function GuideSection(): JSX.Element {
           <Shortcut keys={["⌘/Ctrl", "K"]}>The command palette. Start here — it holds the lot.</Shortcut>
           <Shortcut keys={["⌘/Ctrl", "/"]}>The keyboard shortcut sheet.</Shortcut>
           <Shortcut keys={["g", "t"]} chord>
-            Jump to the task list.
+            Open the Thread drawer.
           </Shortcut>
           <Shortcut keys={["g", "h"]} chord>
             Jump back to the composer.
@@ -119,15 +135,14 @@ export function GuideSection(): JSX.Element {
           <Shortcut keys={["G"]}>Jump down to the latest message.</Shortcut>
           <Shortcut keys={["Esc"]}>
             Back out, one rung at a time: close whatever is open, else stop the running turn, else
-            clear the focused task.
+            return from the focused Thread to Home.
           </Shortcut>
         </div>
 
         <SectionHeader>Where to poke around</SectionHeader>
         <P>
-          The floating ⋯ on the home screen opens Processes: every sub-agent and monitor running
-          right now, with a count on the button so you can see at a glance whether anything is. You
-          cannot stop one from there — ask hirsel to stop it and it will.
+          The activity icon in the rail opens Processes, where you can inspect sub-agents and
+          monitors. Ask Hirsel to stop a process when you no longer need it.
         </P>
         <P>
           Settings → Agents is where the models, reasoning levels and system prompts live, and

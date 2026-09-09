@@ -1,7 +1,8 @@
 // Settings → Agents → Fork agent: the provider, model and prompt of the
 // ephemeral fork spawned once per incoming event (ADR-0015). Stored
 // configuration — the running Agent is untouched by any of it.
-import { createEffect, createSignal, type JSX } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import type { ForkAgentConfig } from "../../protocol";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
@@ -19,9 +20,8 @@ export function ForkAgentSection(props: { fork: () => ForkAgentConfig }): JSX.El
   const current = () => props.fork().current;
   const providerId = () => props.fork().provider_id;
   const [selectedProviderId, setSelectedProviderId] = createSignal(providerId());
-  createEffect(() => {
-    const stored = providerId();
-    if (!pending.isPending("fork-provider")) setSelectedProviderId(stored);
+  createEffect(() => ({ stored: providerId(), busy: pending.isPending("fork-provider") }), ({ stored, busy }) => {
+    if (!busy) setSelectedProviderId(stored);
   });
   const modelView = () =>
     agentModelView(
@@ -38,14 +38,9 @@ export function ForkAgentSection(props: { fork: () => ForkAgentConfig }): JSX.El
   // what this effect tracks (equal nested fields do not notify on their own).
   createEffect(() => {
     const fork = state.prompts?.fork;
-    if (!fork) return;
-    void state.promptsRevision;
-    void fork.current.id;
-    void fork.current.variant;
-    void fork.provider_id;
-    void fork.prompt.text;
-    void fork.prompt.is_default;
-    pending.settleAll();
+    return fork ? [state.promptsRevision, fork.current.id, fork.current.variant, fork.provider_id, fork.prompt.text, fork.prompt.is_default] : null;
+  }, (fork) => {
+    if (fork) pending.settleAll();
   });
 
   return (

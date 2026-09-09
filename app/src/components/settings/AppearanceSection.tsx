@@ -1,6 +1,6 @@
 // Settings → Appearance: the theme mode choice, the one purely-local
 // presentation preference.
-import type { JSX } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { setThemeMode, themeMode } from "../../lib/theme";
 import { Group, Field, SegmentedControl } from "./rows";
 

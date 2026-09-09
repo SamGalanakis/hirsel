@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 beforeEach(() => {
@@ -21,6 +22,7 @@ describe("clearFinishedEventsWithUndo — the one-op sweep with a batch undo", (
     const { clearFinishedEventsWithUndo } = await import("./event-sweep");
 
     const ids = clearFinishedEventsWithUndo([1, 2, 3]);
+    flush();
     expect(ids).toEqual([1, 2, 3]);
     // One wire op — not three per-card archives.
     expect(cleared).toBe(1);
@@ -35,6 +37,7 @@ describe("clearFinishedEventsWithUndo — the one-op sweep with a batch undo", (
     const t = toast.toasts().find((x) => /Cleared 3/.test(x.message));
     expect(t?.action?.label).toBe("Undo");
     t!.action!.onClick();
+    flush();
     expect(unarchived).toEqual([1, 2, 3]);
     expect(store.state.eventOverrides).toEqual({});
   });

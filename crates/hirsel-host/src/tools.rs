@@ -22,6 +22,7 @@ mod monitors;
 mod session;
 mod shell;
 mod subagents;
+mod threads;
 mod views;
 
 #[cfg(test)]
@@ -67,7 +68,7 @@ pub struct ProcessTerminal {
 }
 
 #[derive(Clone)]
-struct TerminalEventBus {
+pub(crate) struct TerminalEventBus {
     tx: broadcast::Sender<ProcessTerminal>,
     retained: Arc<Mutex<HashMap<String, ProcessTerminal>>>,
 }
@@ -76,11 +77,11 @@ pub(crate) struct TerminalEventReceiver {
     rx: broadcast::Receiver<ProcessTerminal>,
     retained: Arc<Mutex<HashMap<String, ProcessTerminal>>>,
     pending: VecDeque<ProcessTerminal>,
-    seen: HashSet<String>,
+    acknowledged: HashSet<String>,
 }
 
 impl TerminalEventBus {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self {
             tx,
@@ -88,18 +89,18 @@ impl TerminalEventBus {
         }
     }
 
-    fn subscribe(&self) -> TerminalEventReceiver {
+    pub(crate) fn subscribe(&self) -> TerminalEventReceiver {
         let rx = self.tx.subscribe();
         let pending = self.retained_events();
         TerminalEventReceiver {
             rx,
             retained: Arc::clone(&self.retained),
             pending,
-            seen: HashSet::new(),
+            acknowledged: HashSet::new(),
         }
     }
 
-    fn publish(&self, event: ProcessTerminal) {
+    pub(crate) fn publish(&self, event: ProcessTerminal) {
         self.retained
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -121,15 +122,21 @@ impl TerminalEventBus {
 }
 
 impl TerminalEventReceiver {
+    /// Receipt means delivery to the consumer, not durable handling. Only the
+    /// consumer can acknowledge after its append (and wake delivery) succeeds.
+    pub(crate) fn acknowledge(&mut self, process_id: &str) {
+        self.acknowledged.insert(process_id.to_string());
+    }
+
     pub(crate) async fn recv(&mut self) -> Result<ProcessTerminal, broadcast::error::RecvError> {
         loop {
             while let Some(event) = self.pending.pop_front() {
-                if self.seen.insert(event.process_id.clone()) {
+                if !self.acknowledged.contains(&event.process_id) {
                     return Ok(event);
                 }
             }
             match self.rx.recv().await {
-                Ok(event) if self.seen.insert(event.process_id.clone()) => return Ok(event),
+                Ok(event) if !self.acknowledged.contains(&event.process_id) => return Ok(event),
                 Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     self.pending = self
@@ -137,7 +144,7 @@ impl TerminalEventReceiver {
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
                         .values()
-                        .filter(|event| !self.seen.contains(&event.process_id))
+                        .filter(|event| !self.acknowledged.contains(&event.process_id))
                         .cloned()
                         .collect();
                 }

@@ -1,5 +1,6 @@
-import { Bot, Braces, Brain, Check, ChevronRight, ListTree, LoaderCircle, X } from "lucide-solid";
+import { Bot, Braces, Brain, Check, ChevronRight, ListTree, LoaderCircle, X } from "@/components/ui/icons";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
+
 import { showAgentCode } from "../../lib/prefs";
 import type { TimelineEvent } from "../../store/types";
 import { Markdown, renderInline } from "../Markdown";
@@ -73,12 +74,12 @@ function ReasoningRow(props: { text: string }) {
       <button
         type="button"
         class="inline-flex w-fit items-center gap-1 text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
-        aria-expanded={open()}
+        aria-expanded={(open()) ? "true" : "false"}
         onClick={() => setOpen((v) => !v)}
       >
         <ChevronRight
-          class="size-3 shrink-0 transition-transform"
-          classList={{ "rotate-90": open() }}
+          class={["size-3 shrink-0 transition-transform", { "rotate-90": open() }]}
+
           aria-hidden="true"
         />
         <Brain class="size-3 shrink-0" aria-hidden="true" />
@@ -137,12 +138,12 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
           when={hasDetail()}
           fallback={
             <span
-              class="shrink-0 font-mono text-meta"
-              classList={{
+              class={["shrink-0 font-mono text-meta", {
                 "text-foreground": running() || delegation(),
                 "text-foreground/70": !running() && !delegation(),
                 "font-medium": delegation(),
-              }}
+              }]}
+
             >
               {props.item.name}
             </span>
@@ -151,22 +152,22 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
           <button
             type="button"
             class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            aria-expanded={open()}
+            aria-expanded={(open()) ? "true" : "false"}
             aria-label={`${props.item.name} — ${open() ? "hide" : "show"} result`}
             onClick={() => setOpen((v) => !v)}
           >
             <ChevronRight
-              class="size-3 shrink-0 text-muted-foreground/60 transition-transform"
-              classList={{ "rotate-90": open() }}
+              class={["size-3 shrink-0 text-muted-foreground/60 transition-transform", { "rotate-90": open() }]}
+
               aria-hidden="true"
             />
             <span
-              class="shrink-0 font-mono text-meta"
-              classList={{
+              class={["shrink-0 font-mono text-meta", {
                 "text-foreground": running() || delegation(),
                 "text-foreground/70": !running() && !delegation(),
                 "font-medium": delegation(),
-              }}
+              }]}
+
             >
               {props.item.name}
             </span>
@@ -181,8 +182,8 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
       </div>
       <Show when={open() && hasDetail()}>
         <pre
-          class="ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80"
-          classList={{ "text-destructive/90": failed() }}
+          class={["ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}
+
         >
           {detail()}
         </pre>
@@ -234,24 +235,24 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
           <button
             type="button"
             class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            aria-expanded={open()}
+            aria-expanded={(open()) ? "true" : "false"}
             aria-label={`${label()} program — ${open() ? "hide" : "show"} source`}
             onClick={() => setOpen((v) => !v)}
           >
             <ChevronRight
-              class="size-3 shrink-0 text-muted-foreground/60 transition-transform"
-              classList={{ "rotate-90": open() }}
+              class={["size-3 shrink-0 text-muted-foreground/60 transition-transform", { "rotate-90": open() }]}
+
               aria-hidden="true"
             />
             <Braces class="size-3 shrink-0" aria-hidden="true" />
             <span
-              class="shrink-0 font-mono text-meta"
-              classList={{ "text-foreground": running(), "text-foreground/70": !running() }}
+              class={["shrink-0 font-mono text-meta", { "text-foreground": running(), "text-foreground/70": !running() }]}
+
             >
               {label()}
             </span>
             <Show when={done()?.result}>
-              <span class="min-w-0 flex-1 truncate" classList={{ "text-destructive/90": failed() }}>
+              <span class={["min-w-0 flex-1 truncate", { "text-destructive/90": failed() }]} >
                 {done()?.result}
               </span>
             </Show>
@@ -265,8 +266,8 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
       </div>
       <Show when={open() && hasCode()}>
         <pre
-          class="ml-4 max-h-96 overflow-auto whitespace-pre rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80"
-          classList={{ "text-destructive/90": failed() }}
+          class={["ml-4 max-h-96 overflow-auto whitespace-pre rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}
+
         >
           {props.item.code}
           <Show when={props.item.truncated}>
@@ -370,13 +371,13 @@ export function TurnDetails(props: {
       <button
         type="button"
         class="-ml-1 inline-flex w-fit items-center gap-1 rounded px-1 py-px text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-        aria-expanded={expanded()}
+        aria-expanded={(expanded()) ? "true" : "false"}
         aria-label="Turn details"
         onClick={toggle}
       >
         <ChevronRight
-          class="size-3 shrink-0 transition-transform"
-          classList={{ "rotate-90": expanded() }}
+          class={["size-3 shrink-0 transition-transform", { "rotate-90": expanded() }]}
+
           aria-hidden="true"
         />
         <ListTree class="size-3 shrink-0" aria-hidden="true" />

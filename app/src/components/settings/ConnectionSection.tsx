@@ -2,7 +2,7 @@
 // row, the build-time endpoint and the stored access token (with its
 // forget affordance). Pairing and the device roster live on the Host — the web
 // client holds only this browser's token, so there is nothing else to list.
-import { onMount, type JSX } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { createFocusTrap } from "../../lib/focus";
 import { state } from "../../store/store";
 import { getStoredToken } from "../../ws/client";
@@ -26,11 +26,11 @@ export function ConnectionSection(props: {
         <div class="flex items-center gap-3 py-3">
           <span
             aria-hidden="true"
-            class="size-2 shrink-0 rounded-full"
-            classList={{
+            class={["size-2 shrink-0 rounded-full", {
               "bg-status-success": state.connection === "connected",
               "bg-status-attention motion-safe:animate-pulse": state.connection !== "connected",
-            }}
+            }]}
+
           />
           <div class="min-w-0 flex-1">
             <div class="truncate text-sm font-medium text-foreground">
@@ -80,9 +80,8 @@ export function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: ()
   // Topmost modal over the Settings sheet: trap focus in the card and own
   // Escape (cancel) while it's up; the stack hands control back to the Settings
   // panel trap on close (C21).
-  onMount(() => {
-    createFocusTrap(() => dialogRef, { onEscape: () => props.onCancel() });
-  });
+  createFocusTrap(() => dialogRef, { onEscape: () => props.onCancel() });
+
 
   return (
     // Centered within the panel (absolute), calm dim + hairline card. A click on

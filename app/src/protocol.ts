@@ -1,3 +1,5 @@
+import type { Thread, ThreadClientMessage, ThreadServerMessage } from "./threads/types";
+import type { ArtifactClientMessage, ArtifactServerMessage } from "./artifacts/types";
 // Hand-written mirror of ../PROTOCOL.md (canonical). Historical Chat/Ping names
 // in this file are wire-only compatibility spellings, never product destinations.
 // If that file changes, this
@@ -25,6 +27,9 @@ export interface ToolCall {
 }
 
 export interface ChatMessage {
+  artifact_ids?: number[];
+  thread_id?: number;
+  client_id?: string;
   id: number; // u64, monotonic, host-assigned
   author: Author;
   body: string; // markdown
@@ -351,7 +356,7 @@ export interface HelloMsg {
 }
 
 /** v1.2 send mode. "send" = plain Enter (Early Injection if a turn is active,
- * else normal ingress); "next_turn" = Tab (always held until the current turn
+ * else normal ingress); "next_turn" = explicit queue (always held until the current turn
  * commits, lash Next Full Turn). Absent is treated as "send". */
 export type SendMode = "send" | "next_turn";
 
@@ -413,6 +418,7 @@ export interface GetBlobUrlMsg {
 
 /** v1.2: cooperatively interrupt the active agent turn (Esc). No-op if idle. */
 export interface CancelTurnMsg {
+  thread_id?: number;
   type: "cancel_turn";
 }
 
@@ -557,6 +563,8 @@ export interface FetchMessagesMsg {
 }
 
 export type ClientMessage =
+  | ArtifactClientMessage
+  | ThreadClientMessage
   | HelloMsg
   | SendMessageMsg
   | ResolvePingMsg
@@ -584,6 +592,7 @@ export type ClientMessage =
 // ---- Server -> client ----
 
 export interface HelloOkMsg {
+  threads?: Thread[];
   type: "hello_ok";
   latest_msg_id: number;
   messages: ChatMessage[];
@@ -632,6 +641,8 @@ export interface MessagesMsg {
 export type AgentActivityState = "thinking" | "idle";
 
 export interface AgentActivityMsg {
+  turn_id?: number | null;
+  thread_id?: number | null;
   type: "agent_activity";
   state: AgentActivityState;
   text: string | null;
@@ -702,6 +713,8 @@ export type TurnEvent =
  * within a turn (gaps tolerated, redelivery idempotent). Replaces v1.4's
  * `agent_tool_call`. */
 export interface TurnEventMsg {
+  turn_id?: number | null;
+  thread_id?: number | null;
   type: "turn_event";
   seq: number;
   event: TurnEvent;
@@ -775,6 +788,8 @@ export interface PluginPushMsg {
 }
 
 export type ServerMessage =
+  | ArtifactServerMessage
+  | ThreadServerMessage
   | HelloOkMsg
   | MsgMsg
   | MessagesMsg

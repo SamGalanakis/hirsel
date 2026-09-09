@@ -24,6 +24,8 @@ pub enum HostToClient {
     },
     HelloOk {
         latest_msg_id: u64,
+        #[serde(default)]
+        threads: Vec<crate::Thread>,
         messages: Vec<ChatMessage>,
         events: Vec<Event>,
         processes: Vec<ProcessInfo>,
@@ -63,6 +65,10 @@ pub enum HostToClient {
         process: ProcessInfo,
     },
     TurnEvent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<u64>,
         seq: u64,
         event: TurnEventKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,10 +78,42 @@ pub enum HostToClient {
         id: u64,
     },
     AgentActivity {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<u64>,
         state: AgentActivityState,
         text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sc: Option<String>,
+    },
+    ArtifactsListed {
+        client_id: String,
+        artifacts: Vec<crate::ArtifactSummary>,
+    },
+    ArtifactOpened {
+        client_id: String,
+        artifact: crate::Artifact,
+    },
+    ArtifactUpsert {
+        artifact: crate::ArtifactSummary,
+    },
+    ThreadUpsert {
+        thread: crate::Thread,
+    },
+    ThreadOpened {
+        client_id: String,
+        detail: crate::ThreadDetail,
+    },
+    ThreadCreated {
+        client_id: String,
+        thread: crate::Thread,
+    },
+    ThreadActivity {
+        activity: crate::ThreadActivity,
+    },
+    ThreadTurn {
+        turn: crate::ThreadTurn,
     },
     EventUpsert {
         event: Event,

@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // A scriptable WebSocket stand-in (jsdom has no live socket). The client only
@@ -40,7 +41,7 @@ class FakeWebSocket {
 
   // ---- host-side driver ----
   private emit(type: string, ev: unknown) {
-    for (const cb of this.listeners[type] ?? []) cb(ev);
+    flush(() => { for (const cb of this.listeners[type] ?? []) cb(ev); });
   }
   serverOpen() {
     this.readyState = FakeWebSocket.OPEN;
@@ -103,6 +104,31 @@ async function load() {
 }
 
 describe("HirselWsClient lifecycle", () => {
+  it("keeps artifact retrieval errors out of the conversation and clears them after retry", async () => {
+    const { client } = await load();
+    const artifacts = await import("../artifacts/store");
+    const threads = await import("../threads/store");
+    client.startClient("wss://host/ws", "good");
+    const ws = FakeWebSocket.instances[0]; ws.serverOpen(); ws.serverSend(HELLO_OK);
+    artifacts.openArtifact(4); flush();
+    const request = JSON.parse(ws.sent.at(-1)!);
+    ws.serverSend({ type: "error", client_id: request.client_id, detail: "Artifact could not be loaded" });
+    expect(artifacts.artifactState.error).toBe("Artifact could not be loaded");
+    expect(threads.threadState.error).toBeNull();
+    artifacts.openArtifact(4); flush();
+    ws.serverSend({ type: "artifact_opened", client_id: JSON.parse(ws.sent.at(-1)!).client_id, artifact: { id: 4, title: "Plan", kind: "html", mime: "text/html", content: "Working", thread_ids: [0], created_at: "a", updated_at: "b" } });
+    expect(artifacts.artifactState.error).toBeNull();
+    expect(artifacts.artifactState.opened?.content).toBe("Working");
+    expect(threads.threadState.error).toBeNull();
+    threads.sendThreadMessage(0, "Follow up", "send", [], []); flush();
+    const send = JSON.parse(ws.sent.at(-1)!);
+    ws.serverSend({ type: "error", client_id: send.client_id, detail: "Thread send failed" });
+    expect(threads.threadState.error).toMatchObject({ operation: "send", detail: "Thread send failed" });
+    expect(threads.threadState.pending[0].failed).toBe(true);
+    ws.serverSend({ type: "error", detail: "Connection runtime failed" });
+    expect(threads.threadState.error).toMatchObject({ operation: "request", detail: "Connection runtime failed" });
+    client.getClient()?.close();
+  });
   it("opens, sends hello, and reaches connected on hello_ok", async () => {
     const { store, client } = await load();
     client.startClient("wss://host/ws", "good");
@@ -125,6 +151,7 @@ describe("HirselWsClient lifecycle", () => {
     ws1.serverSend(HELLO_OK);
 
     c.sendMessage("hi there", null);
+    flush();
     expect(store.state.pendingSends).toHaveLength(1);
     expect(ws1.sentTypes().filter((t) => t === "send_message")).toHaveLength(1);
 
@@ -133,6 +160,7 @@ describe("HirselWsClient lifecycle", () => {
     expect(store.state.connection).toBe("reconnecting");
 
     vi.advanceTimersByTime(2000); // clears the first backoff (≤ ~1.2s incl. jitter)
+    flush();
     const ws2 = FakeWebSocket.instances[1];
     expect(ws2).toBeTruthy();
 
@@ -152,10 +180,12 @@ describe("HirselWsClient lifecycle", () => {
     ws.serverSend(HELLO_OK);
 
     c.sendMessage("no echo", null);
+    flush();
     const cid = store.state.pendingSends[0].clientId;
     expect(store.state.messages.find((m) => m.clientId === cid)?.failed).toBeFalsy();
 
     vi.advanceTimersByTime(30_000);
+    flush();
     expect(store.state.messages.find((m) => m.clientId === cid)?.failed).toBe(true);
   });
 });
@@ -240,8 +270,10 @@ describe("HirselWsClient auth rejection (C5)", () => {
     // A refused connection emits error then close without ever reaching open.
     FakeWebSocket.instances[0].serverError();
     vi.advanceTimersByTime(2000);
+    flush();
     FakeWebSocket.instances[1].serverError();
     vi.advanceTimersByTime(4000);
+    flush();
 
     expect(onAuthReject).not.toHaveBeenCalled();
     expect(client.getStoredToken()).toBe("good");
@@ -316,6 +348,7 @@ describe("HirselWsClient auth rejection (C5)", () => {
 
     // Strike 2: reconnects, closes pre-hello again → concluded auth failure.
     vi.advanceTimersByTime(2000);
+    flush();
     const ws2 = FakeWebSocket.instances[1];
     ws2.serverOpen();
     ws2.serverClose(1006);
@@ -336,8 +369,10 @@ describe("HirselWsClient auth rejection (C5)", () => {
     // Two pre-hello closes in a row afterwards must keep reconnecting, never gate.
     ws1.serverClose(1006);
     vi.advanceTimersByTime(2000);
+    flush();
     FakeWebSocket.instances[1].serverClose(1006);
     vi.advanceTimersByTime(4000);
+    flush();
 
     expect(onAuthReject).not.toHaveBeenCalled();
     expect(store.state.connection).toBe("reconnecting");

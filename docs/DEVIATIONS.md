@@ -6,7 +6,7 @@ This file records intentional differences between this scaffold branch and the f
 
 The previous Lash Runtime and Runtime Processes deviations are resolved in the scaffold branch:
 
-- `hirsel-host` embeds `LashCore::rlm_builder` with the RLM protocol factory, SQLite session/process/trigger stores, file attachments, process env store, and `InlineEffectHost`.
+- `hirsel-host` embeds `LashCore::rlm_builder` with the RLM protocol factory, SQLite session/process/trigger stores, file attachments, process env store, and `NativeEffectHost`.
 - The default Agent mode is a real Lash RLM session named `agent`; `prompts/agent.md` is installed as a session prompt contribution.
 - `HIRSEL_PROVIDER=anthropic|codex` selects the Lash provider. Missing credentials degrade to an Agent-authored error Chat message while the host stays up.
 - Hirsel tools are registered as a Lash `ToolProvider` with Lashlang bindings for Pings, Sub-agents, and shell. Chat replies are not a tool; committed Agent turn output is appended as the Agent-authored Chat message.

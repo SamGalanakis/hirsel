@@ -5,13 +5,15 @@
 // truth that the app renders; plugin contributions are foreign code the app only
 // hosts, so they live in their own reactive island. Nothing here can make the
 // reducer produce a different AppState.
-import { createStore, produce } from "solid-js/store";
+import { createStore } from "solid-js";
+
 import type { PluginPushMsg } from "../protocol";
 import { SLOT_NAMES, type SlotComponent, type SlotName } from "./types";
 
 /** One mounted contribution. `pluginId`/`label` are carried so an error
  * boundary can name the culprit instead of showing an anonymous failure. */
 export interface SlotEntry {
+  registrationId: symbol;
   pluginId: string;
   label: string;
   component: SlotComponent;
@@ -44,10 +46,10 @@ export function registerSlot(
   if (!SLOT_NAMES.includes(name)) {
     throw new Error(`unknown plugin slot: ${String(name)}`);
   }
-  const entry: SlotEntry = { pluginId, label, component };
-  setSlots(name, (current) => [...current, entry]);
+  const entry: SlotEntry = { registrationId: Symbol(pluginId), pluginId, label, component };
+  setSlots(draft => { draft[name] = ((current) => [...current, entry])(draft[name]); });
   return () => {
-    setSlots(name, (current) => current.filter((candidate) => candidate !== entry));
+    setSlots(draft => { draft[name] = ((current) => current.filter((candidate) => candidate.registrationId !== entry.registrationId))(draft[name]); });
   };
 }
 
@@ -116,17 +118,15 @@ const [failures, setFailures] = createStore<{ list: PluginLoadFailure[] }>({ lis
 /** Record that a bundle could not be imported or initialised. Surfaced in
  * Settings → Plugins so a broken bundle is visible rather than merely absent. */
 export function recordLoadFailure(failure: PluginLoadFailure): void {
-  setFailures(
-    produce((current) => {
+  setFailures(draft => { ((current) => {
       const existing = current.list.findIndex((f) => f.id === failure.id);
       if (existing >= 0) current.list[existing] = failure;
       else current.list.push(failure);
-    }),
-  );
+    })(draft); });
 }
 
 export function clearLoadFailure(id: string): void {
-  setFailures("list", (current) => current.filter((f) => f.id !== id));
+  setFailures(draft => { draft["list"] = ((current) => current.filter((f) => f.id !== id))(draft["list"]); });
 }
 
 /** Reactive read of the bundles that failed this session. */
@@ -141,7 +141,7 @@ export function loadFailures(): PluginLoadFailure[] {
  */
 export function unregisterPlugin(id: string): void {
   for (const name of SLOT_NAMES) {
-    setSlots(name, (current) => current.filter((entry) => entry.pluginId !== id));
+    setSlots(draft => { draft[name] = ((current) => current.filter((entry) => entry.pluginId !== id))(draft[name]); });
   }
   pushHandlers.delete(id);
   clearLoadFailure(id);
@@ -149,7 +149,7 @@ export function unregisterPlugin(id: string): void {
 
 /** Full reset — used by tests, which import a fresh module graph per case. */
 export function resetPluginRegistry(): void {
-  setSlots(emptySlots());
+  setSlots(draft => { Object.assign(draft, emptySlots()); });
   pushHandlers.clear();
-  setFailures("list", []);
+  setFailures(draft => { draft["list"] = []; });
 }

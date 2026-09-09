@@ -1,6 +1,7 @@
 import { cva, type VariantProps } from "class-variance-authority";
-import type { ComponentProps } from "solid-js";
-import { mergeProps, splitProps } from "solid-js";
+import type { ComponentProps } from "@solidjs/web";
+import { merge, omit } from "solid-js";
+
 import { cn } from "@/lib/utils";
 import { Button, type ButtonProps } from "@/components/ui/button";
 
@@ -31,11 +32,12 @@ type AttachmentProps = ComponentProps<"div"> &
   VariantProps<typeof attachmentVariants> & { state?: AttachmentState };
 
 const Attachment = (props: AttachmentProps) => {
-  const mergedProps = mergeProps(
+  const mergedProps = merge(
     { state: "done", size: "default", orientation: "horizontal" } as const,
     props,
   );
-  const [local, others] = splitProps(mergedProps, ["class", "state", "size", "orientation"]);
+  const local = mergedProps;
+  const others = omit(local, "class", "state", "size", "orientation");
   return (
     <div
       data-slot="attachment"
@@ -70,8 +72,9 @@ const attachmentMediaVariants = cva(
 type AttachmentMediaProps = ComponentProps<"div"> & VariantProps<typeof attachmentMediaVariants>;
 
 const AttachmentMedia = (props: AttachmentMediaProps) => {
-  const mergedProps = mergeProps({ variant: "icon" } as const, props);
-  const [local, others] = splitProps(mergedProps, ["class", "variant"]);
+  const mergedProps = merge({ variant: "icon" } as const, props);
+  const local = mergedProps;
+  const others = omit(local, "class", "variant");
   return (
     <div
       data-slot="attachment-media"
@@ -85,7 +88,8 @@ const AttachmentMedia = (props: AttachmentMediaProps) => {
 type AttachmentContentProps = ComponentProps<"div">;
 
 const AttachmentContent = (props: AttachmentContentProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div
       data-slot="attachment-content"
@@ -98,7 +102,8 @@ const AttachmentContent = (props: AttachmentContentProps) => {
 type AttachmentTitleProps = ComponentProps<"span">;
 
 const AttachmentTitle = (props: AttachmentTitleProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <span
       data-slot="attachment-title"
@@ -114,7 +119,8 @@ const AttachmentTitle = (props: AttachmentTitleProps) => {
 type AttachmentDescriptionProps = ComponentProps<"span">;
 
 const AttachmentDescription = (props: AttachmentDescriptionProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <span
       data-slot="attachment-description"
@@ -130,7 +136,8 @@ const AttachmentDescription = (props: AttachmentDescriptionProps) => {
 type AttachmentActionsProps = ComponentProps<"div">;
 
 const AttachmentActions = (props: AttachmentActionsProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div
       data-slot="attachment-actions"
@@ -143,8 +150,9 @@ const AttachmentActions = (props: AttachmentActionsProps) => {
 type AttachmentActionProps = ButtonProps;
 
 const AttachmentAction = (props: AttachmentActionProps) => {
-  const mergedProps = mergeProps({ variant: "ghost", size: "icon-xs" } as const, props);
-  const [local, others] = splitProps(mergedProps as AttachmentActionProps, ["class"]);
+  const mergedProps = merge({ variant: "ghost", size: "icon-xs" } as const, props);
+  const local = mergedProps as AttachmentActionProps;
+  const others = omit(local, "class");
   return (
     <Button
       data-slot="attachment-action"
@@ -157,7 +165,8 @@ const AttachmentAction = (props: AttachmentActionProps) => {
 type AttachmentGroupProps = ComponentProps<"div">;
 
 const AttachmentGroup = (props: AttachmentGroupProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div
       data-slot="attachment-group"

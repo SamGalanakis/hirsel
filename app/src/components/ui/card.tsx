@@ -1,11 +1,13 @@
-import { type ComponentProps, mergeProps, splitProps } from "solid-js";
+import { merge, omit } from "solid-js";
+import { type ComponentProps } from "@solidjs/web";
 import { cn } from "@/lib/utils";
 
 type CardProps = ComponentProps<"div"> & { size?: "default" | "sm" };
 
 const Card = (props: CardProps) => {
-  const mergedProps = mergeProps({ size: "default" } as const, props);
-  const [local, others] = splitProps(mergedProps, ["class", "size"]);
+  const mergedProps = merge({ size: "default" } as const, props);
+  const local = mergedProps;
+  const others = omit(local, "class", "size");
   return (
     <div
       data-slot="card"
@@ -19,7 +21,8 @@ const Card = (props: CardProps) => {
 type CardHeaderProps = ComponentProps<"div">;
 
 const CardHeader = (props: CardHeaderProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div
       data-slot="card-header"
@@ -35,14 +38,16 @@ const CardHeader = (props: CardHeaderProps) => {
 type CardTitleProps = ComponentProps<"div">;
 
 const CardTitle = (props: CardTitleProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return <div data-slot="card-title" class={cn("z-card-title", local.class)} {...others} />;
 };
 
 type CardDescriptionProps = ComponentProps<"div">;
 
 const CardDescription = (props: CardDescriptionProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div data-slot="card-description" class={cn("z-card-description", local.class)} {...others} />
   );
@@ -51,7 +56,8 @@ const CardDescription = (props: CardDescriptionProps) => {
 type CardActionProps = ComponentProps<"div">;
 
 const CardAction = (props: CardActionProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div
       data-slot="card-action"
@@ -67,14 +73,16 @@ const CardAction = (props: CardActionProps) => {
 type CardContentProps = ComponentProps<"div">;
 
 const CardContent = (props: CardContentProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return <div data-slot="card-content" class={cn("z-card-content", local.class)} {...others} />;
 };
 
 type CardFooterProps = ComponentProps<"div">;
 
 const CardFooter = (props: CardFooterProps) => {
-  const [local, others] = splitProps(props, ["class"]);
+  const local = props;
+  const others = omit(local, "class");
   return (
     <div
       data-slot="card-footer"

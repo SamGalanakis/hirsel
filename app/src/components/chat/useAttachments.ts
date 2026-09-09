@@ -1,5 +1,7 @@
 import { onCleanup } from "solid-js";
-import { createStore, produce, reconcile } from "solid-js/store";
+
+import { createStore, reconcile } from "solid-js";
+
 import type { Blob } from "../../protocol";
 import { getClient, makeClientId } from "../../ws/client";
 import { fileToBase64 } from "../../lib/format";
@@ -83,7 +85,7 @@ export function createComposerAttachments(): AttachmentsController {
   // it — the union's whole point is that only one variant's fields exist at a
   // time. Reconcile replaces the record and drops the fields that left.
   function setUpload(clientId: string, upload: UploadStatus): void {
-    setStaged("files", (f) => f.clientId === clientId, "upload", reconcile(upload));
+    setStaged(draft => { for (const item of draft["files"].filter((f) => f.clientId === clientId)) { reconcile(upload)(item["upload"]); } });
   }
 
   // Per-composer counters so a message's pasted items read pasted-image-1,
@@ -119,7 +121,7 @@ export function createComposerAttachments(): AttachmentsController {
       if (typeof s === "string") toast(s, { variant: "error" });
       else accepted.push(s);
     }
-    if (accepted.length > 0) setStaged("files", (f) => [...f, ...accepted]);
+    if (accepted.length > 0) setStaged(draft => { draft["files"] = ((f) => [...f, ...accepted])(draft["files"]); });
   }
 
   function addFiles(list: FileList | File[]): void {
@@ -156,15 +158,12 @@ export function createComposerAttachments(): AttachmentsController {
   }
 
   function removeFile(clientId: string): void {
-    setStaged(
-      "files",
-      produce((f: PendingFile[]) => {
+    setStaged(draft => { ((f: PendingFile[]) => {
         const idx = f.findIndex((x) => x.clientId === clientId);
         if (idx === -1) return;
         if (f[idx].previewUrl) URL.revokeObjectURL(f[idx].previewUrl);
         f.splice(idx, 1);
-      }),
-    );
+      })(draft["files"]); });
   }
 
   /** Run one file's upload, moving its `upload` through the lifecycle. The
@@ -217,7 +216,7 @@ export function createComposerAttachments(): AttachmentsController {
 
   function clear(): void {
     for (const x of files()) if (x.previewUrl) URL.revokeObjectURL(x.previewUrl);
-    setStaged("files", []);
+    setStaged(draft => { draft["files"] = []; });
     // Numbering is per message, so the next one starts at pasted-image-1 again.
     pastedImages = 0;
     pastedTexts = 0;

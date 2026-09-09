@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{
-    AgentActivityState, Event, HostToClient, ModelSelection, ModelSnapshot, Ping, QuickReply,
-    SendMode, SubagentModelCatalog, ToolCallSummary, TurnEventKind,
+    AgentActivityState, Event, HostToClient, ModelSelection, ModelSnapshot, Ping, SendMode,
+    SubagentModelCatalog, ToolCallSummary, TurnEventKind,
 };
 use lash::{
     InputItem, PromptLayerSink, QueuedTurnDrain, TurnInput,
@@ -25,7 +25,7 @@ use lash::{
         PluginSessionContext, SessionPlugin,
     },
     process::{
-        ProcessAwaitOutput, ProcessAwaiter, ProcessCompletionAuthority, ProcessEventAppendRequest,
+        ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEventAppendRequest,
         ProcessEventType, ProcessExecutionEnvSpec, ProcessIdentity, ProcessInput,
         ProcessStartRequest, ProcessStatus, ProcessWakeDelivery, ProcessWakeSpec, RecoveryContract,
         SessionScope,
@@ -36,7 +36,7 @@ use lash::{
         usage::RemoteTurnEvent,
     },
     rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect},
-    runtime::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest},
+    runtime::{NativeQueuedWork, QueuedWorkRunHandle, QueuedWorkRunRequest},
     tools::{
         StaticToolExecute, ToolBinding, ToolCall, ToolContract, ToolDefinition,
         ToolDefinitionBindingExt, ToolManifest, ToolOutcome, ToolProvider,
@@ -46,8 +46,8 @@ use lash::{
 use lash_core::{
     ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
     ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, ProcessTerminalSpec,
-    ProcessValueSelector, SessionPolicy, TriggerStore, TriggerSubscriptionFilter,
-    TurnInputCheckpointBoundary, TurnInputIngress, plugin::ProcessEngineContributionContext,
+    ProcessValueSelector, SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputIngress,
+    plugin::ProcessEngineContributionContext,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -66,7 +66,7 @@ use crate::{
     storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
     subagent_models::SubagentModelState,
     text::short_label,
-    tools::{JudgmentOptionInput, ToolSuite},
+    tools::ToolSuite,
 };
 
 /// The RLM source dialect the main agent is prompted in and pinned to. Changing
@@ -109,6 +109,7 @@ const SNOOZE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const SNOOZE_TICK_INTERVAL: Duration = Duration::from_millis(25);
 
+mod artifact_tools;
 mod bridges;
 mod condense;
 mod executor;
@@ -118,15 +119,25 @@ mod process_engines;
 mod provider;
 mod runtime;
 mod scripted;
+mod thread_queue;
+mod thread_schemas;
+mod thread_tools;
 mod timeline;
 mod timers;
 mod tool_defs;
 mod tool_results;
 mod tool_schemas;
 mod turn;
+use thread_schemas::*;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod thread_recovery_tests;
+#[cfg(test)]
+mod thread_tests;
+#[cfg(test)]
+mod upgrade_tests;
 
 use bridges::*;
 use condense::*;
@@ -145,5 +156,7 @@ use turn::*;
 
 pub use provider::RuntimeConfig;
 pub(crate) use provider::agent_host_section;
-pub use runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn, TaskActionContext};
+pub use runtime::{
+    AgentRuntime, CancelQueuedResult, OwnerTurn, TaskActionContext, ThreadActionContext,
+};
 pub(crate) use turn::append_mentioned_ping_context;

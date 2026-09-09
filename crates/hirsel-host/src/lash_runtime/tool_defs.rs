@@ -65,143 +65,85 @@ pub(super) fn hirsel_tool_definitions(
 ) -> Vec<ToolDefinition> {
     vec![
         tool_definition(
-            "hirsel.events_judgment",
-            "events_judgment",
-            "Emit a judgment Event when work reaches a taste boundary and needs Sam's decision. Valid example: events.judgment({ question: \"Where should canvas view state persist?\", context: \"Local persistence keeps the reopen path available after a host restart.\", options: [{ label: \"SQLite\", detail: \"Durable with the existing host store.\", recommended: true }, { label: \"Memory\", detail: \"Simpler, but state disappears on restart.\" }], unblocks: 2 }). Rules: context must add information beyond the question or be omitted; context \"Choose where canvas view state should persist.\" is rejected for question \"Where should canvas view state persist?\" because it only paraphrases it. Supply 2–4 options. Keys are optional and become A, B, C… in order; mark one recommendation explicitly, or the host recommends the first option.",
-            events_judgment_input_schema(),
-            event_send_output_schema("judgment"),
-            ["events"],
-            "judgment",
+            "hirsel.artifacts_create",
+            "artifacts_create",
+            "Explicitly publish a reusable artifact and insert its card in the current conversation. Solid artifacts are self-contained JSX modules exporting default App; imports limited to solid-js and @solidjs/web (Solid 2). HTML is self-contained. Files are UTF-8 text. All interaction is local: no network, backend or Hirsel tool access. Never create artifacts automatically from every output.",
+            json!({"type":"object","additionalProperties":false,"required":["title","kind","content"],"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"kind":{"type":"string","enum":["solid","html","file"]},"content":{"type":"string","minLength":1,"maxLength":1048576},"mime":{"type":"string"},"filename":{"type":"string"}}}),
+            json!({"type":"object"}),
+            ["artifacts"],
+            "create",
         ),
         tool_definition(
-            "hirsel.events_notify",
-            "events_notify",
-            "Emit a quiet info Event for an FYI that belongs outside a warm Chat exchange.",
-            events_notify_input_schema(),
-            event_send_output_schema("info"),
-            ["events"],
-            "notify",
+            "hirsel.artifacts_edit",
+            "artifacts_edit",
+            "Edit a saved artifact in place using exact-match replacements. Each old_string must occur exactly once. The ID stays stable and every earlier reference opens the latest content; no revision history. Publishes a card in the current Thread. Use show to read current source before editing.",
+            json!({"type":"object","additionalProperties":false,"required":["artifact_id","edits"],"properties":{"artifact_id":{"type":"integer","minimum":1},"title":{"type":"string","minLength":1,"maxLength":200},"edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["old_string","new_string"],"properties":{"old_string":{"type":"string","minLength":1},"new_string":{"type":"string"}}}}}}),
+            json!({"type":"object"}),
+            ["artifacts"],
+            "edit",
         ),
         tool_definition(
-            "hirsel.events_summary",
-            "events_summary",
-            "Emit a summary Event for a digest, using either markdown content or a validated constrained-JSON UI tree.",
-            events_summary_input_schema(),
-            event_send_output_schema("summary"),
-            ["events"],
-            "summary",
+            "hirsel.artifacts_list",
+            "artifacts_list",
+            "List global artifact summaries, optionally filtered to references in a Thread. Artifacts have no owning Thread; thread_ids are backlinks to conversations that reference them.",
+            json!({"type":"object","additionalProperties":false,"properties":{"thread_id":{"type":"integer","minimum":0}}}),
+            json!({"type":"object"}),
+            ["artifacts"],
+            "list",
         ),
         tool_definition(
-            "hirsel.events_recompose",
-            "events_recompose",
-            "Recompose the exact open Task whose generated action woke this Agent turn. The Host preserves its identity and Anchor and validates the constrained UI. Never create a nested Task for the next stage.",
-            events_recompose_input_schema(),
-            events_recompose_output_schema(),
-            ["events"],
-            "recompose",
+            "hirsel.artifacts_show",
+            "artifacts_show",
+            "Read an artifact's latest source and publish its card in the current conversation. Showing a global artifact adds a reference, never transfers ownership or copies content.",
+            json!({"type":"object","additionalProperties":false,"required":["artifact_id"],"properties":{"artifact_id":{"type":"integer","minimum":1}}}),
+            json!({"type":"object"}),
+            ["artifacts"],
+            "show",
         ),
         tool_definition(
-            "hirsel.events_archive",
-            "events_archive",
-            "Archive one finished Event so Sam's feed hides it. Archiving an open or snoozed Event also resolves it as dismissed.",
-            event_archive_input_schema(),
-            event_archive_output_schema(),
-            ["events"],
-            "archive",
+            "hirsel.threads_create",
+            "threads_create",
+            "Create durable work with its own conversation. Ordinary work needs no choices or notification kind. Reuse client_id on retries; every created Thread is visible immediately.",
+            thread_create_schema(),
+            thread_result_schema(),
+            ["threads"],
+            "create",
         ),
         tool_definition(
-            "hirsel.events_clear",
-            "events_clear",
-            "Clear Sam's feed by archiving every finished Event. Use events.clear when Sam asks to clear out or clear my feed; open judgments, including snoozed judgments, are kept until they receive a response.",
+            "hirsel.threads_update",
+            "threads_update",
+            "Update an existing Thread title, description, generated instrument or attention from any wake. Identity and conversation are preserved. Reading or updating never settles it.",
+            thread_update_schema(),
+            thread_result_schema(),
+            ["threads"],
+            "update",
+        ),
+        tool_definition(
+            "hirsel.threads_list",
+            "threads_list",
+            "List durable Threads, including settled and archived state, to inspect work across conversations.",
             empty_object_input_schema(),
-            events_clear_output_schema(),
-            ["events"],
-            "clear",
+            json!({"type":"object","required":["threads"],"properties":{"threads":{"type":"array","items":{"type":"object"}}}}),
+            ["threads"],
+            "list",
         ),
         tool_definition(
-            "hirsel.pings_send",
-            "pings_send",
-            "deprecated: use events.judgment / events.notify. Compatibility alias for emitting a judgment or info Event from the current Agent turn.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["name", "description"],
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 32,
-                        "description": "Short event handle."
-                    },
-                    "description": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The judgment question shown as the card heading."
-                    },
-                    "content_md": {
-                        "type": "string",
-                        "description": "Optional judgment context. It must add stakes or constraints beyond the heading; omit it or pass an empty string when no context is needed."
-                    },
-                    "requires_response": { "type": "boolean", "default": true },
-                    "view": { "type": ["object", "array", "null"] },
-                    "unblocks": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Optional count of agents unblocked by this judgment."
-                    },
-                    "quick_replies": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": 4,
-                        "description": "Legacy judgment choices; the first is recommended. Prefer options.",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["value", "label"],
-                            "properties": {
-                                "value": { "type": "string" },
-                                "label": { "type": "string" }
-                            }
-                        }
-                    },
-                    "options": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": 4,
-                        "description": "Judgment choices. Keys are optional; when no recommendation is marked, the first option is recommended.",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["label", "detail"],
-                            "properties": {
-                                "key": { "type": "string", "pattern": "^[A-Z]$" },
-                                "label": { "type": "string", "minLength": 1 },
-                                "detail": { "type": "string", "minLength": 1 },
-                                "recommended": { "type": "boolean", "default": false }
-                            }
-                        }
-                    }
-                }
-            }),
-            pings_send_output_schema(),
-            ["pings"],
-            "send",
+            "hirsel.threads_read",
+            "threads_read",
+            "Read a Thread's own conversation, turns and activity. Use before acting on another Thread; this read does not settle or mark attention handled.",
+            thread_read_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "read",
         ),
         tool_definition(
-            "hirsel.pings_resolve",
-            "pings_resolve",
-            "Resolve a Ping that was overtaken by events.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["ping_id"],
-                "properties": {
-                    "ping_id": { "type": "integer", "minimum": 1 }
-                }
-            }),
-            pings_resolve_output_schema(),
-            ["pings"],
-            "resolve",
+            "hirsel.threads_activity",
+            "threads_activity",
+            "Append a factual update to an existing Thread. Activity does not create work, request attention, or settle it. Use threads.update when attention or the instrument changes.",
+            thread_activity_schema(),
+            json!({"type":"object","required":["activity"],"properties":{"activity":{"type":"object"}}}),
+            ["threads"],
+            "activity",
         ),
         tool_definition(
             "hirsel.views_show",
@@ -309,7 +251,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.subagents_prompt",
             "subagents_prompt",
-            "Send follow-up input to a running Sub-agent process.",
+            "Send steering input to a running Sub-agent. Codex targets its active turn; Claude acknowledges native input receipt, which does not guarantee incorporation before the run ends. Completed or stale runs return an error. This does not resume completed work or create a Hirsel follow-up queue.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -326,7 +268,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.subagents_interrupt",
             "subagents_interrupt",
-            "Request interruption of a running Sub-agent process.",
+            "Request interruption of a running Sub-agent process and await the provider's control acknowledgement. The process terminal event reports when the run actually stops.",
             json!({
                 "type": "object",
                 "additionalProperties": false,

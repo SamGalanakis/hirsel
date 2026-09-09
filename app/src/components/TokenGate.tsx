@@ -1,4 +1,5 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createSignal, onSettled, Show } from "solid-js";
+
 import { BrandMark } from "./BrandMark";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -16,7 +17,7 @@ export function TokenGate(props: Props) {
   const [value, setValue] = createSignal("");
   let inputRef: HTMLInputElement | undefined;
 
-  onMount(() => inputRef?.focus());
+  onSettled(() => inputRef?.focus());
 
   function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
@@ -40,7 +41,7 @@ export function TokenGate(props: Props) {
         <Input
           ref={(node) => { inputRef = node; }}
           type="password"
-          inputMode="text"
+          inputmode="text"
           autocomplete="off"
           autocapitalize="off"
           autocorrect="off"

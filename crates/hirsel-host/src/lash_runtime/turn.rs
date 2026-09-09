@@ -40,7 +40,7 @@ pub(super) fn owner_turn_source_key(client_id: &str) -> String {
 
 pub(super) fn owner_turn_text(turn: &OwnerTurn) -> String {
     let mut text = match turn.anchor {
-        Some(anchor) => format!("Owner replied to Ping anchor {anchor}.\n\n{}", turn.body),
+        Some(anchor) => format!("Owner replied to message {anchor}.\n\n{}", turn.body),
         None => turn.body.clone(),
     };
     for attachment in &turn.attachments {
@@ -53,7 +53,18 @@ pub(super) fn owner_turn_text(turn: &OwnerTurn) -> String {
             attachment.blob.size
         ));
     }
+    text.insert_str(0, &format!("[Owning Thread #{}; answer only within this Thread. Use threads.read to inspect other conversations.]\n", turn.thread_id));
     append_mentioned_ping_context(&mut text, &turn.mentioned_pings);
+    if let Some(context) = &turn.thread_action {
+        text.push_str("\n\n[Authoritative Thread instrument action]\n");
+        text.push_str(
+            &serde_json::to_string(
+                &json!({"thread":context.thread,"action":context.action,"data":context.data}),
+            )
+            .unwrap_or_default(),
+        );
+        text.push_str("\nUse threads.update to advance this same Thread's instrument or attention. Preserve identity. Continue is not settlement; only the Owner's explicit settle/complete action settles it.");
+    }
     if let Some(context) = &turn.task_action {
         let payload = json!({
             "task": {
@@ -70,7 +81,7 @@ pub(super) fn owner_turn_text(turn: &OwnerTurn) -> String {
         });
         text.push_str("\n\n[authoritative Task action context]\n");
         text.push_str(&serde_json::to_string_pretty(&payload).unwrap_or_default());
-        text.push_str("\nRecompose this exact open Task with events.recompose. Preserve its id and Anchor; do not create a nested task or session.");
+        text.push_str("\nThis is a legacy instrument action. Inspect threads.list/read to identify its imported Thread before using threads.update; never create duplicate work.");
     }
     text
 }

@@ -1,3 +1,5 @@
+> Historical Event/Task protocol runbook. For the current Thread product gate, see [E2E rules](../RULES.md). The old npm runner commands below are retired.
+
 # Generated Task Instrument E2E
 
 > **Read [../RULES.md](../RULES.md) first** — task-surface pre-flight, isolation, Abort/RCA, and reporting rules apply.

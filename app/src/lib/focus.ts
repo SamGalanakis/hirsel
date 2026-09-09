@@ -1,8 +1,9 @@
-// Focus handoff for the standing Hirsel composer and the flat task index.
+// Focus handoff for the Hirsel composer and summoned utilities.
 // DOM-query based so summoned utilities can return attention without threading
 // refs through the shell. Deferred a microtask so it runs after teardown.
 
 import { createEffect, createSignal, onCleanup } from "solid-js";
+
 
 /** A reactive boolean tracking a CSS media query, kept in sync via the
  * MediaQueryList `change` event. Lets a component read a breakpoint (e.g. "is
@@ -26,17 +27,6 @@ export function createMediaFlag(query: string): () => boolean {
 export function focusMainComposer(): void {
   queueMicrotask(() => {
     document.querySelector<HTMLTextAreaElement>('[data-composer="main"]')?.focus();
-  });
-}
-
-/** Move focus to the open task, or the first task when the global field is
- * active. This is the task-world peer of `focusMainComposer`. */
-export function focusTaskIndex(): void {
-  queueMicrotask(() => {
-    const nav = document.querySelector<HTMLElement>('[data-slot="task-index"]');
-    const task = nav?.querySelector<HTMLElement>('[aria-current="page"]') ??
-      nav?.querySelector<HTMLElement>("button");
-    task?.focus();
   });
 }
 
@@ -104,9 +94,9 @@ export function registerOverlayPresence(): () => void {
  * released late (or never) would kill the global keyboard layer. Call inside a
  * component's reactive scope. */
 export function createOverlayPresence(isOpen: () => boolean): void {
-  createEffect(() => {
-    if (!isOpen()) return;
-    onCleanup(registerOverlayPresence());
+  createEffect(isOpen, (open) => {
+    if (!open) return;
+    return registerOverlayPresence();
   });
 }
 
@@ -151,7 +141,7 @@ function canReceiveRestoredFocus(element: HTMLElement | null | undefined): eleme
 /** Focus management for an overlay panel: move focus into it on mount, trap Tab
  * within it (unless `trapTab` opts out), route Escape to `onEscape`, and restore
  * focus to the trigger on cleanup. Call inside a component's reactive scope
- * (onMount / a createEffect); it registers its own `onCleanup`. `getPanel`
+ * (onSettled / a createEffect); it registers its own `onCleanup`. `getPanel`
  * returns the panel root element once it exists (give the root `tabindex={-1}`
  * so it can hold focus when it has no focusable children yet). */
 export function createFocusTrap(
@@ -256,10 +246,11 @@ export function createFocusTrap(
     if (!shouldTrapTab()) return;
     queueMicrotask(ensureVisibleFocus);
   });
-  const observedPanel = getPanel();
-  if (observedPanel) {
-    panelObserver.observe(observedPanel, { childList: true, subtree: true });
-  }
+  queueMicrotask(() => {
+    if (!trapStack.some(trap => trap.id === id)) return;
+    const observedPanel = getPanel();
+    if (observedPanel) panelObserver.observe(observedPanel, { childList: true, subtree: true });
+  });
 
   window.addEventListener("keydown", onKeyDown, true);
   window.addEventListener("focusin", onFocusIn);

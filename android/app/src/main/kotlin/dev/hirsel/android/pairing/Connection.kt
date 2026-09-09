@@ -5,6 +5,7 @@ import android.os.Looper
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,7 +40,7 @@ sealed interface Phase {
 }
 
 /** An outbound message that never reached the host, kept so the UI can offer a retry. */
-data class FailedSend(val id: Long, val body: String)
+data class FailedSend(val id: Long, val body: String, val threadId: ULong)
 
 /**
  * Live, observable state of a single native [Client]. Callbacks arrive on native
@@ -64,25 +65,46 @@ class Connection internal constructor(
     val failedSends = mutableStateListOf<FailedSend>()
     private var failCounter = 0L
 
+    var focusedThreadId by mutableStateOf<ULong?>(null)
+    val drafts = mutableStateMapOf<ULong, String>()
+    var creatingClientId by mutableStateOf<String?>(null)
+    var actionError by mutableStateOf<String?>(null)
+
+    fun openThread(id: ULong) {
+        focusedThreadId = id
+        client?.openThread(id, null)
+    }
+
+    fun createThread(title: String) {
+        creatingClientId = client?.createThread(title)?.clientId
+    }
+
+    fun action(threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
+        runCatching { client?.threadAction(threadId, action, data, revision) }
+            .onFailure { actionError = it.message ?: "Action failed" }
+    }
+
+    fun stop(threadId: ULong) { client?.cancelTurn(threadId) }
+
     val isOnline: Boolean get() = phase is Phase.Online
 
     /** Fire-and-forget send off the main thread; a throw becomes a retryable [FailedSend]. */
-    fun send(body: String) {
-        val c = client ?: run { recordFailure(body); return }
+    fun send(body: String, threadId: ULong = focusedThreadId ?: 0uL) {
+        val c = client ?: run { recordFailure(body, threadId); return }
         Thread {
-            runCatching { c.sendMessage(body) }
-                .onFailure { mainHandler.post { recordFailure(body) } }
+            runCatching { c.sendThreadMessage(threadId, body, emptyList(), emptyList()) }
+                .onFailure { mainHandler.post { recordFailure(body, threadId) } }
         }.start()
     }
 
     /** Drop the failed entry and try the same body again. */
     fun retry(failed: FailedSend) {
         failedSends.remove(failed)
-        send(failed.body)
+        send(failed.body, failed.threadId)
     }
 
-    private fun recordFailure(body: String) {
-        failedSends.add(FailedSend(failCounter++, body))
+    private fun recordFailure(body: String, threadId: ULong) {
+        failedSends.add(FailedSend(failCounter++, body, threadId))
     }
 
     /** The device token the host issued during a successful pairing handshake. */
@@ -133,6 +155,10 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
             mainHandler.post {
                 val conn = target.value ?: return@post
                 conn.snapshot = snapshot
+                snapshot.createdThreads.firstOrNull { it.clientId == conn.creatingClientId }?.let {
+                    conn.creatingClientId = null
+                    conn.openThread(it.threadId)
+                }
                 if (snapshot.connection == ConnectionState.ONLINE && conn.phase !is Phase.Online) {
                     conn.phase = Phase.Online
                 }
@@ -147,7 +173,7 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                         if (event.attempt == 0u) Phase.Connecting else Phase.Reconnecting(event.attempt.toInt() + 1)
                     is LifecycleEvent.Online -> Phase.Online
                     is LifecycleEvent.Offline -> Phase.Offline(event.reason)
-                    is LifecycleEvent.ProtocolError -> Phase.Failed(event.detail)
+                    is LifecycleEvent.ProtocolError -> { conn.actionError = event.detail; conn.phase }
                 }
             }
         }

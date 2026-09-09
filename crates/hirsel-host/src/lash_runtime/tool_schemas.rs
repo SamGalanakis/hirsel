@@ -1,208 +1,7 @@
 use super::*;
 
-pub(super) fn events_judgment_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["question", "options"],
-        "properties": {
-            "question": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The one-line decision question shown as the judgment heading."
-            },
-            "context": {
-                "type": "string",
-                "description": "Optional stakes or constraints that add information beyond the question. Omit it instead of paraphrasing the question."
-            },
-            "options": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 4,
-                "description": "Two to four real choices with tradeoff details. Mark one recommended; if none is marked, the first is recommended.",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["label", "detail"],
-                    "properties": {
-                        "label": { "type": "string", "minLength": 1 },
-                        "detail": { "type": "string", "minLength": 1 },
-                        "recommended": { "type": "boolean", "default": false },
-                        "key": {
-                            "type": "string",
-                            "pattern": "^[A-Z]$",
-                            "description": "Optional presentation key. Omitted keys are assigned A, B, C… by position."
-                        }
-                    }
-                }
-            },
-            "unblocks": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Optional count of agents this decision unblocks."
-            },
-            "view": {
-                "type": ["object", "array", "null"],
-                "description": "Optional accompanying constrained view embedded in the blessed card."
-            }
-        }
-    })
-}
-
 pub(super) fn empty_object_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false
-    })
-}
-
-pub(super) fn event_archive_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["event_id"],
-        "properties": {
-            "event_id": { "type": "integer", "minimum": 1 }
-        }
-    })
-}
-
-pub(super) fn events_notify_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "description"],
-        "properties": {
-            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
-            "description": {
-                "type": "string",
-                "minLength": 1,
-                "description": "One-line notification text."
-            },
-            "content_md": {
-                "type": "string",
-                "description": "Optional supporting markdown; the description is used when omitted."
-            }
-        }
-    })
-}
-
-pub(super) fn events_summary_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "description"],
-        "properties": {
-            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
-            "description": {
-                "type": "string",
-                "minLength": 1,
-                "description": "One-line digest outcome."
-            },
-            "content_md": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Digest markdown used to build the standard summary card."
-            },
-            "ui": {
-                "type": "object",
-                "description": "A constrained-JSON UI component tree validated by the host."
-            }
-        },
-        "oneOf": [
-            { "required": ["content_md"], "not": { "required": ["ui"] } },
-            { "required": ["ui"], "not": { "required": ["content_md"] } }
-        ]
-    })
-}
-
-pub(super) fn events_recompose_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["event_id", "ui"],
-        "properties": {
-            "event_id": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "Exact Task id supplied in the active generated-action context."
-            },
-            "description": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional updated one-line Task description."
-            },
-            "ui": {
-                "oneOf": [
-                    { "type": "object" },
-                    { "type": "array", "minItems": 1 }
-                ],
-                "description": "Complete next constrained-JSON Task instrument."
-            }
-        }
-    })
-}
-
-pub(super) fn events_recompose_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["event_id", "status"],
-        "properties": {
-            "event_id": { "type": "integer", "minimum": 1 },
-            "status": { "const": "open" }
-        }
-    })
-}
-
-pub(super) fn event_send_output_schema(kind: &str) -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["event_id", "anchor", "kind"],
-        "properties": {
-            "event_id": { "type": "integer", "minimum": 1 },
-            "anchor": { "type": "integer", "minimum": 1 },
-            "kind": { "const": kind }
-        }
-    })
-}
-
-pub(super) fn event_archive_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["event_id", "status", "archived"],
-        "properties": {
-            "event_id": { "type": "integer", "minimum": 1 },
-            "status": { "const": "done" },
-            "archived": { "const": true }
-        }
-    })
-}
-
-pub(super) fn events_clear_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["count"],
-        "properties": {
-            "count": { "type": "integer", "minimum": 0 }
-        }
-    })
-}
-
-pub(super) fn pings_send_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["ping_id", "anchor", "requires_response"],
-        "properties": {
-            "ping_id": { "type": "integer", "minimum": 1 },
-            "anchor": { "type": "integer", "minimum": 1 },
-            "requires_response": { "type": "boolean" }
-        }
-    })
+    json!({"type":"object","additionalProperties":false,"properties":{}})
 }
 
 pub(super) fn view_instance_output_schema() -> Value {
@@ -239,88 +38,6 @@ pub(super) fn views_list_templates_output_schema() -> Value {
                 "id": { "type": "string", "minLength": 1 },
                 "title": { "type": "string", "minLength": 1 }
             }
-        }
-    })
-}
-
-pub(super) fn pings_resolve_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["ping"],
-        "properties": {
-            "ping": {
-                "oneOf": [
-                    ping_output_schema(),
-                    { "type": "null" }
-                ]
-            }
-        }
-    })
-}
-
-pub(super) fn ping_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-            "ping_id",
-            "kind",
-            "source",
-            "name",
-            "description",
-            "ui",
-            "anchor",
-            "requires_response",
-            "quick_replies",
-            "status",
-            "read",
-            "archived",
-            "snoozed_until",
-            "archived_at",
-            "fork_sc",
-            "ts"
-        ],
-        "properties": {
-            "ping_id": { "type": "integer", "minimum": 1 },
-            "kind": { "type": "string", "enum": ["judgment", "summary", "info"] },
-            "source": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["kind", "ref"],
-                "properties": {
-                    "kind": { "type": "string", "enum": ["agent", "subagent", "scheduled", "monitor"] },
-                    "ref": { "type": ["string", "null"] }
-                }
-            },
-            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
-            "description": { "type": "string", "minLength": 1 },
-            "ui": {},
-            "anchor": { "type": "integer", "minimum": 1 },
-            "requires_response": { "type": "boolean" },
-            "quick_replies": {
-                "type": "array",
-                "items": quick_reply_output_schema()
-            },
-            "status": { "type": "string", "enum": ["open", "done"] },
-            "read": { "type": "boolean" },
-            "archived": { "type": "boolean" },
-            "snoozed_until": { "oneOf": [timestamp_output_schema(), { "type": "null" }] },
-            "archived_at": { "oneOf": [timestamp_output_schema(), { "type": "null" }] },
-            "fork_sc": { "type": ["string", "null"] },
-            "ts": timestamp_output_schema()
-        }
-    })
-}
-
-pub(super) fn quick_reply_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["value", "label"],
-        "properties": {
-            "value": { "type": "string" },
-            "label": { "type": "string" }
         }
     })
 }
@@ -512,6 +229,16 @@ pub(super) fn process_await_output_schema() -> Value {
             {
                 "type": "object",
                 "additionalProperties": false,
+                "required": ["type", "terminal_label", "pruned_at_ms"],
+                "properties": {
+                    "type": { "const": "no_longer_retained" },
+                    "terminal_label": { "type": "string" },
+                    "pruned_at_ms": { "type": "integer", "minimum": 0 }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
                 "required": ["type", "value"],
                 "properties": {
                     "type": { "const": "success" },
@@ -528,6 +255,7 @@ pub(super) fn process_await_output_schema() -> Value {
                         "type": "string",
                         "enum": [
                             "invalid_request",
+                            "io",
                             "unavailable",
                             "permission_denied",
                             "timeout",
@@ -565,7 +293,7 @@ pub(super) fn process_await_output_schema() -> Value {
                         "properties": {
                             "writer": {
                                 "type": "string",
-                                "enum": ["owner_drain", "sweep", "reconciled_request"]
+                                "enum": ["owner_drain", "sweep", "reconciled_request", "engine_gave_up"]
                             },
                             "epoch_ms": { "type": "integer", "minimum": 0 }
                         }

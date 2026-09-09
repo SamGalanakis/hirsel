@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { fireEvent, render } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -167,7 +168,7 @@ describe("picker keyboard", () => {
     await userEvent.type(textarea, "#dep");
     const row = options()[0];
     const event = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
-    row.dispatchEvent(event);
+    flush(() => row.dispatchEvent(event));
     expect(event.defaultPrevented).toBe(true);
     expect(textarea.value).toBe("#1 ");
   });
@@ -175,11 +176,11 @@ describe("picker keyboard", () => {
 
 describe("Esc is the picker's own rung of the ladder", () => {
   it("closes the picker and leaves the focused Task alone", async () => {
-    const { focusTask, state } = await import("../../store/store");
+    const { setThreadState, threadState } = await import("../../threads/store");
     const { installGlobalKeymap } = await import("../../lib/keymap");
     const dispose = installGlobalKeymap();
     try {
-      focusTask(1);
+      flush(() => setThreadState(draft => { draft["focusedId"] = 1; }));
       const { textarea, picker } = await renderComposer();
       await userEvent.type(textarea, "#dep");
       expect(picker()).not.toBeNull();
@@ -189,12 +190,12 @@ describe("Esc is the picker's own rung of the ladder", () => {
       fireEvent.keyDown(textarea, { key: "Escape" });
 
       expect(picker()).toBeNull();
-      expect(state.focusedTaskId).toBe(1);
+      expect(threadState.focusedId).toBe(1);
       expect(textarea.value).toBe("#dep");
 
       // A second Escape, with nothing left owning it, DOES clear focus.
       fireEvent.keyDown(textarea, { key: "Escape" });
-      expect(state.focusedTaskId).toBeNull();
+      expect(threadState.focusedId).toBe(0);
     } finally {
       dispose();
     }

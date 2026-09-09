@@ -1,0 +1,73 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { flush } from "solid-js";
+import type { ArtifactClientMessage, ArtifactSummary } from "./types";
+const row: ArtifactSummary = { id: 9, title: "Plan", kind: "html", mime: "text/html", thread_ids: [2, 5], created_at: "a", updated_at: "b" };
+beforeEach(() => vi.resetModules());
+describe("artifact references", () => {
+  it("tracks inventory loading and failure separately from preview and retains rows through retry", async () => {
+    const store = await import("./store"); const frames: ArtifactClientMessage[] = [];
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.setArtifactState({ summaries: [row] }); store.listArtifacts(); flush();
+    expect(store.artifactState.listing).toBe(true);
+    store.handleArtifactMessage({ type: "error", client_id: frames.at(-1)!.client_id, detail: "list unavailable" }); flush();
+    expect(store.artifactState.listError).toBe("list unavailable");
+    expect(store.artifactState.error).toBeNull();
+    expect(store.artifactState.summaries).toHaveLength(1);
+    store.listArtifacts(); flush();
+    expect(store.artifactState.listError).toBeNull(); expect(store.artifactState.listing).toBe(true);
+    store.handleArtifactMessage({ type: "artifacts_listed", client_id: frames.at(-1)!.client_id, artifacts: [row] }); flush();
+    expect(store.artifactState.listing).toBe(false); expect(store.artifactState.listed).toBe(true);
+    expect(store.artifactState.listError).toBeNull(); store.disconnectArtifacts();
+  });
+  it("uses global IDs and follows latest edit while preserving selection", async () => {
+    const store = await import("./store");
+    const frames: ArtifactClientMessage[] = [];
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.openArtifact(9); flush();
+    const request = frames.at(-1)!;
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: request.client_id, artifact: { ...row, content: "old" } }); flush();
+    expect(store.artifactState.opened?.content).toBe("old");
+    store.handleArtifactMessage({ type: "artifact_upsert", artifact: { ...row, title: "Updated plan", updated_at: "c" } }); flush();
+    const refresh = frames.at(-1)!;
+    expect(refresh).toMatchObject({ type: "open_artifact", artifact_id: 9 });
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: refresh.client_id, artifact: { ...row, content: "new" } }); flush();
+    expect(store.artifactState.opened?.content).toBe("new");
+    expect(store.artifactState.selectedId).toBe(9);
+    expect(store.artifactState.summaries[0].thread_ids).toEqual([2, 5]);
+    store.disconnectArtifacts();
+  });
+  it("keeps every artifact in a roster received in one frame", async () => {
+    const store = await import("./store");
+    const frames: ArtifactClientMessage[] = [];
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.listArtifacts();
+    store.handleArtifactMessage({ type: "artifacts_listed", client_id: frames[0].client_id, artifacts: [row, { ...row, id: 10 }, { ...row, id: 11 }] }); flush();
+    expect(store.artifactState.summaries.map(row => row.id).sort()).toEqual([10, 11, 9]);
+    store.disconnectArtifacts();
+  });
+  it("ignores an earlier response for the same artifact after an edit refresh", async () => {
+    const store = await import("./store");
+    const frames: ArtifactClientMessage[] = [];
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.openArtifact(9); flush();
+    store.handleArtifactMessage({ type: "artifact_upsert", artifact: row }); flush();
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[1].client_id, artifact: { ...row, content: "latest" } }); flush();
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[0].client_id, artifact: { ...row, content: "stale" } }); flush();
+    expect(store.artifactState.opened?.content).toBe("latest");
+    store.disconnectArtifacts();
+  });
+  it("ignores stale opens after selecting another artifact or closing", async () => {
+    const store = await import("./store");
+    const frames: ArtifactClientMessage[] = [];
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.openArtifact(9); flush(); const first = frames[0];
+    store.openArtifact(10); flush();
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: first.client_id, artifact: { ...row, content: "old" } }); flush();
+    expect(store.artifactState.selectedId).toBe(10);
+    expect(store.artifactState.opened).toBeNull();
+    store.closeArtifact(); flush();
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[1].client_id, artifact: { ...row, id: 10, content: "late" } }); flush();
+    expect(store.artifactState.opened).toBeNull();
+    store.disconnectArtifacts();
+  });
+});

@@ -7,6 +7,7 @@
 // indicator on the active tab's leading edge — the tab's left edge in the rail,
 // its bottom edge in the strip.
 import { For, Show } from "solid-js";
+
 import type { SettingsTab } from "../../store/store";
 
 export const SETTINGS_TABS: readonly { id: SettingsTab; label: string }[] = [
@@ -90,17 +91,17 @@ export function SettingsTabs(props: {
               role="tab"
               id={settingsTabId(tab.id)}
               data-tab={tab.id}
-              aria-selected={active()}
+              aria-selected={(active()) ? "true" : "false"}
               aria-controls={settingsPanelId(tab.id)}
               // Roving tabindex: the whole list is ONE tab stop, and the arrow
               // keys move within it.
               tabindex={active() ? 0 : -1}
               onClick={() => props.onSelect(tab.id)}
-              class="relative shrink-0 whitespace-nowrap rounded-md px-2 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 rail:px-3"
-              classList={{
+              class={["relative shrink-0 whitespace-nowrap rounded-md px-2 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 rail:px-3", {
                 "font-medium text-foreground": active(),
                 "text-muted-foreground hover:text-foreground": !active(),
-              }}
+              }]}
+
             >
               {tab.label}
               <Show when={active()}>

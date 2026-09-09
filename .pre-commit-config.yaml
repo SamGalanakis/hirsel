@@ -11,6 +11,8 @@ repos:
       - id: check-toml
       - id: check-added-large-files
         args: [--maxkb=1500]
+        # Retain these original design reference renders at their full resolution.
+        exclude: '^docs/thread-concepts/assets/(journal-v2|workbench)\.png$'
       - id: check-merge-conflict
       - id: detect-private-key
 

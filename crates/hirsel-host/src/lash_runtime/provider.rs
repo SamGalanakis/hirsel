@@ -55,6 +55,8 @@ impl DegradedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Thinking,
                 text: Some("provider unavailable".to_string()),
                 sc: None,
@@ -67,6 +69,8 @@ impl DegradedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Idle,
                 text: None,
                 sc: None,
@@ -80,6 +84,8 @@ impl DegradedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Idle,
                 text: None,
                 sc: None,

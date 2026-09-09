@@ -1,5 +1,6 @@
 package dev.hirsel.android.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -76,203 +77,123 @@ import dev.hirsel.core.AgentActivityState
 import dev.hirsel.core.Blob
 import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
-import dev.hirsel.core.Ping
-import dev.hirsel.core.PingStatus
 import dev.hirsel.core.ToolCall
 import kotlinx.coroutines.launch
 
-/**
- * The primary chat surface. Renders the conversation (messages, agent tool
- * activity, attachments), the live agent-working indicator, ping cards with
- * quick-reply affordances, a connection banner with friendly copy, and the
- * composer — auto-scrolling to the newest content unless the user has scrolled up.
- */
+/** Durable thread inventory and focused, independently owned conversation. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ChatScreen(
-    connection: Connection,
-    onOpenSettings: () -> Unit,
-) {
+fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
     val snapshot = connection.snapshot
-    val phase = connection.phase
-    val messages = snapshot?.messages.orEmpty()
-    val pings = snapshot?.pings.orEmpty()
-    val activity = snapshot?.agentActivity
-    val thinking = activity?.state == AgentActivityState.THINKING
-    val failed = connection.failedSends
     val c = LocalHirselColors.current
-
-    var draft by remember { mutableStateOf("") }
+    val focused = connection.focusedThreadId
+    BackHandler(enabled = focused != null) { connection.focusedThreadId = null }
+    val thread = snapshot?.threads?.find { it.id == focused }
+    val messages = snapshot?.messages.orEmpty().filter { it.threadId == focused }
+    val stream = snapshot?.streams?.find { it.threadId == focused && !it.finished }
+    val thinking = stream?.activity?.state == AgentActivityState.THINKING
+    val executing = snapshot?.turns.orEmpty().any { it.threadId == focused && it.state in listOf("queued", "running") }
+    var title by remember { mutableStateOf("") }
+    var inventory by remember { mutableStateOf("Active") }
+    val draft = focused?.let { connection.drafts[it] }.orEmpty()
     val send = {
-        draft.trim().takeIf(String::isNotEmpty)?.let {
-            connection.send(it)
-            draft = ""
-        }
-        Unit
-    }
-
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    // "Pinned to newest": the last item is (nearly) visible. When true we follow
-    // new content; when the user scrolls up to read history we leave them be.
-    val atBottom by remember {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
-            last.index >= info.totalItemsCount - 1
+        if (focused != null && draft.isNotBlank()) {
+            connection.send(draft.trim(), focused)
+            connection.drafts[focused] = ""
         }
     }
-    // Auto-scroll to newest when new content lands and we're already at the bottom.
-    LaunchedEffect(messages.size, failed.size, pings.size, thinking) {
-        if (atBottom) {
-            val target = listState.layoutInfo.totalItemsCount - 1
-            if (target >= 0) listState.animateScrollToItem(target)
-        }
-    }
-
-    val banner: String? = when (val p = phase) {
-        is Phase.Reconnecting -> "Reconnecting to your host…"
-        is Phase.Offline -> ErrorCopy.connection(p.reason)
-        is Phase.Failed -> ErrorCopy.connection(p.detail)
-        else -> null
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .imePadding()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-    ) {
-        // Thin top bar: wordmark left, connection pill + gear right.
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("hirsel", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = c.Foreground)
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (focused != null) Button(onClick = { connection.focusedThreadId = null }) { Text("Threads") }
+            else Text("Threads", color = c.Foreground, fontSize = 20.sp)
             Spacer(Modifier.weight(1f))
-            ConnectionPill(phase)
-            Spacer(Modifier.width(6.dp))
-            GearButton(onClick = onOpenSettings)
+            ConnectionPill(connection.phase)
+            GearButton(onOpenSettings)
         }
-
-        Spacer(Modifier.height(10.dp))
-        HairlineDivider()
-
-        if (banner != null) {
-            ConnectionBanner(banner)
+        connection.actionError?.let { error ->
+            Text(error, color = c.StatusDanger, modifier = Modifier.clickable { connection.actionError = null })
         }
-        Spacer(Modifier.height(10.dp))
-
-        val hasContent = messages.isNotEmpty() || pings.isNotEmpty() || failed.isNotEmpty()
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (!hasContent) {
-                val connecting = snapshot == null || phase is Phase.Connecting || phase is Phase.Reconnecting
-                ChatPlaceholder(connecting = connecting)
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("chat-list"),
-                ) {
-                    itemsIndexed(
-                        messages,
-                        key = { _, m -> "message-${m.id?.toString() ?: m.clientId.orEmpty()}" },
-                    ) { index, message ->
-                        val prev = messages.getOrNull(index - 1)
-                        val gap = when {
-                            prev == null -> 0.dp
-                            prev.author == message.author -> 3.dp
-                            else -> 12.dp
-                        }
-                        Spacer(Modifier.height(gap))
-                        MessageRow(message)
-                    }
-
-                    items(failed, key = { "failed-${it.id}" }) { f ->
-                        Spacer(Modifier.height(6.dp))
-                        FailedMessageRow(f, onRetry = { connection.retry(f) })
-                    }
-
-                    if (thinking) {
-                        item(key = "agent-activity") {
-                            Spacer(Modifier.height(10.dp))
-                            WorkingRow(activity?.text)
-                        }
-                    }
-
-                    if (pings.isNotEmpty()) {
-                        item(key = "pings-header") {
-                            Spacer(Modifier.height(if (messages.isEmpty()) 0.dp else 20.dp))
-                            Text(
-                                "Pings",
-                                style = microLabel(),
-                                color = c.MutedForeground,
-                                modifier = Modifier.padding(bottom = 8.dp),
-                            )
-                        }
-                        itemsIndexed(pings, key = { _, p -> "ping-${p.id}" }) { index, ping ->
-                            if (index > 0) Spacer(Modifier.height(8.dp))
-                            PingCard(ping, onReply = { connection.send(it) })
-                        }
-                    }
-                    item(key = "tail-spacer") { Spacer(Modifier.height(4.dp)) }
-                }
-
-                // Jump-to-latest — only when the user has scrolled up off the bottom.
-                if (!atBottom) {
-                    JumpToLatest(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 8.dp),
-                        onClick = {
-                            scope.launch {
-                                val target = listState.layoutInfo.totalItemsCount - 1
-                                if (target >= 0) listState.animateScrollToItem(target)
-                            }
-                        },
-                    )
+        when (val phase = connection.phase) {
+            is Phase.Reconnecting -> ConnectionBanner("Reconnecting to your host…")
+            is Phase.Offline -> ConnectionBanner(ErrorCopy.connection(phase.reason))
+            is Phase.Failed -> ConnectionBanner(ErrorCopy.connection(phase.detail))
+            else -> Unit
+        }
+        if (focused == null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New thread", testTag = "new-thread-title", singleLine = true) }
+                Button(onClick = { connection.createThread(title.trim()); title = "" }, enabled = title.isNotBlank() && connection.isOnline) { Text("Create") }
+            }
+            FlowRow {
+                listOf("Active", "Settled", "Snoozed", "Archived").forEach { filter ->
+                    ReplyChip(if (inventory == filter) "• $filter" else filter) { inventory = filter }
                 }
             }
-        }
-
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(modifier = Modifier.weight(1f)) {
-                HirselField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    placeholder = "Message",
-                    testTag = "message-composer",
-                    singleLine = true,
-                    imeAction = ImeAction.Send,
-                    onImeAction = { send() },
-                    contentDescription = "Message composer",
-                )
+            LazyColumn(Modifier.weight(1f).testTag("thread-list")) {
+                item { Button(onClick = { connection.openThread(0uL) }) { Text("Orchestrator") } }
+                items(snapshot?.threads.orEmpty().filter { t ->
+                    if (t.id == 0uL) false else when (inventory) {
+                        "Archived" -> t.archivedAt != null
+                        "Settled" -> t.archivedAt == null && t.settledAt != null
+                        "Snoozed" -> t.archivedAt == null && t.settledAt == null && isSnoozed(t.snoozedUntil)
+                        else -> t.archivedAt == null && t.settledAt == null && !isSnoozed(t.snoozedUntil)
+                    }
+                }.sortedByDescending { it.id }, key = { it.id.toString() }) { t ->
+                    Column(Modifier.fillMaxWidth().clickable { connection.openThread(t.id) }.padding(vertical = 12.dp).testTag("thread-${t.id}")) {
+                        Text(t.title, color = c.Foreground, fontWeight = FontWeight.SemiBold)
+                        Text(if (t.needsOwner) "Needs you" else if (!t.read) "Unread" else "Open", color = c.MutedForeground)
+                    }
+                    HairlineDivider()
+                }
             }
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = send,
-                enabled = draft.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = c.Accent,
-                    contentColor = c.OnAccent,
-                    disabledContainerColor = c.Secondary,
-                    disabledContentColor = c.MutedForeground,
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .height(48.dp)
-                    .testTag("send-message")
-                    .semantics { contentDescription = "Send message" },
-            ) { Text("Send") }
+        } else {
+            Text(thread?.title ?: if (focused == 0uL) "Orchestrator" else "Thread #$focused", color = c.Foreground, fontSize = 18.sp)
+            if (thread != null && focused != 0uL) {
+                FlowRow {
+                    ReplyChip(if (thread.settledAt == null) "Settle" else "Reopen") { connection.action(focused, if (thread.settledAt == null) "settle" else "reopen") }
+                    if (!thread.read) ReplyChip("Mark read") { connection.action(focused, "read") }
+                    ReplyChip(if (thread.archivedAt == null) "Archive" else "Unarchive") { connection.action(focused, if (thread.archivedAt == null) "archive" else "unarchive") }
+                    ReplyChip(if (isSnoozed(thread.snoozedUntil)) "Unsnooze" else "Snooze 1h") {
+                        if (isSnoozed(thread.snoozedUntil)) connection.action(focused, "unsnooze")
+                        else connection.action(focused, "snooze", org.json.JSONObject().put("until", java.time.Instant.now().plusSeconds(3600).toString()).toString())
+                    }
+                }
+            }
+            LazyColumn(Modifier.weight(1f).testTag("chat-list")) {
+                if (thread != null) item {
+                    ThreadInstrument(thread, connection)
+                }
+                if (snapshot?.openedThreads?.contains(focused) != true) item { Text("Loading conversation…", color = c.MutedForeground) }
+                if (snapshot?.historyHasMore?.contains(focused) == true) item {
+                    Button(onClick = { connection.client?.openThread(focused, messages.mapNotNull { it.id }.minOrNull()) }) { Text("Load earlier messages") }
+                }
+                items(messages, key = { "message-${it.id ?: it.clientId}" }) { message ->
+                    Spacer(Modifier.height(8.dp)); MessageRow(message)
+                    message.error?.let { error ->
+                        Text(error, color = c.StatusDanger)
+                        Button(onClick = { message.clientId?.let { connection.client?.retrySend(it) } }) { Text("Retry") }
+                    }
+                    if (message.mentions.isNotEmpty()) FlowRow { message.mentions.forEach { id -> ReplyChip("#$id") { connection.openThread(id) } } }
+                }
+                items(connection.failedSends.filter { it.threadId == focused }, key = { "failed-${it.id}" }) { failed -> FailedMessageRow(failed) { connection.retry(failed) } }
+                if (stream != null) item {
+                    StreamTimeline(stream.eventsJson)
+                    if (thinking) WorkingRow(stream.activity.text)
+                }
+                if (stream != null || executing) item { Button(onClick = { connection.stop(focused) }) { Text("Stop") } }
+                items(snapshot?.activities.orEmpty().filter { it.threadId == focused }, key = { "activity-${it.id}" }) { activity ->
+                    Text(activity.kind.replace('_', ' '), color = c.MutedForeground, fontSize = 11.sp)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { HirselField(value = draft, onValueChange = { connection.drafts[focused] = it }, placeholder = "Message this thread", testTag = "message-composer", singleLine = false, imeAction = ImeAction.Send, onImeAction = send) }
+                Button(onClick = send, enabled = draft.isNotBlank()) { Text("Send") }
+            }
         }
     }
 }
+
+private fun isSnoozed(until: String?): Boolean = until?.let { runCatching { java.time.Instant.parse(it).isAfter(java.time.Instant.now()) }.getOrDefault(false) } ?: false
 
 /** A quiet, tappable gear affordance in the chat top bar — the entry to Settings.
  *  Sized to a 48dp touch target while keeping the glyph small (C28). */
@@ -357,23 +278,6 @@ private fun WorkingRow(text: String?) {
 }
 
 @Composable
-private fun JumpToLatest(modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val c = LocalHirselColors.current
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(9999.dp))
-            .background(c.Accent, RoundedCornerShape(9999.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp)
-            .testTag("jump-to-latest")
-            .semantics { contentDescription = "Jump to latest" },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("↓ Latest", color = c.OnAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-@Composable
 private fun MessageRow(message: ChatMessage) {
     val c = LocalHirselColors.current
     val owner = message.author == ChatAuthor.OWNER
@@ -408,6 +312,7 @@ private fun MessageRow(message: ChatMessage) {
                 AttachmentStrip(message.attachments)
             }
             val footer = when {
+                owner && message.error != null -> "Not sent"
                 owner && message.pending -> "sending…"
                 time != null -> time
                 else -> null
@@ -562,180 +467,6 @@ private fun formatSize(bytes: ULong): String {
         b >= 1_000_000 -> "%.1f MB".format(b / 1_000_000)
         b >= 1_000 -> "%.0f KB".format(b / 1_000)
         else -> "$bytes B"
-    }
-}
-
-@Composable
-private fun ChatPlaceholder(connecting: Boolean) {
-    val c = LocalHirselColors.current
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        if (connecting) {
-            CircularProgressIndicator(color = c.AccentRing, strokeWidth = 2.5.dp, modifier = Modifier.size(26.dp))
-            Spacer(Modifier.height(16.dp))
-            Text("Connecting over iroh…", color = c.MutedForeground, fontSize = 13.sp)
-        } else {
-            Text("No messages yet", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = c.Foreground)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Send a message to your agent — it's listening.",
-                color = c.MutedForeground,
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-                modifier = Modifier.widthIn(max = 280.dp),
-            )
-        }
-    }
-}
-
-/**
- * A ping card. Tappable to expand its full content and mark it read (C31);
- * a ping that requires a response shows quick-reply chips and an inline reply
- * field that send back through the FFI message path (C4).
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun PingCard(ping: Ping, onReply: (String) -> Unit) {
-    val c = LocalHirselColors.current
-    val done = ping.status == PingStatus.DONE
-    val requires = ping.requiresResponse && !done
-
-    var expanded by remember(ping.id) { mutableStateOf(false) }
-    // Local read state: the FFI exposes no mark-read call, so tapping marks the
-    // ping read on-device for immediate feedback. See report (needs an FFI
-    // read/ack method to persist to the host).
-    var locallyRead by remember(ping.id) { mutableStateOf(ping.read) }
-    var replyDraft by remember(ping.id) { mutableStateOf("") }
-
-    val hasMore = ping.content.isNotBlank() && ping.content.trim() != ping.description.trim()
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .clip(RoundedCornerShape(14.dp))
-            .alpha(if (done) 0.6f else 1f)
-            .background(c.Card, RoundedCornerShape(14.dp))
-            .border(1.dp, c.Border, RoundedCornerShape(14.dp))
-            .clickable(enabled = hasMore || !locallyRead) {
-                if (hasMore) expanded = !expanded
-                locallyRead = true
-            }
-            .testTag("ping-card"),
-    ) {
-        Row(modifier = Modifier.height(IntrinsicSize.Min)) {
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .background(if (requires) c.Accent else Color.Transparent),
-            )
-            Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    if (requires && !locallyRead) {
-                        StatusDot(c.Accent, size = 7)
-                        Spacer(Modifier.width(7.dp))
-                    }
-                    Text(
-                        "@${ping.name}",
-                        color = c.Foreground,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        fontFamily = HirselMono,
-                        modifier = Modifier.testTag("ping-name"),
-                    )
-                    Spacer(Modifier.weight(1f))
-                    if (done) {
-                        Text("✓", color = c.StatusSuccess, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Done", style = microLabel(), color = c.MutedForeground)
-                    } else {
-                        shortTime(ping.timestamp)?.let {
-                            Text(it, color = c.MutedForeground, fontSize = 11.sp)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    if (expanded && hasMore) ping.content else ping.description,
-                    color = if (requires) c.Foreground else c.MutedForeground,
-                    fontWeight = if (requires) FontWeight.Medium else FontWeight.Normal,
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                )
-                if (hasMore) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        if (expanded) "Show less" else "Show more",
-                        color = c.AccentRing,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-
-                // Quick-reply affordances (C4) — chips + an inline reply field.
-                if (requires) {
-                    Spacer(Modifier.height(10.dp))
-                    if (ping.quickReplies.isNotEmpty()) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            ping.quickReplies.forEach { qr ->
-                                ReplyChip(qr.label) {
-                                    onReply(qr.value)
-                                    locallyRead = true
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            HirselField(
-                                value = replyDraft,
-                                onValueChange = { replyDraft = it },
-                                placeholder = "Reply…",
-                                testTag = "ping-reply-field",
-                                singleLine = true,
-                                imeAction = ImeAction.Send,
-                                onImeAction = {
-                                    replyDraft.trim().takeIf(String::isNotEmpty)?.let {
-                                        onReply(it)
-                                        replyDraft = ""
-                                        locallyRead = true
-                                    }
-                                },
-                                contentDescription = "Reply to ${ping.name}",
-                            )
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        val canSend = replyDraft.isNotBlank()
-                        Text(
-                            "Send",
-                            color = if (canSend) c.AccentRing else c.MutedForeground,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable(enabled = canSend) {
-                                    onReply(replyDraft.trim())
-                                    replyDraft = ""
-                                    locallyRead = true
-                                }
-                                .semantics { role = Role.Button; contentDescription = "Send reply" }
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
-                                .testTag("ping-reply-send"),
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 

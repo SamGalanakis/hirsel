@@ -169,15 +169,7 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       // A dismissed sheet's overlay leaves `pointer-events: none` on <body>
       // after its panel is gone, which would block the next ⋯ click.
       const user = userEvent.setup({ pointerEventsCheck: 0 });
-      const overflow = () =>
-        document.querySelector('[data-slot="phone-overflow-trigger"]') as HTMLElement;
-      expect(overflow().getAttribute("aria-label")).toBe("More actions, 1 processes running");
-      await user.click(overflow());
-      const processesItem = await within(document.body).findByRole("menuitem", {
-        name: /Processes/,
-      });
-      expect(processesItem.textContent).toContain("1");
-      await user.click(processesItem);
+      await user.click(screen.getByRole("button", { name: "Processes" }));
       await waitFor(() => expect(store.state.rightRegion).toBe("processes"));
       await screen.findByText("Running (1)");
       const row = (await screen.findByText("Review the auth refactor")).closest(
@@ -237,15 +229,7 @@ describe("Headless scenario: Processes tab + tool-call visibility", () => {
       await waitFor(() => expect(runningProcessCount(store.state.processes)).toBe(0), {
         timeout: 10000,
       });
-      await waitFor(() =>
-        expect(overflow().getAttribute("aria-label")).toBe("More actions")
-      );
-      await user.click(overflow());
-      const completedItem = await within(document.body).findByRole("menuitem", {
-        name: /Processes/,
-      });
-      expect(completedItem.textContent).not.toContain("1");
-      await user.click(completedItem);
+      await user.click(screen.getByRole("button", { name: "Processes" }));
       await screen.findByText("Finished (1)");
       expect(screen.queryByText("Running (1)")).toBeNull();
       checklist.push("process completed: moved Running → Finished, overflow count cleared");

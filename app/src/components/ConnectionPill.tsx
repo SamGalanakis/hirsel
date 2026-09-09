@@ -25,11 +25,11 @@ export function ConnectionPill() {
     <Badge variant="outline" class="gap-1.5 text-muted-foreground" role="status" aria-live="polite">
       <span
         aria-hidden="true"
-        class="size-1.5 rounded-full"
-        classList={{
+        class={["size-1.5 rounded-full", {
           "bg-status-success": !pending(),
           "bg-status-attention animate-pulse": pending(),
-        }}
+        }]}
+
       />
       {LABEL[state.connection]}
     </Badge>

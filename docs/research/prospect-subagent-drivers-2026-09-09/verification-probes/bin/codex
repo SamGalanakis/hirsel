@@ -1,0 +1,32 @@
+#!/usr/bin/python3
+import json, os, sys, time
+mode=os.environ['VERIFY_MODE']
+open(os.environ['VERIFY_PID'],'w').write(str(os.getpid()))
+def send(v): print(json.dumps(v),flush=True)
+if mode=='startup':
+ print('malformed JSON',flush=True)
+ time.sleep(60)
+ sys.exit()
+for line in sys.stdin:
+ r=json.loads(line); method=r['method']; rid=r['id']
+ if method=='initialize': send({'id':rid,'result':{}})
+ elif method=='thread/start': send({'id':rid,'result':{'thread':{'id': '019fcfd6-17bb-72f0-ae12-a1f2dee6e3e5' if mode=='child' else 'root'}}})
+ elif method=='turn/start':
+  if mode=='child':
+   fixture=json.load(open('/tmp/ref-t3code/apps/server/src/provider/testFixtures/codexMultiAgentWire.json'))
+   for n in fixture['notifications']:
+    if n['method']!='thread/started': send(n)
+   continue
+  if rid==3:
+   send({'id':rid,'result':{'turn':{'id':'A'}}})
+   send({'method':'turn/started','params':{'threadId':'root','turn':{'id':'A'}}})
+   send({'method':'item/started','params':{'threadId':'root','item':{'text':'barrier-A'}}})
+  elif mode=='reject':
+   send({'id':rid,'error':{'code':-1,'message':'REJECTED'}})
+   send({'method':'item/started','params':{'threadId':'root','item':{'text':'barrier-rejected'}}})
+  elif mode=='queue':
+   send({'id':rid,'result':{'turn':{'id':'B'}}})
+   send({'method':'item/started','params':{'threadId':'root','item':{'text':'barrier-B-queued'}}})
+ elif method=='turn/interrupt':
+  send({'method':'item/started','params':{'threadId':'root','item':{'text':'interrupt-target-'+r['params']['turnId']}}})
+  send({'id':rid,'error':{'code':-1,'message':'REJECTED'}})

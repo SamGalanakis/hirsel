@@ -228,10 +228,8 @@ pub(super) fn is_hirsel_subagent_process_record(record: &lash_core::ProcessRecor
 }
 
 pub(super) fn cancelled_await_output(message: String) -> ProcessAwaitOutput {
-    ProcessAwaitOutput::Cancelled {
-        message,
-        raw: None,
-        control: None,
+    ProcessAwaitOutput::Settled {
+        output: lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(message)),
     }
 }
 
@@ -444,41 +442,42 @@ pub(super) fn terminal_event_type(name: &str, status: ProcessStatus) -> ProcessE
 }
 
 pub(super) fn terminal_event_payload(outcome: &TerminalOutcome) -> (&'static str, Value) {
-    match outcome {
+    let (event_type, text, output) = match outcome {
         TerminalOutcome::Done { summary } => (
             SUBAGENT_COMPLETED,
-            json!({
-                "text": format!("Sub-agent completed: {summary}"),
-                "await_output": {
-                    "type": "success",
-                    "value": { "summary": summary },
-                }
-            }),
+            format!("Sub-agent completed: {summary}"),
+            lash_core::ToolCallOutput::success(json!({ "summary": summary })),
         ),
-        TerminalOutcome::Failed { reason } => (
-            SUBAGENT_FAILED,
-            json!({
-                "text": format!("Sub-agent failed: {reason}"),
-                "await_output": {
-                    "type": "failure",
-                    "class": "execution",
-                    "code": "subagent_failed",
-                    "message": reason,
-                    "raw": { "reason": reason },
-                }
-            }),
-        ),
+        TerminalOutcome::Failed { reason } => {
+            let mut failure = lash_core::ToolFailure::tool(
+                lash_core::ToolFailureClass::Execution,
+                "subagent_failed",
+                reason,
+            );
+            failure.raw = Some(lash_core::ToolValue::untrusted_json(
+                json!({ "reason": reason }),
+            ));
+            (
+                SUBAGENT_FAILED,
+                format!("Sub-agent failed: {reason}"),
+                lash_core::ToolCallOutput::failure(failure),
+            )
+        }
         TerminalOutcome::Interrupted => (
             SUBAGENT_CANCELLED,
-            json!({
-                "text": "Sub-agent was interrupted.",
-                "await_output": {
-                    "type": "cancelled",
-                    "message": "Sub-agent was interrupted.",
-                }
-            }),
+            "Sub-agent was interrupted.".to_string(),
+            lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(
+                "Sub-agent was interrupted.",
+            )),
         ),
-    }
+    };
+    (
+        event_type,
+        json!({
+            "text": text,
+            "await_output": ProcessAwaitOutput::from_tool_output(output),
+        }),
+    )
 }
 
 pub(super) fn subagent_abandoned_payload() -> Value {

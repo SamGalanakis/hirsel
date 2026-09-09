@@ -13,7 +13,7 @@ use hirsel_host::{
     iroh::IrohServer,
     router_from_state,
 };
-use hirsel_proto::{ChatAuthor, PingStatus};
+use hirsel_proto::{ChatAuthor, ThreadAttention};
 use tokio::net::TcpListener;
 
 const TOKEN: &str = "iroh-proof-token";
@@ -25,20 +25,19 @@ const ROUND_TRIP_BODY: &str = "iroh client-core round-trip";
 async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(test_host_config(dir.path())).await.unwrap();
-    let anchor = state
+    state
         .storage
         .append_chat(ChatAuthor::Agent, "iroh proof anchor", None)
         .await
         .unwrap();
-    let ping = state
+    let (thread, _) = state
         .storage
-        .create_ping(
+        .create_thread(
             "iroh-proof",
             "Iroh proof",
             "Visible over the shared protocol",
-            anchor.id,
-            true,
-            Vec::new(),
+            &serde_json::json!({"type":"text","text":"Ordinary work"}),
+            ThreadAttention::Quiet,
         )
         .await
         .unwrap();
@@ -96,9 +95,9 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     .await;
     assert!(
         online
-            .pings
+            .threads
             .iter()
-            .any(|item| { item.id == ping.id && item.status == PingStatus::Open })
+            .any(|item| { item.id == thread.id && item.settled_at.is_none() })
     );
     let device_token = client
         .paired_device_token()
@@ -151,9 +150,11 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     assert!(reconnected.messages.iter().any(|entry| {
         matches!(entry, ChatEntry::Confirmed(message) if message.body == "iroh proof anchor")
     }));
-    assert!(reconnected.pings.iter().any(|item| item.id == ping.id));
+    assert!(reconnected.threads.iter().any(|item| item.id == thread.id));
 
-    reconnected_client.send_message(SendMessageRequest::new(ROUND_TRIP_BODY.to_owned()));
+    let mut request = SendMessageRequest::new(ROUND_TRIP_BODY.to_owned());
+    request.thread_id = thread.id;
+    reconnected_client.send_message(request);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if state
@@ -163,7 +164,9 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
                 .unwrap()
                 .iter()
                 .any(|message| {
-                    message.author == ChatAuthor::Owner && message.body == ROUND_TRIP_BODY
+                    message.author == ChatAuthor::Owner
+                        && message.body == ROUND_TRIP_BODY
+                        && message.thread_id == thread.id
                 })
             {
                 break;
@@ -179,12 +182,17 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
             matches!(
                 entry,
                 ChatEntry::Confirmed(message)
-                    if message.author == ChatAuthor::Owner && message.body == ROUND_TRIP_BODY
+                    if message.author == ChatAuthor::Owner && message.body == ROUND_TRIP_BODY && message.thread_id == thread.id
             )
         })
     })
     .await;
-    assert!(round_tripped.pings.iter().any(|item| item.id == ping.id));
+    assert!(
+        round_tripped
+            .threads
+            .iter()
+            .any(|item| item.id == thread.id)
+    );
     reconnected_client.disconnect().await;
 
     let mismatch = device_client(

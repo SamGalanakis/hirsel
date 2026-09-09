@@ -1,5 +1,6 @@
-import { Activity } from "lucide-solid";
+import { Activity } from "@/components/ui/icons";
 import { createMemo, For, Show } from "solid-js";
+
 import type { ProcessInfo } from "../../protocol";
 import { partitionProcesses } from "../../store/selectors";
 import { closeRightRegion, prefillComposer, state } from "../../store/store";

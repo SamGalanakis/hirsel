@@ -1,4 +1,4 @@
-import type { JSX } from "solid-js";
+import type { JSX } from "@solidjs/web";
 
 /**
  * The hirsel mark — the owner-supplied isometric cube. Its four faces are drawn

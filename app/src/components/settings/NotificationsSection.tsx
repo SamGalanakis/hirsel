@@ -5,7 +5,8 @@
 // "no notification slot machine" rule). App.tsx fires a silent notification for
 // a NEW blocking judgment while the tab is hidden, but only once this reads
 // "granted".
-import { createSignal, type JSX, Show } from "solid-js";
+import { createSignal, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { setTitleBadgeEnabled, titleBadgeEnabled } from "../../lib/prefs";
 import { Button } from "../ui/button";
 import { Group, Field, Toggle } from "./rows";
@@ -55,11 +56,11 @@ export function NotificationsSection(): JSX.Element {
             when={notificationsSupported && notifPermission() === "default"}
             fallback={
               <span
-                class="shrink-0 text-xs font-medium"
-                classList={{
+                class={["shrink-0 text-xs font-medium", {
                   "text-status-success": notifPermission() === "granted",
                   "text-muted-foreground": notifPermission() !== "granted",
-                }}
+                }]}
+
               >
                 {notifPermission() === "granted" ? "Enabled" : "Off"}
               </span>

@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { describe, expect, it } from "vitest";
 import { EventKind } from "../../protocol";
 import type { EventItem } from "../../protocol";
@@ -105,41 +106,41 @@ describe("task focus", () => {
   });
 
   it("starts ambient and toggles one task into and out of focus", () => {
-    clearTaskFocus();
+    flush(() => clearTaskFocus());
     expect(state.focusedTaskId).toBeNull();
-    toggleTaskFocus(task.id);
+    flush(() => toggleTaskFocus(task.id));
     expect(state.focusedTaskId).toBe(task.id);
-    toggleTaskFocus(task.id);
+    flush(() => toggleTaskFocus(task.id));
     expect(state.focusedTaskId).toBeNull();
   });
 
   it("moves focus straight to another task without passing through ambient", () => {
-    clearTaskFocus();
-    toggleTaskFocus(task.id);
-    toggleTaskFocus(8);
+    flush(() => clearTaskFocus());
+    flush(() => toggleTaskFocus(task.id));
+    flush(() => toggleTaskFocus(8));
     expect(state.focusedTaskId).toBe(8);
-    clearTaskFocus();
+    flush(() => clearTaskFocus());
   });
 
   it("returns to ambient when the focused task disappears", () => {
-    toggleTaskFocus(task.id);
-    reconcileTaskFocus([8]);
+    flush(() => toggleTaskFocus(task.id));
+    flush(() => reconcileTaskFocus([8]));
     expect(state.focusedTaskId).toBeNull();
   });
 
   it("keeps focus while the focused task is still in the field", () => {
-    toggleTaskFocus(task.id);
-    reconcileTaskFocus([8, task.id]);
+    flush(() => toggleTaskFocus(task.id));
+    flush(() => reconcileTaskFocus([8, task.id]));
     expect(state.focusedTaskId).toBe(task.id);
-    clearTaskFocus();
+    flush(() => clearTaskFocus());
   });
 
   it("focuses a task outright, without the toggle's off-state", () => {
-    clearTaskFocus();
-    focusTask(task.id);
-    focusTask(task.id);
+    flush(() => clearTaskFocus());
+    flush(() => focusTask(task.id));
+    flush(() => focusTask(task.id));
     expect(state.focusedTaskId).toBe(task.id);
-    clearTaskFocus();
+    flush(() => clearTaskFocus());
   });
 });
 

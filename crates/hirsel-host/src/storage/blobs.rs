@@ -140,7 +140,7 @@ fn blob_for_client_id(conn: &Connection, client_id: &str) -> rusqlite::Result<St
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredBlob {
     pub blob: Blob,
     pub path: PathBuf,

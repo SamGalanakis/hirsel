@@ -1,5 +1,6 @@
-import { Bot, ChevronDown, OctagonX, Radar } from "lucide-solid";
+import { Bot, ChevronDown, OctagonX, Radar } from "@/components/ui/icons";
 import { createSignal, Show } from "solid-js";
+
 import type { ProcessInfo, ProcessState } from "../../protocol";
 import { formatRelativeTime } from "../../lib/format";
 import { Card } from "../ui/card";
@@ -26,13 +27,13 @@ function StateChip(props: { state: ProcessState }) {
   const running = () => props.state === "running";
   return (
     <span
-      class="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-xs font-medium"
-      classList={{
+      class={["inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-xs font-medium", {
         "bg-status-active/15 text-status-active": running(),
         "bg-status-danger/15 text-status-danger": props.state === "failed",
         "bg-status-attention/15 text-status-attention": props.state === "abandoned",
         "bg-muted text-muted-foreground": props.state === "done" || props.state === "cancelled",
-      }}
+      }]}
+
       data-state={props.state}
     >
       <Show when={running()}>
@@ -56,13 +57,13 @@ function StateMark(props: { state: ProcessState }) {
       data-state={props.state}
     >
       <span
-        class="size-1.5 rounded-full"
-        classList={{
+        class={["size-1.5 rounded-full", {
           "bg-status-active": props.state === "running",
           "bg-status-danger": props.state === "failed",
           "bg-status-attention": props.state === "abandoned",
           "bg-muted-foreground": props.state === "done" || props.state === "cancelled",
-        }}
+        }]}
+
         aria-hidden="true"
       />
       {STATE_LABEL[props.state]}
@@ -77,8 +78,8 @@ function DisclosureChevron(props: { expanded: boolean; class?: string }) {
   return (
     <ChevronDown
       aria-hidden="true"
-      class={`size-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out ${props.class ?? ""}`}
-      classList={{ "-rotate-90": !props.expanded }}
+      class={[`size-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out ${props.class ?? ""}`, { "-rotate-90": !props.expanded }]}
+
     />
   );
 }
@@ -105,7 +106,7 @@ export function ProcessRow(props: Props) {
       <button
         type="button"
         class="flex min-w-0 flex-1 items-center gap-2 py-2.5 text-left [@media(pointer:coarse)]:min-h-11"
-        aria-expanded={expanded()}
+        aria-expanded={(expanded()) ? "true" : "false"}
         aria-label={`Show details for ${p().label}`}
         onClick={() => setExpanded((v) => !v)}
       >
@@ -148,7 +149,7 @@ export function ProcessRow(props: Props) {
       <button
         type="button"
         class="flex min-h-11 w-full items-start gap-2 text-left"
-        aria-expanded={expanded()}
+        aria-expanded={(expanded()) ? "true" : "false"}
         onClick={() => setExpanded((v) => !v)}
       >
         <span class="mt-0.5 shrink-0 text-muted-foreground">

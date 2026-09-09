@@ -8,7 +8,7 @@ use std::{
 
 use axum::{Router, body::Body, http::Request, routing::post};
 use hirsel_plugin_api::{
-    NewEvent, Plugin, PluginCtx, PluginRegistration, PluginRouterState, PluginTool,
+    NewActivity, NewThread, Plugin, PluginCtx, PluginRegistration, PluginRouterState, PluginTool,
     SettingDescriptor, async_trait,
 };
 use hirsel_proto::HostToClient;
@@ -591,9 +591,9 @@ async fn a_plugin_push_reaches_every_connected_client() {
 }
 
 #[tokio::test]
-async fn plugin_events_land_in_the_feed() {
+async fn plugin_threads_and_activity_have_distinct_durable_identities() {
     let dir = tempfile::tempdir().unwrap();
-    let (host, _tools, storage, _broadcaster) = start_host(
+    let (host, _tools, storage, broadcaster) = start_host(
         dir.path(),
         vec![PluginRegistration::new(
             Box::new(QuietPlugin { id: "quiet" }),
@@ -602,21 +602,84 @@ async fn plugin_events_land_in_the_feed() {
         )],
     )
     .await;
+    let mut client = broadcaster.subscribe();
     let ctx = host.inner.plugins[0].ctx.clone();
-
-    let event_id = ctx
-        .events()
-        .notify(NewEvent::new("build", "The build finished").with_content("All green."))
+    let before = storage.thread_snapshot().await.unwrap().len();
+    let receipt = ctx
+        .threads()
+        .append_activity(NewActivity::new(
+            "build_finished",
+            json!({"message": "All green."}),
+        ))
         .await
         .unwrap();
-    let event = storage.ping(event_id).await.unwrap().expect("event exists");
-    assert_eq!(event.name, "quiet-build");
-    assert_eq!(event.description, "The build finished");
-
-    ctx.events().resolve(event_id).await.unwrap();
+    assert_eq!(receipt.thread_id, 0);
     assert_eq!(
-        storage.ping(event_id).await.unwrap().unwrap().status,
-        hirsel_proto::EventStatus::Done
+        storage.thread_snapshot().await.unwrap().len(),
+        before,
+        "FYI does not create work"
+    );
+    match client.recv().await.unwrap() {
+        HostToClient::ThreadActivity { activity } => {
+            assert_eq!(activity.id, receipt.activity_id);
+            assert_eq!(activity.data["plugin"], "quiet");
+            assert_eq!(activity.data["payload"]["message"], "All green.");
+        }
+        other => panic!("expected activity, got {other:?}"),
+    }
+    let thread_id = ctx
+        .threads()
+        .create(NewThread::new("Buy groceries", "Shopping list"))
+        .await
+        .unwrap();
+    let thread = storage.thread(thread_id).await.unwrap().unwrap();
+    assert_eq!(thread.title, "Buy groceries");
+    assert_eq!(thread.attention, hirsel_proto::ThreadAttention::Quiet);
+    assert!(matches!(
+        client.recv().await.unwrap(),
+        HostToClient::ThreadUpsert { .. }
+    ));
+    ctx.threads()
+        .append_activity(
+            NewActivity::new("progress", json!({"message": "List ready"})).in_thread(thread_id),
+        )
+        .await
+        .unwrap();
+    storage.mark_thread_read(thread_id).await.unwrap();
+    assert!(
+        storage
+            .thread(thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+    ctx.threads().settle(thread_id, true).await.unwrap();
+    assert!(
+        storage
+            .thread(thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_some()
+    );
+    ctx.threads().settle(thread_id, false).await.unwrap();
+    assert!(
+        storage
+            .thread(thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+    assert!(
+        ctx.threads()
+            .append_activity(NewActivity::new("progress", json!({})).in_thread(u64::MAX))
+            .await
+            .is_err()
     );
 }
 

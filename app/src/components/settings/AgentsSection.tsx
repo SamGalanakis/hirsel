@@ -3,8 +3,9 @@
 // interlocutor — then the ephemeral fork, then the Sub-agent models. Every
 // control is host-backed: it reflects a broadcast snapshot and settles from the
 // next one, never from an optimistic local write.
-import { ChevronDown } from "lucide-solid";
-import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
+import { ChevronDown } from "@/components/ui/icons";
+import { createEffect, createSignal, For, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import { createPendingKeys } from "../../lib/pending";
 import type { ModelSelection, SubagentModel } from "../../protocol";
 import { state } from "../../store/store";
@@ -36,9 +37,8 @@ function MainAgent() {
   const current = () => snapshot()?.current;
   const providerId = () => snapshot()?.provider_id;
   const [selectedProviderId, setSelectedProviderId] = createSignal(providerId());
-  createEffect(() => {
-    const stored = providerId();
-    if (!pending.isPending("main-provider")) setSelectedProviderId(stored);
+  createEffect(() => ({ stored: providerId(), busy: pending.isPending("main-provider") }), ({ stored, busy }) => {
+    if (!busy) setSelectedProviderId(stored);
   });
   const modelView = () => {
     const stored = current();
@@ -58,9 +58,7 @@ function MainAgent() {
   // frame, or the timeout — the value is NOT guaranteed to be echoed (the host
   // only broadcasts an actual change).
   const [awaited, setAwaited] = createSignal<ModelSelection | null>(null);
-  createEffect(() => {
-    const selection = awaited();
-    const settled = current();
+  createEffect(() => ({ selection: awaited(), settled: current() ? { id: current()!.id, variant: current()!.variant } : null }), ({ selection, settled }) => {
     if (selection && settled && settled.id === selection.id && settled.variant === selection.variant) {
       setAwaited(null);
       pending.settleAll();
@@ -69,13 +67,8 @@ function MainAgent() {
 
   // The main prompt settles from the authoritative prompts frame, like the
   // fork's does. Equal snapshots are still acknowledgements.
-  createEffect(() => {
-    const prompts = state.prompts;
-    if (!prompts) return;
-    void state.promptsRevision;
-    void prompts.agent.text;
-    void prompts.agent.is_default;
-    pending.settle("agent-prompt");
+  createEffect(() => state.prompts ? [state.promptsRevision, state.prompts.agent.text, state.prompts.agent.is_default] : null, (prompts) => {
+    if (prompts) pending.settle("agent-prompt");
   });
 
   function select(selection: ModelSelection) {
@@ -193,8 +186,8 @@ function SubagentModelRow(props: {
 
   return (
     <div
-      class="py-3 transition-opacity"
-      classList={{ "opacity-60": props.pending }}
+      class={["py-3 transition-opacity", { "opacity-60": props.pending }]}
+
     >
       <div class="flex items-center gap-3">
         <div class="min-w-0 flex-1">
@@ -213,9 +206,9 @@ function SubagentModelRow(props: {
       <div
         role="group"
         aria-label={`${props.model.label} enabled variants`}
-        aria-disabled={!props.model.enabled}
-        class="mt-3 flex flex-wrap gap-1.5 transition-opacity"
-        classList={{ "opacity-45": !props.model.enabled }}
+        aria-disabled={(!props.model.enabled) ? "true" : "false"}
+        class={["mt-3 flex flex-wrap gap-1.5 transition-opacity", { "opacity-45": !props.model.enabled }]}
+
       >
         <For each={props.model.variants}>
           {(variant) => {
@@ -224,17 +217,17 @@ function SubagentModelRow(props: {
             return (
               <button
                 type="button"
-                aria-pressed={active()}
+                aria-pressed={(active()) ? "true" : "false"}
                 aria-label={`${active() ? "Disable" : "Enable"} ${props.model.label} ${variant} variant`}
                 disabled={props.pending || !props.model.enabled || isLast()}
                 title={isLast() ? "At least one variant must stay enabled" : undefined}
                 onClick={() => toggleVariant(variant)}
-                class="min-h-8 rounded-full border px-2.5 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-55 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3.5"
-                classList={{
+                class={["min-h-8 rounded-full border px-2.5 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-55 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3.5", {
                   "border-primary/60 bg-primary/10 text-foreground": active(),
                   "border-border bg-surface text-muted-foreground hover:border-input hover:text-foreground":
                     !active(),
-                }}
+                }]}
+
               >
                 {titleCase(variant)}
               </button>
@@ -268,8 +261,7 @@ function SubagentModels() {
   // A rejected or no-op write produces no broadcast at all, so each key is also
   // bounded by the error frame and by its timeout.
   const pending = createPendingKeys();
-  createEffect(() => {
-    catalogVersion();
+  createEffect(catalogVersion, () => {
     pending.settleAll();
   });
   settleOnProtocolError(pending);
@@ -311,7 +303,7 @@ function SubagentModels() {
             <div>
               <button
                 type="button"
-                aria-expanded={!isCollapsed(group.provider)}
+                aria-expanded={(!isCollapsed(group.provider)) ? "true" : "false"}
                 aria-controls={providerPanelId(group.provider)}
                 aria-label={`${isCollapsed(group.provider) ? "Expand" : "Collapse"} ${group.label} models`}
                 onClick={() => toggleProvider(group.provider)}
@@ -320,8 +312,8 @@ function SubagentModels() {
                 <span>{group.label}</span>
                 <ChevronDown
                   aria-hidden="true"
-                  class="size-3.5 transition-transform duration-200 ease-out"
-                  classList={{ "-rotate-90": isCollapsed(group.provider) }}
+                  class={["size-3.5 transition-transform duration-200 ease-out", { "-rotate-90": isCollapsed(group.provider) }]}
+
                 />
               </button>
               <Show when={!isCollapsed(group.provider)}>

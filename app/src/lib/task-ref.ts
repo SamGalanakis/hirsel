@@ -17,7 +17,7 @@
 // the token and the mention drops with it; there is no parallel list to keep in
 // step.
 
-import type { EventItem } from "../protocol";
+export interface RefTarget { id: number; name?: string; title?: string; attention?: string; settled_at?: string | null; }
 
 /** The character that opens the picker. */
 export const TASK_REF_TRIGGER = "#";
@@ -72,12 +72,12 @@ function normalize(name: string): string {
 
 /** How well one Task answers a query — lower is a better answer. `null` means
  * it does not answer it at all. */
-function rank(task: EventItem, query: string): number | null {
+function rank(task: RefTarget, query: string): number | null {
   if (query.length === 0) return 4;
   const id = String(task.id);
   if (id === query) return 0;
   if (id.startsWith(query)) return 1;
-  const name = normalize(task.name);
+  const name = normalize(task.title ?? task.name ?? "");
   const q = query.toLowerCase().replaceAll(" ", "-");
   if (name.startsWith(q)) return 2;
   if (name.includes(q)) return 3;
@@ -87,13 +87,13 @@ function rank(task: EventItem, query: string): number | null {
 /** Tasks answering `query`, best answer first; ties go newest-first (higher id).
  * An empty query lists the whole field, capped at `limit`. */
 export function filterTaskCandidates(
-  tasks: EventItem[],
+  tasks: RefTarget[],
   query: string,
   limit = 6,
-): EventItem[] {
+): RefTarget[] {
   return tasks
     .map((task) => ({ task, rank: rank(task, query) }))
-    .filter((row): row is { task: EventItem; rank: number } => row.rank !== null)
+    .filter((row): row is { task: RefTarget; rank: number } => row.rank !== null)
     .sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : b.task.id - a.task.id))
     .slice(0, limit)
     .map((row) => row.task);
@@ -138,7 +138,7 @@ function scanRefs(text: string): { index: number; id: number; token: string }[] 
  * `send_message.mentions`. Deduped, order-preserving, and silent about refs that
  * name nothing in the field: an unresolvable `#99` stays plain text and is never
  * sent as a mention. */
-export function resolveMentionIds(text: string, tasks: EventItem[]): number[] {
+export function resolveMentionIds(text: string, tasks: RefTarget[]): number[] {
   const known = new Set(tasks.map((task) => task.id));
   const ids: number[] = [];
   const seen = new Set<number>();

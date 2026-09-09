@@ -1,5 +1,6 @@
-import { X } from "lucide-solid";
+import { X } from "@/components/ui/icons";
 import { For, Show } from "solid-js";
+
 import { cn } from "@/lib/utils";
 import { dismissToast, pauseToast, resumeToast, toasts } from "../lib/toast";
 

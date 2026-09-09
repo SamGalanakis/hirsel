@@ -1,7 +1,8 @@
 import { For, Show } from "solid-js";
-import type { EventItem } from "../../protocol";
+
+import type { RefTarget } from "../../lib/task-ref";
 import { formatTaskRef } from "../../lib/task-ref";
-import { taskLabel, taskName, taskStatus, taskTone } from "../tasks/task-model";
+
 
 export const TASK_REF_PICKER_ID = "task-ref-picker";
 
@@ -15,10 +16,10 @@ export const TASK_REF_PICKER_ID = "task-ref-picker";
  * is typing; on a coarse pointer each row is a 44px target and a tap accepts it
  * without dropping the keyboard. */
 export function TaskRefPicker(props: {
-  candidates: EventItem[];
+  candidates: RefTarget[];
   activeIndex: number;
   anchorX: number;
-  onAccept: (task: EventItem) => void;
+  onAccept: (task: RefTarget) => void;
   onHover: (index: number) => void;
 }) {
   return (
@@ -27,7 +28,7 @@ export function TaskRefPicker(props: {
         data-slot="task-ref-picker"
         id={TASK_REF_PICKER_ID}
         role="listbox"
-        aria-label="Cite a task"
+        aria-label="Cite a thread"
         /* Anchored to the caret, clamped so a `#` typed at the right-hand end of
            a long line never pushes the list off the column. */
         style={{
@@ -37,7 +38,7 @@ export function TaskRefPicker(props: {
       >
         <For each={props.candidates}>
           {(task, index) => {
-            const status = () => taskStatus(task);
+            const status = () => task.settled_at ? "Settled" : task.attention === "needs_owner" ? "Needs you" : "";
             return (
               <div
                 id={`${TASK_REF_PICKER_ID}-option-${task.id}`}
@@ -45,11 +46,11 @@ export function TaskRefPicker(props: {
                 /* The rows never take focus — the caret stays in the composer
                    and `aria-activedescendant` does the pointing — but an option
                    must still be focusable to be a legal one. */
-                tabIndex={-1}
+                tabindex={-1}
                 data-task-ref-option={task.id}
-                aria-selected={index() === props.activeIndex}
-                class="flex cursor-pointer items-center gap-2.5 rounded-xl px-2 py-1.5 text-sm text-muted-foreground [@media(pointer:coarse)]:min-h-11"
-                classList={{ "bg-primary/10 text-foreground": index() === props.activeIndex }}
+                aria-selected={(index() === props.activeIndex) ? "true" : "false"}
+                class={["flex cursor-pointer items-center gap-2.5 rounded-xl px-2 py-1.5 text-sm text-muted-foreground [@media(pointer:coarse)]:min-h-11", { "bg-primary/10 text-foreground": index() === props.activeIndex }]}
+
                 onMouseEnter={() => props.onHover(index())}
                 /* Pointer-down, not click: a click would blur the composer
                    first, and the caret the insertion needs would be gone. */
@@ -58,12 +59,12 @@ export function TaskRefPicker(props: {
                   props.onAccept(task);
                 }}
               >
-                <span class={`size-1.5 shrink-0 rounded-full ${taskTone(status())}`} aria-hidden="true" />
+                <span class="size-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
                 <span class="shrink-0 font-mono text-meta text-muted-foreground/80">
                   {formatTaskRef(task.id)}
                 </span>
-                <span class="min-w-0 flex-1 truncate">{taskName(task)}</span>
-                <span class="shrink-0 text-xs text-muted-foreground/70">{taskLabel(status())}</span>
+                <span class="min-w-0 flex-1 truncate">{task.title ?? task.name}</span>
+                <span class="shrink-0 text-xs text-muted-foreground/70">{status()}</span>
               </div>
             );
           }}

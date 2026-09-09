@@ -20,6 +20,14 @@ pub struct Blob {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: u64,
+    #[serde(default)]
+    pub mentions: Vec<u64>,
     pub id: u64,
     pub author: ChatAuthor,
     pub body: String,

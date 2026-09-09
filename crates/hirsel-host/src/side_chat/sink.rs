@@ -24,6 +24,8 @@ impl TurnActivitySink for ScopedTurnSink {
         match activity.event {
             lash::TurnEvent::ModelRequestStarted { .. } => {
                 self.publish(HostToClient::AgentActivity {
+                    turn_id: None,
+                    thread_id: None,
                     state: AgentActivityState::Thinking,
                     text: Some("thinking".to_string()),
                     sc,
@@ -34,6 +36,8 @@ impl TurnActivitySink for ScopedTurnSink {
                     text: text.to_string(),
                 });
                 self.publish(HostToClient::AgentActivity {
+                    turn_id: None,
+                    thread_id: None,
                     state: AgentActivityState::Thinking,
                     text: latest_line(&text),
                     sc,
@@ -44,6 +48,8 @@ impl TurnActivitySink for ScopedTurnSink {
                     text: text.to_string(),
                 });
                 self.publish(HostToClient::AgentActivity {
+                    turn_id: None,
+                    thread_id: None,
                     state: AgentActivityState::Thinking,
                     text: latest_line(&text),
                     sc,
@@ -61,6 +67,8 @@ impl TurnActivitySink for ScopedTurnSink {
                     summary: compact_json(&args),
                 });
                 self.publish(HostToClient::AgentActivity {
+                    turn_id: None,
+                    thread_id: None,
                     state: AgentActivityState::Thinking,
                     text: Some(format!("tool {name}")),
                     sc,
@@ -83,12 +91,16 @@ impl TurnActivitySink for ScopedTurnSink {
                     summary,
                 });
                 self.publish(HostToClient::AgentActivity {
+                    turn_id: None,
+                    thread_id: None,
                     state: AgentActivityState::Thinking,
                     text: Some(format!("tool {name} completed")),
                     sc,
                 });
             }
             lash::TurnEvent::Error { message } => self.publish(HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Thinking,
                 text: latest_line(&message),
                 sc,
@@ -102,6 +114,8 @@ impl ScopedTurnSink {
     fn publish_turn_event(&self, event: TurnEventKind) {
         let seq = self.session.seq.fetch_add(1, Ordering::AcqRel) + 1;
         self.publish(HostToClient::TurnEvent {
+            turn_id: None,
+            thread_id: None,
             seq,
             event,
             sc: Some(self.session.sc.clone()),

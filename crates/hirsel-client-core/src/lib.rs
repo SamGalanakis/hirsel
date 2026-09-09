@@ -1,9 +1,4 @@
-//! Shared transport and state foundation for Hirsel clients.
-//!
-//! This first slice deliberately excludes attachments and blobs, send modes and
-//! cancellation, running-turn timelines, and side chats. Those protocol
-//! features remain in `hirsel-proto` and can be layered onto this foundation in
-//! later slices.
+//! Shared transport and durable Thread state for Hirsel clients.
 
 mod client;
 mod config;
@@ -17,10 +12,15 @@ pub use config::{ClientConfig, ConfigError, ReconnectPolicy};
 pub use identity::generate_iroh_identity;
 pub use observer::{ClientObserver, LifecycleEvent};
 pub use store::{
-    AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, ConnectionState, PendingSend,
+    AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, ConnectionState, CreatedThread,
+    PendingSend, ThreadStream,
 };
 
 pub use hirsel_proto::{
-    AgentActivityState, Blob, ChatAuthor, ChatMessage, HelloAuth, Ping, PingStatus, ProcessInfo,
-    ProcessKind, ProcessState, QuickReply, ToolCallSummary,
+    AgentActivityState, Blob, ChatAuthor, ChatMessage, HelloAuth, ProcessInfo, ProcessKind,
+    ProcessState, Thread, ThreadActivity, ThreadAttention, ThreadTurn, ThreadTurnState,
+    ToolCallSummary,
 };
+
+#[cfg(test)]
+mod thread_tests;

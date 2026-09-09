@@ -10,7 +10,7 @@ use rusqlite::params;
 
 impl Storage {
     pub async fn init(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -130,6 +130,8 @@ impl Storage {
         conn.execute("DELETE FROM side_chat_messages", [])?;
         migrate_pings_schema(&conn)?;
         ensure_chat_tool_calls_column(&conn)?;
+        super::thread_schema::migrate(&mut conn)?;
+        super::artifacts::migrate(&conn)?;
         let integrity = conn
             .prepare("PRAGMA integrity_check")?
             .query_map([], |row| row.get::<_, String>(0))?

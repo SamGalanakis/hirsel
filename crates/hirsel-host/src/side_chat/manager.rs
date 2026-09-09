@@ -156,6 +156,7 @@ impl SideChatManager {
             && matches!(event.kind, EventKind::Judgment)
         {
             session
+                .admin()
                 .tools()
                 .add_provider(Arc::new(fork_decide_provider(
                     Arc::downgrade(self),
@@ -253,6 +254,8 @@ impl SideChatManager {
         let cancelled = session.cancel_active_turn();
         session.touch();
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: Some(sc.to_string()),
@@ -383,6 +386,18 @@ impl SideChatManager {
                 Some(current.anchor),
             )
             .await?;
+        // This acceptance is a persisted coordinator message, unlike the
+        // scoped side-chat transcript. Refresh it even if resolving fails.
+        match self.storage.thread(anchor.thread_id).await {
+            Ok(Some(thread)) => self.publish(HostToClient::ThreadUpsert { thread }),
+            Ok(None) => tracing::warn!(
+                thread_id = anchor.thread_id,
+                "cannot publish missing Thread summary"
+            ),
+            Err(error) => {
+                tracing::warn!(thread_id = anchor.thread_id, %error, "cannot refresh Thread summary")
+            }
+        }
         let event = self
             .storage
             .resolve_event_fork(event_id)
@@ -544,6 +559,8 @@ impl SideChatManager {
         let cancel = lash::CancellationToken::new();
         session.set_active_cancel(Some(cancel.clone()));
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Thinking,
             text: Some("thinking".to_string()),
             sc: Some(session.sc.clone()),
@@ -566,6 +583,8 @@ impl SideChatManager {
         };
         session.set_active_cancel(None);
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: Some(session.sc.clone()),
@@ -590,11 +609,15 @@ impl SideChatManager {
         let cancel = lash::CancellationToken::new();
         session.set_active_cancel(Some(cancel.clone()));
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Thinking,
             text: Some("processing side-chat message".to_string()),
             sc: Some(session.sc.clone()),
         });
         self.publish(HostToClient::TurnEvent {
+            turn_id: None,
+            thread_id: None,
             seq: 1,
             event: TurnEventKind::Prose {
                 text: "I am checking the side-chat context.".to_string(),
@@ -611,6 +634,8 @@ impl SideChatManager {
                 .await?;
         }
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: Some(session.sc.clone()),
@@ -620,6 +645,8 @@ impl SideChatManager {
 
     async fn scripted_conclusion(&self, session: &Arc<SideChatSession>) -> anyhow::Result<String> {
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Thinking,
             text: Some("drafting conclusion".to_string()),
             sc: Some(session.sc.clone()),
@@ -636,6 +663,8 @@ impl SideChatManager {
             session.ping_content
         );
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: Some(session.sc.clone()),
@@ -679,6 +708,8 @@ impl SideChatManager {
             }
         }
         self.publish(HostToClient::AgentActivity {
+            turn_id: None,
+            thread_id: None,
             state: AgentActivityState::Idle,
             text: None,
             sc: Some(session.sc.clone()),

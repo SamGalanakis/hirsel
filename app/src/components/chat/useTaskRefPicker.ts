@@ -1,5 +1,6 @@
 import { createMemo, createSignal } from "solid-js";
-import type { EventItem } from "../../protocol";
+
+import type { RefTarget } from "../../lib/task-ref";
 import { caretPoint, type CaretPoint } from "../../lib/caret";
 import { createOverlayPresence } from "../../lib/focus";
 import {
@@ -26,14 +27,14 @@ export function createTaskRefPicker(opts: {
   getEl: () => HTMLTextAreaElement | undefined;
   value: () => string;
   setValue: (v: string) => void;
-  tasks: () => EventItem[];
+  tasks: () => RefTarget[];
 }) {
   const [open, setOpen] = createSignal(false);
   const [query, setQuery] = createSignal<RefQuery | null>(null);
   const [activeIndex, setActiveIndex] = createSignal(0);
   const [anchor, setAnchor] = createSignal<CaretPoint>({ x: 0, y: 0, lineHeight: 0 });
 
-  const candidates = createMemo<EventItem[]>(() => {
+  const candidates = createMemo<RefTarget[]>(() => {
     const q = query();
     if (!open() || q === null) return [];
     return filterTaskCandidates(opts.tasks(), q.query);
@@ -87,7 +88,7 @@ export function createTaskRefPicker(opts: {
 
   /** Write the chosen Task's ref at the caret, then close and restore the caret
    * after the token. */
-  function accept(task: EventItem): void {
+  function accept(task: RefTarget): void {
     const el = opts.getEl();
     const q = query();
     if (!el || !q) return;

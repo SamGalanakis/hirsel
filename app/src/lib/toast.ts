@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 
+
 // Minimal dependency-free toast queue. A single module-level signal holds the
 // active toasts; <Toaster/> renders them and `toast()` enqueues one. Kept tiny
 // on purpose — no external toast lib, no bundle cost.

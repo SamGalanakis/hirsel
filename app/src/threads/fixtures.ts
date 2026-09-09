@@ -1,0 +1,2 @@
+import type { Thread } from "./types";
+export const makeThread = (id = 1, patch: Partial<Thread> = {}): Thread => ({ id, title: "Buy groceries", description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: "2026-09-09T10:00:00Z", updated_at: "2026-09-09T10:00:00Z", revision: 1, running_turn: null, queued_turn_count: 0, last_finished_turn: null, last_activity_at: "2026-09-09T10:00:00Z", ...patch });

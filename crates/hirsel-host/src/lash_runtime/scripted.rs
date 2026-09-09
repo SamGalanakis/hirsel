@@ -16,6 +16,8 @@ pub(super) struct ScriptedQueueState {
 }
 
 pub(super) struct ScriptedActiveTurn {
+    pub(super) turn_id: Option<u64>,
+    pub(super) thread_id: u64,
     pub(super) cancel: lash::CancellationToken,
 }
 
@@ -25,6 +27,16 @@ impl ScriptedAgentRuntime {
         if turn.body == "__hirsel_test_enqueue_error__" {
             anyhow::bail!("scripted enqueue failed for test");
         }
+        self.tools
+            .storage()
+            .save_thread_request(&turn.client_id, &serde_json::to_value(&turn)?)
+            .await?;
+        let queued = self
+            .tools
+            .storage()
+            .queue_thread_turn(turn.thread_id, Some(turn.message_id))
+            .await?;
+        self.tools.publish_thread_turn(queued).await;
         self.state.lock().await.queue.push_back(turn);
         self.notify.notify_one();
         Ok(())
@@ -45,6 +57,8 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Idle,
                 text: None,
                 sc: None,
@@ -63,7 +77,23 @@ impl ScriptedAgentRuntime {
             .iter()
             .position(|turn| turn.client_id == client_id)
         {
-            state.queue.remove(position);
+            let turn = state.queue.remove(position).expect("position exists");
+            drop(state);
+            let record = self
+                .tools
+                .storage()
+                .queue_thread_turn(turn.thread_id, Some(turn.message_id))
+                .await?;
+            let record = self
+                .tools
+                .storage()
+                .finish_thread_turn(record.id, hirsel_proto::ThreadTurnState::Cancelled, None)
+                .await?;
+            self.tools.publish_thread_turn(record).await;
+            self.tools
+                .storage()
+                .remove_thread_request(&turn.client_id)
+                .await?;
             return Ok(CancelQueuedResult::Cancelled);
         }
         Ok(CancelQueuedResult::AlreadyClaimed)
@@ -74,6 +104,8 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Thinking,
                 text: Some("monitor wake".to_string()),
                 sc: None,
@@ -84,6 +116,8 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: None,
+                thread_id: None,
                 state: AgentActivityState::Idle,
                 text: None,
                 sc: None,
@@ -155,6 +189,36 @@ impl ScriptedAgentRuntime {
             data_dir = %self.config.data_dir.display(),
             "Scripted Agent test double opened session agent"
         );
+        match self.tools.storage().pending_thread_requests().await {
+            Ok(requests) => {
+                for (client_id, payload) in requests {
+                    let Ok(turn) = serde_json::from_value::<OwnerTurn>(payload) else {
+                        continue;
+                    };
+                    let Ok(record) = self
+                        .tools
+                        .storage()
+                        .queue_thread_turn(turn.thread_id, Some(turn.message_id))
+                        .await
+                    else {
+                        continue;
+                    };
+                    if record.finished_at.is_some() {
+                        let _ = self.tools.storage().remove_thread_request(&client_id).await;
+                        continue;
+                    }
+                    let mut state = self.state.lock().await;
+                    if !state
+                        .queue
+                        .iter()
+                        .any(|existing| existing.client_id == client_id)
+                    {
+                        state.queue.push_back(turn);
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error,"failed to restore queued Thread turns"),
+        }
         let mut snooze_tick = tokio::time::interval(SNOOZE_TICK_INTERVAL);
         snooze_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -183,6 +247,8 @@ impl ScriptedAgentRuntime {
         let turn = state.queue.pop_front()?;
         let cancel = lash::CancellationToken::new();
         state.active = Some(ScriptedActiveTurn {
+            turn_id: None,
+            thread_id: turn.thread_id,
             cancel: cancel.clone(),
         });
         Some((turn, cancel))
@@ -197,20 +263,64 @@ impl ScriptedAgentRuntime {
         turn: OwnerTurn,
         cancel: lash::CancellationToken,
     ) -> anyhow::Result<()> {
+        let record = self
+            .tools
+            .storage()
+            .queue_thread_turn(turn.thread_id, Some(turn.message_id))
+            .await?;
+        let record = self.tools.storage().run_thread_turn(record.id).await?;
+        self.tools.publish_thread_turn(record.clone()).await;
+        if let Some(active) = self.state.lock().await.active.as_mut() {
+            active.turn_id = Some(record.id);
+        }
         publish(
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: Some(record.id),
+                thread_id: Some(turn.thread_id),
                 state: AgentActivityState::Thinking,
-                text: Some("processing owner message".to_string()),
+                text: Some("processing owner message".into()),
                 sc: None,
             },
         );
         let result = self.handle_turn_inner(&turn, &cancel).await;
+        let state = if cancel.is_cancelled() {
+            hirsel_proto::ThreadTurnState::Cancelled
+        } else if result.is_ok() {
+            hirsel_proto::ThreadTurnState::Completed
+        } else {
+            hirsel_proto::ThreadTurnState::Failed
+        };
+        let detail = self
+            .tools
+            .storage()
+            .thread_detail(turn.thread_id, None, 100)
+            .await?;
+        let reply_id = detail
+            .messages
+            .iter()
+            .rev()
+            .find(|m| {
+                m.author == hirsel_proto::ChatAuthor::Agent && m.r#ref == Some(turn.message_id)
+            })
+            .map(|m| m.id);
+        let record = self
+            .tools
+            .storage()
+            .finish_thread_turn(record.id, state, reply_id)
+            .await?;
+        self.tools.publish_thread_turn(record.clone()).await;
+        self.tools
+            .storage()
+            .remove_thread_request(&turn.client_id)
+            .await?;
         publish(
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
+                turn_id: Some(record.id),
+                thread_id: Some(turn.thread_id),
                 state: AgentActivityState::Idle,
                 text: None,
                 sc: None,
@@ -232,11 +342,32 @@ impl ScriptedAgentRuntime {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        self.emit_scripted_timeline().await;
+        self.emit_scripted_timeline(turn.thread_id).await;
         let turn_text = owner_turn_text(turn);
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             return self.handle_fake_delegation(turn).await;
+        }
+        if let Some(context) = &turn.thread_action {
+            let label = context
+                .data
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(&context.action);
+            let instrument = json!({"type":"card","children":[{"type":"heading","level":2,"text":format!("{} advanced", context.thread.title)},{"type":"text","text":format!("Received action: {label}")}]});
+            let thread = self
+                .tools
+                .storage()
+                .update_thread(
+                    context.thread.id,
+                    None,
+                    Some(&format!("Advanced after {label}")),
+                    Some(&instrument),
+                    Some(hirsel_proto::ThreadAttention::Quiet),
+                )
+                .await?;
+            self.tools.publish_thread(thread);
+            return Ok(());
         }
         if let Some(context) = &turn.task_action {
             let label = context
@@ -298,7 +429,7 @@ impl ScriptedAgentRuntime {
         if turn.anchor.is_some() {
             self.tools
                 .chat_send(
-                    "Acknowledged. I will continue from that Ping reply.",
+                    "Acknowledged. I will continue in this Thread.",
                     Some(turn.message_id),
                 )
                 .await?;
@@ -326,11 +457,20 @@ impl ScriptedAgentRuntime {
         Ok(())
     }
 
-    pub(super) async fn emit_scripted_timeline(&self) {
+    pub(super) async fn emit_scripted_timeline(&self, thread_id: u64) {
+        let turn_id = self
+            .state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .and_then(|a| a.turn_id);
         publish(
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::TurnEvent {
+                turn_id,
+                thread_id: Some(thread_id),
                 seq: 1,
                 event: TurnEventKind::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
@@ -343,6 +483,8 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::TurnEvent {
+                turn_id,
+                thread_id: Some(thread_id),
                 seq: 2,
                 event: TurnEventKind::ToolStart {
                     id: "scripted-tool-1".to_string(),
@@ -357,6 +499,8 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::TurnEvent {
+                turn_id,
+                thread_id: Some(thread_id),
                 seq: 3,
                 event: TurnEventKind::ToolDone {
                     id: "scripted-tool-1".to_string(),
@@ -371,6 +515,8 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::TurnEvent {
+                turn_id,
+                thread_id: Some(thread_id),
                 seq: 4,
                 event: TurnEventKind::Prose {
                     text: "The scripted response is ready.".to_string(),
@@ -384,7 +530,7 @@ impl ScriptedAgentRuntime {
         let anchor = self
             .tools
             .chat_send(
-                "I delegated the repo fix to a Sub-agent and will send the result as a Ping.",
+                "I delegated the repo fix to a Sub-agent; its result will stay in this Thread.",
                 Some(turn.message_id),
             )
             .await?;
@@ -406,27 +552,20 @@ impl ScriptedAgentRuntime {
                 match terminal_events.recv().await {
                     Ok(event) if event.process_id == process.process_id => {
                         let content = terminal_content(&event.outcome);
-                        if let Err(error) = tools
-                            .pings_send(
-                                "delegated-fix-ready",
-                                "The delegated fix is ready for review",
-                                content,
-                                anchor.id,
-                                true,
-                                vec![
-                                    QuickReply {
-                                        value: "ship it".to_string(),
-                                        label: "Ship it".to_string(),
-                                    },
-                                    QuickReply {
-                                        value: "revise it".to_string(),
-                                        label: "Revise it".to_string(),
-                                    },
-                                ],
+                        let activity = tools
+                            .storage()
+                            .append_thread_activity(
+                                anchor.thread_id,
+                                None,
+                                "process_completed",
+                                &json!({"process_id":process.process_id,"summary":content}),
                             )
-                            .await
-                        {
-                            tracing::warn!(%error, "failed to send Sub-agent terminal Ping");
+                            .await;
+                        match activity {
+                            Ok(activity) => tools.publish_thread_activity(activity).await,
+                            Err(error) => {
+                                tracing::warn!(%error,"failed to record Sub-agent completion")
+                            }
                         }
                         break;
                     }

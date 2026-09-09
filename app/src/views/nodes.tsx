@@ -10,7 +10,8 @@
 // text is set, and density. Everything particular to a tier (the catalog's
 // layout/table/form components, the card's eyebrow/optionList/submit/viewSlot/
 // inset, each tier's heading scale) stays in its own file.
-import { For, type JSX, Show } from "solid-js";
+import { For, Show } from "solid-js";
+import { type JSX } from "@solidjs/web";
 import type { ViewSpec } from "../protocol";
 import { cn } from "@/lib/utils";
 import { statusDotClass, toneBadgeClass, toneTextClass } from "./tokens";

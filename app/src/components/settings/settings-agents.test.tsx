@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -245,7 +246,7 @@ describe("Settings → Agents: main agent", () => {
       expect(variantSelect.disabled).toBe(true);
       expect(modelSelect.disabled).toBe(true);
 
-      vi.advanceTimersByTime(4000);
+      flush(() => vi.advanceTimersByTime(4000));
 
       expect(variantSelect.disabled).toBe(false);
       expect(modelSelect.disabled).toBe(false);
@@ -395,7 +396,7 @@ describe("Settings → Agents: sub-agents", () => {
     try {
       fireEvent.click(toggle());
       expect(toggle()).toBeDisabled();
-      vi.advanceTimersByTime(4000);
+      flush(() => vi.advanceTimersByTime(4000));
       expect(toggle()).not.toBeDisabled();
     } finally {
       vi.useRealTimers();

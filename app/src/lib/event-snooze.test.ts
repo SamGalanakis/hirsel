@@ -1,3 +1,4 @@
+import { flush } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventKind } from "../protocol";
 
@@ -38,6 +39,7 @@ describe("snoozeEventWithUndo — the event_action snooze round-trip", () => {
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event } });
 
     const payload = snoozeEventWithUndo(5, UNTIL, "This evening", { silent: true });
+    flush();
 
     expect(payload).toEqual({
       type: "event_action",
@@ -83,9 +85,11 @@ describe("snoozeEventWithUndo — the event_action snooze round-trip", () => {
     store.dispatch({ type: "event_upsert", payload: { type: "event_upsert", event } });
 
     snoozeEventWithUndo(8, UNTIL, "This evening");
+    flush();
     const t = toast.toasts().find((x) => /Snoozed/.test(x.message));
     expect(t?.action?.label).toBe("Undo");
     t!.action!.onClick();
+    flush();
 
     expect(sent).toEqual([
       { eventId: 8, action: "snooze" },

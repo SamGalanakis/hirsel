@@ -3,16 +3,11 @@ use super::*;
 pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
     let summary = match name {
         "shell_run" => labeled_scalar(payload, "cmd", "cmd"),
-        "events_judgment" => labeled_scalar(payload, "question", "question"),
-        "events_notify" | "events_summary" => {
-            labeled_first_scalar(payload, &["description", "name"], "event")
+        "threads_create" => labeled_scalar(payload, "title", "thread"),
+        "threads_update" | "threads_read" | "threads_activity" => {
+            scalar_field(payload, "thread_id").map(|id| format!("thread #{id}"))
         }
-        "events_archive" => scalar_field(payload, "event_id").map(|id| format!("event {id}")),
-        "events_clear" => None,
-        "pings_send" => {
-            labeled_first_scalar(payload, &["content_md", "content", "body"], "content")
-        }
-        "pings_resolve" => scalar_any(payload, &["ping_id", "id"]).map(|id| format!("ping {id}")),
+        "threads_list" => None,
         "views_show" => scalar_any(payload, &["template_id", "instance_id"])
             .map(|value| format!("view {value}")),
         "views_update" | "views_clear" => {
@@ -45,16 +40,9 @@ pub(super) fn condense_result(name: &str, args: &Value, output: &Value) -> Optio
     let payload = tool_output_payload(output).unwrap_or(output);
     let detail = match name {
         "shell_run" => shell_result_summary(payload),
-        "events_judgment" | "events_notify" | "events_summary" | "events_archive" => {
-            scalar_field(payload, "event_id").map(|id| format!("event {id}"))
+        "threads_create" | "threads_update" => {
+            scalar_field(payload, "thread_id").map(|id| format!("thread #{id}"))
         }
-        "events_clear" => scalar_field(payload, "count").map(|count| format!("{count} archived")),
-        "pings_send" => scalar_field(payload, "ping_id").map(|id| format!("ping {id}")),
-        "pings_resolve" => payload
-            .get("ping")
-            .and_then(|ping| scalar_field(ping, "ping_id"))
-            .or_else(|| scalar_any(args, &["ping_id", "id"]))
-            .map(|id| format!("ping {id}")),
         "views_show" | "views_update" | "views_clear" => scalar_field(payload, "instance_id")
             .or_else(|| scalar_field(args, "instance_id"))
             .map(|id| format!("view {}", tail_identifier(&id))),
@@ -278,6 +266,8 @@ pub(super) fn truncate_chars(text: &str, max_chars: usize) -> String {
 
 pub(super) fn agent_activity(state: AgentActivityState, text: Option<String>) -> HostToClient {
     HostToClient::AgentActivity {
+        turn_id: None,
+        thread_id: None,
         state,
         text,
         sc: None,

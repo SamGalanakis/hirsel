@@ -15,6 +15,8 @@ use crate::transport;
 /// Owned send arguments. Later slices will add attachments and send mode here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendMessageRequest {
+    pub thread_id: u64,
+    pub attachments: Vec<String>,
     pub body: String,
     pub reply_to: Option<u64>,
     pub mentions: Vec<u64>,
@@ -23,6 +25,8 @@ pub struct SendMessageRequest {
 impl SendMessageRequest {
     pub fn new(body: String) -> Self {
         Self {
+            thread_id: 0,
+            attachments: Vec::new(),
             body,
             reply_to: None,
             mentions: Vec::new(),
@@ -49,6 +53,7 @@ pub enum ClientError {
 
 pub(crate) enum Command {
     SendPending,
+    Retry(String),
     Stop,
 }
 
@@ -189,6 +194,8 @@ impl Client {
         self.inner
             .write_store()
             .add_optimistic_send(PendingSend::new(
+                request.thread_id,
+                request.attachments,
                 client_id.clone(),
                 request.body,
                 request.reply_to,
@@ -205,6 +212,97 @@ impl Client {
             let _ = sender.send(Command::SendPending);
         }
         SendReceipt { client_id }
+    }
+
+    pub fn retry_send(&self, client_id: String) {
+        for entry in &mut self.inner.write_store().messages {
+            if let crate::ChatEntry::Pending(send) = entry
+                && send.client_id == client_id
+            {
+                send.error = None;
+            }
+        }
+        if let Some(sender) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(Command::Retry(client_id));
+        }
+        self.inner.notify_snapshot();
+    }
+
+    fn queue_frame(&self, frame: ClientToHost) {
+        self.inner
+            .pending_frames
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(frame);
+        if let Some(sender) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(Command::SendPending);
+        }
+    }
+
+    pub fn create_thread(&self, title: String) -> SendReceipt {
+        let client_id = Uuid::new_v4().to_string();
+        self.inner
+            .write_store()
+            .pending_creates
+            .push((client_id.clone(), title));
+        if let Some(sender) = self
+            .inner
+            .command_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(Command::SendPending);
+        }
+        SendReceipt { client_id }
+    }
+
+    pub fn open_thread(&self, thread_id: u64, before_id: Option<u64>) -> SendReceipt {
+        let client_id = Uuid::new_v4().to_string();
+        self.inner
+            .write_store()
+            .requests
+            .push((client_id.clone(), thread_id));
+        self.queue_frame(ClientToHost::OpenThread {
+            client_id: client_id.clone(),
+            thread_id,
+            before_id,
+        });
+        SendReceipt { client_id }
+    }
+
+    pub fn thread_action(
+        &self,
+        thread_id: u64,
+        action: String,
+        data: serde_json::Value,
+        expected_revision: Option<u64>,
+    ) {
+        self.queue_frame(ClientToHost::ThreadAction {
+            thread_id,
+            action,
+            data,
+            expected_revision,
+        });
+    }
+
+    pub fn cancel_turn(&self, thread_id: u64) {
+        self.queue_frame(ClientToHost::CancelTurn {
+            thread_id: Some(thread_id),
+            sc: None,
+        });
     }
 
     /// Register a push token once the WebSocket is online. Registrations made
@@ -260,15 +358,14 @@ impl Client {
     }
 }
 
-pub(crate) fn pending_to_wire(pending: &PendingSend) -> ClientToHost {
-    ClientToHost::SendMessage {
-        client_id: pending.client_id.clone(),
-        body: pending.body.clone(),
-        r#ref: pending.reply_to,
-        attachments: Vec::new(),
+pub(crate) fn pending_to_wire(send: &PendingSend) -> ClientToHost {
+    ClientToHost::SendThreadMessage {
+        client_id: send.client_id.clone(),
+        thread_id: send.thread_id,
+        body: send.body.clone(),
+        attachments: send.attachments.clone(),
         mode: hirsel_proto::SendMode::Send,
-        sc: None,
-        mentions: pending.mentions.clone(),
+        mentions: send.mentions.clone(),
     }
 }
 

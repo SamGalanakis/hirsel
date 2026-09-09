@@ -77,12 +77,6 @@ impl Storage {
             added_tools,
         })
     }
-
-    #[cfg(test)]
-    pub(crate) async fn meta_value(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let conn = self.conn.lock().await;
-        meta_value_from_conn(&conn, key).map_err(Into::into)
-    }
 }
 
 fn meta_value_from_conn(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

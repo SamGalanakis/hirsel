@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 
+
 // Local-only client preferences with a reactive value + localStorage backing,
 // so a Settings toggle and the effect that consumes it (e.g. App's title badge)
 // stay in sync without threading state through the tree. Honestly scoped to this

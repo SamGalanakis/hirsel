@@ -4,119 +4,79 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hirsel_plugin_api::{
-    EventOption, NewEvent, PluginEvents, PluginKv, PluginPush, PluginSettingsAccess,
-    SettingsSnapshot,
+    ActivityReceipt, NewActivity, NewThread, PluginKv, PluginPush, PluginSettingsAccess,
+    PluginThreads, SettingsSnapshot,
 };
-use hirsel_proto::{ChatAuthor, HostToClient};
-use serde_json::{Map, Value};
+use hirsel_proto::{HostToClient, ThreadAttention};
+use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
-use crate::{
-    BroadcastLog,
-    storage::Storage,
-    tools::{JudgmentOptionInput, ToolSuite},
-};
+use crate::{BroadcastLog, storage::Storage, tools::ToolSuite};
 
-/// Events raised by a plugin go through the same `ToolSuite` seam the agent's
-/// own `events.*` tools use, so they land in Sam's feed with identical shape,
-/// broadcast, and push behaviour. The only host-side difference is the anchor:
-/// a plugin has no turn, so it anchors to the newest chat message (appending a
-/// bootstrap message when the log is still empty, the way a scheduled digest
-/// does).
-pub(super) struct HostEvents {
+/// Plugins create durable work or append activity through distinct capabilities.
+pub(super) struct HostThreads {
     pub(super) plugin_id: String,
     pub(super) label: String,
     pub(super) tools: ToolSuite,
     pub(super) storage: Storage,
 }
 
-impl HostEvents {
-    async fn anchor(&self) -> Result<u64, String> {
-        let latest = self.storage.latest_msg_id().await.map_err(stringify)?;
-        if latest != 0 {
-            return Ok(latest);
-        }
-        self.storage
-            .append_chat(
-                ChatAuthor::Agent,
-                format!("Plugin `{}` raised its first Event.", self.label),
-                None,
-            )
-            .await
-            .map(|message| message.id)
-            .map_err(stringify)
-    }
-}
-
 #[async_trait]
-impl PluginEvents for HostEvents {
-    async fn notify(&self, event: NewEvent) -> Result<u64, String> {
-        let anchor = self.anchor().await?;
-        self.tools
-            .events_notify(
-                event_name(&self.plugin_id, &event.name),
-                event.description,
-                event.content_md,
-                anchor,
+impl PluginThreads for HostThreads {
+    async fn create(&self, input: NewThread) -> Result<u64, String> {
+        let (thread, _) = self
+            .storage
+            .create_thread(
+                &format!("plugin:{}:{}", self.plugin_id, uuid::Uuid::new_v4()),
+                &input.title,
+                &input.description,
+                &input.instrument,
+                if input.needs_owner {
+                    ThreadAttention::NeedsOwner
+                } else {
+                    ThreadAttention::Quiet
+                },
             )
             .await
-            .map(|event| event.id)
-            .map_err(stringify)
+            .map_err(stringify)?;
+        self.tools.publish_thread(thread.clone());
+        self.append_activity(
+            NewActivity::new("created", json!({"title": input.title})).in_thread(thread.id),
+        )
+        .await?;
+        Ok(thread.id)
     }
 
-    async fn summary(&self, event: NewEvent) -> Result<u64, String> {
-        let anchor = self.anchor().await?;
-        let content = event
-            .content_md
-            .clone()
-            .unwrap_or_else(|| event.description.clone());
-        self.tools
-            .events_summary(
-                event_name(&self.plugin_id, &event.name),
-                event.description,
-                Some(content),
+    async fn append_activity(&self, input: NewActivity) -> Result<ActivityReceipt, String> {
+        if input.kind.trim().is_empty() {
+            return Err("activity kind must not be empty".into());
+        }
+        let activity = self
+            .storage
+            .append_thread_activity(
+                input.thread_id,
                 None,
-                anchor,
+                &format!("plugin.{}", input.kind),
+                &json!({"plugin": self.plugin_id, "label": self.label, "payload": input.data}),
             )
             .await
-            .map(|event| event.id)
-            .map_err(stringify)
+            .map_err(stringify)?;
+        let receipt = ActivityReceipt {
+            activity_id: activity.id,
+            thread_id: activity.thread_id,
+        };
+        self.tools.publish_thread_activity(activity).await;
+        Ok(receipt)
     }
 
-    async fn judgment(&self, event: NewEvent, options: Vec<EventOption>) -> Result<u64, String> {
-        let anchor = self.anchor().await?;
-        let content = event.content_md.unwrap_or_default();
-        let options = options
-            .into_iter()
-            .map(|option| JudgmentOptionInput {
-                key: None,
-                label: option.label,
-                detail: option.detail,
-                recommended: option.recommended,
-            })
-            .collect();
-        self.tools
-            .pings_send_with_options(
-                event_name(&self.plugin_id, &event.name),
-                event.description,
-                content,
-                anchor,
-                true,
-                options,
-                None,
-                None,
-            )
+    async fn settle(&self, thread_id: u64, settled: bool) -> Result<(), String> {
+        let thread = self
+            .storage
+            .settle_thread(thread_id, settled)
             .await
-            .map(|event| event.id)
-            .map_err(stringify)
-    }
-
-    async fn resolve(&self, event_id: u64) -> Result<(), String> {
-        self.tools
-            .pings_resolve(event_id)
-            .await
-            .map(|_| ())
-            .map_err(stringify)
+            .map_err(stringify)?;
+        self.tools.publish_thread(thread);
+        Ok(())
     }
 }
 
@@ -209,12 +169,6 @@ pub(super) fn effective_settings(
         values.insert(key.clone(), value.clone());
     }
     Arc::new(values)
-}
-
-fn event_name(plugin_id: &str, name: &str) -> String {
-    let combined = format!("{plugin_id}-{name}");
-    // `create_event` caps handles at 32 characters.
-    combined.chars().take(32).collect()
 }
 
 fn stringify(error: anyhow::Error) -> String {

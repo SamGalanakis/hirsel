@@ -152,8 +152,9 @@ describe("Settings: Guide", () => {
   const HEADINGS = [
     "What hirsel is",
     "The home screen",
-    "Tasks",
+    "Threads",
     "Talking to it",
+    "Artifacts and execution",
     "The agents",
     "Keyboard, on a desktop",
     "Where to poke around",
@@ -196,8 +197,8 @@ describe("Settings: one entry point", () => {
     vi.doMock("../../lib/focus", () => ({
       anyOverlayOpen: () => false,
       createOverlayPresence: () => {},
+      createFocusTrap: () => {},
       focusMainComposer: () => {},
-      focusTaskIndex: () => {},
     }));
     const { CommandPalette } = await import("../CommandPalette");
     render(() => <CommandPalette open onOpenChange={() => {}} />);

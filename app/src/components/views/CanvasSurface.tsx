@@ -1,5 +1,6 @@
-import { ChevronLeft, PanelRight } from "lucide-solid";
-import { For, onMount, Show } from "solid-js";
+import { ChevronLeft, PanelRight } from "@/components/ui/icons";
+import { For, Show } from "solid-js";
+
 import {
   createFocusTrap,
   createMediaFlag,
@@ -76,20 +77,19 @@ function CanvasPhonePanel() {
   // desktop presentation is the in-flow CanvasRail above, so this phone panel is
   // `rail:hidden`. `phone()` gates the modal semantics to that width.
   const phone = createMediaFlag("(max-width: 1099.98px)");
-  onMount(() => {
-    createFocusTrap(() => panelRef, {
+  createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
       trapTab: () => !window.matchMedia(RAIL_MQ).matches,
       restoreTo: () => phone() ? phoneUtilityRestoreTarget() : undefined,
     });
-  });
+
   return (
     <div
       ref={(node) => { panelRef = node; }}
       tabindex={-1}
       data-slot="canvas-sheet"
       role="dialog"
-      aria-modal={phone() ? "true" : undefined}
+      aria-modal={(phone() ? "true" : undefined) ? "true" : "false"}
       aria-labelledby="canvas-sheet-heading"
       class="fixed inset-0 z-40 flex flex-col bg-background outline-none pb-[env(safe-area-inset-bottom)] rail:hidden
         motion-safe:animate-in motion-safe:slide-in-from-bottom motion-safe:duration-200"

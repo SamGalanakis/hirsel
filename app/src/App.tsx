@@ -1,6 +1,8 @@
-import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onSettled, Show } from "solid-js";
+
 import { CommandPalette, ShortcutHelp } from "./components/CommandPalette";
-import { TaskShell } from "./components/tasks/TaskShell";
+import { ThreadShell } from "./threads/ThreadShell";
+import { threadState } from "./threads/store";
 import { Toaster } from "./components/Toaster";
 import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
@@ -13,21 +15,27 @@ import {
 } from "./lib/keymap";
 import { titleBadgeEnabled } from "./lib/prefs";
 import { startPlugins } from "./plugins/loader";
-import {
-  eventTitle,
-  isOpenJudgment,
-  taskEvents,
-  tasksNeedingOwnerCount,
-} from "./store/selectors";
-import { effectiveEvents, state } from "./store/store";
+import { state } from "./store/store";
 import { getStoredToken, setStoredToken, startClient } from "./ws/client";
 
 const WS_URL = resolveWsUrl();
 
 const BASE_TITLE = "hirsel";
 
+/** Dev convenience: loopback hosts run with the justfile's default token, so
+ * first run skips the gate. Stored like a submitted token (HTTP blob fetches
+ * read it too); a host with a real token rejects it and drops to the gate. */
+function initialToken(): string | null {
+  const stored = getStoredToken();
+  if (stored !== null) return stored;
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+  if (!import.meta.env.DEV && !loopback) return null;
+  setStoredToken("dev-token");
+  return "dev-token";
+}
+
 function App() {
-  const [token, setToken] = createSignal<string | null>(getStoredToken());
+  const [token, setToken] = createSignal<string | null>(initialToken());
   // A rejected/expired token surfaces here (C5): the ws client clears the stored
   // token and calls back; we drop to the gate and show this inline error instead
   // of the old "reconnecting…" forever dead-end.
@@ -37,16 +45,15 @@ function App() {
   // latest, ⌘K palette, `?` cheat-sheet). Window-level; it suppresses itself
   // while the Owner is typing or an overlay owns input, so it never fights the
   // composer or a focus-trap.
-  onMount(() => {
+  onSettled(() => {
     const dispose = installGlobalKeymap();
-    onCleanup(dispose);
+    return dispose;
   });
 
   // Open (and tear down) the single WebSocket connection whenever the token is
   // set. Components run once in Solid; this effect re-runs only when token()
   // changes (first-run gate submit).
-  createEffect(() => {
-    const t = token();
+  createEffect(token, (t) => {
     if (!t) return;
     const client = startClient(WS_URL, t, {
       onAuthReject: (detail) => {
@@ -56,15 +63,15 @@ function App() {
         setAuthError(detail);
       },
     });
-    onCleanup(() => client.close());
+    return () => client.close();
   });
 
   // Plugin tier: load browser bundles once the socket has actually
   // authenticated. The boot manifest and every plugin RPC use the same owner
   // token, so loading before `hello_ok` would just race a 401; `startPlugins`
   // latches, so a later reconnect never mounts a plugin's components twice.
-  createEffect(() => {
-    if (state.connection === "connected") startPlugins();
+  createEffect(() => state.connection, (connection) => {
+    if (connection === "connected") startPlugins();
   });
 
   // The "needs you" count is the SINGLE truth the attention layer reads: open,
@@ -73,21 +80,19 @@ function App() {
   // favicon dot, and desktop notifications onto THIS (they read the
   // superseded legacy state before — a live bug).
   const needsYouCount = () =>
-    tasksNeedingOwnerCount(taskEvents(effectiveEvents()));
+    threadState.threads.filter(t => !t.settled_at && !t.archived_at && t.attention === "needs_owner").length;
 
   // Reflect the needs-you count in document.title, so it's visible from a
   // backgrounded tab without push. (Replaces the React useTitleBadge hook.)
-  createEffect(() => {
-    const count = needsYouCount();
+  createEffect(() => ({ count: needsYouCount(), enabled: titleBadgeEnabled() }), ({ count, enabled }) => {
     document.title =
-      titleBadgeEnabled() && count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
+      enabled && count > 0 ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
   });
 
   // Swap the tab favicon to the dotted variant while anything needs you, so a
   // backgrounded tab reads "attend to this" at a glance — one calm indigo dot on
   // the cube mark, never a red count. Reverts to the plain mark at zero.
-  createEffect(() => {
-    const dotted = needsYouCount() > 0;
+  createEffect(() => needsYouCount() > 0, (dotted) => {
     const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
     if (link) link.href = dotted ? "/favicon-dot.svg" : "/favicon.svg";
   });
@@ -99,10 +104,7 @@ function App() {
   // snapshot never notifies for pre-existing work; one silent notification per
   // freshly-arrived blocking judgment.
   let knownBlockingIds: Set<number> | null = null;
-  createEffect(() => {
-    const blocking = taskEvents(effectiveEvents()).filter(
-      (e) => isOpenJudgment(e) && e.blocking,
-    );
+  createEffect(() => threadState.threads.filter(t => !t.settled_at && !t.archived_at && t.attention === "needs_owner").map(t => ({ id: t.id, title: t.title })), (blocking) => {
     const ids = new Set(blocking.map((e) => e.id));
     if (knownBlockingIds === null) {
       knownBlockingIds = ids;
@@ -121,7 +123,7 @@ function App() {
     const newest = fresh[fresh.length - 1];
     try {
       const note = new Notification("hirsel — needs you", {
-        body: eventTitle(newest),
+        body: newest.title,
         tag: `hirsel-judgment-${newest.id}`,
         silent: true,
       });
@@ -157,7 +159,7 @@ function App() {
       {/* Task Margins: one responsive shell. Opening a task changes the subject
           and generated UI; the standing composer stays connected to global
           Hirsel and scopes through a removable task chip. */}
-      <TaskShell />
+      <ThreadShell />
       <Toaster />
       {/* Summoned surfaces — no standing chrome. Opened from the keymap (⌘K /
           `?`) and command-palette affordances. */}

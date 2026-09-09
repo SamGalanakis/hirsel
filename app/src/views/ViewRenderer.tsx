@@ -14,17 +14,10 @@
 // quiet placeholder, and every tone maps to a status token (see tokens.ts).
 //
 // The client NEVER resolves templates or bindings — `spec` is always concrete.
-import { Check } from "lucide-solid";
-import {
-  createContext,
-  createMemo,
-  createSignal,
-  ErrorBoundary,
-  For,
-  Show,
-  useContext,
-} from "solid-js";
-import type { JSX } from "solid-js";
+import { Check } from "@/components/ui/icons";
+import { createContext, createMemo, createSignal, Errored, For, Show, useContext } from "solid-js";
+
+import type { JSX } from "@solidjs/web";
 import type { ViewPlacement, ViewSpec } from "../protocol";
 import { cn } from "@/lib/utils";
 import { createSubmitting } from "../lib/pending";
@@ -386,7 +379,7 @@ function OptionSetNode(node: Node): JSX.Element {
                     : "bg-transparent text-foreground hover:bg-muted",
                 )}
                 disabled={pending()}
-                aria-pressed={selected}
+                aria-pressed={(selected) ? "true" : "false"}
                 onClick={() => {
                   begin();
                   emit(action, { value: choice.value });
@@ -697,7 +690,7 @@ export interface ViewRendererProps {
 
 /** Public entry point. Renders a view spec, providing the emit context so
  * interactive components (`action` / `optionSet` / `form`) can send
- * `view_event` frames. The whole tree is wrapped in an ErrorBoundary so a
+ * `view_event` frames. The whole tree is wrapped in an Errored so a
  * malformed spec degrades to a quiet notice instead of white-screening the app
  * ("never throws"). */
 export function ViewRenderer(props: ViewRendererProps): JSX.Element {
@@ -723,16 +716,16 @@ export function ViewRenderer(props: ViewRendererProps): JSX.Element {
     }
   });
   return (
-    <ErrorBoundary
+    <Errored
       fallback={<Notice>This view couldn't be displayed.</Notice>}
     >
-      <ViewEmitContext.Provider value={{ instanceId: props.instanceId, emit }}>
+      <ViewEmitContext value={{ instanceId: props.instanceId, emit }}>
         <div data-slot="view" data-placement={props.placement}>
           <Show when={specKey()} keyed>
             {(_key: string) => <ViewNode node={props.spec} />}
           </Show>
         </div>
-      </ViewEmitContext.Provider>
-    </ErrorBoundary>
+      </ViewEmitContext>
+    </Errored>
   );
 }

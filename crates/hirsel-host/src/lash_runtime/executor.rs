@@ -4,11 +4,9 @@ use super::*;
 pub(super) struct HirselToolExecutor {
     pub(super) tools: ToolSuite,
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
-    /// The host's own process registry. A recorded tool attempt reads and
-    /// declares; it no longer starts, cancels, or awaits processes through its
-    /// context, so the one read that genuinely blocks — waiting for a Sub-agent
-    /// to reach a terminal state — goes to the registry hirsel owns.
-    pub(super) process_registry: Arc<dyn lash::process::ProcessRegistry>,
+    /// Installed after boot to use Lash's process wait without retaining a
+    /// core -> tool provider -> core ownership cycle.
+    pub(super) runtime: Arc<std::sync::OnceLock<std::sync::Weak<LashAgentRuntime>>>,
 }
 
 pub(super) struct HirselToolProvider {
@@ -114,14 +112,16 @@ impl HirselToolExecutor {
         call: ToolCall<'_>,
     ) -> Result<HirselToolOutcome, String> {
         let outcome: HirselToolOutcome = match call.name {
-            "events_judgment" => self.events_judgment(call.args).await?.into(),
-            "events_notify" => self.events_notify(call.args).await?.into(),
-            "events_summary" => self.events_summary(call.args).await?.into(),
-            "events_recompose" => self.events_recompose(call.args).await?.into(),
-            "events_archive" => self.events_archive(call.args).await?.into(),
-            "events_clear" => self.events_clear().await?.into(),
-            "pings_send" => self.pings_send(call.args).await?.into(),
-            "pings_resolve" => self.pings_resolve(call.args).await?.into(),
+            "artifacts_create" | "artifacts_edit" | "artifacts_show" => self
+                .artifact_mutation(call.name, call.args, call.context)
+                .await?
+                .into(),
+            "artifacts_list" => self.artifacts_list(call.args).await?.into(),
+            "threads_create" => self.threads_create(call.args).await?.into(),
+            "threads_update" => self.threads_update(call.args).await?.into(),
+            "threads_list" => self.threads_list().await?.into(),
+            "threads_read" => self.threads_read(call.args).await?.into(),
+            "threads_activity" => self.threads_activity(call.args).await?.into(),
             "views_show" => self.views_show(call.args).await?.into(),
             "views_update" => self.views_update(call.args).await?.into(),
             "views_clear" => self.views_clear(call.args).await?.into(),
@@ -151,183 +151,6 @@ impl HirselToolExecutor {
             },
         };
         Ok(outcome)
-    }
-
-    pub(super) async fn events_judgment(&self, args: &Value) -> Result<Value, String> {
-        let question = required_string(args, "question")?;
-        let context = optional_string_any_allow_empty(args, &["context"])?.unwrap_or_default();
-        let options = args
-            .get("options")
-            .cloned()
-            .ok_or_else(|| "missing required field `options`".to_string())
-            .and_then(|options| {
-                serde_json::from_value::<Vec<JudgmentOptionInput>>(options)
-                    .map_err(|error| format!("invalid options: {error}"))
-            })?;
-        let view = args.get("view").cloned().filter(|value| !value.is_null());
-        let unblocks = args.get("unblocks").and_then(Value::as_u64);
-        let anchor = self.require_current_event_anchor().await?;
-        let event = self
-            .tools
-            .events_judgment(question, context, anchor, options, view, unblocks)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(event_send_result(&event))
-    }
-
-    pub(super) async fn events_notify(&self, args: &Value) -> Result<Value, String> {
-        let name = required_string(args, "name")?;
-        let description = required_string(args, "description")?;
-        let content_md = optional_string_any_allow_empty(args, &["content_md"])?;
-        let anchor = self.require_current_event_anchor().await?;
-        let event = self
-            .tools
-            .events_notify(name, description, content_md, anchor)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(event_send_result(&event))
-    }
-
-    pub(super) async fn events_summary(&self, args: &Value) -> Result<Value, String> {
-        let name = required_string(args, "name")?;
-        let description = required_string(args, "description")?;
-        let content_md = optional_string_any_allow_empty(args, &["content_md"])?;
-        let ui = args.get("ui").cloned().filter(|value| !value.is_null());
-        let anchor = self.require_current_event_anchor().await?;
-        let event = self
-            .tools
-            .events_summary(name, description, content_md, ui, anchor)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(event_send_result(&event))
-    }
-
-    pub(super) async fn events_recompose(&self, args: &Value) -> Result<Value, String> {
-        let event_id = required_u64_any(args, &["event_id"])?;
-        let active_event_id = self
-            .anchors
-            .lock()
-            .await
-            .active
-            .as_ref()
-            .and_then(|anchors| anchors.task_action_event_id)
-            .ok_or_else(|| {
-                "events.recompose requires an active generated Task action turn".to_string()
-            })?;
-        if event_id != active_event_id {
-            return Err(format!(
-                "events.recompose may only update Task {active_event_id} during this turn"
-            ));
-        }
-        let description = optional_string_any_allow_empty(args, &["description"])?;
-        let ui = args
-            .get("ui")
-            .cloned()
-            .ok_or_else(|| "missing required field `ui`".to_string())?;
-        let event = self
-            .tools
-            .events_recompose(event_id, description, ui)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(json!({
-            "event_id": event.id,
-            "status": event.status,
-        }))
-    }
-
-    pub(super) async fn events_archive(&self, args: &Value) -> Result<Value, String> {
-        let event_id = required_u64_any(args, &["event_id"])?;
-        let event = self
-            .tools
-            .events_archive(event_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("event not found: {event_id}"))?;
-        Ok(event_archive_result(&event))
-    }
-
-    pub(super) async fn events_clear(&self) -> Result<Value, String> {
-        let count = self
-            .tools
-            .events_clear()
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(events_clear_result(count))
-    }
-
-    pub(super) async fn pings_send(&self, args: &Value) -> Result<Value, String> {
-        let name = required_string_any(args, &["name"])?;
-        let description = required_string_any(args, &["description"])?;
-        let content = optional_string_any_allow_empty(args, &["content_md", "content", "body"])?
-            .unwrap_or_default();
-        let requires_response = args
-            .get("requires_response")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let quick_replies = args
-            .get("quick_replies")
-            .cloned()
-            .map(serde_json::from_value::<Vec<QuickReply>>)
-            .transpose()
-            .map_err(|error| format!("invalid quick_replies: {error}"))?
-            .unwrap_or_default();
-        let options = args
-            .get("options")
-            .cloned()
-            .map(serde_json::from_value::<Vec<JudgmentOptionInput>>)
-            .transpose()
-            .map_err(|error| format!("invalid options: {error}"))?;
-        if options.is_some() && args.get("quick_replies").is_some() {
-            return Err("provide options or quick_replies, not both".to_string());
-        }
-        let view = args.get("view").cloned().filter(|value| !value.is_null());
-        let unblocks = args.get("unblocks").and_then(Value::as_u64);
-        let anchor = self
-            .current_anchor()
-            .await
-            .ok_or_else(|| "pings.send requires an active Owner turn anchor".to_string())?;
-        let ping = match options {
-            Some(options) => {
-                self.tools
-                    .pings_send_with_options(
-                        name,
-                        description,
-                        content,
-                        anchor,
-                        requires_response,
-                        options,
-                        view,
-                        unblocks,
-                    )
-                    .await
-            }
-            None => {
-                self.tools
-                    .pings_send_with_view(
-                        name,
-                        description,
-                        content,
-                        anchor,
-                        requires_response,
-                        quick_replies,
-                        view,
-                        unblocks,
-                    )
-                    .await
-            }
-        }
-        .map_err(|error| error.to_string())?;
-        Ok(pings_send_result(&ping))
-    }
-
-    pub(super) async fn pings_resolve(&self, args: &Value) -> Result<Value, String> {
-        let ping_id = required_u64_any(args, &["ping_id", "id"])?;
-        let ping = self
-            .tools
-            .pings_resolve(ping_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        pings_resolve_result(ping.as_ref())
     }
 
     pub(super) async fn views_show(&self, args: &Value) -> Result<Value, String> {
@@ -465,11 +288,15 @@ impl HirselToolExecutor {
 
     pub(super) async fn subagents_wait(&self, args: &Value) -> Result<Value, String> {
         let process_id = required_string(args, "process_id")?;
-        // An attempt context reads processes but cannot await one. Hirsel owns
-        // the registry, so the wait polls it directly rather than reaching for
-        // a capability the recorded-attempt seam deliberately withholds.
-        let outcome = ProcessAwaiter::polling(Arc::clone(&self.process_registry))
-            .await_terminal(&process_id)
+        let runtime = self
+            .runtime
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "agent runtime is unavailable".to_string())?;
+        let outcome = runtime
+            .core
+            .processes()
+            .await_output(&process_id)
             .await
             .map_err(|error| error.to_string())?;
         subagents_wait_result(&process_id, &outcome)
@@ -559,21 +386,6 @@ impl HirselToolExecutor {
                 },
             )],
         ))
-    }
-
-    pub(super) async fn current_anchor(&self) -> Option<u64> {
-        self.anchors
-            .lock()
-            .await
-            .active
-            .as_ref()
-            .map(|anchors| anchors.owner_message_id)
-    }
-
-    pub(super) async fn require_current_event_anchor(&self) -> Result<u64, String> {
-        self.current_anchor()
-            .await
-            .ok_or_else(|| "event tools require an active Owner turn anchor".to_string())
     }
 }
 

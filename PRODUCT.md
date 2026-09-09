@@ -1,44 +1,43 @@
-# Product
+# Hirsel
 
-## Register
+Hirsel is a personal Agent that coordinates work across durable **Threads**. The Owner talks to one globally aware Agent. Each Thread owns its conversation, generated instrument, execution turns and factual activity.
 
-product
+## Work and conversation
 
-## Platform
+A Thread is an ongoing subject or unit of work. It has a stable numeric identity, title, description and optional instrument. It exists and appears in the inventory before any message, decision or execution is required. “Buy groceries” creates a Thread; the shopping list, store decision and progress all stay there.
 
-web
+The composer sends to the focused Thread. Messages belong to exactly one Thread. References and cross-thread mentions provide context; they never transfer message ownership. The Agent can explicitly inspect other Thread histories and keeps global orchestration context. The coordinator Thread, ID 0, holds coordination and unaddressed background activity.
 
-> Note: the web app is hirsel's desktop client and the protocol's reference implementation. The mobile end-state is a native Android app (Jetpack Compose over a shared Rust `hirsel-client-core`, ADR-0010), built outside impeccable. impeccable governs this web surface; `web` here selects web design rules rather than a native (Material 3 / HIG) rulebook.
+## Independent state
 
-## Users
+- **Settlement:** open or explicitly settled by the Owner. Reopening preserves history and identity.
+- **Attention:** quiet or needs Owner input. It can change repeatedly during a Thread's lifetime.
+- **Visibility:** archived, snoozed or visible. Hiding a Thread never silently settles it.
+- **Read state:** seen or unseen; reading never completes work.
+- **Execution:** queued, running, completed, failed, cancelled or interrupted turns. Completing a turn never settles the Thread.
 
-Exactly one: Sam — the author of lash, a Rust systems person who lives in terminals and drives coding agents all day. hirsel is his single-player, phone-first personal agent: one human, one long-lived agent, one VM. His context switches between glancing at a phone (is any task blocked on me? what is moving?) and working at depth on a desktop (shaping task-generated UI, reading a turn timeline, reviewing delegated work). Assume total fluency — CLI keyboard conventions are features not barriers, density is welcome, hand-holding is insulting. Not a product for sale; no multi-tenancy, no permission gating, no onboarding funnel.
+Thread inventory membership does not depend on whether content is information, a question or a digest. There is no separate Event/Ping work inventory.
 
-## Product Purpose
+## Instruments
 
-hirsel is the interface to one personal agent that works asynchronously on Sam's behalf. The product has one durable user-facing object: the **task**. A task is an addressable unit of work with current state, a constrained JSON-generated interface, and any conversation that changed it. The wire's typed Events are task updates; their stable id and anchor bind generated UI and owner messages to the same task.
+The Agent composes constrained JSON UI on an existing Thread. Updates preserve identity and conversation. A generated `continue` action runs the next stage in that Thread; a control explicitly marked to complete settles it. Reading, ordinary replies and progress are lifecycle-neutral. Only currently displayed actions are accepted, with revision checks preventing stale instruments from silently acting on newer state.
 
-Hirsel is always the interlocutor and is globally aware of every task conversation. Opening a task focuses the subject and generated interface, never the agent or the conversation universe. With no task focused, Hirsel is ambient across everything; that state is expressed by the absence of focus rather than a named mode. The standing composer inherits the field's focus and contains no scope control or instructional placeholder. Background processes, tools, model settings, and raw timelines remain inspectable utilities, not destinations or additional product objects. Success is that Sam can see what is moving, dive into one task, and return to the ambient whole without reconstructing context or entering a nested thread.
+## Agent and processes
 
-## Brand Personality
+One Agent orchestrates all Threads. Sub-agent and monitor processes are execution resources associated with work, not competing durable work objects. The Agent delegates slow work and remains available for new requests. Cross-thread requests queue at a strict turn boundary; one execution never silently merges Owner conversations from different Threads.
 
-**Calm terminal.** Dark, quiet, precise — a professional instrument in the lineage of a good TUI (lash-tui, Linear, Superhuman), not a chat toy. Three words: understated, legible, exact. Monospace earns its place for ids, commands, tool names, and keyboard hints; motion is restrained; the surface is information-dense but never noisy. Confidence comes from typography and spacing, not decoration. The agent is capable and understated; the UI never performs. Emotional goal: the quiet competence of a tool that respects your attention — calm, never cheer.
+Background results become activity in their addressed Thread, or coordinator activity when ownership is unknown. A triage fork may record or escalate evidence; it cannot settle work. Recovery preserves queued Owner requests and marks interrupted execution for judgment rather than automatically restarting it.
 
-## Anti-references
+## Clients
 
-- **Corporate SaaS chat** (Intercom / Zendesk): chirpy bubbles, marketing tone, rounded friendliness, "How can I help you today!" energy.
-- **Consumer assistant** (Siri / Alexa / ChatGPT mobile app): mascot personality, over-explaining, hand-holding, empty enthusiasm.
-- **Notification slot machine**: badge spam, red dots everywhere, engagement-bait urgency. hirsel signals "needs you" with one restrained accent and stays silent otherwise.
+Web and native clients share the same Thread contract. The inventory, focused conversation, instrument and streaming activity use durable IDs. Reconnection obtains persisted Thread state, messages, turns and activity. Live frames carry owning Thread and turn identities so delayed activity cannot appear inside an unrelated conversation.
 
-## Design Principles
+The source decision is [ADR 0016](docs/adr/0016-threads-own-conversation.md). It supersedes earlier Task/Event/Ping vocabulary and the global-conversation ownership model.
 
-- **Glanceable on a phone, deep on a desktop.** Same information; presentation earns the width (phone shelf/sheet ↔ desktop rails/split). Neither surface is a compromise of the other.
-- **Tasks are the only durable objects.** No Feed, Chat, Side Chat, evidence space, agent thread, or Canvas becomes a parallel destination. Generated UI and conversation live inside the task they affect.
-- **The agent is the interface.** Hirsel remains one globally aware interlocutor. Utilities are summoned and dismissed; they never become the information architecture.
-- **Restraint as respect.** One accent for "needs you," muted for everything else. Silence is a feature; the UI interrupts only when the agent is genuinely blocked on the Owner.
-- **Keyboard-grade and thumb-grade.** CLI composer semantics on desktop, first-class touch on phone — both first-class, neither an afterthought.
-- **Show the work on demand.** Delegation, tool calls, and process state remain inspectable, but the resting surface shows tasks and the exact judgment or action each task needs.
+## Artifacts
 
-## Accessibility & Inclusion
+An Artifact is an explicitly published result with a stable global ID and mutable content. It has no owning Thread. Agent tools create, edit, list and show artifacts; create, edit and show place a compact reference card in the addressed conversation. Multiple Threads may reference the same artifact. Cards always resolve the latest content, including cards in earlier messages. There is no revision history.
 
-Single known user, no stated disability requirements, but hold to WCAG AA regardless: the dark palette must keep AA contrast for body and secondary text (no gray-on-gray murk), the single "needs you" state must be distinguishable without relying on color alone (weight/label, not just a hue), all keyboard flows must have visible focus, and everything honors `prefers-reduced-motion`. Density must not come at the cost of tap-target size on the phone surface.
+Initial formats are self-contained Solid 2 JSX, HTML, and UTF-8 files. Previews support local interaction only, in an isolated browser surface without network access or a Hirsel backend/tool bridge. Files can be read and downloaded. Publication is deliberate; ordinary messages, attachments, execution output and generated instruments do not automatically become artifacts.
+
+Conversation is the resting surface. Its Artifacts view lists the results referenced in that Thread; the global Artifacts inventory links each result back to its conversations. Opening or expanding a result never changes the Thread addressed by the composer. Execution details remain under Inspect execution. Thread instruments retain their existing action validation and revision checks; they are distinct from artifacts.

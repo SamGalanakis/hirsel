@@ -1,5 +1,5 @@
 import "@fontsource-variable/inter";
-import { render } from "solid-js/web";
+import { render } from "@solidjs/web";
 import App from "./App";
 import { registerServiceWorker } from "./lib/pwa";
 import "./styles.css";

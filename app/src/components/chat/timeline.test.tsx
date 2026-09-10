@@ -109,25 +109,21 @@ describe("Timeline component", () => {
     expect(done.getByText("read 10 lines")).toBeTruthy();
   });
 
-  it("keeps reasoning collapsed until clicked", () => {
-    const { container, getByText, queryByText } = render(() => (
+  it("keeps reasoning readable inline without repeated disclosure chrome", () => {
+    const { container, getByText } = render(() => (
       <Timeline events={evs({ kind: "reasoning", text: "secret chain of thought" })} />
     ));
     const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
-    const toggle = within(row).getByRole("button");
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(queryByText("secret chain of thought")).toBeNull();
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(getByText("secret chain of thought")).toBeTruthy();
+    expect(within(row).queryByRole("button")).toBeNull();
+    expect(row.textContent).not.toContain("reasoning");
   });
 
-  it("renders inline markdown in expanded reasoning without literal asterisks", () => {
+  it("renders inline markdown in reasoning without literal asterisks", () => {
     const { container } = render(() => (
       <Timeline events={evs({ kind: "reasoning", text: "**Inspecting** the resolve path" })} />
     ));
     const row = container.querySelector('[data-slot="timeline-reasoning"]') as HTMLElement;
-    fireEvent.click(within(row).getByRole("button"));
     expect(row.querySelector("strong")?.textContent).toBe("Inspecting");
     // The dim italic block carries the full prose but never the raw `**` markers.
     const block = row.querySelector("p") as HTMLElement;
@@ -307,48 +303,34 @@ describe("streaming reasoning block", () => {
     expect(block.className).not.toContain("pl-4");
   });
 
-  it("folds into the collapsed row once a later event follows the run", () => {
-    const { container, queryByText } = render(() => (
+  it("keeps earlier reasoning inline once a later event follows the run", () => {
+    const { container, getByText } = render(() => (
       <Timeline
         events={evs(thinking, { kind: "tool_start", id: "t1", name: "grep", summary: "resolve" })}
         live
       />
     ));
     expect(stream(container)).toBeNull();
-    expect(within(row(container) as HTMLElement).getByRole("button").getAttribute("aria-expanded"))
-      .toBe("false");
-    expect(queryByText("Checking the resolve path first.")).toBeNull();
-  });
-
-  it("folds into the collapsed row when the turn stops being live", () => {
-    const [live, setLive] = createSignal(true);
-    const { container, queryByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
-    expect(stream(container)).toBeTruthy();
-    flush(() => setLive(false));
-    expect(stream(container)).toBeNull();
-    expect(within(row(container) as HTMLElement).getByRole("button").getAttribute("aria-expanded"))
-      .toBe("false");
-    expect(queryByText("Checking the resolve path first.")).toBeNull();
-  });
-
-  it("reveals the same text through the folded row's toggle", () => {
-    const [live, setLive] = createSignal(true);
-    const { container, getByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
-    flush(() => setLive(false));
-    const toggle = within(row(container) as HTMLElement).getByRole("button");
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(within(row(container) as HTMLElement).queryByRole("button")).toBeNull();
     expect(getByText("Checking the resolve path first.")).toBeTruthy();
   });
 
-  it("renders committed turn details as the collapsed row, never the live block", () => {
-    const { container, queryByText } = render(() => (
+  it("keeps the reasoning visible when the turn stops being live", () => {
+    const [live, setLive] = createSignal(true);
+    const { container, getByText } = render(() => <Timeline events={evs(thinking)} live={live()} />);
+    expect(stream(container)).toBeTruthy();
+    flush(() => setLive(false));
+    expect(stream(container)).toBeNull();
+    expect(getByText("Checking the resolve path first.")).toBeTruthy();
+  });
+
+  it("renders committed reasoning inline, never as the live block", () => {
+    const { container, getByText } = render(() => (
       <Timeline events={evs(thinking)} />
     ));
     expect(stream(container)).toBeNull();
-    expect(within(row(container) as HTMLElement).getByRole("button").getAttribute("aria-expanded"))
-      .toBe("false");
-    expect(queryByText("Checking the resolve path first.")).toBeNull();
+    expect(within(row(container) as HTMLElement).queryByRole("button")).toBeNull();
+    expect(getByText("Checking the resolve path first.")).toBeTruthy();
   });
 });
 

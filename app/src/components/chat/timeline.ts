@@ -1,7 +1,7 @@
 // Pure fold from the running turn's ordered `turn_event`s (v1.5) into rendered
 // timeline items. Kept free of any Solid/DOM concerns so it can be unit tested
-// directly (see timeline.test.tsx) and reused by both the live timeline under
-// the thinking marker and the committed-turn "turn details" view.
+// directly (see timeline.test.tsx) and reused by both live and committed inline
+// turn activity.
 import type { TimelineEvent } from "../../store/types";
 
 /** Where a started step (a tool call, an Agent program cell) has got to. A step

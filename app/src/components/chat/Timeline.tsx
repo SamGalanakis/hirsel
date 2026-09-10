@@ -1,4 +1,4 @@
-import { Bot, Braces, Brain, Check, ChevronRight, LoaderCircle, Square, X } from "@/components/ui/icons";
+import { Bot, Braces, Check, ChevronRight, LoaderCircle, Square, X } from "@/components/ui/icons";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 
 import { showAgentCode } from "../../lib/prefs";
@@ -47,9 +47,8 @@ const LIVE_REASONING_BLOCK =
  * is furniture around the only thing worth reading. Height-clamped and
  * tail-anchored so a long chain never dominates the screen.
  *
- * It is deliberately a different component from `ReasoningRow` rather than a
- * mode of it: swapping components on settle is what gives the folded row a fresh
- * collapsed toggle, with no live-phase state to carry across. */
+ * It is deliberately a different component from `ReasoningRow`: only the live
+ * tail needs a height ceiling and tail anchoring. */
 function StreamingReasoning(props: { text: string }) {
   return (
     <li
@@ -64,32 +63,15 @@ function StreamingReasoning(props: { text: string }) {
   );
 }
 
-/** A settled reasoning run: a thin, dim "reasoning" row that expands to the dim
- * italic text. Kept deliberately quieter than prose — never a headline. This is
- * what a live run folds into the moment anything follows it. */
+/** Settled reasoning remains readable in the stream. Tool rows already divide
+ * long thought into chronological blocks; repeating a labelled disclosure
+ * around every block obscures the actual sequence. */
 function ReasoningRow(props: { text: string }) {
-  const [open, setOpen] = createSignal(false);
   return (
-    <li class="flex flex-col gap-1" data-slot="timeline-reasoning">
-      <button
-        type="button"
-        class="inline-flex min-h-11 w-fit items-center gap-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
-        aria-expanded={(open()) ? "true" : "false"}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <ChevronRight
-          class={["size-3 shrink-0 transition-transform", { "rotate-90": open() }]}
-
-          aria-hidden="true"
-        />
-        <Brain class="size-3 shrink-0" aria-hidden="true" />
-        <span class="italic">reasoning</span>
-      </button>
-      <Show when={open()}>
-        <p class="whitespace-pre-wrap pl-4 text-meta italic leading-relaxed text-muted-foreground/60">
-          {renderInline(props.text)}
-        </p>
-      </Show>
+    <li class="min-w-0" data-slot="timeline-reasoning">
+      <p class="max-w-prose whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground/75">
+        {renderInline(props.text)}
+      </p>
     </li>
   );
 }
@@ -284,21 +266,18 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }>; settled
 
 /**
  * The running (or finished) turn rendered as a lash-CLI-style timeline: prose
- * blocks interleaved with tool rows and collapsed reasoning, in exact seq order.
+ * blocks interleaved with tool rows and readable reasoning, in exact seq order.
  * Prose is muted vs committed bubbles so the live turn reads as provisional.
- * Drives both the live view under the thinking marker and the committed "turn
- * details" panel — `live` is what tells the two apart, and defaults off so a
- * committed turn is unchanged.
+ * Drives both the live view and the committed inline activity stream. `live`
+ * tells the actively growing reasoning tail from settled history.
  */
 export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settled?: boolean }) {
   // Durations (tool_done.at − tool_start.at) come out of the fold on each row's
   // status, measured within that row's own id namespace.
   const items = createMemo(() => buildTimeline(props.events, showAgentCode()));
   // Only the LAST item of a live turn is still being written. A reasoning run
-  // there is the Agent thinking at this instant, so it reads as an open block;
-  // the moment anything follows it (or the turn goes idle) it is history, and
-  // history is quiet. Keyed rather than indexed so the flag follows the run
-  // itself through the fold's in-place growth.
+  // there is the Agent thinking at this instant, so its height is bounded while
+  // streaming. Settled reasoning stays inline at full length.
   const streamingKey = createMemo(() => {
     if (!props.live) return null;
     const rows = items();
@@ -321,10 +300,8 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settl
               </li>
             </Match>
             <Match when={row().kind === "reasoning"}>
-              {/* Live tail: bare streaming text. Settled: the collapsed row.
-                  Swapping components (rather than toggling a mode) is what
-                  makes the fold a clean handover — the row mounts with its own
-                  fresh, collapsed toggle. */}
+              {/* Live tail and settled history share the same quiet prose
+                  treatment; only the actively growing tail is height-bounded. */}
               <Show
                 when={row().key === streamingKey()}
                 fallback={

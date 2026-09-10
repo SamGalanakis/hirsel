@@ -14,13 +14,12 @@ export function toolSummary(activity: ThreadActivity): ToolCall | null {
  * outcomes. The canonical call ID is the sole join key. */
 export function mergePersistedToolCalls(events: TimelineEvent[], calls: ToolCall[]): TimelineEvent[] {
   const items = buildTimeline(events);
-  const durableById = new Map(calls.map(call => [call.id, call]));
+  const presentById = new Map(items.flatMap(item => item.kind === "tool" ? [[item.toolId, item] as const] : []));
   let seq = Math.max(0, ...events.map(event => event.seq));
   const completions: TimelineEvent[] = [];
-  for (const item of items) {
-    if (item.kind !== "tool" || item.status.state !== "running") continue;
-    const call = durableById.get(item.toolId);
-    if (!call) continue;
+  for (const call of calls) {
+    const item = presentById.get(call.id);
+    if (item?.status.state === "done") continue;
     completions.push({ seq: ++seq, event: { kind: "tool_done", id: call.id, name: call.name, ok: call.ok, summary: null } });
   }
   return completions.length > 0 ? [...events, ...completions] : events;
@@ -76,5 +75,5 @@ export function workLabel(turn: ThreadTurn | undefined, events: TimelineEvent[],
   }
   if (count) return `Used ${count} ${count === 1 ? "tool" : "tools"}`;
   if (turn?.state === "completed" && !hasReply) return "Finished without a reply";
-  return "Work details";
+  return "Activity";
 }

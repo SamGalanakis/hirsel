@@ -27,16 +27,22 @@ export function conversationEntries(history: ThreadHistory): ConversationEntry[]
   const inPage = (timestamp: string) => oldest === null || instant(timestamp) >= oldest;
   const finals = new Map(history.turns.filter(turn => turn.agent_message_id !== null).map(turn => [turn.agent_message_id!, turn]));
   const unfinished = history.turns.filter(turn => turn.agent_message_id === null && (turn.owner_message_id !== null ? loaded.has(turn.owner_message_id) : inPage(turn.started_at)));
-  const owned = new Map<number, ThreadTurn[]>();
-  for (const turn of unfinished) if (turn.owner_message_id !== null) owned.set(turn.owner_message_id, [...owned.get(turn.owner_message_id) ?? [], turn]);
   const positioned: { entry: ConversationEntry; time: bigint; order: number }[] = [];
   for (const message of history.messages) {
     const time = instant(message.ts);
     const turn = finals.get(message.id);
     positioned.push({ entry: { key: turn ? `turn-${turn.id}` : `message-${message.id}`, kind: "message", message, turn }, time, order: 0 });
-    for (const turn of owned.get(message.id) ?? []) positioned.push({ entry: { key: `turn-${turn.id}`, kind: "turn", turn }, time, order: 1 });
   }
-  for (const turn of unfinished) if (turn.owner_message_id === null) positioned.push({ entry: { key: `turn-${turn.id}`, kind: "turn", turn }, time: instant(turn.started_at), order: 1 });
+  const ownerTimes = new Map(history.messages.map(message => [message.id, instant(message.ts)]));
+  for (const turn of unfinished) {
+    // A queued turn belongs beside the message that queued it. Once execution
+    // starts, the host replaces started_at with its activation time; that is
+    // the truthful point for the live row in the shared chronology. Ownership
+    // still joins by exact ID and never participates in ordering.
+    const ownerTime = turn.owner_message_id === null ? undefined : ownerTimes.get(turn.owner_message_id);
+    const time = turn.state === "queued" && ownerTime !== undefined ? ownerTime : instant(turn.started_at);
+    positioned.push({ entry: { key: `turn-${turn.id}`, kind: "turn", turn }, time, order: 1 });
+  }
   const visibleTurns = new Set([...finals.values()].filter(turn => loaded.has(turn.agent_message_id!)).map(turn => turn.id).concat(unfinished.map(turn => turn.id)));
   for (const activity of history.activities) {
     if (!inPage(activity.ts) || (activity.turn_id !== null && !visibleTurns.has(activity.turn_id))) continue;

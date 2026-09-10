@@ -16,7 +16,7 @@ const message: ChatMessage = { id: 1, thread_id: 1, author: "agent", body: "Fini
 const turn = (state: ThreadTurn["state"]): ThreadTurn => ({ id: 1, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: state === "completed" ? 1 : null, state, started_at: "2026-09-09T09:59:00Z", finished_at: ["running", "queued"].includes(state) ? null : activity.ts });
 
 describe("readable work outcomes", () => {
-  it("shows failure and recovery outside collapsed details", () => {
+  it("shows failure and recovery in the inline stream", () => {
     const view = render(() => <ThreadWork turn={turn("failed")} events={[]} activities={[{ ...activity, kind: "execution_failed", data: { reason: "Browser checks failed: the page did not load." } }]} />);
     expect(view.getByText("Couldn’t finish")).toBeTruthy();
     const failure = view.container.querySelector('[data-slot="work-failure"]')!;
@@ -25,7 +25,7 @@ describe("readable work outcomes", () => {
     const recovery = view.container.querySelector('[data-slot="work-recovery"]')!;
     expect(recovery).toHaveTextContent("Send a message to continue.");
     expect(failure.nextElementSibling).toBe(recovery);
-    expect(view.container.querySelector("details")!.open).toBe(false);
+    expect(view.container.querySelector("details")).toBeNull();
   });
   it("keeps plain replies free of an empty work disclosure", () => {
     const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [] }} events={[]} activities={[]} />);
@@ -48,8 +48,8 @@ describe("readable work outcomes", () => {
 describe("execution result preservation", () => {
   it("settles a started tool from the recorded final outcome without duplicating the invocation", () => {
     const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [{ id: "read", name: "read_file", ok: true }] }} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null } }]} activities={[]} />);
-    expect(view.getByText("Used 1 tool")).toBeTruthy();
-    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
+    expect(view.getByText("Activity")).toBeTruthy();
+    expect(view.container.querySelector('[data-slot="work-details"]')).toBeNull();
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(1);
     expect(view.container.querySelector('[data-slot="timeline-tool"] [aria-label="ok"]')).toBeTruthy();
     expect(view.getAllByText("read_file")).toHaveLength(1);
@@ -60,8 +60,6 @@ describe("execution result preservation", () => {
     const [final, setFinal] = createSignal<ChatMessage>();
     const [activities, setActivities] = createSignal<ThreadActivity[]>([]);
     const view = render(() => <ThreadWork message={final()} activities={activities()} events={events} />);
-    const inspector = view.container.querySelector("details")!;
-    inspector.open = true;
     for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
     expect(view.getByText("Distinct result: first file contents")).toBeTruthy();
     expect(view.getByText("Distinct error: second file permission denied")).toBeTruthy();
@@ -74,7 +72,7 @@ describe("execution result preservation", () => {
     expect(view.getAllByText("read_file")).toHaveLength(2);
     expect(view.container.querySelectorAll('[aria-label="failed"]')).toHaveLength(1);
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
-    expect(inspector.textContent).not.toContain("tool completed");
+    expect(view.container.textContent).not.toContain("tool completed");
     expect(view.queryByRole("button", { name: "4 tool calls" })).toBeNull();
   });
 
@@ -91,7 +89,6 @@ describe("execution result preservation", () => {
       ],
     };
     const view = render(() => <ThreadWork turn={turn("completed")} message={reverseCompletionOrder} events={starts} activities={[]} />);
-    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
     const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
     expect(rows).toHaveLength(2);
     expect(rows.map(row => [row.getAttribute("data-tool-call-id"), Boolean(row.querySelector('[aria-label="ok"]')), Boolean(row.querySelector('[aria-label="failed"]'))])).toEqual([
@@ -107,7 +104,6 @@ describe("execution result preservation", () => {
       { seq: 3, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "B failed" } },
     ];
     const view = render(() => <ThreadWork turn={turn("completed")} message={message} events={partial} activities={[]} />);
-    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
     const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
     expect(rows).toHaveLength(2);
     expect(rows.map(row => row.getAttribute("data-tool-call-id"))).toEqual(["call-a", "call-b"]);
@@ -117,7 +113,6 @@ describe("execution result preservation", () => {
 
   it("keeps an exact durable tool outcome on a turn with no final message", () => {
     const view = render(() => <ThreadWork turn={turn("interrupted")} activities={[activity]} events={[{ seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: null } }]} />);
-    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
     const row = view.container.querySelector('[data-slot="timeline-tool"]')!;
     expect(row.getAttribute("data-tool-call-id")).toBe("call-a");
     expect(row.querySelector('[aria-label="ok"]')).toBeTruthy();
@@ -126,7 +121,6 @@ describe("execution result preservation", () => {
 
   it("keeps both completion payloads when only the first persisted activity has arrived", () => {
     const view = render(() => <ThreadWork activities={[activity]} events={events} live />);
-    view.container.querySelector("details")!.open = true;
     for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
     expect(view.getAllByText("Distinct result: first file contents")).toHaveLength(1);
     expect(view.getAllByText("Distinct error: second file permission denied")).toHaveLength(1);
@@ -150,7 +144,6 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
   flush(() => setShowAgentCode(true));
   try {
     const view = render(() => <ThreadWork message={final()} activities={activities()} events={stream()} />);
-    view.container.querySelector("details")!.open = true;
     flush(() => setStream([...initial,
       { ...events[1], seq: 6 },
       { seq: 7, event: { kind: "code_done", id: "cell", ok: true, summary: "42" } },

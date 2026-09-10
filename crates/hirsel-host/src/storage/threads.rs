@@ -3,6 +3,27 @@ use chrono::{DateTime, Utc};
 use hirsel_proto::{Thread, ThreadAttention};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ThreadPublication {
+    history_id: String,
+    thread: Thread,
+}
+
+impl ThreadPublication {
+    pub(crate) fn history_id(&self) -> &str {
+        &self.history_id
+    }
+
+    pub(crate) fn thread(&self) -> &Thread {
+        &self.thread
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test(history_id: String, thread: Thread) -> Self {
+        Self { history_id, thread }
+    }
+}
+
 pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,showcased_artifact_id";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     let parent_thread_id = r.get::<_, Option<u64>>(12)?;
@@ -140,6 +161,36 @@ fn create_in_transaction(
 }
 
 impl Storage {
+    pub(crate) async fn current_thread_publication(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(tokio::sync::MutexGuard<'_, Connection>, ThreadPublication)> {
+        let c = self.conn.lock().await;
+        let publication = ThreadPublication {
+            history_id: super::schema::read_history_id(&c)?,
+            thread: get(&c, id)?,
+        };
+        Ok((c, publication))
+    }
+
+    pub(crate) async fn checked_thread_publication(
+        &self,
+        expected_history: &str,
+        expected: &Thread,
+    ) -> anyhow::Result<(tokio::sync::MutexGuard<'_, Connection>, ThreadPublication)> {
+        let guard = self.conn.lock().await;
+        super::thread_scope::validate_history(&guard, expected_history)?;
+        let publication = ThreadPublication {
+            history_id: expected_history.to_owned(),
+            thread: get(&guard, expected.id)?,
+        };
+        anyhow::ensure!(
+            publication.thread == *expected,
+            "Thread publication snapshot is stale"
+        );
+        Ok((guard, publication))
+    }
+
     pub async fn thread(&self, id: u64) -> anyhow::Result<Option<Thread>> {
         let c = self.conn.lock().await;
         match get(&c, id) {

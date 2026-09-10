@@ -53,12 +53,17 @@ pub(super) fn initialize(conn: &mut Connection) -> anyhow::Result<()> {
 }
 impl Storage {
     pub async fn history_id(&self) -> anyhow::Result<String> {
-        Ok(self.conn.lock().await.query_row(
-            "SELECT value FROM meta WHERE key='history_id'",
-            [],
-            |r| r.get(0),
-        )?)
+        let conn = self.conn.lock().await;
+        read_history_id(&conn)
     }
+}
+
+pub(super) fn read_history_id(conn: &Connection) -> anyhow::Result<String> {
+    Ok(
+        conn.query_row("SELECT value FROM meta WHERE key='history_id'", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 #[cfg(test)]
 mod tests;

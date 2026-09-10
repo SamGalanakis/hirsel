@@ -28,6 +28,7 @@ mod thread_summary;
 mod threads;
 pub(crate) use thread_execution::ThreadExecution;
 pub(crate) use thread_icons::parse_icon;
+pub(crate) use threads::ThreadPublication;
 mod thread_mutations;
 mod thread_read;
 pub(crate) use thread_mutations::{RelatedTargetInput, ThreadMutation};

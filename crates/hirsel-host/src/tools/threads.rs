@@ -45,9 +45,14 @@ impl ToolSuite {
         self.broadcast(HostToClient::ArtifactUpsert { artifact });
     }
     pub(crate) async fn publish_thread_summary(&self, thread_id: u64) {
-        match self.storage.thread(thread_id).await {
-            Ok(Some(thread)) => self.publish_thread(thread).await,
-            Ok(None) => tracing::warn!(thread_id, "cannot publish missing Thread summary"),
+        match self.storage.current_thread_publication(thread_id).await {
+            Ok((guard, publication)) => {
+                self.broadcast(HostToClient::ThreadUpsert {
+                    thread: publication.thread().clone(),
+                });
+                drop(guard);
+                self.pushes.enqueue_thread(&publication).await;
+            }
             Err(error) => tracing::warn!(thread_id, %error, "cannot refresh Thread summary"),
         }
     }
@@ -56,9 +61,22 @@ impl ToolSuite {
         self.broadcast(HostToClient::Msg { message });
         self.publish_thread_summary(thread_id).await;
     }
-    pub(crate) async fn publish_thread(&self, thread: Thread) {
-        self.pushes.enqueue_thread(&thread).await;
-        self.broadcast(HostToClient::ThreadUpsert { thread });
+    pub(crate) async fn publish_thread(&self, expected_history: &str, thread: Thread) {
+        let thread_id = thread.id;
+        match self
+            .storage
+            .checked_thread_publication(expected_history, &thread)
+            .await
+        {
+            Ok((guard, publication)) => {
+                self.broadcast(HostToClient::ThreadUpsert {
+                    thread: publication.thread().clone(),
+                });
+                drop(guard);
+                self.pushes.enqueue_thread(&publication).await;
+            }
+            Err(error) => tracing::warn!(thread_id, %error, "cannot publish stale Thread summary"),
+        }
     }
     pub(crate) async fn publish_thread_activity(&self, activity: ThreadActivity) {
         let thread_id = activity.thread_id;
@@ -81,7 +99,7 @@ impl ToolSuite {
                     }) {
                         self.publish_thread_activity(activity).await;
                     }
-                    self.publish_thread(detail.thread).await;
+                    self.publish_thread_summary(parent).await;
                 }
                 Err(error) => tracing::warn!(%error,"failed to publish committed child report"),
             }

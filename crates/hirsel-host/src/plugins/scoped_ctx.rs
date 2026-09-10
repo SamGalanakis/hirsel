@@ -80,7 +80,9 @@ impl PluginThreads for ScopedThreads {
         let thread: hirsel_proto::Thread =
             serde_json::from_value(result["thread"].clone()).map_err(|e| e.to_string())?;
         let id = thread.id;
-        self.tools.publish_thread(thread).await;
+        self.tools
+            .publish_thread(&self.caller.history_id, thread)
+            .await;
         Ok(id)
     }
     async fn append_activity(&self, input: NewActivity) -> Result<ActivityReceipt, String> {
@@ -114,7 +116,9 @@ impl PluginThreads for ScopedThreads {
             .settle_scoped_thread(&self.caller, id, settled)
             .await
             .map_err(|e| e.to_string())?;
-        self.tools.publish_thread(thread).await;
+        self.tools
+            .publish_thread(&self.caller.history_id, thread)
+            .await;
         Ok(())
     }
 }

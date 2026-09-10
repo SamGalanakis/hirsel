@@ -20,7 +20,7 @@ impl ToolSuite {
                 .is_some_and(|until| until <= chrono::Utc::now())
             {
                 let thread = self.storage.snooze_thread(thread.id, None).await?;
-                self.publish_thread(thread).await;
+                self.publish_thread_summary(thread.id).await;
             }
         }
         Ok(())

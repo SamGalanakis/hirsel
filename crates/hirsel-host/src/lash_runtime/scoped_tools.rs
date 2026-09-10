@@ -257,7 +257,9 @@ impl ScopedThreadTools {
                     .thread_detail(accepted.thread_id, None, 1)
                     .await
                     .map_err(|e| e.to_string())?;
-                self.tools.publish_thread(detail.thread).await;
+                self.tools
+                    .publish_thread(&self.caller.history_id, detail.thread)
+                    .await;
                 for turn in detail
                     .turns
                     .into_iter()
@@ -445,7 +447,10 @@ impl ScopedThreadTools {
         }
         if let Some(thread) = result.get("thread") {
             self.tools
-                .publish_thread(serde_json::from_value(thread.clone()).map_err(|e| e.to_string())?)
+                .publish_thread(
+                    &self.caller.history_id,
+                    serde_json::from_value(thread.clone()).map_err(|e| e.to_string())?,
+                )
                 .await;
         }
         if let Some(activity) = result.get("activity") {

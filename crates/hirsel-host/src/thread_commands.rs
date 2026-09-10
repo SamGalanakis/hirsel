@@ -268,7 +268,9 @@ impl AppState {
                 .publish_showcase_artifacts(expected_history, &ids)
                 .await?;
         }
-        self.tools.publish_thread(thread.clone()).await;
+        self.tools
+            .publish_thread(expected_history, thread.clone())
+            .await;
         Ok(thread)
     }
 }

@@ -11,10 +11,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use hirsel_proto::{Thread, ThreadAttention};
+use hirsel_proto::ThreadAttention;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::Storage;
+use crate::storage::{Storage, ThreadPublication};
 
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -310,10 +310,9 @@ impl PushGateway {
         }
     }
 
-    pub(crate) async fn enqueue_thread(&self, thread: &Thread) {
-        let Ok(history_id) = self.storage.history_id().await else {
-            return;
-        };
+    pub(crate) async fn enqueue_thread(&self, publication: &ThreadPublication) {
+        let history_id = publication.history_id().to_owned();
+        let thread = publication.thread();
         let eligible = thread.attention == ThreadAttention::NeedsOwner
             && thread.settled_at.is_none()
             && thread.archived_at.is_none()
@@ -520,7 +519,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use hirsel_proto::PushPlatform;
+    use hirsel_proto::{PushPlatform, Thread};
 
     use super::*;
 
@@ -553,6 +552,16 @@ mod tests {
             .unwrap()
             .0
     }
+
+    async fn enqueue_current(gateway: &PushGateway, storage: &Storage, thread: &Thread) {
+        gateway
+            .enqueue_thread(&ThreadPublication::test(
+                storage.history_id().await.unwrap(),
+                thread.clone(),
+            ))
+            .await;
+    }
+
     async fn wait_attempts(attempts: &AtomicUsize, expected: usize) {
         tokio::time::timeout(Duration::from_secs(2), async {
             while attempts.load(Ordering::SeqCst) < expected {
@@ -615,9 +624,7 @@ mod tests {
         let (gateway, _) = PushGateway::recording(storage.clone());
 
         let old_history = storage.history_id().await.unwrap();
-        gateway
-            .enqueue_thread(&attention_thread(&storage).await)
-            .await;
+        enqueue_current(&gateway, &storage, &attention_thread(&storage).await).await;
         wait_recorded(&gateway, 1).await;
 
         storage.reset().await.unwrap();
@@ -634,9 +641,7 @@ mod tests {
             vec!["durable-token"]
         );
 
-        gateway
-            .enqueue_thread(&attention_thread(&storage).await)
-            .await;
+        enqueue_current(&gateway, &storage, &attention_thread(&storage).await).await;
         wait_recorded(&gateway, 2).await;
         let pushes = gateway.recorded_pushes();
         assert_eq!(pushes[0].payload.data.history_id, old_history);
@@ -655,9 +660,9 @@ mod tests {
         let sender = Arc::new(FailOnceSender::default());
         let gateway = PushGateway::new(storage.clone(), sender.clone(), None);
         let thread = attention_thread(&storage).await;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         wait_attempts(&sender.attempts, 2).await;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         assert_eq!(sender.attempts.load(Ordering::SeqCst), 2);
     }
     struct HeldSender {
@@ -686,12 +691,12 @@ mod tests {
         });
         let gateway = PushGateway::new(storage.clone(), sender.clone(), None);
         let mut thread = attention_thread(&storage).await;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         wait_attempts(&sender.attempts, 1).await;
         thread.attention = ThreadAttention::Quiet;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         thread.attention = ThreadAttention::NeedsOwner;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         wait_attempts(&sender.attempts, 2).await;
         sender.release.add_permits(2);
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -707,12 +712,12 @@ mod tests {
         // Ordinary revisions/read changes stay in the same attention episode.
         thread.revision += 1;
         thread.read = true;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         assert_eq!(sender.attempts.load(Ordering::SeqCst), 2);
         thread.snoozed_until = Some(Utc::now() + chrono::Duration::hours(1));
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         thread.snoozed_until = None;
-        gateway.enqueue_thread(&thread).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         wait_attempts(&sender.attempts, 3).await;
         sender.release.add_permits(1);
     }

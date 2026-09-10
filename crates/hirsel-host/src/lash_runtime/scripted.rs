@@ -343,7 +343,7 @@ impl ScriptedAgentRuntime {
                     Some(hirsel_proto::ThreadAttention::Quiet),
                 )
                 .await?;
-            self.tools.publish_thread(thread).await;
+            self.tools.publish_thread(&turn.history_id, thread).await;
             return Ok(None);
         }
 

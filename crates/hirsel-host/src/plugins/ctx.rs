@@ -40,7 +40,7 @@ impl PluginThreads for HostThreads {
             )
             .await
             .map_err(stringify)?;
-        self.tools.publish_thread(thread.clone()).await;
+        self.tools.publish_thread_summary(thread.id).await;
         self.append_activity(NewActivity::new(
             thread.id,
             "created",
@@ -78,7 +78,7 @@ impl PluginThreads for HostThreads {
             .settle_thread(thread_id, settled)
             .await
             .map_err(stringify)?;
-        self.tools.publish_thread(thread).await;
+        self.tools.publish_thread_summary(thread.id).await;
         Ok(())
     }
 }

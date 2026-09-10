@@ -373,7 +373,7 @@ async function runChat(context) {
   const { page, frames, nonce, threadId } = context;
   const firstMarker = `HIRSEL-CHAT-FIRST-${nonce}`;
   const secondMarker = `HIRSEL-CHAT-SECOND-${nonce}`;
-  const firstPrompt = `Use shell.run once with cmd "sleep 3; printf '${firstMarker}'". After the tool returns, end with the exact marker ${firstMarker}.`;
+  const firstPrompt = `Use shell.run once with cmd "sleep 8; printf '${firstMarker}'". After the tool returns, end with the exact marker ${firstMarker}.`;
   const secondPrompt = `Use shell.run once with cmd "sleep 3; printf '${secondMarker}'". After the tool returns, end with the exact marker ${secondMarker}.`;
   const first = await sendMessage(page, frames, threadId, firstPrompt);
   await waitForTurn(frames, first.turnId, turn => turn.state === "running", "first turn running");
@@ -384,7 +384,24 @@ async function runChat(context) {
     frame => frame.type === "thread_upsert" && frame.thread.id === threadId
       && frame.thread.queued_turn_count >= 1,
   ));
-  await capture("10-queued", context);
+  const queuedTurn = await waitForOwnerTurn(frames, threadId, second.owner.id);
+  assert.equal(queuedTurn.state, "queued", "accepted second turn was not published as queued");
+  assert.equal(latestFrame(frames, frame => frame.type === "thread_turn" && frame.turn.id === first.turnId && terminal(frame.turn.state)), undefined, "first turn finished before queued acknowledgement");
+  const assertQueued = snapshot => {
+    const entry = snapshot.dom.entries.find(candidate => candidate.turnId === String(queuedTurn.id));
+    assert(entry?.visible, "accepted queued turn has no visible row");
+    assert.match(entry.text, /Queued/, "accepted queued turn is not labelled Queued");
+    const detailTurn = snapshot.detail.turns.find(turn => turn.id === queuedTurn.id);
+    assert.equal(detailTurn?.owner_message_id, second.owner.id);
+    assert.equal(detailTurn?.state, "queued");
+    const storedTurn = snapshot.store.turns.find(turn => turn.id === queuedTurn.id);
+    assert.equal(storedTurn?.owner_message_id, second.owner.id);
+    assert.equal(storedTurn?.state, "queued");
+  };
+  assertQueued(await capture("10-queued", context));
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator(`[data-execution-turn="${queuedTurn.id}"]`).getByText("Queued", { exact: true }).waitFor();
+  assertQueued(await capture("11-queued-reloaded", context));
 
   const firstTerminal = await waitForTurn(frames, first.turnId, turn => terminal(turn.state), "first turn terminal");
   assert.equal(firstTerminal.state, "completed");
@@ -413,6 +430,15 @@ async function runChat(context) {
   assert.equal(settled.store.turns.length, 2);
   const firstTool = toolPair(frames, first.turnId, /shell[._]run/);
   const secondTool = toolPair(frames, secondTurn.id, /shell[._]run/);
+  const collapsedTools = [firstTool, secondTool].map(tool => {
+    const row = settled.dom.entries.flatMap(entry => entry.timeline).find(candidate => candidate.toolCallId === tool.started.event.id);
+    assert(row?.visible, `tool ${tool.started.event.id} has no visible collapsed row`);
+    assert(row.text.includes(tool.started.event.summary), `tool ${tool.started.event.id} lost its command/subject summary`);
+    assert.match(row.text, /Succeeded/, `tool ${tool.started.event.id} has no plain success outcome`);
+    assert.doesNotMatch(row.text, /ok status 0/, `tool ${tool.started.event.id} exposes transport status instead of a plain outcome`);
+    return row.text;
+  });
+  assert.notEqual(collapsedTools[0], collapsedTools[1], "completed tool summaries are not meaningfully distinct");
   for (const [turn, marker, tool] of [
     [firstTerminal, firstMarker, firstTool],
     [secondTerminal, secondMarker, secondTool],
@@ -432,7 +458,7 @@ async function runChat(context) {
   assertReasoningIntegrity(settledExpanded.dom, secondTerminal, durableTimeline(settledExpanded.detail, secondTurn.id));
   const before = timelineProjection(settledExpanded.dom);
   await page.reload({ waitUntil: "domcontentloaded" });
-  await page.locator(`[data-message-id="${secondTerminal.agent_message_id}"]`).getByText(secondMarker, { exact: false }).waitFor();
+  await page.locator(`[data-message-id="${secondTerminal.agent_message_id}"]`).getByText(secondMarker, { exact: true }).waitFor();
   await expandInlineTools(page, [firstTool.started.event.id, secondTool.started.event.id]);
   const reloaded = await capture("31-reloaded", context);
   const after = timelineProjection(reloaded.dom);

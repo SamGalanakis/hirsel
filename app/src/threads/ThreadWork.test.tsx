@@ -61,14 +61,12 @@ describe("execution result preservation", () => {
     const [activities, setActivities] = createSignal<ThreadActivity[]>([]);
     const view = render(() => <ThreadWork message={final()} activities={activities()} events={events} />);
     for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
-    expect(view.getByText("Distinct result: first file contents")).toBeTruthy();
-    expect(view.getByText("Distinct error: second file permission denied")).toBeTruthy();
+    const resultText = () => [...view.container.querySelectorAll('[data-slot="tool-result"]')].map(row => row.textContent);
+    expect(resultText()).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
     flush(() => setFinal(message));
     flush(() => setActivities([activity]));
-    expect(view.getAllByText("Distinct result: first file contents")).toHaveLength(1);
-    expect(view.getAllByText("Distinct error: second file permission denied")).toHaveLength(1);
     const results = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
-    expect(results.map(row => row.textContent)).toEqual(["Distinct result: first file contents", "Distinct error: second file permission denied"]);
+    expect(results.map(row => row.textContent)).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
     expect(view.getAllByText("read_file")).toHaveLength(2);
     expect(view.container.querySelectorAll('[aria-label="failed"]')).toHaveLength(1);
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
@@ -107,7 +105,7 @@ describe("execution result preservation", () => {
     const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
     expect(rows).toHaveLength(2);
     expect(rows.map(row => row.getAttribute("data-tool-call-id"))).toEqual(["call-a", "call-b"]);
-    expect(view.getByText("B failed")).toBeTruthy();
+    expect(view.getByText("Reading B · Failed")).toBeTruthy();
     expect(view.getAllByText("read_file")).toHaveLength(2);
   });
 
@@ -122,9 +120,7 @@ describe("execution result preservation", () => {
   it("keeps both completion payloads when only the first persisted activity has arrived", () => {
     const view = render(() => <ThreadWork activities={[activity]} events={events} live />);
     for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
-    expect(view.getAllByText("Distinct result: first file contents")).toHaveLength(1);
-    expect(view.getAllByText("Distinct error: second file permission denied")).toHaveLength(1);
-    expect([...view.container.querySelectorAll('[data-slot="tool-result"]')].map(row => row.textContent)).toEqual(["Distinct result: first file contents", "Distinct error: second file permission denied"]);
+    expect([...view.container.querySelectorAll('[data-slot="tool-result"]')].map(row => row.textContent)).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
     expect(view.queryByRole("button", { name: /tool calls/ })).toBeNull();
   });
 });
@@ -166,11 +162,9 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
     for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
     const results = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
     expect(results.map(row => [row.getAttribute("data-tool-call-id"), row.textContent])).toEqual([
-      ["call-a", "Distinct result: first file contents"],
-      ["call-b", "Distinct error: second file permission denied"],
+      ["call-a", "Result\nDistinct result: first file contents"],
+      ["call-b", "Result\nDistinct error: second file permission denied"],
     ]);
-    expect(view.getAllByText("Distinct result: first file contents")).toHaveLength(1);
-    expect(view.getAllByText("Distinct error: second file permission denied")).toHaveLength(1);
     expect(view.getAllByText("read_file")).toHaveLength(2);
     expect(view.container.querySelectorAll('[aria-label="failed"]')).toHaveLength(1);
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);

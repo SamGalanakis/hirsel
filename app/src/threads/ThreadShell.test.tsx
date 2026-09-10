@@ -323,7 +323,7 @@ it("keeps the same expanded tool result and focus when the live turn becomes its
   flush(() => handleThreadMessage({ type: "thread_turn", turn: { ...turn, agent_message_id: 93, state: "completed", finished_at: "2026-09-09T10:00:02Z" } }));
   expect(view.getByRole("button", { name: "read_file — hide result" })).toBe(result);
   await waitFor(() => expect(document.activeElement).toBe(result));
-  expect(view.getAllByText("Exact file contents")).toHaveLength(1);
+  expect(view.container.querySelector('[data-slot="tool-result"]')?.textContent).toBe("Result\nExact file contents");
   expect(view.getAllByText("File checked")).toHaveLength(1);
   const timeline = view.container.querySelector('[data-message-id="93"] [data-slot="timeline"]')!;
   const reply = view.getByText("File checked");

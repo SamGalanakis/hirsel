@@ -114,6 +114,20 @@ async fn scripted_next_turn_waits_and_cancel_queued_removes_message() {
         )
         .await
         .unwrap();
+    let queued_turn = state
+        .storage
+        .thread_detail(thread.id, None, 100)
+        .await
+        .unwrap()
+        .turns
+        .into_iter()
+        .find(|turn| turn.owner_message_id == Some(queued.message.id))
+        .expect("accepted Owner message has a durable turn");
+    assert_eq!(queued_turn.state, hirsel_proto::ThreadTurnState::Queued);
+    assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
+        frame,
+        HostToClient::ThreadTurn { turn } if turn == &queued_turn
+    )));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         state

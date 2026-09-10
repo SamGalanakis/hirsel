@@ -106,7 +106,7 @@ describe("Timeline component", () => {
       />
     ));
     expect(done.container.querySelector('[aria-label="ok"]')).toBeTruthy();
-    expect(done.getByText("read 10 lines")).toBeTruthy();
+    expect(done.getByText("x.ts · Succeeded")).toBeTruthy();
   });
 
   it("keeps reasoning readable inline without repeated disclosure chrome", () => {
@@ -154,21 +154,44 @@ describe("Timeline component", () => {
     expect(queryByText("secret")).toBeNull();
   });
 
-  it("expands bounded tool input and actual result with truthful truncation", () => {
+  it("keeps a distinct shell command and plain outcome collapsed, then prioritizes output while preserving raw result", () => {
     const { container } = render(() => (
       <Timeline events={evs(
         { kind: "tool_start", id: "shell", name: "shell_run", summary: "cmd: printf", input: { text: "{\n  \"cmd\": \"printf hello\"\n}", truncated: false } },
-        { kind: "tool_done", id: "shell", name: "shell_run", ok: true, summary: "ok status 0", result: { text: "{\n  \"stdout\": \"hello\"\n}", truncated: true } },
+        { kind: "tool_done", id: "shell", name: "shell_run", ok: true, summary: "ok status 0", result: { text: "{\n  \"outcome\": {\n    \"payload\": {\n      \"status\": 0,\n      \"stderr\": \"\",\n      \"stdout\": \"hello\",\n      \"timed_out\": false\n    },\n    \"status\": \"success\"\n  }\n}", truncated: true } },
       )} />
     ));
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    expect(row.textContent).toContain("shell_run");
+    expect(row.textContent).toContain("cmd: printf");
+    expect(row.textContent).toContain("Succeeded");
+    expect(row.textContent).not.toContain("ok status 0");
     fireEvent.click(within(row).getByRole("button"));
     const payload = row.querySelector('[data-slot="tool-result"]') as HTMLElement;
+    const primary = payload.querySelector(":scope > pre") as HTMLElement;
+    expect(primary.textContent).toContain("Output");
+    expect(primary.textContent).toContain("hello");
     expect(payload.textContent).toContain("Input");
     expect(payload.textContent).toContain("printf hello");
-    expect(payload.textContent).toContain("Result");
-    expect(payload.textContent).toContain('"stdout": "hello"');
-    expect(payload.textContent).toContain("… truncated");
+    const raw = payload.querySelector('[data-slot="tool-result-raw"]') as HTMLDetailsElement;
+    expect(raw.open).toBe(false);
+    expect(raw.textContent).toContain('"stdout": "hello"');
+    expect(payload.textContent).toContain("… result truncated");
+  });
+
+  it("keeps completed shell rows distinguishable by their bounded start summaries", () => {
+    const { container } = render(() => <Timeline events={evs(
+      { kind: "tool_start", id: "first", name: "shell_run", summary: "cmd: printf first", input: null },
+      { kind: "tool_done", id: "first", name: "shell_run", ok: true, summary: "ok status 0", result: null },
+      { kind: "tool_start", id: "second", name: "shell_run", summary: "cmd: printf second", input: null },
+      { kind: "tool_done", id: "second", name: "shell_run", ok: true, summary: "ok status 0", result: null },
+    )} />);
+    const rows = [...container.querySelectorAll('[data-slot="timeline-tool"]')];
+    expect(rows.map(row => row.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining("cmd: printf first · Succeeded"),
+      expect.stringContaining("cmd: printf second · Succeeded"),
+    ]));
+    expect(rows[0].textContent).not.toBe(rows[1].textContent);
   });
 
   it("shows a per-tool duration from the client arrival timestamps", () => {

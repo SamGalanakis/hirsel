@@ -75,22 +75,59 @@ function ReasoningRow(props: { text: string }) {
   );
 }
 
+interface ToolResultPresentation {
+  primary: string;
+  raw: string | null;
+}
+
+/** Shell results have one stable Host-owned envelope. Keep the common payload
+ * readable without turning every tool result into a generic JSON inspector;
+ * the exact bounded wire value remains available as the secondary raw result. */
+function presentToolResult(name: string, result: string | null, truncated: boolean): ToolResultPresentation | null {
+  if (result === null) return null;
+  if (name !== "shell_run") return { primary: result, raw: null };
+  try {
+    const decoded = JSON.parse(result) as { outcome?: { payload?: unknown } };
+    const value = decoded.outcome?.payload;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return { primary: result, raw: null };
+    const payload = value as Record<string, unknown>;
+    const sections: string[] = [];
+    if (typeof payload.stdout === "string" && payload.stdout.length > 0) sections.push(`Output\n${payload.stdout}`);
+    if (typeof payload.stderr === "string" && payload.stderr.length > 0) sections.push(`Error output\n${payload.stderr}`);
+    if (typeof payload.status === "number" || typeof payload.status === "string") sections.push(`Exit status\n${payload.status}`);
+    if (payload.timed_out === true) sections.push("Timed out");
+    if (sections.length === 0) return { primary: result, raw: null };
+    if (truncated) sections.push("… result truncated");
+    return { primary: sections.join("\n\n"), raw: result };
+  } catch {
+    return { primary: result, raw: null };
+  }
+}
+
 /** One resolved/pending tool row. While running it is the emphasized step
  * (spinner + full-strength name); once done it quiets down (dimmer name) so the
  * live cursor is always the running step. Carries a quiet right-aligned mono
  * duration once resolved, and — when it produced a result/error — click-to-
- * expand into a mono well showing the bounded input/result payload. */
+ * expand into a readable payload with the bounded raw shell envelope secondary. */
 function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
-  const detail = () => done()?.summary ?? props.item.summary;
-  const payload = () => {
+  const result = () => presentToolResult(props.item.name, done()?.result ?? null, done()?.resultTruncated ?? false);
+  const detail = () => {
+    const outcome = done();
+    if (!outcome) return props.item.summary;
+    const identity = props.item.summary ?? outcome.summary?.replace(/^(?:ok|err)\s+/i, "") ?? null;
+    return [identity, outcome.ok ? "Succeeded" : "Failed"].filter(Boolean).join(" · ");
+  };
+  const primaryPayload = () => {
     const sections: string[] = [];
+    const presentation = result();
+    if (presentation !== null) sections.push(presentation.primary);
+    else if (done()?.summary) sections.push(`Result\n${done()!.summary}`);
     if (props.item.input !== null) sections.push(`Input\n${props.item.input}${props.item.inputTruncated ? "\n… truncated" : ""}`);
-    if (done()?.result !== null && done()?.result !== undefined) sections.push(`Result\n${done()!.result}${done()!.resultTruncated ? "\n… truncated" : ""}`);
     return sections.join("\n\n") || detail() || "";
   };
-  const hasDetail = () => payload().length > 0;
+  const hasDetail = () => primaryPayload().length > 0;
   const running = () => done() === null && !props.settled;
   const failed = () => done()?.ok === false;
   const delegation = () => isDelegationTool(props.item.name);
@@ -170,12 +207,17 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
         <Show when={!done() && props.settled}><span>No result recorded</span></Show>
       </div>
       <Show when={open() && hasDetail()}>
-        <pre data-slot="tool-result" data-tool-call-id={props.item.toolId}
-          class={["ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}
-
-        >
-          {payload()}
-        </pre>
+        <div data-slot="tool-result" data-tool-call-id={props.item.toolId} class="ml-4 space-y-1.5">
+          <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}>
+            {primaryPayload()}
+          </pre>
+          <Show when={result()?.raw}>{raw =>
+            <details data-slot="tool-result-raw" class="text-meta text-muted-foreground">
+              <summary class="min-h-11 cursor-pointer py-3">Raw result{done()?.resultTruncated ? " (truncated)" : ""}</summary>
+              <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/35 px-2 py-1.5 font-mono leading-relaxed text-foreground/75">{raw()}</pre>
+            </details>
+          }</Show>
+        </div>
       </Show>
     </li>
   );

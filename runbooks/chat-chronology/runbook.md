@@ -11,12 +11,17 @@ Settling and reloading must not reorder or duplicate anything.
 ## Golden rules
 
 1. Queue the second message only after the first turn is visibly running.
-2. The second turn's working row starts after the first reply and therefore
+2. The accepted second request immediately shows its own quiet **Queued** row,
+   beside that Owner message, and survives reload before activation.
+3. The second turn's working row starts after the first reply and therefore
    renders below that reply. The already-queued Owner message may correctly
    precede the first reply because the Owner sent it earlier.
-3. Reasoning, progress, tool invocation/result, and reply stay inline at their
+4. Reasoning, progress, tool invocation/result, and reply stay inline at their
    event positions. There is no turn-wide `Work details` gate.
-4. After both turns settle, reload preserves the full per-turn event sequence:
+5. Completed tool rows retain their distinct command/subject while collapsed
+   and state the outcome in plain language. Expanded shell results lead with
+   stdout/stderr and retain the exact wire envelope under **Raw result**.
+6. After both turns settle, reload preserves the full per-turn event sequence:
    stable event/call identities, ordering, kind, and available payload—not only
    the outer message and turn IDs.
 
@@ -36,8 +41,10 @@ second marker prompt through the same composer.
 
 **Expect:** both Owner messages have distinct durable IDs; the Thread's
 authoritative queue count increases while the first turn remains the only
-running turn. The queued request receives its turn ID when the Host claims it.
-`10-queued.png` shows the live state.
+running turn. The second request's already-durable turn ID arrives immediately
+in `queued` state and a visible **Queued** row is placed beside its message.
+Reload before activation preserves that row and exact ID. `10-queued.png` and
+`11-queued-reloaded.png` show the live and reloaded states.
 
 ## Phase 2 — handoff ordering
 
@@ -64,8 +71,10 @@ available payload; equality of only the four message IDs is insufficient. Save
 |---|---|---|---|
 | Empty scope | selected Thread has zero messages/turns on all three surfaces | | `00-*` |
 | Real queue | second send accepted while first turn is visibly running | | `10-*`, frames |
+| Queued reload | queued row and exact ID survive reload before activation | | `11-queued-reloaded-*` |
 | Handoff chronology | reply one precedes turn two's working row | | `20-handoff.png`, DOM IDs |
 | Inline work | turn events are visible without a whole-turn disclosure | | `20-*`, `30-*` |
+| Tool identity | collapsed rows retain distinct subjects and plain outcomes; expanded result leads with payload and keeps Raw result | | `30-*`, `31-*` |
 | Settled identity | two Owner + two Agent messages and two terminal turns agree across surfaces | | `30-*` |
 | Reload timeline | event/call identities, order, kind, and available payload are equal before and after reload | | `30-*`, `31-*`, `result.json` |
 

@@ -318,7 +318,11 @@ impl ThreadRuntimeRegistry {
             turn.history_id == self.epoch.read().expect("runtime epoch poisoned").0,
             "request belongs to an old history"
         );
-        turn.stored_turn(&self.tools.storage()).await?;
+        let accepted = turn.stored_turn(&self.tools.storage()).await?;
+        // SQL acceptance already committed this exact queued turn with the
+        // Owner message. Publish that authoritative identity immediately; the
+        // later running transition updates the same row when the lane claims it.
+        self.tools.publish_thread_turn(accepted).await;
         // SQL acceptance already committed the FIFO input. Polling covers both
         // provider kinds and is also the recovery/wakeup path for child reports.
         Ok(())

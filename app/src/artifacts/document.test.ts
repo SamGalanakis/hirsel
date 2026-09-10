@@ -41,4 +41,33 @@ describe("artifact isolation", () => {
     expect(document).not.toContain('<script>alert("x")</script>');
     expect(document).toContain("event.key === 'Escape'");
   });
+  it("renders explicit SVG files as encoded image data with safe accessible text", () => {
+    const content = '<svg xmlns="http://www.w3.org/2000/svg"><text>Cat & moon</text></svg>';
+    const title = 'Cat <picture> "night"';
+    const page = new DOMParser().parseFromString(artifactDocument({
+      ...artifact,
+      kind: "file",
+      mime: " Image/SVG+XML ; charset=UTF-8 ",
+      filename: "cat.svg",
+      title,
+      content,
+    }), "text/html");
+    const image = page.querySelector<HTMLImageElement>("img.artifact-image");
+    expect(image?.alt).toBe(title);
+    expect(image?.src).toBe(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(content)}`);
+    expect(image?.getAttribute("style")).toContain("object-fit:contain");
+    expect(page.querySelector("svg")).toBeNull();
+    expect(page.querySelectorAll("script")).toHaveLength(1);
+  });
+  it("does not infer SVG rendering from the filename", () => {
+    const page = new DOMParser().parseFromString(artifactDocument({
+      ...artifact,
+      kind: "file",
+      mime: "text/plain",
+      filename: "cat.svg",
+      content: "<svg>plain source</svg>",
+    }), "text/html");
+    expect(page.querySelector("img")).toBeNull();
+    expect(page.querySelector("body > pre")?.textContent).toBe("<svg>plain source</svg>");
+  });
 });

@@ -16,7 +16,8 @@
     "e2e:product-runbook": "node ../e2e/product-runbook.mjs",
     "dev:artifact-preview": "vite --config artifact-preview.config.ts",
     "e2e:artifacts": "node ../e2e/artifact-thread-smoke.mjs",
-    "e2e:artifact-runtime": "node ../e2e/artifact-runtime-smoke.mjs"
+    "e2e:artifact-runtime": "node ../e2e/artifact-runtime-smoke.mjs",
+    "e2e:svg-artifact": "node ../e2e/svg-artifact-preview-smoke.mjs"
   },
   "dependencies": {
     "@babel/standalone": "^7.29.0",

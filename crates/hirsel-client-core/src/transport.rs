@@ -426,8 +426,16 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 false
             }
             HostToClient::ThreadOpened { client_id, detail } => {
-                store.apply_detail(&client_id, detail);
-                true
+                let thread_id = detail.thread.id;
+                let applied = store.apply_detail(&client_id, detail);
+                drop(store);
+                if applied {
+                    client.notify_lifecycle(LifecycleEvent::ThreadOpened {
+                        client_id,
+                        thread_id,
+                    });
+                }
+                applied
             }
             HostToClient::ThreadActivity { activity } => {
                 if activity.kind == "delegation_received"

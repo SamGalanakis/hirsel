@@ -198,7 +198,7 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 }
                 if (snapshot?.openedThreads?.contains(focused) != true) item { Text("Loading conversation…", color = c.MutedForeground) }
                 if (snapshot?.historyHasMore?.contains(focused) == true) item {
-                    Button(onClick = { connection.client?.openThread(focused, messages.mapNotNull { it.id }.minOrNull()) }) { Text("Load earlier messages") }
+                    Button(onClick = { connection.openThread(focused, messages.mapNotNull { it.id }.minOrNull()) }) { Text("Load earlier messages") }
                 }
                 items(messages, key = { "message-${it.id ?: it.clientId}" }) { message ->
                     Spacer(Modifier.height(8.dp)); MessageRow(message)

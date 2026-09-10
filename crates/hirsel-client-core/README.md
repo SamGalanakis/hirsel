@@ -21,7 +21,11 @@ Thread actions return a client request ID and carry the caller-captured history 
 Thread. The host acknowledges an applied action with that same ID and address, and
 echoes the ID on failure. Native lifecycle events expose successful acknowledgements;
 protocol errors retain their request ID so UI shells can display a failure only in
-the action's owning context. Uncorrelated protocol errors remain global.
+the action's owning context. `ThreadOpened` exposes the successful open request ID
+to native shells as well. Android retains bounded pending ownership for create,
+open, Related and action requests, then removes it on exact success, failure,
+timeout or history reset. Late correlated errors are ignored; only errors without
+a request ID remain global.
 
 Explicitly saved URL and Thread references are exposed as `ClientSnapshot.related_items`,
 separate from canonical artifact references. Opening or reconnecting loads the

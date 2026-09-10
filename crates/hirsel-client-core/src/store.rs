@@ -302,13 +302,13 @@ impl LocalStore {
         }
     }
 
-    pub fn apply_detail(&mut self, client_id: &str, detail: hirsel_proto::ThreadDetail) {
+    pub fn apply_detail(&mut self, client_id: &str, detail: hirsel_proto::ThreadDetail) -> bool {
         let Some(index) = self
             .requests
             .iter()
             .position(|(id, thread)| id == client_id && *thread == detail.thread.id)
         else {
-            return;
+            return false;
         };
         self.requests.remove(index);
         let thread_id = detail.thread.id;
@@ -350,6 +350,7 @@ impl LocalStore {
         }
         self.messages
             .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
+        true
     }
 
     /// Related snapshots order only against prior Related snapshots. Metadata

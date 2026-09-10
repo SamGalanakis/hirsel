@@ -648,7 +648,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     })
     .await;
     assert_eq!(snapshot.threads[0].id, 5);
-    client.open_thread(5, None);
+    let opened = client.open_thread(5, None);
     wait_for_snapshot(&client, |s| s.opened_threads.contains(&5)).await;
     let first_action = client
         .thread_action(
@@ -684,13 +684,19 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
                         if client_id == &first_action.client_id && history_id == "test-store-a"
                 )
             });
+            let opened_event = events.iter().any(|event| {
+                matches!(event,
+                    LifecycleEvent::ThreadOpened { client_id, thread_id: 5 }
+                        if client_id == &opened.client_id
+                )
+            });
             let failed = events.iter().any(|event| {
                 matches!(event,
                     LifecycleEvent::ProtocolError { client_id: Some(client_id), detail }
                         if client_id == &second_action.client_id && detail == "Read rejected"
                 )
             });
-            if applied && failed {
+            if opened_event && applied && failed {
                 break;
             }
             sleep(Duration::from_millis(5)).await;

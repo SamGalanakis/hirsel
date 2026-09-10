@@ -19,6 +19,10 @@ pub enum LifecycleEvent {
         history_id: String,
         thread_id: u64,
     },
+    ThreadOpened {
+        client_id: String,
+        thread_id: u64,
+    },
     ThreadRelatedChanged {
         history_id: String,
         thread_id: u64,

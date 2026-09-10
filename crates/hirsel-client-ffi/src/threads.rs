@@ -284,6 +284,16 @@ mod tests {
             }
         );
         assert_eq!(
+            crate::LifecycleEvent::from(core::LifecycleEvent::ThreadOpened {
+                client_id: "open".into(),
+                thread_id: 5,
+            }),
+            crate::LifecycleEvent::ThreadOpened {
+                client_id: "open".into(),
+                thread_id: 5,
+            }
+        );
+        assert_eq!(
             crate::LifecycleEvent::from(core::LifecycleEvent::ProtocolError {
                 detail: "History changed".into(),
                 client_id: Some("old".into()),

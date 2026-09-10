@@ -235,6 +235,10 @@ pub enum LifecycleEvent {
         history_id: String,
         thread_id: u64,
     },
+    ThreadOpened {
+        client_id: String,
+        thread_id: u64,
+    },
     ThreadRelatedChanged {
         history_id: String,
         thread_id: u64,
@@ -258,6 +262,13 @@ impl From<core::LifecycleEvent> for LifecycleEvent {
             } => Self::ThreadActionApplied {
                 client_id,
                 history_id,
+                thread_id,
+            },
+            core::LifecycleEvent::ThreadOpened {
+                client_id,
+                thread_id,
+            } => Self::ThreadOpened {
+                client_id,
                 thread_id,
             },
             core::LifecycleEvent::ThreadRelatedChanged {

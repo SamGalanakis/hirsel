@@ -2997,6 +2997,16 @@ sealed class LifecycleEvent {
         companion object
     }
 
+    data class ThreadOpened(
+        val `clientId`: kotlin.String,
+        val `threadId`: kotlin.ULong) : LifecycleEvent()
+
+    {
+
+
+        companion object
+    }
+
     data class ThreadRelatedChanged(
         val `historyId`: kotlin.String,
         val `threadId`: kotlin.ULong,
@@ -3040,7 +3050,11 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
                 FfiConverterString.read(buf),
                 FfiConverterULong.read(buf),
                 )
-            6 -> LifecycleEvent.ThreadRelatedChanged(
+            6 -> LifecycleEvent.ThreadOpened(
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            7 -> LifecycleEvent.ThreadRelatedChanged(
                 FfiConverterString.read(buf),
                 FfiConverterULong.read(buf),
                 FfiConverterOptionalString.read(buf),
@@ -3087,6 +3101,14 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
                 + FfiConverterULong.allocationSize(value.`threadId`)
             )
         }
+        is LifecycleEvent.ThreadOpened -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`clientId`)
+                + FfiConverterULong.allocationSize(value.`threadId`)
+            )
+        }
         is LifecycleEvent.ThreadRelatedChanged -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3127,8 +3149,14 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
                 FfiConverterULong.write(value.`threadId`, buf)
                 Unit
             }
-            is LifecycleEvent.ThreadRelatedChanged -> {
+            is LifecycleEvent.ThreadOpened -> {
                 buf.putInt(6)
+                FfiConverterString.write(value.`clientId`, buf)
+                FfiConverterULong.write(value.`threadId`, buf)
+                Unit
+            }
+            is LifecycleEvent.ThreadRelatedChanged -> {
+                buf.putInt(7)
                 FfiConverterString.write(value.`historyId`, buf)
                 FfiConverterULong.write(value.`threadId`, buf)
                 FfiConverterOptionalString.write(value.`clientId`, buf)

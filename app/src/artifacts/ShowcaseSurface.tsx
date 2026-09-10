@@ -9,6 +9,7 @@ import { threadState } from "../threads/store";
 import { useRelatedOrigin } from "../related/context";
 import type { RelatedOrigin } from "../related/store";
 import { ArtifactPreview } from "./ArtifactPreview";
+import { ArtifactPresentationToggle, hasArtifactPresentationModes, type ArtifactPresentationMode } from "./ArtifactPresentationMode";
 import { downloadArtifact } from "./download";
 import { artifactState, listArtifacts } from "./store";
 import { captureShowcaseOrigin, phoneShowcase, setPhoneShowcase, setShowcasePicker, setThreadShowcase, showcasePicker, type ShowcaseOrigin } from "./showcase-actions";
@@ -49,8 +50,16 @@ function ThreadShowcase(props: { origin: RelatedOrigin }) {
   let restore: HTMLElement | null = null;
   let target: ShowcaseOrigin | null = null;
   const [error, setError] = createSignal<string | null>(null);
+  const [mode, setMode] = createSignal<ArtifactPresentationMode>("rendered");
+  let previousVisible = false;
+  let previousArtifactId: number | null = null;
   createOverlayPresence(() => phone() && visible());
   createEffect(() => current()?.showcased_artifact_id ?? null, id => selectShowcase(props.origin.historyId, props.origin.threadId, id));
+  createEffect(() => ({ visible: visible(), artifactId: current()?.showcased_artifact_id ?? null }), next => {
+    if (next.artifactId !== previousArtifactId || (next.visible && !previousVisible)) setMode("rendered");
+    previousVisible = next.visible;
+    previousArtifactId = next.artifactId;
+  });
   createEffect(() => ({ visible: visible(), phone: phone() }), next => {
     if (!dialog) return;
     const active = document.activeElement;
@@ -70,7 +79,8 @@ function ThreadShowcase(props: { origin: RelatedOrigin }) {
     catch (error) { setError(error instanceof Error ? error.message : "Couldn’t remove the showcase."); }
   };
   return <dialog ref={node => { dialog = node; }} onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }} aria-label="Thread showcase" aria-modal={phone() ? "true" : undefined} role={phone() ? "dialog" : "complementary"} data-slot="thread-showcase" class="fixed inset-0 z-40 m-0 h-full max-h-none w-full max-w-none min-h-0 min-w-0 flex-col border-0 bg-background p-0 text-foreground outline-none open:flex lg:static lg:z-auto lg:w-[44%] lg:min-w-80 lg:border-l lg:border-border">
-    <header class="flex shrink-0 items-center gap-1 border-b border-border/60 px-4 py-3"><div class="min-w-0 flex-1"><p class="text-xs text-muted-foreground">Showcase</p><h2 class="truncate font-semibold">{showcaseState.artifact?.title ?? "Artifact"}</h2></div>
+    <header class="flex shrink-0 flex-wrap items-center gap-1 border-b border-border/60 px-4 py-3"><div class="min-w-0 w-full sm:w-auto sm:flex-1"><p class="text-xs text-muted-foreground">Showcase</p><h2 class="truncate font-semibold">{showcaseState.artifact?.title ?? "Artifact"}</h2></div>
+      <Show when={showcaseState.artifact && hasArtifactPresentationModes(showcaseState.artifact)}><ArtifactPresentationToggle mode={mode()} onChange={setMode} /></Show>
       <Show when={showcaseState.artifact}><button class={button} title="Download showcase" aria-label="Download showcase" onClick={() => downloadArtifact(showcaseState.artifact!)}><ArrowDownToLine class="size-4" /></button></Show>
       <DropdownMenu onOpenChange={open => { if (open) { target = captureShowcaseOrigin(props.origin); setError(null); } }}><DropdownMenuTrigger class={button} aria-label="Showcase actions"><MoreHorizontal class="size-4" /></DropdownMenuTrigger><DropdownMenuContent><DropdownMenuItem onSelect={replace}>Replace showcase</DropdownMenuItem><DropdownMenuItem onSelect={remove}>Remove showcase</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
       <button class={`${button} lg:hidden`} aria-label="Back to conversation" onClick={close}><X class="size-5" /></button>
@@ -78,7 +88,7 @@ function ThreadShowcase(props: { origin: RelatedOrigin }) {
     <Show when={phone()}><ThreadError threadId={props.origin.threadId} /></Show>
     <Show when={error() || showcaseState.error}><div role="alert" class="p-4 text-sm"><p>{error() ?? showcaseState.error}</p><Show when={showcaseState.error}><button class={button} onClick={refreshShowcase}>Retry showcase</button></Show></div></Show>
     <Show when={showcaseState.loading}><p role="status" class="px-4 py-2 text-sm text-muted-foreground">Loading showcase…</p></Show>
-    <Show when={showcaseState.artifact}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} onDismiss={() => { if (phone()) close(); }} onReturnToComposer={() => { close(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${props.origin.threadId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Show>
+    <Show when={showcaseState.artifact}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} mode={mode()} onDismiss={() => { if (phone()) close(); }} onReturnToComposer={() => { close(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${props.origin.threadId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Show>
   </dialog>;
 }
 function ShowcasePicker() {

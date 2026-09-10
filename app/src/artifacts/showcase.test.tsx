@@ -13,7 +13,7 @@ import { refreshShowcase, showcaseState, selectShowcase } from "./showcase-store
 import { captureShowcaseOrigin, setPhoneShowcase, setShowcasePicker, setThreadShowcase } from "./showcase-actions";
 import type { Artifact, ArtifactClientMessage } from "./types";
 import type { ThreadClientMessage } from "../threads/types";
-vi.mock("./ArtifactPreview", () => ({ ArtifactPreview: (props: { artifact: Artifact }) => <div data-preview={props.artifact.id}>{props.artifact.content}</div> }));
+vi.mock("./ArtifactPreview", () => ({ ArtifactPreview: (props: { artifact: Artifact; mode?: string }) => <div data-preview={props.artifact.id} data-mode={props.mode}>{props.artifact.content}</div> }));
 const artifact: Artifact = { id: 4, title: "Architecture", kind: "file", mime: "text/plain", content: "Plan content", thread_ids: [1], created_at: "a", updated_at: "b" };
 const frames: ArtifactClientMessage[] = []; const actions: ThreadClientMessage[] = [];
 beforeEach(() => {
@@ -22,7 +22,7 @@ beforeEach(() => {
   attachArtifactTransport(frame => frames.push(frame)); attachThreadTransport(frame => actions.push(frame));
 });
 afterEach(() => { cleanup(); resetArtifacts(); disconnectThreads(); });
-function reply(id: number, content: string) { const frame = frames.filter(frame => frame.type === "open_artifact" && frame.artifact_id === id).at(-1)!; flush(() => handleArtifactMessage({ type: "artifact_opened", client_id: frame.client_id, artifact: { ...artifact, id, content } })); }
+function reply(id: number, content: string, patch: Partial<Artifact> = {}) { const frame = frames.filter(frame => frame.type === "open_artifact" && frame.artifact_id === id).at(-1)!; flush(() => handleArtifactMessage({ type: "artifact_opened", client_id: frame.client_id, artifact: { ...artifact, id, content, ...patch } })); }
 describe("persistent Thread showcase", () => {
   it("promotes a specific card with its captured origin and no About staging or preview", async () => {
     const view = render(() => <RelatedContext value={{ historyId: "history-a", threadId: 1 }}><ArtifactCard id={4} /></RelatedContext>);
@@ -54,6 +54,23 @@ describe("persistent Thread showcase", () => {
     flush(() => setThreadState(draft => { draft.focusedId = 2; }));
     expect(view.queryByRole("complementary", { name: "Thread showcase" })).toBeNull();
     expect(showcaseState.artifact).toBeNull();
+  });
+  it("shares the Rendered and Source control, retains mode across refresh, and resets it for a new showcase", () => {
+    flush(() => setThreadState(draft => { draft.threads[0].showcased_artifact_id = 4; }));
+    const view = render(() => <ShowcaseSurface />); flush();
+    reply(4, "<main>First</main>", { kind: "html", mime: "text/html" });
+    const pane = view.getByRole("complementary", { name: "Thread showcase" });
+    const source = within(pane).getByRole("button", { name: "Source" });
+    expect(within(pane).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(source);
+    expect(pane.querySelector('[data-preview="4"]')).toHaveAttribute("data-mode", "source");
+
+    flush(refreshShowcase); reply(4, "<main>Refreshed</main>", { kind: "html", mime: "text/html" });
+    expect(source).toHaveAttribute("aria-pressed", "true");
+    flush(() => setThreadState(draft => { draft.threads[0].showcased_artifact_id = 5; }));
+    reply(5, "# Replacement", { kind: "file", mime: "text/markdown", filename: "replacement.md" });
+    expect(within(pane).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+    expect(pane.querySelector('[data-preview="5"]')).toHaveAttribute("data-mode", "rendered");
   });
   it("replaces and removes through explicit revision-checked controls", async () => {
     flush(() => setThreadState(draft => { draft.threads[0].showcased_artifact_id = 4; }));

@@ -1,11 +1,11 @@
 import { ArtifactActions } from "./ShowcaseSurface";
 import { downloadArtifact } from "./download";
 import { draftArtifact, stageDraftArtifact } from "./draft-context";
-import { isMarkdownArtifact } from "./markdown";
 import { createEffect, createSignal, onCleanup, For, Show } from "solid-js";
 import { ArrowDownToLine, ArrowUpRight, FileText, X } from "../components/ui/icons";
 import { createMediaFlag, createOverlayPresence } from "../lib/focus";
 import { ArtifactPreview } from "./ArtifactPreview";
+import { ArtifactPresentationToggle, hasArtifactPresentationModes, type ArtifactPresentationMode } from "./ArtifactPresentationMode";
 import { artifactState, closeArtifact, openArtifact, listArtifacts } from "./store";
 import { focusThread, threadState } from "../threads/store";
 import type { ArtifactSummary } from "./types";
@@ -44,12 +44,15 @@ export function ArtifactSurface() {
 }
 function ArtifactPanel() {
   let panel: HTMLDialogElement | undefined;
-  const [source, setSource] = createSignal(false);
+  const [mode, setMode] = createSignal<ArtifactPresentationMode>("rendered");
   const isPhone = createMediaFlag("(max-width: 1023px)");
   const restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const returnThread = threadState.focusedId;
   const returnArtifact = artifactState.selectedId;
   createOverlayPresence(() => true);
+  createEffect(() => artifactState.selectedId, (id, previous) => {
+    if (previous !== undefined && id !== previous) setMode("rendered");
+  });
   createEffect(isPhone, phone => {
     if (!panel) return;
     // Native modal navigation includes the opaque iframe's focusable content.
@@ -70,16 +73,16 @@ function ArtifactPanel() {
   const dismiss = (event: Event) => { event.preventDefault(); closeArtifact(); };
   return <>
     <dialog ref={node => { panel = node; }} onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }} role={isPhone() ? "dialog" : "complementary"} aria-modal={isPhone() ? "true" : undefined} aria-label="Artifact preview" data-slot="artifact-preview" class="fixed inset-0 z-40 m-0 flex h-full max-h-none w-full max-w-none min-h-0 min-w-0 flex-col border-0 bg-background p-0 text-foreground outline-none lg:static lg:z-auto lg:w-[44%] lg:min-w-80 lg:border-l lg:border-border">
-      <header class="flex shrink-0 items-center gap-2 border-b border-border/60 px-4 py-3">
-        <h2 class="min-w-0 flex-1 truncate font-semibold">{artifactState.opened?.title ?? "Artifact"}</h2>
-        <Show when={artifactState.opened && isMarkdownArtifact(artifactState.opened)}><button class={button} aria-pressed={source() ? "true" : "false"} onClick={() => setSource(value => !value)}>{source() ? "Preview" : "Source"}</button></Show>
+      <header class="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-4 py-3">
+        <h2 class="min-w-0 w-full truncate font-semibold sm:w-auto sm:flex-1">{artifactState.opened?.title ?? "Artifact"}</h2>
+        <Show when={artifactState.opened && hasArtifactPresentationModes(artifactState.opened)}><ArtifactPresentationToggle mode={mode()} onChange={setMode} /></Show>
         <Show when={artifactState.opened}><button class={button} onClick={() => downloadArtifact(artifactState.opened!)} title="Download" aria-label="Download"><ArrowDownToLine class="size-4" /><span class="hidden xl:inline">Download</span></button></Show>
         <button class={button} onClick={closeArtifact} title="Back to conversation" aria-label="Back to conversation"><X class="size-5" /></button>
       </header>
       <Show when={artifactState.opened && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) && draftArtifact(threadState.focusedId)?.id !== artifactState.opened.id}><div class="flex shrink-0 items-center gap-2 border-b border-border/60 px-4"><button class={`${button} min-w-0 text-xs`} onClick={() => stagePreviewContext(artifactState.opened!.id, artifactState.opened!.title)}>Use in message</button><span class="min-w-0 truncate text-xs text-muted-foreground">#{threadState.focusedId} {threadState.threads.find(thread => thread.id === threadState.focusedId)?.title}</span></div></Show>
       <Show when={artifactState.error}><div role="alert" class="p-6 text-sm"><p>{artifactState.error}</p><button class={button} onClick={() => openArtifact(artifactState.selectedId!)}>Try again</button></div></Show>
       <Show when={artifactState.loading}><p role="status" class="p-6 text-sm text-muted-foreground">Loading artifact…</p></Show>
-      <Show when={artifactState.opened}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={source() && isMarkdownArtifact(artifact()) ? { ...artifact(), mime: "text/plain", filename: "source.txt" } : artifact()} onDismiss={closeArtifact} onReturnToComposer={() => { closeArtifact(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${threadState.focusedId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Show>
+      <Show when={artifactState.opened}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} mode={mode()} onDismiss={closeArtifact} onReturnToComposer={() => { closeArtifact(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${threadState.focusedId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Show>
     </dialog>
   </>;
 }

@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
-import { ArtifactCard, ArtifactList } from "./ArtifactSurface";
+import { ArtifactCard, ArtifactList, ArtifactSurface } from "./ArtifactSurface";
 import { artifactState, attachArtifactTransport, closeArtifact, disconnectArtifacts, setArtifactState, handleArtifactMessage, listArtifacts } from "./store";
 import { setThreadState, threadState } from "../threads/store";
 import { makeThread } from "../threads/fixtures";
@@ -63,5 +63,32 @@ describe("artifact navigation", () => {
     second.unmount();
     render(() => <ArtifactList threadId={8} />);
     expect(screen.queryByRole("button", { name: /Architecture/ })).toBeNull();
+  });
+});
+describe("artifact presentation", () => {
+  const opened = (id: number, patch: Partial<ArtifactSummary & { content: string }> = {}) => ({
+    ...artifact, id, kind: "html" as const, mime: "text/html", content: "<p>Rendered</p>", ...patch,
+  });
+  it("defaults to Rendered, keeps Source through same-artifact refresh, and resets for a different artifact or reopened viewer", async () => {
+    setArtifactState({ selectedId: 4, opened: opened(4), loading: false });
+    const view = render(() => <ArtifactSurface />);
+    let panel = view.getByRole("complementary", { name: "Artifact preview" });
+    const source = within(panel).getByRole("button", { name: "Source" });
+    expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(panel.querySelector("iframe")).not.toBeNull());
+
+    source.focus(); fireEvent.click(source);
+    expect(document.activeElement).toBe(source);
+    expect(panel.querySelector('[data-slot="artifact-source"]')).toHaveTextContent("<p>Rendered</p>");
+    flush(() => setArtifactState({ opened: opened(4, { content: "  <em>Updated</em>\n" }) }));
+    expect(source).toHaveAttribute("aria-pressed", "true");
+    expect(panel.querySelector('[data-slot="artifact-source"]')?.textContent).toBe("  <em>Updated</em>\n");
+
+    flush(() => setArtifactState({ selectedId: 5, opened: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) }));
+    expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+    flush(closeArtifact);
+    flush(() => setArtifactState({ selectedId: 5, opened: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) }));
+    panel = view.getByRole("complementary", { name: "Artifact preview" });
+    expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
   });
 });

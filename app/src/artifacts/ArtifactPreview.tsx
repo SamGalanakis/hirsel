@@ -1,8 +1,9 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import type { ArtifactPresentationMode } from "./ArtifactPresentationMode";
 import { ARTIFACT_DISMISS_MESSAGE, type Artifact } from "./types";
 
 /** Opaque execution surface. The only accepted message dismisses this preview. */
-export function ArtifactPreview(props: { artifact: Artifact; onDismiss?: () => void; onReturnToComposer?: () => void }) {
+export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPresentationMode; onDismiss?: () => void; onReturnToComposer?: () => void }) {
   const [document, setDocument] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
   const [attempt, setAttempt] = createSignal(0);
@@ -17,9 +18,12 @@ export function ArtifactPreview(props: { artifact: Artifact; onDismiss?: () => v
   let generation = 0;
   const dispose = () => { worker?.terminate(); worker = undefined; clearTimeout(timeout); };
   onCleanup(() => { generation++; dispose(); });
-  createEffect(() => ({ artifact: { ...props.artifact }, attempt: attempt() }), ({ artifact }) => {
+  createEffect(() => ({ artifact: { ...props.artifact }, mode: props.mode ?? "rendered", attempt: attempt() }), ({ artifact, mode }) => {
     const current = ++generation;
     dispose(); setDocument(""); setError(null);
+    // Source stays in the trusted host as inert text. Do not even load the
+    // renderer or start the JSX compiler while this path is selected.
+    if (mode === "source") return;
     void import("./document").then(({ artifactDocument }) => {
       if (current !== generation) return;
       if (artifact.kind !== "solid") { setDocument(artifactDocument(artifact)); return; }
@@ -38,7 +42,7 @@ export function ArtifactPreview(props: { artifact: Artifact; onDismiss?: () => v
       worker.postMessage(artifact.content);
     }).catch(cause => { if (current === generation) setError(String(cause)); });
   });
-  return <Show when={!error()} fallback={<div role="alert" class="space-y-4 p-6 text-sm">
+  return <Show when={(props.mode ?? "rendered") === "source"} fallback={<Show when={!error()} fallback={<div role="alert" class="space-y-4 p-6 text-sm">
     <p class="font-medium">This artifact couldn’t be displayed.</p>
     <p class="max-w-prose leading-relaxed text-muted-foreground">Try the preview again. If it still fails, ask Hirsel to repair artifact #{props.artifact.id}, “{props.artifact.title}”. Your conversation and draft are kept.</p>
     <div class="flex flex-wrap gap-2"><button class="min-h-11 rounded-lg bg-muted px-3 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setAttempt(value => value + 1)}>Try preview again</button><Show when={props.onReturnToComposer}><button class="min-h-11 rounded-lg px-3 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={props.onReturnToComposer}>Return to composer</button></Show></div>
@@ -47,5 +51,5 @@ export function ArtifactPreview(props: { artifact: Artifact; onDismiss?: () => v
     <Show when={document()} fallback={<p role="status" class="p-6 text-sm text-muted-foreground">Preparing preview…</p>}>
       <iframe ref={node => { frame = node; }} title={props.artifact.title} srcdoc={document()} sandbox="allow-scripts" referrerpolicy="no-referrer" class="h-full min-h-64 w-full border-0 bg-white" />
     </Show>
-  </Show>;
+  </Show>}><pre data-slot="artifact-source" class="min-h-full overflow-auto whitespace-pre p-4 font-mono text-sm leading-relaxed text-foreground">{props.artifact.content}</pre></Show>;
 }

@@ -1,4 +1,5 @@
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { createSignal, flush } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ARTIFACT_DISMISS_MESSAGE, type Artifact } from "./types";
@@ -31,6 +32,39 @@ describe("artifact preview recovery", () => {
     fireEvent.click(view.getByRole("button", { name: "Return to composer" }));
     expect(onReturn).toHaveBeenCalledOnce();
     view.unmount();
+  });
+});
+describe("artifact source presentation", () => {
+  it("switches from the rendered document to exact inert source and back", async () => {
+    const content = "  <script>globalThis.ran = true</script>\n<p>& raw</p>\n";
+    const [mode, setMode] = createSignal<"rendered" | "source">("rendered");
+    const view = render(() => <ArtifactPreview artifact={{ ...artifact, content }} mode={mode()} />);
+    await waitFor(() => expect(view.container.querySelector("iframe")).not.toBeNull());
+
+    flush(() => setMode("source"));
+    const source = view.container.querySelector<HTMLElement>('[data-slot="artifact-source"]')!;
+    expect(source.textContent).toBe(content);
+    expect(source.querySelector("script")).toBeNull();
+    expect(view.container.querySelector("iframe")).toBeNull();
+
+    flush(() => setMode("rendered"));
+    await waitFor(() => expect(view.container.querySelector("iframe")).not.toBeNull());
+  });
+  it("does not start the Solid compiler until Rendered is selected", async () => {
+    const workers: FakeWorker[] = [];
+    class FakeWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      postMessage = vi.fn(); terminate = vi.fn();
+      constructor() { workers.push(this); }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    const [mode, setMode] = createSignal<"rendered" | "source">("source");
+    const view = render(() => <ArtifactPreview artifact={{ ...artifact, kind: "solid", content: "throw new Error('must stay inert')" }} mode={mode()} />);
+    expect(view.getByText("throw new Error('must stay inert')")).toBeTruthy();
+    expect(workers).toHaveLength(0);
+
+    flush(() => setMode("rendered"));
+    await waitFor(() => expect(workers).toHaveLength(1));
   });
 });
 describe("artifact keyboard dismissal boundary", () => {

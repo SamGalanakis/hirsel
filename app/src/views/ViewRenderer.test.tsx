@@ -267,6 +267,31 @@ describe("ViewRenderer — event round-trip", () => {
     });
   });
 
+  it("submits independently edited values for distinct field names", async () => {
+    const onEvent = vi.fn();
+    const screen = renderSpec(
+      {
+        type: "form",
+        action: "submit_answers",
+        fields: [
+          { type: "field", name: "first", label: "First answer", kind: "text" },
+          { type: "field", name: "second", label: "Second answer", kind: "text" },
+        ],
+      },
+      onEvent,
+    );
+
+    await userEvent.type(screen.getByLabelText(/First answer/) as HTMLInputElement, "one");
+    await userEvent.type(screen.getByLabelText(/Second answer/) as HTMLInputElement, "two");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    expect(onEvent).toHaveBeenCalledWith({
+      instanceId: "view-1",
+      action: "submit_answers",
+      data: { first: "one", second: "two" },
+    });
+  });
+
   it("form seeds values from declared field defaults", async () => {
     const onEvent = vi.fn();
     const screen = renderSpec(

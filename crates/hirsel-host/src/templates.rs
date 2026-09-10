@@ -73,6 +73,149 @@ mod tests {
         assert!(error.contains("unknown property `flash`"));
     }
 
+    #[test]
+    fn same_field_name_is_allowed_in_separate_forms() {
+        validate(&json!({
+            "type": "stack",
+            "children": [
+                {
+                    "type": "form",
+                    "action": "first",
+                    "fields": [{
+                        "type": "field",
+                        "name": "answer",
+                        "label": "First answer",
+                        "kind": "text"
+                    }]
+                },
+                {
+                    "type": "form",
+                    "action": "second",
+                    "fields": [{
+                        "type": "field",
+                        "name": "answer",
+                        "label": "Second answer",
+                        "kind": "text"
+                    }]
+                }
+            ]
+        }))
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inline_form_rejects_duplicate_names_before_view_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(8);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+
+        let error = views
+            .show(
+                "fixture-history",
+                1,
+                None,
+                Some(json!({
+                    "type": "form",
+                    "action": "submit",
+                    "fields": [
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "First answer",
+                            "kind": "text"
+                        },
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "Second answer",
+                            "kind": "text"
+                        }
+                    ]
+                })),
+                None,
+                Some("duplicate-inline".to_string()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate form field name `answer`"));
+        assert!(error.contains("spec.fields[1]"));
+        assert!(views.snapshot().await.is_empty());
+        assert!(matches!(
+            broadcasts.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_backed_form_rejects_duplicate_names_before_view_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("duplicate.json"),
+            serde_json::to_vec(&json!({
+                "id": "duplicate",
+                "title": "Duplicate form",
+                "spec": {
+                    "type": "form",
+                    "action": "submit",
+                    "fields": [
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "First answer",
+                            "kind": "text"
+                        },
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "Second answer",
+                            "kind": "text"
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(8);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+
+        let error = views
+            .show(
+                "fixture-history",
+                1,
+                Some("duplicate".to_string()),
+                None,
+                None,
+                Some("duplicate-file".to_string()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate form field name `answer`"));
+        assert!(error.contains("spec.fields[1]"));
+        assert!(views.snapshot().await.is_empty());
+        assert!(matches!(
+            broadcasts.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
     #[tokio::test]
     async fn template_resolve_reloads_edits_without_restart() {
         let dir = tempfile::tempdir().unwrap();

@@ -227,11 +227,19 @@ fn validate_form(object: &Map<String, Value>, at: &str) -> anyhow::Result<()> {
         .get("fields")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("{at}.fields must be an array"))?;
+    let mut field_names = BTreeSet::new();
     for (index, field) in fields.iter().enumerate() {
         let field_at = format!("{at}.fields[{index}]");
         validate_node(field, &field_at)?;
         if field.get("type").and_then(Value::as_str) != Some("field") {
             anyhow::bail!("{field_at} must be a field component");
+        }
+        let field_object = field
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("{field_at} must be an object"))?;
+        let name = required_string(field_object, "name", &field_at)?;
+        if !field_names.insert(name) {
+            anyhow::bail!("duplicate form field name `{name}` at {field_at}");
         }
     }
     Ok(())

@@ -55,7 +55,7 @@ Every component is a JSON object with a required `type`. Unknown component types
 - `action`: required `label` and `action`; optional `data` (any JSON) and `variant: "primary" | "secondary" | "danger"`. Activation emits `{ instance_id, action, data }`.
 - `optionSet`: required `action` and `choices: [{ label, value: display scalar, description? }]`; optional `label` and `selected: display scalar`. Selection emits the declared action with `data: { "value": <choice value> }`.
 - `field`: required `name`, `label`, and `kind: "text" | "textarea" | "number" | "toggle" | "select"`; optional scalar-or-null `value`, `placeholder`, and `required`. A select field requires `options: [{ label, value: display scalar }]`; other kinds reject `options`.
-- `form`: required `action` and `fields: field[]`; optional `submitLabel`. Submission emits the declared action with `data` containing values keyed by field name.
+- `form`: required `action` and `fields: field[]`; optional `submitLabel`. Field names must be unique within each form; the same name may be used in separate forms. Submission emits the declared action with `data` containing values keyed by field name.
 
 The client must render actions as owner-initiated events and send a `view_event` frame. It must not execute commands or create a separate interaction channel.
 

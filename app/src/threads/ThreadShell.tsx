@@ -2,7 +2,7 @@ import { ShowcaseButton, ShowcaseSurface } from "../artifacts/ShowcaseSurface";
 import { RelatedContext } from "../related/context";
 import { RelatedList } from "../related/RelatedList";
 import { relatedState } from "../related/store";
-import { anyOverlayOpen } from "../lib/focus";
+import { anyOverlayOpen, createMediaFlag } from "../lib/focus";
 import { consumeDraftArtifact, draftArtifact, stageDraftArtifact } from "../artifacts/draft-context";
 import { historyId, recoveredDrafts } from "../lib/history";
 import { ArtifactCard, ArtifactList, ArtifactSurface } from "../artifacts/ArtifactSurface";
@@ -37,6 +37,15 @@ import { createThread, focusThread, followThreadLocation, openThread, retryThrea
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground";
+const desktopNavigationPreferenceKey = "hirsel.thread-navigation.desktop";
+function readDesktopNavigationPreference(): boolean {
+  try { return localStorage.getItem(desktopNavigationPreferenceKey) !== "closed"; }
+  catch { return true; }
+}
+function writeDesktopNavigationPreference(open: boolean): void {
+  try { localStorage.setItem(desktopNavigationPreferenceKey, open ? "open" : "closed"); }
+  catch { /* The current session still responds when storage is unavailable. */ }
+}
 function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void; onBrowse: () => void }) {
   const [now, setNow] = createSignal(Date.now());
   const statusTimer = setInterval(() => setNow(Date.now()), 30_000);
@@ -81,7 +90,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       <header class="flex min-h-14 shrink-0 items-center gap-0.5 border-b border-border/60 px-1.5 sm:gap-1 sm:px-2" data-slot="thread-context">
         <button class={iconButton} aria-label={props.globalArtifacts ? "Back to conversation" : "Browse threads"} title={props.globalArtifacts ? "Back to conversation" : "Browse threads"} onClick={() => { if (props.globalArtifacts) props.onConversation(); else props.onBrowse(); }}><ArrowLeft class="size-4" /></button>
         <ThreadAvatar thread={{ id: props.id, title: current()?.title ?? "Thread", icon: current()?.icon }} />
-        <h1 class="min-w-0 flex-1 text-sm font-medium"><button class="block min-h-11 w-full truncate rounded-lg px-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={current()?.title ?? "Loading thread…"} title="Show full thread name in Threads" aria-haspopup="dialog" aria-controls="thread-navigation" onClick={() => openThreadNavigation()}><span class="flex min-w-0 items-center gap-1.5"><span class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">#{props.id}</span><span class="truncate">{current()?.title ?? "Loading thread…"}</span></span></button></h1>
+        <h1 class="min-w-0 flex-1 text-sm font-medium"><button class="block min-h-11 w-full truncate rounded-lg px-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={current()?.title ?? "Loading thread…"} title="Show full thread name in Threads" aria-controls="thread-navigation" onClick={() => openThreadNavigation()}><span class="flex min-w-0 items-center gap-1.5"><span class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">#{props.id}</span><span class="truncate">{current()?.title ?? "Loading thread…"}</span></span></button></h1>
         <Show when={current()?.attention === "needs_owner"}><span class="size-2 shrink-0 rounded-full bg-status-attention" role="status" aria-label="Needs you" title="Needs you" /></Show>
         <Show when={current()?.settled_at}><span class="hidden text-xs text-muted-foreground sm:inline">Settled</span></Show>
         <button class={iconButton} aria-label="Conversation" title="Conversation" aria-pressed={!showRelated() ? "true" : "false"} onClick={() => { setRelatedView(false); props.onConversation(); }}><MessageCircle class="size-4" /></button>
@@ -167,6 +176,24 @@ function ThreadStart(props: { globalArtifacts: boolean; onSelect: (id: number) =
 }
 
 export function ThreadShell() {
+  const wideWorkspace = createMediaFlag("(min-width: 1280px)");
+  const [desktopNavigationOpen, setDesktopNavigationOpen] = createSignal(readDesktopNavigationPreference());
+  const navigationVisible = () => navigationOpen() || (wideWorkspace() && desktopNavigationOpen());
+  const setDesktopNavigation = (open: boolean) => {
+    setDesktopNavigationOpen(open);
+    writeDesktopNavigationPreference(open);
+  };
+  const openNavigation = (intent: Parameters<typeof openThreadNavigation>[0] = { kind: "browse" }) => {
+    if (wideWorkspace()) setDesktopNavigation(true);
+    openThreadNavigation(intent);
+  };
+  const closeNavigation = () => {
+    if (wideWorkspace()) setDesktopNavigation(false);
+    closeThreadNavigation();
+  };
+  createEffect(() => ({ wide: wideWorkspace(), intent: threadNavigationIntent() }), ({ wide, intent }) => {
+    if (wide && intent) setDesktopNavigation(true);
+  });
   const [globalArtifacts, setGlobalArtifacts] = createSignal(false);
   const [attentionNow, setAttentionNow] = createSignal(Date.now());
   const needsAttention = (thread: (typeof threadState.threads)[number]) => !thread.archived_at && thread.attention === "needs_owner";
@@ -194,16 +221,16 @@ export function ThreadShell() {
   return <div class="flex h-dvh min-h-0 bg-background text-foreground">
     <nav aria-label="Hirsel" data-slot="icon-rail" class="relative z-10 flex w-14 shrink-0 flex-col items-center gap-2 py-2">
       <button class={iconButton} aria-label="Thread overview" title="Thread overview" aria-pressed={threadState.focusedId === null && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); focusThread(null); }}><BrandMark size={23} /></button>
-      <button class={`${iconButton} relative`} aria-label="Threads" aria-describedby={attentionCount() > 0 ? "thread-attention-summary" : undefined} title={attentionCount() > 0 ? `Threads · ${attentionCount()} need you` : "Threads"} data-slot="thread-navigation-trigger" aria-controls="thread-navigation" aria-expanded={navigationOpen() ? "true" : "false"} aria-pressed={threadState.focusedId !== null && !globalArtifacts() ? "true" : "false"} onClick={() => navigationOpen() ? closeThreadNavigation() : openThreadNavigation()}><GitBranch class="size-5" /><Show when={attentionCount() > 0}><span aria-hidden="true" class="absolute right-2 top-2 size-1.5 rounded-full bg-status-attention" /><span id="thread-attention-summary" class="sr-only">{attentionCount()} {attentionCount() === 1 ? "thread needs" : "threads need"} your attention</span></Show></button>
+      <button class={`${iconButton} relative`} aria-label="Threads" aria-describedby={attentionCount() > 0 ? "thread-attention-summary" : undefined} title={attentionCount() > 0 ? `Threads · ${attentionCount()} need you` : "Threads"} data-slot="thread-navigation-trigger" aria-controls="thread-navigation" aria-expanded={navigationVisible() ? "true" : "false"} aria-pressed={threadState.focusedId !== null && !globalArtifacts() ? "true" : "false"} onClick={() => navigationVisible() ? closeNavigation() : openNavigation()}><GitBranch class="size-5" /><Show when={attentionCount() > 0}><span aria-hidden="true" class="absolute right-2 top-2 size-1.5 rounded-full bg-status-attention" /><span id="thread-attention-summary" class="sr-only">{attentionCount()} {attentionCount() === 1 ? "thread needs" : "threads need"} your attention</span></Show></button>
       <Show when={threadState.focusedId !== null && !globalArtifacts()}><svg class="pointer-events-none absolute top-[58px] left-12 h-8 w-4 text-border" viewBox="0 0 16 32" fill="none" aria-hidden="true" data-slot="thread-connector"><path d="M0 24h4c8 0 12-4 12-12V0" stroke="currentColor" /></svg></Show>
-      <button class={iconButton} aria-label="New thread" title="New thread" onClick={() => { const history = historyId(); if (history) openThreadNavigation({ kind: "create", historyId: history, parentId: null }); }}><Plus class="size-5" /></button>
+      <button class={iconButton} aria-label="New thread" title="New thread" onClick={() => { const history = historyId(); if (history) openNavigation({ kind: "create", historyId: history, parentId: null }); }}><Plus class="size-5" /></button>
       <button class={iconButton} aria-label="All artifacts" title="All artifacts" aria-pressed={globalArtifacts() ? "true" : "false"} onClick={() => setGlobalArtifacts(value => !value)}><LayoutGrid class="size-5" /></button>
       <button class={iconButton} aria-label="Processes" title="Processes" onClick={openProcesses}><Activity class="size-5" /></button>
       <div class="flex-1" />
       <button class={iconButton} aria-label="Settings" title="Settings" onClick={() => openSettings()}><Settings class="size-5" /></button>
     </nav>
     <ThreadIconPicker />
-    <ThreadNavigation intent={threadNavigationIntent()} onClose={() => closeThreadNavigation()} onSelect={selectThread} />
+    <ThreadNavigation open={navigationVisible()} modal={!wideWorkspace()} intent={threadNavigationIntent()} onClose={closeNavigation} onSelect={selectThread} />
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <Show when={recoveredDrafts().length > 0}><details class="px-3 py-2 text-sm"><summary class="cursor-pointer text-muted-foreground">Saved drafts from another history</summary><p class="py-2">Copy any text you want to keep into a new conversation.</p><For each={recoveredDrafts()}>{draft => <pre class="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border p-2 text-xs">{draft.text}</pre>}</For></details></Show>
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>

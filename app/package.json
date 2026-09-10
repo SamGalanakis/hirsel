@@ -18,7 +18,8 @@
     "e2e:artifacts": "node ../e2e/artifact-thread-smoke.mjs",
     "e2e:artifact-runtime": "node ../e2e/artifact-runtime-smoke.mjs",
     "e2e:svg-artifact": "node ../e2e/svg-artifact-preview-smoke.mjs",
-    "e2e:artifact-presentation-recovery": "node ../e2e/artifact-presentation-recovery.mjs"
+    "e2e:artifact-presentation-recovery": "node ../e2e/artifact-presentation-recovery.mjs",
+    "e2e:workspace-responsive": "node ../e2e/workspace-responsive.mjs"
   },
   "dependencies": {
     "@babel/standalone": "^7.29.0",

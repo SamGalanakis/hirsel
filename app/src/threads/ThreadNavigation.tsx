@@ -16,9 +16,12 @@ import { historyId } from "../lib/history";
 import { createThread, threadState } from "./store";
 
 const control = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
-export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null; onClose: () => void; onSelect: (id: number) => void }) {
+export function ThreadNavigation(props: { open: boolean; modal: boolean; intent: ThreadNavigationIntent | null; onClose: () => void; onSelect: (id: number) => void }) {
   let dialog: HTMLDialogElement | undefined;
   let restoreTarget: HTMLElement | null = null;
+  let displayedAsModal: boolean | null = null;
+  let focusWasSummoned = false;
+  let ownsFocus = false;
   const [section, setSection] = createSignal<ThreadSection>("active");
   const [expanded, setExpanded] = createSignal<ReadonlySet<number>>(new Set());
   const [parentId, setParentId] = createSignal<number | null>(null);
@@ -27,32 +30,62 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
   const [creating, setCreating] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [now, setNow] = createSignal(Date.now());
-  onCleanup(() => dialog?.close());
-  createEffect(() => props.intent !== null, open => {
+  const trackFocus = (event: FocusEvent) => { ownsFocus = !!dialog?.contains(event.target as Node); };
+  document.addEventListener("focusin", trackFocus);
+  onCleanup(() => { document.removeEventListener("focusin", trackFocus); dialog?.close(); });
+  createEffect(() => props.open, open => {
     if (!open) return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   });
-  createOverlayPresence(() => props.intent !== null);
+  createOverlayPresence(() => props.open && props.modal);
+  createEffect(() => ({ open: props.open, modal: props.modal }), next => {
+    if (!dialog) return;
+    if (!next.open) {
+      if (dialog.open) dialog.close();
+      displayedAsModal = null;
+      return;
+    }
+    if (dialog.open && displayedAsModal !== next.modal) dialog.close();
+    if (!dialog.open) {
+      if (next.modal) {
+        // Capture the opener before showModal runs the browser's native focus
+        // steps. The intent effect will then focus the requested row/input,
+        // while dismissal can still return to the control outside the drawer.
+        if (props.intent && !focusWasSummoned) {
+          restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          focusWasSummoned = true;
+        }
+        dialog.showModal();
+      }
+      // Setting the non-modal state directly avoids the browser's dialog
+      // focusing steps. A default wide dock is standing navigation, so only an
+      // explicit opening intent below should move focus into it.
+      else dialog.setAttribute("open", "");
+    }
+    displayedAsModal = next.modal;
+  });
   createEffect(() => props.intent, intent => {
     if (!dialog) return;
     if (intent) {
       setParentId(intent.kind === "create" ? intent.parentId : null);
       setCreateHistoryId(intent.kind === "create" ? intent.historyId : null);
       setExpanded(previous => new Set([...previous, ...threadAncestors(threadState.threads, threadState.focusedId ?? -1).map(thread => thread.id)]));
-      if (!dialog.open) restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      if (!dialog.open) dialog.showModal();
+      if (!focusWasSummoned) restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      focusWasSummoned = true;
       const frame = requestAnimationFrame(() => {
         if (!dialog?.open) return;
         const selected = dialog.querySelector<HTMLButtonElement>(`[data-thread-row="${threadState.focusedId}"]`);
         (intent.kind === "create" ? dialog.querySelector<HTMLInputElement>("input") : selected ?? dialog.querySelector<HTMLButtonElement>("[data-thread-row]") ?? dialog.querySelector<HTMLInputElement>("input"))?.focus();
       });
       return () => cancelAnimationFrame(frame);
-    } else if (dialog.open) {
-      dialog.close();
-      const destination = restoreTarget?.isConnected ? restoreTarget : document.querySelector<HTMLElement>('[data-slot="thread-navigation-trigger"]');
-      destination?.focus();
+    } else if (focusWasSummoned) {
+      focusWasSummoned = false;
+      if (!props.open) {
+        const destination = restoreTarget?.isConnected ? restoreTarget : document.querySelector<HTMLElement>('[data-slot="thread-navigation-trigger"]');
+        destination?.focus();
+      }
     }
   });
   const tree = createMemo(() => threadTree(threadState.threads, section(), now(), expanded()));
@@ -61,7 +94,7 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
   let focusedRowIndex = 0;
   createEffect(() => visibleRows().map(row => row.key).join(","), () => {
     const frame = requestAnimationFrame(() => {
-      if (!dialog?.open || document.activeElement !== document.body) return;
+      if (!dialog?.open || !ownsFocus || document.activeElement !== document.body) return;
       const rows = dialog.querySelectorAll<HTMLButtonElement>("[data-thread-row]");
       (rows[Math.min(focusedRowIndex, rows.length - 1)] ?? dialog.querySelector<HTMLButtonElement>('[data-thread-filter]'))?.focus();
     });
@@ -95,10 +128,10 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
     finally { setCreating(false); }
   };
   const dismiss = (event: Event) => { event.preventDefault(); props.onClose(); };
-  return <dialog ref={node => { dialog = node; }} id="thread-navigation" aria-label="Threads" data-slot="thread-drawer"
+  return <dialog ref={node => { dialog = node; }} id="thread-navigation" role={props.modal ? "dialog" : "complementary"} aria-modal={props.modal ? "true" : undefined} aria-label="Threads" data-slot="thread-drawer"
     onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }}
     onPointerDown={event => { if (event.target === dialog && dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) props.onClose(); } }}
-    class="fixed inset-y-0 left-14 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-3.5rem))] max-w-none flex-col border-0 border-r border-border bg-background p-4 text-foreground backdrop:bg-transparent open:flex">
+    class="fixed inset-y-0 left-14 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-3.5rem))] max-w-none flex-col border-0 border-r border-border bg-background p-4 text-foreground backdrop:bg-transparent open:flex workspace:static workspace:z-auto workspace:h-auto workspace:w-80 workspace:shrink-0">
     <div class="mb-4 flex items-center justify-between"><div class="min-w-0 flex-1"><h2 class="text-base font-semibold">Threads</h2><p data-slot="thread-filter-caption" class="text-xs capitalize text-muted-foreground">{section()}</p></div><DropdownMenu><DropdownMenuTrigger data-thread-filter class={`${control} ${section() !== "active" ? "bg-muted text-foreground" : ""}`} aria-label={`Filter threads: ${section()}`} title={`Filter threads: ${section()}`}><Funnel class="size-4" /></DropdownMenuTrigger><DropdownMenuContent><For each={["active", "settled", "snoozed", "archived"] as const}>{name => <DropdownMenuItem role="menuitemradio" aria-checked={section() === name ? "true" : "false"} class="min-h-11 capitalize" onSelect={() => setSection(name)}><Check class={section() === name ? "size-4" : "size-4 invisible"} />{name}</DropdownMenuItem>}</For></DropdownMenuContent></DropdownMenu><button class={control} aria-label="Search threads" title="Search threads" onClick={openThreadSearch}><Search class="size-4" /></button><button class={control} aria-label="Close threads" title="Close threads" onClick={props.onClose}><X class="size-5" /></button></div>
     <Show when={parentId() !== null}><p class="mb-2 break-words text-xs text-muted-foreground">New child in {threadPath(threadState.threads, parentId()!)} <button class="min-h-11 rounded px-2 underline" onClick={() => { const history = historyId(); if (history) openThreadNavigation({ kind: "create", historyId: history, parentId: null }); }}>Create at top level</button></p></Show>
     <form onSubmit={event => void add(event)} class="mb-3 flex gap-2"><input aria-label="New thread title" placeholder={parentId() === null ? "New thread…" : "New child thread…"} value={title()} onInput={event => setTitle(event.currentTarget.value)} class="min-w-0 flex-1 rounded-lg border border-border bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /><button type="submit" class={`${control} bg-muted text-foreground`} aria-label="Create thread" title="Create thread" disabled={!title().trim() || creating() || state.connection !== "connected"}><Plus class="size-5" /></button></form>

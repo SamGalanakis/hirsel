@@ -11,6 +11,29 @@ import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMess
 import type { ThreadClientMessage } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
 const sent: ThreadClientMessage[] = [];
+function responsiveMedia(initialWidth: number) {
+  let width = initialWidth;
+  const queries = new Map<string, { media: string; matches: boolean; onchange: null; listeners: Set<() => void>; addEventListener: (_: string, listener: () => void) => void; removeEventListener: (_: string, listener: () => void) => void; addListener: (listener: () => void) => void; removeListener: (listener: () => void) => void; dispatchEvent: () => boolean }>();
+  const evaluate = (query: string) => query === "(min-width: 1280px)" ? width >= 1280 : query === "(max-width: 1023px)" ? width <= 1023 : false;
+  vi.stubGlobal("matchMedia", ((query: string) => {
+    if (!queries.has(query)) {
+      const listeners = new Set<() => void>();
+      queries.set(query, { media: query, matches: evaluate(query), onchange: null, listeners,
+        addEventListener: (_event, listener) => listeners.add(listener), removeEventListener: (_event, listener) => listeners.delete(listener),
+        addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener), dispatchEvent: () => false });
+    }
+    return queries.get(query)!;
+  }) as unknown as typeof window.matchMedia);
+  return (nextWidth: number) => {
+    width = nextWidth;
+    for (const query of queries.values()) {
+      const matches = evaluate(query.media);
+      if (matches === query.matches) continue;
+      query.matches = matches;
+      flush(() => query.listeners.forEach(listener => listener()));
+    }
+  };
+}
 beforeEach(() => {
   sent.length = 0;
   flush(() => dispatch({ type: "connection_status", status: "connected" }));
@@ -23,6 +46,36 @@ beforeEach(() => {
 });
 afterEach(() => { disconnectThreads(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe("thread workspace", () => {
+  it("coordinates the wide dock with the modal drawer without stealing focus or losing the desktop choice", async () => {
+    const resize = responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    const dock = view.getByRole("complementary", { name: "Threads" });
+    expect(dock).toBeVisible();
+    expect(dock.contains(document.activeElement)).toBe(false);
+    expect(view.getByRole("button", { name: "Threads" })).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(view.container.querySelector('[data-thread-row="2"]')!);
+    expect(threadState.focusedId).toBe(2);
+    expect(view.getByRole("complementary", { name: "Threads" })).toBeVisible();
+    resize(1024);
+    expect(view.queryByRole("dialog", { name: "Threads" })).toBeNull();
+    resize(1440);
+
+    fireEvent.click(view.getByRole("button", { name: "Close threads" }));
+    expect(view.queryByRole("complementary", { name: "Threads" })).toBeNull();
+    expect(localStorage.getItem("hirsel.thread-navigation.desktop")).toBe("closed");
+    resize(1024);
+    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    expect(view.getByRole("dialog", { name: "Threads" })).toBeVisible();
+    fireEvent.click(view.getByRole("button", { name: "Close threads" }));
+    resize(1440);
+    expect(view.queryByRole("complementary", { name: "Threads" })).toBeNull();
+
+    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    const reopened = view.getByRole("complementary", { name: "Threads" });
+    await waitFor(() => expect(reopened.querySelector('[data-thread-row="2"]')).toHaveFocus());
+    expect(localStorage.getItem("hirsel.thread-navigation.desktop")).toBe("open");
+  });
   it("shows quiet work with no messages and switches independent conversations", async () => {
     flush(() => setThreadState(draft => { draft["histories"][1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 1, thread_id: 1, author: "owner", body: "Groceries only", ref: null, ts: "2026-09-09T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false }; }));
     flush(() => setThreadState(draft => { draft["histories"][2] = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 2, thread_id: 2, author: "owner", body: "Holiday only", mentions: [1], ref: null, ts: "2026-09-09T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false }; }));

@@ -169,19 +169,7 @@ impl FcmPushSender {
             .client
             .post(endpoint)
             .bearer_auth(access_token)
-            .json(&serde_json::json!({
-                "message": {
-                    "token": token,
-                    "notification": {
-                        "title": payload.title,
-                        "body": payload.body,
-                    },
-                    "data": {
-                        "thread_id": payload.data.thread_id.to_string(),
-                        "title": payload.data.title,
-                    }
-                }
-            }))
+            .json(&fcm_request(token, payload))
             .send()
             .await
             .context("send FCM message")?;
@@ -195,6 +183,23 @@ impl FcmPushSender {
         }
         Ok(())
     }
+}
+
+fn fcm_request(token: &str, payload: &PushPayload) -> serde_json::Value {
+    serde_json::json!({
+        "message": {
+            "token": token,
+            "notification": {
+                "title": payload.title,
+                "body": payload.body,
+            },
+            "data": {
+                "history_id": payload.data.history_id,
+                "thread_id": payload.data.thread_id.to_string(),
+                "title": payload.data.title,
+            }
+        }
+    })
 }
 
 fn token_suffix(token: &str) -> String {
@@ -557,6 +562,88 @@ mod tests {
         .await
         .unwrap();
     }
+
+    #[test]
+    fn fcm_request_projects_the_captured_destination_as_string_data() {
+        let payload = PushPayload {
+            title: "Hirsel".to_string(),
+            body: "Decision".to_string(),
+            data: PushData {
+                history_id: "history-a".to_string(),
+                thread_id: 42,
+                title: "Choose".to_string(),
+            },
+        };
+
+        assert_eq!(
+            fcm_request("device-token", &payload),
+            serde_json::json!({
+                "message": {
+                    "token": "device-token",
+                    "notification": {
+                        "title": "Hirsel",
+                        "body": "Decision",
+                    },
+                    "data": {
+                        "history_id": "history-a",
+                        "thread_id": "42",
+                        "title": "Choose",
+                    },
+                },
+            })
+        );
+    }
+
+    async fn wait_recorded(gateway: &PushGateway, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gateway.recorded_pushes().len() < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_reset_retains_registration_for_new_history_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(PushPlatform::Android, "durable-token")
+            .await
+            .unwrap();
+        let (gateway, _) = PushGateway::recording(storage.clone());
+
+        let old_history = storage.history_id().await.unwrap();
+        gateway
+            .enqueue_thread(&attention_thread(&storage).await)
+            .await;
+        wait_recorded(&gateway, 1).await;
+
+        storage.reset().await.unwrap();
+        let new_history = storage.history_id().await.unwrap();
+        assert_ne!(new_history, old_history);
+        assert_eq!(
+            storage
+                .push_tokens()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec!["durable-token"]
+        );
+
+        gateway
+            .enqueue_thread(&attention_thread(&storage).await)
+            .await;
+        wait_recorded(&gateway, 2).await;
+        let pushes = gateway.recorded_pushes();
+        assert_eq!(pushes[0].payload.data.history_id, old_history);
+        assert_eq!(pushes[1].payload.data.history_id, new_history);
+        assert_eq!(pushes[1].tokens, vec!["durable-token"]);
+    }
+
     #[tokio::test]
     async fn current_thread_delivery_retries_then_deduplicates() {
         let dir = tempfile::tempdir().unwrap();

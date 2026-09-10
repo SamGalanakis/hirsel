@@ -118,7 +118,6 @@ impl Storage {
                 DELETE FROM blobs;
                 DELETE FROM client_messages;
                 DELETE FROM monitors;
-                DELETE FROM push_tokens;
                 DELETE FROM chat_messages;
                 DELETE FROM threads;
                 DELETE FROM sqlite_sequence

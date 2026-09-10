@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.hirsel.android.chat.ChatScreen
 import dev.hirsel.android.onboarding.QrScanner
 import dev.hirsel.android.pairing.Connection
@@ -107,10 +108,12 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         val settings = SettingsStore(this)
+        val pushRegistrations = PushRegistrationStore.get(this)
         setContent {
             // Read synchronously from prefs so the chosen scheme is set before the
             // first paint — no light/dark flash on cold start.
             var themeMode by remember { mutableStateOf(settings.themeMode) }
+            val pushRegistration by pushRegistrations.state.collectAsStateWithLifecycle()
             // Status/nav-bar icons must contrast the theme canvas: dark glyphs on
             // the light scheme, light glyphs on dark. Recomputed on theme change.
             val dark = when (themeMode) {
@@ -138,6 +141,9 @@ class MainActivity : ComponentActivity() {
                         notificationHistoryId = notificationHistoryId,
                         onNotificationHandled = { notificationThreadId = null; notificationHistoryId = null },
                         settings = settings,
+                        pushRegistration = pushRegistration,
+                        onPushEnabledChange = pushRegistrations::setEnabled,
+                        recordPushToken = pushRegistrations::recordToken,
                         themeMode = themeMode,
                         onThemeModeChange = { themeMode = it; settings.themeMode = it },
                     )
@@ -162,6 +168,9 @@ private fun HirselRoot(
     notificationHistoryId: String?,
     onNotificationHandled: () -> Unit,
     settings: SettingsStore,
+    pushRegistration: PushRegistration,
+    onPushEnabledChange: (Boolean) -> Unit,
+    recordPushToken: (String) -> Boolean,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
 ) {
@@ -222,15 +231,27 @@ private fun HirselRoot(
         }
     }
 
-    // Best-effort FCM registration once the transport is up (Thread push tokens),
-    // gated on the user's push preference.
-    LaunchedEffect(connection.isOnline) {
-        if (!connection.isOnline || !settings.pushEnabled) return@LaunchedEffect
+    // Registration follows the latest durable token, preference, and authenticated
+    // connection state. Firebase callbacks only publish state; this existing
+    // connection remains the sole path to the host.
+    LaunchedEffect(connection.isOnline, pushRegistration) {
+        val action = pushRegistrationAction(pushRegistration, connection.isOnline)
         runCatching {
-            val token = fetchFcmToken()
-            Log.i(FCM_LOG_TAG, "FCM token fetched")
-            withContext(Dispatchers.IO) { connection.client?.registerPushToken("android", token) }
-            Log.i(FCM_LOG_TAG, "FCM token registered with Hirsel host")
+            executePushRegistrationAction(
+                action = action,
+                fetchToken = ::fetchFcmToken,
+                recordToken = recordPushToken,
+                registerToken = { token ->
+                    withContext(Dispatchers.IO) {
+                        connection.client?.registerPushToken("android", token)
+                    }
+                },
+            )
+            when (action) {
+                PushRegistrationAction.Fetch -> Log.i(FCM_LOG_TAG, "FCM token fetched")
+                is PushRegistrationAction.Register -> Log.i(FCM_LOG_TAG, "FCM token registered with Hirsel host")
+                PushRegistrationAction.Idle -> Unit
+            }
         }.onFailure { Log.e(FCM_LOG_TAG, "FCM token registration failed", it) }
     }
 
@@ -254,6 +275,8 @@ private fun HirselRoot(
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
                 settings = settings,
+                pushEnabled = pushRegistration.enabled,
+                onPushEnabledChange = onPushEnabledChange,
                 phase = connection.phase,
                 deviceLabel = activeLabel,
                 identitySecret = credential?.irohSecretKey,

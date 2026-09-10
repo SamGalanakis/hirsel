@@ -1,5 +1,9 @@
 # Thread E2E rules
 
+The real-model, agent-judged product scenarios live under [`../runbooks/`](../runbooks/)
+and follow [`../runbooks/RULES.md`](../runbooks/RULES.md). Keep those semantic
+browser checks separate from the deterministic scripted gates described here.
+
 The current product gate is `thread-smoke.mjs`: durable thread inventory,
 thread-owned conversations and drafts, explicit settlement/reopening, reconnect,
 and desktop/phone containment. All runners use the current tagged authentication and Thread contract.

@@ -71,6 +71,15 @@ test:
 check:
     bash scripts/check-static.sh
 
+# Agent-judged product scenarios. Each scenario boots an isolated real-model
+# Host and production PWA, preserves evidence, and refuses live port 3076.
+product-runbook scenario="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd app && npm run build )
+    cargo build -p hirsel-host
+    cd app && npm run e2e:product-runbook -- "{{ scenario }}"
+
 # Regenerate the plugin aggregator from the folders under plugins/. Run after
 # adding or removing a plugin folder; `just dev` runs it for you.
 sync-plugins:

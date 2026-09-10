@@ -13,6 +13,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "e2e:threads": "node ../e2e/thread-smoke.mjs",
+    "e2e:product-runbook": "node ../e2e/product-runbook.mjs",
     "dev:artifact-preview": "vite --config artifact-preview.config.ts",
     "e2e:artifacts": "node ../e2e/artifact-thread-smoke.mjs",
     "e2e:artifact-runtime": "node ../e2e/artifact-runtime-smoke.mjs"

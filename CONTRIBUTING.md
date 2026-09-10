@@ -53,6 +53,20 @@ prek run --all-files
 cargo test --workspace
 ```
 
+## Product runbooks
+
+Behavior visible to the Owner is accepted with the agent-judged scenarios in
+[`runbooks/`](runbooks/). They boot disposable Host data and the production web
+build, use the configured real model path, and preserve browser/wire/store
+evidence. Read [`runbooks/RULES.md`](runbooks/RULES.md) before running one:
+
+```bash
+just product-runbook all
+```
+
+The deterministic Rust, frontend, and `e2e/*.mjs` gates remain necessary but
+do not replace these product checks.
+
 ## Releases
 
 Android releases are manual. Run the release workflow from `main` with a

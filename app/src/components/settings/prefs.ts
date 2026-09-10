@@ -2,15 +2,12 @@
 // sections share.
 //
 // The WS protocol (see PROTOCOL.md) carries only a token + replay cursor from
-// this client — no device label, no roster, no pairing, no push. So these are
-// honestly scoped to this browser: a cosmetic display label and a debug flag,
-// both persisted locally and surfaced in the diagnostics blob, never sent to
-// the Host.
+// this client — no device label, no roster, no pairing, no push. The cosmetic
+// display label is honestly scoped to this browser and never sent to the Host.
 import { copyWithToast } from "../../lib/clipboard";
 import type { ConnectionStatus } from "../../store/types";
 
 export const DEVICE_LABEL_KEY = "hirsel.deviceLabel";
-export const DEBUG_KEY = "hirsel.debug";
 
 export const PHASE_WORD: Record<ConnectionStatus, string> = {
   connecting: "connecting…",

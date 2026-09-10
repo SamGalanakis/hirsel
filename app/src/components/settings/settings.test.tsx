@@ -1,8 +1,8 @@
-import { fireEvent, render, within } from "@solidjs/testing-library";
+import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// SettingsSheet reads/writes the unqualified global `localStorage` (device
-// label, debug flag), which in this runner is Node's unusable experimental Web
+// SettingsSheet reads/writes the unqualified global `localStorage` for the
+// device label, which in this runner is Node's unusable experimental Web
 // Storage; back it with a plain in-memory Storage so persistence actually lands.
 const memStore = new Map<string, string>();
 const memLocalStorage: Storage = {
@@ -49,6 +49,31 @@ describe("Settings: About & debug", () => {
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText } = render(() => <SettingsSheet />);
     expect(getByText("0.9.9-test")).toBeTruthy();
+  });
+
+  it("copies real diagnostics without a dead debug preference or field", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const store = await import("../../store/store");
+    store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", session_id: "s1", host_version: "0.9.9-test", history_id: "test-history", threads: [], processes: [], views: [], model: null, subagent_models: null, prompts: null, providers: null } } as never);
+    store.openSettings("about");
+    const { SettingsSheet } = await import("./SettingsSheet");
+    const { getByRole, queryByLabelText } = render(() => <SettingsSheet />);
+
+    expect(queryByLabelText("Debug mode")).toBeNull();
+    fireEvent.click(getByRole("button", { name: /Copy diagnostics/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+
+    const [copied] = writeText.mock.calls[0] as [string];
+    expect(copied).toContain("hirsel diagnostics");
+    expect(copied).toContain("host version: 0.9.9-test");
+    expect(copied).toContain("device label: (unset)");
+    expect(copied).toContain("show agent code: off");
+    expect(copied).not.toContain("debug:");
   });
 
   it("persists the local 'Show agent code' toggle", async () => {

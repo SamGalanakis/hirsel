@@ -29,7 +29,6 @@ import { SettingsTabs, settingsPanelId, settingsTabId } from "./SettingsTabs";
 import {
   computeFingerprint,
   copyText,
-  DEBUG_KEY,
   DEVICE_LABEL_KEY,
   PHASE_WORD,
   readLocal,
@@ -43,7 +42,6 @@ function SettingsPanel() {
   const endpoint = resolveWsUrl();
 
   const [deviceLabel, setDeviceLabel] = createSignal(readLocal(DEVICE_LABEL_KEY));
-  const [debug, setDebug] = createSignal(readLocal(DEBUG_KEY) === "1");
   const [fingerprint, setFingerprint] = createSignal("…");
   const [confirmForget, setConfirmForget] = createSignal(false);
   // The landing tab is chosen once, on open: `openSettings("providers")` lands
@@ -86,15 +84,6 @@ function SettingsPanel() {
     toast("Device label saved");
   }
 
-  function toggleDebug(v: boolean) {
-    setDebug(v);
-    try {
-      localStorage.setItem(DEBUG_KEY, v ? "1" : "0");
-    } catch {
-      /* best-effort */
-    }
-  }
-
   function diagnostics(): string {
     return [
       "hirsel diagnostics",
@@ -104,7 +93,6 @@ function SettingsPanel() {
       `connection: ${PHASE_WORD[state.connection]}`,
       `theme: ${themeMode()}`,
       "notifications: not available (web)",
-      `debug: ${debug() ? "on" : "off"}`,
       `show agent code: ${showAgentCode() ? "on" : "off"}`,
       `device label: ${deviceLabel() || "(unset)"}`,
       `identity: ${fingerprint()}`,
@@ -210,8 +198,6 @@ function SettingsPanel() {
                 </Match>
                 <Match when={tab() === "about"}>
                   <AboutSection
-                    debug={debug()}
-                    onDebugChange={toggleDebug}
                     onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
                   />
                 </Match>

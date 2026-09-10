@@ -472,10 +472,11 @@ export function ProvidersSection(): JSX.Element {
   // the only settle signal a write here has. Equal rosters are still
   // acknowledgements, so the revision counter is what this tracks.
   const pending = createPendingKeys();
-  let awaitingFrame = false;
   createEffect(() => state.providersRevision, () => {
-    if (awaitingFrame) {
-      awaitingFrame = false;
+    // Only a roster revision can close a form. Check the existing pending set
+    // before settling it so errors/timeouts leave a continued draft open while
+    // an authoritative acknowledgement still closes the write's form.
+    if (pending.any()) {
       setEditing(null);
       setAdding(false);
     }
@@ -484,7 +485,6 @@ export function ProvidersSection(): JSX.Element {
   settleOnProtocolError(pending);
 
   function write(key: string, send: () => void) {
-    awaitingFrame = true;
     pending.begin(key);
     send();
   }

@@ -33,7 +33,7 @@ use lash::{
         observations::{RemoteSessionCursor, RemoteSessionObservationEventPayload},
         usage::RemoteTurnEvent,
     },
-    rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect},
+    rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect, RlmTermination, RlmTurnOptions},
     runtime::{NativeQueuedWork, QueuedWorkRunHandle, QueuedWorkRunRequest},
     tools::{
         StaticToolExecute, ToolBinding, ToolCall, ToolContract, ToolDefinition,
@@ -43,8 +43,9 @@ use lash::{
 };
 use lash_core::{
     ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
-    ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, SessionPolicy, TriggerStore,
-    TriggerSubscriptionFilter, TurnInputIngress, plugin::ProcessEngineContributionContext,
+    ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, ProtocolTurnOptions,
+    SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputIngress,
+    plugin::ProcessEngineContributionContext,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

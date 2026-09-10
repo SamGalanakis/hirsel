@@ -405,6 +405,17 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
 
     let input = owner_turn_input(&turn, &storage).await.unwrap();
     assert_eq!(input.items.len(), 2);
+    let options = input
+        .protocol_turn_options
+        .as_ref()
+        .expect("resident Agent turns require an explicit finish");
+    assert_eq!(
+        options.decode::<RlmTurnOptions>().unwrap(),
+        RlmTurnOptions {
+            termination: Some(RlmTermination::FinishRequired { schema: None }),
+            final_answer_format: None,
+        }
+    );
     assert!(matches!(input.items[0], InputItem::Text { .. }));
     let InputItem::Attachment {
         source: lash::direct::AttachmentSource::Inline { media_type, bytes },
@@ -414,6 +425,121 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
     };
     assert_eq!(media_type.as_str(), "image/png");
     assert_eq!(bytes.as_slice(), &[137, 80, 78, 71]);
+}
+
+#[tokio::test]
+async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
+    use lash_core::{LlmOutputPart, llm::types::LlmResponse};
+
+    let responses = Arc::new(std::sync::Mutex::new(VecDeque::from([
+        "I cannot create that artifact.".to_string(),
+        "<typescript>\nfinish(\"Ordinary chat answer.\");\n</typescript>".to_string(),
+    ])));
+    let request_count = Arc::new(AtomicU64::new(0));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("hirsel-resident-finish-test")
+        .complete({
+            let responses = Arc::clone(&responses);
+            let request_count = Arc::clone(&request_count);
+            move |_request| {
+                let response = responses
+                    .lock()
+                    .expect("response queue")
+                    .pop_front()
+                    .expect("queued response");
+                request_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Ok(LlmResponse {
+                        parts: vec![LlmOutputPart::Text {
+                            text: response,
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    })
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::builder()
+            .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
+            .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
+            .memory_limit(lash_protocol_rlm::MemoryBound::mebibytes(64))
+            .build(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
+        .with_native_queued_work()
+        .provider(provider)
+        .model(provider_rebind_test_model("hirsel-resident-finish-model"))
+        .store_factory(Arc::new(
+            lash_core::facade_support::InMemorySessionStoreFactory::new(),
+        ))
+        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+        .without_queued_work()
+        .build(lash_core::testing::runtime_lease_owner())
+        .unwrap();
+    let session = core
+        .session("hirsel-resident-finish")
+        .plugin_option(
+            RLM_PROTOCOL_PLUGIN_ID,
+            RlmCreateExtras {
+                dialect: Some(AGENT_RLM_DIALECT),
+                ..RlmCreateExtras::default()
+            },
+        )
+        .unwrap()
+        .open()
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let turn = OwnerTurn {
+        history_id: "fixture-history".into(),
+        turn_id: None,
+        thread_id: 0,
+        thread_action: None,
+        message_id: Some(1),
+        report_triggered: false,
+        client_id: "resident-finish".into(),
+        body: "Say hello".into(),
+        anchor: None,
+        attachments: Vec::new(),
+        mode: SendMode::Send,
+    };
+
+    session
+        .enqueue(owner_turn_input(&turn, &storage).await.unwrap())
+        .id("resident-finish")
+        .ingress(TurnInputIngress::next_turn())
+        .send()
+        .await
+        .unwrap();
+    let output = session
+        .queued_turn()
+        .turn_id("resident-finish-drain")
+        .run()
+        .await
+        .unwrap()
+        .expect("resident input should drain");
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        output.final_value(),
+        Some(&serde_json::json!("Ordinary chat answer."))
+    );
+    assert_eq!(
+        turn_chat_payload(&output).map(|payload| payload.0),
+        Some("Ordinary chat answer.".to_string())
+    );
+    assert!(responses.lock().unwrap().is_empty());
 }
 
 #[test]

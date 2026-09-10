@@ -35,7 +35,13 @@ pub(super) async fn owner_turn_input(
         ));
     }
 
-    Ok(TurnInput::items(items))
+    let options = ProtocolTurnOptions::typed(RlmTurnOptions {
+        termination: Some(RlmTermination::FinishRequired { schema: None }),
+        final_answer_format: None,
+    })
+    .context("encode resident Agent turn options")?;
+
+    Ok(TurnInput::items(items).with_protocol_turn_options(options))
 }
 
 pub(super) fn owner_turn_source_key(client_id: &str) -> String {

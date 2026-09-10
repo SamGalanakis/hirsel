@@ -1,5 +1,123 @@
 use super::*;
+use hirsel_drivers::AgentKind;
 use hirsel_proto::{ChatAuthor, ThreadAttention, ThreadTurnState};
+
+async fn delegated_cli_turn(
+    storage: &crate::Storage,
+    caller: &crate::storage::ThreadCaller,
+    operation_id: &str,
+    title: &str,
+) -> (u64, u64) {
+    let assignment = crate::storage::Delegation {
+        title: title.into(),
+        brief: format!("Run {title}"),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(crate::storage::ThreadExecution::Cli {
+            agent: AgentKind::Claude,
+            model: "fake-model".into(),
+            variant: "fake-variant".into(),
+            cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
+        }),
+    };
+    let delegated = storage
+        .delegate_thread(
+            caller,
+            operation_id,
+            &assignment,
+            &serde_json::to_value(&assignment).unwrap(),
+        )
+        .await
+        .unwrap();
+    (delegated.thread_id, delegated.turn_id)
+}
+
+#[tokio::test]
+async fn restart_interrupts_native_input_without_blocking_later_thread_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(dir.path()).await.unwrap();
+    let caller = storage.test_running_caller().await;
+    let interrupted_client_id = format!("delegation:{}:interrupted", caller.turn_id);
+    let interrupted = delegated_cli_turn(&storage, &caller, "interrupted", "Interrupted").await;
+    let peer = delegated_cli_turn(&storage, &caller, "peer", "Peer").await;
+    assert_eq!(
+        storage.run_thread_turn(interrupted.1).await.unwrap().state,
+        ThreadTurnState::Running
+    );
+    drop(storage);
+
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let later = state
+        .submit_thread_message(
+            "later-after-restart".into(),
+            interrupted.0,
+            "Run the later request".into(),
+            Vec::new(),
+            Vec::new(),
+            SendMode::NextTurn,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let later_turn_id = state
+        .storage
+        .thread_request(&later.client_id)
+        .await
+        .unwrap()
+        .unwrap()["turn_id"]
+        .as_u64()
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let interrupted_turn = state.storage.thread_turn(interrupted.1).await.unwrap();
+            let later_turn = state.storage.thread_turn(later_turn_id).await.unwrap();
+            let peer_turn = state.storage.thread_turn(peer.1).await.unwrap();
+            if interrupted_turn.state == ThreadTurnState::Interrupted
+                && later_turn.state == ThreadTurnState::Completed
+                && peer_turn.state == ThreadTurnState::Completed
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("later same-Thread and peer work must complete after restart");
+
+    let detail = state
+        .storage
+        .thread_detail(interrupted.0, None, 30)
+        .await
+        .unwrap();
+    let old = detail
+        .turns
+        .iter()
+        .find(|turn| turn.id == interrupted.1)
+        .unwrap();
+    assert_eq!(old.state, ThreadTurnState::Interrupted);
+    assert_eq!(old.agent_message_id, None);
+    assert_eq!(
+        detail
+            .turns
+            .iter()
+            .filter(|turn| turn.state == ThreadTurnState::Completed)
+            .count(),
+        1
+    );
+    assert!(
+        state
+            .storage
+            .pending_thread_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|(client_id, _)| client_id != &interrupted_client_id
+                && client_id != &later.client_id)
+    );
+}
 
 #[tokio::test]
 async fn queued_scripted_replies_and_telemetry_keep_their_owning_threads() {

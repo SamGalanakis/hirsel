@@ -163,18 +163,31 @@ impl ThreadRuntimeRegistry {
         }
         let requests = self.tools.storage().pending_thread_requests().await?;
         let mut seen = HashSet::new();
-        for (_, payload) in requests {
+        for (client_id, payload) in requests {
             let request: OwnerTurn = serde_json::from_value(payload)?;
             let id = request.thread_id;
+            let turn = request.stored_turn(&self.tools.storage()).await?;
+            let execution = self.tools.storage().turn_execution(turn.id).await?;
+            if let crate::storage::ThreadExecution::Cli { .. } = &execution {
+                match turn.state {
+                    hirsel_proto::ThreadTurnState::Queued => {}
+                    hirsel_proto::ThreadTurnState::Running => continue,
+                    hirsel_proto::ThreadTurnState::Completed
+                    | hirsel_proto::ThreadTurnState::Failed
+                    | hirsel_proto::ThreadTurnState::Cancelled
+                    | hirsel_proto::ThreadTurnState::Interrupted => {
+                        self.tools
+                            .storage()
+                            .remove_thread_request(&client_id)
+                            .await?;
+                        continue;
+                    }
+                }
+            }
             if !seen.insert(id) || self.cli.lock().await.contains_key(&id) {
                 continue;
             }
-            let turn = request.stored_turn(&self.tools.storage()).await?;
-            let execution = self.tools.storage().turn_execution(turn.id).await?;
             if let crate::storage::ThreadExecution::Cli { agent, .. } = &execution {
-                if turn.state != hirsel_proto::ThreadTurnState::Queued {
-                    continue;
-                }
                 let work = CliTurn::new(turn.id, self.tools.driver_for(*agent));
                 self.cli.lock().await.insert(id, work.clone());
                 let active = self.cli.clone();

@@ -209,7 +209,6 @@ mod tests {
     async fn config(dir: &tempfile::TempDir, provider: ProviderMode) -> PromptConfig {
         let store = ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
             &crate::host_config::EnvBootstrap::default(),
         )

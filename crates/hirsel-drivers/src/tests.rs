@@ -12,6 +12,7 @@ use crate::{
     codex::{CodexDriver, codex_agent_message, codex_terminal_outcome},
     fake::FakeDriver,
     shared::drain_stderr,
+    test_support::scoped_launch,
     types::{
         AgentKind, DriverError, SessionHandle, SpawnSpec, SubagentDriver, SubagentEvent,
         TerminalOutcome,
@@ -110,6 +111,7 @@ async fn fake_driver_emits_started_progress_and_done() {
             prompt: "fix it".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -125,6 +127,7 @@ async fn fake_driver_emits_started_progress_and_done() {
             .unwrap();
         match event {
             SubagentEvent::Progress { .. } => saw_progress = true,
+            SubagentEvent::AssistantOutput { text } => assert_eq!(text, "fake driver completed"),
             SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Done { .. },
             } => break,
@@ -145,6 +148,7 @@ async fn fake_driver_records_requested_model() {
             prompt: "fix it".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -178,6 +182,7 @@ async fn fake_driver_interrupt_is_terminal() {
             prompt: "wait".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: Some(fixture.path().to_path_buf()),
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -242,6 +247,7 @@ async fn fake_driver_retire_ends_an_interrupted_session() {
             prompt: "wait".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: Some(fixture.path().to_path_buf()),
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -291,6 +297,7 @@ async fn fake_driver_replays_instant_terminal_to_late_subscriber() {
             prompt: "instant".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: Some(fixture.path().to_path_buf()),
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -354,6 +361,7 @@ async fn claude_code_driver_real_cli_smoke() {
             prompt: "Reply with exactly: driver-smoke".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: real_scoped_launch(),
         })
         .await
         .unwrap();
@@ -378,6 +386,7 @@ async fn codex_driver_real_cli_smoke() {
             prompt: "Reply with exactly: driver-smoke".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: real_scoped_launch(),
         })
         .await
         .unwrap();
@@ -388,4 +397,13 @@ async fn codex_driver_real_cli_smoke() {
         }
     }
     panic!("codex CLI exited without a terminal event");
+}
+
+fn real_scoped_launch() -> crate::ScopedMcpLaunch {
+    let value = std::env::var("HIRSEL_DRIVER_TEST_SCOPED_MCP")
+        .expect("real driver smoke requires explicit host-issued scoped MCP launch JSON");
+    let launch: crate::ScopedMcpLaunch =
+        serde_json::from_str(&value).expect("invalid scoped MCP launch JSON");
+    launch.validate().expect("invalid scoped MCP launch");
+    launch
 }

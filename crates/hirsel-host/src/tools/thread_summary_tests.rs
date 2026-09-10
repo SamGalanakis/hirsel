@@ -28,6 +28,7 @@ async fn unopened_thread_receives_each_execution_transition_at_the_same_revision
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            None,
         )
         .await
         .unwrap();
@@ -97,6 +98,7 @@ async fn message_and_activity_publish_recency_without_changing_thread_lifecycle(
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            None,
         )
         .await
         .unwrap();
@@ -137,23 +139,36 @@ async fn coordinator_chat_and_scheduled_digest_refresh_inventory() {
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "digest-origin",
+            "Digest origin",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
     let message = state
         .tools
-        .chat_send("Coordinator result", None)
+        .thread_chat_send(thread.id, "Coordinator result".into(), None, Vec::new())
         .await
         .unwrap();
-    assert_eq!(summary(&state, 0).last_activity_at, message.ts);
+    assert_eq!(summary(&state, thread.id).last_activity_at, message.ts);
     state.broadcast_log.clear();
     let event = state
         .tools
-        .emit_scheduled_digest("daily", "Digest", "ready")
+        .emit_scheduled_digest(
+            &state.storage.history_id().await.unwrap(),
+            thread.id,
+            "daily",
+            "Digest",
+            "ready",
+        )
         .await
         .unwrap();
-    let anchor = state
-        .storage
-        .chat_message(event.anchor)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(summary(&state, 0).last_activity_at, anchor.ts);
+    assert_eq!(summary(&state, thread.id).last_activity_at, event.ts);
 }

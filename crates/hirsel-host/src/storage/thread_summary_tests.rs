@@ -9,19 +9,26 @@ fn ts(value: &str) -> DateTime<Utc> {
 
 async fn work(storage: &Storage) -> hirsel_proto::Thread {
     storage
-        .create_thread("work", "Work", "", &json!({}), ThreadAttention::NeedsOwner)
+        .create_thread(
+            "work",
+            "Work",
+            "",
+            &json!({}),
+            ThreadAttention::NeedsOwner,
+            None,
+        )
         .await
         .unwrap()
         .0
 }
 
 #[tokio::test]
-async fn empty_inventory_including_home_has_truthful_creation_fallback() {
+async fn ordinary_inventory_has_truthful_creation_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
     let thread = work(&storage).await;
-    let snapshot = storage.hello_snapshot(None).await.unwrap();
-    assert_eq!(snapshot.threads.len(), 2);
+    let snapshot = storage.hello_snapshot().await.unwrap();
+    assert_eq!(snapshot.threads.len(), 1);
     for row in snapshot.threads {
         assert_eq!(row.last_activity_at, row.created_at);
         assert_eq!(row.queued_turn_count, 0);
@@ -170,8 +177,8 @@ async fn activity_and_latest_outcome_use_timestamp_chronology_not_ids_or_offsets
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
     let thread = work(&storage).await;
-    let early_id = storage.start_thread_turn(thread.id, None).await.unwrap();
-    let later_id = storage.start_thread_turn(thread.id, None).await.unwrap();
+    let early_id = storage.queue_thread_turn(thread.id, None).await.unwrap();
+    let later_id = storage.queue_thread_turn(thread.id, None).await.unwrap();
     let conn = storage.conn.lock().await;
     conn.execute(
         "UPDATE threads SET created_at='2020-01-01T00:00:00Z' WHERE id=?1",
@@ -192,11 +199,38 @@ async fn deleted_message_recency_recedes_to_remaining_facts_and_stays_thread_loc
     let storage = Storage::open(dir.path()).await.unwrap();
     let thread = work(&storage).await;
     let (message, _) = storage
-        .append_thread_owner_message(thread.id, "message", "Draft", None, &[], &[])
+        .append_thread_owner_message(
+            &storage.history_id().await.unwrap(),
+            thread.id,
+            "message",
+            "Draft",
+            None,
+            &[],
+            &[],
+            &[],
+        )
         .await
         .unwrap();
     storage
-        .append_thread_chat(0, ChatAuthor::Agent, "Other conversation", None, vec![])
+        .append_thread_chat(
+            storage
+                .create_thread(
+                    "other",
+                    "Other",
+                    "",
+                    &json!({}),
+                    ThreadAttention::Quiet,
+                    None,
+                )
+                .await
+                .unwrap()
+                .0
+                .id,
+            ChatAuthor::Agent,
+            "Other conversation",
+            None,
+            vec![],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -228,8 +262,8 @@ async fn assert_precise_terminal_projection(
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
     let thread = work(&storage).await;
-    let first = storage.start_thread_turn(thread.id, None).await.unwrap();
-    let second = storage.start_thread_turn(thread.id, None).await.unwrap();
+    let first = storage.queue_thread_turn(thread.id, None).await.unwrap();
+    let second = storage.queue_thread_turn(thread.id, None).await.unwrap();
     {
         let conn = storage.conn.lock().await;
         conn.execute(
@@ -261,7 +295,7 @@ async fn assert_precise_terminal_projection(
     assert_eq!(row.last_activity_at, expected_time);
     assert_eq!(
         storage
-            .hello_snapshot(None)
+            .hello_snapshot()
             .await
             .unwrap()
             .threads

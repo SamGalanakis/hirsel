@@ -1,5 +1,5 @@
-import type { PhrasingContent, RootContent, Table } from "mdast";
-import { createMemo, For, Show } from "solid-js";
+import type { Definition, LinkReference, PhrasingContent, RootContent, Table } from "mdast";
+import { createContext, createMemo, For, Show, useContext } from "solid-js";
 import { type JSX } from "@solidjs/web";
 import { Dynamic } from "@solidjs/web";
 import { CodeBlock } from "./markdown/CodeBlock";
@@ -12,33 +12,46 @@ import { mdastToString, parseMarkdown, parseStreamingMarkdown } from "./markdown
 // URLs are scheme-checked, and nothing anywhere assigns innerHTML. That keeps
 // the app's XSS-safe-by-construction property without a sanitizer.
 
-const SAFE_SCHEMES = ["http:", "https:", "mailto:"];
+import { RichLink } from "../related/RichLink";
+import { safeHref } from "./markdown/url";
 
-/** A safe href, or null when the URL should degrade to plain text. */
-function safeHref(url: string | null | undefined): string | null {
-  if (!url) return null;
-  const trimmed = url.trim();
-  // Relative and anchor links carry no scheme and are harmless.
-  if (/^[#/](?![/\\])/.test(trimmed)) return trimmed;
-  try {
-    const parsed = new URL(trimmed, "https://hirsel.invalid/");
-    return SAFE_SCHEMES.includes(parsed.protocol) ? trimmed : null;
-  } catch {
-    return null;
-  }
+const LinkDefinitions = createContext<() => Map<string, Definition>>(() => new Map());
+function definitionsIn(nodes: readonly RootContent[]): Map<string, Definition> {
+  const definitions = new Map<string, Definition>();
+  const visit = (node: RootContent) => {
+    if (node.type === "definition" && !definitions.has(node.identifier)) definitions.set(node.identifier, node);
+    if ("children" in node) for (const child of node.children) visit(child as RootContent);
+  };
+  nodes.forEach(visit);
+  return definitions;
+}
+function ReferenceLink(props: { node: LinkReference }) {
+  const definitions = useContext(LinkDefinitions);
+  const definition = () => definitions().get(props.node.identifier);
+  const href = () => safeHref(definition()?.url);
+  return <Show when={href()} fallback={<>{renderPhrasing(props.node.children)}</>}>{url =>
+    <RichLink href={url()} title={definition()?.title ?? undefined} label={mdastToString(props.node)} imageOnly={props.node.children.every(child => child.type === "image" || child.type === "imageReference")}>
+      {renderPhrasing(props.node.children, true)}
+    </RichLink>
+  }</Show>;
+}
+function ReferenceImage(props: { node: Extract<PhrasingContent, {type: "imageReference"}> }) {
+  const definitions = useContext(LinkDefinitions);
+  const definition = () => definitions().get(props.node.identifier);
+  const src = () => safeHref(definition()?.url);
+  return <Show when={src()} fallback={props.node.alt ?? ""}>{url => <img src={url()} alt={props.node.alt ?? ""} title={definition()?.title ?? undefined} loading="lazy" class="max-w-full rounded-md border border-border/60" />}</Show>;
 }
 
 const inlineCodeClass = "rounded bg-muted/70 px-1 py-0.5 font-mono text-[0.85em]";
-const linkClass = "underline decoration-current/50 underline-offset-2 hover:decoration-current";
 
-/** `noRefs` suppresses Task-citation lifting for a subtree that cannot host a
+/** `noRefs` suppresses Thread-citation lifting for a subtree that cannot host a
  * control — a link label, where a nested button would be invalid markup. */
 function renderPhrasing(nodes: readonly PhrasingContent[], noRefs = false): JSX.Element[] {
   const out: JSX.Element[] = [];
   for (const node of nodes) {
     switch (node.type) {
       case "text":
-        // Task citations are lifted out of prose here and nowhere else, so a
+        // Thread citations are lifted out of prose here and nowhere else, so a
         // `#12` inside code, a link label or an autolink stays literal. The
         // cheap `includes` keeps every ordinary line on the plain-string path.
         out.push(
@@ -66,15 +79,9 @@ function renderPhrasing(nodes: readonly PhrasingContent[], noRefs = false): JSX.
         const href = safeHref(node.url);
         out.push(
           href ? (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer nofollow"
-              title={node.title ?? undefined}
-              class={linkClass}
-            >
+            <RichLink href={href} title={node.title ?? undefined} label={mdastToString(node)} imageOnly={node.children.every(child => child.type === "image" || child.type === "imageReference")}>
               {renderPhrasing(node.children, true)}
-            </a>
+            </RichLink>
           ) : (
             <>{renderPhrasing(node.children, noRefs)}</>
           ),
@@ -99,11 +106,13 @@ function renderPhrasing(nodes: readonly PhrasingContent[], noRefs = false): JSX.
         break;
       }
       case "linkReference":
+        out.push(<ReferenceLink node={node} />);
+        break;
       case "footnoteReference":
         out.push(<>{mdastToString(node)}</>);
         break;
       case "imageReference":
-        out.push(node.alt ?? "");
+        out.push(<ReferenceImage node={node} />);
         break;
       case "html":
         // Raw HTML never becomes markup — show the author's literal text.
@@ -292,14 +301,15 @@ export function renderInline(text: string): JSX.Element[] {
     if (node.type === "paragraph" || node.type === "heading") out.push(...renderPhrasing(node.children));
     else out.push(...renderNodes([node]));
   });
-  return out;
+  return [<LinkDefinitions value={() => definitionsIn(root.children)}>{out}</LinkDefinitions>];
 }
 
 export function Markdown(props: { children: string; class?: string }) {
   // One parse per source change keeps streaming updates cheap and stable.
   const tree = createMemo(() => parseStreamingMarkdown(props.children));
+  const definitions = createMemo(() => definitionsIn(tree().children));
   return (
-    <div
+    <LinkDefinitions value={definitions}><div
       data-testid="markdown"
       /* The column is `minmax(0,1fr)` rather than the implicit `auto` track.
          An auto track is floored at its item's min-content width, so a wide
@@ -312,6 +322,6 @@ export function Markdown(props: { children: string; class?: string }) {
       class={`grid grid-cols-[minmax(0,1fr)] gap-2 text-sm leading-relaxed wrap-break-word ${props.class ?? ""}`}
     >
       <For each={tree().children}>{(node) => renderNodes([node])}</For>
-    </div>
+    </div></LinkDefinitions>
   );
 }

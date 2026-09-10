@@ -198,7 +198,7 @@ fun SettingsScreen(
             SettingsCard(contentPadding = 0.dp) {
                 ToggleRow(
                     title = "Push notifications",
-                    subtitle = "Register this device for Ping pushes.",
+                    subtitle = "Register this device for Thread notifications.",
                     checked = pushEnabled,
                     onCheckedChange = { pushEnabled = it; settings.pushEnabled = it },
                     testTag = "push-toggle",

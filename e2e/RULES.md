@@ -2,9 +2,7 @@
 
 The current product gate is `thread-smoke.mjs`: durable thread inventory,
 thread-owned conversations and drafts, explicit settlement/reopening, reconnect,
-and desktop/phone containment. Task Margins runners and their reports in this
-directory are historical evidence for the superseded Event protocol. They are
-not current-product gates and are no longer advertised npm commands.
+and desktop/phone containment. All runners use the current tagged authentication and Thread contract.
 
 ## Automated runs
 
@@ -20,9 +18,7 @@ HIRSEL_THREAD_SMOKE_TOKEN=development-token \
 npm run e2e:threads
 ```
 
-`CHROMIUM_EXECUTABLE` selects an installed Chromium. Set
-`HIRSEL_THREAD_SMOKE_EXPECT_ID=5` when using an isolated imported data snapshot to
-verify the formerly invisible groceries thread. `HIRSEL_THREAD_SMOKE_ARTIFACTS`
+`CHROMIUM_EXECUTABLE` selects an installed Chromium. `HIRSEL_THREAD_SMOKE_ARTIFACTS`
 selects the screenshot directory. Set `HIRSEL_THREAD_SMOKE_ADAPTIVE=1` to seed a scripted-only Thread instrument, exercise Continue in place, and reject replay of its stale revision without another message. The script creates test threads and sends
 scripted messages; it makes no provider calls when the host is configured above.
 

@@ -4,6 +4,7 @@ import { createMemo, For, Show } from "solid-js";
 import type { ProcessInfo } from "../../protocol";
 import { partitionProcesses } from "../../store/selectors";
 import { closeRightRegion, prefillComposer, state } from "../../store/store";
+import { focusThread } from "../../threads/store";
 import { snippet } from "../../lib/format";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { ProcessRow } from "./ProcessRow";
@@ -11,10 +12,10 @@ import { ProcessRow } from "./ProcessRow";
 export function ProcessesView() {
   const groups = createMemo(() => partitionProcesses(state.processes));
 
-  // "Ask Hirsel to stop": interrupts route through globally aware Hirsel. The task
-  // world stays put while the standing composer receives the request.
+  // Process requests address the recorded origin conversation.
   function handleAskToStop(process: ProcessInfo) {
     closeRightRegion();
+    focusThread(process.thread_id);
     prefillComposer(`stop process ${process.id} (${snippet(process.label, 48)})`);
   }
 
@@ -30,7 +31,7 @@ export function ProcessesView() {
               </EmptyMedia>
               <EmptyTitle>Nothing running</EmptyTitle>
               <EmptyDescription>
-                Sub-agents and monitors Hirsel starts will show up here.
+                Thread execution processes and monitors appear here.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

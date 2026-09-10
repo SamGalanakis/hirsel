@@ -139,8 +139,7 @@ export async function loadPlugins(deps: LoaderDeps = {}): Promise<void> {
   try {
     plugins = await list();
   } catch (error) {
-    // No plugin surface (older Host) or the Host is unreachable: no plugin UI,
-    // and nothing else changes.
+    // A roster fetch failure leaves plugin loading unavailable for this attempt.
     // eslint-disable-next-line no-console
     console.warn("hirsel plugins: roster unavailable", error);
     return;

@@ -3,9 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{Blob, ChatMessage};
-use crate::event::Event;
 use crate::models::{ModelSnapshot, PromptSnapshot, SubagentModelCatalog};
-use crate::process::{ProcessInfo, SideChatSummary};
+use crate::process::ProcessInfo;
 use crate::providers::ProviderRoster;
 use crate::turn::{AgentActivityState, TurnEventKind};
 use crate::view::ViewInstance;
@@ -23,69 +22,37 @@ pub enum HostToClient {
         device_token: String,
     },
     HelloOk {
-        latest_msg_id: u64,
-        #[serde(default)]
+        history_id: String,
         threads: Vec<crate::Thread>,
-        messages: Vec<ChatMessage>,
-        events: Vec<Event>,
         processes: Vec<ProcessInfo>,
-        #[serde(default)]
-        side_chats: Vec<SideChatSummary>,
-        /// Host build identity (crate version + git sha), shown in Settings → About.
-        /// `#[serde(default)]` keeps older hosts/snapshots that omit it parseable.
-        #[serde(default)]
         host_version: String,
-        /// Runtime-selectable main-agent model state. Older hosts omit it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelSnapshot>,
-        /// Runtime-selectable Sub-agent model catalog. Older hosts omit it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_models: Option<SubagentModelCatalog>,
-        /// Owner-editable Agent and fork prompts. Older hosts omit it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         prompts: Option<PromptSnapshot>,
-        /// The configured provider roster. Older hosts omit it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         providers: Option<ProviderRoster>,
-        #[serde(default)]
         views: Vec<ViewInstance>,
     },
     Msg {
         message: ChatMessage,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sc: Option<String>,
     },
-    Messages {
-        client_id: String,
-        before_id: u64,
-        messages: Vec<ChatMessage>,
-        has_more: bool,
-    },
+
     ProcessUpsert {
         process: ProcessInfo,
     },
     TurnEvent {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<u64>,
+        turn_id: u64,
+        thread_id: u64,
         seq: u64,
         event: TurnEventKind,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sc: Option<String>,
     },
     MsgRemoved {
         id: u64,
     },
     AgentActivity {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<u64>,
+        turn_id: u64,
+        thread_id: u64,
         state: AgentActivityState,
         text: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sc: Option<String>,
     },
     ArtifactsListed {
         client_id: String,
@@ -105,6 +72,13 @@ pub enum HostToClient {
         client_id: String,
         detail: crate::ThreadDetail,
     },
+    ThreadRelatedChanged {
+        client_id: Option<String>,
+        history_id: String,
+        thread_id: u64,
+        revision: u64,
+        items: Vec<crate::ThreadRelatedItem>,
+    },
     ThreadCreated {
         client_id: String,
         thread: crate::Thread,
@@ -115,9 +89,7 @@ pub enum HostToClient {
     ThreadTurn {
         turn: crate::ThreadTurn,
     },
-    EventUpsert {
-        event: Event,
-    },
+
     /// The main agent's model surface after an accepted edit — the WHOLE
     /// snapshot, because a provider change reshapes it: a curated registry and
     /// a free-text id are two different controls, and the client cannot derive
@@ -155,22 +127,9 @@ pub enum HostToClient {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
     },
-    SideChatOpen {
-        sc: String,
-        event_id: u64,
-        /// Compatibility mirror for clients that still address side chats as Pings.
-        ping_id: u64,
-        event: Event,
-        messages: Vec<ChatMessage>,
-    },
-    ConclusionDraft {
-        sc: String,
-        text: String,
-    },
-    SideChatClosed {
-        sc: String,
-    },
+
     ViewUpsert {
+        thread_id: u64,
         instance_id: String,
         placement: String,
         spec: serde_json::Value,

@@ -1,16 +1,12 @@
 import type { Thread, ThreadClientMessage, ThreadServerMessage } from "./threads/types";
 import type { ArtifactClientMessage, ArtifactServerMessage } from "./artifacts/types";
-// Hand-written mirror of ../PROTOCOL.md (canonical). Historical Chat/Ping names
-// in this file are wire-only compatibility spellings, never product destinations.
-// If that file changes, this
-// file and the Rust `hirsel-proto` crate both need to change to match.
-//
+// Current-only mirror of app/PROTOCOL.md and hirsel-proto.
 // Transport: WebSocket, JSON text frames, one message per frame.
 
 export type Author = "owner" | "agent";
 
 /** A stored attachment (v1.1). CONTENT is fetched out-of-band from
- * `GET /blob/{id}?token=…`; this record is only the metadata carried on the
+ * a signed blob URL; this record is only the metadata carried on the
  * wire. */
 export interface Blob {
   id: string; // uuid
@@ -28,7 +24,7 @@ export interface ToolCall {
 
 export interface ChatMessage {
   artifact_ids?: number[];
-  thread_id?: number;
+  thread_id: number;
   client_id?: string;
   id: number; // u64, monotonic, host-assigned
   author: Author;
@@ -36,7 +32,7 @@ export interface ChatMessage {
   ref: number | null; // id of the chat message this replies to
   ts: string; // RFC3339
   attachments?: Blob[]; // v1.1, default []
-  /** Task ids explicitly addressed by this message. */
+  /** Thread IDs cited by this message; citations never change ownership. */
   mentions?: number[];
   /** v1.4: tools invoked in the turn that committed this (agent) message.
    * Optional on the wire; absent/empty renders no footer chip. */
@@ -52,6 +48,7 @@ export type ProcessKind = "subagent" | "monitor";
 export type ProcessState = "running" | "done" | "failed" | "cancelled" | "abandoned";
 
 export interface ProcessInfo {
+  thread_id: number;
   id: string;
   kind: ProcessKind;
   label: string;
@@ -62,38 +59,6 @@ export interface ProcessInfo {
   started_ts: string; // RFC3339
   last_event_ts: string; // RFC3339, drives newest-activity-first ordering
   summary: string | null; // latest progress line, single-line truncated in UI
-}
-
-export interface QuickReply {
-  value: string;
-  label: string;
-}
-
-/** A Ping has exactly two lifecycle states — `open` (needs the Owner's
- * attention) and `done` (dealt with, kept findable). The Owner replying to the
- * Ping's Anchor resolves it to `done` automatically, host-side. `archived` is
- * the pre-ADR-0009 persisted value for the same terminal state; the live wire
- * is open|done, but `isResolvedStatus` tolerates the legacy spelling for any
- * old persisted rows. No separate hard-delete state exists. */
-export type PingStatus = "open" | "done";
-
-/** v2.1 (ADR-0009 addendum): a Ping is a named, addressable async work item.
- * `name` is its short `@` handle (≤32 chars, mono in the UI) and `description`
- * is a one-line subtitle; both are required on the wire. `content` is the
- * markdown body. The Owner replying to `anchor` moves it open→done. */
-export interface Ping {
-  id: number;
-  name: string; // short @-handle, <= 32 chars
-  description: string; // one line
-  content: string; // markdown
-  anchor: number; // ChatMessage.id where pings.send was called
-  requires_response: boolean;
-  quick_replies: QuickReply[]; // may be empty
-  status: PingStatus;
-  ts: string;
-  /** v1.3: Owner-side "seen" state, set automatically once a Ping has been
-   * viewed (email-like). Optional on the wire; absent is treated as false. */
-  read?: boolean;
 }
 
 /** Generative-UI tier (view templates): a resolved, concrete component tree the
@@ -107,102 +72,16 @@ export interface ViewSpec {
   [prop: string]: unknown;
 }
 
-/** Wire placement. `canvas` is the utility surface; historical `chat` means
- * inline conversation and `ping:<id>` means inside the matching Task. The old
- * strings remain protocol-only for backend compatibility. */
-export type ViewPlacement = "canvas" | "chat" | (string & {});
+/** Current host-authored utility placement. */
+export type ViewPlacement = "canvas";
 
 /** One active view instance. Keyed by `instance_id`; an update in place is just
  * a re-`view_upsert` of the same id. */
 export interface ViewInstance {
+  thread_id: number;
   instance_id: string;
   placement: ViewPlacement;
   spec: ViewSpec;
-}
-
-// ---- Typed event queue (ADR-0012 / ADR-0013) ----
-//
-// `Event` (wire) generalizes `Ping`: a Ping is exactly a `judgment` Event. It
-// is named `EventItem` here to avoid shadowing the DOM `Event` global (the wire
-// tags stay `event_upsert` / `event_action`). The card body rides the wire as
-// an OPAQUE JSON UI tree (`ui`) — the same pattern as `ViewInstance.spec` — and
-// is validated/rendered client-side by the constrained catalog (ADR-0013), so a
-// vocabulary skew degrades gracefully rather than breaking a card.
-
-/** The interrupt-vs-accrue axis, baked into the type (ADR-0012). `judgment`
- * needs a decision (the hero — a Ping's `requires_response` maps here);
- * `summary` is a digest; `info` a quiet notification. Ordering (not a flag)
- * keeps info from drowning judgment. Open set on the wire — an unknown kind is
- * tolerated as awareness. */
-export const EventKind = {
-  Judgment: "judgment",
-  Summary: "summary",
-  Info: "info",
-} as const;
-export type EventKind = (typeof EventKind)[keyof typeof EventKind];
-
-/** Who produced an Event: the main Agent, a sub-agent at its own taste
- * boundary, a scheduled lash job (the "morning brief" is one), or a monitor.
- * `ref` is the producer handle (process_id / job_id / monitor label). */
-export interface EventSource {
-  kind: "agent" | "subagent" | "scheduled" | "monitor";
-  ref: string | null;
-}
-
-/** Lifecycle mirrors a Ping (ADR-0009): `open` needs the Owner; `done` is
- * decided/dismissed and kept findable. A judgment resolves when decided;
- * summary/info auto-read on pass. */
-export type EventStatus = "open" | "done";
-
-/** One typed event in the home queue. `ui` is the constrained JSON-UI card body
- * (ADR-0013): the blessed judgment template (eyebrow · fork · optionList ·
- * viewSlot) for a judgment, a light tree for summary/info. Carried loosely
- * (opaque `ViewSpec`, or an array of nodes) so the renderer narrows per catalog
- * component and never trusts the shape. */
-export interface EventItem {
-  id: number;
-  kind: EventKind;
-  source: EventSource;
-  /** Short `@`-handle (≤32 chars, mono in the UI). */
-  name: string;
-  /** One-line subtitle. */
-  description: string;
-  /** The constrained JSON-UI card body — a root node or an array of nodes. */
-  ui: ViewSpec | ViewSpec[];
-  /** True for a judgment; a judgment's options also live in `ui.optionList`. */
-  requires_response: boolean;
-  quick_replies: QuickReply[];
-  status: EventStatus;
-  read: boolean;
-  anchor: number;
-  ts: string;
-  /** Host hint: this judgment stopped the fleet, so it leads the queue (ADR-0012
-   * "blocking judgments first"). Optional on the wire; absent is treated as
-   * false. Ordering is otherwise derived (kind + wait time). */
-  blocking?: boolean;
-  /** Archive contract v1: the Owner has swept this event out of the resting
-   * queue. Orthogonal to `status` (the host auto-resolves an open judgment as
-   * dismissed at archive time; unarchive does NOT reopen it). Optional on the
-   * wire (`#[serde(default)]` host-side); absent is treated as false, so old
-   * data and old hosts stay valid. Toggled by `event_action`
-   * archive/unarchive; the client filters (hello_ok carries archived events). */
-  archived?: boolean;
-  /** Wave-3 (durable snooze): the instant this Event returns to the resting
-   * queue, or `null`/absent when it is not snoozed. Set host-side by an
-   * `event_action{snooze,{until}}` and cleared by `unsnooze` — or, when the
-   * instant passes, by the host's own timer, which sets it back to `null`,
-   * re-broadcasts `event_upsert`, and re-pushes an open judgment (the return IS a
-   * new interrupt). While `snoozed_until > now` the client hides the Event from
-   * Active everywhere and excludes it from the needs-you count; it surfaces only
-   * under the quiet "Snoozed (n)" filter. Optional on the wire; absent/null is
-   * treated as not snoozed. */
-  snoozed_until?: string | null;
-  /** Archive contract v1 (time axis): the instant the Owner swept this Event out
-   * of the resting queue, set host-side when `archived` flips true. Orders the
-   * quiet Archived day-log (newest-first) and drives its "Today"/"Yesterday" day
-   * groupings. Optional on the wire (older data/hosts omit it); absent falls back
-   * to `id` order and a "Today" grouping for a just-archived row. */
-  archived_at?: string | null;
 }
 
 // ---- Model configuration (main agent + sub-agent catalog) ----
@@ -228,7 +107,7 @@ export interface AvailableModel {
 export interface ModelSnapshot {
   current: ModelSelection;
   available: AvailableModel[];
-  /** The provider instance this agent runs on. Absent on older hosts. */
+  /** The provider instance this agent runs on. Null when no provider is configured. */
   provider_id?: string;
   /** True when the selected provider takes a free-text model id: `available`
    * is then empty and `current.id` is whatever the Owner typed. */
@@ -248,7 +127,7 @@ export interface ForkAgentConfig {
   current: ModelSelection;
   available: AvailableModel[];
   prompt: PromptDoc;
-  /** The provider instance this agent runs on. Absent on older hosts. */
+  /** The provider instance this agent runs on. Null when no provider is configured. */
   provider_id?: string;
   /** True when the selected provider takes a free-text model id: `available`
    * is then empty and `current.id` is whatever the Owner typed. */
@@ -326,8 +205,7 @@ export interface ProviderInstance {
   detection?: DetectionStatus;
   /** Whether the main Agent and the fork may select it. Claude is false. */
   agent_selectable: boolean;
-  /** The provider-specific model controls. Absent on older hosts and on
-   * providers that resident agents cannot select. */
+  /** The provider-specific model controls. Absent on providers that resident agents cannot select. */
   selection?: ProviderSelection;
   /** Built-in instances (codex, claude) are configured, never removed. */
   removable: boolean;
@@ -351,8 +229,7 @@ export type AgentSlot = "main" | "fork";
 
 export interface HelloMsg {
   type: "hello";
-  token: string;
-  last_seen_msg_id: number | null;
+  auth: { static_token: string } | { device_token: string } | { pairing_code: { code: string; device_label: string } };
 }
 
 /** v1.2 send mode. "send" = plain Enter (Early Injection if a turn is active,
@@ -360,45 +237,8 @@ export interface HelloMsg {
  * commits, lash Next Full Turn). Absent is treated as "send". */
 export type SendMode = "send" | "next_turn";
 
-export interface SendMessageMsg {
-  type: "send_message";
-  client_id: string; // client-generated idempotency key (uuid)
-  body: string;
-  ref: number | null;
-  attachments?: string[]; // v1.1 blob ids, default []
-  mode?: SendMode; // v1.2, default "send"
-  /** v2.1 (ADR-0009 addendum): ping ids @-mentioned in the body. The host
-   * validates every id and appends each Ping's context to the Agent turn.
-   * Lifecycle-neutral — mentioning a Ping never resolves it. Default []/omitted. */
-  mentions?: number[];
-}
-
-/** v2.1: resolve a Ping to `done` (⋯ "Mark done"). Idempotent; the host sets
- * status=done and broadcasts a ping_upsert. (Was `archive_item`.) */
-export interface ResolvePingMsg {
-  type: "resolve_ping";
-  ping_id: number;
-}
-
-/** v2.2: reopen a resolved Ping (⋯ "Reopen", or the "Marked done" toast's
- * Undo). Idempotent; on success the host sets status=open and broadcasts the
- * same `ping_upsert` a resolve does — there is no bespoke inbound reply. The
- * recovery peer of `resolve_ping`, so a mis-tapped Done is never terminal. */
-export interface ReopenPingMsg {
-  type: "reopen_ping";
-  ping_id: number;
-}
-
-/** v1.3: mark a Ping read (email-like "seen"). Idempotent; the host sets
- * read=true and broadcasts a ping_upsert. There is no "unread" op — that is a
- * client-only override (see store). (Was `read_item`.) */
-export interface ReadPingMsg {
-  type: "read_ping";
-  ping_id: number;
-}
-
 /** v1.1: upload a file's bytes (base64) before referencing it from a
- * send_message. Correlated to a blob_ok by `client_id`. */
+ * send_thread_message. Correlated to a blob_ok by `client_id`. */
 export interface UploadBlobMsg {
   type: "upload_blob";
   client_id: string;
@@ -418,7 +258,7 @@ export interface GetBlobUrlMsg {
 
 /** v1.2: cooperatively interrupt the active agent turn (Esc). No-op if idle. */
 export interface CancelTurnMsg {
-  thread_id?: number;
+  thread_id: number;
   type: "cancel_turn";
 }
 
@@ -429,47 +269,12 @@ export interface CancelQueuedMsg {
   client_id: string;
 }
 
-/** Generative-UI tier: an owner-initiated event from an interactive view
- * component (`action` / `optionSet` / `form`). The host looks the instance up
- * and routes it through the normal owner-submission path — for a `ping:<id>`
- * view it becomes an anchor-refed reply without settling the Task. The client
- * must NOT create messages, settle Tasks, or open any side channel
- * directly; it only emits this frame. `data` is the component's declared payload
- * (`null` for a bare `action`, `{ value }` for `optionSet`, an object keyed by
- * field `name` for `form`). */
+/** Current host-authored View interaction; the Host handles its action payload. */
 export interface ViewEventMsg {
   type: "view_event";
   instance_id: string;
   action: string;
   data: unknown;
-}
-
-/** Typed event queue (ADR-0012/0013): an owner-initiated action from an event
- * card's constrained UI. Generalizes the quick-reply resolution + `view_event`.
- * `action` is `choose` (data.choice = option key; resolves a judgment; optional
- * `data.record_rule` seeds the taste store), `submit` (data = field values),
- * `snooze` (Wave-3 durable snooze; `data.{until}` an RFC3339 instant — a snooze
- * with no `until` is invalid, a retryable error naming the presets), `unsnooze`
- * (clears `snoozed_until`, returning the Event to Active now), `archive` /
- * `unarchive` (data `{}`), `dismiss`, or `reopen` (Done-as-toggle recovery — the
- * peer of a choose, per the reopen machinery on main). The host looks the event
- * up and routes it through the normal owner-submission path; the client never
- * resolves the event itself, it only emits this frame. */
-export interface EventActionMsg {
-  type: "event_action";
-  event_id: number;
-  action: string;
-  data: unknown;
-}
-
-/** Wave-3 (sweep): clear every FINISHED event (decided, or read awareness that
- * never needed a response) out of the resting queue in one op — the "Clear
- * finished (n)" sweep, mirroring the `events.clear` tool. The host archives the
- * matching set and broadcasts an `event_upsert` (archived=true) for each, so the
- * client's optimistic batch-archive reconciles the same way a single archive
- * does. Reversible: the sweep's Undo unarchives that batch one by one. */
-export interface ClearFinishedEventsMsg {
-  type: "clear_finished_events";
 }
 
 /** Select the main agent's model + reasoning variant. The host applies it and
@@ -554,30 +359,15 @@ export interface RedetectProviderMsg {
   id: string;
 }
 
-/** Request one bounded page immediately before a loaded conversation id. */
-export interface FetchMessagesMsg {
-  type: "fetch_messages";
-  client_id: string;
-  before_id: number;
-  limit: number;
-}
-
 export type ClientMessage =
   | ArtifactClientMessage
   | ThreadClientMessage
   | HelloMsg
-  | SendMessageMsg
-  | ResolvePingMsg
-  | ReopenPingMsg
-  | ReadPingMsg
   | UploadBlobMsg
   | GetBlobUrlMsg
   | CancelTurnMsg
   | CancelQueuedMsg
   | ViewEventMsg
-  | EventActionMsg
-  | ClearFinishedEventsMsg
-  | FetchMessagesMsg
   | SetModelMsg
   | SetSubagentModelMsg
   | SetAgentPromptMsg
@@ -592,36 +382,16 @@ export type ClientMessage =
 // ---- Server -> client ----
 
 export interface HelloOkMsg {
-  threads?: Thread[];
   type: "hello_ok";
-  latest_msg_id: number;
-  messages: ChatMessage[];
-  pings: Ping[];
-  /** Typed event queue (ADR-0012): the authoritative open + recent event set on
-   * (re)connect, generalizing `pings`. Optional on the wire (serde-default []);
-   * absent is treated as []. Pings continue to arrive on `pings` until the host
-   * cutover; the client keeps both slices. */
-  events?: EventItem[];
-  /** v1.4: all non-terminal processes + the last 10 terminal ones. Optional on
-   * the wire; absent is treated as []. */
-  processes?: ProcessInfo[];
-  /** Generative-UI tier: the authoritative active view set on (re)connect.
-   * Optional on the wire (serde-default []); absent is treated as []. */
-  views?: ViewInstance[];
-  /** Host build identity (crate version + git sha), shown in Settings → About.
-   * Optional on the wire; older hosts omit it and About shows "Not reported". */
-  host_version?: string;
-  /** The main agent's model snapshot (selection + everything selectable).
-   * Optional on the wire; older hosts omit it and the Models control is hidden. */
-  model?: ModelSnapshot;
-  /** The sub-agent model catalog, grouped by provider. Optional on the wire;
-   * older hosts omit it and the Sub-agent models control is hidden. */
-  subagent_models?: SubagentModelCatalog;
-  /** Editable Agent and fork configuration. Optional for older hosts. */
-  prompts?: PromptSnapshot;
-  /** The configured provider roster. Optional on the wire; older hosts omit it
-   * and the Providers tab says so rather than inventing a roster. */
-  providers?: ProviderRoster;
+  history_id: string;
+  threads: Thread[];
+  processes: ProcessInfo[];
+  views: ViewInstance[];
+  host_version: string;
+  model: ModelSnapshot | null;
+  subagent_models: SubagentModelCatalog | null;
+  prompts: PromptSnapshot | null;
+  providers: ProviderRoster | null;
 }
 
 export interface MsgMsg {
@@ -629,35 +399,14 @@ export interface MsgMsg {
   message: ChatMessage;
 }
 
-/** Correlated response to `fetch_messages`, oldest-to-newest within the page. */
-export interface MessagesMsg {
-  type: "messages";
-  client_id: string;
-  before_id: number;
-  messages: ChatMessage[];
-  has_more: boolean;
-}
-
 export type AgentActivityState = "thinking" | "idle";
 
 export interface AgentActivityMsg {
-  turn_id?: number | null;
-  thread_id?: number | null;
+  turn_id: number;
+  thread_id: number;
   type: "agent_activity";
   state: AgentActivityState;
   text: string | null;
-}
-
-export interface PingUpsertMsg {
-  type: "ping_upsert";
-  ping: Ping;
-}
-
-/** Typed event queue (ADR-0012): seed or update one Event in place, keyed by
- * `id`. Generalizes `ping_upsert` (an update is a re-send of the same id). */
-export interface EventUpsertMsg {
-  type: "event_upsert";
-  event: EventItem;
 }
 
 /** v1.1: ack for an upload_blob, correlated by `client_id`. */
@@ -713,8 +462,8 @@ export type TurnEvent =
  * within a turn (gaps tolerated, redelivery idempotent). Replaces v1.4's
  * `agent_tool_call`. */
 export interface TurnEventMsg {
-  turn_id?: number | null;
-  thread_id?: number | null;
+  turn_id: number;
+  thread_id: number;
   type: "turn_event";
   seq: number;
   event: TurnEvent;
@@ -732,6 +481,7 @@ export interface ErrorMsg {
 /** Generative-UI tier: seed or update a view in place, keyed by `instance_id`.
  * An update in place is a re-send of the same id with a new resolved `spec`. */
 export interface ViewUpsertMsg {
+  thread_id: number;
   type: "view_upsert";
   instance_id: string;
   placement: ViewPlacement;
@@ -792,10 +542,7 @@ export type ServerMessage =
   | ThreadServerMessage
   | HelloOkMsg
   | MsgMsg
-  | MessagesMsg
   | AgentActivityMsg
-  | PingUpsertMsg
-  | EventUpsertMsg
   | BlobOkMsg
   | BlobUrlMsg
   | MsgRemovedMsg

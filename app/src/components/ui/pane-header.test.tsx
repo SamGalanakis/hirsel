@@ -32,11 +32,11 @@ describe("PaneHeader: one slot, close parity", () => {
     expect(close.className).toContain("focus-visible:ring-ring/50");
   });
 
-  it("renders the resting Pings home with NO close and its badge instead", async () => {
+  it("renders the utility header with NO close and its badge instead", async () => {
     const { queryByLabelText, container } = render(() => (
       <PaneHeader
         icon={<span data-slot="icon" />}
-        title="Pings"
+        title="Processes"
         badge={<span data-slot="pings-rail-badge">3</span>}
       />
     ));

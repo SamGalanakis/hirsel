@@ -26,6 +26,7 @@ impl AppState {
         self.prompts.expand_skill(body)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit_thread_message(
         &self,
         client_id: String,
@@ -34,8 +35,11 @@ impl AppState {
         attachments: Vec<String>,
         mentions: Vec<u64>,
         mode: SendMode,
+        artifact_ids: Vec<u64>,
     ) -> anyhow::Result<OwnerSubmission> {
+        let expected_history = self.storage.history_id().await?;
         self.submit_addressed_turn(
+            &expected_history,
             client_id,
             thread_id,
             body,
@@ -43,12 +47,14 @@ impl AppState {
             mentions,
             mode,
             None,
+            artifact_ids,
         )
         .await
     }
     #[allow(clippy::too_many_arguments)]
-    async fn submit_addressed_turn(
+    pub(crate) async fn submit_addressed_turn(
         &self,
+        expected_history: &str,
         client_id: String,
         thread_id: u64,
         body: String,
@@ -56,6 +62,7 @@ impl AppState {
         mentions: Vec<u64>,
         mode: SendMode,
         thread_action: Option<ThreadActionContext>,
+        artifact_ids: Vec<u64>,
     ) -> anyhow::Result<OwnerSubmission> {
         self.agent.readiness()?;
         let agent_body = self
@@ -66,11 +73,13 @@ impl AppState {
         let (message, inserted) = self
             .storage
             .append_thread_owner_request(
+                expected_history,
                 thread_id,
                 &client_id,
                 body,
                 &attachments,
                 &mentions,
+                &artifact_ids,
                 &request,
             )
             .await?;
@@ -83,18 +92,12 @@ impl AppState {
                     .ok_or_else(|| anyhow::anyhow!("unknown thread: {thread_id}"))?;
                 self.broadcast(HostToClient::ThreadUpsert { thread });
             }
-            let turn = OwnerTurn {
-                thread_id,
-                thread_action,
-                message_id: message.id,
-                client_id: client_id.clone(),
-                body: agent_body,
-                anchor: message.r#ref,
-                attachments: self.storage.blobs_for_message(message.id).await?,
-                mentioned_pings: Vec::new(),
-                mode,
-                task_action: None,
-            };
+            let payload = self
+                .storage
+                .thread_request(&client_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("accepted request is no longer available"))?;
+            let turn: OwnerTurn = serde_json::from_value(payload)?;
             if let Err(error) = self.agent.enqueue(turn).await {
                 // The durable request and message remain together for recovery.
                 tracing::warn!(%error, message_id=message.id,"thread request persisted; admission will recover on restart");
@@ -116,12 +119,56 @@ impl AppState {
         data: serde_json::Value,
         expected_revision: Option<u64>,
     ) -> anyhow::Result<Thread> {
+        let expected_history = self.storage.history_id().await?;
         let current = self
             .storage
             .thread(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown thread: {id}"))?;
         let thread = match action.as_str() {
+            "set_icon" => {
+                let object = data
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("set_icon data must be an object"))?;
+                anyhow::ensure!(
+                    object.keys().all(|key| key == "icon"),
+                    "set_icon accepts only icon"
+                );
+                let icon = crate::storage::parse_icon(&data)?;
+                let revision = expected_revision
+                    .ok_or_else(|| anyhow::anyhow!("expected_revision is required for set_icon"))?;
+                self.storage
+                    .update_thread_icon(id, icon.as_ref().map(|value| value.as_deref()), revision)
+                    .await?
+            }
+
+            "set_showcase" => {
+                let object = data
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("set_showcase data must be an object"))?;
+                anyhow::ensure!(
+                    object.len() == 2
+                        && object.contains_key("artifact_id")
+                        && object.contains_key("history_id"),
+                    "set_showcase requires artifact_id and history_id"
+                );
+                let history = data["history_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("history_id must be a string"))?;
+                let artifact_id =
+                    crate::storage::parse_showcase(&data, "artifact_id")?.expect("required field");
+                let revision = expected_revision.ok_or_else(|| {
+                    anyhow::anyhow!("expected_revision is required for set_showcase")
+                })?;
+                self.storage
+                    .update_thread_showcase(history, id, artifact_id, revision)
+                    .await?
+            }
+
+            "pin" | "unpin" => {
+                validate_empty_lifecycle_data(&action, &data)?;
+                self.storage.pin_thread(id, action == "pin").await?
+            }
             "settle" => {
                 validate_empty_lifecycle_data(&action, &data)?;
                 self.storage.settle_thread(id, true).await?
@@ -163,8 +210,11 @@ impl AppState {
                             .is_none_or(|until| until <= chrono::Utc::now()),
                     "only an active thread accepts instrument actions"
                 );
-                let validated =
-                    crate::task_ui::validate_action(&current.instrument, generated, &data)?;
+                let validated = crate::thread_instrument::validate_action(
+                    &current.instrument,
+                    generated,
+                    &data,
+                )?;
                 let body = validated
                     .choice_label
                     .as_deref()
@@ -172,6 +222,7 @@ impl AppState {
                     .unwrap_or(generated)
                     .to_string();
                 self.submit_addressed_turn(
+                    &expected_history,
                     format!("thread-action-{id}-{}-{generated}", current.revision),
                     id,
                     body,
@@ -183,6 +234,7 @@ impl AppState {
                         action: action.clone(),
                         data,
                     }),
+                    Vec::new(),
                 )
                 .await?;
                 if validated.settles {
@@ -195,9 +247,17 @@ impl AppState {
                 }
             }
         };
-        self.broadcast(HostToClient::ThreadUpsert {
-            thread: thread.clone(),
-        });
+        if action == "set_showcase" {
+            let ids = current
+                .showcased_artifact_id
+                .into_iter()
+                .chain(thread.showcased_artifact_id)
+                .collect::<Vec<_>>();
+            self.tools
+                .publish_showcase_artifacts(&expected_history, &ids)
+                .await?;
+        }
+        self.tools.publish_thread(thread.clone()).await;
         Ok(thread)
     }
 }
@@ -221,6 +281,7 @@ mod tests {
                 "",
                 &instrument,
                 ThreadAttention::NeedsOwner,
+                None,
             )
             .await
             .unwrap();
@@ -277,55 +338,6 @@ mod tests {
                 .iter()
                 .any(|m| m.author == hirsel_proto::ChatAuthor::Owner && m.thread_id == thread.id)
         );
-        assert!(
-            state
-                .storage
-                .thread_detail(0, None, 100)
-                .await
-                .unwrap()
-                .messages
-                .is_empty()
-        );
-    }
-    #[tokio::test]
-    async fn read_and_legacy_clear_never_settle_thread_work() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = crate::build_state(crate::tests::test_config(dir.path()))
-            .await
-            .unwrap();
-        let (t, _) = state
-            .storage
-            .create_thread(
-                "groceries",
-                "Buy groceries",
-                "",
-                &json!({}),
-                ThreadAttention::Quiet,
-            )
-            .await
-            .unwrap();
-        let read = state
-            .handle_thread_action(t.id, "read".into(), json!({}), None)
-            .await
-            .unwrap();
-        assert!(read.read);
-        assert!(read.settled_at.is_none());
-        state.tools.events_clear().await.unwrap();
-        assert!(
-            state
-                .storage
-                .thread(t.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .settled_at
-                .is_none()
-        );
-        assert!(
-            state
-                .handle_thread_action(999, "read".into(), json!({}), None)
-                .await
-                .is_err()
-        );
+        assert!(state.storage.thread(0).await.unwrap().is_none());
     }
 }

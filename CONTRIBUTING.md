@@ -13,12 +13,26 @@ up-to-date `main`, make a focused change, and open a pull request. The CI
 workflow must pass before the branch is merged back to `main`; do not keep
 long-running integration branches.
 
-CI always checks the Rust workspace and web app. Its Android job runs only
-when `android/**` or `crates/hirsel-client-*/**` changes. The Android job skips
-without error when `GOOGLE_SERVICES_JSON_B64` is unavailable, as it is for
-pull requests from forks.
+The Owner has authorized routine pushes and keeping the local test instance
+current after validated changes. Push completed commits with a normal
+fast-forward push, then refresh the test app at `http://127.0.0.1:3076` when
+its code has changed. Build and verify a matching backend/frontend release
+before restarting; preserve its current configuration, history, data, and
+previous release. Identify the current listener and check for active work
+instead of reusing a recorded PID or an old cutover script. Verify liveness,
+readiness, served assets, and the authenticated connection after the update.
+This is a completed-change workflow, not a restart on every file save.
+
+CI always checks the Rust workspace and web app. Its Android job builds when
+Android, native client, protocol, Cargo, or CI workflow files change. It uses
+a placeholder Firebase configuration, so pull requests do not need release
+secrets to compile the debug APK.
 
 ## Local hooks with prek
+
+Use the Node version pinned in CI and the npm version in `app/package.json`.
+Run `npm ci` in `app/` after dependency changes so local validation checks the
+same lockfile contract as CI.
 
 Install [prek](https://github.com/j178/prek), then install both repository
 hooks:

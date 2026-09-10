@@ -63,7 +63,7 @@ class FakeWebSocket {
   }
 }
 
-const HELLO_OK = { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [] } as const;
+const HELLO_OK = { type: "hello_ok", history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null } as const;
 
 // The client reads/writes the unqualified global `localStorage`, which in this
 // runner is Node's experimental Web Storage (no valid path ⇒ its methods are
@@ -120,7 +120,7 @@ describe("HirselWsClient lifecycle", () => {
     expect(artifacts.artifactState.error).toBeNull();
     expect(artifacts.artifactState.opened?.content).toBe("Working");
     expect(threads.threadState.error).toBeNull();
-    threads.sendThreadMessage(0, "Follow up", "send", [], []); flush();
+    threads.sendThreadMessage(0, "Follow up", "send", [], [], []); flush();
     const send = JSON.parse(ws.sent.at(-1)!);
     ws.serverSend({ type: "error", client_id: send.client_id, detail: "Thread send failed" });
     expect(threads.threadState.error).toMatchObject({ operation: "send", detail: "Thread send failed" });
@@ -140,53 +140,6 @@ describe("HirselWsClient lifecycle", () => {
 
     ws.serverSend(HELLO_OK);
     expect(store.state.connection).toBe("connected");
-  });
-
-  it("reconnects with backoff and flushes pending sends on the new socket", async () => {
-    vi.useFakeTimers();
-    const { store, client } = await load();
-    const c = client.startClient("wss://host/ws", "good");
-    const ws1 = FakeWebSocket.instances[0];
-    ws1.serverOpen();
-    ws1.serverSend(HELLO_OK);
-
-    c.sendMessage("hi there", null);
-    flush();
-    expect(store.state.pendingSends).toHaveLength(1);
-    expect(ws1.sentTypes().filter((t) => t === "send_message")).toHaveLength(1);
-
-    // A network drop (not an auth reject) → reconnecting + scheduled retry.
-    ws1.serverClose(1006);
-    expect(store.state.connection).toBe("reconnecting");
-
-    vi.advanceTimersByTime(2000); // clears the first backoff (≤ ~1.2s incl. jitter)
-    flush();
-    const ws2 = FakeWebSocket.instances[1];
-    expect(ws2).toBeTruthy();
-
-    ws2.serverOpen();
-    ws2.serverSend(HELLO_OK);
-    // flushOutbox resent the still-un-acked send on the fresh socket.
-    expect(ws2.sentTypes().filter((t) => t === "send_message")).toHaveLength(1);
-    expect(store.state.connection).toBe("connected");
-  });
-
-  it("marks a send failed after the fail window with no echo", async () => {
-    vi.useFakeTimers();
-    const { store, client } = await load();
-    const c = client.startClient("wss://host/ws", "good");
-    const ws = FakeWebSocket.instances[0];
-    ws.serverOpen();
-    ws.serverSend(HELLO_OK);
-
-    c.sendMessage("no echo", null);
-    flush();
-    const cid = store.state.pendingSends[0].clientId;
-    expect(store.state.messages.find((m) => m.clientId === cid)?.failed).toBeFalsy();
-
-    vi.advanceTimersByTime(30_000);
-    flush();
-    expect(store.state.messages.find((m) => m.clientId === cid)?.failed).toBe(true);
   });
 });
 
@@ -232,32 +185,7 @@ describe("HirselWsClient signed blob URLs (D9)", () => {
   });
 });
 
-describe("HirselWsClient history paging", () => {
-  it("correlates a page and shares one in-flight request", async () => {
-    const { client } = await load();
-    const c = client.startClient("wss://host/ws", "good");
-    const ws = FakeWebSocket.instances[0];
-    ws.serverOpen();
-    ws.serverSend(HELLO_OK);
 
-    const first = c.fetchMessages(201, 100);
-    const second = c.fetchMessages(201, 100);
-    expect(first).toBe(second);
-    const frames = ws.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
-    const requests = frames.filter((frame) => frame.type === "fetch_messages");
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ before_id: 201, limit: 100 });
-
-    ws.serverSend({
-      type: "messages",
-      client_id: requests[0].client_id,
-      before_id: 201,
-      messages: [],
-      has_more: false,
-    });
-    await expect(first).resolves.toMatchObject({ before_id: 201, has_more: false });
-  });
-});
 
 describe("HirselWsClient auth rejection (C5)", () => {
   it("keeps reconnecting when refused connections never reach open", async () => {
@@ -333,29 +261,7 @@ describe("HirselWsClient auth rejection (C5)", () => {
     expect(client.getStoredToken()).toBe("good"); // token untouched
   });
 
-  it("treats repeated pre-hello closes on a never-authed token as auth failure", async () => {
-    vi.useFakeTimers();
-    const { client } = await load();
-    localStorage.setItem("hirsel.token", "bad");
-    const onAuthReject = vi.fn();
-    client.startClient("wss://host/ws", "bad", { onAuthReject });
 
-    // Strike 1: a generic close before any hello_ok — still just a retry.
-    const ws1 = FakeWebSocket.instances[0];
-    ws1.serverOpen();
-    ws1.serverClose(1006);
-    expect(onAuthReject).not.toHaveBeenCalled();
-
-    // Strike 2: reconnects, closes pre-hello again → concluded auth failure.
-    vi.advanceTimersByTime(2000);
-    flush();
-    const ws2 = FakeWebSocket.instances[1];
-    ws2.serverOpen();
-    ws2.serverClose(1006);
-
-    expect(onAuthReject).toHaveBeenCalledOnce();
-    expect(client.getStoredToken()).toBeNull();
-  });
 
   it("does NOT gate a mid-session drop once the token has authenticated", async () => {
     vi.useFakeTimers();
@@ -377,5 +283,41 @@ describe("HirselWsClient auth rejection (C5)", () => {
     expect(onAuthReject).not.toHaveBeenCalled();
     expect(store.state.connection).toBe("reconnecting");
     expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("current history boundary", () => {
+  it("sends only tagged auth and waits for hello before sending requests", async () => {
+    const { client } = await load();
+    const c = client.startClient("wss://host/ws", "good");
+    const ws = FakeWebSocket.instances[0]; ws.serverOpen();
+    expect(JSON.parse(ws.sent[0])).toEqual({ type: "hello", auth: { static_token: "good" } });
+    c.setAgentPrompt("New prompt");
+    expect(ws.sentTypes()).toEqual(["hello"]);
+    ws.serverSend(HELLO_OK);
+    expect(ws.sentTypes()).toContain("set_agent_prompt"); c.close();
+  });
+  it("replays an unacknowledged Thread send only when history identity matches", async () => {
+    vi.useFakeTimers(); const { client } = await load();
+    const threads = await import("../threads/store");
+    const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
+    flush(() => threads.sendThreadMessage(4,"Retain me","send",[],[], []));
+    const sent = JSON.parse(first.sent.find(row=>JSON.parse(row).type==="send_thread_message")!);
+    first.serverClose(1006); vi.advanceTimersByTime(2000); const same = FakeWebSocket.instances[1]; same.serverOpen();
+    expect(same.sentTypes()).not.toContain("send_thread_message"); same.serverSend(HELLO_OK);
+    expect(same.sent.map(row=>JSON.parse(row))).toContainEqual(sent); c.close();
+  });
+  it("clears stale cache, uploads and queued operations on reset while retaining unsent text for recovery", async () => {
+    vi.useFakeTimers(); const { client } = await load();
+    const threads = await import("../threads/store"); const artifacts = await import("../artifacts/store");
+    const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
+    flush(() => { threads.sendThreadMessage(4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; }); artifacts.setArtifactState({ selectedId: 2 }); });
+    const upload = c.uploadBlob("upload-old","old.txt","text/plain","eA==").catch(error=>error.message);
+    first.serverClose(1006); c.setAgentPrompt("Stale queued operation"); vi.advanceTimersByTime(2000);
+    const next = FakeWebSocket.instances[1]; next.serverOpen(); next.serverSend({ ...HELLO_OK, history_id: "fresh-history" }); await Promise.resolve(); flush();
+    expect(next.sentTypes()).not.toContain("send_thread_message"); expect(next.sentTypes()).not.toContain("set_agent_prompt");
+    expect(threads.threadState.pending).toEqual([]); expect(threads.threadState.focusedId).toBeNull(); expect(threads.threadState.error).toBeNull();
+    expect(artifacts.artifactState.selectedId).toBeNull(); expect(await upload).toContain("History was reset");
+    const { recoveredDrafts } = await import("../lib/history"); expect(recoveredDrafts().map(row=>row.text)).toContain("Saved unsent text"); c.close();
   });
 });

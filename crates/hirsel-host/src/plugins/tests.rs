@@ -19,7 +19,6 @@ use tower::ServiceExt;
 use super::{PluginHost, PluginStatus, SupervisorConfig, http::masked_values};
 use crate::{
     BroadcastLog,
-    processes::ProcessStore,
     storage::Storage,
     tools::{ToolSuite, ToolsConfig},
 };
@@ -46,11 +45,14 @@ async fn test_tools(
         crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
             .await
             .unwrap();
-    let views =
-        crate::templates::ViewManager::new(templates, broadcaster.clone(), broadcast_log.clone());
+    let views = crate::templates::ViewManager::new(
+        storage.history_id().await.unwrap(),
+        templates,
+        broadcaster.clone(),
+        broadcast_log.clone(),
+    );
     let config_store = crate::host_config::ConfigStore::load(
         path.join("hirsel.toml"),
-        path,
         std::path::Path::new("/docs/hirsel-config.md"),
         &crate::host_config::EnvBootstrap::default(),
     )
@@ -65,7 +67,6 @@ async fn test_tools(
         storage.clone(),
         broadcaster.clone(),
         broadcast_log.clone(),
-        ProcessStore::default(),
         pushes,
         views,
     );
@@ -458,7 +459,13 @@ async fn a_crash_looping_daemon_is_restarted_then_parked_as_errored() {
     assert!(
         tools
             .plugin_tools()
-            .call("plugin__panicky__echo", json!({}))
+            .call(
+                "plugin__panicky__echo",
+                json!({}),
+                tools.clone(),
+                tools.storage().test_running_caller().await,
+                "plugin-call".into()
+            )
             .await
             .is_none(),
         "an errored plugin tool is absent from dispatch"
@@ -604,16 +611,30 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
     .await;
     let mut client = broadcaster.subscribe();
     let ctx = host.inner.plugins[0].ctx.clone();
+    let origin = storage
+        .create_thread(
+            "plugin-origin",
+            "Plugin origin",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0
+        .id;
     let before = storage.thread_snapshot().await.unwrap().len();
     let receipt = ctx
         .threads()
         .append_activity(NewActivity::new(
+            origin,
             "build_finished",
             json!({"message": "All green."}),
         ))
         .await
         .unwrap();
-    assert_eq!(receipt.thread_id, 0);
+    assert_eq!(receipt.thread_id, origin);
     assert_eq!(
         storage.thread_snapshot().await.unwrap().len(),
         before,
@@ -640,9 +661,11 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
         HostToClient::ThreadUpsert { .. }
     ));
     ctx.threads()
-        .append_activity(
-            NewActivity::new("progress", json!({"message": "List ready"})).in_thread(thread_id),
-        )
+        .append_activity(NewActivity::new(
+            thread_id,
+            "progress",
+            json!({"message": "List ready"}),
+        ))
         .await
         .unwrap();
     storage.mark_thread_read(thread_id).await.unwrap();
@@ -677,7 +700,7 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
     );
     assert!(
         ctx.threads()
-            .append_activity(NewActivity::new("progress", json!({})).in_thread(u64::MAX))
+            .append_activity(NewActivity::new(u64::MAX, "progress", json!({})))
             .await
             .is_err()
     );
@@ -794,7 +817,13 @@ async fn an_installed_plugin_works_end_to_end_in_the_real_host() {
     let result = state
         .tools
         .plugin_tools()
-        .call("plugin__greeter__ping", json!({ "message": "hi" }))
+        .call(
+            "plugin__greeter__ping",
+            json!({ "message": "hi" }),
+            state.tools.clone(),
+            state.storage.test_running_caller().await,
+            "plugin-call".into(),
+        )
         .await
         .expect("greeter registers plugin__greeter__ping")
         .unwrap();
@@ -932,4 +961,79 @@ async fn read_body(response: axum::response::Response) -> Vec<u8> {
         .await
         .unwrap()
         .to_vec()
+}
+
+#[tokio::test]
+async fn agent_plugin_resources_are_thread_scoped_and_old_callbacks_fail_after_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let (host, tools, storage, _) = start_host(
+        dir.path(),
+        vec![PluginRegistration::new(
+            Box::new(QuietPlugin {
+                id: "scoped-plugin",
+            }),
+            "1.0.0",
+            "plugins/scoped-plugin",
+        )],
+    )
+    .await;
+    let a = storage.test_running_caller().await;
+    let b = storage.test_running_caller().await;
+    let base = host.inner.plugins[0].ctx.clone();
+    let own = super::scoped_ctx::context(&base, tools.clone(), a.clone(), "invocation-a".into());
+    let peer = super::scoped_ctx::context(&base, tools.clone(), b.clone(), "invocation-b".into());
+    own.kv().set("secret", json!("A only")).await.unwrap();
+    assert_eq!(own.kv().get("secret").await.unwrap(), Some(json!("A only")));
+    assert_eq!(peer.kv().get("secret").await.unwrap(), None);
+    let child = own
+        .threads()
+        .create(NewThread::new("Child", "Scoped plugin work"))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .thread(child)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent_thread_id,
+        Some(a.thread_id)
+    );
+    own.threads()
+        .append_activity(NewActivity::new(child, "progress", json!({})))
+        .await
+        .unwrap();
+    assert!(
+        own.threads()
+            .append_activity(NewActivity::new(b.thread_id, "forbidden", json!({})))
+            .await
+            .is_err()
+    );
+    assert!(own.threads().settle(b.thread_id, true).await.is_err());
+    assert!(
+        storage
+            .thread(b.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+    storage.reset().await.unwrap();
+    let current = storage.test_running_caller().await;
+    assert_eq!(current.thread_id, a.thread_id);
+    assert_eq!(current.turn_id, a.turn_id);
+    let fresh = super::scoped_ctx::context(&base, tools, current, "fresh".into());
+    assert!(own.kv().set("late", json!(true)).await.is_err());
+    assert!(own.kv().get("secret").await.is_err());
+    assert!(
+        own.threads()
+            .create(NewThread::new("Late", "Must not appear"))
+            .await
+            .is_err()
+    );
+    assert!(own.threads().settle(a.thread_id, true).await.is_err());
+    assert!(fresh.kv().entries().await.unwrap().is_empty());
+    fresh.kv().set("fresh", json!(true)).await.unwrap();
+    assert_eq!(storage.thread_snapshot().await.unwrap().len(), 1);
 }

@@ -3,8 +3,9 @@ use chrono::{DateTime, Utc};
 use hirsel_proto::{Thread, ThreadAttention};
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision";
+pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,showcased_artifact_id";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
+    let parent_thread_id = r.get::<_, Option<u64>>(12)?;
     let time = |i| -> rusqlite::Result<Option<DateTime<Utc>>> {
         r.get::<_, Option<String>>(i)?
             .map(|s| parse_ts(&s))
@@ -12,7 +13,17 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     };
     Ok(Thread {
         id: r.get(0)?,
+        parent_thread_id,
+        // Older stores may contain child pins. They have no meaning in the
+        // root inventory; keep their stored data intact and project no pin.
+        pinned_at: if parent_thread_id.is_none() {
+            time(13)?
+        } else {
+            None
+        },
         title: r.get(1)?,
+        icon: r.get(14)?,
+        showcased_artifact_id: r.get(15)?,
         description: r.get(2)?,
         instrument: serde_json::from_str(&r.get::<_, String>(3)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
@@ -59,7 +70,7 @@ pub(super) fn attention(value: ThreadAttention) -> &'static str {
         ThreadAttention::NeedsOwner => "needs_owner",
     }
 }
-fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
+pub(super) fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
     // An empty instrument is valid when ordinary work has no controls yet.
     if instrument.is_null()
         || instrument
@@ -68,7 +79,7 @@ fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    crate::task_ui::validate(instrument)?;
+    crate::thread_instrument::validate(instrument)?;
     let mut pending = vec![instrument];
     while let Some(node) = pending.pop() {
         if let Some(nodes) = node.as_array() {
@@ -79,13 +90,17 @@ fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
                 anyhow::ensure!(
                     !matches!(
                         action,
-                        "settle"
+                        "set_icon"
+                            | "set_showcase"
+                            | "settle"
                             | "reopen"
                             | "read"
                             | "archive"
                             | "unarchive"
                             | "snooze"
                             | "unsnooze"
+                            | "pin"
+                            | "unpin"
                     ),
                     "instrument action `{action}` is reserved for Thread lifecycle commands"
                 );
@@ -124,6 +139,7 @@ impl Storage {
         description: &str,
         instrument: &serde_json::Value,
         needs: ThreadAttention,
+        parent_thread_id: Option<u64>,
     ) -> anyhow::Result<(Thread, bool)> {
         validate_instrument(instrument)?;
         anyhow::ensure!(!client_id.is_empty(), "client_id must not be empty");
@@ -139,11 +155,18 @@ impl Storage {
             .optional()?
         {
             let t = get(&tx, id)?;
+            anyhow::ensure!(
+                t.parent_thread_id == parent_thread_id,
+                "creation key belongs to another parent"
+            );
             tx.commit()?;
             return Ok((t, false));
         }
+        if let Some(parent) = parent_thread_id {
+            get(&tx, parent)?;
+        }
         let now = Utc::now().to_rfc3339();
-        tx.execute("INSERT INTO threads(client_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES(?1,?2,?3,?4,?5,0,?6,?6,1)",params![client_id,title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now])?;
+        tx.execute("INSERT INTO threads(client_id,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,0,?6,?6,1,?7)",params![client_id,title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now,parent_thread_id])?;
         let thread = get(&tx, tx.last_insert_rowid() as u64)?;
         tx.commit()?;
         Ok((thread, true))
@@ -184,12 +207,10 @@ impl Storage {
         get(&c, id)
     }
     pub async fn settle_thread(&self, id: u64, settled: bool) -> anyhow::Result<Thread> {
-        anyhow::ensure!(id != 0, "Orchestrator cannot be settled");
         self.set_thread_field(id, "settled_at", settled.then(|| Utc::now().to_rfc3339()))
             .await
     }
     pub async fn archive_thread(&self, id: u64, archived: bool) -> anyhow::Result<Thread> {
-        anyhow::ensure!(id != 0, "Orchestrator cannot be archived");
         self.set_thread_field(id, "archived_at", archived.then(|| Utc::now().to_rfc3339()))
             .await
     }
@@ -201,7 +222,28 @@ impl Storage {
         self.set_thread_field(id, "snoozed_until", until.map(|v| v.to_rfc3339()))
             .await
     }
+    pub async fn pin_thread(&self, id: u64, pinned: bool) -> anyhow::Result<Thread> {
+        let c = self.conn.lock().await;
+        let thread = get(&c, id)?;
+        anyhow::ensure!(
+            !pinned || thread.parent_thread_id.is_none(),
+            "only top-level Threads can be pinned"
+        );
+        c.execute(
+            "UPDATE threads SET pinned_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                pinned.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        get(&c, id)
+    }
     pub async fn mark_thread_read(&self, id: u64) -> anyhow::Result<Thread> {
         self.set_thread_field(id, "read", Some("1".into())).await
     }
 }
+
+#[cfg(test)]
+#[path = "thread_pins_tests.rs"]
+mod pin_tests;

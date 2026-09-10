@@ -1,154 +1,16 @@
 //! Main chat transcript: messages, owner submissions, replay.
 
 use super::Storage;
-use super::blobs::{message_attachments, validate_blob_ids};
+use super::blobs::message_attachments;
 use super::common::{collect_rows, parse_ts};
-use super::events::ping_snapshot_from_conn;
-use chrono::Utc;
 use hirsel_proto::ChatAuthor;
 use hirsel_proto::ChatMessage;
-use hirsel_proto::Event;
-use hirsel_proto::ToolCallSummary;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 use rusqlite::types::Type;
 
 impl Storage {
-    pub async fn append_chat(
-        &self,
-        author: ChatAuthor,
-        body: impl Into<String>,
-        anchor: Option<u64>,
-    ) -> anyhow::Result<ChatMessage> {
-        let body = body.into();
-        let ts = Utc::now();
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO chat_messages (author, body, ref, ts) VALUES (?1, ?2, ?3, ?4)",
-            params![author_to_str(author), body, anchor, ts.to_rfc3339()],
-        )?;
-        let id = conn.last_insert_rowid() as u64;
-        Ok(ChatMessage {
-            artifact_ids: Vec::new(),
-            client_id: None,
-            thread_id: 0,
-            mentions: Vec::new(),
-            id,
-            author,
-            body,
-            r#ref: anchor,
-            ts,
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-        })
-    }
-
-    pub async fn append_chat_with_tool_calls(
-        &self,
-        author: ChatAuthor,
-        body: impl Into<String>,
-        anchor: Option<u64>,
-        tool_calls: Vec<ToolCallSummary>,
-    ) -> anyhow::Result<ChatMessage> {
-        let thread_id = match anchor {
-            Some(id) => self.chat_message(id).await?.map_or(0, |m| m.thread_id),
-            None => 0,
-        };
-        self.append_thread_chat(thread_id, author, body, anchor, tool_calls)
-            .await
-    }
-
-    pub async fn append_owner_message(
-        &self,
-        client_id: &str,
-        body: impl Into<String>,
-        anchor: Option<u64>,
-        attachments: &[String],
-    ) -> anyhow::Result<(ChatMessage, bool)> {
-        self.append_owner_record(client_id, body.into(), anchor, attachments, None)
-            .await
-    }
-
-    pub async fn append_owner_request(
-        &self,
-        client_id: &str,
-        body: String,
-        anchor: Option<u64>,
-        attachments: &[String],
-        request: &serde_json::Value,
-    ) -> anyhow::Result<(ChatMessage, bool)> {
-        anyhow::ensure!(
-            request.is_object()
-                && request
-                    .get("body")
-                    .is_some_and(serde_json::Value::is_string),
-            "owner request requires a text body"
-        );
-        self.append_owner_record(client_id, body, anchor, attachments, Some(request))
-            .await
-    }
-
-    async fn append_owner_record(
-        &self,
-        client_id: &str,
-        body: String,
-        anchor: Option<u64>,
-        attachments: &[String],
-        request: Option<&serde_json::Value>,
-    ) -> anyhow::Result<(ChatMessage, bool)> {
-        let ts = Utc::now();
-        let mut conn = self.conn.lock().await;
-        let tx = conn.transaction()?;
-        let existing_id = tx
-            .query_row(
-                "SELECT msg_id FROM client_messages WHERE client_id = ?1",
-                params![client_id],
-                |row| row.get::<_, u64>(0),
-            )
-            .optional()?;
-        if let Some(existing_id) = existing_id {
-            let message = get_chat_message(&tx, existing_id)?;
-            tx.commit()?;
-            return Ok((message, false));
-        }
-        validate_blob_ids(&tx, attachments)?;
-        tx.execute(
-            "INSERT INTO chat_messages (author, body, ref, ts) VALUES ('owner', ?1, ?2, ?3)",
-            params![body, anchor, ts.to_rfc3339()],
-        )?;
-        let id = tx.last_insert_rowid() as u64;
-        tx.execute(
-            "INSERT INTO client_messages (client_id, msg_id) VALUES (?1, ?2)",
-            params![client_id, id],
-        )?;
-        for (position, blob_id) in attachments.iter().enumerate() {
-            tx.execute(
-                "
-                INSERT INTO message_attachments (message_id, blob_id, position)
-                VALUES (?1, ?2, ?3)
-                ",
-                params![id, blob_id, position as u64],
-            )?;
-        }
-        let message = get_chat_message(&tx, id)?;
-        if let Some(request) = request {
-            let mut request = request.clone();
-            request["message_id"] = serde_json::json!(id);
-            request["thread_id"] = serde_json::json!(message.thread_id);
-            request["client_id"] = serde_json::json!(client_id);
-            request["anchor"] = serde_json::json!(anchor);
-            request["attachments"] =
-                serde_json::to_value(super::blobs::message_attachments(&tx, id)?)?;
-            tx.execute(
-                "INSERT INTO thread_requests(client_id,payload) VALUES(?1,?2)",
-                params![client_id, serde_json::to_string(&request)?],
-            )?;
-        }
-        tx.commit()?;
-        Ok((message, true))
-    }
-
     pub async fn latest_msg_id(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock().await;
         Ok(conn.query_row(
@@ -186,39 +48,17 @@ impl Storage {
         Ok(changed > 0)
     }
 
-    pub async fn replay_messages(
-        &self,
-        last_seen_msg_id: Option<u64>,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        let conn = self.conn.lock().await;
-        replay_messages_from_conn(&conn, last_seen_msg_id)
-    }
-
-    pub async fn fetch_messages(&self, before_id: u64, limit: u64) -> anyhow::Result<MessagePage> {
-        let conn = self.conn.lock().await;
-        fetch_messages_from_conn(&conn, before_id, limit)
-    }
-
-    pub async fn hello_snapshot(
-        &self,
-        last_seen_msg_id: Option<u64>,
-    ) -> anyhow::Result<HelloSnapshot> {
+    pub async fn hello_snapshot(&self) -> anyhow::Result<HelloSnapshot> {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
-        let db_max: u64 = tx.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM chat_messages",
-            [],
-            |row| row.get(0),
-        )?;
-        let effective_cursor = last_seen_msg_id.filter(|cursor| *cursor <= db_max);
-        let messages = replay_messages_from_conn(&tx, effective_cursor)?;
-        let events = ping_snapshot_from_conn(&tx)?;
+        let history_id =
+            tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |r| {
+                r.get(0)
+            })?;
         let threads = super::threads::snapshot(&tx)?;
         tx.commit()?;
         Ok(HelloSnapshot {
-            latest_msg_id: db_max,
-            messages,
-            events,
+            history_id,
             threads,
         })
     }
@@ -229,7 +69,7 @@ impl Storage {
             .lock()
             .await
             .execute(
-                "ALTER TABLE chat_messages RENAME TO broken_chat_messages",
+                "ALTER TABLE threads RENAME COLUMN title TO broken_title",
                 [],
             )
             .expect("break hello snapshot schema for test");
@@ -282,105 +122,8 @@ impl Storage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelloSnapshot {
-    pub latest_msg_id: u64,
-    pub messages: Vec<ChatMessage>,
-    pub events: Vec<Event>,
+    pub history_id: String,
     pub threads: Vec<hirsel_proto::Thread>,
-}
-
-/// The newest-N conversation window every `hello_ok` carries, whatever cursor
-/// the client presents.
-pub(crate) const HELLO_REPLAY_WINDOW: u64 = 200;
-
-/// Maximum number of rows returned by one just-in-time history request.
-pub(crate) const FETCH_MESSAGES_LIMIT: u64 = 100;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessagePage {
-    pub messages: Vec<ChatMessage>,
-    pub has_more: bool,
-}
-
-fn fetch_messages_from_conn(
-    conn: &Connection,
-    before_id: u64,
-    requested_limit: u64,
-) -> anyhow::Result<MessagePage> {
-    let limit = requested_limit.clamp(1, FETCH_MESSAGES_LIMIT);
-    // SQLite row ids are signed 64-bit. A protocol u64 above that range simply
-    // means "beyond the newest row", not a binding error.
-    let before_id = before_id.min(i64::MAX as u64);
-    let mut stmt = conn.prepare(
-        "
-        SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
-        FROM (
-            SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
-            FROM chat_messages
-            WHERE id < ?1
-            ORDER BY id DESC
-            LIMIT ?2
-        )
-        ORDER BY id ASC
-        ",
-    )?;
-    let rows = stmt.query_map(params![before_id, limit], chat_message_from_row)?;
-    let mut messages = collect_rows(rows)?;
-    load_attachments_for_messages(conn, &mut messages)?;
-    let has_more = match messages.first() {
-        Some(first) => conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id < ?1)",
-            params![first.id],
-            |row| row.get(0),
-        )?,
-        None => false,
-    };
-    Ok(MessagePage { messages, has_more })
-}
-
-/// Replay for a `hello`.
-///
-/// `last_seen_msg_id` is an ATTENTION cursor (what this client had already
-/// seen), never a history gate: a reload must not empty the conversation just
-/// because the client had seen everything. So the replay is always at least the
-/// newest [`HELLO_REPLAY_WINDOW`] rows, and grows beyond that only for a client
-/// that is further behind than the window. A null cursor keeps its historical
-/// meaning — exactly the window — because that is the same floor.
-///
-/// The client merge is range-authoritative (the snapshot owns everything from
-/// its lowest id up, local history below it is preserved), so re-sending rows
-/// the client already holds is an idempotent replace, not a duplicate.
-fn replay_messages_from_conn(
-    conn: &Connection,
-    last_seen_msg_id: Option<u64>,
-) -> anyhow::Result<Vec<ChatMessage>> {
-    // Lowest id inside the newest-N window (0 when the table is empty).
-    let window_floor: u64 = conn.query_row(
-        "
-        SELECT COALESCE(MIN(id), 0)
-        FROM (SELECT id FROM chat_messages ORDER BY id DESC LIMIT ?1)
-        ",
-        params![HELLO_REPLAY_WINDOW],
-        |row| row.get(0),
-    )?;
-    // Exclusive cursor: `> window_cursor` is exactly the window.
-    let window_cursor = window_floor.saturating_sub(1);
-    let cursor = match last_seen_msg_id {
-        Some(seen) if seen < window_cursor => seen,
-        _ => window_cursor,
-    };
-
-    let mut stmt = conn.prepare(
-        "
-        SELECT id, author, body, ref, ts, tool_calls, thread_id, mentions
-        FROM chat_messages
-        WHERE id > ?1
-        ORDER BY id ASC
-        ",
-    )?;
-    let rows = stmt.query_map(params![cursor], chat_message_from_row)?;
-    let mut messages = collect_rows(rows)?;
-    load_attachments_for_messages(conn, &mut messages)?;
-    Ok(messages)
 }
 
 pub(super) fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<ChatMessage> {

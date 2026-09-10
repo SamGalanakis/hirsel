@@ -2,8 +2,9 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct HirselProcessPluginFactory {
+    pub(super) history_id: String,
+    pub(super) thread_id: u64,
     pub(super) tools: ToolSuite,
-    pub(super) notify: Arc<Notify>,
     /// Handed to the monitor engine so a monitor wake is triaged by a fork
     /// instead of turning the main Agent (ADR-0015).
     pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
@@ -31,16 +32,12 @@ impl PluginFactory for HirselProcessPluginFactory {
         &self,
         _ctx: &ProcessEngineContributionContext<'_>,
     ) -> Result<Vec<Arc<dyn ProcessEngine>>, PluginError> {
-        Ok(vec![
-            Arc::new(HirselSubagentEngine {
-                tools: self.tools.clone(),
-            }),
-            Arc::new(HirselMonitorEngine {
-                tools: self.tools.clone(),
-                notify: Arc::clone(&self.notify),
-                fork_wake: self.fork_wake.clone(),
-            }),
-        ])
+        Ok(vec![Arc::new(HirselMonitorEngine {
+            history_id: self.history_id.clone(),
+            thread_id: self.thread_id,
+            tools: self.tools.clone(),
+            fork_wake: self.fork_wake.clone(),
+        })])
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {

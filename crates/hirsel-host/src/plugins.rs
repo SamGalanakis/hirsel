@@ -12,6 +12,7 @@
 
 mod ctx;
 mod http;
+mod scoped_ctx;
 mod supervisor;
 mod tools;
 

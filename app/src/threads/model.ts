@@ -2,13 +2,14 @@ import type { ChatMessage } from "../protocol";
 import type { Thread, ThreadActivity, ThreadDetail, ThreadTurn } from "./types";
 
 export interface ThreadHistory {
+  brief: ThreadDetail["brief"];
   messages: ChatMessage[];
   turns: ThreadTurn[];
   activities: ThreadActivity[];
   hasMore: boolean;
   loaded: boolean;
 }
-export const emptyHistory = (): ThreadHistory => ({ messages: [], turns: [], activities: [], hasMore: false, loaded: false });
+export const emptyHistory = (): ThreadHistory => ({ brief: { text: "", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: false });
 export function upsertThread(threads: Thread[], incoming: Thread): Thread[] {
   const prior = threads.find(t => t.id === incoming.id);
   if (prior && prior.revision > incoming.revision) return threads;
@@ -23,8 +24,10 @@ export function mergeById<T extends { id: number }>(prior: T[], incoming: T[]): 
 export function mergeDetail(prior: ThreadHistory, detail: ThreadDetail, earlier: boolean): ThreadHistory {
   const id = detail.thread.id;
   const turns = mergeById(detail.turns.filter(t => t.thread_id === id), prior.turns);
+  const latestAssignment = (activities: ThreadActivity[]) => Math.max(-1, ...activities.filter(activity => activity.kind === "delegation_received").map(activity => activity.id));
   return {
-    messages: mergeById(detail.messages.filter(m => (m.thread_id ?? 0) === id), prior.messages),
+    brief: latestAssignment(prior.activities) > latestAssignment(detail.activities) ? prior.brief : detail.brief,
+    messages: mergeById(detail.messages.filter(m => m.thread_id === id), prior.messages),
     turns,
     activities: mergeById(detail.activities.filter(a => a.thread_id === id), prior.activities),
     hasMore: earlier || !prior.loaded ? detail.has_more : prior.hasMore,

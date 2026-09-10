@@ -44,16 +44,7 @@ describe("Settings: device label persistence", () => {
 describe("Settings: About & debug", () => {
   it("shows the host version reported over hello_ok", async () => {
     const store = await import("../../store/store");
-    store.dispatch({
-      type: "hello_ok",
-      payload: {
-        type: "hello_ok",
-        session_id: "s1",
-        latest_msg_id: 0,
-        messages: [],
-        host_version: "0.9.9-test",
-      },
-    } as never);
+    store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", session_id: "s1", host_version: "0.9.9-test", history_id: "test-history", threads: [], processes: [], views: [], model: null, subagent_models: null, prompts: null, providers: null } } as never);
     store.openSettings("about");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByText } = render(() => <SettingsSheet />);

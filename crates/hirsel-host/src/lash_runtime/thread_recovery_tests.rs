@@ -6,7 +6,14 @@ async fn runtime_fixture() -> (crate::AppState, tempfile::TempDir) {
     let mut config = crate::tests::test_config(dir.path());
     config.agent = AgentMode::Lash;
     config.anthropic_api_key = Some("test-key-no-inference".into());
-    (crate::build_state(config).await.unwrap(), dir)
+    let state = crate::build_state(config).await.unwrap();
+    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
+        panic!("registry")
+    };
+    // Closed capacity makes automatic provider dispatch impossible; tests drive
+    // durable admission manually and only drain already-cancelled inputs.
+    registry.capacity.close();
+    (state, dir)
 }
 
 fn install_test_skill(dir: &std::path::Path) -> std::path::PathBuf {
@@ -19,9 +26,7 @@ fn install_test_skill(dir: &std::path::Path) -> std::path::PathBuf {
 #[tokio::test]
 async fn skill_submission_captures_instructions_and_retries_after_removal() {
     let (state, dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let path = install_test_skill(dir.path());
     let guidance = state.prompts.agent_guidance();
@@ -35,6 +40,7 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
             "",
             &Value::Null,
             ThreadAttention::Quiet,
+            None,
         )
         .await
         .unwrap();
@@ -46,6 +52,7 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
             vec![],
             vec![],
             SendMode::NextTurn,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -74,6 +81,7 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
             vec![],
             vec![],
             SendMode::NextTurn,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -104,25 +112,24 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
 }
 
 #[tokio::test]
-async fn skill_commands_cover_owner_compatibility_and_reject_unknown_before_acceptance() {
+async fn skill_commands_cover_addressed_input_and_reject_unknown_before_acceptance() {
     let (state, dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let path = install_test_skill(dir.path());
     let accepted = state
-        .submit_owner_message(
+        .submit_thread_message(
             "owner-skill".into(),
-            "/skill:check check compatibility".into(),
-            None,
+            runtime.thread_id,
+            "/skill:check check current input".into(),
             vec![],
             vec![],
             SendMode::Send,
+            Vec::new(),
         )
         .await
         .unwrap();
-    assert_eq!(accepted.message.body, "/skill:check check compatibility");
+    assert_eq!(accepted.message.body, "/skill:check check current input");
     let pending = state.storage.pending_thread_requests().await.unwrap();
     assert!(
         pending
@@ -137,13 +144,14 @@ async fn skill_commands_cover_owner_compatibility_and_reject_unknown_before_acce
     std::fs::remove_file(path).unwrap();
     assert!(
         !state
-            .submit_owner_message(
+            .submit_thread_message(
                 "owner-skill".into(),
-                "/skill:check check compatibility".into(),
-                None,
+                runtime.thread_id,
+                "/skill:check check current input".into(),
                 vec![],
                 vec![],
-                SendMode::Send
+                SendMode::Send,
+                Vec::new()
             )
             .await
             .unwrap()
@@ -153,11 +161,12 @@ async fn skill_commands_cover_owner_compatibility_and_reject_unknown_before_acce
         state
             .submit_thread_message(
                 "unknown-skill".into(),
-                0,
+                runtime.thread_id,
                 "/skill:absent".into(),
                 vec![],
                 vec![],
-                SendMode::Send
+                SendMode::Send,
+                Vec::new()
             )
             .await
             .is_err()
@@ -172,13 +181,14 @@ async fn skill_commands_cover_owner_compatibility_and_reject_unknown_before_acce
     );
     assert!(
         state
-            .submit_owner_message(
+            .submit_thread_message(
                 "unknown-owner-skill".into(),
+                runtime.thread_id,
                 "/skill:absent".into(),
-                None,
                 vec![],
                 vec![],
-                SendMode::Send
+                SendMode::Send,
+                Vec::new()
             )
             .await
             .is_err()
@@ -196,9 +206,7 @@ async fn skill_commands_cover_owner_compatibility_and_reject_unknown_before_acce
 #[tokio::test]
 async fn generated_action_labels_are_not_skill_commands() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let instrument = json!({"type":"optionList","action":"advance","settles":false,"options":[{"key":"go","label":"/skill:absent"}]});
     let (thread, _) = state
@@ -209,6 +217,7 @@ async fn generated_action_labels_are_not_skill_commands() {
             "",
             &instrument,
             ThreadAttention::Quiet,
+            None,
         )
         .await
         .unwrap();
@@ -229,43 +238,34 @@ async fn generated_action_labels_are_not_skill_commands() {
 async fn request(state: &crate::AppState, key: &str) -> OwnerTurn {
     let (thread, _) = state
         .storage
-        .create_thread(key, key, "", &Value::Null, ThreadAttention::Quiet)
+        .create_thread(key, key, "", &Value::Null, ThreadAttention::Quiet, None)
         .await
         .unwrap();
-    let (message, _) = state
+    let (_message, _) = state
         .storage
         .append_thread_owner_request(
+            &state.storage.history_id().await.unwrap(),
             thread.id,
             key,
             format!("message {key}"),
+            &[],
             &[],
             &[],
             &json!({"mode":"send","thread_action":null}),
         )
         .await
         .unwrap();
-    OwnerTurn {
-        thread_id: thread.id,
-        thread_action: None,
-        message_id: message.id,
-        client_id: key.into(),
-        body: message.body,
-        anchor: None,
-        attachments: Vec::new(),
-        mentioned_pings: Vec::new(),
-        mode: SendMode::Send,
-        task_action: None,
-    }
+    serde_json::from_value(state.storage.thread_request(key).await.unwrap().unwrap()).unwrap()
 }
 
 #[tokio::test]
 async fn accepted_lash_input_survives_admission_retry_with_changed_thread_context() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let turn = request(&state, "accepted").await;
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
     // Fault boundary: Lash accepted the input, Hirsel has not marked its turn running.
     runtime
         .session
@@ -306,11 +306,11 @@ async fn accepted_lash_input_survives_admission_retry_with_changed_thread_contex
 #[tokio::test]
 async fn cancelling_between_lash_acceptance_and_hirsel_admission_removes_both_queues() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let turn = request(&state, "cancel-before-admit").await;
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
     runtime
         .session
         .enqueue(owner_turn_input(&turn).await.unwrap())
@@ -357,11 +357,11 @@ async fn cancelling_between_lash_acceptance_and_hirsel_admission_removes_both_qu
 #[tokio::test]
 async fn stop_after_admission_before_dispatch_cancels_exact_thread_without_provider() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let turn = request(&state, "stop-before-dispatch").await;
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
     let next = request(&state, "must-remain-queued").await;
     runtime.admit_next_thread_request().await.unwrap();
     assert!(
@@ -416,12 +416,12 @@ async fn stop_after_admission_before_dispatch_cancels_exact_thread_without_provi
 #[tokio::test]
 async fn unowned_inputs_are_removed_before_any_thread_can_drain() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let turn = request(&state, "owned").await;
-    for id in ["legacy-orphan", "owned"] {
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
+    for id in ["orphan-input", "owned"] {
         runtime
             .session
             .enqueue(TurnInput::text(id))
@@ -443,11 +443,11 @@ async fn unowned_inputs_are_removed_before_any_thread_can_drain() {
 #[tokio::test]
 async fn later_queued_message_is_not_in_earlier_thread_history() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let turn = request(&state, "earlier").await;
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
     state
         .storage
         .append_thread_chat(
@@ -469,11 +469,16 @@ async fn later_queued_message_is_not_in_earlier_thread_history() {
 #[tokio::test]
 async fn background_wake_receipt_survives_delivery_and_rejects_duplicate_turn() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
-    let wake = subagent_wake_message("worker", "done", "finished".into());
+    let wake = crate::fork_wake::WakeMessage::new(
+        runtime.thread_id,
+        crate::fork_wake::WakeSource::External {
+            origin: "fixture".into(),
+        },
+        "finished",
+        "fixture:finished",
+    );
     runtime
         .enqueue_fork_brief(&wake, "First brief")
         .await
@@ -512,7 +517,11 @@ async fn background_wake_receipt_survives_delivery_and_rejects_duplicate_turn() 
             .unwrap()
             .is_empty()
     );
-    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
+    let detail = state
+        .storage
+        .thread_detail(runtime.thread_id, None, 30)
+        .await
+        .unwrap();
     assert_eq!(detail.turns.len(), 1);
     assert_eq!(detail.turns[0].state, ThreadTurnState::Completed);
     assert_eq!(detail.messages.len(), 1);
@@ -546,9 +555,7 @@ fn delayed_observations_route_without_retaining_completed_turns() {
 #[tokio::test]
 async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     // Exercise the native queued-work drain without a Hirsel Owner request.
     runtime
@@ -560,12 +567,12 @@ async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
         .unwrap();
     assert!(runtime.activate_background_turn().await.unwrap());
     let route = runtime.anchors.lock().await.active.clone().unwrap();
-    assert_eq!(route.thread_id, 0);
+    assert_eq!(route.thread_id, runtime.thread_id);
     assert!(route.request_id.is_none());
     let id = runtime.active_turn_id.lock().await.clone().unwrap();
     assert_eq!(
         super::bridges::observation_thread_route(&id),
-        Some((0, route.thread_turn_id.unwrap()))
+        Some((runtime.thread_id, route.thread_turn_id.unwrap()))
     );
     runtime.cancel_turn().await.unwrap();
     let output = tokio::time::timeout(Duration::from_secs(5), runtime.run_admitted_drain(&id))
@@ -574,7 +581,11 @@ async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
         .unwrap()
         .expect("cancelled background drain");
     runtime.finish_active_thread(Some(&output)).await.unwrap();
-    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
+    let detail = state
+        .storage
+        .thread_detail(runtime.thread_id, None, 30)
+        .await
+        .unwrap();
     assert_eq!(detail.turns.len(), 1);
     assert_eq!(detail.turns[0].state, ThreadTurnState::Cancelled);
 }
@@ -582,11 +593,11 @@ async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
 #[tokio::test]
 async fn cancellation_intent_survives_crash_before_lash_cleanup() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let turn = request(&state, "cancel-intent").await;
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
     runtime
         .session
         .enqueue(owner_turn_input(&turn).await.unwrap())
@@ -597,7 +608,7 @@ async fn cancellation_intent_survives_crash_before_lash_cleanup() {
         .unwrap();
     let queued = state
         .storage
-        .queue_thread_turn(turn.thread_id, Some(turn.message_id))
+        .queue_thread_turn(turn.thread_id, turn.message_id)
         .await
         .unwrap();
     // Crash after Hirsel recorded cancellation, before Lash acknowledged it.
@@ -628,9 +639,7 @@ async fn cancellation_intent_survives_crash_before_lash_cleanup() {
 #[tokio::test]
 async fn artifact_reference_identity_reaches_the_next_turn_context() {
     let (state, _dir) = runtime_fixture().await;
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("Lash runtime")
-    };
+    let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
     let (thread, _) = state
         .storage
@@ -640,12 +649,13 @@ async fn artifact_reference_identity_reaches_the_next_turn_context() {
             "",
             &Value::Null,
             ThreadAttention::Quiet,
+            None,
         )
         .await
         .unwrap();
     let (artifact, _) = state
         .storage
-        .publish_artifact(
+        .publish_artifact_human(
             "context-fixture",
             &json!({"create":"diagram"}),
             thread.id,
@@ -662,6 +672,8 @@ async fn artifact_reference_identity_reaches_the_next_turn_context() {
         .await
         .unwrap();
     request(&state, "artifact-context").await;
+    let runtime = runtime_lane(&state, Some(thread.id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
     runtime.admit_next_thread_request().await.unwrap();
     let pending = runtime.session.pending_turn_inputs().await.unwrap();
     let input = serde_json::to_value(&pending[0].input).unwrap();
@@ -670,4 +682,37 @@ async fn artifact_reference_identity_reaches_the_next_turn_context() {
         encoded.contains(&format!("\\\"artifact_ids\\\":[{}]", artifact.summary.id)),
         "{encoded}"
     );
+}
+
+pub(super) async fn runtime_lane(
+    state: &crate::AppState,
+    id: Option<u64>,
+) -> Arc<LashAgentRuntime> {
+    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
+        panic!("registry")
+    };
+    let id = match id {
+        Some(id) => id,
+        None => {
+            state
+                .storage
+                .create_thread(
+                    "fixture-runtime",
+                    "Fixture",
+                    "",
+                    &Value::Null,
+                    ThreadAttention::Quiet,
+                    None,
+                )
+                .await
+                .unwrap()
+                .0
+                .id
+        }
+    };
+    let lane = registry.lane(id).await.unwrap();
+    let AgentBackend::Lash(runtime) = lane.as_ref() else {
+        panic!("Lash lane")
+    };
+    runtime.clone()
 }

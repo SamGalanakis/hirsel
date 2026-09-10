@@ -10,6 +10,19 @@ async fn monitors_are_persisted_and_project_to_process_info() {
 
     let monitor = storage
         .create_monitor(
+            storage
+                .create_thread(
+                    "fixture-Monitor",
+                    "Monitor",
+                    "",
+                    &serde_json::Value::Null,
+                    hirsel_proto::ThreadAttention::Quiet,
+                    None,
+                )
+                .await
+                .unwrap()
+                .0
+                .id,
             "printf ready",
             5,
             MonitorWakeOn::Changed,

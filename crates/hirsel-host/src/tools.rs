@@ -1,32 +1,21 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
-use hirsel_drivers::{
-    AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SessionHandle, SubagentDriver,
-    TerminalOutcome,
-};
-use hirsel_proto::{HostToClient, ProcessInfo, SubagentModelCatalog};
-use serde::{Deserialize, Serialize};
+use hirsel_drivers::{AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SubagentDriver};
+use hirsel_proto::{HostToClient, SubagentModelCatalog};
+use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::{
-    BroadcastLog, config::DriverMode, processes::ProcessStore, storage::Storage,
-    subagent_models::SubagentModelState,
+    BroadcastLog, config::DriverMode, storage::Storage, subagent_models::SubagentModelState,
 };
 
-mod events;
+mod digest;
 mod monitors;
 mod session;
-mod shell;
-mod subagents;
+pub(crate) mod shell;
+
 mod threads;
 mod views;
-
-#[cfg(test)]
-mod tests;
 
 #[derive(Clone)]
 pub struct ToolsConfig {
@@ -41,14 +30,12 @@ pub struct ToolSuite {
     storage: Storage,
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
-    processes: ProcessStore,
     pushes: crate::push::PushGateway,
     views: crate::templates::ViewManager,
     subagent_models: SubagentModelState,
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
-    terminal_events: TerminalEventBus,
     /// Tools contributed by enabled plugins. Empty until the plugin host
     /// registers into it, and empty forever when no plugin is installed.
     plugin_tools: crate::plugins::PluginToolRegistry,
@@ -61,123 +48,11 @@ pub(crate) struct AgentSessionBootstrap {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ProcessTerminal {
-    pub process_id: String,
-    pub handle: SessionHandle,
-    pub outcome: TerminalOutcome,
-}
-
-#[derive(Clone)]
-pub(crate) struct TerminalEventBus {
-    tx: broadcast::Sender<ProcessTerminal>,
-    retained: Arc<Mutex<HashMap<String, ProcessTerminal>>>,
-}
-
-pub(crate) struct TerminalEventReceiver {
-    rx: broadcast::Receiver<ProcessTerminal>,
-    retained: Arc<Mutex<HashMap<String, ProcessTerminal>>>,
-    pending: VecDeque<ProcessTerminal>,
-    acknowledged: HashSet<String>,
-}
-
-impl TerminalEventBus {
-    pub(crate) fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self {
-            tx,
-            retained: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub(crate) fn subscribe(&self) -> TerminalEventReceiver {
-        let rx = self.tx.subscribe();
-        let pending = self.retained_events();
-        TerminalEventReceiver {
-            rx,
-            retained: Arc::clone(&self.retained),
-            pending,
-            acknowledged: HashSet::new(),
-        }
-    }
-
-    pub(crate) fn publish(&self, event: ProcessTerminal) {
-        self.retained
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(event.process_id.clone(), event.clone());
-        let _ = self.tx.send(event);
-    }
-
-    fn retained_events(&self) -> VecDeque<ProcessTerminal> {
-        let mut events = self
-            .retained
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        events.sort_by(|left, right| left.process_id.cmp(&right.process_id));
-        events.into()
-    }
-}
-
-impl TerminalEventReceiver {
-    /// Receipt means delivery to the consumer, not durable handling. Only the
-    /// consumer can acknowledge after its append (and wake delivery) succeeds.
-    pub(crate) fn acknowledge(&mut self, process_id: &str) {
-        self.acknowledged.insert(process_id.to_string());
-    }
-
-    pub(crate) async fn recv(&mut self) -> Result<ProcessTerminal, broadcast::error::RecvError> {
-        loop {
-            while let Some(event) = self.pending.pop_front() {
-                if !self.acknowledged.contains(&event.process_id) {
-                    return Ok(event);
-                }
-            }
-            match self.rx.recv().await {
-                Ok(event) if !self.acknowledged.contains(&event.process_id) => return Ok(event),
-                Ok(_) => continue,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    self.pending = self
-                        .retained
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .values()
-                        .filter(|event| !self.acknowledged.contains(&event.process_id))
-                        .cloned()
-                        .collect();
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SpawnedProcess {
-    pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub handle: SessionHandle,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct ShellRunOutput {
     pub status: Option<i32>,
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct JudgmentOptionInput {
-    #[serde(default)]
-    pub key: Option<String>,
-    pub label: String,
-    pub detail: String,
-    #[serde(default)]
-    pub recommended: bool,
 }
 
 impl ToolSuite {
@@ -193,7 +68,6 @@ impl ToolSuite {
         storage: Storage,
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
-        processes: ProcessStore,
         pushes: crate::push::PushGateway,
         views: crate::templates::ViewManager,
     ) -> Self {
@@ -203,14 +77,12 @@ impl ToolSuite {
             storage,
             broadcaster,
             broadcast_log,
-            processes,
             pushes,
             views,
             subagent_models,
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
-            terminal_events: TerminalEventBus::new(128),
             plugin_tools: crate::plugins::PluginToolRegistry::default(),
         }
     }
@@ -222,24 +94,16 @@ impl ToolSuite {
         &self.plugin_tools
     }
 
-    pub(crate) fn terminal_events(&self) -> TerminalEventReceiver {
-        self.terminal_events.subscribe()
-    }
-
     pub(crate) fn subagent_model_snapshot(&self) -> SubagentModelCatalog {
         self.subagent_models.snapshot()
     }
 
-    fn broadcast(&self, event: HostToClient) {
+    pub(crate) fn broadcast(&self, event: HostToClient) {
         self.broadcast_log.record(event.clone());
         let _ = self.broadcaster.send(event);
     }
 
-    fn broadcast_process_upsert(&self, process: ProcessInfo) {
-        publish_process_upsert(&self.broadcast_log, &self.broadcaster, process);
-    }
-
-    fn driver_for(&self, agent: AgentKind) -> Arc<dyn SubagentDriver> {
+    pub(crate) fn driver_for(&self, agent: AgentKind) -> Arc<dyn SubagentDriver> {
         match (self.config.driver_mode, agent) {
             (DriverMode::Fake, _) => self.fake.clone(),
             (DriverMode::Real, AgentKind::Claude) => self.claude.clone(),
@@ -248,19 +112,34 @@ impl ToolSuite {
     }
 }
 
-fn info_ui(text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "card",
-        "children": [{ "type": "text", "text": text }]
-    })
+impl ToolSuite {
+    pub(crate) fn resolve_thread_cli_model(
+        &self,
+        agent: AgentKind,
+        model: Option<&str>,
+        variant: Option<&str>,
+    ) -> anyhow::Result<crate::subagent_models::ResolvedSubagentModel> {
+        self.subagent_models.resolve(agent, model, variant)
+    }
 }
 
-fn publish_process_upsert(
-    broadcast_log: &BroadcastLog,
-    broadcaster: &broadcast::Sender<HostToClient>,
-    process: ProcessInfo,
-) {
-    let event = HostToClient::ProcessUpsert { process };
-    broadcast_log.record(event.clone());
-    let _ = broadcaster.send(event);
+impl ToolSuite {
+    pub(crate) fn driver_fixture(&self) -> Option<std::path::PathBuf> {
+        self.config.fake_fixture.clone()
+    }
+}
+
+impl ToolSuite {
+    pub(crate) async fn reset_runtime_projections(&self) {
+        self.views
+            .clear_all(
+                self.storage
+                    .history_id()
+                    .await
+                    .expect("current history after reset"),
+            )
+            .await;
+        self.broadcast_log.clear();
+        self.pushes.clear_recorded_pushes();
+    }
 }

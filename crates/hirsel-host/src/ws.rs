@@ -61,7 +61,7 @@ impl ProtocolChannel for WebSocketChannel<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Duration};
+    use std::net::SocketAddr;
 
     use axum::Router;
     use futures_util::{SinkExt, StreamExt};
@@ -77,7 +77,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn websocket_hello_replays_existing_chat() {
+    async fn websocket_hello_supplies_current_inventory_and_store_identity() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config {
             token: "test-token".to_string(),
@@ -94,12 +94,30 @@ mod tests {
             fake_fixture: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             debug: true,
-            compat_side_session_ttl_secs: Some(86_400),
         };
         let state = build_state(config.clone()).await.unwrap();
         state
             .storage
-            .append_chat(ChatAuthor::Agent, "prior", None)
+            .append_thread_chat(
+                state
+                    .storage
+                    .create_thread(
+                        "fixture-Conversation",
+                        "Conversation",
+                        "",
+                        &serde_json::Value::Null,
+                        hirsel_proto::ThreadAttention::Quiet,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .0
+                    .id,
+                ChatAuthor::Agent,
+                "prior",
+                None,
+                vec![],
+            )
             .await
             .unwrap();
         let app = router_from_state(state);
@@ -109,8 +127,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "hello",
-                "token": "test-token",
-                "last_seen_msg_id": null
+                "auth": {"static_token":"test-token"}
             })
             .to_string(),
         ))
@@ -122,11 +139,8 @@ mod tests {
         match response {
             HostToClient::HelloOk {
                 threads,
-                latest_msg_id,
-                messages,
-                events,
+                history_id,
                 processes,
-                side_chats,
                 host_version,
                 model,
                 subagent_models,
@@ -135,13 +149,9 @@ mod tests {
                 views,
             } => {
                 assert_eq!(threads.len(), 1);
-                assert_eq!(threads[0].id, 0);
-                assert_eq!(latest_msg_id, 1);
-                assert_eq!(messages.len(), 1);
-                assert_eq!(messages[0].author, ChatAuthor::Agent);
-                assert!(events.is_empty());
+                assert_eq!(threads[0].id, 1);
+                assert!(!history_id.is_empty());
                 assert!(processes.is_empty());
-                assert!(side_chats.is_empty());
                 assert!(views.is_empty());
                 assert!(!host_version.is_empty());
                 assert!(model.is_none());
@@ -166,98 +176,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_push_surface_registers_and_inspects_recorded_pushes() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let app = router_from_state(state.clone());
-        let addr = spawn_app(app).await;
-        let client = owner_http_client();
-
-        let unauthorized = reqwest::Client::new()
-            .get(format!("http://{addr}/debug/health"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
-
-        let registered: serde_json::Value = client
-            .post(format!("http://{addr}/debug/register-push-token"))
-            .json(&serde_json::json!({
-                "platform": "android",
-                "token": "debug-token"
-            }))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(registered["token"], "debug-token");
-        assert_eq!(registered["platform"], "android");
-
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Owner, "Choose", None)
-            .await
-            .unwrap();
-        let ping = state
-            .storage
-            .create_ping(
-                "debug-choice",
-                "Choose from debug",
-                "A or B?",
-                anchor.id,
-                true,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        state.pushes.enqueue_ping(&ping).await;
-
-        let pushes = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let body: serde_json::Value = client
-                    .get(format!("http://{addr}/debug/pushes"))
-                    .send()
-                    .await
-                    .unwrap()
-                    .error_for_status()
-                    .unwrap()
-                    .json()
-                    .await
-                    .unwrap();
-                if !body["pushes"].as_array().unwrap().is_empty() {
-                    break body;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("debug push was recorded");
-        assert_eq!(pushes["pushes"][0]["payload"]["body"], "Choose from debug");
-        assert_eq!(pushes["pushes"][0]["payload"]["data"]["event_id"], ping.id);
-
-        let removed: serde_json::Value = client
-            .post(format!("http://{addr}/debug/unregister-push-token"))
-            .json(&serde_json::json!({ "token": "debug-token" }))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(removed["removed"], true);
-        assert!(state.storage.push_tokens().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn debug_view_surface_shows_lists_and_posts_events() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
+        let thread = state
+            .storage
+            .create_thread(
+                "destination",
+                "Destination",
+                "",
+                &serde_json::json!({}),
+                hirsel_proto::ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
         let client = owner_http_client();
@@ -265,6 +199,7 @@ mod tests {
         let shown: serde_json::Value = client
             .post(format!("http://{addr}/debug/show-view"))
             .json(&serde_json::json!({
+                "thread_id":thread.id,
                 "spec": {
                     "type": "action",
                     "label": "Continue",
@@ -325,7 +260,7 @@ mod tests {
             (crate::protocol::HelloTestHookPoint::Snapshotted, false),
             (crate::protocol::HelloTestHookPoint::HelloOkSent, false),
         ];
-        for (index, (point, should_be_in_snapshot)) in cases.into_iter().enumerate() {
+        for (index, (point, _should_be_in_snapshot)) in cases.into_iter().enumerate() {
             let dir = tempfile::tempdir().unwrap();
             let token = format!("race-token-{index}");
             let body = format!("race-message-{index}");
@@ -338,35 +273,13 @@ mod tests {
 
             let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
             send_hello_token(&mut ws, &token).await;
-            match read_hello_ok(&mut ws).await {
-                HostToClient::HelloOk {
-                    latest_msg_id,
-                    messages,
-                    ..
-                } if should_be_in_snapshot => {
-                    assert_eq!(latest_msg_id, 1);
-                    assert_eq!(messages.len(), 1);
-                    assert_eq!(messages[0].body, body);
-                    assert!(
-                        tokio::time::timeout(Duration::from_millis(100), ws.next())
-                            .await
-                            .is_err(),
-                        "snapshot message should not be delivered again from the buffered broadcast"
-                    );
-                }
-                HostToClient::HelloOk {
-                    latest_msg_id,
-                    messages,
-                    ..
-                } => {
-                    assert_eq!(latest_msg_id, 0);
-                    assert!(messages.is_empty());
-                    match read_agent_msg(&mut ws).await {
-                        HostToClient::Msg { message, .. } => assert_eq!(message.body, body),
-                        other => panic!("unexpected message response: {other:?}"),
-                    }
-                }
-                other => panic!("unexpected hello response: {other:?}"),
+            assert!(matches!(
+                read_hello_ok(&mut ws).await,
+                HostToClient::HelloOk { .. }
+            ));
+            match read_agent_msg(&mut ws).await {
+                HostToClient::Msg { message } => assert_eq!(message.body, body),
+                other => panic!("unexpected message response: {other:?}"),
             }
         }
     }
@@ -375,6 +288,19 @@ mod tests {
     async fn websocket_upload_blob_is_idempotent_and_send_message_replays_attachment() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
+        let thread = state
+            .storage
+            .create_thread(
+                "destination",
+                "Destination",
+                "",
+                &serde_json::json!({}),
+                hirsel_proto::ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
         let app = router_from_state(state);
         let addr = spawn_app(app).await;
 
@@ -450,10 +376,12 @@ mod tests {
 
         ws.send(Message::Text(
             serde_json::json!({
-                "type": "send_message",
+                "type": "send_thread_message",
+                "artifact_ids": [],
+                "thread_id": thread.id,
                 "client_id": "message-1",
                 "body": "see attached",
-                "ref": null,
+
                 "attachments": [first_blob.id]
             })
             .to_string(),
@@ -471,9 +399,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_send_message_enqueue_failure_returns_error_without_msg() {
+    async fn websocket_enqueue_failure_reports_error_and_keeps_durable_request() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
+        let thread = state
+            .storage
+            .create_thread(
+                "destination",
+                "Destination",
+                "",
+                &serde_json::json!({}),
+                hirsel_proto::ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
 
@@ -483,10 +424,12 @@ mod tests {
 
         ws.send(Message::Text(
             serde_json::json!({
-                "type": "send_message",
+                "type": "send_thread_message",
+                "artifact_ids": [],
+                "thread_id": thread.id,
                 "client_id": "enqueue-fails",
                 "body": "__hirsel_test_enqueue_error__",
-                "ref": null
+
             })
             .to_string(),
         ))
@@ -501,13 +444,30 @@ mod tests {
             }
             other => panic!("unexpected response before error: {other:?}"),
         }
-        assert!(state.storage.all_chat().await.unwrap().is_empty());
+        assert_eq!(state.storage.all_chat().await.unwrap().len(), 1);
+        assert_eq!(
+            state.storage.pending_thread_requests().await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn websocket_rejects_unknown_mention_with_correlated_error() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
+        let thread = state
+            .storage
+            .create_thread(
+                "destination",
+                "Destination",
+                "",
+                &serde_json::json!({}),
+                hirsel_proto::ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
 
@@ -516,10 +476,12 @@ mod tests {
         let _ = read_hello_ok(&mut ws).await;
         ws.send(Message::Text(
             serde_json::json!({
-                "type": "send_message",
+                "type": "send_thread_message",
+                "artifact_ids": [],
+                "thread_id": thread.id,
                 "client_id": "bad-mention",
                 "body": "What about this?",
-                "ref": null,
+
                 "mentions": [99_999]
             })
             .to_string(),
@@ -529,79 +491,12 @@ mod tests {
 
         match read_error(&mut ws).await {
             HostToClient::Error { detail, client_id } => {
-                assert!(detail.contains("unknown mentioned ping: 99999"));
+                assert!(detail.contains("99999"), "{detail}");
                 assert_eq!(client_id.as_deref(), Some("bad-mention"));
             }
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(state.storage.all_chat().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn websocket_read_ping_marks_read_and_errors_on_unknown_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        let anchor = state
-            .storage
-            .append_chat(ChatAuthor::Agent, "anchor", None)
-            .await
-            .unwrap()
-            .id;
-        let ping = state
-            .storage
-            .create_ping("question", "Question", "question", anchor, true, Vec::new())
-            .await
-            .unwrap();
-        assert!(!ping.read);
-        let app = router_from_state(state.clone());
-        let addr = spawn_app(app).await;
-
-        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
-        send_hello(&mut ws).await;
-        match read_hello_ok(&mut ws).await {
-            HostToClient::HelloOk { events, .. } => {
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].id, ping.id);
-                assert!(!events[0].read);
-            }
-            other => panic!("unexpected hello response: {other:?}"),
-        }
-
-        ws.send(Message::Text(
-            serde_json::json!({
-                "type": "read_ping",
-                "ping_id": ping.id
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
-        match read_ping_upsert(&mut ws).await {
-            HostToClient::EventUpsert { event: read_ping } => {
-                assert_eq!(read_ping.id, ping.id);
-                assert!(read_ping.read);
-            }
-            other => panic!("unexpected read response: {other:?}"),
-        }
-        assert!(state.storage.all_pings().await.unwrap()[0].read);
-
-        ws.send(Message::Text(
-            serde_json::json!({
-                "type": "read_ping",
-                "ping_id": 99_999,
-                "client_id": "raw-correlation"
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
-        match read_error(&mut ws).await {
-            HostToClient::Error { detail, client_id } => {
-                assert!(detail.contains("unknown ping"));
-                assert_eq!(client_id.as_deref(), Some("raw-correlation"));
-            }
-            other => panic!("unexpected error response: {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -728,7 +623,7 @@ mod tests {
     }
 
     fn test_config(data_dir: &std::path::Path) -> Config {
-        crate::tests::test_config_with_compat_side_sessions(data_dir, 86_400)
+        crate::tests::test_config(data_dir)
     }
 
     fn owner_http_client() -> reqwest::Client {
@@ -760,8 +655,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "hello",
-                "token": token,
-                "last_seen_msg_id": null
+                "auth": {"static_token":token}
             })
             .to_string(),
         ))
@@ -787,17 +681,6 @@ mod tests {
     ) -> HostToClient {
         read_until(ws, |response| {
             matches!(response, HostToClient::BlobOk { .. })
-        })
-        .await
-    }
-
-    async fn read_ping_upsert(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> HostToClient {
-        read_until(ws, |response| {
-            matches!(response, HostToClient::EventUpsert { .. })
         })
         .await
     }

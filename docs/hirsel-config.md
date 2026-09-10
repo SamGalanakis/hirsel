@@ -7,18 +7,14 @@ across WebSocket and authenticated HTTP routes. Debug mode forces the Host to
 loopback even if `HIRSEL_LISTEN` names another interface. Production mode
 remains strict and requires the exact `HIRSEL_TOKEN`.
 
-The current Host starts only the global Task orchestrator. Legacy side-session
-wire compatibility is disabled by default and must be opted into explicitly:
+The Host runs addressed Thread conversations plus current subagent, monitor and fork-triage resources. There are no side-session compatibility flags or Event/Ping APIs.
 
-```bash
-export HIRSEL_COMPAT_SIDE_SESSIONS=1
-export HIRSEL_SIDECHAT_TTL_SECS=86400 # optional; parsed only when enabled
-```
-
-Opt-in retains the compatibility backend but still opens no side Lash session
-and starts no TTL reaper until the first legacy `open_side_chat` frame arrives.
-Sub-agents, Processes, monitors, generated Task actions, and the global Agent
-do not depend on this flag.
+History lives in `hirsel.sqlite`. New stores use the complete current schema 4
+layout. Startup accepts that exact layout or an empty store and refuses every
+other layout before modification. Back up the data directory before replacing
+an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
+project files remain independent. See `e2e/thread-protocol/runbook.md` for
+current validation and operator retention requirements.
 
 ## The provider roster
 
@@ -108,8 +104,9 @@ key material appears in either.
 What the model choice looks like depends on the selected provider:
 
 - **`codex`** — a curated registry the Host validates against. The main Agent
-  gets `gpt-5.6-sol` with variants `low`, `medium`, `high`, `xhigh`, `max`; the
-  fork gets `gpt-5.6-luna` (default `max`) plus `gpt-5.6-sol` as a deliberate
+  gets `gpt-5.6-sol` with variants `low`, `medium`, `high`, `xhigh`, `max`, plus
+  `gpt-6-astra` with those efforts and `ultra` (default `medium`). Sol remains
+  the default model. The fork gets `gpt-5.6-luna` (default `max`) plus `gpt-5.6-sol` as a deliberate
   escalation. An off-registry id or variant is a rejected command.
 - **An OpenAI-compatible instance** — the model id is free text: whatever the
   endpoint offers. The Host validates only that it is non-empty and carries no
@@ -139,19 +136,23 @@ warning and falls back to that provider's default model.
   the same reason. The stored values are what the Host builds the handle from.
 - **Fork provider and model** — stored only. No fork runtime consumes them yet.
 
-## Sub-agent lanes
+## CLI Thread models
 
-The Sub-agent catalog is a separate surface from the roster above: it is the
-delegation lanes, grouped by CLI provider — one row per lane, one reasoning level per row. There is no per-task
-effort tuning, so a spawn that omits its variant always gets the lane's level.
-`enabled` is the model-wide switch; setting it to `false` takes that lane out
-of service. Entries naming anything outside the catalog are logged and ignored.
+The Thread model catalog is separate from the roster above and grouped by CLI
+provider. `enabled` is the model-wide switch; `enabled_variants` restricts the
+efforts available to `threads.delegate`. Omitting an effort uses the model's
+default if enabled, otherwise its first enabled effort. Omitting the model keeps
+Codex on Sol and Claude on Opus. Entries outside the catalog are logged and ignored.
 
 - `codex` `gpt-5.6-sol` at `high` — workhorse: judgment-heavy implementation
   and review-expensive verification.
 - `codex` `gpt-5.6-luna` at `max` — economy: mechanically verifiable work.
 - `claude` `claude-opus-5` at `high` — workhorse: taste-critical work (UI, API
   shape, copy) and fresh review of a finished diff.
+- `codex` `gpt-6-astra` with `low`, `medium`, `high`, `xhigh`, `max`, `ultra`;
+  default `medium`.
+- `claude` `claude-fable-5-1` with `low`, `medium`, `high`, `xhigh`, `max`;
+  default `high`.
 
 ```toml
 [subagent_models.codex."gpt-5.6-sol"]
@@ -165,6 +166,14 @@ enabled_variants = ["max"]
 [subagent_models.claude.claude-opus-5]
 enabled = true
 enabled_variants = ["high"]
+
+[subagent_models.codex."gpt-6-astra"]
+enabled = true
+enabled_variants = ["low", "medium", "high", "xhigh", "max", "ultra"]
+
+[subagent_models.claude.claude-fable-5-1]
+enabled = true
+enabled_variants = ["low", "medium", "high", "xhigh", "max"]
 ```
 
 Generative-UI templates live in the templates directory; see `templates/CATALOG.md`.

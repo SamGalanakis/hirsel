@@ -13,21 +13,34 @@ fn draft(content: &str) -> ArtifactDraft {
 async fn explicit_artifact_is_atomic_replay_safe_and_globally_referenced() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
+    let caller = storage.test_running_caller().await;
     let input = serde_json::json!({"content":"first"});
     let (first, card) = storage
-        .publish_artifact("create", &input, 0, None, Some(draft("first")))
+        .publish_artifact_human(
+            "create",
+            &input,
+            caller.thread_id,
+            None,
+            Some(draft("first")),
+        )
         .await
         .unwrap();
     let card = card.unwrap();
     assert_eq!(card.artifact_ids, vec![first.summary.id]);
     let replay = storage
-        .publish_artifact("create", &input, 0, None, Some(draft("first")))
+        .publish_artifact_human(
+            "create",
+            &input,
+            caller.thread_id,
+            None,
+            Some(draft("first")),
+        )
         .await
         .unwrap();
     assert_eq!(replay.1.unwrap().id, card.id);
     assert_eq!(
         storage
-            .thread_detail(0, None, 100)
+            .thread_detail(caller.thread_id, None, 100)
             .await
             .unwrap()
             .messages
@@ -41,12 +54,13 @@ async fn explicit_artifact_is_atomic_replay_safe_and_globally_referenced() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            None,
         )
         .await
         .unwrap()
         .0;
     storage
-        .publish_artifact(
+        .publish_artifact_human(
             "show",
             &serde_json::json!({"show":first.summary.id}),
             thread.id,
@@ -62,35 +76,43 @@ async fn explicit_artifact_is_atomic_replay_safe_and_globally_referenced() {
     let mut edited = draft("latest");
     edited.expected_content = Some("first".into());
     storage
-        .publish_artifact(
+        .publish_artifact_human(
             "edit",
             &serde_json::json!({"edit":"latest"}),
-            0,
+            caller.thread_id,
             Some(first.summary.id),
             Some(edited),
         )
         .await
         .unwrap();
     let old_replay = storage
-        .artifact_operation("create", 0, &input)
+        .artifact_operation("create", &caller, &input)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(old_replay.0.content, "latest");
     assert_eq!(old_replay.1.unwrap().id, card.id);
-    assert_eq!(old_replay.0.summary.thread_ids, vec![0, thread.id]);
+    assert_eq!(
+        old_replay.0.summary.thread_ids,
+        vec![caller.thread_id, thread.id]
+    );
     let reopened = Storage::open(dir.path()).await.unwrap();
     assert_eq!(
         reopened.artifact(first.summary.id).await.unwrap().content,
         "latest"
     );
     assert_eq!(
-        reopened.thread_detail(0, None, 100).await.unwrap().messages[0].artifact_ids,
+        reopened
+            .thread_detail(caller.thread_id, None, 100)
+            .await
+            .unwrap()
+            .messages[0]
+            .artifact_ids,
         vec![first.summary.id]
     );
     assert!(
         reopened
-            .artifact_operation("create", 0, &serde_json::json!({"different":true}))
+            .artifact_operation("create", &caller, &serde_json::json!({"different":true}))
             .await
             .is_err()
     );
@@ -109,46 +131,63 @@ async fn explicit_artifact_is_atomic_replay_safe_and_globally_referenced() {
 async fn invalid_content_thread_or_stale_edit_leaves_no_partial_artifact_or_card() {
     let dir = tempfile::tempdir().unwrap();
     let s = Storage::open(dir.path()).await.unwrap();
+    let caller = s.test_running_caller().await;
     let input = serde_json::json!({});
     assert!(
-        s.publish_artifact("bad-thread", &input, 999, None, Some(draft("safe")))
+        s.publish_artifact_human("bad-thread", &input, 999, None, Some(draft("safe")))
             .await
             .is_err()
     );
     assert!(
-        s.publish_artifact("huge", &input, 0, None, Some(draft(&"x".repeat(1_048_577))))
-            .await
-            .is_err()
+        s.publish_artifact_human(
+            "huge",
+            &input,
+            caller.thread_id,
+            None,
+            Some(draft(&"x".repeat(1_048_577)))
+        )
+        .await
+        .is_err()
     );
     let mut invalid = draft("safe");
     invalid.filename = Some("../secret".into());
     assert!(
-        s.publish_artifact("path", &input, 0, None, Some(invalid))
+        s.publish_artifact_human("path", &input, caller.thread_id, None, Some(invalid))
             .await
             .is_err()
     );
     assert!(s.artifacts(None).await.unwrap().is_empty());
     assert!(
-        s.thread_detail(0, None, 100)
+        s.thread_detail(caller.thread_id, None, 100)
             .await
             .unwrap()
             .messages
             .is_empty()
     );
     let (a, _) = s
-        .publish_artifact("ok", &input, 0, None, Some(draft("first")))
+        .publish_artifact_human("ok", &input, caller.thread_id, None, Some(draft("first")))
         .await
         .unwrap();
     let mut stale = draft("replacement");
     stale.expected_content = Some("wrong".into());
     assert!(
-        s.publish_artifact("stale", &input, 0, Some(a.summary.id), Some(stale))
-            .await
-            .is_err()
+        s.publish_artifact_human(
+            "stale",
+            &input,
+            caller.thread_id,
+            Some(a.summary.id),
+            Some(stale)
+        )
+        .await
+        .is_err()
     );
     assert_eq!(s.artifact(a.summary.id).await.unwrap().content, "first");
     assert_eq!(
-        s.thread_detail(0, None, 100).await.unwrap().messages.len(),
+        s.thread_detail(caller.thread_id, None, 100)
+            .await
+            .unwrap()
+            .messages
+            .len(),
         1
     );
     s.reset().await.unwrap();

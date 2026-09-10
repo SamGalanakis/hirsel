@@ -5,7 +5,7 @@ pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
         "shell_run" => labeled_scalar(payload, "cmd", "cmd"),
         "threads_create" => labeled_scalar(payload, "title", "thread"),
         "threads_update" | "threads_read" | "threads_activity" => {
-            scalar_field(payload, "thread_id").map(|id| format!("thread #{id}"))
+            scalar_field(payload, "thread").map(|id| format!("thread {id}"))
         }
         "threads_list" => None,
         "views_show" => scalar_any(payload, &["template_id", "instance_id"])
@@ -14,21 +14,13 @@ pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
             scalar_field(payload, "instance_id").map(|id| format!("view {}", tail_identifier(&id)))
         }
         "views_list_templates" => None,
-        "subagents_spawn" => {
-            let agent = scalar_field(payload, "agent").unwrap_or_else(|| "subagent".to_string());
-            scalar_any(payload, &["prompt", "task"]).map(|prompt| format!("{agent}: {prompt}"))
-        }
-        "subagents_prompt" => process_summary(payload).map(|process| {
-            match scalar_any(payload, &["text", "prompt", "message"]) {
-                Some(text) => format!("{process}: {text}"),
-                None => process,
-            }
-        }),
-        "subagents_interrupt" | "subagents_progress" | "subagents_wait" => process_summary(payload),
+        "threads_delegate" => labeled_scalar(payload, "title", "child"),
+        "threads_send" => labeled_scalar(payload, "text", "message"),
+        "threads_report" => labeled_scalar(payload, "summary", "report"),
         "monitors_create" => labeled_first_scalar(payload, &["label", "cmd"], "monitor"),
-        "monitors_cancel" => scalar_any(payload, &["monitor_id", "process_id", "id"])
+        "monitors_cancel" => scalar_any(payload, &["monitor_id"])
             .map(|id| format!("monitor {}", tail_identifier(&id))),
-        "monitors_list" | "subagents_list" => None,
+        "monitors_list" => None,
         _ => first_string_field(payload).map(|(key, value)| format!("{key}: {value}")),
     };
     clean_summary(summary)
@@ -49,29 +41,16 @@ pub(super) fn condense_result(name: &str, args: &Value, output: &Value) -> Optio
         "views_list_templates" => payload
             .as_array()
             .map(|templates| format!("{} templates", templates.len())),
-        "subagents_spawn" => scalar_any(payload, &["process_id"])
-            .or_else(|| {
-                payload
-                    .get("handle")
-                    .and_then(|handle| scalar_field(handle, "process_id"))
-            })
-            .map(|id| format!("process {}", tail_identifier(&id))),
-        "subagents_prompt" => process_summary(args),
-        "subagents_interrupt" => process_summary(args),
-        "subagents_progress" => process_summary(args),
-        "subagents_wait" => scalar_any(payload, &["process_id"])
-            .or_else(|| scalar_any(args, &["process_id"]))
-            .map(|id| format!("process {}", tail_identifier(&id))),
-        "monitors_create" => scalar_any(payload, &["monitor_id", "process_id"])
+        "threads_delegate" | "threads_send" | "threads_report" => {
+            scalar_field(payload, "thread_id").map(|id| format!("thread #{id}"))
+        }
+        "monitors_create" => scalar_any(payload, &["monitor_id"])
             .map(|id| format!("monitor {}", tail_identifier(&id))),
         "monitors_cancel" => scalar_any(payload, &["monitor_id"])
-            .or_else(|| scalar_any(args, &["monitor_id", "process_id", "id"]))
+            .or_else(|| scalar_any(args, &["monitor_id"]))
             .map(|id| format!("monitor {}", tail_identifier(&id))),
         "monitors_list" => {
             scalar_count(payload, "monitors").map(|count| format!("{count} monitors"))
-        }
-        "subagents_list" => {
-            scalar_count(payload, "processes").map(|count| format!("{count} processes"))
         }
         _ => first_scalar_field(payload).map(|(_, value)| value),
     }
@@ -136,10 +115,6 @@ pub(super) fn scalar_count(value: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_array)
         .map(|items| items.len().to_string())
-}
-
-pub(super) fn process_summary(value: &Value) -> Option<String> {
-    scalar_any(value, &["process_id", "id"]).map(|id| format!("process {}", tail_identifier(&id)))
 }
 
 pub(super) fn labeled_scalar(value: &Value, key: &str, label: &str) -> Option<String> {
@@ -264,14 +239,11 @@ pub(super) fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(super) fn agent_activity(state: AgentActivityState, text: Option<String>) -> HostToClient {
-    HostToClient::AgentActivity {
-        turn_id: None,
-        thread_id: None,
-        state,
-        text,
-        sc: None,
-    }
+pub(super) fn agent_activity(
+    state: AgentActivityState,
+    text: Option<String>,
+) -> (AgentActivityState, Option<String>) {
+    (state, text)
 }
 
 pub(super) fn publish(

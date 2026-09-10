@@ -1,4 +1,4 @@
-import { Bot, Braces, Brain, Check, ChevronRight, ListTree, LoaderCircle, X } from "@/components/ui/icons";
+import { Bot, Braces, Brain, Check, ChevronRight, LoaderCircle, Square, X } from "@/components/ui/icons";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 
 import { showAgentCode } from "../../lib/prefs";
@@ -73,7 +73,7 @@ function ReasoningRow(props: { text: string }) {
     <li class="flex flex-col gap-1" data-slot="timeline-reasoning">
       <button
         type="button"
-        class="inline-flex w-fit items-center gap-1 text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+        class="inline-flex min-h-11 w-fit items-center gap-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-meta text-muted-foreground/70 transition-colors hover:text-muted-foreground"
         aria-expanded={(open()) ? "true" : "false"}
         onClick={() => setOpen((v) => !v)}
       >
@@ -99,12 +99,12 @@ function ReasoningRow(props: { text: string }) {
  * live cursor is always the running step. Carries a quiet right-aligned mono
  * duration once resolved, and — when it produced a result/error — click-to-
  * expand into a mono "well" showing the full, untruncated payload. */
-function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
+function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
   const detail = () => done()?.result ?? props.item.summary;
   const hasDetail = () => (detail() ?? "").length > 0;
-  const running = () => done() === null;
+  const running = () => done() === null && !props.settled;
   const failed = () => done()?.ok === false;
   const delegation = () => isDelegationTool(props.item.name);
   const duration = () => {
@@ -116,6 +116,7 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
     <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-tool">
       <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
         <Switch>
+          <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
           <Match when={running()}>
             <LoaderCircle
               class="size-3 shrink-0 animate-spin text-status-active"
@@ -151,7 +152,7 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
         >
           <button
             type="button"
-            class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            class="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-expanded={(open()) ? "true" : "false"}
             aria-label={`${props.item.name} — ${open() ? "hide" : "show"} result`}
             onClick={() => setOpen((v) => !v)}
@@ -171,7 +172,7 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
             >
               {props.item.name}
             </span>
-            <span class="min-w-0 flex-1 truncate">{detail()}</span>
+            <Show when={!open()}><span class="min-w-0 flex-1 truncate">{detail()}</span></Show>
           </button>
         </Show>
         <Show when={duration()}>
@@ -179,9 +180,10 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
             {duration()}
           </span>
         </Show>
+        <Show when={!done() && props.settled}><span>No result recorded</span></Show>
       </div>
       <Show when={open() && hasDetail()}>
-        <pre
+        <pre data-slot="tool-result" data-tool-call-id={props.item.toolId}
           class={["ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}
 
         >
@@ -197,10 +199,10 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }> }) {
  * you read every turn — expanding to the verbatim monospace program. Once the
  * cell completes, a failure tints the row and the well so a broken program is
  * findable without expanding it. */
-function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
+function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }>; settled?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
-  const running = () => done() === null;
+  const running = () => done() === null && !props.settled;
   const failed = () => done()?.ok === false;
   const label = () => props.item.language || "code";
   const hasCode = () => props.item.code.length > 0;
@@ -213,6 +215,7 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
     <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-code">
       <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
         <Switch>
+          <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
           <Match when={running()}>
             <LoaderCircle
               class="size-3 shrink-0 animate-spin text-status-active"
@@ -234,7 +237,7 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
         >
           <button
             type="button"
-            class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            class="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-expanded={(open()) ? "true" : "false"}
             aria-label={`${label()} program — ${open() ? "hide" : "show"} source`}
             onClick={() => setOpen((v) => !v)}
@@ -287,7 +290,7 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }> }) {
  * details" panel — `live` is what tells the two apart, and defaults off so a
  * committed turn is unchanged.
  */
-export function Timeline(props: { events: TimelineEvent[]; live?: boolean }) {
+export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settled?: boolean }) {
   // Durations (tool_done.at − tool_start.at) come out of the fold on each row's
   // status, measured within that row's own id namespace.
   const items = createMemo(() => buildTimeline(props.events, showAgentCode()));
@@ -307,85 +310,41 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean }) {
       class="ml-1 flex min-w-0 flex-col gap-2 border-l border-border/60 pl-3"
       data-slot="timeline"
     >
-      <For each={items()}>
-        {(item) => (
+      <For each={items()} keyed={item => item.key}>
+        {(row) => (
           <Switch>
-            <Match when={item.kind === "prose"}>
+            <Match when={row().kind === "prose"}>
               <li class="min-w-0" data-slot="timeline-prose">
                 <Markdown class="text-muted-foreground">
-                  {(item as Extract<TimelineItem, { kind: "prose" }>).text}
+                  {(row() as Extract<TimelineItem, { kind: "prose" }>).text}
                 </Markdown>
               </li>
             </Match>
-            <Match when={item.kind === "reasoning"}>
+            <Match when={row().kind === "reasoning"}>
               {/* Live tail: bare streaming text. Settled: the collapsed row.
                   Swapping components (rather than toggling a mode) is what
                   makes the fold a clean handover — the row mounts with its own
                   fresh, collapsed toggle. */}
               <Show
-                when={item.key === streamingKey()}
+                when={row().key === streamingKey()}
                 fallback={
-                  <ReasoningRow text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text} />
+                  <ReasoningRow text={(row() as Extract<TimelineItem, { kind: "reasoning" }>).text} />
                 }
               >
                 <StreamingReasoning
-                  text={(item as Extract<TimelineItem, { kind: "reasoning" }>).text}
+                  text={(row() as Extract<TimelineItem, { kind: "reasoning" }>).text}
                 />
               </Show>
             </Match>
-            <Match when={item.kind === "tool"}>
-              <ToolRow item={item as Extract<TimelineItem, { kind: "tool" }>} />
+            <Match when={row().kind === "tool"}>
+              <ToolRow item={row() as Extract<TimelineItem, { kind: "tool" }>} settled={props.settled} />
             </Match>
-            <Match when={item.kind === "code"}>
-              <CodeRow item={item as Extract<TimelineItem, { kind: "code" }>} />
+            <Match when={row().kind === "code"}>
+              <CodeRow item={row() as Extract<TimelineItem, { kind: "code" }>} settled={props.settled} />
             </Match>
           </Switch>
         )}
       </For>
     </ul>
-  );
-}
-
-/** Committed-turn "turn details" affordance (v1.5) in an agent bubble's footer:
- * a subtle collapsed chip that expands inline to the finished turn's full
- * timeline. Supersedes the "⚙ N tools" chip whenever a live timeline was
- * captured for the turn (it already conveys the tool outcomes, and more).
- *
- * Expansion is optionally controllable (`expanded`/`onExpandedChange`) so a
- * message's actions menu ("View turn details") can force it open; uncontrolled
- * (self-managed) when those props are omitted. */
-export function TurnDetails(props: {
-  events: TimelineEvent[];
-  expanded?: boolean;
-  onExpandedChange?: (open: boolean) => void;
-}) {
-  const [internal, setInternal] = createSignal(false);
-  const expanded = () => props.expanded ?? internal();
-  const toggle = () => {
-    const next = !expanded();
-    setInternal(next);
-    props.onExpandedChange?.(next);
-  };
-  return (
-    <div class="flex flex-col gap-1" data-slot="turn-details">
-      <button
-        type="button"
-        class="-ml-1 inline-flex w-fit items-center gap-1 rounded px-1 py-px text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-        aria-expanded={(expanded()) ? "true" : "false"}
-        aria-label="Turn details"
-        onClick={toggle}
-      >
-        <ChevronRight
-          class={["size-3 shrink-0 transition-transform", { "rotate-90": expanded() }]}
-
-          aria-hidden="true"
-        />
-        <ListTree class="size-3 shrink-0" aria-hidden="true" />
-        turn details
-      </button>
-      <Show when={expanded()}>
-        <Timeline events={props.events} />
-      </Show>
-    </div>
   );
 }

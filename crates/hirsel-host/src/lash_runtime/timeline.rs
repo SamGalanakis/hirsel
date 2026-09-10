@@ -267,16 +267,18 @@ impl TurnTimelineBridge {
         broadcast_log: &BroadcastLog,
         broadcaster: &broadcast::Sender<HostToClient>,
     ) {
+        let (Some(thread_id), Some(turn_id)) = (self.thread_id, self.turn_id) else {
+            return;
+        };
         self.seq += 1;
         publish(
             broadcast_log,
             broadcaster,
             HostToClient::TurnEvent {
-                turn_id: self.turn_id,
-                thread_id: self.thread_id,
+                turn_id,
+                thread_id,
                 seq: self.seq,
                 event,
-                sc: None,
             },
         );
     }
@@ -348,34 +350,6 @@ pub(super) fn turn_chat_payload(
 }
 
 #[cfg(test)]
-pub(super) async fn materialize_turn_chat(
-    tools: &ToolSuite,
-    output: &lash::TurnOutput,
-) -> anyhow::Result<bool> {
-    let Some((text, tool_calls)) = turn_chat_payload(output) else {
-        return Ok(false);
-    };
-    tools.thread_chat_send(0, text, None, tool_calls).await?;
-    Ok(true)
-}
-
-pub(super) async fn materialize_thread_turn_chat(
-    tools: &ToolSuite,
-    output: &lash::TurnOutput,
-    thread_id: u64,
-    anchor: u64,
-) -> anyhow::Result<Option<u64>> {
-    let Some((text, calls)) = turn_chat_payload(output) else {
-        return Ok(None);
-    };
-    Ok(Some(
-        tools
-            .thread_chat_send(thread_id, text, Some(anchor), calls)
-            .await?
-            .id,
-    ))
-}
-
 pub(super) async fn materialize_thread_turn_reply(
     tools: &ToolSuite,
     output: &lash::TurnOutput,

@@ -38,6 +38,7 @@ describe("artifact isolation", () => {
   it("escapes file content, including HTML masquerading as a file", () => {
     const document = artifactDocument({ ...artifact, kind: "file", content: '<script>alert("x")</script>' });
     expect(document).toContain("&lt;script&gt;");
-    expect(document).not.toContain("<script>");
+    expect(document).not.toContain('<script>alert("x")</script>');
+    expect(document).toContain("event.key === 'Escape'");
   });
 });

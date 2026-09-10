@@ -44,58 +44,14 @@ pub(super) fn agent_guidance_with_handoff(
 #[derive(Clone)]
 pub(super) struct DegradedAgentRuntime {
     pub(super) reason: String,
-    pub(super) tools: ToolSuite,
-    pub(super) broadcaster: broadcast::Sender<HostToClient>,
-    pub(super) broadcast_log: BroadcastLog,
 }
 
 impl DegradedAgentRuntime {
     pub(super) async fn enqueue(&self, _turn: OwnerTurn) -> anyhow::Result<()> {
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: None,
-                thread_id: None,
-                state: AgentActivityState::Thinking,
-                text: Some("provider unavailable".to_string()),
-                sc: None,
-            },
-        );
-        self.tools
-            .chat_send(format!("Agent turn failed: {}", self.reason), None)
-            .await?;
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: None,
-                thread_id: None,
-                state: AgentActivityState::Idle,
-                text: None,
-                sc: None,
-            },
-        );
-        Ok(())
+        anyhow::bail!("Lash store unavailable: {}", self.reason)
     }
 
     pub(super) async fn cancel_turn(&self) -> anyhow::Result<()> {
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: None,
-                thread_id: None,
-                state: AgentActivityState::Idle,
-                text: None,
-                sc: None,
-            },
-        );
-        Ok(())
-    }
-
-    pub(super) async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
-        self.tools.chat_send(text, None).await?;
         Ok(())
     }
 

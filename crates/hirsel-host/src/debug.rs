@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use hirsel_proto::{
-    Blob, ChatMessage, Event, HostToClient, ModelSelection, Ping, PushPlatform, SendMode, Thread,
+    Blob, ChatMessage, HostToClient, ModelSelection, PushPlatform, SendMode, Thread,
     ThreadAttention, ViewInstance,
 };
 use serde::{Deserialize, Serialize};
@@ -32,20 +32,10 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/reset", post(reset))
         .route("/debug/upload", post(upload_blob))
         .route("/debug/owner-message", post(owner_message))
-        .route("/debug/open-side-chat", post(open_side_chat))
-        .route("/debug/side-message", post(side_message))
-        .route("/debug/conclude", post(conclude))
-        .route("/debug/confirm-conclusion", post(confirm_conclusion))
-        .route("/debug/side-chats", get(side_chats))
-        .route("/debug/read-ping", post(read_ping))
-        .route("/debug/resolve-ping", post(resolve_ping))
-        .route("/debug/reopen-ping", post(reopen_ping))
-        .route("/debug/event-action", post(event_action))
         .route("/debug/seed-adaptive-thread", post(seed_adaptive_thread))
         .route("/debug/publish-artifact", post(artifacts::publish_artifact))
         .route("/debug/trigger-digest", post(trigger_digest))
         .route("/debug/fork-wake", post(fork_wake))
-        .route("/debug/taste", get(taste))
         .route("/debug/register-push-token", post(register_push_token))
         .route("/debug/unregister-push-token", post(unregister_push_token))
         .route("/debug/pushes", get(recorded_pushes))
@@ -62,8 +52,6 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/view-event", post(view_event))
         .route("/debug/broadcasts", get(broadcasts))
         .route("/debug/chat", get(chat))
-        .route("/debug/pings", get(pings))
-        .route("/debug/events", get(events))
         .route("/debug/processes", get(processes))
         .route("/debug/pair", post(pair))
         .route("/debug/devices", get(devices))
@@ -92,11 +80,11 @@ async fn require_owner(
 
 #[derive(Debug, Deserialize)]
 struct OwnerMessageRequest {
+    artifact_ids: Vec<u64>,
     #[serde(default)]
     client_id: Option<String>,
     body: String,
-    #[serde(rename = "ref")]
-    anchor: Option<u64>,
+    thread_id: u64,
     #[serde(default)]
     attachments: Vec<String>,
     #[serde(default)]
@@ -118,20 +106,8 @@ struct UploadBlobRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct PingRequest {
-    ping_id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventActionRequest {
-    event_id: u64,
-    action: String,
-    #[serde(default)]
-    data: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
 struct TriggerDigestRequest {
+    thread_id: u64,
     #[serde(default = "default_digest_job_id")]
     job_id: String,
     #[serde(default = "default_digest_text")]
@@ -152,34 +128,8 @@ struct UnregisterPushTokenRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenSideChatRequest {
-    #[serde(default)]
-    event_id: Option<u64>,
-    #[serde(default)]
-    ping_id: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SideMessageRequest {
-    sc: String,
-    body: String,
-    #[serde(default)]
-    mentions: Vec<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ConcludeRequest {
-    sc: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ConfirmConclusionRequest {
-    sc: String,
-    text: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct CreateMonitorRequest {
+    thread_id: u64,
     cmd: String,
     #[serde(default)]
     every_secs: Option<u64>,
@@ -206,6 +156,7 @@ struct SetSubagentModelRequest {
 
 #[derive(Debug, Deserialize)]
 struct ShowViewRequest {
+    thread_id: u64,
     #[serde(default)]
     template_id: Option<String>,
     #[serde(default)]
@@ -225,7 +176,6 @@ struct ViewEventRequest {
 
 #[derive(Debug, Deserialize)]
 struct PairRequest {
-    #[serde(alias = "label")]
     device_label: String,
 }
 
@@ -257,21 +207,6 @@ struct ChatResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct PingsResponse {
-    pings: Vec<Ping>,
-}
-
-#[derive(Debug, Serialize)]
-struct EventsResponse {
-    events: Vec<Event>,
-}
-
-#[derive(Debug, Serialize)]
-struct TasteResponse {
-    decisions: Vec<crate::storage::TasteDecision>,
-}
-
-#[derive(Debug, Serialize)]
 struct RecordedPushesResponse {
     pushes: Vec<RecordedPush>,
 }
@@ -279,27 +214,6 @@ struct RecordedPushesResponse {
 #[derive(Debug, Serialize)]
 struct CreateMonitorResponse {
     monitor: MonitorRecord,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenSideChatResponse {
-    sc: String,
-    event_id: u64,
-    ping_id: u64,
-    event: Event,
-    messages: Vec<ChatMessage>,
-    resumed: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ConclusionResponse {
-    sc: String,
-    text: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SideChatsResponse {
-    side_chats: Vec<crate::side_chat::SideChatView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -354,12 +268,7 @@ impl From<Device> for DeviceResponse {
 }
 
 async fn reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>, DebugError> {
-    state.side_chats.discard_all().await;
-    state.storage.reset().await?;
-    state.processes.reset()?;
-    state.views.clear_all().await;
-    state.broadcast_log.clear();
-    state.pushes.clear_recorded_pushes();
+    state.agent.reset_history().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -384,6 +293,7 @@ async fn seed_adaptive_thread(State(state): State<AppState>) -> Result<Json<Thre
             "Advance this Thread through the real Host action contract",
             &instrument,
             ThreadAttention::NeedsOwner,
+            None,
         )
         .await?;
     state.broadcast(HostToClient::ThreadUpsert {
@@ -400,6 +310,8 @@ async fn show_view(
         state
             .views
             .show(
+                &state.storage.history_id().await?,
+                request.thread_id,
                 request.template_id,
                 request.spec,
                 request.params,
@@ -429,78 +341,6 @@ async fn view_event(
     })))
 }
 
-async fn open_side_chat(
-    State(state): State<AppState>,
-    Json(request): Json<OpenSideChatRequest>,
-) -> Result<Json<OpenSideChatResponse>, DebugError> {
-    let (event_id, legacy_ping) = match (request.event_id, request.ping_id) {
-        (Some(event_id), None) => (event_id, false),
-        (None, Some(ping_id)) => (ping_id, true),
-        (Some(event_id), Some(ping_id)) if event_id == ping_id => (event_id, false),
-        (Some(_), Some(_)) => return Err(anyhow::anyhow!("event_id and ping_id must match").into()),
-        (None, None) => return Err(anyhow::anyhow!("event_id or ping_id is required").into()),
-    };
-    let opened = if legacy_ping {
-        state.side_chats.open_legacy_ping(event_id).await?
-    } else {
-        state.side_chats.open(event_id).await?
-    };
-    state.broadcast(HostToClient::SideChatOpen {
-        sc: opened.sc.clone(),
-        event_id,
-        ping_id: event_id,
-        event: opened.event.clone(),
-        messages: opened.messages.clone(),
-    });
-    Ok(Json(OpenSideChatResponse {
-        sc: opened.sc,
-        event_id,
-        ping_id: event_id,
-        event: opened.event,
-        messages: opened.messages,
-        resumed: opened.resumed,
-    }))
-}
-
-async fn side_message(
-    State(state): State<AppState>,
-    Json(request): Json<SideMessageRequest>,
-) -> Result<Json<serde_json::Value>, DebugError> {
-    state
-        .side_chats
-        .send(&request.sc, request.body, request.mentions)
-        .await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn conclude(
-    State(state): State<AppState>,
-    Json(request): Json<ConcludeRequest>,
-) -> Result<Json<ConclusionResponse>, DebugError> {
-    let text = state.side_chats.conclude(&request.sc).await?;
-    Ok(Json(ConclusionResponse {
-        sc: request.sc,
-        text,
-    }))
-}
-
-async fn confirm_conclusion(
-    State(state): State<AppState>,
-    Json(request): Json<ConfirmConclusionRequest>,
-) -> Result<Json<serde_json::Value>, DebugError> {
-    state
-        .side_chats
-        .confirm(&request.sc, request.text, &state)
-        .await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn side_chats(State(state): State<AppState>) -> Result<Json<SideChatsResponse>, DebugError> {
-    Ok(Json(SideChatsResponse {
-        side_chats: state.side_chats.views().await?,
-    }))
-}
-
 async fn owner_message(
     State(state): State<AppState>,
     Json(request): Json<OwnerMessageRequest>,
@@ -509,13 +349,14 @@ async fn owner_message(
         .client_id
         .unwrap_or_else(|| format!("debug-{}", Uuid::new_v4()));
     let submission = state
-        .submit_owner_message(
+        .submit_thread_message(
             client_id,
+            request.thread_id,
             request.body,
-            request.anchor,
             request.attachments,
             request.mentions,
             request.mode,
+            request.artifact_ids,
         )
         .await?;
     Ok(Json(OwnerMessageResponse {
@@ -555,76 +396,27 @@ async fn upload_blob(
     Ok(Json(stored.blob))
 }
 
-async fn read_ping(
-    State(state): State<AppState>,
-    Json(request): Json<PingRequest>,
-) -> Result<Json<Ping>, DebugError> {
-    let ping = state
-        .storage
-        .mark_ping_read(request.ping_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
-    state.broadcast(HostToClient::EventUpsert {
-        event: ping.clone(),
-    });
-    Ok(Json(ping))
-}
-
-async fn resolve_ping(
-    State(state): State<AppState>,
-    Json(request): Json<PingRequest>,
-) -> Result<Json<Ping>, DebugError> {
-    let ping = state
-        .storage
-        .resolve_ping(request.ping_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
-    state.broadcast(HostToClient::EventUpsert {
-        event: ping.clone(),
-    });
-    Ok(Json(ping))
-}
-
-async fn reopen_ping(
-    State(state): State<AppState>,
-    Json(request): Json<PingRequest>,
-) -> Result<Json<Ping>, DebugError> {
-    let ping = state
-        .storage
-        .reopen_ping(request.ping_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("unknown ping: {}", request.ping_id))?;
-    state.broadcast(HostToClient::EventUpsert {
-        event: ping.clone(),
-    });
-    Ok(Json(ping))
-}
-
-async fn event_action(
-    State(state): State<AppState>,
-    Json(request): Json<EventActionRequest>,
-) -> Result<Json<Event>, DebugError> {
-    Ok(Json(
-        state
-            .handle_event_action(request.event_id, request.action, request.data)
-            .await?,
-    ))
-}
-
 async fn trigger_digest(
     State(state): State<AppState>,
     Json(request): Json<TriggerDigestRequest>,
-) -> Result<Json<Event>, DebugError> {
+) -> Result<Json<hirsel_proto::ThreadActivity>, DebugError> {
     Ok(Json(
         state
             .tools
-            .emit_scheduled_digest(request.job_id, request.text, request.status)
+            .emit_scheduled_digest(
+                &state.storage.history_id().await?,
+                request.thread_id,
+                request.job_id,
+                request.text,
+                request.status,
+            )
             .await?,
     ))
 }
 
 #[derive(Deserialize)]
 struct ForkWakeRequest {
+    thread_id: u64,
     /// The non-owner message to triage, verbatim.
     text: String,
     /// Where it came from, for the pack's attribution line.
@@ -647,20 +439,15 @@ async fn fork_wake(
     Json(request): Json<ForkWakeRequest>,
 ) -> Result<Json<serde_json::Value>, DebugError> {
     let message = crate::fork_wake::WakeMessage::new(
+        request.thread_id,
         crate::fork_wake::WakeSource::External {
             origin: request.origin,
         },
         request.text,
         format!("debug:{}", Uuid::new_v4()),
     );
-    let dispatched = state.agent.dispatch_fork_wake(message);
+    let dispatched = state.agent.dispatch_fork_wake(message).await?;
     Ok(Json(serde_json::json!({ "dispatched": dispatched })))
-}
-
-async fn taste(State(state): State<AppState>) -> Result<Json<TasteResponse>, DebugError> {
-    Ok(Json(TasteResponse {
-        decisions: state.storage.taste_decisions().await?,
-    }))
 }
 
 async fn register_push_token(
@@ -695,6 +482,7 @@ async fn create_monitor(
 ) -> Result<Json<CreateMonitorResponse>, DebugError> {
     let monitor = state
         .create_monitor(
+            request.thread_id,
             request.cmd,
             request.every_secs.unwrap_or(30),
             request.wake_on,
@@ -741,18 +529,6 @@ async fn set_subagent_model(
 async fn chat(State(state): State<AppState>) -> Result<Json<ChatResponse>, DebugError> {
     Ok(Json(ChatResponse {
         messages: state.storage.all_chat().await?,
-    }))
-}
-
-async fn pings(State(state): State<AppState>) -> Result<Json<PingsResponse>, DebugError> {
-    Ok(Json(PingsResponse {
-        pings: state.storage.all_pings().await?,
-    }))
-}
-
-async fn events(State(state): State<AppState>) -> Result<Json<EventsResponse>, DebugError> {
-    Ok(Json(EventsResponse {
-        events: state.storage.all_pings().await?,
     }))
 }
 

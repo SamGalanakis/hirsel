@@ -28,7 +28,7 @@ export function formatRelativeTime(ts: string, now: number = Date.now()): string
 }
 
 /** One-line, whitespace-collapsed, ellipsis-truncated preview of a body of
- * text — shared by a Task's reply quote, the Processes "Ask Hirsel to stop"
+ * text — shared by a Thread's reply quote, the Processes "Ask Hirsel to stop"
  * pre-fill. */
 export function snippet(body: string, maxLen = 80): string {
   const oneLine = body.replace(/\s+/g, " ").trim();

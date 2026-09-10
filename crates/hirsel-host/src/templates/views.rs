@@ -26,6 +26,7 @@ struct PatchOperation {
 
 #[derive(Debug, Clone)]
 struct ActiveView {
+    history_id: String,
     view: ViewInstance,
     source: ViewSource,
     params: Value,
@@ -37,6 +38,7 @@ struct ActiveView {
 #[derive(Clone)]
 pub struct ViewManager {
     templates: TemplateStore,
+    history_id: Arc<std::sync::RwLock<String>>,
     active: Arc<RwLock<BTreeMap<String, ActiveView>>>,
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
@@ -44,12 +46,14 @@ pub struct ViewManager {
 
 impl ViewManager {
     pub fn new(
+        history_id: String,
         templates: TemplateStore,
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
     ) -> Self {
         Self {
             templates,
+            history_id: Arc::new(std::sync::RwLock::new(history_id)),
             active: Arc::new(RwLock::new(BTreeMap::new())),
             broadcaster,
             broadcast_log,
@@ -60,8 +64,11 @@ impl ViewManager {
         &self.templates
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn show(
         &self,
+        expected_history: &str,
+        thread_id: u64,
         template_id: Option<String>,
         spec: Option<Value>,
         params: Option<Value>,
@@ -90,13 +97,23 @@ impl ViewManager {
             anyhow::bail!("instance_id must be a non-empty string");
         }
         let view = ViewInstance {
+            thread_id,
             instance_id: instance_id.clone(),
             placement,
             spec: resolved,
         };
-        self.active.write().await.insert(
+        let mut active = self.active.write().await;
+        self.validate_history(expected_history)?;
+        anyhow::ensure!(
+            active
+                .get(&instance_id)
+                .is_none_or(|v| v.view.thread_id == thread_id),
+            "view belongs to another Thread"
+        );
+        active.insert(
             instance_id,
             ActiveView {
+                history_id: expected_history.to_owned(),
                 view: view.clone(),
                 source,
                 params,
@@ -104,11 +121,14 @@ impl ViewManager {
             },
         );
         self.publish_upsert(&view);
+        drop(active);
         Ok(view)
     }
 
     pub async fn update(
         &self,
+        expected_history: &str,
+        thread_id: u64,
         instance_id: &str,
         params: Option<Value>,
         patch: Option<Value>,
@@ -128,6 +148,10 @@ impl ViewManager {
             .get(instance_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown view instance `{instance_id}`"))?;
+        anyhow::ensure!(
+            record.history_id == expected_history && record.view.thread_id == thread_id,
+            "view belongs to another Thread"
+        );
         if let Some(params) = params {
             merge_params(&mut record.params, params)?;
         }
@@ -144,16 +168,33 @@ impl ViewManager {
         validate(&resolved)?;
         record.view.spec = resolved;
         let view = record.view.clone();
-        self.active
-            .write()
-            .await
-            .insert(instance_id.to_string(), record);
+        let mut active = self.active.write().await;
+        self.validate_history(expected_history)?;
+        anyhow::ensure!(
+            active.contains_key(instance_id),
+            "view was removed during update"
+        );
+        active.insert(instance_id.to_string(), record);
         self.publish_upsert(&view);
+        drop(active);
         Ok(view)
     }
 
-    pub async fn clear(&self, instance_id: &str) -> anyhow::Result<()> {
-        if self.active.write().await.remove(instance_id).is_none() {
+    pub async fn clear(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+        instance_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut active = self.active.write().await;
+        self.validate_history(expected_history)?;
+        anyhow::ensure!(
+            active
+                .get(instance_id)
+                .is_none_or(|v| v.view.thread_id == thread_id),
+            "view belongs to another Thread"
+        );
+        if active.remove(instance_id).is_none() {
             anyhow::bail!("unknown view instance `{instance_id}`");
         }
         let event = HostToClient::ViewRemoved {
@@ -181,12 +222,29 @@ impl ViewManager {
             .map(|record| record.view.clone())
     }
 
-    pub async fn clear_all(&self) {
-        self.active.write().await.clear();
+    pub async fn bound_view(&self, instance_id: &str) -> Option<(String, ViewInstance)> {
+        self.active
+            .read()
+            .await
+            .get(instance_id)
+            .map(|record| (record.history_id.clone(), record.view.clone()))
+    }
+    fn validate_history(&self, expected: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            *self.history_id.read().expect("view history poisoned") == expected,
+            "view history is no longer current"
+        );
+        Ok(())
+    }
+    pub async fn clear_all(&self, history_id: String) {
+        let mut active = self.active.write().await;
+        *self.history_id.write().expect("view history poisoned") = history_id;
+        active.clear();
     }
 
     fn publish_upsert(&self, view: &ViewInstance) {
         let event = HostToClient::ViewUpsert {
+            thread_id: view.thread_id,
             instance_id: view.instance_id.clone(),
             placement: view.placement.clone(),
             spec: view.spec.clone(),
@@ -200,12 +258,7 @@ fn validate_placement(placement: &str) -> anyhow::Result<()> {
     if matches!(placement, "canvas" | "chat") {
         return Ok(());
     }
-    if let Some(ping_id) = placement.strip_prefix("ping:")
-        && ping_id.parse::<u64>().is_ok_and(|id| id > 0)
-    {
-        return Ok(());
-    }
-    anyhow::bail!("placement must be `canvas`, `chat`, or `ping:<ping_id>`")
+    anyhow::bail!("placement must be `canvas` or `chat`")
 }
 
 fn merge_params(existing: &mut Value, update: Value) -> anyhow::Result<()> {

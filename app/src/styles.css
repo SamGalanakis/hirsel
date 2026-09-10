@@ -56,7 +56,7 @@
   --status-idle: oklch(0.55 0 0);
   --status-success: oklch(0.52 0.17 149);
   --status-danger: var(--destructive);
-  --status-attention: oklch(0.56 0.15 73);
+  --status-attention: oklch(0.53 0.14 73);
 
   /* The one raised-control elevation (selected segment). A token rather than a
      hardcoded rgb() so the lift is honest on BOTH canvases: an ink shadow on

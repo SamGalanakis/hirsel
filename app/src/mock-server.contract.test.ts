@@ -73,7 +73,7 @@ async function hello(
     ws.once("error", reject);
   });
   const response = waitForFrame(ws, (frame) => frame.type === "hello_ok");
-  ws.send(JSON.stringify({ type: "hello", token, last_seen_msg_id: null }));
+  ws.send(JSON.stringify({ type: "hello", auth: { static_token: token } }));
   return { ws, frame: await response };
 }
 
@@ -117,7 +117,6 @@ describe("dev mock Thread contract", () => {
     });
     let connection = await hello(port);
     expect(connection.frame.threads).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 0 }),
       expect.objectContaining({ id: 1, title: "Buy groceries", attention: "quiet", settled_at: null }),
     ]));
     const request = async (command: Record<string, unknown>, type: string) => {
@@ -125,11 +124,11 @@ describe("dev mock Thread contract", () => {
       connection.ws.send(JSON.stringify(command));
       return response;
     };
-    const created = (await request({ type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread as Thread;
+    const created = (await request({ parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread as Thread;
     expect(created.attention).toBe("quiet");
-    expect((await request({ type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread).toEqual(created);
+    expect((await request({ parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread).toEqual(created);
     const completed = waitForFrame(connection.ws, frame => frame.type === "thread_turn" && (frame.turn as { state?: string }).state === "completed");
-    const command = { type: "send_thread_message", thread_id: created.id, client_id: "message", body: "keep investigating", mentions: [1], attachments: [] };
+    const command = { type: "send_thread_message", artifact_ids: [], thread_id: created.id, client_id: "message", body: "keep investigating", mentions: [1], attachments: [] };
     const owner = (await request(command, "msg")).message as ChatMessage;
     expect(owner).toMatchObject({ thread_id: created.id, mentions: [1], client_id: "message" });
     await completed;
@@ -147,18 +146,34 @@ describe("dev mock Thread contract", () => {
     expect((await request({ type: "thread_action", thread_id: created.id, action: "read" }, "thread_upsert")).thread).toMatchObject({ id: created.id, read: true, settled_at: null });
     const settled = (await request({ type: "thread_action", thread_id: created.id, action: "settle" }, "thread_upsert")).thread as Thread;
     expect(settled.settled_at).not.toBeNull();
+    expect(settled.icon).toBeNull();
+    const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "👩🏽‍💻" }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
+    expect(withIcon.icon).toBe("👩🏽‍💻");
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "🌱" }, expected_revision: settled.revision }, "changed");
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "x\n" }, expected_revision: withIcon.revision }, "Invalid thread icon");
+    const reset = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: null }, expected_revision: withIcon.revision }, "thread_upsert")).thread as Thread;
+    expect(reset.icon).toBeNull();
     await close(connection.ws);
     const isolated = await hello(port, "parallel-runbook");
     expect((isolated.frame.threads as Thread[]).some(thread => thread.id === created.id)).toBe(false);
-    expect(isolated.frame.messages).toEqual([]);
+    expect(isolated.frame).not.toHaveProperty("messages");
     await close(isolated.ws);
     connection = await hello(port);
-    expect((connection.frame.threads as Thread[]).find(thread => thread.id === created.id)).toEqual(settled);
-    expect(connection.frame.messages).toEqual([]);
+    expect((connection.frame.threads as Thread[]).find(thread => thread.id === created.id)).toEqual(reset);
+    expect(connection.frame).not.toHaveProperty("messages");
     const replay = (await request({ type: "open_thread", client_id: "replay", thread_id: created.id }, "thread_opened")).detail as ThreadDetail;
     expect(replay.messages).toEqual(detail.messages);
-    expect((await request({ type: "thread_action", thread_id: created.id, action: "reopen" }, "thread_upsert")).thread).toMatchObject({ id: created.id, settled_at: null, read: true });
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: 0, action: "settle" }, "orchestrator");
+    const reopened = (await request({ type: "thread_action", thread_id: created.id, action: "reopen" }, "thread_upsert")).thread as Thread;
+    expect(reopened).toMatchObject({ id: created.id, settled_at: null, read: true });
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: 0, action: "settle" }, "does not exist");
+    await expectActionError(connection.ws, { type: "create_thread", client_id: "missing-parent", title: "Missing parent" }, "parent_thread_id");
+    const childThread = (await request({ type: "create_thread", client_id: "child", title: "Focused review", parent_thread_id: created.id }, "thread_created")).thread as Thread;
+    expect(childThread.parent_thread_id).toBe(created.id);
+    await expectActionError(connection.ws, { type: "thread_action", thread_id: childThread.id, action: "pin", expected_revision: childThread.revision }, "Only top-level threads");
+    const pinned = (await request({ type: "thread_action", thread_id: created.id, action: "pin", expected_revision: reopened.revision }, "thread_upsert")).thread as Thread;
+    expect(pinned.pinned_at).not.toBeNull();
+    expect(pinned.last_activity_at).toBe(reopened.last_activity_at);
+    expect(pinned.settled_at).toBeNull();
     const publish = async (body: Record<string, unknown>) => {
       const response = await fetch(`http://127.0.0.1:${port}/debug/publish-artifact`, { method:"POST", headers:{ Authorization:"Bearer dev", "Content-Type":"application/json" }, body:JSON.stringify(body) });
       expect(response.status).toBe(200);
@@ -185,6 +200,23 @@ describe("dev mock Thread contract", () => {
     expect((await otherList).artifacts).toEqual([]);
     await close(other.ws);
 
+    const recipient=(await request({type:"create_thread",client_id:"artifact-recipient",title:"Unrelated artifact discussion",parent_thread_id:null},"thread_created")).thread as Thread;
+    const beforeShare=(await request({type:"open_artifact",client_id:"preview-only",artifact_id:artifact.id},"artifact_opened")).artifact as {thread_ids:number[]};
+    expect(beforeShare.thread_ids).not.toContain(recipient.id);
+    const plainDone=waitForFrame(connection.ws,frame=>frame.type==="thread_turn"&&(frame.turn as {thread_id:number;state:string}).thread_id===recipient.id&&(frame.turn as {state:string}).state==="completed");
+    const plain=(await request({type:"send_thread_message",client_id:"plain-artifact-number",thread_id:recipient.id,body:`Edit artifact ${artifact.id}`,attachments:[],mentions:[],artifact_ids:[]},"msg")).message as ChatMessage;
+    expect(plain.artifact_ids).toEqual([]); await plainDone;
+    const contextMessage={type:"send_thread_message",client_id:"explicit-artifact-reference",thread_id:recipient.id,body:"Make this simpler",attachments:[],mentions:[],artifact_ids:[artifact.id,artifact.id]};
+    const shared=(await request(contextMessage,"msg")).message as ChatMessage;
+    expect(shared.artifact_ids).toEqual([artifact.id]);
+    expect((await request({...contextMessage,artifact_ids:[artifact.id]},"msg")).message).toEqual(shared);
+    await expectActionError(connection.ws,{...contextMessage,artifact_ids:[]},"different content");
+    await expectActionError(connection.ws,{...contextMessage,client_id:"invalid-artifact",artifact_ids:[999999]},"does not exist");
+    const afterShare=(await request({type:"open_thread",client_id:"shared-history",thread_id:recipient.id},"thread_opened")).detail as ThreadDetail;
+    expect(afterShare.messages.filter(message=>message.author==="owner")).toHaveLength(2);
+    expect(afterShare.messages.filter(message=>message.artifact_ids?.includes(artifact.id))).toHaveLength(1);
+    const linked=(await request({type:"open_artifact",client_id:"after-reference",artifact_id:artifact.id},"artifact_opened")).artifact as {thread_ids:number[]};
+    expect(linked.thread_ids).toContain(recipient.id);
     await close(connection.ws);
   });
 });

@@ -18,6 +18,7 @@ use uuid::Uuid;
 impl Storage {
     pub async fn create_monitor(
         &self,
+        thread_id: u64,
         cmd: impl Into<String>,
         every_secs: u64,
         wake_on: MonitorWakeOn,
@@ -26,6 +27,7 @@ impl Storage {
     ) -> anyhow::Result<MonitorRecord> {
         let now = Utc::now();
         let record = MonitorRecord {
+            thread_id,
             id: format!("mon-{}", Uuid::new_v4()),
             cmd: cmd.into(),
             every_secs: every_secs.max(30),
@@ -41,10 +43,46 @@ impl Storage {
         };
         validate_monitor_record(&record)?;
         let conn = self.conn.lock().await;
-        conn.execute(
-            "
+        super::threads::get(&conn, thread_id)?;
+        insert_monitor(&conn, &record)
+    }
+
+    pub(crate) async fn create_scoped_monitor(
+        &self,
+        caller: &super::ThreadCaller,
+        cmd: String,
+        every_secs: u64,
+        wake_on: MonitorWakeOn,
+        pattern: Option<String>,
+        label: String,
+    ) -> anyhow::Result<MonitorRecord> {
+        let now = Utc::now();
+        let record = MonitorRecord {
+            thread_id: caller.thread_id,
+            id: format!("mon-{}", Uuid::new_v4()),
+            cmd,
+            every_secs: every_secs.max(30),
+            wake_on,
+            pattern,
+            label,
+            created_ts: now,
+            last_event_ts: now,
+            last_run_ts: None,
+            last_output: None,
+            summary: None,
+            cancelled_ts: None,
+        };
+        validate_monitor_record(&record)?;
+        let conn = self.conn.lock().await;
+        super::thread_scope::validate_caller(&conn, caller)?;
+        insert_monitor(&conn, &record)
+    }
+}
+fn insert_monitor(conn: &Connection, record: &MonitorRecord) -> anyhow::Result<MonitorRecord> {
+    conn.execute(
+        "
             INSERT INTO monitors (
-                id,
+                thread_id, id,
                 cmd,
                 every_secs,
                 wake_on,
@@ -57,22 +95,23 @@ impl Storage {
                 summary,
                 cancelled_ts
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL)
+            VALUES (?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL)
             ",
-            params![
-                record.id,
-                record.cmd,
-                record.every_secs,
-                monitor_wake_on_to_str(record.wake_on),
-                record.pattern,
-                record.label,
-                record.created_ts.to_rfc3339(),
-                record.last_event_ts.to_rfc3339(),
-            ],
-        )?;
-        get_monitor(&conn, &record.id).map_err(Into::into)
-    }
-
+        params![
+            record.id,
+            record.cmd,
+            record.every_secs,
+            monitor_wake_on_to_str(record.wake_on),
+            record.pattern,
+            record.label,
+            record.created_ts.to_rfc3339(),
+            record.last_event_ts.to_rfc3339(),
+            record.thread_id,
+        ],
+    )?;
+    get_monitor(conn, &record.id).map_err(Into::into)
+}
+impl Storage {
     pub async fn monitor(&self, monitor_id: &str) -> anyhow::Result<Option<MonitorRecord>> {
         let conn = self.conn.lock().await;
         get_monitor_optional(&conn, monitor_id).map_err(Into::into)
@@ -83,7 +122,7 @@ impl Storage {
         let mut stmt = conn.prepare(
             "
             SELECT id, cmd, every_secs, wake_on, pattern, label, created_ts, last_event_ts,
-                   last_run_ts, last_output, summary, cancelled_ts
+                   last_run_ts, last_output, summary, cancelled_ts, thread_id
             FROM monitors
             WHERE cancelled_ts IS NULL
             ORDER BY created_ts ASC, id ASC
@@ -98,7 +137,7 @@ impl Storage {
         let mut stmt = conn.prepare(
             "
             SELECT id, cmd, every_secs, wake_on, pattern, label, created_ts, last_event_ts,
-                   last_run_ts, last_output, summary, cancelled_ts
+                   last_run_ts, last_output, summary, cancelled_ts, thread_id
             FROM monitors
             ORDER BY created_ts ASC, id ASC
             ",
@@ -189,6 +228,7 @@ pub enum MonitorWakeOn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MonitorRecord {
+    pub thread_id: u64,
     pub id: String,
     pub cmd: String,
     pub every_secs: u64,
@@ -210,6 +250,7 @@ pub struct MonitorRecord {
 
 pub fn monitor_process_info(record: &MonitorRecord) -> ProcessInfo {
     ProcessInfo {
+        thread_id: record.thread_id,
         id: record.id.clone(),
         kind: ProcessKind::Monitor,
         label: short_label(&record.label),
@@ -257,7 +298,7 @@ fn get_monitor_optional(
     conn.query_row(
         "
         SELECT id, cmd, every_secs, wake_on, pattern, label, created_ts, last_event_ts,
-               last_run_ts, last_output, summary, cancelled_ts
+               last_run_ts, last_output, summary, cancelled_ts, thread_id
         FROM monitors
         WHERE id = ?1
         ",
@@ -274,6 +315,7 @@ fn monitor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MonitorRecord> 
     let last_run_ts: Option<String> = row.get(8)?;
     let cancelled_ts: Option<String> = row.get(11)?;
     Ok(MonitorRecord {
+        thread_id: row.get(12)?,
         id: row.get(0)?,
         cmd: row.get(1)?,
         every_secs: u64_from_row(row, 2)?,
@@ -310,3 +352,65 @@ fn monitor_wake_on_from_str(value: &str) -> rusqlite::Result<MonitorWakeOn> {
 
 #[cfg(test)]
 mod tests;
+
+impl Storage {
+    pub(crate) async fn scoped_monitors(
+        &self,
+        caller: &super::ThreadCaller,
+    ) -> anyhow::Result<Vec<MonitorRecord>> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_caller(&c, caller)?;
+        let ids=c.prepare("WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT m.id FROM monitors m JOIN scope s ON s.id=m.thread_id ORDER BY m.created_ts,m.id LIMIT 100")?.query_map([caller.thread_id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| get_monitor(&c, &id).map_err(Into::into))
+            .collect()
+    }
+    pub(crate) async fn cancel_scoped_monitor(
+        &self,
+        caller: &super::ThreadCaller,
+        id: &str,
+    ) -> anyhow::Result<MonitorRecord> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_caller(&c, caller)?;
+        let record = get_monitor(&c, id)?;
+        super::thread_scope::authorize(&c, caller.thread_id, record.thread_id)?;
+        c.execute("UPDATE monitors SET cancelled_ts=COALESCE(cancelled_ts,?2),last_event_ts=?2,summary='cancelled' WHERE id=?1",params![id,Utc::now().to_rfc3339()])?;
+        Ok(get_monitor(&c, id)?)
+    }
+}
+
+impl Storage {
+    pub(crate) async fn background_monitor(
+        &self,
+        history: &str,
+        thread_id: u64,
+        id: &str,
+    ) -> anyhow::Result<Option<MonitorRecord>> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, history)?;
+        let record = get_monitor_optional(&c, id)?;
+        anyhow::ensure!(
+            record.as_ref().is_none_or(|r| r.thread_id == thread_id),
+            "monitor is unavailable in this Thread"
+        );
+        Ok(record)
+    }
+    pub(crate) async fn record_background_monitor_tick(
+        &self,
+        history: &str,
+        thread_id: u64,
+        id: &str,
+        output: String,
+        summary: String,
+    ) -> anyhow::Result<Option<MonitorRecord>> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, history)?;
+        let record = get_monitor_optional(&c, id)?;
+        anyhow::ensure!(
+            record.as_ref().is_none_or(|r| r.thread_id == thread_id),
+            "monitor is unavailable in this Thread"
+        );
+        c.execute("UPDATE monitors SET last_run_ts=?2,last_event_ts=?2,last_output=?3,summary=?4 WHERE id=?1 AND cancelled_ts IS NULL",params![id,Utc::now().to_rfc3339(),output,summary])?;
+        get_monitor_optional(&c, id).map_err(Into::into)
+    }
+}

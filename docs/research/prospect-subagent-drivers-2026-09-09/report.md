@@ -2,6 +2,8 @@
 
 2026-09-09. Reference revisions: [bb 4ed2743](https://github.com/get-bb/bb/tree/4ed2743219e8a6ecd7d2c2535c68865dcf821b20), [T3 Code e16b8b0](https://github.com/pingdotgg/t3code/tree/e16b8b059c9f5ff6dfed1addecffb831c6aee043), and [Pi 05c6229](https://github.com/badlogic/pi-mono/tree/05c6229813414010445558db9a80c84e15d65e70). Local clones were inspected; the pre-existing conflicted /tmp/ref-pi-mono was preserved and a clean /tmp/ref-pi-skills clone used instead.
 
+> **Current implementation note (2026-09-10):** Source links below describe the historical pre-cutover architecture. Native CLI turns now enter through `crates/hirsel-host/src/lash_runtime/cli_turn.rs` and commit terminal output through `crates/hirsel-host/src/storage/thread_completion.rs`; there is no general `tools/subagents.rs` execution path. The hermetic `cli_delivery_tests.rs` suite revalidated issue #6 across transient SQLite failures, exactly-once replay, separate wake retries, concurrent progress, and history replacement.
+
 ## Verdict
 
 Keep Hirsel's native Rust driver architecture. The useful improvements are inside its command and process-lifetime contracts: correlate provider replies, distinguish active work from queued input, scope events to the correct provider thread, and deliver one durable terminal result even when startup or transport fails. bb and T3 contain transferable mechanisms for those guarantees; their larger plugin/SDK/runtime stacks are unnecessary here.

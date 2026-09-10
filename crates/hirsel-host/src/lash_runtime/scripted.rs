@@ -1,6 +1,9 @@
 use super::*;
 
 pub(super) struct ScriptedAgentRuntime {
+    pub(super) tasks: RuntimeTasks,
+    pub(super) thread_id: u64,
+    pub(super) capacity: Arc<tokio::sync::Semaphore>,
     pub(super) config: RuntimeConfig,
     pub(super) tools: ToolSuite,
     pub(super) broadcaster: broadcast::Sender<HostToClient>,
@@ -22,7 +25,7 @@ pub(super) struct ScriptedActiveTurn {
 }
 
 impl ScriptedAgentRuntime {
-    pub(super) async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
+    pub(super) async fn enqueue(&self, mut turn: OwnerTurn) -> anyhow::Result<()> {
         #[cfg(test)]
         if turn.body == "__hirsel_test_enqueue_error__" {
             anyhow::bail!("scripted enqueue failed for test");
@@ -31,11 +34,8 @@ impl ScriptedAgentRuntime {
             .storage()
             .save_thread_request(&turn.client_id, &serde_json::to_value(&turn)?)
             .await?;
-        let queued = self
-            .tools
-            .storage()
-            .queue_thread_turn(turn.thread_id, Some(turn.message_id))
-            .await?;
+        let queued = turn.stored_turn(&self.tools.storage()).await?;
+        turn.turn_id = Some(queued.id);
         self.tools.publish_thread_turn(queued).await;
         self.state.lock().await.queue.push_back(turn);
         self.notify.notify_one();
@@ -53,17 +53,7 @@ impl ScriptedAgentRuntime {
         {
             cancel.cancel();
         }
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: None,
-                thread_id: None,
-                state: AgentActivityState::Idle,
-                text: None,
-                sc: None,
-            },
-        );
+
         Ok(())
     }
 
@@ -79,11 +69,7 @@ impl ScriptedAgentRuntime {
         {
             let turn = state.queue.remove(position).expect("position exists");
             drop(state);
-            let record = self
-                .tools
-                .storage()
-                .queue_thread_turn(turn.thread_id, Some(turn.message_id))
-                .await?;
+            let record = turn.stored_turn(&self.tools.storage()).await?;
             let record = self
                 .tools
                 .storage()
@@ -100,48 +86,16 @@ impl ScriptedAgentRuntime {
     }
 
     pub(super) async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: None,
-                thread_id: None,
-                state: AgentActivityState::Thinking,
-                text: Some("monitor wake".to_string()),
-                sc: None,
-            },
-        );
-        self.tools.chat_send(text, None).await?;
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: None,
-                thread_id: None,
-                state: AgentActivityState::Idle,
-                text: None,
-                sc: None,
-            },
-        );
-        Ok(())
-    }
+        self.tools
+            .thread_chat_send(self.thread_id, text, None, Vec::new())
+            .await?;
 
-    pub(super) async fn spawn_active_standalone_monitors(self: Arc<Self>) {
-        match self.tools.active_monitors().await {
-            Ok(monitors) => {
-                for monitor in monitors {
-                    self.spawn_standalone_monitor(monitor.id);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to resume scripted standalone monitors");
-            }
-        }
+        Ok(())
     }
 
     pub(super) fn spawn_standalone_monitor(self: &Arc<Self>, monitor_id: String) {
         let runtime = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             loop {
                 let record = match runtime.tools.monitor(&monitor_id).await {
                     Ok(Some(record)) if record.cancelled_ts.is_none() => record,
@@ -183,31 +137,37 @@ impl ScriptedAgentRuntime {
         });
     }
 
-    pub(super) async fn run(self: Arc<Self>) {
-        tracing::info!(
-            model = %self.config.model,
-            data_dir = %self.config.data_dir.display(),
-            "Scripted Agent test double opened session agent"
-        );
+    pub(super) async fn recover_pending(&self) -> anyhow::Result<()> {
         match self.tools.storage().pending_thread_requests().await {
             Ok(requests) => {
-                for (client_id, payload) in requests {
+                for (client_id, payload) in requests
+                    .into_iter()
+                    .filter(|(_, p)| p["thread_id"].as_u64() == Some(self.thread_id))
+                {
                     let Ok(turn) = serde_json::from_value::<OwnerTurn>(payload) else {
                         continue;
                     };
-                    let Ok(record) = self
-                        .tools
-                        .storage()
-                        .queue_thread_turn(turn.thread_id, Some(turn.message_id))
-                        .await
-                    else {
+                    let Ok(record) = turn.stored_turn(&self.tools.storage()).await else {
                         continue;
                     };
+                    if !matches!(
+                        self.tools.storage().turn_execution(record.id).await?,
+                        crate::storage::ThreadExecution::Host { .. }
+                    ) {
+                        continue;
+                    }
                     if record.finished_at.is_some() {
                         let _ = self.tools.storage().remove_thread_request(&client_id).await;
                         continue;
                     }
                     let mut state = self.state.lock().await;
+                    if state
+                        .active
+                        .as_ref()
+                        .is_some_and(|a| a.turn_id == Some(record.id))
+                    {
+                        continue;
+                    }
                     if !state
                         .queue
                         .iter()
@@ -218,6 +178,17 @@ impl ScriptedAgentRuntime {
                 }
             }
             Err(error) => tracing::warn!(%error,"failed to restore queued Thread turns"),
+        }
+        Ok(())
+    }
+    pub(super) async fn run(self: Arc<Self>) {
+        tracing::info!(
+            model = %self.config.model,
+            data_dir = %self.config.data_dir.display(),
+            "Scripted Agent test double opened session agent"
+        );
+        if let Err(error) = self.recover_pending().await {
+            tracing::warn!(%error,"Thread queue recovery failed");
         }
         let mut snooze_tick = tokio::time::interval(SNOOZE_TICK_INTERVAL);
         snooze_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -235,6 +206,9 @@ impl ScriptedAgentRuntime {
                     }
                 }
             };
+            let Ok(_capacity) = self.capacity.acquire().await else {
+                return;
+            };
             if let Err(error) = self.handle_turn(turn, cancel.clone()).await {
                 tracing::error!(%error, "scripted Agent turn failed");
             }
@@ -247,7 +221,7 @@ impl ScriptedAgentRuntime {
         let turn = state.queue.pop_front()?;
         let cancel = lash::CancellationToken::new();
         state.active = Some(ScriptedActiveTurn {
-            turn_id: None,
+            turn_id: turn.turn_id,
             thread_id: turn.thread_id,
             cancel: cancel.clone(),
         });
@@ -263,11 +237,7 @@ impl ScriptedAgentRuntime {
         turn: OwnerTurn,
         cancel: lash::CancellationToken,
     ) -> anyhow::Result<()> {
-        let record = self
-            .tools
-            .storage()
-            .queue_thread_turn(turn.thread_id, Some(turn.message_id))
-            .await?;
+        let record = turn.stored_turn(&self.tools.storage()).await?;
         let record = self.tools.storage().run_thread_turn(record.id).await?;
         self.tools.publish_thread_turn(record.clone()).await;
         if let Some(active) = self.state.lock().await.active.as_mut() {
@@ -277,11 +247,10 @@ impl ScriptedAgentRuntime {
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
-                turn_id: Some(record.id),
-                thread_id: Some(turn.thread_id),
+                turn_id: record.id,
+                thread_id: turn.thread_id,
                 state: AgentActivityState::Thinking,
                 text: Some("processing owner message".into()),
-                sc: None,
             },
         );
         let result = self.handle_turn_inner(&turn, &cancel).await;
@@ -292,61 +261,69 @@ impl ScriptedAgentRuntime {
         } else {
             hirsel_proto::ThreadTurnState::Failed
         };
-        let detail = self
+        let (record, message) = self
             .tools
             .storage()
-            .thread_detail(turn.thread_id, None, 100)
+            .complete_thread_turn(
+                &turn.history_id,
+                record.id,
+                state,
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|text| text.clone())
+                    .map(|text| (text, vec![])),
+            )
             .await?;
-        let reply_id = detail
-            .messages
-            .iter()
-            .rev()
-            .find(|m| {
-                m.author == hirsel_proto::ChatAuthor::Agent && m.r#ref == Some(turn.message_id)
-            })
-            .map(|m| m.id);
-        let record = self
-            .tools
-            .storage()
-            .finish_thread_turn(record.id, state, reply_id)
-            .await?;
+        if let Some(message) = message {
+            self.tools.publish_thread_message(message).await;
+        }
         self.tools.publish_thread_turn(record.clone()).await;
-        self.tools
-            .storage()
-            .remove_thread_request(&turn.client_id)
-            .await?;
         publish(
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::AgentActivity {
-                turn_id: Some(record.id),
-                thread_id: Some(turn.thread_id),
+                turn_id: record.id,
+                thread_id: turn.thread_id,
                 state: AgentActivityState::Idle,
                 text: None,
-                sc: None,
             },
         );
-        result
+        result.map(|_| ())
     }
 
     pub(super) async fn handle_turn_inner(
         &self,
         turn: &OwnerTurn,
         cancel: &lash::CancellationToken,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         if let Some(duration) = slow_turn_duration(&turn.body)?
             && !sleep_until_done_or_cancelled(duration, cancel).await
         {
-            return Ok(());
+            return Ok(None);
         }
         if cancel.is_cancelled() {
-            return Ok(());
+            return Ok(None);
         }
         self.emit_scripted_timeline(turn.thread_id).await;
         let turn_text = owner_turn_text(turn);
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
-            return self.handle_fake_delegation(turn).await;
+            let turn_id = turn
+                .turn_id
+                .ok_or_else(|| anyhow::anyhow!("accepted turn missing"))?;
+            let launch = uuid::Uuid::new_v4().to_string();
+            let caller = self
+                .tools
+                .storage()
+                .bind_thread_execution(&turn.history_id, &launch, &launch, turn_id)
+                .await?;
+            let facade = ScopedThreadTools {
+                tools: self.tools.clone(),
+                caller,
+                operation_id: format!("scripted:{turn_id}:delegate"),
+            };
+            facade.execute("threads_delegate",&json!({"title":"Repository fix","brief":"Make the trivial repo fix and report back.","artifact_ids":[],"agent":"claude","cwd":std::env::current_dir()?})).await.map_err(anyhow::Error::msg)?;
         }
         if let Some(context) = &turn.thread_action {
             let label = context
@@ -366,95 +343,20 @@ impl ScriptedAgentRuntime {
                     Some(hirsel_proto::ThreadAttention::Quiet),
                 )
                 .await?;
-            self.tools.publish_thread(thread);
-            return Ok(());
+            self.tools.publish_thread(thread).await;
+            return Ok(None);
         }
-        if let Some(context) = &turn.task_action {
-            let label = context
-                .data
-                .get("label")
-                .and_then(Value::as_str)
-                .unwrap_or(&context.action);
-            self.tools
-                .events_recompose(
-                    context.event.id,
-                    Some(format!("Advanced after {label}")),
-                    json!({
-                        "type": "card",
-                        "children": [
-                            {
-                                "type": "eyebrow",
-                                "text": "Deterministic Host fixture",
-                                "tone": "accent"
-                            },
-                            {
-                                "type": "heading",
-                                "text": format!("{} advanced", context.event.name),
-                                "level": 2
-                            },
-                            {
-                                "type": "status",
-                                "state": "success",
-                                "label": format!("Received action: {}", context.action),
-                                "tone": "success"
-                            },
-                            {
-                                "type": "text",
-                                "text": "The same Task and Anchor now expose the next meaningful stage.",
-                                "tone": "muted"
-                            },
-                            {
-                                "type": "optionList",
-                                "action": "choose",
-                                "options": [
-                                    {
-                                        "key": "A",
-                                        "label": "Complete task",
-                                        "detail": "Settle this recomposed Task.",
-                                        "recommended": true
-                                    },
-                                    {
-                                        "key": "B",
-                                        "label": "Keep open",
-                                        "detail": "Leave the Task at this stage."
-                                    }
-                                ]
-                            }
-                        ]
-                    }),
-                )
-                .await?;
-            return Ok(());
-        }
+
         if turn.anchor.is_some() {
-            self.tools
-                .chat_send(
-                    "Acknowledged. I will continue in this Thread.",
-                    Some(turn.message_id),
-                )
-                .await?;
-            return Ok(());
+            return Ok(Some("Acknowledged. I will continue in this Thread.".into()));
         }
         if lower.contains("pong") {
-            self.tools.chat_send("pong", Some(turn.message_id)).await?;
-            return Ok(());
+            return Ok(Some("pong".into()));
         }
         if !turn.attachments.is_empty() {
-            self.tools
-                .chat_send(
-                    format!("Scripted turn input:\n\n{turn_text}"),
-                    Some(turn.message_id),
-                )
-                .await?;
-            return Ok(());
+            return Ok(Some(format!("Scripted turn input:\n\n{turn_text}")));
         }
-        self.tools
-            .chat_send(
-                "I received the Owner message. This scripted Agent mode is a deterministic test double; set HIRSEL_AGENT=lash for the real RLM runtime.",
-                Some(turn.message_id),
-            )
-            .await?;
-        Ok(())
+        Ok(Some("I received the Owner message. This scripted Agent mode is a deterministic test double; set HIRSEL_AGENT=lash for the real RLM runtime.".into()))
     }
 
     pub(super) async fn emit_scripted_timeline(&self, thread_id: u64) {
@@ -465,17 +367,19 @@ impl ScriptedAgentRuntime {
             .active
             .as_ref()
             .and_then(|a| a.turn_id);
+        let Some(turn_id) = turn_id else {
+            return;
+        };
         publish(
             &self.broadcast_log,
             &self.broadcaster,
             HostToClient::TurnEvent {
                 turn_id,
-                thread_id: Some(thread_id),
+                thread_id,
                 seq: 1,
                 event: TurnEventKind::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
                 },
-                sc: None,
             },
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -484,14 +388,13 @@ impl ScriptedAgentRuntime {
             &self.broadcaster,
             HostToClient::TurnEvent {
                 turn_id,
-                thread_id: Some(thread_id),
+                thread_id,
                 seq: 2,
                 event: TurnEventKind::ToolStart {
                     id: "scripted-tool-1".to_string(),
                     name: "scripted_double".to_string(),
                     summary: Some("deterministic branch".to_string()),
                 },
-                sc: None,
             },
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -500,7 +403,7 @@ impl ScriptedAgentRuntime {
             &self.broadcaster,
             HostToClient::TurnEvent {
                 turn_id,
-                thread_id: Some(thread_id),
+                thread_id,
                 seq: 3,
                 event: TurnEventKind::ToolDone {
                     id: "scripted-tool-1".to_string(),
@@ -508,7 +411,6 @@ impl ScriptedAgentRuntime {
                     ok: true,
                     summary: Some("ok fixture selected".to_string()),
                 },
-                sc: None,
             },
         );
         publish(
@@ -516,65 +418,12 @@ impl ScriptedAgentRuntime {
             &self.broadcaster,
             HostToClient::TurnEvent {
                 turn_id,
-                thread_id: Some(thread_id),
+                thread_id,
                 seq: 4,
                 event: TurnEventKind::Prose {
                     text: "The scripted response is ready.".to_string(),
                 },
-                sc: None,
             },
         );
-    }
-
-    pub(super) async fn handle_fake_delegation(&self, turn: &OwnerTurn) -> anyhow::Result<()> {
-        let anchor = self
-            .tools
-            .chat_send(
-                "I delegated the repo fix to a Sub-agent; its result will stay in this Thread.",
-                Some(turn.message_id),
-            )
-            .await?;
-        let mut terminal_events = self.tools.terminal_events();
-        let cwd = std::env::current_dir()?;
-        let process = self
-            .tools
-            .subagents_spawn(
-                AgentKind::Claude,
-                None,
-                None,
-                "Make the trivial repo fix and report back.",
-                cwd,
-            )
-            .await?;
-        let tools = self.tools.clone();
-        tokio::spawn(async move {
-            loop {
-                match terminal_events.recv().await {
-                    Ok(event) if event.process_id == process.process_id => {
-                        let content = terminal_content(&event.outcome);
-                        let activity = tools
-                            .storage()
-                            .append_thread_activity(
-                                anchor.thread_id,
-                                None,
-                                "process_completed",
-                                &json!({"process_id":process.process_id,"summary":content}),
-                            )
-                            .await;
-                        match activity {
-                            Ok(activity) => tools.publish_thread_activity(activity).await,
-                            Err(error) => {
-                                tracing::warn!(%error,"failed to record Sub-agent completion")
-                            }
-                        }
-                        break;
-                    }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-        Ok(())
     }
 }

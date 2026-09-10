@@ -11,7 +11,7 @@ import { ProcessRow } from "./ProcessRow";
 const AGO = (mins: number) => new Date(Date.now() - mins * 60_000).toISOString();
 
 function finished(over: Partial<ProcessInfo> = {}): ProcessInfo {
-  return {
+  return { thread_id: 1,
     id: "proc-1",
     kind: "subagent",
     label: "Review the auth refactor",

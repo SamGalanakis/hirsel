@@ -3,7 +3,7 @@ import { elapsedTime, threadStatus } from "./status";
 import { makeThread } from "./fixtures";
 import type { ThreadTurn } from "./types";
 const now = Date.parse("2026-09-09T12:12:00Z");
-const turn: ThreadTurn = { id: 3, thread_id: 1, owner_message_id: 4, agent_message_id: null, state: "running", started_at: "2026-09-09T12:00:00Z", finished_at: null };
+const turn: ThreadTurn = { requester_thread_id: null, requester_turn_id: null, id: 3, thread_id: 1, owner_message_id: 4, agent_message_id: null, state: "running", started_at: "2026-09-09T12:00:00Z", finished_at: null };
 describe("authoritative Thread row status", () => {
   it("shows actual running duration and coexisting queue independently of settlement/attention/read", () => {
     const thread = makeThread(1, { running_turn: turn, queued_turn_count: 2, attention: "needs_owner", read: false, settled_at: "2026-09-09T11:00:00Z", updated_at: "2026-09-09T12:11:59Z" });

@@ -1,8 +1,13 @@
 import { createSignal, Show } from "solid-js";
 import { openThread, setThreadState, threadState } from "./store";
-export function ThreadError(props: { threadId?: number }) {
+export function ThreadError(props: { threadId?: number; navigation?: boolean }) {
   const [retrying, setRetrying] = createSignal(false);
-  const error = () => threadState.error && (props.threadId === undefined || threadState.error.threadId === undefined || props.threadId === threadState.error.threadId) ? threadState.error : null;
+  const error = () => {
+    const failure = threadState.error;
+    if (!failure) return null;
+    if (props.navigation) return failure.operation === "request" ? failure : null;
+    return failure.threadId === undefined || failure.threadId === props.threadId ? failure : null;
+  };
   const retry = async () => {
     const failure = error(); if (failure?.operation !== "load" || failure.threadId === undefined) return;
     setRetrying(true); try { await openThread(failure.threadId, failure.beforeId); } catch { /* Keep contextual failure visible. */ } finally { setRetrying(false); }

@@ -17,7 +17,7 @@ function readBool(key: string, fallback: boolean): boolean {
   }
 }
 
-// Whether Tasks needing attention show as "(3) hirsel" in the tab title (default on). A user
+// Whether Threads needing attention show as "(3) hirsel" in the tab title (default on). A user
 // who finds the badge distracting can silence it in Settings → Notifications.
 const [titleBadgeEnabled, setTitleBadgeSignal] = createSignal(readBool(TITLE_BADGE_KEY, true));
 

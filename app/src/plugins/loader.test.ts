@@ -18,7 +18,7 @@ function info(id: string, state: PluginInfo["state"] = "running"): PluginInfo {
 function mounts(): () => Promise<unknown> {
   return async () => ({
     default: (api: PluginApi) => {
-      api.slots.register("home.section", () => null);
+      api.slots.register("settings.section", () => null);
     },
   });
 }
@@ -38,7 +38,7 @@ describe("plugin loader: roster gating", () => {
       modules: { alpha: mounts(), beta: mounts() },
     });
 
-    expect(slotEntries("home.section").map((e) => e.pluginId)).toEqual(["alpha", "beta"]);
+    expect(slotEntries("settings.section").map((e) => e.pluginId)).toEqual(["alpha", "beta"]);
   });
 
   it("does not initialise a compiled-in module for a disabled plugin", async () => {
@@ -53,7 +53,7 @@ describe("plugin loader: roster gating", () => {
 
     // Its folder is in the build; the Owner switched it off. It must stay inert.
     expect(off).not.toHaveBeenCalled();
-    expect(slotEntries("home.section")).toHaveLength(0);
+    expect(slotEntries("settings.section")).toHaveLength(0);
   });
 
   it("keeps the UI of an errored (crash-looping) plugin mounted", async () => {
@@ -65,7 +65,7 @@ describe("plugin loader: roster gating", () => {
       modules: { alpha: mounts() },
     });
 
-    expect(slotEntries("home.section").map((e) => e.pluginId)).toEqual(["alpha"]);
+    expect(slotEntries("settings.section").map((e) => e.pluginId)).toEqual(["alpha"]);
   });
 
   it("ignores a rostered plugin that ships no UI module", async () => {
@@ -74,7 +74,7 @@ describe("plugin loader: roster gating", () => {
 
     await loadPlugins({ list: async () => [info("headless")], modules: {} });
 
-    expect(slotEntries("home.section")).toHaveLength(0);
+    expect(slotEntries("settings.section")).toHaveLength(0);
     expect(loadFailures()).toEqual([]);
   });
 
@@ -91,7 +91,7 @@ describe("plugin loader: roster gating", () => {
     });
 
     expect(importer).not.toHaveBeenCalled();
-    expect(slotEntries("home.section")).toHaveLength(0);
+    expect(slotEntries("settings.section")).toHaveLength(0);
   });
 });
 
@@ -110,7 +110,7 @@ describe("plugin loader: failure isolation", () => {
       },
     });
 
-    expect(slotEntries("home.section").map((e) => e.pluginId)).toEqual(["good"]);
+    expect(slotEntries("settings.section").map((e) => e.pluginId)).toEqual(["good"]);
     expect(loadFailures()).toEqual([
       { id: "bad", label: "bad plugin", detail: "chunk load failed" },
     ]);
@@ -125,7 +125,7 @@ describe("plugin loader: failure isolation", () => {
       modules: { bad: async () => ({ default: { not: "a function" } }) },
     });
 
-    expect(slotEntries("home.section")).toHaveLength(0);
+    expect(slotEntries("settings.section")).toHaveLength(0);
     expect(loadFailures()[0].detail).toBe("UI module has no default export function");
   });
 
@@ -138,7 +138,7 @@ describe("plugin loader: failure isolation", () => {
       modules: {
         bad: async () => ({
           default: (api: PluginApi) => {
-            api.slots.register("home.section", () => null);
+            api.slots.register("settings.section", () => null);
             throw new Error("boom");
           },
         }),
@@ -146,7 +146,7 @@ describe("plugin loader: failure isolation", () => {
     });
 
     // A half-initialised plugin must leave nothing mounted.
-    expect(slotEntries("home.section")).toHaveLength(0);
+    expect(slotEntries("settings.section")).toHaveLength(0);
     expect(loadFailures()[0].detail).toBe("boom");
   });
 

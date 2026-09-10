@@ -49,11 +49,13 @@ export function useTextInput(maxHeightPx: number, persistKey?: string) {
   });
 
   // Auto-grow the textarea up to a cap whenever the draft changes.
-  createEffect(value, () => {
+  const resize = () => {
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, maxHeightPx)}px`;
-  });
+  };
+  createEffect(value, resize);
+  onSettled(resize);
 
   // Persist the draft per surface. Runs immediately with the restored value
   // (a harmless write-back), then on every subsequent keystroke.

@@ -14,41 +14,33 @@ import dev.hirsel.android.settings.SettingsStore
 
 const val FCM_LOG_TAG = "HirselFcm"
 
-private const val PING_CHANNEL_ID = "hirsel-pings"
+private const val THREAD_CHANNEL_ID = "hirsel-threads"
 
 class HirselFirebaseMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
-        Log.i(FCM_LOG_TAG, "FCM token refreshed: ${token.take(16)}…")
+        Log.i(FCM_LOG_TAG, "FCM token refreshed")
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        val name = message.data["name"] ?: "ping"
-        val pingId = message.data["ping_id"] ?: "unknown"
+        val name = message.data["title"] ?: return
+        val threadId = message.data["thread_id"]?.takeIf { it.toULongOrNull() != null } ?: return
+        val historyId = message.data["history_id"]?.takeIf { it.isNotBlank() } ?: return
         val title = message.notification?.title ?: "Hirsel"
         val body = message.notification?.body ?: name
-        Log.i(
-            FCM_LOG_TAG,
-            "FCM message received: name=$name ping_id=$pingId title=$title body=$body data=${message.data}",
-        )
-        // Honor the user's push preference locally: a token may still be registered
-        // with the host after the user turns push off, so suppress at delivery too.
-        // Notify-scope is intent only here — the host currently pushes exclusively
-        // for requires-response pings, so every delivered push already qualifies
-        // under both "needs a reply" and "all pings".
         if (!SettingsStore(this).pushEnabled) {
-            Log.i(FCM_LOG_TAG, "push disabled in settings; suppressing notification for ping $pingId")
+            Log.i(FCM_LOG_TAG, "push disabled in settings; suppressing notification for Thread $threadId")
             return
         }
-        postPingNotification(title, body, name, pingId)
+        postThreadNotification(title, body, name, threadId, historyId)
     }
 
-    private fun postPingNotification(title: String, body: String, name: String, pingId: String) {
+    private fun postThreadNotification(title: String, body: String, name: String, threadId: String, historyId: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
                 NotificationChannel(
-                    PING_CHANNEL_ID,
-                    "Hirsel pings",
+                    THREAD_CHANNEL_ID,
+                    "Hirsel threads",
                     NotificationManager.IMPORTANCE_HIGH,
                 ),
             )
@@ -56,21 +48,23 @@ class HirselFirebaseMessagingService : FirebaseMessagingService() {
 
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("thread_id", threadId)
+            putExtra("history_id", historyId)
         }
         val pendingIntent = PendingIntent.getActivity(
             this,
-            pingId.hashCode(),
+            (historyId + ":" + threadId).hashCode(),
             launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(this, PING_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, THREAD_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(body)
-            .setSubText("@$name · Ping $pingId")
+            .setSubText("@$name · Thread #$threadId")
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()
-        manager.notify(pingId.toIntOrNull() ?: pingId.hashCode(), notification)
+        manager.notify(threadId.toIntOrNull() ?: (historyId + ":" + threadId).hashCode(), notification)
     }
 }

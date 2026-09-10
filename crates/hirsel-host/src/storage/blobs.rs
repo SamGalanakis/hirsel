@@ -22,6 +22,7 @@ impl Storage {
         mime: impl Into<String>,
         data: Vec<u8>,
     ) -> anyhow::Result<StoredBlob> {
+        let expected_history = self.history_id().await?;
         tokio::fs::create_dir_all(self.blobs_dir.as_ref()).await?;
         let id = Uuid::new_v4().to_string();
         let path = self.blobs_dir.join(&id);
@@ -31,6 +32,9 @@ impl Storage {
         tokio::fs::write(&path, &data)
             .await
             .with_context(|| format!("write blob file {}", path.display()))?;
+
+        #[cfg(test)]
+        tests::pause(self.blobs_dir.as_ref(), "upload").await;
 
         let record = StoredBlob {
             blob: Blob {
@@ -45,6 +49,7 @@ impl Storage {
         let metadata_result: anyhow::Result<Option<StoredBlob>> = async {
             let mut conn = self.conn.lock().await;
             let tx = conn.transaction()?;
+            super::thread_scope::validate_history(&tx, &expected_history)?;
             tx.execute(
                 "
                 INSERT INTO blobs (id, name, mime, size, path, created_ts)
@@ -208,4 +213,4 @@ fn blob_size_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

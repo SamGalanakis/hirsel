@@ -447,7 +447,6 @@ mod tests {
     async fn roster(dir: &tempfile::TempDir, booted: ProviderMode) -> ProviderRosterState {
         let store = ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
             &EnvBootstrap::default(),
         )
@@ -656,7 +655,7 @@ mod tests {
             main.iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.6-sol"]
+            ["gpt-5.6-sol", "gpt-6-astra"]
         );
         assert_eq!(
             fork.iter()

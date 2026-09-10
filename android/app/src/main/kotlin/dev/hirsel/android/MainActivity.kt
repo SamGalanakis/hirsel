@@ -87,8 +87,19 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private var notificationHistoryId by mutableStateOf<String?>(null)
+    private var notificationThreadId by mutableStateOf<ULong?>(null)
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        notificationThreadId = intent.getStringExtra("thread_id")?.toULongOrNull()
+        notificationHistoryId = intent.getStringExtra("history_id")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        notificationThreadId = intent.getStringExtra("thread_id")?.toULongOrNull()
+        notificationHistoryId = intent.getStringExtra("history_id")
         // Edge-to-edge with transparent system bars; the icon appearance is driven
         // reactively from the active theme below so light mode gets dark icons.
         enableEdgeToEdge()
@@ -123,6 +134,9 @@ class MainActivity : ComponentActivity() {
                     color = LocalHirselColors.current.Background,
                 ) {
                     HirselRoot(
+                        notificationThreadId = notificationThreadId,
+                        notificationHistoryId = notificationHistoryId,
+                        onNotificationHandled = { notificationThreadId = null; notificationHistoryId = null },
                         settings = settings,
                         themeMode = themeMode,
                         onThemeModeChange = { themeMode = it; settings.themeMode = it },
@@ -144,6 +158,9 @@ class MainActivity : ComponentActivity() {
  */
 @Composable
 private fun HirselRoot(
+    notificationThreadId: ULong?,
+    notificationHistoryId: String?,
+    onNotificationHandled: () -> Unit,
     settings: SettingsStore,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
@@ -171,6 +188,15 @@ private fun HirselRoot(
     }
 
     val connection = rememberConnection(activeSpec)
+    LaunchedEffect(notificationThreadId, notificationHistoryId, connection.snapshot?.historyId, connection.phase) {
+        val id = notificationThreadId
+        if (id != null && connection.isOnline && connection.snapshot?.historyId != null) {
+            val destination = notificationDestination(notificationHistoryId, id, connection.snapshot?.historyId, connection.snapshot?.threads.orEmpty().map { it.id })
+            if (destination != null) connection.openThread(destination)
+            else connection.actionError = "This Thread is no longer available."
+            onNotificationHandled()
+        }
+    }
 
     // On a successful pairing handshake, capture + persist the issued device token.
     if (activeSpec is ConnectionSpec.Pairing) {
@@ -196,13 +222,13 @@ private fun HirselRoot(
         }
     }
 
-    // Best-effort FCM registration once the transport is up (Ping push tokens),
+    // Best-effort FCM registration once the transport is up (Thread push tokens),
     // gated on the user's push preference.
     LaunchedEffect(connection.isOnline) {
         if (!connection.isOnline || !settings.pushEnabled) return@LaunchedEffect
         runCatching {
             val token = fetchFcmToken()
-            Log.i(FCM_LOG_TAG, "FCM token fetched: ${token.take(16)}…")
+            Log.i(FCM_LOG_TAG, "FCM token fetched")
             withContext(Dispatchers.IO) { connection.client?.registerPushToken("android", token) }
             Log.i(FCM_LOG_TAG, "FCM token registered with Hirsel host")
         }.onFailure { Log.e(FCM_LOG_TAG, "FCM token registration failed", it) }

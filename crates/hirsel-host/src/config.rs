@@ -41,9 +41,6 @@ pub struct Config {
     pub fake_fixture: Option<PathBuf>,
     pub listen: SocketAddr,
     pub debug: bool,
-    /// Legacy side-session compatibility. `None` is the current-product
-    /// default: no compatibility backend retention and no TTL reaper.
-    pub compat_side_session_ttl_secs: Option<u64>,
 }
 
 impl Config {
@@ -117,10 +114,6 @@ impl Config {
             .parse()
             .context("HIRSEL_LISTEN must be a socket address")?;
         let debug = env::var("HIRSEL_DEBUG").ok().as_deref() == Some("1");
-        let compat_side_session_ttl_secs = compatibility_side_session_ttl(
-            env::var("HIRSEL_COMPAT_SIDE_SESSIONS").ok().as_deref(),
-            env::var("HIRSEL_SIDECHAT_TTL_SECS").ok().as_deref(),
-        )?;
         if debug && !listen.ip().is_loopback() {
             listen = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen.port());
         }
@@ -139,25 +132,7 @@ impl Config {
             fake_fixture,
             listen,
             debug,
-            compat_side_session_ttl_secs,
         })
-    }
-}
-
-fn compatibility_side_session_ttl(
-    enabled: Option<&str>,
-    ttl: Option<&str>,
-) -> anyhow::Result<Option<u64>> {
-    match enabled {
-        None | Some("0") => Ok(None),
-        Some("1") => {
-            Ok(Some(ttl.unwrap_or("86400").parse().context(
-                "HIRSEL_SIDECHAT_TTL_SECS must be an unsigned integer",
-            )?))
-        }
-        Some(other) => Err(anyhow!(
-            "HIRSEL_COMPAT_SIDE_SESSIONS must be 0 or 1, got {other}"
-        )),
     }
 }
 
@@ -179,39 +154,9 @@ fn validate_owner_token(token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::compatibility_side_session_ttl;
-
-    #[test]
-    fn side_session_compatibility_is_explicit_and_ttl_is_parsed_only_when_enabled() {
-        assert_eq!(
-            compatibility_side_session_ttl(None, Some("broken")).unwrap(),
-            None
-        );
-        assert_eq!(
-            compatibility_side_session_ttl(Some("0"), Some("broken")).unwrap(),
-            None
-        );
-        assert_eq!(
-            compatibility_side_session_ttl(Some("1"), None).unwrap(),
-            Some(86_400)
-        );
-        assert_eq!(
-            compatibility_side_session_ttl(Some("1"), Some("60")).unwrap(),
-            Some(60)
-        );
-        assert!(compatibility_side_session_ttl(Some("1"), Some("broken")).is_err());
-        assert!(compatibility_side_session_ttl(Some("true"), None).is_err());
-    }
-
-    use super::validate_owner_token;
-
-    #[test]
-    fn owner_token_rejects_empty_and_whitespace_values() {
-        for token in ["", " ", "\t\r\n"] {
-            assert!(validate_owner_token(token).is_err(), "accepted {token:?}");
-        }
-        validate_owner_token("real-token").unwrap();
-    }
+/// Whether this host is configured to offer the optional native transport.
+pub fn iroh_enabled() -> bool {
+    env::var("HIRSEL_IROH").map_or(true, |value| {
+        value != "0" && !value.eq_ignore_ascii_case("false")
+    })
 }

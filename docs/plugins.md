@@ -126,6 +126,10 @@ Copy the folder into another hirsel checkout and run `just sync-plugins`. That
 is the whole distribution story, and it is proportionate to a system with one
 user.
 
-Plugin FYIs use `NewActivity::new(kind, data)` and belong to the orchestrator (Thread 0) by default. Use `.in_thread(thread_id)` for activity about existing work. The host stamps plugin identity on every activity. Creating activity never creates or settles a Thread, and its `activity_id` must not be used as a Thread id. Use `NewThread::new(title, description)` when the plugin actually creates durable work; it appears in the same inventory as Owner and Agent-created Threads.
+Plugin FYIs use `NewActivity::new(thread_id, kind, data)` with an explicit existing destination. Agent-invoked plugins receive scoped Thread and KV capabilities tied to the active execution; daemon plugins remain host-managed. The host stamps plugin identity on every activity. Creating activity never creates or settles a Thread, and its `activity_id` must not be used as a Thread id. Use `NewThread::new(title, description)` when the plugin actually creates durable work; it appears in the same inventory as Owner and Agent-created Threads.
 
 A decision is still a Thread: `.with_instrument(semantic_json).needs_owner()` attaches validated controls and requests attention when creating it. It uses the same generated action contract as any other Thread. This does not change settlement.
+
+## Browser slots
+
+Plugin UI is compiled with the app's Solid 2 runtime. The current mounted slot is `settings.section`; `api.slots.register("settings.section", component)` supplies a component receiving an empty context. There are no Task/Home slot aliases. Plugin Views and push events retain their current Host contracts.

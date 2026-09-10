@@ -11,24 +11,33 @@ pub struct AgentRuntime {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OwnerTurn {
+    pub history_id: String,
+    pub turn_id: Option<u64>,
     pub thread_id: u64,
     pub thread_action: Option<ThreadActionContext>,
-    pub message_id: u64,
+    pub message_id: Option<u64>,
+    pub report_triggered: bool,
     pub client_id: String,
     pub body: String,
     pub anchor: Option<u64>,
     pub attachments: Vec<StoredBlob>,
-    pub mentioned_pings: Vec<Ping>,
     pub mode: SendMode,
-    pub task_action: Option<TaskActionContext>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskActionContext {
-    pub event: Event,
-    pub action: String,
-    pub data: Value,
+impl OwnerTurn {
+    pub(super) async fn stored_turn(
+        &self,
+        storage: &crate::storage::Storage,
+    ) -> anyhow::Result<hirsel_proto::ThreadTurn> {
+        let id = self
+            .turn_id
+            .ok_or_else(|| anyhow::anyhow!("input requires an accepted turn identity"))?;
+        storage
+            .accepted_thread_turn(&self.history_id, id, self.thread_id)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -45,6 +54,7 @@ pub enum CancelQueuedResult {
 }
 
 pub(super) enum AgentBackend {
+    Threaded(Arc<ThreadRuntimeRegistry>),
     Scripted(Arc<ScriptedAgentRuntime>),
     Lash(Arc<LashAgentRuntime>),
     Degraded(Arc<DegradedAgentRuntime>),
@@ -53,26 +63,14 @@ pub(super) enum AgentBackend {
 impl AgentRuntime {
     pub fn readiness(&self) -> anyhow::Result<()> {
         match self.backend.as_ref() {
-            AgentBackend::Scripted(_) | AgentBackend::Lash(_) => Ok(()),
+            AgentBackend::Threaded(_) | AgentBackend::Scripted(_) | AgentBackend::Lash(_) => Ok(()),
             AgentBackend::Degraded(_) => anyhow::bail!("Lash store is unavailable"),
         }
     }
 
     pub fn is_scripted(&self) -> bool {
         matches!(self.backend.as_ref(), AgentBackend::Scripted(_))
-    }
-
-    pub(crate) fn side_chat_backend(&self) -> crate::side_chat::SideChatBackend {
-        match self.backend.as_ref() {
-            AgentBackend::Scripted(_) => crate::side_chat::SideChatBackend::Scripted,
-            AgentBackend::Lash(runtime) => crate::side_chat::SideChatBackend::Lash {
-                core: Arc::new(runtime.core.clone()),
-                prompts: runtime.prompts.clone(),
-            },
-            AgentBackend::Degraded(runtime) => {
-                crate::side_chat::SideChatBackend::Degraded(runtime.reason.clone())
-            }
-        }
+            || matches!(self.backend.as_ref(), AgentBackend::Threaded(r) if r.is_scripted())
     }
 
     pub async fn start(
@@ -81,9 +79,6 @@ impl AgentRuntime {
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
     ) -> anyhow::Result<Self> {
-        for turn in tools.storage().interrupt_unfinished_thread_turns().await? {
-            tools.publish_thread_turn(turn).await;
-        }
         let model_selection = match config.provider_mode {
             provider @ (ProviderMode::Codex | ProviderMode::OpenRouter) => Some(
                 ModelSelectionState::load(
@@ -97,36 +92,29 @@ impl AgentRuntime {
             ),
             ProviderMode::Anthropic => None,
         };
-        match config.agent_mode {
-            AgentMode::Scripted => Ok(Self {
-                backend: Arc::new(AgentBackend::Scripted(start_scripted_runtime(
-                    config,
-                    tools,
-                    broadcaster,
-                    broadcast_log,
-                ))),
-                model_selection,
-            }),
-            AgentMode::Lash => {
-                match LashAgentRuntime::start(
-                    config,
-                    model_selection.clone(),
-                    tools,
-                    broadcaster,
-                    broadcast_log,
-                )
-                .await?
-                {
-                    LashStartup::Ready(runtime) => Ok(Self {
-                        backend: Arc::new(AgentBackend::Lash(runtime)),
-                        model_selection,
-                    }),
-                    LashStartup::Unavailable(runtime) => Ok(Self {
-                        backend: Arc::new(AgentBackend::Degraded(runtime)),
-                        model_selection,
-                    }),
-                }
-            }
+        let registry = ThreadRuntimeRegistry::start(
+            tools.storage().history_id().await?,
+            config,
+            model_selection.clone(),
+            tools.clone(),
+            broadcaster,
+            broadcast_log,
+        );
+        registry.refresh_execution_default().await?;
+        for turn in tools.storage().interrupt_unfinished_thread_turns().await? {
+            tools.publish_thread_turn(turn).await;
+        }
+        registry.spawn_poller();
+        Ok(Self {
+            backend: Arc::new(AgentBackend::Threaded(registry)),
+            model_selection,
+        })
+    }
+
+    pub(crate) async fn reset_history(&self) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Threaded(registry) => registry.reset_history().await,
+            _ => anyhow::bail!("history reset requires the Thread runtime registry"),
         }
     }
 
@@ -151,6 +139,9 @@ impl AgentRuntime {
         if !state.applies_to_live_session() {
             return Ok(selection);
         }
+        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
+            registry.refresh_execution_default().await?;
+        }
         if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
             runtime.apply_selected_model().await?;
         }
@@ -164,6 +155,13 @@ impl AgentRuntime {
         if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
             runtime.apply_agent_prompt().await?;
         }
+        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
+            for lane in registry.opened().await {
+                if let AgentBackend::Lash(runtime) = lane.as_ref() {
+                    runtime.apply_agent_prompt().await?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -174,6 +172,13 @@ impl AgentRuntime {
         if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
             runtime.refresh_subagent_model_tools(catalog).await?;
         }
+        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
+            for lane in registry.opened().await {
+                if let AgentBackend::Lash(runtime) = lane.as_ref() {
+                    runtime.refresh_subagent_model_tools(catalog).await?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -183,6 +188,13 @@ impl AgentRuntime {
     pub async fn refresh_plugin_tools(&self, tool_names: &[String]) -> anyhow::Result<()> {
         if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
             runtime.refresh_plugin_tools(tool_names).await?;
+        }
+        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
+            for lane in registry.opened().await {
+                if let AgentBackend::Lash(runtime) = lane.as_ref() {
+                    runtime.refresh_plugin_tools(tool_names).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -198,6 +210,7 @@ impl AgentRuntime {
 
     pub async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
         match self.backend.as_ref() {
+            AgentBackend::Threaded(runtime) => runtime.enqueue(turn).await,
             AgentBackend::Scripted(runtime) => runtime.enqueue(turn).await,
             AgentBackend::Lash(runtime) => runtime.enqueue_inner(turn).await,
             AgentBackend::Degraded(runtime) => runtime.enqueue(turn).await,
@@ -206,6 +219,7 @@ impl AgentRuntime {
 
     pub async fn cancel_thread_turn(&self, thread_id: u64) -> anyhow::Result<()> {
         match self.backend.as_ref() {
+            AgentBackend::Threaded(runtime) => runtime.cancel(thread_id).await?,
             AgentBackend::Scripted(runtime) => {
                 let state = runtime.state.lock().await;
                 let active = state
@@ -223,6 +237,7 @@ impl AgentRuntime {
 
     pub async fn cancel_turn(&self) -> anyhow::Result<()> {
         match self.backend.as_ref() {
+            AgentBackend::Threaded(_) => anyhow::bail!("cancellation requires an explicit Thread"),
             AgentBackend::Scripted(runtime) => runtime.cancel_turn().await,
             AgentBackend::Lash(runtime) => runtime.cancel_turn().await,
             AgentBackend::Degraded(runtime) => runtime.cancel_turn().await,
@@ -231,6 +246,7 @@ impl AgentRuntime {
 
     pub async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
         match self.backend.as_ref() {
+            AgentBackend::Threaded(runtime) => runtime.cancel_queued(client_id).await,
             AgentBackend::Scripted(runtime) => runtime.cancel_queued(client_id).await,
             AgentBackend::Lash(runtime) => runtime.cancel_queued(client_id).await,
             AgentBackend::Degraded(runtime) => runtime.cancel_queued(client_id).await,
@@ -239,6 +255,7 @@ impl AgentRuntime {
 
     pub async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
         match self.backend.as_ref() {
+            AgentBackend::Threaded(registry) => registry.start_monitor(record).await,
             AgentBackend::Lash(runtime) => runtime.start_monitor_process(record).await,
             AgentBackend::Scripted(runtime) => {
                 runtime.spawn_standalone_monitor(record.id.clone());
@@ -248,11 +265,8 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn cancel_monitor_process(&self, monitor_id: &str) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Lash(runtime) => runtime.cancel_monitor_process(monitor_id).await,
-            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(()),
-        }
+    pub async fn cancel_monitor_process(&self, _monitor_id: &str) -> anyhow::Result<()> {
+        Ok(())
     }
 
     /// Deliver a standalone monitor wake.
@@ -261,35 +275,14 @@ impl AgentRuntime {
     /// to a triage fork rather than the main Agent's queue; only the fork's
     /// Escalate exit reaches the Agent. The other backends have no fork
     /// dispatcher and keep their pre-ADR delivery.
-    pub async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
+    pub async fn dispatch_fork_wake(
+        &self,
+        message: crate::fork_wake::WakeMessage,
+    ) -> anyhow::Result<bool> {
         match self.backend.as_ref() {
-            AgentBackend::Scripted(runtime) => runtime.deliver_monitor_wake(text).await,
-            AgentBackend::Lash(runtime) => {
-                let message = crate::fork_wake::WakeMessage::new(
-                    crate::fork_wake::WakeSource::Monitor {
-                        monitor_id: "standalone".to_string(),
-                        label: "standalone monitor".to_string(),
-                    },
-                    text,
-                    format!("monitor:standalone:{}", Uuid::new_v4()),
-                );
-                if !runtime.fork_wake.dispatch(message) {
-                    anyhow::bail!("fork-wake dispatch is not installed");
-                }
-                Ok(())
-            }
-            AgentBackend::Degraded(runtime) => runtime.deliver_monitor_wake(text).await,
-        }
-    }
-
-    /// Route one non-owner message to a triage fork, for host surfaces that
-    /// have one to deliver (the debug smoke lever, and any future ingress).
-    /// Returns `false` when the backend has no fork dispatcher.
-    #[must_use]
-    pub fn dispatch_fork_wake(&self, message: crate::fork_wake::WakeMessage) -> bool {
-        match self.backend.as_ref() {
-            AgentBackend::Lash(runtime) => runtime.fork_wake.dispatch(message),
-            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => false,
+            AgentBackend::Threaded(registry) => registry.dispatch_fork_wake(message).await,
+            AgentBackend::Lash(runtime) => Ok(runtime.fork_wake.dispatch(message)),
+            _ => Ok(false),
         }
     }
 }
@@ -299,8 +292,14 @@ pub(super) fn start_scripted_runtime(
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
+    thread_id: u64,
+    tasks: RuntimeTasks,
+    capacity: Arc<tokio::sync::Semaphore>,
 ) -> Arc<ScriptedAgentRuntime> {
     let runtime = Arc::new(ScriptedAgentRuntime {
+        thread_id,
+        tasks,
+        capacity,
         config,
         tools,
         broadcaster,
@@ -309,22 +308,8 @@ pub(super) fn start_scripted_runtime(
         notify: Arc::new(Notify::new()),
     });
     let worker = Arc::clone(&runtime);
-    tokio::spawn(async move {
+    runtime.tasks.spawn(async move {
         worker.run().await;
-    });
-    let restore_worker = Arc::clone(&runtime);
-    tokio::spawn(async move {
-        if let Err(error) = restore_worker
-            .tools
-            .restore_subagent_processes_after_restart()
-            .await
-        {
-            tracing::warn!(%error, "failed to restore scripted Sub-agent processes after restart");
-        }
-    });
-    let monitor_worker = Arc::clone(&runtime);
-    tokio::spawn(async move {
-        monitor_worker.spawn_active_standalone_monitors().await;
     });
     runtime
 }
@@ -335,6 +320,11 @@ pub(super) enum LashStartup {
 }
 
 pub(super) struct LashAgentRuntime {
+    pub(super) tasks: RuntimeTasks,
+    pub(super) history_id: String,
+    pub(super) thread_id: u64,
+    pub(super) provider_id: String,
+    pub(super) capacity: Arc<tokio::sync::Semaphore>,
     pub(super) core: lash::LashCore,
     /// Kept so an ephemeral triage fork can open on the same transport the
     /// main session rides (ADR-0015); the fork differs in model, not provider.
@@ -370,7 +360,6 @@ pub(super) struct TurnAnchors {
     pub(super) request_id: Option<String>,
     pub(super) thread_id: u64,
     pub(super) thread_turn_id: Option<u64>,
-    pub(super) owner_message_id: u64,
 }
 
 #[derive(Debug, Default)]

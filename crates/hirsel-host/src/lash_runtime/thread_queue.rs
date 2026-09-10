@@ -1,15 +1,11 @@
-//! One admitted Owner input per global Agent turn. Lash may coalesce pending
+//! One admitted input per Thread lane. Lash may coalesce pending
 //! inputs, so addressed requests wait durably in Hirsel until the prior turn ends.
 use super::*;
 use hirsel_proto::ThreadTurnState;
 
 impl LashAgentRuntime {
     pub(super) async fn enqueue_thread_request(&self, turn: OwnerTurn) -> anyhow::Result<()> {
-        let stored = self
-            .tools
-            .storage()
-            .queue_thread_turn(turn.thread_id, Some(turn.message_id))
-            .await?;
+        let stored = turn.stored_turn(&self.tools.storage()).await?;
         self.tools
             .storage()
             .save_thread_request(&turn.client_id, &serde_json::to_value(&turn)?)
@@ -63,21 +59,24 @@ impl LashAgentRuntime {
             .pending_thread_requests()
             .await?
             .into_iter()
-            .next()
+            .find(|(_, p)| p["thread_id"].as_u64() == Some(self.thread_id))
         else {
             return Ok(None);
         };
         let mut turn: OwnerTurn = serde_json::from_value(payload.clone())?;
+        let accepted = turn.stored_turn(&self.tools.storage()).await?;
+        if !matches!(
+            self.tools.storage().turn_execution(accepted.id).await?,
+            crate::storage::ThreadExecution::Host { .. }
+        ) {
+            return Ok(None);
+        }
         let mut detail = self
             .tools
             .storage()
-            .thread_detail(
-                turn.thread_id,
-                (turn.message_id > 0).then_some(turn.message_id),
-                30,
-            )
+            .thread_detail(turn.thread_id, turn.message_id, 30)
             .await?;
-        let queued = if let Some(id) = payload.get("_thread_turn_id").and_then(Value::as_u64) {
+        let queued = if let Some(id) = payload.get("turn_id").and_then(Value::as_u64) {
             detail
                 .turns
                 .iter()
@@ -85,10 +84,7 @@ impl LashAgentRuntime {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("missing background ThreadTurn {id}"))?
         } else {
-            self.tools
-                .storage()
-                .queue_thread_turn(turn.thread_id, Some(turn.message_id))
-                .await?
+            turn.stored_turn(&self.tools.storage()).await?
         };
         if !detail.turns.iter().any(|t| t.id == queued.id) {
             detail.turns.push(queued.clone());
@@ -115,10 +111,15 @@ impl LashAgentRuntime {
         let history = detail
             .messages
             .into_iter()
-            .filter(|m| turn.message_id == 0 || m.id < turn.message_id)
+            .filter(|m| turn.message_id.is_none_or(|id|m.id<id))
             .map(|m| json!({"id":m.id,"author":m.author,"body":m.body,"artifact_ids":m.artifact_ids}))
             .collect::<Vec<_>>();
-        let source_label = if turn.message_id == 0 {
+        let current_artifacts = self
+            .tools
+            .storage()
+            .accepted_message_references(&turn.history_id, queued.id)
+            .await?;
+        let source_label = if turn.message_id.is_none() {
             "Background wake"
         } else {
             "Owner message"
@@ -130,11 +131,33 @@ impl LashAgentRuntime {
             serde_json::to_string(&history)?,
             turn.body
         );
-        if turn.message_id > 0
-            && let Some(message) = self.tools.storage().chat_message(turn.message_id).await?
+        turn.body.push_str(&format!(
+            "\n[Current accepted message artifact references]\n{}",
+            serde_json::to_string(&current_artifacts)?
+        ));
+        if let Some(message_id) = turn.message_id
+            && let Some(message) = self.tools.storage().chat_message(message_id).await?
             && !message.mentions.is_empty()
         {
             turn.body.push_str(&format!("\n[Explicitly referenced Threads: {}. References do not change the owning Thread; use threads.read for their context.]",message.mentions.iter().map(|id|format!("#{id}")).collect::<Vec<_>>().join(", ")));
+        }
+        let execution = self.tools.storage().turn_execution(queued.id).await?;
+        let crate::storage::ThreadExecution::Host { provider_id, model } = execution else {
+            anyhow::bail!("CLI turn must run on the CLI lane");
+        };
+        anyhow::ensure!(
+            provider_id == self.provider_id,
+            "accepted provider is unavailable on this host"
+        );
+        if self.session.policy_snapshot().model != model {
+            self.session
+                .admin()
+                .config()
+                .update(lash::SessionConfigPatch {
+                    model: Some(model),
+                    ..Default::default()
+                })
+                .await?;
         }
         let input = owner_turn_input(&turn).await?;
         let source_key = owner_turn_source_key(&client_id);
@@ -142,7 +165,6 @@ impl LashAgentRuntime {
             request_id: Some(client_id.clone()),
             thread_id: turn.thread_id,
             thread_turn_id: Some(queued.id),
-            owner_message_id: turn.message_id,
         };
         // A crash can leave a queued Thread request already accepted by Lash.
         // Reuse that exact input: the Thread title/history may have changed since
@@ -164,6 +186,10 @@ impl LashAgentRuntime {
         let stored = self.tools.storage().run_thread_turn(queued.id).await?;
         self.tools.publish_thread_turn(stored).await;
         let drain_id = self.next_drain_id(&anchors);
+        self.tools
+            .storage()
+            .bind_thread_execution(&self.history_id, &self.session_id, &drain_id, queued.id)
+            .await?;
         self.anchors.lock().await.active = Some(anchors);
         self.set_active_turn_id(Some(drain_id)).await;
         Ok(Some(client_id))
@@ -218,27 +244,6 @@ impl LashAgentRuntime {
     ) -> anyhow::Result<()> {
         let active = self.anchors.lock().await.active.clone();
         if let Some(active) = active {
-            let message_id = if let Some(output) = output {
-                if let Some(turn_id) = active.thread_turn_id {
-                    materialize_thread_turn_reply(
-                        &self.tools,
-                        output,
-                        turn_id,
-                        (active.owner_message_id > 0).then_some(active.owner_message_id),
-                    )
-                    .await?
-                } else {
-                    materialize_thread_turn_chat(
-                        &self.tools,
-                        output,
-                        active.thread_id,
-                        active.owner_message_id,
-                    )
-                    .await?
-                }
-            } else {
-                None
-            };
             let state = match output.map(|o| &o.result.outcome) {
                 Some(lash::TurnOutcome::Finished(_)) => ThreadTurnState::Completed,
                 Some(lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. })) => {
@@ -263,11 +268,19 @@ impl LashAgentRuntime {
                         self.tools.publish_thread_activity(activity).await;
                     }
                 }
-                let stored = self
+                let (stored, message) = self
                     .tools
                     .storage()
-                    .finish_thread_turn(turn_id, state, message_id)
+                    .complete_thread_turn(
+                        &self.history_id,
+                        turn_id,
+                        state,
+                        output.and_then(turn_chat_payload),
+                    )
                     .await?;
+                if let Some(message) = message {
+                    self.tools.publish_thread_message(message).await;
+                }
                 self.tools.publish_thread_turn(stored).await;
             }
         }
@@ -356,19 +369,18 @@ impl LashAgentRuntime {
     ) -> anyhow::Result<CancelQueuedResult> {
         let _request_guard = self.request_lock.lock().await;
         let active = self.anchors.lock().await.active.clone();
-        for (id, payload) in self.tools.storage().pending_thread_requests().await? {
-            if id == client_id {
+        if let Some(payload) = self.tools.storage().thread_request(client_id).await? {
+            {
                 let request: OwnerTurn = serde_json::from_value(payload.clone())?;
-                let queued_id =
-                    if let Some(id) = payload.get("_thread_turn_id").and_then(Value::as_u64) {
-                        id
-                    } else {
-                        self.tools
-                            .storage()
-                            .queue_thread_turn(request.thread_id, Some(request.message_id))
-                            .await?
-                            .id
-                    };
+                let queued_id = if let Some(id) = payload.get("turn_id").and_then(Value::as_u64) {
+                    id
+                } else {
+                    self.tools
+                        .storage()
+                        .queue_thread_turn(request.thread_id, request.message_id)
+                        .await?
+                        .id
+                };
                 if active
                     .as_ref()
                     .is_some_and(|a| a.thread_turn_id == Some(queued_id))

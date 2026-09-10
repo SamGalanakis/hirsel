@@ -6,7 +6,7 @@ import {
 import type { ProcessInfo } from "../protocol";
 
 function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
-  return {
+  return { thread_id: 1,
     id: "proc-1",
     kind: "subagent",
     label: "task",

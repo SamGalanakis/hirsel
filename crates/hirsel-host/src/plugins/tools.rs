@@ -125,10 +125,17 @@ impl PluginToolRegistry {
 
     /// Dispatch `name`. `None` means "not a plugin tool" — the executor then
     /// reports the unknown-tool error it always did.
-    pub(crate) async fn call(&self, name: &str, args: Value) -> Option<Result<Value, String>> {
+    pub(crate) async fn call(
+        &self,
+        name: &str,
+        args: Value,
+        tools: crate::tools::ToolSuite,
+        caller: crate::storage::ThreadCaller,
+        operation_id: String,
+    ) -> Option<Result<Value, String>> {
         let tool = self.read().get(name).cloned()?;
         let handler = Arc::clone(&tool.handler);
-        let ctx = tool.ctx.clone();
+        let ctx = super::scoped_ctx::context(&tool.ctx, tools, caller, operation_id);
         let call = handler.call(ctx, args);
         Some(
             match tokio::time::timeout(PLUGIN_TOOL_TIMEOUT, call).await {

@@ -157,7 +157,7 @@ pub fn is_valid_tool_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_plugin_id, is_valid_tool_name};
+    use super::is_valid_plugin_id;
 
     #[test]
     fn plugin_ids_are_lowercase_kebab() {
@@ -171,13 +171,13 @@ mod tests {
         assert!(!is_valid_plugin_id("hello-"));
         assert!(!is_valid_plugin_id("hello--world"));
     }
+}
 
-    #[test]
-    fn tool_names_are_lowercase_identifiers() {
-        assert!(is_valid_tool_name("ping"));
-        assert!(is_valid_tool_name("send_note2"));
-        assert!(!is_valid_tool_name("Ping"));
-        assert!(!is_valid_tool_name("send-note"));
-        assert!(!is_valid_tool_name(""));
-    }
+#[test]
+fn tool_names_are_lowercase_identifiers() {
+    assert!(is_valid_tool_name("ping"));
+    assert!(is_valid_tool_name("send_note2"));
+    assert!(!is_valid_tool_name("Ping"));
+    assert!(!is_valid_tool_name("send-note"));
+    assert!(!is_valid_tool_name(""));
 }

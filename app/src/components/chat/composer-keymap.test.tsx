@@ -139,8 +139,8 @@ describe("Queue-next-turn affordance (task 4)", () => {
     fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true, shiftKey: true });
 
     expect(onSend).toHaveBeenCalledOnce();
-    // onSend(body, ref, mode, blobs, mentions) — mode is the 3rd arg.
-    expect(onSend.mock.calls[0][2]).toBe("next_turn");
+    // onSend(body, mode, blobs, mentions) — mode is the 2nd arg.
+    expect(onSend.mock.calls[0][1]).toBe("next_turn");
   });
 
   it("leaves Tab as ordinary focus movement with an unfinished draft", async () => {
@@ -171,7 +171,7 @@ describe("No dead affordances in the capsule (composer redesign)", () => {
     await userEvent.setup().click(getByLabelText("Send"));
     expect(onSend).toHaveBeenCalledOnce();
     expect(onSend.mock.calls[0][0]).toBe("a non-empty draft");
-    expect(onSend.mock.calls[0][2]).toBe("send");
+    expect(onSend.mock.calls[0][1]).toBe("send");
     expect(textarea.value).toBe("");
   });
 
@@ -188,7 +188,7 @@ describe("No dead affordances in the capsule (composer redesign)", () => {
     fireEvent.input(textarea, { target: { value: "ship it" } });
     fireEvent.keyDown(textarea, { key: "Enter" });
     expect(onSend).toHaveBeenCalledOnce();
-    expect(onSend.mock.calls[0][2]).toBe("send");
+    expect(onSend.mock.calls[0][1]).toBe("send");
   });
 
   it.each(["send", "next_turn"])("keeps busy touch %s available without stopping the active turn", async (mode) => {
@@ -212,7 +212,7 @@ describe("No dead affordances in the capsule (composer redesign)", () => {
       }
       fireEvent.click(send);
       expect(onSend).toHaveBeenCalledOnce();
-      expect(onSend.mock.calls[0]).toEqual(["Continue with this follow-up", null, mode, [], []]);
+      expect(onSend.mock.calls[0]).toEqual(["Continue with this follow-up", mode, [], [], []]);
       expect(onStop).not.toHaveBeenCalled();
       expect(textarea.value).toBe("");
       fireEvent.click(getByLabelText("Stop the agent"));
@@ -231,4 +231,25 @@ describe("No dead affordances in the capsule (composer redesign)", () => {
     expect(textarea.className).toContain("min-h-9");
     expect(textarea.className).toContain("max-h-28");
   });
+});
+
+it.each([false, true])("snapshots artifact context before upload and rejects a changed history (%s)", async (resetHistory) => {
+  const { Composer } = await import("./Composer");
+  const { createSignal } = await import("solid-js");
+  const { setHistoryId } = await import("../../lib/history");
+  const { draftArtifact, stageDraftArtifact, consumeDraftArtifact } = await import("../../artifacts/draft-context");
+  flush(() => { setHistoryId("upload-history"); stageDraftArtifact(1,{id:44,title:"Original"}); });
+  const [context, setContext] = createSignal({id:44,title:"Original"});
+  let finish!: (blobs: Blob[]) => void;
+  const attachments = stubAttachments();
+  attachments.files = () => [{ clientId:"upload",file:new File(["data"],"notes.txt"),name:"notes.txt",mime:"text/plain",size:4,kind:"file",upload:{state:"idle"} }];
+  attachments.uploadAll = () => new Promise(resolve => { finish=resolve; });
+  const onSend=vi.fn();
+  const view=render(()=> <Composer attachments={attachments} thinking={false} artifactContext={context()} onConsumeArtifactContext={id=>consumeDraftArtifact(1,id)} onSend={onSend} onStop={()=>{}} getLastOwnerBody={()=>null} />);
+  const textarea=view.container.querySelector("textarea")!;
+  fireEvent.input(textarea,{target:{value:"Edit the referenced result"}});fireEvent.keyDown(textarea,{key:"Enter"});
+  flush(()=>{stageDraftArtifact(1,{id:55,title:"Replacement"});setContext({id:55,title:"Replacement"});if(resetHistory)setHistoryId("different-history");});
+  finish([]); await new Promise(resolve=>setTimeout(resolve,0));
+  if(resetHistory)expect(onSend).not.toHaveBeenCalled();
+  else {expect(onSend).toHaveBeenCalledWith("Edit the referenced result","send",[],[],[44]);expect(draftArtifact(1)?.id).toBe(55);}
 });

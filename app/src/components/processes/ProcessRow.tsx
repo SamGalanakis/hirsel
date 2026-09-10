@@ -3,11 +3,12 @@ import { createSignal, Show } from "solid-js";
 
 import type { ProcessInfo, ProcessState } from "../../protocol";
 import { formatRelativeTime } from "../../lib/format";
+import { ThreadLink } from "../../threads/ThreadRef";
 import { Card } from "../ui/card";
 
 interface Props {
   process: ProcessInfo;
-  /** "Ask Hirsel to stop": return to Tasks with the composer pre-filled. Subagent only,
+  /** "Ask Hirsel to stop": return to Threads with the composer pre-filled. Subagent only,
    * while running — interrupts route through Hirsel, never a direct kill. */
   onAskToStop: (process: ProcessInfo) => void;
 }
@@ -112,7 +113,7 @@ export function ProcessRow(props: Props) {
       >
         <span class="shrink-0 text-muted-foreground">
           <Show when={isSubagent()} fallback={<Radar class="size-4" aria-label="Monitor" />}>
-            <Bot class="size-4" aria-label="Sub-agent" />
+            <Bot class="size-4" aria-label="Thread execution" />
           </Show>
         </span>
         <Show
@@ -154,7 +155,7 @@ export function ProcessRow(props: Props) {
       >
         <span class="mt-0.5 shrink-0 text-muted-foreground">
           <Show when={isSubagent()} fallback={<Radar class="size-4" aria-label="Monitor" />}>
-            <Bot class="size-4" aria-label="Sub-agent" />
+            <Bot class="size-4" aria-label="Thread execution" />
           </Show>
         </span>
 
@@ -211,6 +212,7 @@ export function ProcessRow(props: Props) {
         <DisclosureChevron expanded={expanded()} class="mt-0.5" />
       </button>
 
+      <div class="text-xs text-muted-foreground"><ThreadLink id={p().thread_id} /></div>
       {/* Expanded detail. */}
       <Show when={expanded()}>
         <div class="ml-6 flex flex-col gap-2 border-l border-border/60 pl-3 pt-1">

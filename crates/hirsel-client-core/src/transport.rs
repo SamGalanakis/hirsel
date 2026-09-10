@@ -158,10 +158,7 @@ async fn run_session(
     };
     let auth = client.current_auth();
     let mut awaiting_paired = matches!(auth, hirsel_proto::HelloAuth::PairingCode { .. });
-    let hello = ClientToHost::Hello {
-        auth,
-        last_seen_msg_id: client.read_store().last_seen_msg_id,
-    };
+    let hello = ClientToHost::Hello { auth };
     drop(client);
     if let Err(error) = channel.send(&hello).await {
         return SessionEnd::Disconnected {
@@ -210,6 +207,7 @@ async fn run_session(
                         continue;
                     }
                     let hello_ok = matches!(message, HostToClient::HelloOk { .. });
+                    let refresh_brief = matches!(&message, HostToClient::ThreadActivity { activity } if activity.kind == "delegation_received");
                     if hello_ok && awaiting_paired {
                         notify_protocol_error(inner, "hello_ok arrived before paired".to_string());
                         return SessionEnd::Disconnected {
@@ -225,12 +223,11 @@ async fn run_session(
                             client.set_connection(ConnectionState::Online);
                             client.notify_lifecycle(LifecycleEvent::Online);
                         }
-                        if let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
-                            return SessionEnd::Disconnected {
-                                reason: error,
-                                became_online: true,
-                            };
-                        }
+                    }
+                    if online && (hello_ok || refresh_brief)
+                        && let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await
+                    {
+                        return SessionEnd::Disconnected { reason: error, became_online: true };
                     }
                 }
                 Ok(ServerFrame::Invalid(error)) => {
@@ -283,10 +280,14 @@ async fn flush_pending(
             return Err(error);
         }
     }
-    for (client_id, title) in creates {
+    for (client_id, title, parent_thread_id) in creates {
         if sent_this_connection.insert(client_id.clone()) {
             channel
-                .send(&hirsel_proto::ClientToHost::CreateThread { client_id, title })
+                .send(&hirsel_proto::ClientToHost::CreateThread {
+                    client_id,
+                    title,
+                    parent_thread_id,
+                })
                 .await?;
         }
     }
@@ -306,14 +307,21 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
         let mut store = client.write_store();
         match message {
             HostToClient::HelloOk {
-                latest_msg_id,
-                messages,
+                history_id,
                 threads,
                 processes,
                 host_version,
                 ..
             } => {
-                store.apply_hello_ok(latest_msg_id, messages, threads, processes, host_version);
+                let history_changed =
+                    store.apply_hello_ok(history_id, threads, processes, host_version);
+                if history_changed {
+                    client
+                        .pending_frames
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
+                }
                 let mut reopen = store.opened_threads.clone();
                 reopen.extend(store.requests.iter().map(|(_, id)| *id));
                 reopen.sort_unstable();
@@ -337,7 +345,7 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 }
                 true
             }
-            HostToClient::Msg { message, sc: None } => {
+            HostToClient::Msg { message } => {
                 store.apply_message(message);
                 true
             }
@@ -348,9 +356,9 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
             HostToClient::AgentActivity {
                 state,
                 text,
-                sc: None,
-                thread_id: Some(thread_id),
-                turn_id: Some(turn_id),
+
+                thread_id,
+                turn_id,
             } => {
                 if let Some(stream) = store.stream(thread_id, turn_id) {
                     stream.activity = crate::AgentActivity { state, text };
@@ -358,11 +366,10 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 true
             }
             HostToClient::TurnEvent {
-                thread_id: Some(thread_id),
-                turn_id: Some(turn_id),
+                thread_id,
+                turn_id,
                 seq,
                 event,
-                sc: None,
             } => {
                 store.apply_delta(thread_id, turn_id, seq, event);
                 true
@@ -371,8 +378,27 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 store.upsert_thread(thread);
                 true
             }
+            HostToClient::ThreadRelatedChanged {
+                history_id,
+                thread_id,
+                revision,
+                items,
+                client_id,
+            } => {
+                if store.history_id.as_deref() != Some(&history_id) {
+                    return;
+                }
+                let changed = store.apply_thread_related(&history_id, thread_id, revision, items);
+                drop(store);
+                client.notify_lifecycle(LifecycleEvent::ThreadRelatedChanged {
+                    history_id,
+                    thread_id,
+                    client_id,
+                });
+                changed
+            }
             HostToClient::ThreadCreated { client_id, thread } => {
-                store.pending_creates.retain(|(id, _)| *id != client_id);
+                store.pending_creates.retain(|(id, _, _)| *id != client_id);
                 store
                     .created_threads
                     .retain(|created| created.client_id != client_id);
@@ -388,6 +414,15 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 true
             }
             HostToClient::ThreadActivity { activity } => {
+                if activity.kind == "delegation_received"
+                    && let Some(frame) = store.refresh_open_thread(activity.thread_id)
+                {
+                    client
+                        .pending_frames
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_back(frame);
+                }
                 store.upsert_activity(activity);
                 true
             }
@@ -400,19 +435,19 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 true
             }
             HostToClient::Error { detail, client_id } => {
-                if let Some(client_id) = client_id {
-                    store.pending_creates.retain(|(id, _)| *id != client_id);
-                    store.requests.retain(|(id, _)| *id != client_id);
+                if let Some(client_id) = &client_id {
+                    store.pending_creates.retain(|(id, _, _)| id != client_id);
+                    store.requests.retain(|(id, _)| id != client_id);
                     for entry in &mut store.messages {
                         if let crate::ChatEntry::Pending(send) = entry
-                            && send.client_id == client_id
+                            && &send.client_id == client_id
                         {
                             send.error = Some(detail.clone());
                         }
                     }
                 }
                 drop(store);
-                client.notify_lifecycle(LifecycleEvent::ProtocolError { detail });
+                client.notify_lifecycle(LifecycleEvent::ProtocolError { detail, client_id });
                 true
             }
             _ => false,
@@ -425,7 +460,10 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
 
 fn notify_protocol_error(inner: &Weak<ClientInner>, detail: String) {
     if let Some(client) = upgrade(inner) {
-        client.notify_lifecycle(LifecycleEvent::ProtocolError { detail });
+        client.notify_lifecycle(LifecycleEvent::ProtocolError {
+            detail,
+            client_id: None,
+        });
     }
 }
 

@@ -82,16 +82,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 async function mount(roster: ProviderRoster | null = ROSTER) {
   const store = await import("../../store/store");
-  store.dispatch({
-    type: "hello_ok",
-    payload: {
-      type: "hello_ok",
-      latest_msg_id: 0,
-      messages: [],
-      pings: [],
-      providers: roster ?? undefined,
-    },
-  });
+  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", providers: roster, history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null } });
   store.openSettings("providers");
   const { SettingsSheet } = await import("./SettingsSheet");
   return { store, ...render(() => <SettingsSheet />) };

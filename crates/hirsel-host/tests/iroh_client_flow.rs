@@ -5,7 +5,7 @@ use std::{
 
 use hirsel_client_core::{
     ChatEntry, Client, ClientConfig, ClientObserver, ClientSnapshot, ConnectionState,
-    LifecycleEvent, ReconnectPolicy, SendMessageRequest, generate_iroh_identity,
+    LifecycleEvent, ReconnectPolicy, SendThreadMessageRequest, generate_iroh_identity,
 };
 use hirsel_host::{
     build_state,
@@ -25,11 +25,6 @@ const ROUND_TRIP_BODY: &str = "iroh client-core round-trip";
 async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(test_host_config(dir.path())).await.unwrap();
-    state
-        .storage
-        .append_chat(ChatAuthor::Agent, "iroh proof anchor", None)
-        .await
-        .unwrap();
     let (thread, _) = state
         .storage
         .create_thread(
@@ -38,6 +33,19 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
             "Visible over the shared protocol",
             &serde_json::json!({"type":"text","text":"Ordinary work"}),
             ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap();
+
+    state
+        .storage
+        .append_thread_chat(
+            thread.id,
+            ChatAuthor::Agent,
+            "iroh proof anchor",
+            None,
+            vec![],
         )
         .await
         .unwrap();
@@ -152,7 +160,7 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     }));
     assert!(reconnected.threads.iter().any(|item| item.id == thread.id));
 
-    let mut request = SendMessageRequest::new(ROUND_TRIP_BODY.to_owned());
+    let mut request = SendThreadMessageRequest::new(0, ROUND_TRIP_BODY.to_owned());
     request.thread_id = thread.id;
     reconnected_client.send_message(request);
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -270,7 +278,7 @@ async fn assert_protocol_error(client: &Client, expected: &str) {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|event| matches!(event, LifecycleEvent::ProtocolError { detail } if detail == expected))
+                .any(|event| matches!(event, LifecycleEvent::ProtocolError { detail, .. } if detail == expected))
             {
                 break;
             }
@@ -332,7 +340,6 @@ fn test_host_config(data_dir: &std::path::Path) -> Config {
         fake_fixture: None,
         listen: "127.0.0.1:0".parse().unwrap(),
         debug: true,
-        compat_side_session_ttl_secs: None,
     }
 }
 

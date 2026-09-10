@@ -14,7 +14,9 @@ use tokio::{
     sync::broadcast,
 };
 
-use crate::types::{DriverError, DriverResult, EventStream, SessionHandle, SubagentEvent};
+use crate::types::{
+    DriverError, DriverResult, EventStream, SessionHandle, SubagentEvent, TerminalOutcome,
+};
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> DriverResult<MutexGuard<'_, T>> {
     mutex.lock().map_err(|_| DriverError::StatePoisoned)
@@ -51,8 +53,33 @@ impl<S> SessionRegistry<S> {
 }
 
 pub(crate) struct EventHub {
-    tx: broadcast::Sender<SubagentEvent>,
-    events: Mutex<Vec<SubagentEvent>>,
+    tx: broadcast::Sender<()>,
+    state: Mutex<EventState>,
+}
+
+#[derive(Default)]
+struct EventState {
+    events: Vec<SubagentEvent>,
+    has_assistant_output: bool,
+}
+
+impl EventState {
+    fn is_terminal(&self) -> bool {
+        matches!(self.events.last(), Some(SubagentEvent::Terminal { .. }))
+    }
+
+    fn push(&mut self, event: SubagentEvent) {
+        if self.is_terminal() {
+            return;
+        }
+        if let SubagentEvent::AssistantOutput { text } = &event {
+            if self.has_assistant_output || text.is_empty() {
+                return;
+            }
+            self.has_assistant_output = true;
+        }
+        self.events.push(event);
+    }
 }
 
 impl EventHub {
@@ -60,51 +87,74 @@ impl EventHub {
         let (tx, _) = broadcast::channel(capacity);
         Arc::new(Self {
             tx,
-            events: Mutex::new(Vec::new()),
+            state: Mutex::new(EventState::default()),
         })
     }
 
     pub(crate) fn emit(&self, event: SubagentEvent) -> DriverResult<()> {
-        let mut events = lock(&self.events)?;
-        if matches!(events.last(), Some(SubagentEvent::Terminal { .. })) {
-            return Ok(());
+        lock(&self.state)?.push(event);
+        let _ = self.tx.send(());
+        Ok(())
+    }
+
+    /// Output and its terminal event win or lose a cancellation race together.
+    pub(crate) fn complete(
+        &self,
+        outcome: TerminalOutcome,
+        assistant_output: Option<String>,
+    ) -> DriverResult<()> {
+        let mut state = lock(&self.state)?;
+        if let Some(text) = assistant_output {
+            state.push(SubagentEvent::AssistantOutput { text });
         }
-        events.push(event.clone());
-        let _ = self.tx.send(event);
+        state.push(SubagentEvent::Terminal { outcome });
+        let _ = self.tx.send(());
         Ok(())
     }
 
     pub(crate) fn is_terminal(&self) -> bool {
-        self.events
-            .lock()
-            .is_ok_and(|events| matches!(events.last(), Some(SubagentEvent::Terminal { .. })))
+        self.state.lock().is_ok_and(|state| state.is_terminal())
     }
 
     pub(crate) fn stream(self: &Arc<Self>) -> DriverResult<EventStream> {
-        let (backlog, rx) = {
-            let events = lock(&self.events)?;
+        let (hub, mut rx) = {
+            let _state = lock(&self.state)?;
             let rx = self.tx.subscribe();
-            (events.clone(), rx)
+            (Arc::clone(self), rx)
         };
         Ok(Box::pin(stream! {
-            for event in backlog {
-                let terminal = matches!(event, SubagentEvent::Terminal { .. });
-                yield event;
-                if terminal { return; }
-            }
-            let mut rx = rx;
+            let mut cursor = 0;
             loop {
+                // Notifications are only wakeups. The retained log is authoritative,
+                // so a slow subscriber cannot lose final output to broadcast lag.
+                let pending = match lock(&hub.state) {
+                    Ok(state) => state.events[cursor..].to_vec(),
+                    Err(_) => return,
+                };
+                for event in pending {
+                    cursor += 1;
+                    let terminal = matches!(event, SubagentEvent::Terminal { .. });
+                    yield event;
+                    if terminal { return; }
+                }
                 match rx.recv().await {
-                    Ok(event) => {
-                        let terminal = matches!(event, SubagentEvent::Terminal { .. });
-                        yield event;
-                        if terminal { return; }
-                    },
+                    Ok(()) => {},
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }))
+    }
+
+    pub(crate) async fn wait_terminal(self: &Arc<Self>) -> DriverResult<()> {
+        use futures_util::StreamExt;
+        let mut events = self.stream()?;
+        while let Some(event) = events.next().await {
+            if matches!(event, SubagentEvent::Terminal { .. }) {
+                return Ok(());
+            }
+        }
+        Err(DriverError::SessionClosed)
     }
 }
 
@@ -147,7 +197,21 @@ pub(crate) async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Dr
     Ok(())
 }
 
+/// Keep the CLI's existing provider authentication, but never expose the host's
+/// owner credentials or execution configuration through inherited Hirsel vars.
+pub(crate) fn sanitize_hirsel_environment(command: &mut Command) {
+    let names = std::env::vars_os()
+        .map(|(name, _)| name)
+        .chain(command.as_std().get_envs().map(|(name, _)| name.to_owned()))
+        .filter(|name| name.as_encoded_bytes().starts_with(b"HIRSEL_"))
+        .collect::<Vec<_>>();
+    for name in names {
+        command.env_remove(name);
+    }
+}
+
 pub(crate) fn start_in_process_group(command: &mut Command) {
+    sanitize_hirsel_environment(command);
     command.kill_on_drop(true);
     // A Sub-agent Driver owns the whole CLI process tree; setsid lets hard cleanup target the group.
     unsafe {

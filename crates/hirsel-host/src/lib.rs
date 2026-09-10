@@ -14,20 +14,20 @@ pub mod model_selection;
 pub mod monitors;
 pub mod plugins;
 pub mod process_run;
-pub mod processes;
+
 pub mod prompt_config;
 mod protocol;
 pub mod provider_detect;
 pub mod providers;
 pub mod push;
-pub mod side_chat;
 pub mod skills;
 pub mod storage;
 pub mod subagent_models;
-pub mod task_ui;
 pub mod templates;
 mod text;
 mod thread_commands;
+pub mod thread_instrument;
+pub mod thread_tool_bridge;
 pub mod tools;
 pub mod ws;
 
@@ -35,23 +35,22 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
 use anyhow::Context;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use hirsel_proto::{
-    AgentActivityState, AgentSlot, ChatMessage, HostToClient, ModelSelection, ModelSnapshot,
-    ProcessInfo, PromptSnapshot, ProviderRoster, SendMode, SubagentModelCatalog, ViewInstance,
+    AgentSlot, ChatMessage, HostToClient, ModelSelection, ModelSnapshot, ProcessInfo,
+    PromptSnapshot, ProviderRoster, SendMode, SubagentModelCatalog,
 };
 use tokio::sync::{Mutex, broadcast};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
     config::Config,
-    lash_runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn, TaskActionContext},
-    processes::ProcessStore,
+    lash_runtime::{AgentRuntime, CancelQueuedResult},
     storage::{MonitorRecord, MonitorWakeOn, Storage, monitor_process_info},
     tools::{ToolSuite, ToolsConfig},
 };
@@ -65,8 +64,6 @@ pub struct AppState {
     pub broadcaster: broadcast::Sender<HostToClient>,
     pub broadcast_log: BroadcastLog,
     pub agent: AgentRuntime,
-    pub side_chats: Arc<side_chat::SideChatManager>,
-    pub processes: ProcessStore,
     pub tools: ToolSuite,
     pub pushes: push::PushGateway,
     pub views: templates::ViewManager,
@@ -448,89 +445,8 @@ impl AppState {
         }
     }
 
-    pub async fn submit_owner_message(
-        &self,
-        client_id: String,
-        body: String,
-        anchor: Option<u64>,
-        attachments: Vec<String>,
-        mentions: Vec<u64>,
-        mode: SendMode,
-    ) -> anyhow::Result<OwnerSubmission> {
-        self.submit_owner_turn(client_id, body, anchor, attachments, mentions, mode, None)
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn submit_owner_turn(
-        &self,
-        client_id: String,
-        body: String,
-        anchor: Option<u64>,
-        attachments: Vec<String>,
-        mentions: Vec<u64>,
-        mode: SendMode,
-        task_action: Option<TaskActionContext>,
-    ) -> anyhow::Result<OwnerSubmission> {
-        let agent_body = self
-            .owner_input_body(&client_id, &body, task_action.is_some())
-            .await?;
-        let mentioned_pings = self.storage.mentioned_pings(&mentions).await?;
-        let request = serde_json::json!({
-            "body": agent_body, "mode": mode, "mentioned_pings": mentioned_pings,
-            "task_action": task_action, "thread_action": null,
-        });
-        let (message, inserted) = self
-            .storage
-            .append_owner_request(&client_id, body, anchor, &attachments, &request)
-            .await?;
-        if inserted {
-            let stored_attachments = self.storage.blobs_for_message(message.id).await?;
-            if let Err(error) = self
-                .agent
-                .enqueue(OwnerTurn {
-                    thread_id: message.thread_id,
-                    thread_action: None,
-                    message_id: message.id,
-                    client_id: client_id.clone(),
-                    body: agent_body,
-                    anchor: message.r#ref,
-                    attachments: stored_attachments,
-                    mentioned_pings,
-                    mode,
-                    task_action,
-                })
-                .await
-            {
-                if let Err(delete_error) = self.storage.delete_chat_message(message.id).await {
-                    tracing::warn!(
-                        %delete_error,
-                        message_id = message.id,
-                        "failed to delete owner message after Agent enqueue failed"
-                    );
-                }
-                self.tools.publish_thread_summary(message.thread_id).await;
-                return Err(error);
-            }
-            self.tools.publish_thread_message(message.clone()).await;
-        }
-        Ok(OwnerSubmission {
-            client_id,
-            message,
-            inserted,
-        })
-    }
-
     pub async fn cancel_turn(&self) -> anyhow::Result<()> {
-        self.agent.cancel_turn().await?;
-        self.broadcast(HostToClient::AgentActivity {
-            turn_id: None,
-            thread_id: None,
-            state: AgentActivityState::Idle,
-            text: None,
-            sc: None,
-        });
-        Ok(())
+        self.agent.cancel_turn().await
     }
 
     pub async fn cancel_queued_message(&self, client_id: &str) -> anyhow::Result<u64> {
@@ -564,30 +480,33 @@ impl AppState {
         if action.trim().is_empty() {
             anyhow::bail!("view action must be a non-empty string");
         }
-        let view = self
+        let (expected_history, view) = self
             .views
-            .get(&instance_id)
+            .bound_view(&instance_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown view instance `{instance_id}`"))?;
-        let anchor = view_anchor(&view, &self.storage).await?;
+        #[cfg(test)]
+        view_event_tests::pause_after_lookup(&instance_id).await;
         let body = format!(
             "View `{instance_id}` emitted action `{action}` with data {}.",
             serde_json::to_string(&data)?
         );
-        self.submit_owner_message(
+        self.submit_addressed_turn(
+            &expected_history,
             format!("view-event-{}", uuid::Uuid::new_v4()),
+            view.thread_id,
             body,
-            anchor,
             Vec::new(),
             Vec::new(),
             SendMode::Send,
+            None,
+            Vec::new(),
         )
         .await
     }
 
     pub async fn process_snapshot(&self) -> anyhow::Result<Vec<ProcessInfo>> {
-        let mut all = self.processes.snapshot()?;
-        all.extend(self.storage.monitor_snapshot().await?);
+        let all = self.storage.monitor_snapshot().await?;
         let mut running = Vec::new();
         let mut terminal = Vec::new();
         for process in all {
@@ -616,6 +535,7 @@ impl AppState {
 
     pub async fn create_monitor(
         &self,
+        thread_id: u64,
         cmd: String,
         every_secs: u64,
         wake_on: MonitorWakeOn,
@@ -624,7 +544,7 @@ impl AppState {
     ) -> anyhow::Result<MonitorRecord> {
         let record = self
             .storage
-            .create_monitor(cmd, every_secs, wake_on, pattern, label)
+            .create_monitor(thread_id, cmd, every_secs, wake_on, pattern, label)
             .await?;
         self.broadcast_monitor(&record);
         self.agent.start_monitor_process(&record).await?;
@@ -644,103 +564,6 @@ impl AppState {
         self.broadcast(HostToClient::ProcessUpsert {
             process: monitor_process_info(record),
         });
-    }
-
-    pub async fn handle_event_action(
-        &self,
-        event_id: u64,
-        action: String,
-        data: serde_json::Value,
-    ) -> anyhow::Result<hirsel_proto::Event> {
-        let current = self
-            .storage
-            .ping(event_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
-        let event = match action.as_str() {
-            // These are Host lifecycle verbs, not producer-generated actions.
-            // Validate their exact payload before allowing any mutation.
-            "reopen" => {
-                validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.reopen_ping(event_id).await?
-            }
-            "dismiss" => {
-                validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.resolve_ping(event_id).await?
-            }
-            "snooze" => {
-                let until = validate_snooze_lifecycle_data(&data)?;
-                self.storage.snooze_event(event_id, until).await?
-            }
-            "unsnooze" => {
-                validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.unsnooze_event(event_id).await?
-            }
-            "archive" => {
-                validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.archive_event(event_id).await?
-            }
-            "unarchive" => {
-                validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.unarchive_event(event_id).await?
-            }
-            generated => {
-                if current.lifecycle() != hirsel_proto::EventLifecycle::Open {
-                    anyhow::bail!("only an open Task can accept generated actions");
-                }
-                let validated = task_ui::validate_action(&current.ui, generated, &data)?;
-                if !validated.settles {
-                    let body = validated
-                        .choice_label
-                        .as_deref()
-                        .or_else(|| data.get("label").and_then(serde_json::Value::as_str))
-                        .unwrap_or(generated)
-                        .to_string();
-                    self.submit_owner_turn(
-                        format!("event-action-{generated}-{event_id}"),
-                        body,
-                        Some(current.anchor),
-                        Vec::new(),
-                        vec![current.id],
-                        SendMode::Send,
-                        Some(TaskActionContext {
-                            event: current.clone(),
-                            action: generated.to_string(),
-                            data,
-                        }),
-                    )
-                    .await?;
-                    return Ok(current);
-                }
-
-                if generated == "choose" {
-                    if let Some(event) = self.side_chats.decide_event(event_id, &data).await? {
-                        return Ok(event);
-                    }
-                    if !matches!(current.kind, hirsel_proto::EventKind::Judgment) {
-                        anyhow::bail!("choose is only valid for judgment events");
-                    }
-                    let choice_label = validated
-                        .choice_label
-                        .ok_or_else(|| anyhow::anyhow!("choose requires an option-list action"))?;
-                    self.submit_owner_message(
-                        format!("event-action-choose-{event_id}"),
-                        choice_label,
-                        Some(current.anchor),
-                        Vec::new(),
-                        Vec::new(),
-                        SendMode::Send,
-                    )
-                    .await?;
-                }
-                self.storage.resolve_ping(event_id).await?
-            }
-        }
-        .ok_or_else(|| anyhow::anyhow!("unknown event: {event_id}"))?;
-        self.broadcast(HostToClient::EventUpsert {
-            event: event.clone(),
-        });
-        Ok(event)
     }
 }
 
@@ -780,37 +603,6 @@ fn validate_snooze_lifecycle_data(data: &serde_json::Value) -> anyhow::Result<Da
     Ok(until)
 }
 
-fn event_choice_label<'a>(ui: &'a serde_json::Value, choice: &str) -> Option<&'a str> {
-    ui.get("children")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|node| node.get("type").and_then(serde_json::Value::as_str) == Some("optionList"))
-        .and_then(|node| node.get("options"))
-        .and_then(serde_json::Value::as_array)
-        .and_then(|options| {
-            options.iter().find(|option| {
-                option.get("key").and_then(serde_json::Value::as_str) == Some(choice)
-            })
-        })
-        .and_then(|option| option.get("label"))
-        .and_then(serde_json::Value::as_str)
-}
-
-async fn view_anchor(view: &ViewInstance, storage: &Storage) -> anyhow::Result<Option<u64>> {
-    let Some(ping_id) = view.placement.strip_prefix("ping:") else {
-        return Ok(None);
-    };
-    let ping_id = ping_id
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("view has invalid ping placement `{}`", view.placement))?;
-    let ping = storage
-        .ping(ping_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("view references unknown ping `{ping_id}`"))?;
-    Ok(Some(ping.anchor))
-}
-
 pub async fn build_app(config: Config) -> anyhow::Result<Router> {
     let state = build_state(config).await?;
     Ok(router_from_state(state))
@@ -819,7 +611,6 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let config_store = host_config::ConfigStore::load(
         config.config_path.clone(),
-        &config.data_dir,
         &config.docs_path,
         &providers::env_bootstrap(
             config.provider,
@@ -849,9 +640,12 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
                 config.templates_dir.display()
             )
         })?;
-    let views =
-        templates::ViewManager::new(template_store, broadcaster.clone(), broadcast_log.clone());
-    let processes = ProcessStore::default();
+    let views = templates::ViewManager::new(
+        storage.history_id().await?,
+        template_store,
+        broadcaster.clone(),
+        broadcast_log.clone(),
+    );
     let pushes = push::PushGateway::from_env(storage.clone()).await?;
     let tools = ToolSuite::new(
         ToolsConfig {
@@ -862,7 +656,6 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         storage.clone(),
         broadcaster.clone(),
         broadcast_log.clone(),
-        processes.clone(),
         pushes.clone(),
         views.clone(),
     );
@@ -916,18 +709,6 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcast_log.clone(),
     )
     .await?;
-    let side_session_compatibility = config.compat_side_session_ttl_secs.map(|ttl| {
-        side_chat::SideSessionCompatibility::new(
-            agent.side_chat_backend(),
-            Duration::from_secs(ttl),
-        )
-    });
-    let side_chats = Arc::new(side_chat::SideChatManager::new(
-        side_session_compatibility,
-        broadcaster.clone(),
-        broadcast_log.clone(),
-        storage.clone(),
-    ));
     let blob_signer = blob_route::BlobSigner::new(config.token.as_bytes());
     let state = AppState {
         token: Arc::from(config.token),
@@ -935,8 +716,6 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         broadcaster,
         broadcast_log,
         agent,
-        side_chats,
-        processes,
         tools,
         pushes,
         views,
@@ -990,3 +769,6 @@ pub fn router_from_state(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod view_event_tests;

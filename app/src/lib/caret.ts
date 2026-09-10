@@ -3,7 +3,7 @@
 // A textarea gives no geometry for a character offset, so the standard trick is
 // the only one: mirror the field into an off-screen div with identical text
 // metrics, put a marker span at the offset, and read the marker's position. It
-// is used for exactly one thing here — anchoring the Task-ref picker under the
+// is used for exactly one thing here — anchoring the Thread-ref picker under the
 // `#` the Owner is typing — so it stays deliberately small and total: any
 // environment that cannot measure (jsdom, an unattached node) gets `{x:0, y:0}`,
 // and the picker simply anchors to the start of the field.

@@ -38,7 +38,7 @@ import { PROGRESS_FILL, toneTextClass } from "./tokens";
 
 // An interactive control shows its pending/disabled state for a bounded window
 // after a submit: there is no direct ack — the reply returns through the normal
-// conversation/Task flow (often replacing/clearing the view) — so the timeout in
+// conversation/Thread flow (often replacing/clearing the view) — so the timeout in
 // `createSubmitting` (../lib/pending) is what keeps a no-op from freezing the
 // control permanently.
 
@@ -680,7 +680,7 @@ export interface ViewRendererProps {
   spec: ViewSpec;
   /** The owning instance — every emitted `view_event` carries it. */
   instanceId: string;
-  /** Where this view is surfaced. Historical inline/Task strings are carried for
+  /** Where this view is surfaced. Historical inline/Thread strings are carried for
    * context/telemetry; the visual output is placement-independent. */
   placement: ViewPlacement;
   /** Test/host seam for owner-initiated events. Defaults to the ws client's

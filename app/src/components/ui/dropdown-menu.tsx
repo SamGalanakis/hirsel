@@ -21,12 +21,12 @@ function menuContext() {
   return menu;
 }
 function menuItems(panel: HTMLElement) {
-  return Array.from(panel.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])'));
+  return Array.from(panel.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled]), [role="menuitemradio"]:not([disabled])'));
 }
-function DropdownMenu(props: { children: JSX.Element; placement?: "bottom-end"; gutter?: number }) {
+function DropdownMenu(props: { children: JSX.Element; placement?: "bottom-end"; gutter?: number; onOpenChange?: (open: boolean) => void }) {
   const [open, setOpen] = createSignal(false);
   const menu: MenuState = {
-    open, setOpen, first: "first", gutter: props.gutter ?? 6,
+    open, setOpen(value) { props.onOpenChange?.(value); setOpen(value); }, first: "first", gutter: props.gutter ?? 6,
     close(restore = true) {
       setOpen(false);
       if (restore) menu.trigger?.focus();
@@ -128,8 +128,8 @@ type DropdownMenuItemProps = Omit<ComponentProps<"button">, "onSelect"> & {
 function DropdownMenuItem(props: DropdownMenuItemProps) {
   const menu = menuContext();
   const local = props;
-  const others = omit(props, "class", "variant", "onSelect");
-  return <button type="button" {...others} role="menuitem" tabindex={-1}
+  const others = omit(props, "class", "variant", "onSelect", "role");
+  return <button type="button" {...others} role={local.role ?? "menuitem"} tabindex={-1}
     class={cn("relative flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0", local.variant === "destructive" && "text-destructive hover:bg-destructive/10 focus:bg-destructive/10 focus:text-destructive", local.class)}
     data-slot="dropdown-menu-item"
     onClick={() => { menu.close(); local.onSelect?.(); }} />;

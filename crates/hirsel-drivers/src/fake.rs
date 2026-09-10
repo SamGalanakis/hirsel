@@ -1,9 +1,6 @@
 //! Fixture-driven driver used by tests and offline runs.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -11,10 +8,10 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::{
-    shared::{EventHub, SessionRegistry, lock, short_line},
+    shared::{EventHub, SessionRegistry, lock, short_line, terminal_message},
     types::{
-        DriverResult, EventStream, SessionHandle, SpawnSpec, SubagentDriver, SubagentEvent,
-        TerminalOutcome,
+        DriverError, DriverResult, EventStream, SessionHandle, SpawnSpec, SubagentDriver,
+        SubagentEvent, TerminalOutcome,
     },
 };
 
@@ -26,8 +23,6 @@ pub struct FakeDriver {
 
 struct FakeSession {
     events: Arc<EventHub>,
-    interrupted: AtomicBool,
-    terminal_sent: AtomicBool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +35,8 @@ struct FakeFixture {
     delay_ms: u64,
     #[serde(default = "default_fake_terminal")]
     terminal: TerminalOutcome,
+    #[serde(default)]
+    assistant_output: Option<String>,
 }
 
 fn default_fake_external_id() -> String {
@@ -66,6 +63,7 @@ impl Default for FakeFixture {
             progress: default_fake_progress(),
             delay_ms: 10,
             terminal: default_fake_terminal(),
+            assistant_output: Some("fake driver completed".into()),
         }
     }
 }
@@ -85,8 +83,6 @@ impl SubagentDriver for FakeDriver {
         let events = EventHub::new(128);
         let session = Arc::new(FakeSession {
             events: events.clone(),
-            interrupted: AtomicBool::new(false),
-            terminal_sent: AtomicBool::new(false),
         });
         self.sessions.insert(handle.id.clone(), session.clone())?;
 
@@ -98,12 +94,7 @@ impl SubagentDriver for FakeDriver {
                 if fixture.delay_ms > 0 {
                     sleep(Duration::from_millis(fixture.delay_ms)).await;
                 }
-                if session.interrupted.load(Ordering::SeqCst) {
-                    if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-                        let _ = events.emit(SubagentEvent::Terminal {
-                            outcome: TerminalOutcome::Interrupted,
-                        });
-                    }
+                if events.is_terminal() {
                     return;
                 }
                 let _ = events.emit(SubagentEvent::Progress {
@@ -113,17 +104,16 @@ impl SubagentDriver for FakeDriver {
             if fixture.delay_ms > 0 {
                 sleep(Duration::from_millis(fixture.delay_ms)).await;
             }
-            if session.interrupted.load(Ordering::SeqCst) {
-                if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-                    let _ = events.emit(SubagentEvent::Terminal {
-                        outcome: TerminalOutcome::Interrupted,
-                    });
-                }
-            } else if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-                let _ = events.emit(SubagentEvent::Terminal {
-                    outcome: fixture.terminal,
-                });
-            }
+            let outcome = match fixture.terminal {
+                TerminalOutcome::Done { summary } => TerminalOutcome::Done {
+                    summary: terminal_message(summary),
+                },
+                TerminalOutcome::Failed { reason } => TerminalOutcome::Failed {
+                    reason: terminal_message(reason),
+                },
+                TerminalOutcome::Interrupted => TerminalOutcome::Interrupted,
+            };
+            let _ = events.complete(outcome, fixture.assistant_output);
         });
 
         Ok(handle)
@@ -131,25 +121,31 @@ impl SubagentDriver for FakeDriver {
 
     async fn prompt(&self, handle: &SessionHandle, text: String) -> DriverResult<()> {
         let session = self.sessions.get(handle)?;
-        let _ = session.events.emit(SubagentEvent::Progress {
+        if session.events.is_terminal() {
+            return Err(DriverError::SessionClosed);
+        }
+        session.events.emit(SubagentEvent::Progress {
             summary: short_line(format!("prompt: {text}")),
-        });
-        Ok(())
+        })
     }
 
     async fn interrupt(&self, handle: &SessionHandle) -> DriverResult<()> {
         let session = self.sessions.get(handle)?;
-        session.interrupted.store(true, Ordering::SeqCst);
-        if !session.terminal_sent.swap(true, Ordering::SeqCst) {
-            let _ = session.events.emit(SubagentEvent::Terminal {
-                outcome: TerminalOutcome::Interrupted,
-            });
+        if session.events.is_terminal() {
+            return Err(DriverError::SessionClosed);
         }
-        Ok(())
+        session
+            .events
+            .complete(TerminalOutcome::Interrupted, None)?;
+        session.events.wait_terminal().await
     }
 
     async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
-        self.sessions.remove(handle)?;
+        if let Some(session) = self.sessions.remove(handle)? {
+            session
+                .events
+                .complete(TerminalOutcome::Interrupted, None)?;
+        }
         Ok(())
     }
 

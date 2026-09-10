@@ -14,16 +14,20 @@ impl ToolSuite {
     ) -> anyhow::Result<ShellRunOutput> {
         let duration = Duration::from_secs(timeout_secs.unwrap_or(30).min(600));
         let output = run_bash_command(cmd, cwd, duration).await?;
-        Ok(ShellRunOutput {
-            status: output.status,
-            stdout: truncate_output(String::from_utf8_lossy(&output.stdout)),
-            stderr: if output.timed_out {
-                "command timed out".to_string()
-            } else {
-                truncate_output(String::from_utf8_lossy(&output.stderr))
-            },
-            timed_out: output.timed_out,
-        })
+        Ok(shell_output(output))
+    }
+}
+
+pub(crate) fn shell_output(output: crate::process_run::BashCommandOutput) -> ShellRunOutput {
+    ShellRunOutput {
+        status: output.status,
+        stdout: truncate_output(String::from_utf8_lossy(&output.stdout)),
+        stderr: if output.timed_out {
+            "command timed out".to_string()
+        } else {
+            truncate_output(String::from_utf8_lossy(&output.stderr))
+        },
+        timed_out: output.timed_out,
     }
 }
 

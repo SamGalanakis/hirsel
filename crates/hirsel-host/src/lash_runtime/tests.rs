@@ -1,35 +1,15 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    processes::{ProcessRecord, ProcessStatus, ProcessStore},
     storage::Storage,
     tools::{ShellRunOutput, ToolsConfig},
 };
 use chrono::Utc;
-use hirsel_drivers::{SessionHandle, SubagentEvent};
-use hirsel_proto::{Blob, ChatAuthor, Ping, PingStatus};
+use hirsel_proto::{Blob, ChatAuthor, ThreadTurnState};
 use lash_core::{
     ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
     TriggerInputBinding, TriggerSubscriptionRecord,
 };
-
-#[test]
-fn terminal_payload_keeps_full_text_for_wake_and_wait() {
-    let full_summary = format!("{}the actual ending", "research findings ".repeat(20));
-    let (_, payload) = terminal_event_payload(&TerminalOutcome::Done {
-        summary: full_summary.clone(),
-    });
-
-    assert_eq!(
-        payload["text"],
-        format!("Sub-agent completed: {full_summary}")
-    );
-
-    let outcome: ProcessAwaitOutput =
-        serde_json::from_value(payload["await_output"].clone()).unwrap();
-    let wait_payload = subagents_wait_result("proc-1", &outcome).unwrap();
-    assert_eq!(wait_payload["outcome"]["value"]["summary"], full_summary);
-}
 
 use super::timers::*;
 use super::*;
@@ -80,7 +60,11 @@ pub(super) fn test_turn_output(
 fn timeline_flushes_prose_before_tool_events() {
     let broadcast_log = BroadcastLog::default();
     let (broadcaster, _) = broadcast::channel(16);
-    let mut timeline = TurnTimelineBridge::default();
+    let mut timeline = TurnTimelineBridge {
+        thread_id: Some(0),
+        turn_id: Some(1),
+        ..Default::default()
+    };
 
     timeline.observe(
         &remote_turn_activity(RemoteTurnEvent::ModelRequestStarted {
@@ -174,7 +158,11 @@ fn timeline_flushes_prose_before_tool_events() {
 fn code_blocks_stream_full_source_and_pair_with_their_completion() {
     let broadcast_log = BroadcastLog::default();
     let (broadcaster, _) = broadcast::channel(16);
-    let mut timeline = TurnTimelineBridge::default();
+    let mut timeline = TurnTimelineBridge {
+        thread_id: Some(0),
+        turn_id: Some(1),
+        ..Default::default()
+    };
     let source = "const x = await shell.run({ cmd: \"true\" });\nfinish(x);";
 
     timeline.observe(
@@ -318,11 +306,7 @@ async fn finished_tool_only_turn_persists_completed_tools() {
         }],
     );
 
-    assert!(
-        materialize_turn_chat(&executor.tools, &output)
-            .await
-            .unwrap()
-    );
+    assert!(complete_fixture_turn(&executor, &output).await.unwrap());
 
     let messages = storage.all_chat().await.unwrap();
     let persisted = messages.last().expect("tool-only Agent Chat row");
@@ -404,16 +388,18 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
     let text = stored_blob("text-1", "note.txt", "text/plain", 5, text_path);
     let image = stored_blob("image-1", "tiny.png", "image/png", 4, image_path);
     let turn = OwnerTurn {
+        history_id: "fixture-history".into(),
+        turn_id: None,
         thread_id: 0,
         thread_action: None,
-        message_id: 1,
+        message_id: Some(1),
+        report_triggered: false,
         client_id: "client-1".to_string(),
         body: "see attached".to_string(),
         anchor: None,
         attachments: vec![text.clone(), image.clone()],
-        mentioned_pings: Vec::new(),
+
         mode: SendMode::Send,
-        task_action: None,
     };
 
     let rendered = owner_turn_text(&turn);
@@ -440,50 +426,6 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
 }
 
 #[test]
-fn owner_turn_text_expands_mentioned_ping_context() {
-    let turn = OwnerTurn {
-        thread_id: 0,
-        thread_action: None,
-        message_id: 2,
-        client_id: "mention-1".to_string(),
-        body: "What changed?".to_string(),
-        anchor: None,
-        attachments: Vec::new(),
-        mentioned_pings: vec![Ping {
-            id: 7,
-            kind: hirsel_proto::EventKind::Judgment,
-            source: hirsel_proto::EventSource {
-                kind: hirsel_proto::EventSourceKind::Agent,
-                r#ref: None,
-            },
-            name: "release-choice".to_string(),
-            description: "Choose the release channel".to_string(),
-            ui: json!({
-                "type": "card",
-                "children": [{ "type": "text", "text": "Longer details" }]
-            }),
-            anchor: 3,
-            requires_response: true,
-            quick_replies: Vec::new(),
-            status: PingStatus::Done,
-            read: true,
-            archived: false,
-            snoozed_until: None,
-            archived_at: None,
-            fork_sc: None,
-            ts: Utc::now(),
-        }],
-        mode: SendMode::Send,
-        task_action: None,
-    };
-
-    assert_eq!(
-        owner_turn_text(&turn),
-        "[Owning Thread #0; answer only within this Thread. Use threads.read to inspect other conversations.]\nWhat changed?\n[mentioned ping @release-choice (ping_id 7, done, requires_response=true, anchor 3): Choose the release channel]"
-    );
-}
-
-#[test]
 fn agent_host_section_references_runtime_config_and_docs_paths() {
     let dir = tempfile::tempdir().unwrap();
     let config = crate::tests::test_config(dir.path());
@@ -491,61 +433,6 @@ fn agent_host_section_references_runtime_config_and_docs_paths() {
     assert!(section.contains(config.config_path.to_str().unwrap()));
     assert!(section.contains(config.docs_path.to_str().unwrap()));
     assert!(section.contains("## Host configuration"));
-}
-
-#[test]
-fn tool_surface_fingerprint_uses_names_not_argument_schemas() {
-    let first = vec![tool_definition(
-        "test.events_notify",
-        "events_notify",
-        "Notify",
-        json!({
-            "type": "object",
-            "required": ["message"],
-            "properties": { "message": { "type": "string" } }
-        }),
-        json!({ "type": "object" }),
-        ["events"],
-        "notify",
-    )];
-    let argument_only_change = vec![tool_definition(
-        "test.events_notify",
-        "events_notify",
-        "Notify with an evolved schema",
-        json!({
-            "type": "object",
-            "required": ["message"],
-            "properties": {
-                "message": { "type": "string" },
-                "quiet": { "type": "boolean" }
-            }
-        }),
-        json!({ "type": "object" }),
-        ["events"],
-        "notify",
-    )];
-    let mut name_set_change = argument_only_change.clone();
-    name_set_change.push(tool_definition(
-        "test.events_archive",
-        "events_archive",
-        "Archive",
-        json!({ "type": "object" }),
-        json!({ "type": "object" }),
-        ["events"],
-        "archive",
-    ));
-
-    let first = agent_tool_surface(&first).unwrap();
-    let argument_only_change = agent_tool_surface(&argument_only_change).unwrap();
-    let name_set_change = agent_tool_surface(&name_set_change).unwrap();
-
-    assert_eq!(first.fingerprint, argument_only_change.fingerprint);
-    assert_eq!(first.tool_names, vec!["events.notify"]);
-    assert_ne!(first.fingerprint, name_set_change.fingerprint);
-    assert_eq!(
-        name_set_change.tool_names,
-        vec!["events.archive", "events.notify"]
-    );
 }
 
 fn provider_rebind_test_core(
@@ -630,68 +517,6 @@ async fn reopened_agent_session_rebinds_provider_and_model_at_open() {
 }
 
 #[tokio::test]
-async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = crate::build_state(crate::tests::test_config(dir.path()))
-        .await
-        .unwrap();
-    let first = state
-        .tools
-        .prepare_agent_session("v1", &["threads.create".into()])
-        .await
-        .unwrap();
-    assert_eq!(first.session_id, "agent");
-    let (thread, _) = state
-        .storage
-        .create_thread(
-            "release",
-            "Release",
-            "Choose stable or beta",
-            &Value::Null,
-            hirsel_proto::ThreadAttention::NeedsOwner,
-        )
-        .await
-        .unwrap();
-    state
-        .storage
-        .append_thread_chat(
-            thread.id,
-            ChatAuthor::Owner,
-            "Release request",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    let rotated = state
-        .tools
-        .prepare_agent_session("v2", &["threads.create".into(), "threads.read".into()])
-        .await
-        .unwrap();
-    assert_eq!(rotated.session_id, "agent-g1");
-    let seed = rotated.handoff_seed.unwrap();
-    assert!(seed.contains(&format!("Thread #{} owner: Release request", thread.id)));
-    assert!(seed.contains("Choose stable or beta"));
-    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
-    assert!(
-        detail
-            .activities
-            .iter()
-            .any(|a| a.kind == "session_rotated")
-    );
-    assert!(state.storage.all_pings().await.unwrap().is_empty());
-    assert!(
-        state
-            .tools
-            .prepare_agent_session("v2", &["threads.create".into(), "threads.read".into()])
-            .await
-            .unwrap()
-            .handoff_seed
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     let (executor, storage, broadcast_log, _dir) = test_event_executor().await;
     broadcast_log.clear();
@@ -709,11 +534,7 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
         }],
     );
 
-    assert!(
-        materialize_turn_chat(&executor.tools, &output)
-            .await
-            .unwrap()
-    );
+    assert!(complete_fixture_turn(&executor, &output).await.unwrap());
 
     let messages = storage.all_chat().await.unwrap();
     let persisted = messages.last().expect("persisted partial Agent message");
@@ -739,7 +560,7 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     );
     assert!(broadcasts.iter().any(|frame| matches!(
         frame,
-        HostToClient::Msg { message, sc: None } if message == persisted
+        HostToClient::Msg { message } if message == persisted
     )));
 }
 
@@ -748,8 +569,15 @@ pub(super) async fn test_event_executor()
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let storage = Storage::open(&path).await.unwrap();
-    let owner = storage
-        .append_chat(ChatAuthor::Owner, "owner turn", None)
+    let caller = storage.test_running_caller().await;
+    let _owner = storage
+        .append_thread_chat(
+            caller.thread_id,
+            ChatAuthor::Owner,
+            "owner turn",
+            None,
+            vec![],
+        )
         .await
         .unwrap();
     let (broadcaster, _) = broadcast::channel(16);
@@ -759,11 +587,14 @@ pub(super) async fn test_event_executor()
         crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
             .await
             .unwrap();
-    let views =
-        crate::templates::ViewManager::new(templates, broadcaster.clone(), broadcast_log.clone());
+    let views = crate::templates::ViewManager::new(
+        storage.history_id().await.unwrap(),
+        templates,
+        broadcaster.clone(),
+        broadcast_log.clone(),
+    );
     let config_store = crate::host_config::ConfigStore::load(
         path.join("hirsel.toml"),
-        &path,
         std::path::Path::new("/docs/hirsel-config.md"),
         &crate::host_config::EnvBootstrap::default(),
     )
@@ -778,24 +609,18 @@ pub(super) async fn test_event_executor()
         storage.clone(),
         broadcaster,
         broadcast_log.clone(),
-        ProcessStore::default(),
         pushes,
         views,
     );
     let anchors = Arc::new(Mutex::new(TurnAnchorState {
         active: Some(TurnAnchors {
             request_id: None,
-            thread_id: 0,
-            thread_turn_id: None,
-            owner_message_id: owner.id,
+            thread_id: caller.thread_id,
+            thread_turn_id: Some(caller.turn_id),
         }),
     }));
     (
-        HirselToolExecutor {
-            tools,
-            anchors,
-            runtime: Arc::new(std::sync::OnceLock::new()),
-        },
+        HirselToolExecutor { tools, anchors },
         storage,
         broadcast_log,
         dir,
@@ -850,140 +675,11 @@ fn tool_prose_never_names_a_dialect() {
     }
 }
 
-#[test]
-fn subagent_spawn_schema_rejects_model_aliases() {
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
-    let spawn = definitions
-        .iter()
-        .find(|definition| definition.name() == "subagents_spawn")
-        .unwrap();
-    let validator =
-        jsonschema::JSONSchema::compile(spawn.contract.input_schema.canonical()).unwrap();
-
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "claude",
-                "model": "opus",
-                "effort": "high",
-                "prompt": "Research Linear triage."
-            }))
-            .is_err(),
-        "the model-facing contract must reject aliases the Host cannot execute"
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "claude",
-                "model": "claude-opus-5",
-                "effort": "high",
-                "prompt": "Research Linear triage."
-            }))
-            .is_ok()
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "codex",
-                "model": "gpt-5.6-luna",
-                "variant": "max",
-                "prompt": "Audit this repository."
-            }))
-            .is_ok(),
-        "Codex-only variants must be represented by the generated contract"
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "codex",
-                "model": "gpt-5.6-luna",
-                "variant": "high",
-                "prompt": "Audit this repository."
-            }))
-            .is_err(),
-        "each lane carries exactly one effort; there is no per-task tuning"
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "claude",
-                "model": "gpt-5.6-sol",
-                "variant": "high",
-                "prompt": "Audit this repository."
-            }))
-            .is_err(),
-        "the generated contract must reject models from another provider"
-    );
-}
-
 #[tokio::test]
-async fn subagent_tool_provider_resolves_the_current_settings_schema() {
-    let (executor, _storage, _broadcast_log, dir) = test_event_executor().await;
-    let provider = HirselToolProvider { executor };
-    let opus_spawn = json!({
-        "agent": "claude",
-        "model": "claude-opus-5",
-        "effort": "high",
-        "prompt": "Research Linear triage."
-    });
-    let before = provider.resolve_contract("subagents_spawn").unwrap();
-    let before = jsonschema::JSONSchema::compile(before.input_schema.canonical()).unwrap();
-    assert!(before.validate(&opus_spawn).is_ok());
-
-    let store = crate::host_config::ConfigStore::load(
-        dir.path().join("hirsel.toml"),
-        dir.path(),
-        std::path::Path::new("/docs/hirsel-config.md"),
-        &crate::host_config::EnvBootstrap::default(),
-    )
-    .await
-    .unwrap();
-    store
-        .set_subagent_model("claude", "claude-opus-5", false, &["high".to_string()])
-        .await
-        .unwrap();
-
-    let after = provider.resolve_contract("subagents_spawn").unwrap();
-    let after = jsonschema::JSONSchema::compile(after.input_schema.canonical()).unwrap();
-    assert!(
-        after.validate(&opus_spawn).is_err(),
-        "a fresh contract resolution must reflect Settings without rebuilding the provider"
-    );
-}
-
-#[test]
-fn every_executor_result_matches_its_declared_output_schema() {
+async fn every_executor_result_matches_its_declared_output_schema() {
     let now = Utc::now();
-    let events = vec![
-        SubagentEvent::Started {
-            external_id: "driver-session-1".to_string(),
-        },
-        SubagentEvent::Progress {
-            summary: "running tests".to_string(),
-        },
-        SubagentEvent::Terminal {
-            outcome: TerminalOutcome::Done {
-                summary: "tests passed".to_string(),
-            },
-        },
-    ];
-    let process = ProcessRecord::restored(
-        "proc-1".to_string(),
-        AgentKind::Codex,
-        Some("gpt-test".to_string()),
-        SessionHandle {
-            id: "driver-session-1".to_string(),
-            agent: AgentKind::Codex,
-        },
-        "Run the tests".to_string(),
-        "/tmp/repo".to_string(),
-        Some("external-1".to_string()),
-        ProcessStatus::Done,
-        events.clone(),
-        now,
-        now,
-    );
     let monitor = MonitorRecord {
+        thread_id: 1,
         id: "monitor-1".to_string(),
         cmd: "test -f done".to_string(),
         every_secs: 30,
@@ -997,33 +693,6 @@ fn every_executor_result_matches_its_declared_output_schema() {
         summary: Some("matched".to_string()),
         cancelled_ts: Some(now),
     };
-    let wait_outcomes = [
-        ProcessAwaitOutput::Settled {
-            output: lash_core::ToolCallOutput::success(json!({ "summary": "done" })),
-        },
-        ProcessAwaitOutput::Settled {
-            output: lash_core::ToolCallOutput::failure(lash_core::ToolFailure {
-                class: lash_core::ToolFailureClass::Execution,
-                code: "subagent_failed".to_string(),
-                message: "failed".to_string(),
-                raw: Some(lash_core::ToolValue::untrusted_json(
-                    json!({ "reason": "failed" }),
-                )),
-                source: lash_core::ToolFailureSource::Tool,
-                retry: lash_core::ToolRetryStatus::Never,
-            }),
-        },
-        cancelled_await_output("interrupted".to_string()),
-        ProcessAwaitOutput::Abandoned {
-            evidence: Box::new(lash_core::AbandonEvidence {
-                writer: lash_core::AbandonWriter::ReconciledRequest,
-                owner: None,
-                epoch_ms: 42,
-            }),
-            control: None,
-        },
-    ];
-
     let mut results = BTreeMap::<&str, Vec<Value>>::new();
     for name in ["artifacts_create", "artifacts_edit", "artifacts_show"] {
         results.insert(name, vec![json!({"id":1,"content":"result"})]);
@@ -1045,6 +714,7 @@ fn every_executor_result_matches_its_declared_output_schema() {
     );
     results.insert("threads_activity",vec![json!({"activity":{"id":1,"thread_id":1,"turn_id":null,"kind":"progress","data":{},"ts":now}})]);
     let view = hirsel_proto::ViewInstance {
+        thread_id: 1,
         instance_id: "view-1".to_string(),
         placement: "canvas".to_string(),
         spec: json!({ "type": "text", "text": "Ready" }),
@@ -1058,27 +728,6 @@ fn every_executor_result_matches_its_declared_output_schema() {
     results.insert(
         "views_list_templates",
         vec![json!([{ "id": "status", "title": "Status" }])],
-    );
-    results.insert("subagents_spawn", vec![subagent_spawn_result("proc-1")]);
-    results.insert("subagents_prompt", vec![acknowledgement_result()]);
-    results.insert("subagents_interrupt", vec![acknowledgement_result()]);
-    results.insert(
-        "subagents_list",
-        vec![subagents_list_result(std::slice::from_ref(&process)).unwrap()],
-    );
-    results.insert(
-        "subagents_progress",
-        vec![
-            subagents_progress_result(Some(&process), &events).unwrap(),
-            subagents_progress_result(None, &[]).unwrap(),
-        ],
-    );
-    results.insert(
-        "subagents_wait",
-        wait_outcomes
-            .iter()
-            .map(|outcome| subagents_wait_result("proc-1", outcome).unwrap())
-            .collect(),
     );
     results.insert(
         "monitors_create",
@@ -1109,6 +758,44 @@ fn every_executor_result_matches_its_declared_output_schema() {
         ],
     );
 
+    results.insert(
+        "threads_context",
+        vec![json!({"thread":thread,"ancestors":[],"brief":{"text":"","artifact_ids":[]}})],
+    );
+    results.insert("threads_delegate", vec![json!({"thread_id":2,"turn_id":3})]);
+    results.insert("threads_send", vec![json!({"thread_id":2,"turn_id":4})]);
+    results.insert("threads_report", vec![json!({"activity_id":5})]);
+    results.insert(
+        "threads_cancel",
+        vec![json!({"turn_id":4,"cancel_requested":true})],
+    );
+    let (executor, storage, _log, _dir) = test_event_executor().await;
+    let caller = storage.test_running_caller().await;
+    let mut tools = ScopedThreadTools {
+        tools: executor.tools.clone(),
+        caller: caller.clone(),
+        operation_id: String::new(),
+    };
+    let mut added_examples = Vec::new();
+    let mut removed_examples = Vec::new();
+    for (index, input) in [
+        json!({"target":{"kind":"url","url":"https://example.com/reference#section"},"title":"Reference"}),
+        json!({"target":{"kind":"thread","thread":"."}}),
+    ].into_iter().enumerate() {
+        tools.operation_id = format!("schema-add-{index}");
+        let added = tools.execute("threads_add_related", &input).await.unwrap();
+        assert_eq!(added["history_id"], caller.history_id);
+        assert_eq!(added["thread_id"], caller.thread_id);
+        assert_eq!(added["related_items"][0]["target"]["kind"], input["target"]["kind"]);
+        let item_id = added["related_items"][0]["id"].as_u64().unwrap();
+        tools.operation_id = format!("schema-remove-{index}");
+        let removed = tools.execute("threads_remove_related", &json!({"item_id":item_id})).await.unwrap();
+        assert_eq!(removed["related_items"], json!([]));
+        added_examples.push(added);
+        removed_examples.push(removed);
+    }
+    results.insert("threads_add_related", added_examples);
+    results.insert("threads_remove_related", removed_examples);
     let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
     assert_eq!(results.len(), definitions.len());
     for definition in definitions {
@@ -1334,7 +1021,13 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
     // Dispatch runs the plugin's handler and returns its JSON verbatim.
     let result = tools
         .plugin_tools()
-        .call("plugin__catalog_test__ping", serde_json::json!({}))
+        .call(
+            "plugin__catalog_test__ping",
+            serde_json::json!({}),
+            tools.clone(),
+            tools.storage().test_running_caller().await,
+            "plugin-call".into(),
+        )
         .await
         .expect("registered plugin tool")
         .unwrap();
@@ -1363,6 +1056,7 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
 fn engine_start_requests_declare_a_captured_execution_env() {
     let now = Utc::now();
     let monitor = MonitorRecord {
+        thread_id: 1,
         id: "monitor-1".to_string(),
         cmd: "test -f done".to_string(),
         every_secs: 30,
@@ -1377,15 +1071,11 @@ fn engine_start_requests_declare_a_captured_execution_env() {
         cancelled_ts: None,
     };
     let policy = SessionPolicy::new(lash::TurnBudget::Unbounded);
-    let requests = [
-        subagent_start_request(
-            "proc-1",
-            "agent",
-            json!({ "prompt": "go", "cwd": "/tmp" }),
-            host_process_env_spec(policy.clone()),
-        ),
-        monitor_start_request(&monitor, "agent", host_process_env_spec(policy)),
-    ];
+    let requests = [monitor_start_request(
+        &monitor,
+        "agent",
+        host_process_env_spec(policy),
+    )];
 
     for request in requests {
         assert!(
@@ -1399,5 +1089,188 @@ fn engine_start_requests_declare_a_captured_execution_env() {
         let env_ref = env_spec.stable_ref().expect("stable execution env ref");
         let registration = request.into_registration(Some(env_ref.clone()));
         assert_eq!(registration.env_ref, Some(env_ref));
+    }
+}
+
+#[test]
+fn tool_surface_fingerprint_uses_names_not_argument_schemas() {
+    let first = vec![tool_definition(
+        "test.events_notify",
+        "events_notify",
+        "Notify",
+        json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": { "message": { "type": "string" } }
+        }),
+        json!({ "type": "object" }),
+        ["events"],
+        "notify",
+    )];
+    let argument_only_change = vec![tool_definition(
+        "test.events_notify",
+        "events_notify",
+        "Notify with an evolved schema",
+        json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+                "message": { "type": "string" },
+                "quiet": { "type": "boolean" }
+            }
+        }),
+        json!({ "type": "object" }),
+        ["events"],
+        "notify",
+    )];
+    let mut name_set_change = argument_only_change.clone();
+    name_set_change.push(tool_definition(
+        "test.events_archive",
+        "events_archive",
+        "Archive",
+        json!({ "type": "object" }),
+        json!({ "type": "object" }),
+        ["events"],
+        "archive",
+    ));
+
+    let first = agent_tool_surface(&first).unwrap();
+    let argument_only_change = agent_tool_surface(&argument_only_change).unwrap();
+    let name_set_change = agent_tool_surface(&name_set_change).unwrap();
+
+    assert_eq!(first.fingerprint, argument_only_change.fingerprint);
+    assert_eq!(first.tool_names, vec!["events.notify"]);
+    assert_ne!(first.fingerprint, name_set_change.fingerprint);
+    assert_eq!(
+        name_set_change.tool_names,
+        vec!["events.archive", "events.notify"]
+    );
+}
+
+#[tokio::test]
+async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let (thread, _) = state
+        .storage
+        .create_thread(
+            "release",
+            "Release",
+            "Choose stable or beta",
+            &Value::Null,
+            hirsel_proto::ThreadAttention::NeedsOwner,
+            None,
+        )
+        .await
+        .unwrap();
+    let first = state
+        .tools
+        .prepare_agent_session(thread.id, "v1", &["threads.create".into()])
+        .await
+        .unwrap();
+    assert!(first.session_id.starts_with(&format!(
+        "thread-{}-{}-g",
+        state.storage.history_id().await.unwrap(),
+        thread.id
+    )));
+    state
+        .storage
+        .append_thread_chat(
+            thread.id,
+            ChatAuthor::Owner,
+            "Release request",
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let rotated = state
+        .tools
+        .prepare_agent_session(
+            thread.id,
+            "v2",
+            &["threads.create".into(), "threads.read".into()],
+        )
+        .await
+        .unwrap();
+    assert!(rotated.session_id.ends_with("-g1"));
+    let seed = rotated.handoff_seed.unwrap();
+    assert!(seed.contains(&format!("Thread #{} owner: Release request", thread.id)));
+    assert!(seed.contains("This is this Thread"));
+    let detail = state
+        .storage
+        .thread_detail(thread.id, None, 30)
+        .await
+        .unwrap();
+    assert!(
+        detail
+            .activities
+            .iter()
+            .any(|a| a.kind == "session_rotated")
+    );
+
+    assert!(
+        state
+            .tools
+            .prepare_agent_session(
+                thread.id,
+                "v2",
+                &["threads.create".into(), "threads.read".into()]
+            )
+            .await
+            .unwrap()
+            .handoff_seed
+            .is_none()
+    );
+}
+
+#[test]
+fn view_tool_contract_accepts_current_placements_only() {
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let show = definitions
+        .iter()
+        .find(|d| d.name() == "views_show")
+        .unwrap();
+    let schema = jsonschema::JSONSchema::compile(show.contract.input_schema.canonical()).unwrap();
+    for placement in ["canvas", "chat"] {
+        assert!(
+            schema.is_valid(&json!({"placement":placement,"spec":{"type":"text","text":"hello"}}))
+        );
+    }
+    assert!(!schema.is_valid(&json!({"placement":"ping:7","spec":{"type":"text","text":"hello"}})));
+}
+
+async fn complete_fixture_turn(
+    executor: &HirselToolExecutor,
+    output: &lash::TurnOutput,
+) -> anyhow::Result<bool> {
+    let turn_id = executor
+        .anchors
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .unwrap()
+        .thread_turn_id
+        .unwrap();
+    let history = executor.tools.storage().history_id().await?;
+    let reply = turn_chat_payload(output);
+    let terminal = match &output.result.outcome {
+        lash::TurnOutcome::Finished(_) => ThreadTurnState::Completed,
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => ThreadTurnState::Cancelled,
+        _ => ThreadTurnState::Failed,
+    };
+    let (_, message) = executor
+        .tools
+        .storage()
+        .complete_thread_turn(&history, turn_id, terminal, reply)
+        .await?;
+    if let Some(message) = message {
+        executor.tools.publish_thread_message(message).await;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }

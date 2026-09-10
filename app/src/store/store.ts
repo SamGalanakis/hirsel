@@ -1,213 +1,23 @@
-import { untrack } from "solid-js";
-
-import { createStore, reconcile } from "solid-js";
-
-import type { EventItem } from "../protocol";
+import { untrack, createStore, reconcile } from "solid-js";
 import { reduce } from "./reducer";
-import { projectEvents } from "./selectors";
 import { type Action, type AppState, initialState } from "./types";
-
-/** Exactly one temporary utility can cover the task world at a time. */
 export type RightRegion = "none" | "canvas" | "processes" | "settings";
-
-/** Small local UI state layered over the protocol reducer's authoritative data. */
-interface UiState {
-  rightRegion: RightRegion;
-  composerPrefill: string | null;
-  protocolError: string | null;
-  settingsTab: SettingsTab | null;
-  /** The one focused Task, or `null` for the ambient field. Ambient is the
-   * absence of focus, so `null` is the resting value, not a mode. It lives here
-   * rather than inside the shell because focus is now reachable from outside the
-   * task tree — the Esc ladder and the ⌘K "Clear task focus" command both need
-   * to leave a Task without owning the shell's internals. */
-  focusedTaskId: number | null;
-  /** Increments for every prompts_changed frame, including an authoritative
-   * no-change acknowledgement whose object fields equal the store. */
-  promptsRevision: number;
-  /** Increments for every providers_changed frame, on the same terms as
-   * `promptsRevision`: an equal roster is still an acknowledgement. */
-  providersRevision: number;
-}
-
-/** The Settings panel's side-tab identifiers, in the order the rail lists them.
- * A caller that opens Settings pointed at one (see `settingsTab`) names it
- * here; the tab IS the landing, so there is nothing to scroll to. */
-export type SettingsTab =
-  | "appearance"
-  | "agents"
-  | "providers"
-  | "connection"
-  | "notifications"
-  | "guide"
-  | "about"
-  | "plugins";
-
-type Store = AppState & UiState;
-
-function initialStore(): Store {
-  return {
-    ...initialState(),
-    rightRegion: "none",
-    composerPrefill: null,
-    protocolError: null,
-    settingsTab: null,
-    focusedTaskId: null,
-    promptsRevision: 0,
-    providersRevision: 0,
-  };
-}
-
-const [state, setState] = createStore<Store>(initialStore());
-
-/** The projection of `state.events` through `state.eventOverrides` (R6-1),
- * held in its own store rather than derived in a memo for ONE reason: row
- * identity. Every task surface renders through `<For>`, which is keyed by object
- * reference, so a memo minting fresh objects on each override change would tear
- * down and rebuild the row's DOM (losing focus mid-gesture). Reconciled by `id`,
- * the row object survives an optimistic flip and only the changed field notifies.
- * Written synchronously inside `dispatch`, so a caller reading it right after a
- * dispatch (or right before one) always sees the settled truth. */
-const [projection, setProjection] = createStore<{ events: EventItem[] }>({ events: [] });
-
-/** Snapshot the protocol-facing slice to hand to the pure reducer. */
-function appSnapshot(): AppState {
-  return {
-    messages: state.messages,
-    hasEarlierMessages: state.hasEarlierMessages,
-    hasLaterMessages: state.hasLaterMessages,
-    events: state.events,
-    eventOverrides: state.eventOverrides,
-    agentActivity: state.agentActivity,
-    connection: state.connection,
-    lastSeenMsgId: state.lastSeenMsgId,
-    hostVersion: state.hostVersion,
-    model: state.model,
-    subagentModels: state.subagentModels,
-    prompts: state.prompts,
-    providers: state.providers,
-    pendingSends: state.pendingSends,
-    processes: state.processes,
-    turnEvents: state.turnEvents,
-    lastTurnEvents: state.lastTurnEvents,
-    turnDetails: state.turnDetails,
-    removedIds: state.removedIds,
-    views: state.views,
-  };
-}
-
-/** Apply the same pure `reduce` used by the tests, then push the result into
- * the fine-grained store. The rendered arrays go through
- * `reconcile` keyed by `id` so only the DOM bound to genuinely-changed rows
- * re-renders; the small scalar/never-rendered fields are set directly.
- *
- * The whole body is `untrack`ed: dispatch is an imperative command, and it is
- * sometimes invoked synchronously from inside a reactive scope (e.g. the App
- * effect that opens the socket immediately dispatches connection_status). Its
- * internal `appSnapshot()` reads must NOT subscribe that caller to the store,
- * or the subsequent writes here would re-trigger it in an infinite loop. */
+export type SettingsTab = "appearance" | "agents" | "providers" | "connection" | "notifications" | "guide" | "about" | "plugins";
+interface UiState { rightRegion: RightRegion; composerPrefill: string | null; protocolError: string | null; settingsTab: SettingsTab | null; promptsRevision: number; providersRevision: number }
+const [state, setState] = createStore<AppState & UiState>({ ...initialState(), rightRegion: "none", composerPrefill: null, protocolError: null, settingsTab: null, promptsRevision: 0, providersRevision: 0 });
 export function dispatch(action: Action): void {
-  untrack(() => setState(() => {
-    const next = reduce(appSnapshot(), action);
-    setState(draft => { reconcile(next.messages, "id")(draft["messages"]); });
-    setState(draft => { draft["hasEarlierMessages"] = next.hasEarlierMessages; });
-    setState(draft => { draft["hasLaterMessages"] = next.hasLaterMessages; });
-    // Task collection: reconcile typed wire Events by id so only the DOM bound to a
-    // genuinely-changed event (a re-upsert / decide flip) re-renders.
-    setState(draft => { reconcile(next.events, "id")(draft["events"]); });
-    // The one optimistic layer over those events. `reconcile` (rather than a
-    // plain set) keeps the per-id entries stable, so a gesture on one event
-    // never invalidates the projection of every other.
-    setState(draft => { reconcile(next.eventOverrides)(draft["eventOverrides"]); });
-    setProjection(draft => { reconcile(projectEvents(next.events, next.eventOverrides), "id")(draft["events"]); });
-    setState(draft => { draft["pendingSends"] = next.pendingSends; });
-    setState(draft => { draft["removedIds"] = next.removedIds; });
-    setState(draft => { reconcile(next.processes, "id")(draft["processes"]); });
-    setState(draft => { draft["turnEvents"] = next.turnEvents; });
-    // Never rendered directly (the parking slot for a turn whose idle boundary
-    // beat its committing message) — a plain set, no reconcile needed.
-    setState(draft => { draft["lastTurnEvents"] = next.lastTurnEvents; });
-    // A plain set of this Record-of-arrays can retain live proxy references;
-    // reconcile applies the structural diff safely. See retainTurnDetails.
-    setState(draft => { reconcile(next.turnDetails)(draft["turnDetails"]); });
-    setState(draft => { draft["agentActivity"] = next.agentActivity; });
-    setState(draft => { draft["connection"] = next.connection; });
-    setState(draft => { draft["lastSeenMsgId"] = next.lastSeenMsgId; });
-    setState(draft => { draft["hostVersion"] = next.hostVersion; });
-    // Nullable object slices: a plain set (like hostVersion/agentActivity), not
-    // `reconcile`, since reconcile is for arrays/keyed objects and these swap to
-    // a whole new snapshot/catalog (or null) on each change.
-    setState(draft => { draft["model"] = next.model; });
-    setState(draft => { draft["subagentModels"] = next.subagentModels; });
-    setState(draft => { draft["prompts"] = next.prompts; });
-    if (action.type === "prompts_changed") {
-      setState(draft => { draft["promptsRevision"] = ((revision) => revision + 1)(draft["promptsRevision"]); });
-    }
-    setState(draft => { draft["providers"] = next.providers; });
-    if (action.type === "providers_changed") {
-      setState(draft => { draft["providersRevision"] = ((revision) => revision + 1)(draft["providersRevision"]); });
-    }
-    // Generative-UI tier: reconcile keyed by instance_id so only the DOM bound
-    // to a genuinely-changed view (a re-upsert / update-in-place) re-renders.
-    setState(draft => { reconcile(next.views, "instance_id")(draft["views"]); });
+  untrack(() => setState(draft => {
+    const next = reduce(state, action);
+    reconcile(next.processes, "id")(draft.processes);
+    reconcile(next.views, "instance_id")(draft.views);
+    draft.connection = next.connection; draft.hostVersion = next.hostVersion;
+    draft.model = next.model; draft.subagentModels = next.subagentModels;
+    draft.prompts = next.prompts; draft.providers = next.providers;
+    if (action.type === "prompts_changed") draft.promptsRevision++;
+    if (action.type === "providers_changed") draft.providersRevision++;
   }));
 }
-
-/** THE Event list every surface reads: the wire truth in `state.events` with
- * the optimistic `eventOverrides` layer folded in (R6-1). Selectors, components
- * and the action helpers all take these plain projected events, so no caller
- * ever threads override ids around. Reactive like any store read — components
- * track exactly the rows and fields they touch. */
-export function effectiveEvents(): EventItem[] {
-  return projection.events;
-}
-
-// ---- Task focus -------------------------------------------------------------
-
-/** Focus a Task, or return to ambient when it is already the focused one —
- * selecting the focused task again clears focus (DESIGN §4). */
-export function toggleTaskFocus(id: number): void {
-  setState(draft => { draft["focusedTaskId"] = ((current) => (current === id ? null : id))(draft["focusedTaskId"]); });
-}
-
-/** Focus a Task unconditionally. Distinct from `toggleTaskFocus` for callers
- * that are not a selection gesture — the load-time auto-focus in particular,
- * where "toggle" would be the wrong contract. */
-export function focusTask(id: number): void {
-  setState(draft => { draft["focusedTaskId"] = id; });
-}
-
-/** Leave the focused Task for the ambient field. The exit path behind Esc and
- * the ⌘K "Clear task focus" command. The chip's own exit is `toggleTaskFocus`:
- * activating the open chip clears it, which is what its accessible name
- * promises. */
-export function clearTaskFocus(): void {
-  setState(draft => { draft["focusedTaskId"] = null; });
-}
-
-/** Drop focus when the focused Task is no longer in the visible field (archived,
- * swept, resynced away). Untracked like `dispatch`: it is called from the shell's
- * reconciliation effect and must not subscribe that effect to its own write. */
-export function reconcileTaskFocus(visibleIds: number[]): void {
-  untrack(() => {
-    const focused = state.focusedTaskId;
-    if (focused !== null && !visibleIds.includes(focused)) setState(draft => { draft["focusedTaskId"] = null; });
-  });
-}
-
-/** The single low-level setter for the exclusive right region. Every intent
- * helper below routes through this so "one pane owns the region" holds by
- * construction — setting a region is all it takes to unmount whatever held it. */
-export function setRightRegion(region: RightRegion): void {
-  setState(draft => { draft["rightRegion"] = region; });
-}
-
-/** Close whatever pane owns the right region, back to the `none` resting state. */
-export function closeRightRegion(): void {
-  setState(draft => { draft["rightRegion"] = "none"; });
-}
-
-/** Dock the Processes inspector into the task world's utility region. */
+export function closeRightRegion(): void { setState(draft => { draft.rightRegion = "none"; }); }
 export function openProcesses(): void {
   setState(draft => { draft["rightRegion"] = "processes"; });
 }
@@ -243,12 +53,12 @@ export function clearComposerPrefill(): void {
   setState(draft => { draft["composerPrefill"] = null; });
 }
 
-/** Seed the always-mounted Hirsel composer without changing its task subject. */
+/** Seed the always-mounted Hirsel composer without changing its Thread subject. */
 export function prefillComposer(text: string): void {
   setState(draft => { draft["composerPrefill"] = text; });
 }
 
-/** The reactive store proxy: components read `state.messages`, `state.connection`,
+/** The reactive store proxy: components read `state.processes`, `state.connection`,
  * etc. directly and Solid tracks the exact reads. Also read by the WebSocket
- * client module (which is not a component) for the `pendingSends` replay. */
+ * client module (which is not a component) for operational state. */
 export { state };

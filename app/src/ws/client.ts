@@ -1,5 +1,7 @@
-import { attachArtifactTransport, disconnectArtifacts, handleArtifactMessage } from "../artifacts/store";
-import { attachThreadTransport, disconnectThreads, handleThreadMessage } from "../threads/store";
+import { attachRelatedTransport, disconnectRelated, handleRelatedMessage, resetRelated, trackRelatedRead } from "../related/store";
+import { acceptHistory } from "../lib/history";
+import { attachArtifactTransport, disconnectArtifacts, handleArtifactMessage, resetArtifacts } from "../artifacts/store";
+import { attachThreadTransport, disconnectThreads, handleThreadMessage, resetThreads } from "../threads/store";
 // Single WebSocket client module: connect, hello/hello_ok, reconnect with
 // exponential backoff, offline outgoing queue flushed on reconnect using
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
@@ -8,40 +10,15 @@ import type {
   AgentSlot,
   Blob,
   ClientMessage,
-  MessagesMsg,
-  SendMode,
   ServerMessage,
 } from "../protocol";
 import { httpBaseFromWs } from "../lib/endpoint";
 import { deliverPluginPush } from "../plugins/registry";
-import { dispatch, setProtocolError, state } from "../store/store";
-import type { PendingSend } from "../store/types";
+import { dispatch, setProtocolError } from "../store/store";
 import { jitteredDelayMs } from "./backoff";
 
-/** THE `send_message` frame builder — the one place the wire shape is spelled.
- * Three call sites used to spell it out: the first send, the manual retry, and
- * the reconnect outbox flush, each re-applying the same defaults and the same
- * `mentions` omission. `PendingSend` is total, so all this does is apply the one
- * wire omission there is: an empty `mentions` is dropped, keeping the pre-v2.1
- * shape a host without the field expects. */
-function sendMessageFrame(pending: PendingSend): ClientMessage {
-  return {
-    type: "send_message",
-    client_id: pending.clientId,
-    body: pending.body,
-    ref: pending.ref,
-    attachments: pending.attachments,
-    mode: pending.mode,
-    ...(pending.mentions.length > 0 ? { mentions: pending.mentions } : {}),
-  };
-}
-
 const TOKEN_KEY = "hirsel.token";
-const LAST_SEEN_KEY = "hirsel.lastSeenMsgId";
 
-/** A pending send with no host echo after this long is surfaced as "failed"
- * with a retry affordance (spec: socket stays closed > 30s or send errors). */
-const FAILED_AFTER_MS = 30_000;
 
 /** Give up on an upload_blob whose blob_ok / error never arrives. */
 const UPLOAD_TIMEOUT_MS = 45_000;
@@ -50,8 +27,6 @@ const UPLOAD_TIMEOUT_MS = 45_000;
  * image thumbnail / download link from resolving; fail into a placeholder). */
 const BLOB_URL_TIMEOUT_MS = 20_000;
 
-/** Give up on a history page whose correlated `messages` response never arrives. */
-const HISTORY_TIMEOUT_MS = 20_000;
 
 /** WebSocket close codes the host may use to reject a bad/expired token. The
  * canonical code isn't pinned in PROTOCOL.md yet (coordinate with the backend
@@ -61,13 +36,6 @@ const HISTORY_TIMEOUT_MS = 20_000;
  * reconnect. */
 const AUTH_REJECT_CODES = new Set([1008, 4001, 4401, 4403]);
 
-/** Heuristic fallback for hosts that accept a socket, then drop it on a bad
- * token with a generic 1006/1000 before `hello_ok`. Only sockets that reached
- * OPEN count: a connection refused before OPEN means the host is absent, so it
- * keeps reconnecting without striking. A token that ever authenticated sets
- * `everAuthed`, permanently disabling this path so real mid-session drops keep
- * reconnecting forever. Two accepted-then-dropped strikes before we give up. */
-const MAX_CONNECTS_WITHOUT_HELLO = 2;
 
 /** Signalled to the app when the token is rejected: the client has already
  * cleared the stored token and stopped reconnecting; the app clears its token
@@ -90,32 +58,12 @@ export function setStoredToken(token: string): void {
  * app to the first-run gate. The caller reloads to tear the socket down. */
 export function clearStoredToken(): void {
   localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(LAST_SEEN_KEY);
-}
-
-function getStoredLastSeen(): number | null {
-  const raw = localStorage.getItem(LAST_SEEN_KEY);
-  if (raw === null) return null;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function setStoredLastSeen(id: number): void {
-  localStorage.setItem(LAST_SEEN_KEY, String(id));
 }
 
 export function makeClientId(): string {
   return crypto.randomUUID();
 }
 
-// Negative, monotonically-decreasing synthetic ids for optimistic messages -
-// always outside the host's (positive, monotonic) id space.
-let nextLocalId = -1;
-function makeLocalId(): number {
-  const id = nextLocalId;
-  nextLocalId -= 1;
-  return id;
-}
 
 /** Origin for out-of-band blob asset fetches, derived from the WS URL: ws→http,
  * wss→https, and a trailing `/ws` path dropped (the host serves the app + blobs
@@ -131,26 +79,13 @@ class HirselWsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByClient = false;
   private outbox: ClientMessage[] = [];
+  private authenticated = false;
   /** Unresolved upload_blob promises, keyed by their client_id. */
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
   /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
   private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
-  /** Exactly one history request may be in flight; repeated top-edge scroll
-   * events share its promise instead of emitting duplicate pages. */
-  private historyRequest: {
-    clientId: string;
-    promise: Promise<MessagesMsg>;
-    resolve: (page: MessagesMsg) => void;
-    reject: (error: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  } | null = null;
-  /** Per-pending-send "not echoed yet" timers, keyed by client_id. */
-  private failTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** True once any `hello_ok` has arrived on this client — permanently disables
-   * the "closed before hello ⇒ bad token" heuristic (see MAX_CONNECTS...). */
+  /** Distinguish initial auth errors from later operational failures. */
   private everAuthed = false;
-  /** Accepted connections that closed before a `hello_ok` (auth heuristic). */
-  private connectsWithoutHello = 0;
   private handlers: ClientHandlers;
 
   constructor(url: string, token: string, handlers: ClientHandlers = {}) {
@@ -167,57 +102,11 @@ class HirselWsClient {
   close(): void {
     this.closedByClient = true;
     disconnectThreads();
+    disconnectRelated();
     disconnectArtifacts();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    for (const t of this.failTimers.values()) clearTimeout(t);
-    this.failTimers.clear();
+    this.clearRequests("Connection closed.");
     this.socket?.close();
-  }
-
-  /** Send a conversation message. Returns the synthetic local id of the optimistic
-   * entry so callers can request a scroll-to before the host echoes a real id. */
-  sendMessage(
-    body: string,
-    ref: number | null,
-    opts?: { mode?: SendMode; attachments?: Blob[]; mentions?: number[] },
-  ): number {
-    const clientId = makeClientId();
-    const localId = makeLocalId();
-    const mode: SendMode = opts?.mode ?? "send";
-    const attachments = opts?.attachments ?? [];
-    const mentions = opts?.mentions ?? [];
-    dispatch({
-      type: "send_local",
-      localId,
-      clientId,
-      body,
-      ref,
-      ts: new Date().toISOString(),
-      attachments,
-      mode,
-      mentions,
-    });
-    this.sendFrame(
-      sendMessageFrame({
-        clientId,
-        body,
-        ref,
-        attachments: attachments.map((b) => b.id),
-        mode,
-        mentions,
-      }),
-    );
-    this.armFailTimer(clientId);
-    return localId;
-  }
-
-  /** Retry a still-pending send after it was surfaced as failed. */
-  retrySend(clientId: string): void {
-    const pending = state.pendingSends.find((p) => p.clientId === clientId);
-    if (!pending) return;
-    dispatch({ type: "send_retry", clientId });
-    this.sendFrame(sendMessageFrame(pending));
-    this.armFailTimer(clientId);
   }
 
   /** Upload a file's bytes; resolves with the stored Blob when blob_ok arrives,
@@ -278,84 +167,19 @@ class HirselWsClient {
     });
   }
 
-  /** Fetch one page immediately before `beforeId`. Calls made while a page is
-   * pending share that correlated request, enforcing the single-flight guard
-   * below scroll-event frequency as well as in the component decision helper. */
-  fetchMessages(beforeId: number, limit: number): Promise<MessagesMsg> {
-    if (this.historyRequest) return this.historyRequest.promise;
-    const clientId = makeClientId();
-    let resolvePage!: (page: MessagesMsg) => void;
-    let rejectPage!: (error: Error) => void;
-    const promise = new Promise<MessagesMsg>((resolve, reject) => {
-      resolvePage = resolve;
-      rejectPage = reject;
-    });
-    const timer = setTimeout(() => {
-      if (this.historyRequest?.clientId !== clientId) return;
-      this.historyRequest = null;
-      rejectPage(new Error("history request timed out"));
-    }, HISTORY_TIMEOUT_MS);
-    this.historyRequest = {
-      clientId,
-      promise,
-      resolve: resolvePage,
-      reject: rejectPage,
-      timer,
-    };
-    this.enqueue({
-      type: "fetch_messages",
-      client_id: clientId,
-      before_id: beforeId,
-      limit,
-    });
-    return promise;
-  }
-
-  cancelTurn(threadId?: number): void {
-    this.sendFrame({ type: "cancel_turn", ...(threadId === undefined ? {} : { thread_id: threadId }) });
+  cancelTurn(threadId: number): void {
+    this.sendFrame({ type: "cancel_turn", thread_id: threadId });
   }
 
   cancelQueued(clientId: string): void {
     this.sendFrame({ type: "cancel_queued", client_id: clientId });
   }
 
-  /** Mark a Task read through the legacy wire id space and operation,
-   * while the event reducer owns the local optimistic flip. */
-  readEvent(eventId: number): void {
-    this.enqueue({ type: "read_ping", ping_id: eventId });
-  }
-
   // ---- Generative-UI tier (view templates) ----
 
-  /** Emit an owner-initiated event from an interactive view component
-   * (`action` / `optionSet` / `form`). Enqueued so a tap right as the socket
-   * blips still fires once reconnected (like resolve_ping). The reply returns
-   * through the ordinary conversation/Task flow — there is no direct ack — so callers show
-   * a brief local pending state and let the resulting msg/ping_upsert land
-   * normally. The client never creates messages or settles Tasks itself. */
+  /** Deliver a current View interaction; the Host owns its resulting state. */
   sendViewEvent(instanceId: string, action: string, data: unknown): void {
     this.enqueue({ type: "view_event", instance_id: instanceId, action, data });
-  }
-
-  // ---- Task actions (typed Event compatibility wire) ----
-
-  /** Emit an owner action from an event card (`choose` / `submit` / `snooze` /
-   * `dismiss` / `reopen`). Generalizes the quick-reply resolution + view_event.
-   * Enqueued so a tap right as the socket blips still fires once reconnected;
-   * there is no direct ack — the reply returns through the normal event flow (a
-   * `done` event_upsert), so callers show a brief optimistic state and let it
-   * land. The client never resolves the event itself. */
-  sendEventAction(eventId: number, action: string, data: unknown): void {
-    this.enqueue({ type: "event_action", event_id: eventId, action, data });
-  }
-
-  /** Sweep every finished event out of the resting queue in one op (Wave-3 "Clear
-   * finished"). Enqueued like `sendEventAction` so a tap right as the socket
-   * blips still lands once reconnected; the host archives the finished set and
-   * echoes an `archived` `event_upsert` per event, reconciling the client's
-   * optimistic batch archive. No direct ack. */
-  clearFinishedEvents(): void {
-    this.enqueue({ type: "clear_finished_events" });
   }
 
   // ---- Model configuration ----
@@ -445,32 +269,8 @@ class HirselWsClient {
     this.enqueue({ type: "redetect_provider", id });
   }
 
-  private armFailTimer(clientId: string): void {
-    const existing = this.failTimers.get(clientId);
-    if (existing) clearTimeout(existing);
-    this.failTimers.set(
-      clientId,
-      setTimeout(() => {
-        this.failTimers.delete(clientId);
-        if (state.pendingSends.some((p) => p.clientId === clientId)) {
-          dispatch({ type: "send_failed", clientId });
-        }
-      }, FAILED_AFTER_MS),
-    );
-  }
-
-  /** Clear fail timers for sends that have since reconciled away. */
-  private reconcileFailTimers(): void {
-    for (const [clientId, timer] of this.failTimers) {
-      if (!state.pendingSends.some((p) => p.clientId === clientId)) {
-        clearTimeout(timer);
-        this.failTimers.delete(clientId);
-      }
-    }
-  }
-
   private enqueue(frame: ClientMessage): void {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+    if (this.authenticated && this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify(frame));
     } else {
       this.outbox.push(frame);
@@ -478,9 +278,9 @@ class HirselWsClient {
   }
 
   /** Best-effort immediate send; dropped if the socket is not open right now
-   * (send_message durability comes from the pendingSends replay). */
+   * (Thread send durability comes from the Thread store). */
   private sendFrame(frame: ClientMessage): void {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+    if (this.authenticated && this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify(frame));
     }
   }
@@ -493,14 +293,12 @@ class HirselWsClient {
 
     const socket = new WebSocket(this.url);
     this.socket = socket;
-    let opened = false;
+    this.authenticated = false;
 
     socket.addEventListener("open", () => {
-      opened = true;
       const hello: ClientMessage = {
         type: "hello",
-        token: this.token,
-        last_seen_msg_id: getStoredLastSeen(),
+        auth: { static_token: this.token },
       };
       socket.send(JSON.stringify(hello));
     });
@@ -511,21 +309,12 @@ class HirselWsClient {
 
     socket.addEventListener("close", (event) => {
       this.socket = null;
+      this.authenticated = false;
       disconnectThreads();
+    disconnectRelated();
     disconnectArtifacts();
       if (this.closedByClient) return;
-      // The precise, instant auth-reject signal is the pre-auth `error` frame
-      // (handled in handleServerMessage); this close-side check is the FALLBACK
-      // for a host that just drops the socket with no error frame — an explicit
-      // reject code, or (only until the token has ever authenticated) an opened
-      // socket closing before `hello_ok` too many times. Never-opened sockets
-      // mean network absence and reconnect without consuming a strike.
-      const looksLikeAuthReject =
-        AUTH_REJECT_CODES.has((event as CloseEvent).code) ||
-        (opened &&
-          !this.everAuthed &&
-          ++this.connectsWithoutHello >= MAX_CONNECTS_WITHOUT_HELLO);
-      if (looksLikeAuthReject) {
+      if (AUTH_REJECT_CODES.has((event as CloseEvent).code)) {
         this.handleAuthReject();
         return;
       }
@@ -542,18 +331,18 @@ class HirselWsClient {
    * app to return to the gate with an error. Reconnecting would just re-reject
    * the same bad token forever (the C5 dead-end this replaces). `detail` is the
    * host's reason when we have one (a pre-auth `error` frame), else a generic
-   * message for the socket-just-dropped heuristic path. */
+   * message for an explicit authentication close code. */
   private handleAuthReject(detail?: string): void {
     if (this.closedByClient) return; // already torn down (e.g. error then close)
     this.closedByClient = true;
     disconnectThreads();
+    disconnectRelated();
     disconnectArtifacts(); // suppress any in-flight reconnect/close paths
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    for (const t of this.failTimers.values()) clearTimeout(t);
-    this.failTimers.clear();
+    this.clearRequests("Connection closed.");
     this.socket?.close();
     clearStoredToken();
     dispatch({ type: "connection_status", status: "reconnecting" });
@@ -576,63 +365,27 @@ class HirselWsClient {
 
   private handleServerMessage(message: ServerMessage): void {
     if (message.type === "hello_ok") {
-      attachThreadTransport(frame => this.sendFrame(frame));
+      if (acceptHistory(message.history_id)) { this.clearRequests("History was reset. Start this request again."); resetThreads(); resetArtifacts(); resetRelated(); }
+      this.authenticated = true;
+      attachThreadTransport(frame => { trackRelatedRead(frame, message.history_id); this.sendFrame(frame); });
+      attachRelatedTransport(frame => this.sendFrame(frame));
       attachArtifactTransport(frame => this.sendFrame(frame));
     }
     handleArtifactMessage(message);
+    handleRelatedMessage(message);
     handleThreadMessage(message);
     switch (message.type) {
       case "hello_ok": {
-        // The token authenticated: retire the bad-token heuristic for the rest
-        // of this client's life so a later network drop reconnects, never gates.
+        // This socket now addresses the authenticated current history.
         this.everAuthed = true;
-        this.connectsWithoutHello = 0;
         dispatch({ type: "hello_ok", payload: message });
-        setStoredLastSeen(message.latest_msg_id);
         dispatch({ type: "connection_status", status: "connected" });
         this.reconnectAttempt = 0;
-        this.reconcileFailTimers();
         this.flushOutbox();
-        break;
-      }
-      case "msg": {
-        dispatch({ type: "msg", payload: message });
-        setStoredLastSeen(message.message.id);
-        this.reconcileFailTimers();
-        break;
-      }
-      case "messages": {
-        const pending = this.historyRequest;
-        if (pending?.clientId !== message.client_id) break;
-        clearTimeout(pending.timer);
-        this.historyRequest = null;
-        pending.resolve(message);
-        break;
-      }
-      case "msg_removed": {
-        dispatch({ type: "msg_removed", id: message.id });
-        this.reconcileFailTimers();
-        break;
-      }
-      case "agent_activity": {
-        dispatch({
-          type: "agent_activity",
-          payload: { state: message.state, text: message.text },
-        });
-        break;
-      }
-      case "ping_upsert":
-        break; // Legacy wire frame; typed events are authoritative.
-      case "event_upsert": {
-        dispatch({ type: "event_upsert", payload: message });
         break;
       }
       case "process_upsert": {
         dispatch({ type: "process_upsert", payload: message });
-        break;
-      }
-      case "turn_event": {
-        dispatch({ type: "turn_event", payload: message });
         break;
       }
       case "view_upsert": {
@@ -691,7 +444,7 @@ class HirselWsClient {
         // reason and NO client_id, then closes the socket (no numeric close
         // code). Before this client has ever authenticated, that is an auth
         // rejection — act on it immediately (precise + instant) rather than
-        // waiting out the close-before-hello heuristic. A correlated error
+        // waiting for the socket close. A correlated error
         // (upload/blob) always has a client_id and is handled below; a global
         // error that arrives AFTER authentication is a normal runtime error.
         if (!this.everAuthed && !message.client_id) {
@@ -712,12 +465,6 @@ class HirselWsClient {
             blobReq.reject(new Error(message.detail));
             this.blobUrlReqs.delete(message.client_id);
           }
-          const historyReq = this.historyRequest;
-          if (historyReq?.clientId === message.client_id) {
-            clearTimeout(historyReq.timer);
-            this.historyRequest = null;
-            historyReq.reject(new Error(message.detail));
-          }
         } else {
           // An uncorrelated error that arrives AFTER authentication is a runtime
           // protocol error (the pre-auth reject path returned above). Surface it
@@ -732,14 +479,14 @@ class HirselWsClient {
     }
   }
 
+  private clearRequests(detail: string): void {
+    this.outbox = [];
+    for (const request of this.uploads.values()) request.reject(new Error(detail));
+    for (const request of this.blobUrlReqs.values()) request.reject(new Error(detail));
+    this.uploads.clear(); this.blobUrlReqs.clear();
+  }
   private flushOutbox(): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-
-    // Resend anything still un-acked, oldest first, using its original
-    // client_id so the host can dedupe if it received it before the disconnect.
-    for (const pending of state.pendingSends) {
-      this.socket.send(JSON.stringify(sendMessageFrame(pending)));
-    }
 
     const queued = this.outbox;
     this.outbox = [];

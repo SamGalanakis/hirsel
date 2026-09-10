@@ -213,10 +213,17 @@ mod tests {
         let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
         let (broadcaster, mut broadcasts) = broadcast::channel(8);
         let log = BroadcastLog::default();
-        let views = ViewManager::new(templates, broadcaster, log.clone());
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            log.clone(),
+        );
 
         let shown = views
             .show(
+                "fixture-history",
+                1,
                 Some("progress".to_string()),
                 None,
                 Some(json!({ "value": 0.2, "label": "Starting" })),
@@ -233,6 +240,8 @@ mod tests {
 
         let updated = views
             .update(
+                "fixture-history",
+                1,
                 "view-test",
                 Some(json!({ "value": 0.8 })),
                 Some(json!([
@@ -249,7 +258,10 @@ mod tests {
             HostToClient::ViewUpsert { .. }
         ));
 
-        views.clear("view-test").await.unwrap();
+        views
+            .clear("fixture-history", 1, "view-test")
+            .await
+            .unwrap();
         assert!(views.snapshot().await.is_empty());
         assert!(matches!(
             broadcasts.recv().await.unwrap(),

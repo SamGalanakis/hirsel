@@ -9,7 +9,6 @@ use hirsel_proto::{ChatAuthor, ChatMessage};
 use tokio::sync::Mutex;
 
 use super::*;
-use crate::storage::TasteDecision;
 
 // ---------------------------------------------------------------- test doubles
 
@@ -124,6 +123,10 @@ impl TriageRunner for FakeRunner {
 
 fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
     hirsel_proto::Thread {
+        icon: None,
+        showcased_artifact_id: None,
+        parent_thread_id: None,
+        pinned_at: None,
         id,
         title: name.into(),
         description: description.into(),
@@ -146,7 +149,7 @@ fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
         artifact_ids: Vec::new(),
-        thread_id: 0,
+        thread_id: 1,
         client_id: None,
         mentions: Vec::new(),
         id,
@@ -159,10 +162,11 @@ fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     }
 }
 
-fn subagent_message() -> WakeMessage {
+fn external_message() -> WakeMessage {
     WakeMessage::new(
-        WakeSource::Subagent {
-            process_id: "proc-7".to_string(),
+        1,
+        WakeSource::External {
+            origin: "proc-7".to_string(),
         },
         "Sub-agent completed: the migration landed on main.",
         "subagent:proc-7:subagent.completed",
@@ -170,43 +174,58 @@ fn subagent_message() -> WakeMessage {
 }
 
 async fn test_state(dir: &std::path::Path) -> crate::AppState {
-    crate::build_state(crate::tests::test_config(dir))
+    let state = crate::build_state(crate::tests::test_config(dir))
+        .await
+        .unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "fixture-Wake origin",
+            "Wake origin",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
         .await
         .unwrap()
+        .0;
+    assert_eq!(thread.id, 1);
+    state
 }
 
-fn fork_wake(
+async fn fork_wake(
     state: &crate::AppState,
     runner: Arc<FakeRunner>,
     sink: Arc<RecordingSink>,
 ) -> Arc<ForkWake> {
-    ForkWake::new(runner, sink, state.tools.clone(), state.storage.clone())
+    ForkWake::new(
+        1,
+        state.storage.history_id().await.unwrap(),
+        runner,
+        sink,
+        state.tools.clone(),
+        state.storage.clone(),
+    )
 }
 
 // ------------------------------------------------------------- the pack itself
 
 #[test]
 fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
-    let message = subagent_message();
+    let message = external_message();
     let context = PackContext {
         threads: vec![event(11, "release-channel", "Choose stable or beta")],
         recent_chat: vec![
             chat(1, ChatAuthor::Owner, "ship the migration"),
             chat(2, ChatAuthor::Agent, "started a worker on it"),
         ],
-        rules: vec![TasteDecision {
-            id: 1,
-            event_id: 11,
-            choice: Some("A".to_string()),
-            rule: "always pick the stable channel for releases".to_string(),
-            ts: Utc::now(),
-        }],
     };
 
     let pack = build_pack(&message, &context);
 
     // 1. the triggering message, verbatim and attributed
-    assert!(pack.contains("sub-agent proc-7"));
+    assert!(pack.contains("external proc-7"));
     assert!(pack.contains("Sub-agent completed: the migration landed on main."));
     // 2. the live inventory, by id and one line
     assert!(
@@ -218,13 +237,12 @@ fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
     let owner_at = pack.find("owner: ship the migration").unwrap();
     let agent_at = pack.find("agent: started a worker on it").unwrap();
     assert!(owner_at < agent_at);
-    // 4. recorded rules
-    assert!(pack.contains("always pick the stable channel for releases"));
 }
 
 #[test]
 fn the_pack_bounds_every_section_and_never_dumps_history() {
     let message = WakeMessage::new(
+        1,
         WakeSource::Monitor {
             monitor_id: "mon-1".to_string(),
             label: "ci".to_string(),
@@ -239,25 +257,16 @@ fn the_pack_bounds_every_section_and_never_dumps_history() {
         recent_chat: (0..200)
             .map(|id| chat(id, ChatAuthor::Owner, &format!("message {id}")))
             .collect(),
-        rules: (0..100)
-            .map(|id| TasteDecision {
-                id,
-                event_id: id,
-                choice: None,
-                rule: format!("rule {id}"),
-                ts: Utc::now(),
-            })
-            .collect(),
     };
 
     let pack = build_pack(&message, &context);
 
     assert_eq!(
         pack.matches("; attention=NeedsOwner)").count(),
-        pack::PACK_EVENT_LIMIT
+        pack::PACK_THREAD_LIMIT
     );
     assert_eq!(pack.matches(" owner: ").count(), pack::PACK_CHAT_LIMIT);
-    assert_eq!(pack.matches("(from event #").count(), pack::PACK_RULE_LIMIT);
+
     // The oldest chat rows are the ones dropped: a tail, not a transcript.
     assert!(!pack.contains("message 0\n"));
     assert!(pack.contains("message 199"));
@@ -268,12 +277,11 @@ fn the_pack_bounds_every_section_and_never_dumps_history() {
 
 #[test]
 fn an_empty_host_still_renders_every_pack_section() {
-    let pack = build_pack(&subagent_message(), &PackContext::default());
+    let pack = build_pack(&external_message(), &PackContext::default());
 
     assert!(pack.contains("## Incoming event"));
     assert!(pack.contains("## Threads\n\n(none open)"));
     assert!(pack.contains("## Recent conversation\n\n(none)"));
-    assert!(pack.contains("## Recorded rules\n\n(none)"));
 }
 
 // ------------------------------------------------------------- the tool surface
@@ -297,12 +305,10 @@ fn the_fork_tool_surface_is_exactly_its_three_exits() {
     // A fork never spawns Sub-agents, never speaks to the Owner, and never
     // starts long work — enforced as capability, not as instruction.
     for forbidden in [
-        "subagents_spawn",
-        "subagents_prompt",
-        "subagents_wait",
-        "subagents_list",
-        "pings_send",
-        "events_judgment",
+        "threads_delegate",
+        "threads_send",
+        "threads_report",
+        "threads_create",
         "shell_run",
         "monitors_create",
         "views_show",
@@ -320,9 +326,10 @@ async fn a_fork_gets_exactly_one_exit() {
     let state = test_state(dir.path()).await;
     let sink = Arc::new(RecordingSink::default());
     let tools = ForkTools::new(
+        state.storage.history_id().await.unwrap(),
         state.tools.clone(),
         Arc::clone(&sink) as Arc<dyn BriefSink>,
-        subagent_message(),
+        external_message(),
         Some(1),
     );
 
@@ -344,12 +351,13 @@ async fn dispatch_spawns_exactly_one_fork_per_message() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::Drop);
     let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, Arc::clone(&runner), Arc::clone(&sink));
+    let fork = fork_wake(&state, Arc::clone(&runner), Arc::clone(&sink)).await;
 
     for index in 0..5 {
         fork.dispatch_now(WakeMessage::new(
-            WakeSource::Subagent {
-                process_id: format!("proc-{index}"),
+            1,
+            WakeSource::External {
+                origin: format!("proc-{index}"),
             },
             format!("Sub-agent {index} completed."),
             format!("subagent:proc-{index}:done"),
@@ -368,47 +376,14 @@ async fn an_escalating_fork_injects_exactly_one_brief() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::Escalate);
     let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+    let fork = fork_wake(&state, runner, Arc::clone(&sink)).await;
 
-    fork.dispatch_now(subagent_message()).await;
+    fork.dispatch_now(external_message()).await;
 
     let briefs = sink.briefs().await;
     assert_eq!(briefs.len(), 1);
     assert_eq!(briefs[0].0, "subagent:proc-7:subagent.completed");
     assert_eq!(briefs[0].1, "the release job failed; rerun or abandon?");
-}
-
-#[tokio::test]
-async fn a_recording_fork_appends_activity_without_creating_work_or_waking_main() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = test_state(dir.path()).await;
-    let sink = Arc::new(RecordingSink::default());
-    let anchor = state
-        .storage
-        .append_chat(ChatAuthor::Owner, "ship it".to_string(), None)
-        .await
-        .unwrap();
-    let tools = ForkTools::new(
-        state.tools.clone(),
-        Arc::clone(&sink) as Arc<dyn BriefSink>,
-        subagent_message(),
-        Some(anchor.id),
-    );
-
-    tools
-        .record_info("migration-landed", "The migration landed on main.", None)
-        .await
-        .unwrap();
-
-    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
-    assert!(
-        detail
-            .activities
-            .iter()
-            .any(|a| a.kind == "info" && a.data["name"] == "migration-landed")
-    );
-    assert!(state.storage.all_pings().await.unwrap().is_empty());
-    assert!(sink.briefs().await.is_empty());
 }
 
 // ------------------------------------------------------------------ fail-open
@@ -419,9 +394,9 @@ async fn a_failed_fork_still_escalates_the_original_message() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::Fail);
     let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+    let fork = fork_wake(&state, runner, Arc::clone(&sink)).await;
 
-    fork.dispatch_now(subagent_message()).await;
+    fork.dispatch_now(external_message()).await;
 
     let briefs = sink.briefs().await;
     assert_eq!(briefs.len(), 1, "a non-owner message is never lost");
@@ -440,9 +415,9 @@ async fn a_fork_that_takes_no_exit_is_a_failure_not_a_drop() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::NoExit);
     let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+    let fork = fork_wake(&state, runner, Arc::clone(&sink)).await;
 
-    fork.dispatch_now(subagent_message()).await;
+    fork.dispatch_now(external_message()).await;
 
     let briefs = sink.briefs().await;
     assert_eq!(briefs.len(), 1);
@@ -457,7 +432,7 @@ async fn concurrent_forks_are_capped_by_the_semaphore() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::Slow);
     let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, Arc::clone(&runner), sink);
+    let fork = fork_wake(&state, Arc::clone(&runner), sink).await;
 
     let burst = 3 * MAX_CONCURRENT_FORKS;
     let mut handles = Vec::new();
@@ -465,6 +440,7 @@ async fn concurrent_forks_are_capped_by_the_semaphore() {
         let fork = Arc::clone(&fork);
         handles.push(tokio::spawn(async move {
             fork.dispatch_now(WakeMessage::new(
+                1,
                 WakeSource::Monitor {
                     monitor_id: format!("mon-{index}"),
                     label: "ci".to_string(),
@@ -506,13 +482,19 @@ async fn owner_messages_bypass_forks_entirely() {
     let runner = FakeRunner::new(Behaviour::Drop);
     let sink = Arc::new(RecordingSink::default());
     let handle = ForkWakeHandle::default();
-    handle.install(fork_wake(&state, Arc::clone(&runner), sink));
+    handle.install(fork_wake(&state, Arc::clone(&runner), sink).await);
 
     // The Owner's own path: a message lands in the transcript and goes to the
     // Agent's queue. Nothing here consults the handle.
     state
         .storage
-        .append_chat(ChatAuthor::Owner, "ship the migration".to_string(), None)
+        .append_thread_chat(
+            1,
+            ChatAuthor::Owner,
+            "ship the migration".to_string(),
+            None,
+            vec![],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -523,8 +505,8 @@ async fn owner_messages_bypass_forks_entirely() {
 
     // Every source the dispatcher *can* carry is a non-owner origin.
     for source in [
-        WakeSource::Subagent {
-            process_id: "proc-1".to_string(),
+        WakeSource::External {
+            origin: "proc-1".to_string(),
         },
         WakeSource::Monitor {
             monitor_id: "mon-1".to_string(),
@@ -537,11 +519,9 @@ async fn owner_messages_bypass_forks_entirely() {
         match &source {
             // Exhaustive on purpose: adding an Owner-shaped variant must break
             // this test rather than quietly route Owner traffic into a fork.
-            WakeSource::Subagent { .. }
-            | WakeSource::Monitor { .. }
-            | WakeSource::External { .. } => {}
+            WakeSource::Monitor { .. } | WakeSource::External { .. } => {}
         }
-        assert!(handle.dispatch(WakeMessage::new(source, "fired", "k")));
+        assert!(handle.dispatch(WakeMessage::new(1, source, "fired", "k")));
     }
 
     // The spawned forks are detached tasks; wait for the counter to settle.
@@ -565,9 +545,9 @@ async fn an_escalation_the_queue_refuses_is_not_an_exit() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::Escalate);
     let sink = RecordingSink::refusing(1);
-    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+    let fork = fork_wake(&state, runner, Arc::clone(&sink)).await;
 
-    fork.dispatch_now(subagent_message()).await;
+    fork.dispatch_now(external_message()).await;
 
     let briefs = sink.briefs().await;
     assert_eq!(briefs.len(), 1, "the message must still reach the queue");
@@ -588,9 +568,9 @@ async fn a_panicking_fork_still_escalates_its_message() {
     let state = test_state(dir.path()).await;
     let runner = FakeRunner::new(Behaviour::Panic);
     let sink = Arc::new(RecordingSink::default());
-    let fork = fork_wake(&state, runner, Arc::clone(&sink));
+    let fork = fork_wake(&state, runner, Arc::clone(&sink)).await;
 
-    fork.dispatch(subagent_message());
+    fork.dispatch(external_message());
 
     for _ in 0..400 {
         if !sink.briefs().await.is_empty() {
@@ -611,9 +591,10 @@ async fn a_fork_never_mints_a_chat_line_to_anchor_a_record() {
     let state = test_state(dir.path()).await;
     let sink = Arc::new(RecordingSink::default());
     let tools = ForkTools::new(
+        state.storage.history_id().await.unwrap(),
         state.tools.clone(),
         Arc::clone(&sink) as Arc<dyn BriefSink>,
-        subagent_message(),
+        external_message(),
         None,
     );
 
@@ -649,4 +630,38 @@ fn the_fork_keep_set_is_exact_ids_not_a_name_prefix() {
     assert!(ids.iter().all(|id| id.starts_with("hirsel.fork")));
     assert!(!ids.iter().any(|id| id == "hirsel.fork_decide"));
     assert_eq!(ids.len(), 4);
+}
+
+#[tokio::test]
+async fn a_recording_fork_appends_activity_without_creating_work_or_waking_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let sink = Arc::new(RecordingSink::default());
+    let anchor = state
+        .storage
+        .append_thread_chat(1, ChatAuthor::Owner, "ship it".to_string(), None, vec![])
+        .await
+        .unwrap();
+    let tools = ForkTools::new(
+        state.storage.history_id().await.unwrap(),
+        state.tools.clone(),
+        Arc::clone(&sink) as Arc<dyn BriefSink>,
+        external_message(),
+        Some(anchor.id),
+    );
+
+    tools
+        .record_info("migration-landed", "The migration landed on main.", None)
+        .await
+        .unwrap();
+
+    let detail = state.storage.thread_detail(1, None, 30).await.unwrap();
+    assert!(
+        detail
+            .activities
+            .iter()
+            .any(|a| a.kind == "info" && a.data["name"] == "migration-landed")
+    );
+
+    assert!(sink.briefs().await.is_empty());
 }

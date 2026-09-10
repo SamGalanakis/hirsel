@@ -1,4 +1,4 @@
-import type { RefTarget } from "../../lib/task-ref";
+import type { RefTarget } from "../../lib/thread-ref";
 import {
   ArrowUp,
   CornerDownLeft,
@@ -17,10 +17,10 @@ import { state } from "../../store/store";
 import { anyOverlayOpen } from "../../lib/focus";
 import { formatBytes } from "../../lib/format";
 import { handleSubmitKeys } from "../../lib/submitKeymap";
-import { resolveMentionIds } from "../../lib/task-ref";
+import { resolveMentionIds } from "../../lib/thread-ref";
 import { toast } from "../../lib/toast";
-import { TASK_REF_PICKER_ID, TaskRefPicker } from "./TaskRefPicker";
-import { createTaskRefPicker } from "./useTaskRefPicker";
+import { THREAD_REF_PICKER_ID, ThreadRefPicker } from "./ThreadRefPicker";
+import { createThreadRefPicker } from "./useThreadRefPicker";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { useTextInput } from "./useTextInput";
@@ -39,10 +39,16 @@ import type { AttachmentsController, PendingFile } from "./useAttachments";
 import { extractTransferFiles, isLargePaste } from "./paste";
 import { createFileDrop } from "./useFileDrop";
 
+import { historyId } from "../../lib/history";
+import type { DraftArtifact } from "../../artifacts/draft-context";
+
 const MAX_HEIGHT_PX = 112;
 const LONG_PRESS_MS = 450;
 interface Props {
   ariaLabel?: string;
+  artifactContext?: DraftArtifact | null;
+  onRemoveArtifactContext?: () => void;
+  onConsumeArtifactContext?: (id: number) => void;
   draftKey?: string;
   attachments: AttachmentsController;
   thinking: boolean;
@@ -51,21 +57,21 @@ interface Props {
   onConsumePrefill?: () => void;
   onSend: (
     body: string,
-    ref: number | null,
     mode: SendMode,
     blobs: Blob[],
     mentions: number[],
+    artifactIds: number[],
   ) => void;
   onStop: () => void;
   getLastOwnerBody: () => string | null;
   /** Focus is expressed by the surrounding field, never by composer copy. */
   focused?: boolean;
-  /** The citable field: every resting Task, in queue order. The `#` picker
+  /** The citable field: every resting Thread, in queue order. The `#` picker
    * offers these and the send resolves refs against them. */
-  tasks?: RefTarget[];
+  threads?: RefTarget[];
 }
 
-/** Composer anchored at the bottom of the task world. CLI-grade keyboard map on fine-pointer
+/** Composer anchored at the bottom of the thread world. CLI-grade keyboard map on fine-pointer
  * devices (Enter send · Shift+Enter newline · Cmd/Ctrl+Shift+Enter queue next-turn · Esc cancel
  * turn · ArrowUp recall); phone keeps Enter as newline and uses the send button
  * (long-press = queue). Handles attachment staging (paperclip + paste).
@@ -81,14 +87,14 @@ export function Composer(props: Props) {
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
   let textRef: HTMLTextAreaElement | undefined;
-  // Typing `#` cites a Task. The picker owns the trigger, the caret anchor and
+  // Typing `#` cites a Thread. The picker owns the trigger, the caret anchor and
   // its own keyboard rung; the composed text stays the only record of what was
   // cited, so `mentions` is re-derived from the body at send time.
-  const picker = createTaskRefPicker({
+  const picker = createThreadRefPicker({
     getEl: () => textRef,
     value,
     setValue,
-    tasks: () => props.tasks ?? [],
+    threads: () => props.threads ?? [],
   });
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressed = false;
@@ -105,6 +111,8 @@ export function Composer(props: Props) {
 
   async function submit(mode: SendMode) {
     const body = value().trim();
+    const artifactId = props.artifactContext?.id;
+    const submissionHistory = historyId();
     const hasFiles = props.attachments.files().length > 0;
     if (body.length === 0 && !hasFiles) return;
 
@@ -124,7 +132,9 @@ export function Composer(props: Props) {
     // The body IS the mention list: every `#id` still standing in the text at
     // send time, resolved against the live field. A deleted token drops its
     // mention for free, and a ref naming nothing is left as plain prose.
-    props.onSend(body, null, mode, blobs, resolveMentionIds(body, props.tasks ?? []));
+    if (historyId() !== submissionHistory) return;
+    props.onSend(body, mode, blobs, resolveMentionIds(body, props.threads ?? []), artifactId === undefined ? [] : [artifactId]);
+    if (artifactId !== undefined) props.onConsumeArtifactContext?.(artifactId);
     props.attachments.clear();
     setValue("");
     picker.close();
@@ -259,6 +269,7 @@ export function Composer(props: Props) {
     >
       <div class="w-full">
 
+      <Show when={props.artifactContext}>{artifact => <div data-slot="composer-artifact-context" class="flex min-h-11 items-center gap-2 border-b border-border/50 text-xs text-muted-foreground"><FileText class="ml-2 size-4 shrink-0" /><span class="min-w-0 flex-1 truncate" title={artifact().title}>About {artifact().title}</span><button type="button" class="inline-flex size-11 shrink-0 items-center justify-center rounded-lg hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Remove artifact context: ${artifact().title}`} onClick={() => props.onRemoveArtifactContext?.()}><X class="size-4" /></button></div>}</Show>
       {/* Staged attachment chips. */}
       <Show when={props.attachments.files().length > 0}>
         <AttachmentGroup class="mb-2">
@@ -363,10 +374,10 @@ export function Composer(props: Props) {
           class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 leading-snug shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
           aria-label={props.ariaLabel ?? "Message Hirsel"}
           aria-expanded={(picker.open() ? true : undefined) ? "true" : "false"}
-          aria-controls={picker.open() ? TASK_REF_PICKER_ID : undefined}
+          aria-controls={picker.open() ? THREAD_REF_PICKER_ID : undefined}
           aria-activedescendant={
             picker.open() && picker.activeIndex() >= 0
-              ? `${TASK_REF_PICKER_ID}-option-${picker.candidates()[picker.activeIndex()].id}`
+              ? `${THREAD_REF_PICKER_ID}-option-${picker.candidates()[picker.activeIndex()].id}`
               : undefined
           }
           value={value()}
@@ -383,11 +394,11 @@ export function Composer(props: Props) {
           onBlur={() => picker.close()}
           onPaste={handlePaste}
         />
-        <TaskRefPicker
+        <ThreadRefPicker
           candidates={picker.candidates()}
           activeIndex={picker.activeIndex()}
           anchorX={picker.anchor().x}
-          onAccept={(task) => picker.accept(task)}
+          onAccept={(thread) => picker.accept(thread)}
           onHover={picker.setActiveIndex}
         />
         {/* Stop stands on every pointer type while a turn is live — it is the

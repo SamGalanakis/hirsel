@@ -261,14 +261,9 @@ mod tests {
             model: None,
             openrouter_api_key: Some("sk-first-key".to_string()),
         };
-        let store = ConfigStore::load(
-            path.clone(),
-            dir.path(),
-            Path::new("/docs/config.md"),
-            &first,
-        )
-        .await
-        .unwrap();
+        let store = ConfigStore::load(path.clone(), Path::new("/docs/config.md"), &first)
+            .await
+            .unwrap();
         let seeded = store.providers();
         assert_eq!(seeded.len(), 1);
         assert_eq!(seeded[0].id, "openrouter");
@@ -288,14 +283,9 @@ mod tests {
             model: None,
             openrouter_api_key: Some("sk-second-key".to_string()),
         };
-        let reloaded = ConfigStore::load(
-            path.clone(),
-            dir.path(),
-            Path::new("/docs/config.md"),
-            &second,
-        )
-        .await
-        .unwrap();
+        let reloaded = ConfigStore::load(path.clone(), Path::new("/docs/config.md"), &second)
+            .await
+            .unwrap();
         assert_eq!(
             reloaded.providers()[0].api_key.as_deref(),
             Some("sk-first-key")
@@ -309,7 +299,6 @@ mod tests {
         let codex = tempfile::tempdir().unwrap();
         let store = ConfigStore::load(
             codex.path().join("hirsel.toml"),
-            codex.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap {
                 provider: Some("codex".to_string()),
@@ -333,7 +322,6 @@ mod tests {
         let openrouter = tempfile::tempdir().unwrap();
         let store = ConfigStore::load(
             openrouter.path().join("hirsel.toml"),
-            openrouter.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap {
                 provider: Some("openrouter".to_string()),
@@ -358,7 +346,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap::default(),
         )
@@ -382,7 +369,6 @@ mod tests {
         .unwrap();
         let store = ConfigStore::load(
             path,
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap {
                 provider: Some("codex".to_string()),
@@ -402,7 +388,6 @@ mod tests {
         let path = dir.path().join("hirsel.toml");
         let store = ConfigStore::load(
             path.clone(),
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap::default(),
         )

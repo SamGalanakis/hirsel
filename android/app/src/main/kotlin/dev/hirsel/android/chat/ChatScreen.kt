@@ -93,12 +93,15 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
     val stream = snapshot?.streams?.find { it.threadId == focused && !it.finished }
     val thinking = stream?.activity?.state == AgentActivityState.THINKING
     val executing = snapshot?.turns.orEmpty().any { it.threadId == focused && it.state in listOf("queued", "running") }
+    var iconTarget by remember { mutableStateOf<Pair<String, dev.hirsel.core.Thread>?>(null) }
+    LaunchedEffect(snapshot?.historyId) { iconTarget = null }
+    iconTarget?.let { selected -> ThreadIconPicker(selected.second, selected.first, connection) { iconTarget = null } }
     var title by remember { mutableStateOf("") }
     var inventory by remember { mutableStateOf("Active") }
     val draft = focused?.let { connection.drafts[it] }.orEmpty()
     val send = {
         if (focused != null && draft.isNotBlank()) {
-            connection.send(draft.trim(), focused)
+            connection.send(draft.trim(), focused, snapshot?.historyId)
             connection.drafts[focused] = ""
         }
     }
@@ -119,10 +122,22 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
             is Phase.Failed -> ConnectionBanner(ErrorCopy.connection(phase.detail))
             else -> Unit
         }
+        if (connection.recoveredDrafts.isNotEmpty()) {
+            Text("Recovered drafts — choose a Thread, then restore text", color = c.Foreground)
+            connection.recoveredDrafts.toList().forEach { recovered ->
+                Text(recovered, maxLines = 3, color = c.MutedForeground)
+                Button(enabled = focused != null, onClick = {
+                    if (focused != null) {
+                        connection.drafts[focused] = connection.drafts[focused].orEmpty().let { if (it.isBlank()) recovered else "$it\n$recovered" }
+                        connection.recoveredDrafts.remove(recovered)
+                    }
+                }) { Text("Restore to draft") }
+            }
+        }
         if (focused == null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New thread", testTag = "new-thread-title", singleLine = true) }
-                Button(onClick = { connection.createThread(title.trim()); title = "" }, enabled = title.isNotBlank() && connection.isOnline) { Text("Create") }
+                Button(onClick = { connection.createThread(title.trim(), null); title = "" }, enabled = title.isNotBlank() && connection.isOnline) { Text("Create") }
             }
             FlowRow {
                 listOf("Active", "Settled", "Snoozed", "Archived").forEach { filter ->
@@ -130,26 +145,34 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 }
             }
             LazyColumn(Modifier.weight(1f).testTag("thread-list")) {
-                item { Button(onClick = { connection.openThread(0uL) }) { Text("Orchestrator") } }
-                items(snapshot?.threads.orEmpty().filter { t ->
-                    if (t.id == 0uL) false else when (inventory) {
+                items(threadRows(snapshot?.threads.orEmpty().filter { t ->
+                    when (inventory) {
                         "Archived" -> t.archivedAt != null
                         "Settled" -> t.archivedAt == null && t.settledAt != null
                         "Snoozed" -> t.archivedAt == null && t.settledAt == null && isSnoozed(t.snoozedUntil)
                         else -> t.archivedAt == null && t.settledAt == null && !isSnoozed(t.snoozedUntil)
                     }
-                }.sortedByDescending { it.id }, key = { it.id.toString() }) { t ->
-                    Column(Modifier.fillMaxWidth().clickable { connection.openThread(t.id) }.padding(vertical = 12.dp).testTag("thread-${t.id}")) {
-                        Text(t.title, color = c.Foreground, fontWeight = FontWeight.SemiBold)
+                }), key = { it.thread.id.toString() }) { row ->
+                    val t = row.thread
+                    Column(Modifier.fillMaxWidth().clickable { connection.openThread(t.id) }.padding(start = (row.depth.coerceAtMost(6) * 12).dp, top = 12.dp, bottom = 12.dp).testTag("thread-${t.id}")) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) { ThreadAvatar(t); Text(t.title, color = c.Foreground, fontWeight = FontWeight.SemiBold) }
+                        t.parentThreadId?.let { parent -> Text("In ${snapshot?.threads?.find { it.id == parent }?.title ?: "Thread #$parent"}", color = c.MutedForeground) }
+                        if (t.parentThreadId == null && t.pinnedAt != null) Text("Pinned", color = c.MutedForeground)
                         Text(if (t.needsOwner) "Needs you" else if (!t.read) "Unread" else "Open", color = c.MutedForeground)
                     }
                     HairlineDivider()
                 }
             }
         } else {
-            Text(thread?.title ?: if (focused == 0uL) "Orchestrator" else "Thread #$focused", color = c.Foreground, fontSize = 18.sp)
-            if (thread != null && focused != 0uL) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (thread != null) ThreadAvatar(thread)
+                Text(thread?.title ?: "Thread #$focused", color = c.Foreground, fontSize = 18.sp)
+            }
+            if (thread != null) {
                 FlowRow {
+                    ReplyChip("Change thread icon") { snapshot.historyId?.let { iconTarget = it to thread.copy() } }
+                    thread.parentThreadId?.let { parent -> ReplyChip("Parent: ${snapshot.threads.find { it.id == parent }?.title ?: "#$parent"}") { connection.openThread(parent) } }
+                    if (thread.parentThreadId == null) ReplyChip(if (thread.pinnedAt == null) "Pin" else "Unpin") { connection.action(focused, if (thread.pinnedAt == null) "pin" else "unpin", revision = thread.revision) }
                     ReplyChip(if (thread.settledAt == null) "Settle" else "Reopen") { connection.action(focused, if (thread.settledAt == null) "settle" else "reopen") }
                     if (!thread.read) ReplyChip("Mark read") { connection.action(focused, "read") }
                     ReplyChip(if (thread.archivedAt == null) "Archive" else "Unarchive") { connection.action(focused, if (thread.archivedAt == null) "archive" else "unarchive") }
@@ -159,7 +182,15 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                     }
                 }
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New child thread", testTag = "new-child-title", singleLine = true) }
+                Button(onClick = { connection.createThread(title.trim(), focused); title = "" }, enabled = title.isNotBlank() && connection.isOnline) { Text("Create child") }
+            }
+            FlowRow { snapshot?.threads.orEmpty().filter { it.parentThreadId == focused }.forEach { child -> ReplyChip("${threadIconText(child)} ${child.title}") { connection.openThread(child.id) } } }
             LazyColumn(Modifier.weight(1f).testTag("chat-list")) {
+                snapshot?.briefs?.find { it.threadId == focused }?.let { brief ->
+                    if (brief.text.isNotBlank()) item { Text("Current brief", color = c.MutedForeground); Text(brief.text, color = c.Foreground); if (brief.artifactIds.isNotEmpty()) Text("Artifacts: ${brief.artifactIds.joinToString { "#$it" }}", color = c.MutedForeground) }
+                }
                 if (thread != null) item {
                     ThreadInstrument(thread, connection)
                 }
@@ -169,6 +200,7 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 }
                 items(messages, key = { "message-${it.id ?: it.clientId}" }) { message ->
                     Spacer(Modifier.height(8.dp)); MessageRow(message)
+                    if (message.artifactIds.isNotEmpty()) Text("About artifacts ${message.artifactIds.joinToString { "#$it" }}", color = c.MutedForeground)
                     message.error?.let { error ->
                         Text(error, color = c.StatusDanger)
                         Button(onClick = { message.clientId?.let { connection.client?.retrySend(it) } }) { Text("Retry") }
@@ -182,7 +214,12 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 }
                 if (stream != null || executing) item { Button(onClick = { connection.stop(focused) }) { Text("Stop") } }
                 items(snapshot?.activities.orEmpty().filter { it.threadId == focused }, key = { "activity-${it.id}" }) { activity ->
-                    Text(activity.kind.replace('_', ' '), color = c.MutedForeground, fontSize = 11.sp)
+                    if (activity.kind == "child_report") {
+                        val report = runCatching { org.json.JSONObject(activity.dataJson) }.getOrNull()
+                        val childId = report?.optString("child_thread_id")?.toULongOrNull()
+                        Text(report?.optString("summary").orEmpty(), color = c.Foreground)
+                        if (childId != null) ReplyChip("${snapshot?.threads?.find { it.id == childId }?.title ?: "Child #$childId"}: ${report.optString("status")}") { connection.openThread(childId) }
+                    } else Text(activity.kind.replace('_', ' '), color = c.MutedForeground, fontSize = 11.sp)
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {

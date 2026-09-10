@@ -1,9 +1,6 @@
 //! `meta` key/value rows and the Agent tool-surface session state.
 
-use super::{
-    AGENT_SESSION_GENERATION_META_KEY, AgentSessionState, Storage,
-    TOOL_SURFACE_FINGERPRINT_META_KEY, TOOL_SURFACE_NAMES_META_KEY,
-};
+use super::{AgentSessionState, Storage};
 use anyhow::Context;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -13,6 +10,7 @@ use std::collections::HashSet;
 impl Storage {
     pub(crate) async fn reconcile_agent_tool_surface(
         &self,
+        thread_id: u64,
         fingerprint: &str,
         tool_names: &[String],
     ) -> anyhow::Result<AgentSessionState> {
@@ -23,13 +21,21 @@ impl Storage {
 
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
-        let previous_fingerprint = meta_value_from_conn(&tx, TOOL_SURFACE_FINGERPRINT_META_KEY)?;
-        let previous_names = meta_value_from_conn(&tx, TOOL_SURFACE_NAMES_META_KEY)?
+        super::threads::get(&tx, thread_id)?;
+        let fingerprint_key = format!("thread:{thread_id}:tool_fingerprint");
+        let names_key = format!("thread:{thread_id}:tool_names");
+        let generation_key = format!("thread:{thread_id}:session_generation");
+        let history_id: String =
+            tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |r| {
+                r.get(0)
+            })?;
+        let previous_fingerprint = meta_value_from_conn(&tx, &fingerprint_key)?;
+        let previous_names = meta_value_from_conn(&tx, &names_key)?
             .map(|value| serde_json::from_str::<Vec<String>>(&value))
             .transpose()
             .context("decode stored Agent tool surface names")?
             .unwrap_or_default();
-        let generation = meta_value_from_conn(&tx, AGENT_SESSION_GENERATION_META_KEY)?
+        let generation = meta_value_from_conn(&tx, &generation_key)?
             .map(|value| value.parse::<u64>())
             .transpose()
             .context("decode stored Agent session generation")?;
@@ -58,21 +64,18 @@ impl Storage {
             Vec::new()
         };
 
-        set_meta_value(&tx, TOOL_SURFACE_FINGERPRINT_META_KEY, fingerprint)?;
-        set_meta_value(&tx, TOOL_SURFACE_NAMES_META_KEY, &encoded_names)?;
+        set_meta_value(&tx, &fingerprint_key, fingerprint)?;
+        set_meta_value(&tx, &names_key, &encoded_names)?;
         if let Some(generation) = next_generation {
-            set_meta_value(
-                &tx,
-                AGENT_SESSION_GENERATION_META_KEY,
-                &generation.to_string(),
-            )?;
+            set_meta_value(&tx, &generation_key, &generation.to_string())?;
         }
         tx.commit()?;
 
         Ok(AgentSessionState {
-            session_id: next_generation
-                .map(|generation| format!("agent-g{generation}"))
-                .unwrap_or_else(|| "agent".to_string()),
+            session_id: format!(
+                "thread-{history_id}-{thread_id}-g{}",
+                next_generation.unwrap_or(0)
+            ),
             rotated,
             added_tools,
         })

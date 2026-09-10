@@ -1,28 +1,34 @@
 use super::super::Storage;
 use super::MAX_PAIRING_REDEMPTIONS_PER_MINUTE;
-use rusqlite::Connection;
 use std::time::Duration;
 
 #[tokio::test]
-async fn device_tokens_are_pinned_revocable_and_additive() {
+async fn device_tokens_are_pinned_revocable_and_persistent() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let conn = Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE chat_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                author TEXT NOT NULL,
-                body TEXT NOT NULL,
-                ref INTEGER NULL,
-                ts TEXT NOT NULL,
-                tool_calls TEXT NOT NULL DEFAULT '[]'
-            );
-            INSERT INTO chat_messages (author, body, ref, ts)
-            VALUES ('agent', 'existing row', NULL, '2026-07-10T12:00:00Z');
-            ",
-        )
-        .unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .append_thread_chat(
+                storage
+                    .create_thread(
+                        "fixture-Conversation",
+                        "Conversation",
+                        "",
+                        &serde_json::Value::Null,
+                        hirsel_proto::ThreadAttention::Quiet,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .0
+                    .id,
+                hirsel_proto::ChatAuthor::Agent,
+                "existing row",
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
     }
 
     let storage = Storage::open(dir.path()).await.unwrap();

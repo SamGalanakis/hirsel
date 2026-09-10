@@ -1,17 +1,34 @@
 use super::*;
-
 #[tokio::test]
-async fn lash_runtime_boots_with_fresh_sqlite_stores_and_typescript_tools() {
+async fn lash_sessions_are_lazy_thread_local_and_current_only() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = crate::tests::test_config(dir.path());
     config.agent = AgentMode::Lash;
-    // Boot constructs the provider but does not make an inference request.
-    config.anthropic_api_key = Some("test-key-no-inference".to_string());
+    config.anthropic_api_key = Some("test-key-no-inference".into());
     let state = crate::build_state(config).await.unwrap();
-    let AgentBackend::Lash(runtime) = state.agent.backend.as_ref() else {
-        panic!("expected the real Lash runtime");
+    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
+        panic!("Thread registry")
     };
-    state.agent.readiness().unwrap();
+    registry.capacity.close();
+    assert!(registry.opened().await.is_empty());
+    assert!(state.storage.thread_snapshot().await.unwrap().is_empty());
+    let thread = state
+        .storage
+        .create_thread(
+            "fixture-Ordinary root",
+            "Ordinary root",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let lane = registry.lane(thread.id).await.unwrap();
+    let AgentBackend::Lash(runtime) = lane.as_ref() else {
+        panic!("Lash lane")
+    };
     let manifests = runtime
         .session
         .admin()
@@ -19,92 +36,76 @@ async fn lash_runtime_boots_with_fresh_sqlite_stores_and_typescript_tools() {
         .active_manifests()
         .await
         .unwrap();
-    assert!(
-        manifests
-            .iter()
-            .any(|manifest| manifest.name == "subagents_wait")
-    );
-    assert!(dir.path().join("lash/sessions/durable-core.db").is_file());
+    assert!(manifests.iter().any(|m| m.name == "threads_delegate"));
+    assert!(!manifests.iter().any(|m| m.name.starts_with("subagents_")));
     let snapshot = runtime.session.admin().state().export().await;
     assert_eq!(
         lash_protocol_rlm::rlm_session_dialect(&snapshot.protocol_turn_options).unwrap(),
-        RlmDialect::Typescript,
+        RlmDialect::Typescript
     );
-
-    // Exercise the executor's new facade-based wait against a real SQLite
-    // terminal event, without starting a driver or making a provider call.
-    let process_id = "upgrade-wait";
-    let mut terminal = terminal_event_type(SUBAGENT_COMPLETED, ProcessStatus::Completed);
-    terminal.semantics.wake = None;
-    runtime
-        .core
-        .processes()
-        .start(
-            ProcessStartRequest::external(process_id, ProcessOriginator::host(), json!({}))
-                .with_event_types(vec![terminal]),
-            inline_trigger_scope("upgrade-test-start"),
+    assert!(!dir.path().join("lash/sessions/durable-core.db").exists());
+    state
+        .submit_thread_message(
+            "before-reset".into(),
+            thread.id,
+            "private old history".into(),
+            vec![],
+            vec![],
+            SendMode::NextTurn,
+            vec![],
         )
         .await
         .unwrap();
-    let (event_type, payload) = terminal_event_payload(&TerminalOutcome::Done {
-        summary: "persisted completion".into(),
-    });
-    runtime
-        .core
-        .process_registry()
-        .unwrap()
-        .append_event(
-            process_id,
-            ProcessEventAppendRequest::new(event_type, payload)
-                .with_replay_key("upgrade-wait-completion"),
-        )
-        .await
-        .unwrap();
-    let executor = HirselToolExecutor {
-        tools: runtime.tools.clone(),
-        anchors: Arc::clone(&runtime.anchors),
-        runtime: Arc::new(std::sync::OnceLock::from(Arc::downgrade(runtime))),
-    };
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        executor.subagents_wait(&json!({ "process_id": process_id })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    runtime.admit_next_thread_request().await.unwrap();
     assert_eq!(
-        result["outcome"],
-        json!({ "type": "success", "value": { "summary": "persisted completion" } })
+        runtime.session.pending_turn_inputs().await.unwrap().len(),
+        1
     );
-}
-
-#[test]
-fn driver_terminal_events_roundtrip_to_plain_tool_outcomes() {
-    for (terminal, expected) in [
-        (
-            TerminalOutcome::Done {
-                summary: "complete output".into(),
-            },
-            json!({"type":"success","value":{"summary":"complete output"}}),
-        ),
-        (
-            TerminalOutcome::Failed {
-                reason: "failed output".into(),
-            },
-            json!({"type":"failure","class":"execution","code":"subagent_failed","message":"failed output","raw":{"reason":"failed output"}}),
-        ),
-        (
-            TerminalOutcome::Interrupted,
-            json!({"type":"cancelled","message":"Sub-agent was interrupted.","raw":null}),
-        ),
-    ] {
-        let (_, payload) = terminal_event_payload(&terminal);
-        let outcome: ProcessAwaitOutput =
-            serde_json::from_value(payload["await_output"].clone()).unwrap();
-        let projected = subagents_wait_result("process-1", &outcome).unwrap();
-        assert_eq!(projected["outcome"], expected);
-        let schema = subagents_wait_output_schema();
-        let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
-        assert!(validator.is_valid(&projected), "{projected}");
-    }
+    state.agent.reset_history().await.unwrap();
+    assert!(registry.opened().await.is_empty());
+    let fresh = state
+        .storage
+        .create_thread(
+            "fresh",
+            "Fresh",
+            "",
+            &Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(fresh.id, thread.id);
+    let new_lane = registry.lane(fresh.id).await.unwrap();
+    let AgentBackend::Lash(new_runtime) = new_lane.as_ref() else {
+        panic!("fresh Lash lane")
+    };
+    assert_ne!(runtime.session_id, new_runtime.session_id);
+    assert_ne!(runtime.history_id, new_runtime.history_id);
+    assert!(
+        new_runtime
+            .session
+            .pending_turn_inputs()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    state
+        .submit_thread_message(
+            "after-reset".into(),
+            fresh.id,
+            "new history input".into(),
+            vec![],
+            vec![],
+            SendMode::NextTurn,
+            vec![],
+        )
+        .await
+        .unwrap();
+    new_runtime.admit_next_thread_request().await.unwrap();
+    let pending =
+        serde_json::to_string(&new_runtime.session.pending_turn_inputs().await.unwrap()).unwrap();
+    assert!(pending.contains("new history input"));
+    assert!(!pending.contains("private old history"));
 }

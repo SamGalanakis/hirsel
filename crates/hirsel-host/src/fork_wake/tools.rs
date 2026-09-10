@@ -2,7 +2,7 @@
 //!
 //! ADR-0015 gives a triage fork exactly three exits — drop, record, escalate —
 //! and the host enforces that as *capability*, not as instruction. A fork is
-//! opened against this provider alone, so `subagents_spawn`, `pings_send`,
+//! opened against this provider alone, so `threads_delegate`, `threads_create`,
 //! `events_judgment`, `shell_run`, `views_*`, `monitors_*` and every plugin
 //! tool are not "forbidden by the prompt": they do not exist in the fork's
 //! catalog, and naming one is an invalid tool call.
@@ -62,6 +62,7 @@ pub trait BriefSink: Send + Sync {
 /// tests (which call these typed methods directly instead of round-tripping
 /// through a model).
 pub struct ForkTools {
+    history_id: String,
     tools: ToolSuite,
     sink: Arc<dyn BriefSink>,
     message: WakeMessage,
@@ -91,12 +92,14 @@ enum ExitSlot {
 
 impl ForkTools {
     pub fn new(
+        history_id: String,
         tools: ToolSuite,
         sink: Arc<dyn BriefSink>,
         message: WakeMessage,
         _anchor: Option<u64>,
     ) -> Self {
         Self {
+            history_id,
             tools,
             sink,
             message,
@@ -174,7 +177,7 @@ impl ForkTools {
         self.claim().await?;
         // A global transcript tail is not evidence of Thread ownership. Fork
         // outcomes without an explicit addressed source go to coordination.
-        let result = self.tools.storage().append_thread_activity(0,None,kind,&json!({"name":name,"description":description,"content_md":content_md,"source":self.message.key})).await;
+        let result = self.tools.storage().record_background_activity(&self.history_id,self.message.thread_id,kind,&json!({"name":name,"description":description,"content_md":content_md,"source":self.message.key})).await;
         match result {
             Ok(activity) => {
                 self.tools.publish_thread_activity(activity.clone()).await;

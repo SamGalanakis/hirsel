@@ -32,7 +32,7 @@ pub async fn readyz(State(state): State<AppState>) -> Response {
     if disk_has_space(&state.data_dir).is_err() {
         return not_ready("disk_space");
     }
-    if state.iroh_ticket().is_none() {
+    if crate::config::iroh_enabled() && state.iroh_ticket().is_none() {
         return not_ready("iroh_endpoint");
     }
     (

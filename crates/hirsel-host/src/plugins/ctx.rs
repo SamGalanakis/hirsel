@@ -36,13 +36,16 @@ impl PluginThreads for HostThreads {
                 } else {
                     ThreadAttention::Quiet
                 },
+                None,
             )
             .await
             .map_err(stringify)?;
-        self.tools.publish_thread(thread.clone());
-        self.append_activity(
-            NewActivity::new("created", json!({"title": input.title})).in_thread(thread.id),
-        )
+        self.tools.publish_thread(thread.clone()).await;
+        self.append_activity(NewActivity::new(
+            thread.id,
+            "created",
+            json!({"title": input.title}),
+        ))
         .await?;
         Ok(thread.id)
     }
@@ -75,7 +78,7 @@ impl PluginThreads for HostThreads {
             .settle_thread(thread_id, settled)
             .await
             .map_err(stringify)?;
-        self.tools.publish_thread(thread);
+        self.tools.publish_thread(thread).await;
         Ok(())
     }
 }

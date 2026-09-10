@@ -1,10 +1,6 @@
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-    time::timeout,
-};
+use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 #[derive(Debug)]
 pub(crate) struct BashCommandOutput {
@@ -19,55 +15,84 @@ pub(crate) async fn run_bash_command(
     cwd: Option<PathBuf>,
     duration: Duration,
 ) -> anyhow::Result<BashCommandOutput> {
+    start_bash_command(cmd, cwd)?.finish(duration).await
+}
+
+/// Owns only the process group created here. Dropping a cancelled tool future
+/// also tears down its children; no host-wide process discovery is involved.
+pub(crate) struct RunningBash {
+    child: tokio::process::Child,
+    pgid: i32,
+}
+impl Drop for RunningBash {
+    fn drop(&mut self) {
+        kill_process_group(self.pgid);
+    }
+}
+pub(crate) fn start_bash_command(cmd: String, cwd: Option<PathBuf>) -> anyhow::Result<RunningBash> {
     let mut command = Command::new("bash");
     command
         .arg("-lc")
         .arg(cmd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
     start_in_process_group(&mut command);
-
-    let mut child = command.spawn()?;
+    let child = command.spawn()?;
     let pgid = child.id().map(|id| id as i32).unwrap_or_default();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("missing child stdout pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("missing child stderr pipe"))?;
-    let stdout_task = tokio::spawn(read_pipe(stdout));
-    let stderr_task = tokio::spawn(read_pipe(stderr));
-
-    let (status, timed_out) = match timeout(duration, child.wait()).await {
-        Ok(Ok(status)) => (status.code(), false),
-        Ok(Err(error)) => return Err(error.into()),
-        Err(_) => {
-            kill_process_group(pgid);
-            let _ = timeout(Duration::from_secs(5), child.wait()).await;
-            (None, true)
-        }
-    };
-
-    Ok(BashCommandOutput {
-        status,
-        stdout: stdout_task.await??,
-        stderr: stderr_task.await??,
-        timed_out,
-    })
+    Ok(RunningBash { child, pgid })
 }
-
-async fn read_pipe<R>(mut reader: R) -> std::io::Result<Vec<u8>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).await?;
-    Ok(bytes)
+impl RunningBash {
+    pub(crate) async fn finish(mut self, duration: Duration) -> anyhow::Result<BashCommandOutput> {
+        let mut stdout = self
+            .child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing stdout"))?;
+        let mut stderr = self
+            .child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        // Pipe futures and their buffers belong to this scope. Cancellation
+        // stops readers, while timeout retains bytes that were already read.
+        let completed = timeout(duration, async {
+            tokio::try_join!(
+                self.child.wait(),
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err)
+            )
+        })
+        .await;
+        match completed {
+            Ok(Ok((status, _, _))) => {
+                self.pgid = 0;
+                Ok(BashCommandOutput {
+                    status: status.code(),
+                    stdout: out,
+                    stderr: err,
+                    timed_out: false,
+                })
+            }
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => {
+                kill_process_group(self.pgid);
+                let _ = timeout(Duration::from_secs(5), self.child.wait()).await;
+                self.pgid = 0;
+                Ok(BashCommandOutput {
+                    status: None,
+                    stdout: out,
+                    stderr: err,
+                    timed_out: true,
+                })
+            }
+        }
+    }
 }
 
 fn start_in_process_group(command: &mut Command) {
@@ -97,7 +122,10 @@ mod tests {
     async fn timeout_kills_the_spawned_process_group() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("sleep.pid");
-        let cmd = format!("sleep 999 & echo $! > {}; wait", pid_file.display());
+        let cmd = format!(
+            "printf partial-output; printf partial-error >&2; sleep 999 & echo $! > {}; wait",
+            pid_file.display()
+        );
 
         // Generous timeout: the child must reach `echo $! > pidfile` before the
         // timeout fires. A tight 100ms races on a cold/loaded CI runner (bash
@@ -107,6 +135,8 @@ mod tests {
             .unwrap();
 
         assert!(output.timed_out);
+        assert_eq!(output.stdout, b"partial-output");
+        assert_eq!(output.stderr, b"partial-error");
         let pid = tokio::fs::read_to_string(&pid_file)
             .await
             .unwrap()

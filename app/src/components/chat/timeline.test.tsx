@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "../../protocol";
 import type { TimelineEvent } from "../../store/types";
 import { setShowAgentCode } from "../../lib/prefs";
-import { Timeline, TurnDetails } from "./Timeline";
+import { Timeline } from "./Timeline";
 import { buildTimeline, isReasoningTail } from "./timeline";
 
 function evs(...events: TurnEvent[]): TimelineEvent[] {
@@ -249,7 +249,7 @@ describe("committed turn details: agent code cells", () => {
   it("shows the code cell in a committed turn when the preference is on", () => {
     flush(() => setShowAgentCode(true));
     try {
-      const { container, getByRole } = render(() => <TurnDetails events={frozen} expanded={true} />);
+      const { container, getByRole } = render(() => <Timeline events={frozen} />);
       const cell = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
       expect(cell).toBeTruthy();
       expect(cell.textContent).toContain("typescript");
@@ -261,13 +261,13 @@ describe("committed turn details: agent code cells", () => {
   });
 
   it("hides it when the preference is off, keeping the tool row", () => {
-    const { container } = render(() => <TurnDetails events={frozen} expanded={true} />);
+    const { container } = render(() => <Timeline events={frozen} />);
     expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
     expect(container.querySelector('[data-slot="timeline-tool"]')).toBeTruthy();
   });
 
   it("reacts to the toggle without re-committing the message", () => {
-    const { container } = render(() => <TurnDetails events={frozen} expanded={true} />);
+    const { container } = render(() => <Timeline events={frozen} />);
     expect(container.querySelector('[data-slot="timeline-code"]')).toBeNull();
     try {
       flush(() => setShowAgentCode(true));
@@ -343,7 +343,7 @@ describe("streaming reasoning block", () => {
 
   it("renders committed turn details as the collapsed row, never the live block", () => {
     const { container, queryByText } = render(() => (
-      <TurnDetails events={evs(thinking)} expanded={true} />
+      <Timeline events={evs(thinking)} />
     ));
     expect(stream(container)).toBeNull();
     expect(within(row(container) as HTMLElement).getByRole("button").getAttribute("aria-expanded"))

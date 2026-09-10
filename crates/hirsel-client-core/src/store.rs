@@ -1,9 +1,9 @@
 use chrono::Utc;
 use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, ProcessInfo, Thread, ThreadActivity,
-    ThreadTurn, ThreadTurnState, ToolCallSummary, TurnEventKind,
+    ThreadRelatedItem, ThreadTurn, ThreadTurnState, ToolCallSummary, TurnEventKind,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Connection state exposed to client UIs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -46,6 +46,7 @@ pub struct ConfirmedMessage {
     pub thread_id: u64,
     pub client_id: Option<String>,
     pub mentions: Vec<u64>,
+    pub artifact_ids: Vec<u64>,
     pub id: u64,
     pub author: ChatAuthor,
     pub body: String,
@@ -62,6 +63,7 @@ impl From<ChatMessage> for ConfirmedMessage {
             thread_id: message.thread_id,
             client_id: message.client_id,
             mentions: message.mentions,
+            artifact_ids: message.artifact_ids,
             author: message.author,
             body: message.body,
             reply_to: message.r#ref,
@@ -85,8 +87,8 @@ pub struct PendingSend {
     pub attachments: Vec<String>,
     pub client_id: String,
     pub body: String,
-    pub reply_to: Option<u64>,
     pub mentions: Vec<u64>,
+    pub artifact_ids: Vec<u64>,
     pub timestamp: String,
 }
 
@@ -96,8 +98,8 @@ impl PendingSend {
         attachments: Vec<String>,
         client_id: String,
         body: String,
-        reply_to: Option<u64>,
         mentions: Vec<u64>,
+        artifact_ids: Vec<u64>,
     ) -> Self {
         Self {
             error: None,
@@ -105,8 +107,8 @@ impl PendingSend {
             attachments,
             client_id,
             body,
-            reply_to,
             mentions,
+            artifact_ids,
             timestamp: Utc::now().to_rfc3339(),
         }
     }
@@ -136,12 +138,15 @@ pub struct ClientSnapshot {
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
     pub activities: Vec<ThreadActivity>,
+    pub briefs: Vec<ThreadBrief>,
+    pub related_items: Vec<ThreadRelatedItem>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
     pub history_has_more: Vec<u64>,
     pub processes: Vec<ProcessInfo>,
-    pub last_seen_msg_id: Option<u64>,
+    pub history_id: Option<String>,
+    pub recovered_drafts: Vec<String>,
     /// Host build identity from the last `hello_ok`; `None` until a host that
     /// reports it connects (Settings → About shows "Not reported" then).
     pub host_version: Option<String>,
@@ -149,19 +154,23 @@ pub struct ClientSnapshot {
 
 pub(crate) struct LocalStore {
     removed_message_ids: HashSet<u64>,
+    related_revisions: HashMap<u64, u64>,
     pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
     pub activities: Vec<ThreadActivity>,
+    pub briefs: Vec<ThreadBrief>,
+    pub related_items: Vec<ThreadRelatedItem>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
     pub requests: Vec<(String, u64)>,
     pub history_has_more: Vec<u64>,
-    pub pending_creates: Vec<(String, String)>,
+    pub pending_creates: Vec<(String, String, Option<u64>)>,
     pub processes: Vec<ProcessInfo>,
-    pub last_seen_msg_id: Option<u64>,
+    pub history_id: Option<String>,
+    pub recovered_drafts: Vec<String>,
     pub host_version: Option<String>,
 }
 
@@ -169,11 +178,14 @@ impl Default for LocalStore {
     fn default() -> Self {
         Self {
             removed_message_ids: HashSet::new(),
+            related_revisions: HashMap::new(),
             connection: ConnectionState::Offline,
             messages: Vec::new(),
             threads: Vec::new(),
             turns: Vec::new(),
             activities: Vec::new(),
+            briefs: Vec::new(),
+            related_items: Vec::new(),
             streams: Vec::new(),
             opened_threads: Vec::new(),
             created_threads: Vec::new(),
@@ -181,8 +193,10 @@ impl Default for LocalStore {
             history_has_more: Vec::new(),
             pending_creates: Vec::new(),
             processes: Vec::new(),
-            last_seen_msg_id: None,
+
             host_version: None,
+            history_id: None,
+            recovered_drafts: Vec::new(),
         }
     }
 }
@@ -195,12 +209,15 @@ impl LocalStore {
             threads: self.threads.clone(),
             turns: self.turns.clone(),
             activities: self.activities.clone(),
+            briefs: self.briefs.clone(),
+            related_items: self.related_items.clone(),
             streams: self.streams.clone(),
             opened_threads: self.opened_threads.clone(),
             created_threads: self.created_threads.clone(),
             history_has_more: self.history_has_more.clone(),
             processes: self.processes.clone(),
-            last_seen_msg_id: self.last_seen_msg_id,
+            history_id: self.history_id.clone(),
+            recovered_drafts: self.recovered_drafts.clone(),
             host_version: self.host_version.clone(),
         }
     }
@@ -217,27 +234,35 @@ impl LocalStore {
         })
     }
 
+    /// A different store invalidates every identity-bound operation. Plain text
+    /// is retained separately and can only be submitted by an explicit new send.
     pub fn apply_hello_ok(
         &mut self,
-        latest_msg_id: u64,
-        messages: Vec<ChatMessage>,
+        history_id: String,
         threads: Vec<Thread>,
         processes: Vec<ProcessInfo>,
         host_version: String,
-    ) {
-        // An older host that doesn't report its version sends "" — keep it None
-        // so the UI can show "Not reported" rather than a blank line.
-        if !host_version.is_empty() {
-            self.host_version = Some(host_version);
+    ) -> bool {
+        let changed = self
+            .history_id
+            .as_ref()
+            .is_some_and(|old| old != &history_id);
+        if changed {
+            let mut drafts = std::mem::take(&mut self.recovered_drafts);
+            drafts.extend(self.messages.iter().filter_map(|entry| match entry {
+                ChatEntry::Pending(send) => Some(send.body.clone()),
+                _ => None,
+            }));
+            let connection = self.connection;
+            *self = Self::default();
+            self.connection = connection;
+            self.recovered_drafts = drafts;
         }
-        for message in messages {
-            self.apply_message(message);
-        }
-        self.messages
-            .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
+        self.history_id = Some(history_id);
+        self.host_version = Some(host_version);
         self.threads = threads;
         self.processes = processes;
-        self.bump_last_seen(latest_msg_id);
+        changed
     }
 
     pub fn apply_message(&mut self, message: ChatMessage) {
@@ -255,7 +280,6 @@ impl LocalStore {
             return;
         }
 
-        self.bump_last_seen(message.id);
         self.messages.push(message.into());
     }
 
@@ -285,6 +309,13 @@ impl LocalStore {
         };
         self.requests.remove(index);
         let thread_id = detail.thread.id;
+        self.replace_related_items(thread_id, detail.thread.revision, detail.related_items);
+        self.briefs.retain(|b| b.thread_id != thread_id);
+        self.briefs.push(ThreadBrief {
+            thread_id,
+            text: detail.brief.text,
+            artifact_ids: detail.brief.artifact_ids,
+        });
         if !self.opened_threads.contains(&thread_id) {
             self.opened_threads.push(thread_id);
         }
@@ -316,6 +347,55 @@ impl LocalStore {
         }
         self.messages
             .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
+    }
+
+    /// Related snapshots order only against prior Related snapshots. Metadata
+    /// may already be newer and must neither block these items nor roll back.
+    fn replace_related_items(
+        &mut self,
+        thread_id: u64,
+        revision: u64,
+        items: Vec<ThreadRelatedItem>,
+    ) -> bool {
+        if self
+            .related_revisions
+            .get(&thread_id)
+            .is_some_and(|old| *old > revision)
+            || items.iter().any(|link| link.thread_id != thread_id)
+        {
+            return false;
+        }
+        self.related_revisions.insert(thread_id, revision);
+        self.related_items
+            .retain(|link| link.thread_id != thread_id);
+        self.related_items.extend(items);
+        true
+    }
+
+    pub fn apply_thread_related(
+        &mut self,
+        history_id: &str,
+        thread_id: u64,
+        revision: u64,
+        items: Vec<ThreadRelatedItem>,
+    ) -> bool {
+        if self.history_id.as_deref() != Some(history_id) {
+            return false;
+        }
+        self.replace_related_items(thread_id, revision, items)
+    }
+
+    pub fn refresh_open_thread(&mut self, thread_id: u64) -> Option<hirsel_proto::ClientToHost> {
+        if !self.opened_threads.contains(&thread_id) {
+            return None;
+        }
+        let client_id = uuid::Uuid::new_v4().to_string();
+        self.requests.push((client_id.clone(), thread_id));
+        Some(hirsel_proto::ClientToHost::OpenThread {
+            client_id,
+            thread_id,
+            before_id: None,
+        })
     }
 
     pub fn upsert_activity(&mut self, activity: ThreadActivity) {
@@ -386,10 +466,6 @@ impl LocalStore {
             self.processes.push(process);
         }
     }
-
-    fn bump_last_seen(&mut self, id: u64) {
-        self.last_seen_msg_id = Some(self.last_seen_msg_id.map_or(id, |seen| seen.max(id)));
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,4 +494,11 @@ impl ThreadStream {
             finished: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadBrief {
+    pub thread_id: u64,
+    pub text: String,
+    pub artifact_ids: Vec<u64>,
 }

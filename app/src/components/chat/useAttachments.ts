@@ -70,7 +70,7 @@ export interface AttachmentsController {
 }
 
 /** Owns the composer's staged attachments and the upload orchestration. Created
- * once per TaskShell so both the composer (paperclip / paste) and the drop
+ * once per ThreadShell so both the composer (paperclip / paste) and the drop
  * paste path feeds the same queue. */
 export function createComposerAttachments(): AttachmentsController {
   // A store, not a signal: the chips render through `<For>`, which is keyed by

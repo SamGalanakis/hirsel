@@ -4,6 +4,7 @@ import { flush } from "solid-js";
 import { ArtifactCard, ArtifactList } from "./ArtifactSurface";
 import { artifactState, attachArtifactTransport, closeArtifact, disconnectArtifacts, setArtifactState, handleArtifactMessage, listArtifacts } from "./store";
 import { setThreadState, threadState } from "../threads/store";
+import { makeThread } from "../threads/fixtures";
 import type { ArtifactSummary } from "./types";
 const artifact: ArtifactSummary = { id: 4, title: "Architecture", kind: "solid", mime: "text/jsx", thread_ids: [2, 5], created_at: "a", updated_at: "b" };
 afterEach(() => { cleanup(); disconnectArtifacts(); closeArtifact(); });
@@ -31,10 +32,11 @@ describe("artifact navigation", () => {
     expect(screen.getByRole("button", { name: /Updated architecture/ })).toBe(trigger);
     expect(trigger.isConnected).toBe(true);
   });
-  it("names orchestrator backlinks Home", () => {
+  it("names retained zero backlinks from the actual Thread title", () => {
+    setThreadState(draft => { draft.threads = [makeThread(0, { title: "General" })]; });
     setArtifactState({ summaries: [{ ...artifact, thread_ids: [0] }] });
     render(() => <ArtifactList />);
-    expect(screen.getByRole("button", { name: "Home" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "General" })).toBeTruthy();
   });
   it("distinguishes unavailable inventory from an empty result and offers a read-only retry", () => {
     setArtifactState({ summaries: [], listing: true, listed: false, listError: null });

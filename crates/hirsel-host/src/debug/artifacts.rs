@@ -22,7 +22,7 @@ pub(super) async fn publish_artifact(
     let input = serde_json::json!({"thread_id":request.thread_id,"artifact_id":request.artifact_id,"draft":request.draft});
     let (artifact, message) = state
         .storage
-        .publish_artifact(
+        .publish_artifact_human(
             &format!("debug-artifact:{}", request.operation_id),
             &input,
             request.thread_id,

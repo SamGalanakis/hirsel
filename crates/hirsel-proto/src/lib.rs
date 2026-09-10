@@ -10,7 +10,6 @@ pub use artifact::{Artifact, ArtifactKind, ArtifactSummary};
 
 mod chat;
 mod client;
-mod event;
 mod host;
 mod models;
 mod process;
@@ -21,16 +20,12 @@ mod view;
 
 pub use chat::{Blob, ChatAuthor, ChatMessage, ToolCallSummary};
 pub use client::{AgentSlot, ClientToHost, HelloAuth, PushPlatform, SendMode};
-pub use event::{
-    Event, EventKind, EventLifecycle, EventSource, EventSourceKind, EventStatus, Ping, PingStatus,
-    QuickReply,
-};
 pub use host::HostToClient;
 pub use models::{
     AvailableModel, ForkAgentConfig, ModelSelection, ModelSnapshot, PromptDoc, PromptSnapshot,
     SubagentModel, SubagentModelCatalog, SubagentProviderModels,
 };
-pub use process::{ProcessInfo, ProcessKind, ProcessState, SideChatSummary};
+pub use process::{ProcessInfo, ProcessKind, ProcessState};
 pub use providers::{
     DetectionStatus, MaskedSecret, ProviderInstance, ProviderKind, ProviderRoster,
     ProviderSelection,
@@ -44,5 +39,6 @@ pub const IROH_OWNER_ALPN: &[u8] = b"hirsel/owner/1";
 mod tests;
 
 pub use thread::{
-    Thread, ThreadActivity, ThreadAttention, ThreadDetail, ThreadTurn, ThreadTurnState,
+    Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail, ThreadRelatedItem,
+    ThreadRelatedTarget, ThreadTurn, ThreadTurnState,
 };

@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::anyhow;
 use hirsel_drivers::AgentKind;
 use hirsel_proto::{SubagentModel, SubagentModelCatalog, SubagentProviderModels};
@@ -7,9 +5,8 @@ use serde_json::{Value, json};
 
 use crate::host_config::ConfigStore;
 
-/// The catalog is exactly the house delegation lanes: one row per lane, one
-/// effort per row. There is no per-task effort tuning, so `variants` is always
-/// a single entry and `default_variant` is that entry.
+/// Curated CLI models and their selectable reasoning efforts. Existing house
+/// lanes retain their fixed effort; additional models expose supported efforts.
 struct RegistryModel {
     id: &'static str,
     label: &'static str,
@@ -39,6 +36,12 @@ const CODEX_MODELS: &[RegistryModel] = &[
         variants: &["max"],
         default_variant: "max",
     },
+    RegistryModel {
+        id: "gpt-6-astra",
+        label: "Astra",
+        variants: &["low", "medium", "high", "xhigh", "max", "ultra"],
+        default_variant: "medium",
+    },
 ];
 
 const CLAUDE_MODELS: &[RegistryModel] = &[
@@ -47,6 +50,12 @@ const CLAUDE_MODELS: &[RegistryModel] = &[
         id: "claude-opus-5",
         label: "Opus 5",
         variants: &["high"],
+        default_variant: "high",
+    },
+    RegistryModel {
+        id: "claude-fable-5-1",
+        label: "Fable 5.1",
+        variants: &["low", "medium", "high", "xhigh", "max"],
         default_variant: "high",
     },
 ];
@@ -86,14 +95,14 @@ impl SubagentModelState {
         catalog_from_store(&self.config_store)
     }
 
-    /// The model-facing `subagents.spawn` input contract. This is derived from
+    /// The model-facing `threads.delegate` input contract. This is derived from
     /// the same refreshed catalog used by Settings and execution validation.
-    pub fn spawn_input_schema(&self) -> Value {
-        Self::spawn_input_schema_for(&self.snapshot())
+    pub fn delegation_input_schema(&self) -> Value {
+        Self::delegation_input_schema_for(&self.snapshot())
     }
 
-    pub(crate) fn spawn_input_schema_for(catalog: &SubagentModelCatalog) -> Value {
-        spawn_input_schema(catalog)
+    pub(crate) fn delegation_input_schema_for(catalog: &SubagentModelCatalog) -> Value {
+        delegation_input_schema(catalog)
     }
 
     pub fn resolve(
@@ -338,97 +347,34 @@ pub(crate) fn registry_catalog() -> SubagentModelCatalog {
     }
 }
 
-fn spawn_input_schema(catalog: &SubagentModelCatalog) -> Value {
-    let mut provider_ids = Vec::new();
-    let mut model_ids = BTreeSet::new();
-    let mut variants = BTreeSet::new();
-    let mut provider_branches = Vec::new();
-
+fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
+    let mut branches = vec![
+        json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}),
+    ];
+    // An existing child with no new selectors keeps its accepted backend.
+    branches.push(json!({"required":["child_thread_id"],"not":{"anyOf":[{"required":["agent"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}));
     for provider in &catalog.providers {
         let enabled = provider
             .models
             .iter()
-            .filter(|model| model.enabled)
+            .filter(|m| m.enabled)
             .collect::<Vec<_>>();
-        let Some(default_model) = enabled.first() else {
+        let Some(default) = enabled.first() else {
             continue;
         };
-        provider_ids.push(provider.provider.clone());
-        let mut model_branches = vec![json!({
-            "not": { "required": ["model"] },
-            "properties": {
-                "variant": {
-                    "type": "string",
-                    "enum": default_model.enabled_variants
-                },
-                "effort": {
-                    "type": "string",
-                    "enum": default_model.enabled_variants
-                }
-            }
-        })];
+        let mut models = vec![
+            json!({"not":{"required":["model"]},"properties":{"variant":{"enum":default.enabled_variants}}}),
+        ];
         for model in enabled {
-            model_ids.insert(model.id.clone());
-            variants.extend(model.enabled_variants.iter().cloned());
-            model_branches.push(json!({
-                "required": ["model"],
-                "properties": {
-                    "model": { "const": model.id },
-                    "variant": {
-                        "type": "string",
-                        "enum": model.enabled_variants
-                    },
-                    "effort": {
-                        "type": "string",
-                        "enum": model.enabled_variants
-                    }
-                }
-            }));
+            models.push(json!({"required":["model"],"properties":{"model":{"const":model.id},"variant":{"enum":model.enabled_variants}}}));
         }
-        provider_branches.push(json!({
-            "required": ["agent"],
-            "properties": {
-                "agent": { "const": provider.provider }
-            },
-            "oneOf": model_branches
-        }));
-    }
-
-    let mut schema = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["agent", "prompt"],
-        "properties": {
-            "agent": {
-                "type": "string",
-                "description": "Enabled Sub-agent provider."
-            },
-            "model": {
-                "type": "string",
-                "description": "Enabled canonical model id for the selected provider. Omit to use that provider's first enabled model."
-            },
-            "variant": {
-                "type": "string",
-                "description": "Enabled reasoning variant for the selected model."
-            },
-            "effort": {
-                "type": "string",
-                "description": "Compatibility alias for variant; accepts the same enabled values."
-            },
-            "prompt": { "type": "string", "minLength": 1 },
-            "cwd": { "type": "string" }
+        let explicit = json!({"required":["agent"],"properties":{"agent":{"const":provider.provider}},"oneOf":models});
+        branches.push(explicit);
+        if provider.provider == "claude" {
+            branches.push(json!({"not":{"required":["agent"]},"anyOf":[{"not":{"required":["child_thread_id"]}},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}],"oneOf":models}));
         }
-    });
-    if provider_branches.is_empty() {
-        schema["not"] = json!({});
-        return schema;
     }
-    schema["properties"]["agent"]["enum"] = json!(provider_ids);
-    schema["properties"]["model"]["enum"] = json!(model_ids);
-    schema["properties"]["variant"]["enum"] = json!(variants);
-    schema["properties"]["effort"]["enum"] = json!(variants);
-    schema["oneOf"] = json!(provider_branches);
-    schema
+    json!({"type":"object","additionalProperties":false,"required":["title","brief","artifact_ids"],"properties":{"title":{"type":"string","minLength":1},"brief":{"type":"string","minLength":1},"artifact_ids":{"type":"array","maxItems":100,"items":{"type":"integer","minimum":1}},"child_thread_id":{"type":"integer","minimum":0},"agent":{"type":"string","enum":["host","claude","codex"]},"model":{"type":"string"},"variant":{"type":"string"},"cwd":{"type":"string"}},"oneOf":branches})
 }
 
 fn registry_provider(provider: &str) -> Option<&'static RegistryProvider> {
@@ -442,7 +388,6 @@ mod tests {
     async fn test_state(dir: &tempfile::TempDir) -> SubagentModelState {
         let store = ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
             &crate::host_config::EnvBootstrap::default(),
         )
@@ -456,16 +401,15 @@ mod tests {
         for provider in REGISTRY {
             assert!(!provider.models.is_empty());
             for model in provider.models {
-                // One lane, one effort: the variant list is the default.
-                assert_eq!(model.variants, [model.default_variant]);
+                assert!(!model.variants.is_empty());
+                assert!(model.variants.contains(&model.default_variant));
             }
         }
     }
 
-    /// The catalog is exactly the delegation lanes: economy = luna at max,
-    /// workhorse = sol at high plus opus at high. Nothing else is listed.
+    /// New choices do not reorder the existing CLI defaults or retune lanes.
     #[test]
-    fn registry_is_exactly_the_delegation_lanes() {
+    fn registry_preserves_existing_lanes_and_adds_supported_models() {
         let catalog = registry_catalog();
         let lanes = catalog
             .providers
@@ -484,7 +428,23 @@ mod tests {
             [
                 ("gpt-5.6-sol", true, vec!["high".to_string()]),
                 ("gpt-5.6-luna", true, vec!["max".to_string()]),
+                (
+                    "gpt-6-astra",
+                    true,
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                ),
                 ("claude-opus-5", true, vec!["high".to_string()]),
+                (
+                    "claude-fable-5-1",
+                    true,
+                    vec!["low", "medium", "high", "xhigh", "max"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                ),
             ]
         );
     }
@@ -559,7 +519,7 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.6-sol", "gpt-5.6-luna"]
+            ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra"]
         );
         assert_eq!(
             catalog.providers[1]
@@ -567,7 +527,7 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["claude-opus-5"]
+            ["claude-opus-5", "claude-fable-5-1"]
         );
     }
 
@@ -605,7 +565,7 @@ mod tests {
                 .resolve(AgentKind::Claude, Some("claude-opus-5"), None)
                 .unwrap_err()
                 .to_string()
-                .contains("enabled models: none")
+                .contains("enabled models: claude-fable-5-1")
         );
         assert!(
             state
@@ -622,17 +582,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_schema_tracks_enabled_models_and_variants() {
+    async fn delegation_schema_tracks_enabled_models_and_variants() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(&dir).await;
-        let schema = state.spawn_input_schema();
+        let schema = state.delegation_input_schema();
         let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
         let spawn = |agent: &str, model: &str, effort: &str| {
             json!({
                 "agent": agent,
                 "model": model,
-                "effort": effort,
-                "prompt": "Research Linear triage."
+                "variant": effort,
+                "title":"Research", "brief": "Research Linear triage.", "artifact_ids":[]
             })
         };
 
@@ -661,12 +621,87 @@ mod tests {
             .set("claude", "claude-opus-5", false, &["high".to_string()])
             .await
             .unwrap();
-        let validator = jsonschema::JSONSchema::compile(&state.spawn_input_schema()).unwrap();
+        let validator = jsonschema::JSONSchema::compile(&state.delegation_input_schema()).unwrap();
         assert!(
             validator
                 .validate(&spawn("claude", "claude-opus-5", "high"))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn new_models_resolve_persist_and_refresh_the_delegation_schema() {
+        for (agent, provider, id, default, efforts) in [
+            (
+                AgentKind::Codex,
+                "codex",
+                "gpt-6-astra",
+                "medium",
+                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
+            ),
+            (
+                AgentKind::Claude,
+                "claude",
+                "claude-fable-5-1",
+                "high",
+                &["low", "medium", "high", "xhigh", "max"][..],
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = test_state(&dir).await;
+            assert_eq!(
+                state.resolve(agent, Some(id), None).unwrap().variant,
+                default
+            );
+            let input = |effort: &str| json!({"agent":provider,"model":id,"variant":effort,"title":"Work","brief":"Do the work","artifact_ids":[]});
+            let validator =
+                jsonschema::JSONSchema::compile(&state.delegation_input_schema()).unwrap();
+            for effort in efforts {
+                assert_eq!(
+                    state
+                        .resolve(agent, Some(id), Some(effort))
+                        .unwrap()
+                        .variant,
+                    *effort
+                );
+                assert!(validator.is_valid(&input(effort)));
+            }
+            assert!(state.resolve(agent, Some(id), Some("impossible")).is_err());
+            assert!(!validator.is_valid(&input("impossible")));
+            assert!(
+                state
+                    .set(provider, id, true, &["impossible".into()])
+                    .await
+                    .is_err()
+            );
+
+            state
+                .set(provider, id, true, &["high".into()])
+                .await
+                .unwrap();
+            let restricted = test_state(&dir).await;
+            assert_eq!(
+                restricted.resolve(agent, Some(id), None).unwrap().variant,
+                "high"
+            );
+            assert!(restricted.resolve(agent, Some(id), Some("low")).is_err());
+            let validator =
+                jsonschema::JSONSchema::compile(&restricted.delegation_input_schema()).unwrap();
+            assert!(validator.is_valid(&input("high")));
+            assert!(!validator.is_valid(&input("low")));
+
+            restricted
+                .set(provider, id, false, &["high".into()])
+                .await
+                .unwrap();
+            let disabled = test_state(&dir).await;
+            assert!(disabled.resolve(agent, Some(id), None).is_err());
+            assert!(
+                !jsonschema::JSONSchema::compile(&disabled.delegation_input_schema())
+                    .unwrap()
+                    .is_valid(&input("high"))
+            );
+        }
     }
 
     #[tokio::test]

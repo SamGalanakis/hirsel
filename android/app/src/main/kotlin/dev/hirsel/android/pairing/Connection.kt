@@ -15,6 +15,8 @@ import dev.hirsel.core.ClientObserver
 import dev.hirsel.core.ClientSnapshot
 import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.LifecycleEvent
+import dev.hirsel.core.SendReceipt
+import dev.hirsel.core.ThreadRelatedTarget
 
 /** How a hirsel iroh connection should be established. */
 sealed interface ConnectionSpec {
@@ -40,7 +42,7 @@ sealed interface Phase {
 }
 
 /** An outbound message that never reached the host, kept so the UI can offer a retry. */
-data class FailedSend(val id: Long, val body: String, val threadId: ULong)
+data class FailedSend(val id: Long, val body: String, val threadId: ULong, val artifactIds: List<ULong>, val historyId: String)
 
 /**
  * Live, observable state of a single native [Client]. Callbacks arrive on native
@@ -57,7 +59,7 @@ class Connection internal constructor(
 
     /**
      * Sends that threw before the host accepted them. The happy path is owned by
-     * native: `sendMessage` inserts an optimistic message (keyed by its
+     * native: `sendThreadMessage` inserts an optimistic message (keyed by its
      * `clientId`) with `pending = true`, then the host's ack flips it to sent via
      * a fresh snapshot — that reconciliation needs no bookkeeping here. Only the
      * failure case surfaces, as a retryable bubble.
@@ -67,6 +69,7 @@ class Connection internal constructor(
 
     var focusedThreadId by mutableStateOf<ULong?>(null)
     val drafts = mutableStateMapOf<ULong, String>()
+    val recoveredDrafts = mutableStateListOf<String>()
     var creatingClientId by mutableStateOf<String?>(null)
     var actionError by mutableStateOf<String?>(null)
 
@@ -75,8 +78,8 @@ class Connection internal constructor(
         client?.openThread(id, null)
     }
 
-    fun createThread(title: String) {
-        creatingClientId = client?.createThread(title)?.clientId
+    fun createThread(title: String, parentThreadId: ULong?) {
+        creatingClientId = client?.createThread(title, parentThreadId)?.clientId
     }
 
     fun action(threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
@@ -84,27 +87,49 @@ class Connection internal constructor(
             .onFailure { actionError = it.message ?: "Action failed" }
     }
 
+    // Callers capture historyId with the addressed Thread, before any delayed UI action.
+    fun addThreadRelated(historyId: String, threadId: ULong, target: ThreadRelatedTarget, title: String?): SendReceipt? =
+        client?.addThreadRelated(historyId, threadId, target, title)
+
+    fun removeThreadRelated(historyId: String, threadId: ULong, itemId: ULong): SendReceipt? =
+        client?.removeThreadRelated(historyId, threadId, itemId)
+
+    fun openRelatedThread(target: ThreadRelatedTarget): Boolean {
+        val current = snapshot ?: return false
+        val destination = relatedThreadDestination(
+            target, current.connection, current.historyId, current.threads.map { it.id },
+        ) ?: return false
+        // Native state can already have advanced beyond this queued UI snapshot.
+        client?.openRelatedThread(target) ?: return false
+        focusedThreadId = destination
+        return true
+    }
+
     fun stop(threadId: ULong) { client?.cancelTurn(threadId) }
 
     val isOnline: Boolean get() = phase is Phase.Online
 
-    /** Fire-and-forget send off the main thread; a throw becomes a retryable [FailedSend]. */
-    fun send(body: String, threadId: ULong = focusedThreadId ?: 0uL) {
-        val c = client ?: run { recordFailure(body, threadId); return }
-        Thread {
-            runCatching { c.sendThreadMessage(threadId, body, emptyList(), emptyList()) }
-                .onFailure { mainHandler.post { recordFailure(body, threadId) } }
-        }.start()
+    /** Queue locally; a throw becomes a retryable [FailedSend]. */
+    fun send(body: String, threadId: ULong, expectedHistoryId: String?, artifactIds: List<ULong> = emptyList()) {
+        if (expectedHistoryId == null || expectedHistoryId != snapshot?.historyId) {
+            recoveredDrafts.add(body)
+            actionError = "History changed. Restore this text to a current Thread before sending."
+            return
+        }
+        val c = client ?: run { recordFailure(body, threadId, artifactIds, expectedHistoryId); return }
+        // This native method only queues locally; keep it ordered with identity callbacks.
+        runCatching { c.sendThreadMessage(threadId, body, emptyList(), emptyList(), artifactIds.toList()) }
+            .onFailure { recordFailure(body, threadId, artifactIds, expectedHistoryId) }
     }
 
     /** Drop the failed entry and try the same body again. */
     fun retry(failed: FailedSend) {
         failedSends.remove(failed)
-        send(failed.body, failed.threadId)
+        send(failed.body, failed.threadId, failed.historyId, failed.artifactIds)
     }
 
-    private fun recordFailure(body: String, threadId: ULong) {
-        failedSends.add(FailedSend(failCounter++, body, threadId))
+    private fun recordFailure(body: String, threadId: ULong, artifactIds: List<ULong>, historyId: String) {
+        failedSends.add(FailedSend(failCounter++, body, threadId, artifactIds.toList(), historyId))
     }
 
     /** The device token the host issued during a successful pairing handshake. */
@@ -154,6 +179,18 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
         override fun onStateChanged(snapshot: ClientSnapshot) {
             mainHandler.post {
                 val conn = target.value ?: return@post
+                val old = conn.snapshot
+                if (old?.historyId != null && old.historyId != snapshot.historyId) {
+                    conn.recoveredDrafts.addAll(conn.drafts.values.filter { it.isNotBlank() })
+                    conn.recoveredDrafts.addAll(conn.failedSends.map { it.body })
+                    conn.drafts.clear()
+                    conn.failedSends.clear()
+                    conn.focusedThreadId = null
+                    conn.creatingClientId = null
+                    conn.actionError = "History changed. Unsent text is available in recovered drafts."
+                }
+                val priorRecovered = old?.recoveredDrafts.orEmpty().toSet()
+                conn.recoveredDrafts.addAll(snapshot.recoveredDrafts.filter { it !in priorRecovered })
                 conn.snapshot = snapshot
                 snapshot.createdThreads.firstOrNull { it.clientId == conn.creatingClientId }?.let {
                     conn.creatingClientId = null
@@ -173,6 +210,7 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                         if (event.attempt == 0u) Phase.Connecting else Phase.Reconnecting(event.attempt.toInt() + 1)
                     is LifecycleEvent.Online -> Phase.Online
                     is LifecycleEvent.Offline -> Phase.Offline(event.reason)
+                    is LifecycleEvent.ThreadRelatedChanged -> conn.phase
                     is LifecycleEvent.ProtocolError -> { conn.actionError = event.detail; conn.phase }
                 }
             }

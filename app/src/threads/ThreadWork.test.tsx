@@ -11,8 +11,8 @@ const events: TimelineEvent[] = [
   { seq: 1, at: 1, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Distinct result: first file contents" } },
   { seq: 2, at: 2, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "Distinct error: second file permission denied" } },
 ];
-const activity: ThreadActivity = { artifact_ids: [], id: 1, thread_id: 1, turn_id: 1, kind: "tool_completed", data: { name: "read_file", ok: true }, ts: "2026-09-09T10:00:00Z" };
-const message: ChatMessage = { id: 1, thread_id: 1, author: "agent", body: "Finished", ref: null, ts: activity.ts, tool_calls: [{ name: "read_file", ok: true }, { name: "read_file", ok: false }] };
+const activity: ThreadActivity = { artifact_ids: [], id: 1, thread_id: 1, turn_id: 1, kind: "tool_completed", data: { id: "call-a", name: "read_file", ok: true }, ts: "2026-09-09T10:00:00Z" };
+const message: ChatMessage = { id: 1, thread_id: 1, author: "agent", body: "Finished", ref: null, ts: activity.ts, tool_calls: [{ id: "call-a", name: "read_file", ok: true }, { id: "call-b", name: "read_file", ok: false }] };
 const turn = (state: ThreadTurn["state"]): ThreadTurn => ({ id: 1, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: state === "completed" ? 1 : null, state, started_at: "2026-09-09T09:59:00Z", finished_at: ["running", "queued"].includes(state) ? null : activity.ts });
 
 describe("readable work outcomes", () => {
@@ -45,7 +45,7 @@ describe("readable work outcomes", () => {
 
 describe("execution result preservation", () => {
   it("settles a started tool from the recorded final outcome without duplicating the invocation", () => {
-    const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [{ name: "read_file", ok: true }] }} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null } }]} activities={[]} />);
+    const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [{ id: "read", name: "read_file", ok: true }] }} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null } }]} activities={[]} />);
     expect(view.getByText("Used 1 tool")).toBeTruthy();
     view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(1);
@@ -74,6 +74,52 @@ describe("execution result preservation", () => {
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
     expect(inspector.textContent).not.toContain("tool completed");
     expect(view.queryByRole("button", { name: "4 tool calls" })).toBeNull();
+  });
+
+  it("pairs reverse-order same-name durable completions by canonical ID after reconnect", () => {
+    const starts: TimelineEvent[] = [
+      { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: "Reading A" } },
+      { seq: 2, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: "Reading B" } },
+    ];
+    const reverseCompletionOrder: ChatMessage = {
+      ...message,
+      tool_calls: [
+        { id: "call-b", name: "read_file", ok: false },
+        { id: "call-a", name: "read_file", ok: true },
+      ],
+    };
+    const view = render(() => <ThreadWork turn={turn("completed")} message={reverseCompletionOrder} events={starts} activities={[]} />);
+    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
+    const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => [row.getAttribute("data-tool-call-id"), Boolean(row.querySelector('[aria-label="ok"]')), Boolean(row.querySelector('[aria-label="failed"]'))])).toEqual([
+      ["call-a", true, false],
+      ["call-b", false, true],
+    ]);
+  });
+
+  it("joins a partial rich completion with durable outcomes by ID without duplicates", () => {
+    const partial: TimelineEvent[] = [
+      { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: "Reading A" } },
+      { seq: 2, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: "Reading B" } },
+      { seq: 3, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "B failed" } },
+    ];
+    const view = render(() => <ThreadWork turn={turn("completed")} message={message} events={partial} activities={[]} />);
+    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
+    const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => row.getAttribute("data-tool-call-id"))).toEqual(["call-a", "call-b"]);
+    expect(view.getByText("B failed")).toBeTruthy();
+    expect(view.getAllByText("read_file")).toHaveLength(2);
+  });
+
+  it("keeps an exact durable tool outcome on a turn with no final message", () => {
+    const view = render(() => <ThreadWork turn={turn("interrupted")} activities={[activity]} events={[{ seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: null } }]} />);
+    view.container.querySelector<HTMLDetailsElement>('[data-slot="work-details"]')!.open = true;
+    const row = view.container.querySelector('[data-slot="timeline-tool"]')!;
+    expect(row.getAttribute("data-tool-call-id")).toBe("call-a");
+    expect(row.querySelector('[aria-label="ok"]')).toBeTruthy();
+    expect(view.getAllByText("read_file")).toHaveLength(1);
   });
 
   it("keeps both completion payloads when only the first persisted activity has arrived", () => {
@@ -116,11 +162,11 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
     const expected = ["a/result", "timeline-reasoning", "timeline-code", "b/error", "timeline-reasoning"];
     expect(slots()).toEqual(expected);
     // Only B's activity has been persisted; neither completion may move.
-    flush(() => setActivities([{ ...activity, data: { name: "read_file", ok: false } }]));
+    flush(() => setActivities([{ ...activity, data: { id: "call-b", name: "read_file", ok: false } }]));
     expect(slots()).toEqual(expected);
     flush(() => setFinal(message));
     expect(slots()).toEqual(expected);
-    flush(() => setActivities([{ ...activity, data: { name: "read_file", ok: false } }, { ...activity, id: 2 }]));
+    flush(() => setActivities([{ ...activity, data: { id: "call-b", name: "read_file", ok: false } }, { ...activity, id: 2 }]));
     expect(slots()).toEqual(expected);
     for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
     const results = [...view.container.querySelectorAll('[data-slot="tool-result"]')];

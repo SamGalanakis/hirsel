@@ -314,6 +314,31 @@ fn turn_event_tool_done_round_trips() {
 }
 
 #[test]
+fn persisted_tool_call_summary_requires_canonical_id() {
+    let summary = ToolCallSummary {
+        id: "call-1".to_string(),
+        name: "shell_run".to_string(),
+        ok: true,
+    };
+    let encoded = serde_json::to_value(&summary).unwrap();
+    assert_eq!(
+        encoded,
+        serde_json::json!({"id":"call-1","name":"shell_run","ok":true})
+    );
+    assert_eq!(
+        serde_json::from_value::<ToolCallSummary>(encoded).unwrap(),
+        summary
+    );
+    assert!(
+        serde_json::from_value::<ToolCallSummary>(
+            serde_json::json!({"name":"shell_run","ok":true})
+        )
+        .is_err(),
+        "name-only stored summaries are outside the current contract"
+    );
+}
+
+#[test]
 fn model_selection_frames_use_snake_case_protocol_names() {
     let command = ClientToHost::SetModel {
         provider_id: "codex".to_string(),

@@ -16,8 +16,9 @@ export interface Blob {
 }
 
 /** A single tool the Agent invoked during the turn that produced a committed
- * agent message (v1.4). Stamped from lash's per-turn RemoteToolCallSummary. */
+ * agent message, keyed by the same canonical ID as its streamed events. */
 export interface ToolCall {
+  id: string;
   name: string;
   ok: boolean;
 }

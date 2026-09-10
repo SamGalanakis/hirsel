@@ -264,6 +264,7 @@ fn cancelled_turn_materializes_checkpointed_chat_and_completed_tools() {
     assert_eq!(
         tool_calls,
         vec![ToolCallSummary {
+            id: "completed".to_string(),
             name: "shell_run".to_string(),
             ok: true,
         }]
@@ -315,6 +316,7 @@ async fn finished_tool_only_turn_persists_completed_tools() {
     assert_eq!(
         persisted.tool_calls,
         vec![ToolCallSummary {
+            id: "completed".to_string(),
             name: "events_judgment".to_string(),
             ok: true,
         }]
@@ -546,6 +548,7 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     assert_eq!(
         persisted.tool_calls,
         vec![ToolCallSummary {
+            id: "completed".to_string(),
             name: "shell_run".to_string(),
             ok: true,
         }]

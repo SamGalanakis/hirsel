@@ -326,10 +326,10 @@ variant = "default"
         1
     );
     let summaries:String=db.query_row("SELECT tool_calls FROM chat_messages WHERE thread_id=?1 AND author='agent' ORDER BY id DESC LIMIT 1",[child],|r|r.get(0)).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&summaries).unwrap(),
-        json!([{"name":"threads_context","ok":true}])
-    );
+    let summaries = serde_json::from_str::<Value>(&summaries).unwrap();
+    assert_eq!(summaries[0]["name"], "threads_context");
+    assert_eq!(summaries[0]["ok"], true);
+    assert!(summaries[0]["id"].as_str().is_some_and(|id| !id.is_empty()));
 
     // Retain an actual running CLI callback across debug reset, then recreate IDs.
     std::fs::write(dir.path().join("hold"), b"hold this owned fixture").unwrap();

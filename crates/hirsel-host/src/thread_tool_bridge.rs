@@ -45,7 +45,7 @@ impl Drop for ThreadToolBridge {
 }
 impl ThreadToolBridge {
     pub(crate) async fn tool_calls(&self) -> Vec<hirsel_proto::ToolCallSummary> {
-        self.telemetry.lock().await.completed.clone()
+        self.telemetry.lock().await.summaries()
     }
     /// Stop accepting/abort in-flight callbacks, then pair every published
     /// start before the owner persists the terminal assistant projection.

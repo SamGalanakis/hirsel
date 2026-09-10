@@ -71,10 +71,12 @@ async fn chat_tool_summaries_are_persisted_with_chat_messages() {
         .0;
     let tool_calls = vec![
         ToolCallSummary {
+            id: "call-shell".to_string(),
             name: "shell_run".to_string(),
             ok: true,
         },
         ToolCallSummary {
+            id: "call-delegate".to_string(),
             name: "threads_delegate".to_string(),
             ok: false,
         },

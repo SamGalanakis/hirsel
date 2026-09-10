@@ -128,10 +128,12 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
         calls,
         vec![
             hirsel_proto::ToolCallSummary {
+                id: "actual:create".into(),
                 name: "threads_create".into(),
                 ok: true
             },
             hirsel_proto::ToolCallSummary {
+                id: "actual:denied".into(),
                 name: "threads_read".into(),
                 ok: false
             }
@@ -327,6 +329,7 @@ async fn self_cancel_pairs_completion_without_restoring_capability_or_replaying_
     assert_eq!(
         active.tool_calls().await,
         vec![hirsel_proto::ToolCallSummary {
+            id: "provider:cancel".into(),
             name: "threads_cancel".into(),
             ok: true
         }]
@@ -394,6 +397,7 @@ async fn interrupted_inflight_call_finishes_once_and_keeps_authority_revoked() {
     assert_eq!(
         active.tool_calls().await,
         vec![hirsel_proto::ToolCallSummary {
+            id: "provider:held".into(),
             name: "shell_run".into(),
             ok: false
         }]

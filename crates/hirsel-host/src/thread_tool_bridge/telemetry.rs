@@ -5,8 +5,33 @@ use hirsel_proto::{HostToClient, ToolCallSummary, TurnEventKind};
 #[derive(Default)]
 pub(super) struct ToolTelemetry {
     next_sequence: u64,
+    order: Vec<String>,
     pending: HashMap<String, String>,
-    pub(super) completed: Vec<ToolCallSummary>,
+    completed: HashMap<String, ToolCallSummary>,
+}
+impl ToolTelemetry {
+    fn start(&mut self, id: &str, name: &str) {
+        self.order.push(id.into());
+        self.pending.insert(id.into(), name.into());
+    }
+
+    fn complete(&mut self, id: &str, name: String, ok: bool) {
+        self.completed.insert(
+            id.into(),
+            ToolCallSummary {
+                id: id.into(),
+                name,
+                ok,
+            },
+        );
+    }
+
+    pub(super) fn summaries(&self) -> Vec<ToolCallSummary> {
+        self.order
+            .iter()
+            .filter_map(|id| self.completed.get(id).cloned())
+            .collect()
+    }
 }
 impl BridgeState {
     pub(super) async fn start_tool(&self, id: &str, name: &str) -> anyhow::Result<()> {
@@ -27,7 +52,7 @@ impl BridgeState {
                 summary: None,
             },
         });
-        telemetry.pending.insert(id.into(), name.into());
+        telemetry.start(id, name);
         Ok(())
     }
 
@@ -57,7 +82,7 @@ impl BridgeState {
                 summary,
             },
         });
-        telemetry.completed.push(ToolCallSummary { name, ok });
+        telemetry.complete(id, name, ok);
     }
 
     pub(super) async fn finish_pending(&self) {
@@ -77,5 +102,35 @@ impl BridgeState {
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summaries_keep_start_order_across_reverse_completion() {
+        let mut telemetry = ToolTelemetry::default();
+        telemetry.start("A", "read_file");
+        telemetry.start("B", "read_file");
+        telemetry.complete("B", "read_file".into(), false);
+        telemetry.complete("A", "read_file".into(), true);
+
+        assert_eq!(
+            telemetry.summaries(),
+            vec![
+                ToolCallSummary {
+                    id: "A".into(),
+                    name: "read_file".into(),
+                    ok: true,
+                },
+                ToolCallSummary {
+                    id: "B".into(),
+                    name: "read_file".into(),
+                    ok: false,
+                },
+            ]
+        );
     }
 }

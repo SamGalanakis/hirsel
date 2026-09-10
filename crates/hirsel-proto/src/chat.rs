@@ -41,6 +41,7 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallSummary {
+    pub id: String,
     pub name: String,
     pub ok: bool,
 }

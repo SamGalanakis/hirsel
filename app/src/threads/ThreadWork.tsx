@@ -10,7 +10,7 @@ import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { ThreadLink } from "./ThreadRef";
 import { activityText, ownerFacingActivity } from "./conversation";
 import { state } from "../store/store";
-import { activityData, failureReason, remainingTools, resolveStartedTools, toolSummary, workDuration, workLabel } from "./work-summary";
+import { activityData, failureReason, mergePersistedToolCalls, remainingTools, toolSummary, workDuration, workLabel } from "./work-summary";
 export function ActivityEntry(props: { activity: ThreadActivity }) {
   const data = () => props.activity.data as Record<string, unknown>;
   const report = () => props.activity.kind === "child_report";
@@ -39,7 +39,7 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
   });
   const events = () => splitStreamingReply(props.events).activity;
   const recorded = () => props.message?.tool_calls?.length ? props.message.tool_calls : props.activities.flatMap(activity => { const call = toolSummary(activity); return call ? [call] : []; });
-  const resolvedEvents = () => resolveStartedTools(events(), recorded());
+  const resolvedEvents = () => mergePersistedToolCalls(events(), recorded());
   const items = () => buildTimeline(resolvedEvents());
   const extraTools = () => remainingTools(recorded(), items());
   const toolCount = () => items().filter(item => item.kind === "tool").length + extraTools().length;

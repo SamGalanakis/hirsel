@@ -113,7 +113,7 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
   };
 
   return (
-    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-tool">
+    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-tool" data-tool-call-id={props.item.toolId}>
       <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
         <Switch>
           <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>

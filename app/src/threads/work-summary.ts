@@ -8,45 +8,31 @@ export function activityData(activity: ThreadActivity): Record<string, unknown> 
 }
 export function toolSummary(activity: ThreadActivity): ToolCall | null {
   const data = activityData(activity);
-  return activity.kind === "tool_completed" && typeof data.name === "string" && typeof data.ok === "boolean" ? { name: data.name, ok: data.ok } : null;
+  return activity.kind === "tool_completed" && typeof data.id === "string" && typeof data.name === "string" && typeof data.ok === "boolean" ? { id: data.id, name: data.name, ok: data.ok } : null;
 }
-/** A final message/activity can arrive after a reconnect omitted a tool's done
- * event. Complete that exact started row from the persisted name/outcome so one
- * invocation keeps one position and one status. Result text remains absent. */
-export function resolveStartedTools(events: TimelineEvent[], calls: ToolCall[]): TimelineEvent[] {
+/** Complete exact started rows when reconnect retained only their durable
+ * outcomes. The canonical call ID is the sole join key. */
+export function mergePersistedToolCalls(events: TimelineEvent[], calls: ToolCall[]): TimelineEvent[] {
   const items = buildTimeline(events);
-  const unmatched = [...calls];
-  for (const item of items) {
-    if (item.kind !== "tool") continue;
-    const status = item.status;
-    if (status.state !== "done") continue;
-    const index = unmatched.findIndex(call => call.name === item.name && call.ok === status.ok);
-    if (index >= 0) unmatched.splice(index, 1);
-  }
+  const durableById = new Map(calls.map(call => [call.id, call]));
   let seq = Math.max(0, ...events.map(event => event.seq));
   const completions: TimelineEvent[] = [];
   for (const item of items) {
     if (item.kind !== "tool" || item.status.state !== "running") continue;
-    const index = unmatched.findIndex(call => call.name === item.name);
-    if (index < 0) continue;
-    const [call] = unmatched.splice(index, 1);
-    completions.push({ seq: ++seq, event: { kind: "tool_done", id: item.toolId, name: item.name, ok: call.ok, summary: null } });
+    const call = durableById.get(item.toolId);
+    if (!call) continue;
+    completions.push({ seq: ++seq, event: { kind: "tool_done", id: call.id, name: call.name, ok: call.ok, summary: null } });
   }
   return completions.length > 0 ? [...events, ...completions] : events;
 }
-/** Rich events keep their exact call IDs and order. The persisted name/outcome
- * list fills only missing occurrences when reconnect supplied a partial stream. */
+/** Keep durable-only calls once; rich rows win when the same ID is present. */
 export function remainingTools(calls: ToolCall[], items: TimelineItem[]): ToolCall[] {
-  const counts = new Map<string, number>();
-  const key = (name: string, ok: boolean) => JSON.stringify([name, ok]);
-  for (const item of items) if (item.kind === "tool" && item.status.state === "done") {
-    const id = key(item.name, item.status.ok);
-    counts.set(id, (counts.get(id) ?? 0) + 1);
-  }
+  const present = new Set(items.flatMap(item => item.kind === "tool" ? [item.toolId] : []));
+  const emitted = new Set<string>();
   return calls.filter(call => {
-    const id = key(call.name, call.ok), count = counts.get(id) ?? 0;
-    if (!count) return true;
-    counts.set(id, count - 1); return false;
+    if (present.has(call.id) || emitted.has(call.id)) return false;
+    emitted.add(call.id);
+    return true;
   });
 }
 export function workDuration(turn: ThreadTurn | undefined, now: number): string {

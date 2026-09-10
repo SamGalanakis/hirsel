@@ -2647,6 +2647,8 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
 
 
 data class ToolCall (
+    var `id`: kotlin.String
+    ,
     var `name`: kotlin.String
     ,
     var `ok`: kotlin.Boolean
@@ -2667,16 +2669,19 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
     override fun read(buf: ByteBuffer): ToolCall {
         return ToolCall(
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: ToolCall) = (
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterString.allocationSize(value.`name`) +
             FfiConverterBoolean.allocationSize(value.`ok`)
     )
 
     override fun write(value: ToolCall, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`name`, buf)
             FfiConverterBoolean.write(value.`ok`, buf)
     }

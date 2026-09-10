@@ -253,12 +253,12 @@ impl LashAgentRuntime {
             };
             if let Some(turn_id) = active.thread_turn_id {
                 if let Some(output) = output {
-                    for (index, tool) in tool_call_summaries(output).into_iter().enumerate() {
+                    for tool in tool_call_summaries(output) {
                         let activity = self
                             .tools
                             .storage()
                             .append_thread_activity_once(
-                                &format!("turn:{turn_id}:tool:{index}"),
+                                &format!("turn:{turn_id}:tool:{}", tool.id),
                                 active.thread_id,
                                 Some(turn_id),
                                 "tool_completed",

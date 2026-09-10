@@ -264,11 +264,11 @@ describe("thread workspace", () => {
 });
 
 it("preserves the exact open inspector and focused summary across message/activity updates", async () => {
-  flush(() => setThreadState(draft => { draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id:1,thread_id:1,author:"agent",body:"Answer",ref:null,ts:"2026-09-09T10:00:00Z",tool_calls:[{name:"read_file",ok:true},{name:"read_file",ok:true}] }], turns:[{ requester_thread_id: null, requester_turn_id: null,id:1,thread_id:1,owner_message_id:null,agent_message_id:1,state:"completed",started_at:"2026-09-09T09:59:00Z",finished_at:"2026-09-09T10:00:00Z"}],activities:[],loaded:true,hasMore:false }; }));
+  flush(() => setThreadState(draft => { draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id:1,thread_id:1,author:"agent",body:"Answer",ref:null,ts:"2026-09-09T10:00:00Z",tool_calls:[{id:"call-a",name:"read_file",ok:true},{id:"call-b",name:"read_file",ok:true}] }], turns:[{ requester_thread_id: null, requester_turn_id: null,id:1,thread_id:1,owner_message_id:null,agent_message_id:1,state:"completed",started_at:"2026-09-09T09:59:00Z",finished_at:"2026-09-09T10:00:00Z"}],activities:[],loaded:true,hasMore:false }; }));
   const view=render(()=> <ThreadShell />);
   const inspector=view.container.querySelector<HTMLDetailsElement>('[data-message-id="1"] [data-slot="work-details"]')!;
   inspector.open=true; const summary=inspector.querySelector('summary')!; summary.focus();
-  flush(()=>handleThreadMessage({type:"thread_activity",activity:{ artifact_ids: [],id:1,thread_id:1,turn_id:1,kind:"tool_completed",data:{name:"read_file",ok:true},ts:"2026-09-09T10:00:01Z"}}));
+  flush(()=>handleThreadMessage({type:"thread_activity",activity:{ artifact_ids: [],id:1,thread_id:1,turn_id:1,kind:"tool_completed",data:{id:"call-a",name:"read_file",ok:true},ts:"2026-09-09T10:00:01Z"}}));
   flush(()=>handleThreadMessage({type:"msg",message:{id:2,thread_id:1,author:"owner",body:"Next",ref:null,ts:"2026-09-09T10:00:02Z"}}));
   expect(view.container.querySelector('[data-message-id="1"] [data-slot="work-details"]')).toBe(inspector);
   expect(inspector.open).toBe(true); expect(document.activeElement).toBe(summary);
@@ -289,7 +289,7 @@ it("keeps the same expanded work and focused result when the live turn becomes i
   fireEvent.click(result); result.focus();
   // A queued owner message can arrive while this response is still running.
   flush(() => handleThreadMessage({ type: "msg", message: { id: 92, thread_id: 1, author: "owner", body: "Then check the next file", ref: null, ts: "2026-09-09T10:00:01Z" } }));
-  flush(() => handleThreadMessage({ type: "msg", message: { id: 93, thread_id: 1, author: "agent", body: "File checked", ref: 90, ts: "2026-09-09T10:00:02Z", tool_calls: [{ name: "read_file", ok: true }] } }));
+  flush(() => handleThreadMessage({ type: "msg", message: { id: 93, thread_id: 1, author: "agent", body: "File checked", ref: 90, ts: "2026-09-09T10:00:02Z", tool_calls: [{ id: "call-a", name: "read_file", ok: true }] } }));
   flush(() => handleThreadMessage({ type: "thread_turn", turn: { ...turn, agent_message_id: 93, state: "completed", finished_at: "2026-09-09T10:00:02Z" } }));
   expect(view.container.querySelector('[data-message-id="93"] [data-slot="work-details"]')).toBe(disclosure);
   expect(disclosure.open).toBe(true);

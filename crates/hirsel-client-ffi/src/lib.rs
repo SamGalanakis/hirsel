@@ -60,6 +60,7 @@ impl From<core::Blob> for Blob {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ToolCall {
+    pub id: String,
     pub name: String,
     pub ok: bool,
 }
@@ -67,9 +68,28 @@ pub struct ToolCall {
 impl From<core::ToolCallSummary> for ToolCall {
     fn from(value: core::ToolCallSummary) -> Self {
         Self {
+            id: value.id,
             name: value.name,
             ok: value.ok,
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_call_tests {
+    use super::*;
+
+    #[test]
+    fn ffi_tool_call_keeps_canonical_id() {
+        let call: ToolCall = core::ToolCallSummary {
+            id: "call-7".to_string(),
+            name: "shell_run".to_string(),
+            ok: false,
+        }
+        .into();
+        assert_eq!(call.id, "call-7");
+        assert_eq!(call.name, "shell_run");
+        assert!(!call.ok);
     }
 }
 

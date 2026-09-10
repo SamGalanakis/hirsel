@@ -22,7 +22,6 @@ pub(super) struct TurnTimelineBridge {
     pub(super) seq: u64,
     pub(super) in_turn: bool,
     pub(super) pending: Option<PendingTimelineText>,
-    pub(super) tool_id_seq: u64,
     pub(super) code_id_seq: u64,
 }
 
@@ -125,7 +124,9 @@ impl TurnTimelineBridge {
                     } => {
                         self.start_turn_if_needed();
                         self.flush_pending(broadcast_log, broadcaster);
-                        let id = self.tool_event_id(call_id.as_deref(), name);
+                        let Some(id) = call_id.clone() else {
+                            return;
+                        };
                         self.publish_event(
                             TurnEventKind::ToolStart {
                                 id,
@@ -145,7 +146,9 @@ impl TurnTimelineBridge {
                     } => {
                         self.start_turn_if_needed();
                         self.flush_pending(broadcast_log, broadcaster);
-                        let id = self.tool_event_id(call_id.as_deref(), name);
+                        let Some(id) = call_id.clone() else {
+                            return;
+                        };
                         self.publish_event(
                             TurnEventKind::ToolDone {
                                 id,
@@ -172,21 +175,7 @@ impl TurnTimelineBridge {
             self.seq = 0;
             self.pending = None;
             self.in_turn = true;
-            self.tool_id_seq = 0;
             self.code_id_seq = 0;
-        }
-    }
-
-    /// lash supplies call_id on native tool events; RLM cell executions may
-    /// omit it, so fall back to a per-turn ordinal. Started/Completed arrive
-    /// serially per call in RLM mode, so name+ordinal pairs stay aligned.
-    pub(super) fn tool_event_id(&mut self, call_id: Option<&str>, name: &str) -> String {
-        match call_id {
-            Some(id) => id.to_string(),
-            None => {
-                self.tool_id_seq += 1;
-                format!("{name}:{}", self.tool_id_seq.div_ceil(2))
-            }
         }
     }
 
@@ -295,9 +284,12 @@ pub(super) fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSumm
                 lash_core::ToolCallOutcome::Cancelled(_)
             )
         })
-        .map(|call| ToolCallSummary {
-            name: call.tool.clone(),
-            ok: call.output.is_success(),
+        .filter_map(|call| {
+            call.call_id.as_ref().map(|id| ToolCallSummary {
+                id: id.clone(),
+                name: call.tool.clone(),
+                ok: call.output.is_success(),
+            })
         })
         .collect::<Vec<_>>();
     if !summaries.is_empty() {
@@ -307,10 +299,14 @@ pub(super) fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSumm
         .activities
         .iter()
         .filter_map(|activity| match &activity.event {
-            lash::TurnEvent::ToolCallCompleted { name, output, .. }
-                if !matches!(output.outcome, lash_core::ToolCallOutcome::Cancelled(_)) =>
-            {
+            lash::TurnEvent::ToolCallCompleted {
+                call_id: Some(id),
+                name,
+                output,
+                ..
+            } if !matches!(output.outcome, lash_core::ToolCallOutcome::Cancelled(_)) => {
                 Some(ToolCallSummary {
+                    id: id.clone(),
                     name: name.clone(),
                     ok: output.is_success(),
                 })

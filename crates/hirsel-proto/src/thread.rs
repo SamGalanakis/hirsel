@@ -91,6 +91,9 @@ pub struct ThreadDetail {
     pub thread: Thread,
     pub messages: Vec<crate::ChatMessage>,
     pub turns: Vec<ThreadTurn>,
+    /// Durable, exactly ordered timeline events for turns represented in this
+    /// bounded message page. Legacy turns can truthfully have no events.
+    pub turn_timelines: Vec<crate::ThreadTurnTimeline>,
     pub activities: Vec<ThreadActivity>,
     pub has_more: bool,
 }

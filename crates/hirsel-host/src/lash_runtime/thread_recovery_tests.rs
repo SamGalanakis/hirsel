@@ -497,6 +497,8 @@ async fn background_wake_receipt_survives_delivery_and_rejects_duplicate_turn() 
     let pending = state.storage.pending_thread_requests().await.unwrap();
     assert_eq!(pending.len(), 1);
     runtime.admit_next_thread_request().await.unwrap();
+    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    runtime.timeline_commits.record(drain_id).await;
     let output = super::tests::test_turn_output(
         lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
             text: "Background result".into(),
@@ -536,6 +538,71 @@ async fn background_wake_receipt_survives_delivery_and_rejects_duplicate_turn() 
         detail.turns[0].agent_message_id,
         Some(detail.messages[0].id)
     );
+}
+
+#[tokio::test]
+async fn late_timeline_failure_wins_before_terminal_reply() {
+    let (state, _dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let request = request(&state, "late-timeline-failure").await;
+    let runtime = runtime_lane(&state, Some(request.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
+    runtime.admit_next_thread_request().await.unwrap();
+    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let turn_id = runtime
+        .anchors
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .unwrap()
+        .thread_turn_id
+        .unwrap();
+    let output = super::tests::test_turn_output(
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+            text: "must not be published".into(),
+        }),
+        "must not be published",
+        Vec::new(),
+    );
+    let worker = runtime.clone();
+    let client_id = request.client_id.clone();
+    let mut completion = tokio::spawn(async move {
+        worker
+            .finish_thread_request(&client_id, Some(&output))
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut completion)
+            .await
+            .is_err(),
+        "terminal projection must wait for the observation commit"
+    );
+    state
+        .tools
+        .fail_turn_timeline_integrity(turn_id, "injected late timeline persistence failure")
+        .await;
+    runtime.timeline_commits.record(drain_id).await;
+    completion.await.unwrap().unwrap();
+
+    let detail = state
+        .storage
+        .thread_detail(request.thread_id, None, 30)
+        .await
+        .unwrap();
+    let turn = detail.turns.iter().find(|turn| turn.id == turn_id).unwrap();
+    assert_eq!(turn.state, ThreadTurnState::Failed);
+    assert!(turn.agent_message_id.is_none());
+    assert!(
+        detail
+            .messages
+            .iter()
+            .all(|message| message.body != "must not be published")
+    );
+    assert!(state.broadcast_log.recent().iter().all(|frame| {
+        !matches!(frame, HostToClient::ThreadTurn { turn } if turn.id == turn_id && turn.state == ThreadTurnState::Completed)
+    }));
 }
 
 #[test]

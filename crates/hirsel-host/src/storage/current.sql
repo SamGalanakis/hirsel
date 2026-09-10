@@ -28,6 +28,7 @@ CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='r
         turn_id INTEGER REFERENCES thread_turns(id), kind TEXT NOT NULL, data TEXT NOT NULL, ts TEXT NOT NULL);
         CREATE TABLE thread_activity_keys (key TEXT PRIMARY KEY, activity_id INTEGER NOT NULL REFERENCES thread_activities(id));
         CREATE INDEX thread_turns_thread ON thread_turns(thread_id,id);
+CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turns(id), seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY(turn_id,seq));
         CREATE INDEX thread_activities_thread ON thread_activities(thread_id,id);
 
             CREATE TABLE chat_messages (

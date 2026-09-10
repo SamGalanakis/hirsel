@@ -7,6 +7,67 @@ use super::*;
 use crate::config::{AgentMode, Config, DriverMode, ProviderMode};
 
 #[tokio::test]
+async fn timeline_persistence_failure_fails_the_turn_without_broadcasting_the_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(test_config(dir.path())).await.unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "timeline-failure",
+            "Timeline failure",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let turn = state
+        .storage
+        .start_thread_turn(thread.id, None)
+        .await
+        .unwrap();
+    state.broadcast_log.clear();
+
+    assert!(
+        state
+            .tools
+            .publish_turn_event(
+                thread.id + 1,
+                turn.id,
+                hirsel_proto::TurnEventKind::Prose {
+                    text: "must not leak".into(),
+                },
+            )
+            .await
+            .is_err()
+    );
+
+    let detail = state
+        .storage
+        .thread_detail(thread.id, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(detail.turns[0].state, hirsel_proto::ThreadTurnState::Failed);
+    assert_eq!(detail.turn_timelines.len(), 1);
+    assert!(detail.turn_timelines[0].events.is_empty());
+    assert!(detail.activities.iter().any(|activity| {
+        activity.kind == "execution_failed"
+            && activity.data["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("timeline persistence failed"))
+    }));
+    assert!(
+        state
+            .broadcast_log
+            .recent()
+            .iter()
+            .all(|frame| !matches!(frame, hirsel_proto::HostToClient::TurnEvent { .. }))
+    );
+}
+
+#[tokio::test]
 async fn scripted_next_turn_waits_and_cancel_queued_removes_message() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(test_config(dir.path())).await.unwrap();

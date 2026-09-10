@@ -8,8 +8,8 @@ import { ThreadWork } from "./ThreadWork";
 import { setShowAgentCode } from "../lib/prefs";
 
 const events: TimelineEvent[] = [
-  { seq: 1, at: 1, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Distinct result: first file contents" } },
-  { seq: 2, at: 2, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "Distinct error: second file permission denied" } },
+  { seq: 1, at: 1, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Distinct result: first file contents", result: null } },
+  { seq: 2, at: 2, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "Distinct error: second file permission denied", result: null } },
 ];
 const activity: ThreadActivity = { artifact_ids: [], id: 1, thread_id: 1, turn_id: 1, kind: "tool_completed", data: { id: "call-a", name: "read_file", ok: true }, ts: "2026-09-09T10:00:00Z" };
 const message: ChatMessage = { id: 1, thread_id: 1, author: "agent", body: "Finished", ref: null, ts: activity.ts, tool_calls: [{ id: "call-a", name: "read_file", ok: true }, { id: "call-b", name: "read_file", ok: false }] };
@@ -33,7 +33,7 @@ describe("readable work outcomes", () => {
   });
   it("distinguishes queued, active and stopped work without opening diagnostics", () => {
     const [current, setCurrent] = createSignal(turn("queued"));
-    const view = render(() => <ThreadWork turn={current()} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null } }]} activities={[]} />);
+    const view = render(() => <ThreadWork turn={current()} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null, input: null } }]} activities={[]} />);
     expect(view.getByText("Queued")).toBeTruthy();
     flush(() => setCurrent(turn("running")));
     expect(view.getByText("Gathering context")).toBeTruthy();
@@ -47,7 +47,7 @@ describe("readable work outcomes", () => {
 
 describe("execution result preservation", () => {
   it("settles a started tool from the recorded final outcome without duplicating the invocation", () => {
-    const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [{ id: "read", name: "read_file", ok: true }] }} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null } }]} activities={[]} />);
+    const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [{ id: "read", name: "read_file", ok: true }] }} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null, input: null } }]} activities={[]} />);
     expect(view.getByText("Activity")).toBeTruthy();
     expect(view.container.querySelector('[data-slot="work-details"]')).toBeNull();
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(1);
@@ -78,8 +78,8 @@ describe("execution result preservation", () => {
 
   it("pairs reverse-order same-name durable completions by canonical ID after reconnect", () => {
     const starts: TimelineEvent[] = [
-      { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: "Reading A" } },
-      { seq: 2, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: "Reading B" } },
+      { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: "Reading A", input: null } },
+      { seq: 2, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: "Reading B", input: null } },
     ];
     const reverseCompletionOrder: ChatMessage = {
       ...message,
@@ -99,9 +99,9 @@ describe("execution result preservation", () => {
 
   it("joins a partial rich completion with durable outcomes by ID without duplicates", () => {
     const partial: TimelineEvent[] = [
-      { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: "Reading A" } },
-      { seq: 2, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: "Reading B" } },
-      { seq: 3, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "B failed" } },
+      { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: "Reading A", input: null } },
+      { seq: 2, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: "Reading B", input: null } },
+      { seq: 3, event: { kind: "tool_done", id: "call-b", name: "read_file", ok: false, summary: "B failed", result: null } },
     ];
     const view = render(() => <ThreadWork turn={turn("completed")} message={message} events={partial} activities={[]} />);
     const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
@@ -112,7 +112,7 @@ describe("execution result preservation", () => {
   });
 
   it("keeps an exact durable tool outcome on a turn with no final message", () => {
-    const view = render(() => <ThreadWork turn={turn("interrupted")} activities={[activity]} events={[{ seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: null } }]} />);
+    const view = render(() => <ThreadWork turn={turn("interrupted")} activities={[activity]} events={[{ seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: null, input: null } }]} />);
     const row = view.container.querySelector('[data-slot="timeline-tool"]')!;
     expect(row.getAttribute("data-tool-call-id")).toBe("call-a");
     expect(row.querySelector('[aria-label="ok"]')).toBeTruthy();
@@ -132,10 +132,10 @@ describe("execution result preservation", () => {
 
 it("preserves overlapping call pairing and reasoning/code positions through reversed completions and persistence", () => {
   const initial: TimelineEvent[] = [
-    { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: null } },
+    { seq: 1, event: { kind: "tool_start", id: "call-a", name: "read_file", summary: null, input: null } },
     { seq: 2, event: { kind: "reasoning", text: "Between invocations" } },
     { seq: 3, event: { kind: "code_start", id: "cell", language: "python", code: "print(42)", truncated: false } },
-    { seq: 4, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: null } },
+    { seq: 4, event: { kind: "tool_start", id: "call-b", name: "read_file", summary: null, input: null } },
     { seq: 5, event: { kind: "reasoning", text: "After second invocation" } },
   ];
   const [stream, setStream] = createSignal(initial);

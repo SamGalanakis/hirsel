@@ -17,6 +17,7 @@ mod schema;
 mod thread_related;
 pub(crate) use thread_related::ThreadRelated;
 mod thread_activity;
+mod thread_events;
 mod thread_execution;
 mod thread_icons;
 mod thread_showcase;
@@ -113,6 +114,7 @@ impl Storage {
                 DELETE FROM thread_reports;
                 DELETE FROM thread_delegations;
                 DELETE FROM thread_activities;
+                DELETE FROM thread_turn_events;
                 DELETE FROM thread_turns;
                 DELETE FROM message_attachments;
                 DELETE FROM client_blobs;

@@ -218,6 +218,7 @@ impl LashAgentRuntime {
             request_lock: Mutex::new(()),
             anchors,
             active_turn_id: Arc::new(Mutex::new(None)),
+            timeline_commits: TimelineCommitBarrier::default(),
             drain_seq: AtomicU64::new(0),
             drain_boot_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -443,7 +444,6 @@ impl LashAgentRuntime {
                         .clone()
                         .expect("every admitted drain has an execution identity");
                     let result = runtime.run_admitted_drain(&drain_id).await;
-                    runtime.clear_active_turn_id(&drain_id).await;
 
                     match result {
                         Ok(QueuedTurnDrain::Ran(output)) => {
@@ -461,15 +461,18 @@ impl LashAgentRuntime {
                                     if let Err(error) =
                                         runtime.finish_thread_request(id, None).await
                                     {
+                                        runtime.clear_active_turn_id(&drain_id).await;
                                         tracing::error!(%error,"cannot settle failed Thread projection; stopping pump until restart");
                                         return;
                                     }
                                 } else if let Err(error) = runtime.finish_active_thread(None).await
                                 {
+                                    runtime.clear_active_turn_id(&drain_id).await;
                                     tracing::error!(%error, "cannot settle failed background Thread projection");
                                     return;
                                 }
                             }
+                            runtime.clear_active_turn_id(&drain_id).await;
                             runtime.clear_active_anchor().await;
                             continue;
                         }
@@ -483,6 +486,7 @@ impl LashAgentRuntime {
                             if runtime.work_pending().await {
                                 runtime.schedule_drain_retry();
                             }
+                            runtime.clear_active_turn_id(&drain_id).await;
                             break;
                         }
                         Err(error) => {
@@ -490,6 +494,7 @@ impl LashAgentRuntime {
                                 && let Err(delivery_error) =
                                     runtime.finish_thread_request(id, None).await
                             {
+                                runtime.clear_active_turn_id(&drain_id).await;
                                 tracing::error!(%delivery_error, "cannot settle failed Thread turn; stopping pump until restart");
                                 return;
                             }
@@ -497,9 +502,11 @@ impl LashAgentRuntime {
                                 && let Err(delivery_error) =
                                     runtime.finish_active_thread(None).await
                             {
+                                runtime.clear_active_turn_id(&drain_id).await;
                                 tracing::error!(%delivery_error, "cannot settle failed background Thread turn");
                                 return;
                             }
+                            runtime.clear_active_turn_id(&drain_id).await;
                             runtime.handle_turn_error(error).await;
                             runtime.clear_active_anchor().await;
                             break;

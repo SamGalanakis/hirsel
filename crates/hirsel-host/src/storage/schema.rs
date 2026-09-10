@@ -2,7 +2,7 @@
 use super::Storage;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Match the complete current layout before touching an existing store.
 fn catalog(conn: &Connection) -> anyhow::Result<Vec<(String, String, String)>> {

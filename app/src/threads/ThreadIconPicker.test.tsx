@@ -18,7 +18,7 @@ beforeEach(() => {
   flush(() => {
     setHistoryId("icon-history"); closeThreadNavigation(); setThreadIconTarget(null);
     dispatch({ type: "connection_status", status: "connected" });
-    setThreadState(draft => Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "General" }), makeThread(1, { title: "Garden", read: true }), makeThread(2, { title: "Tools", icon: "🛠️" })], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }));
+    setThreadState(draft => Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "General" }), makeThread(1, { title: "Garden", read: true }), makeThread(2, { title: "Tools", icon: "🛠️" })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }));
   });
   attachThreadTransport(frame => sent.push(frame));
 });

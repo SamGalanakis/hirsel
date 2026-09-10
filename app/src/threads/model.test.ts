@@ -24,7 +24,7 @@ describe("durable thread inventory", () => {
   });
   it("merges replay and history pages without losing live messages or cross-owning citations", () => {
     const row = (id: number, thread_id: number, mentions: number[] = []) => ({ id, thread_id, mentions, author: "owner" as const, body: "same", ref: null, ts: "2026-09-09T10:00:00Z" });
-    const detail: ThreadDetail = { brief: { text: "", artifact_ids: [] }, thread: makeThread(), messages: [row(1, 1), row(2, 2, [1])], turns: [], activities: [], related_items: [], has_more: false };
+    const detail: ThreadDetail = { brief: { text: "", artifact_ids: [] }, thread: makeThread(), messages: [row(1, 1), row(2, 2, [1])], turns: [], turn_timelines: [], activities: [], related_items: [], has_more: false };
     const prior = { ...emptyHistory(), messages: [row(3, 1)] };
     const merged = mergeDetail(prior, detail, false);
     expect(merged.messages.map(m => m.id)).toEqual([1, 3]);
@@ -35,7 +35,7 @@ describe("durable thread inventory", () => {
 it("does not replace a live current assignment with an older page response", () => {
   const activity = { id: 9, thread_id: 1, turn_id: 8, kind: "delegation_received", artifact_ids: [4], data: { requester_thread_id: 0, requester_turn_id: null, brief: "New assignment" }, ts: "2026-09-10T10:00:00Z" };
   const prior = { ...emptyHistory(), brief: { text: "New assignment", artifact_ids: [4] }, activities: [activity] };
-  const merged = mergeDetail(prior, { thread: makeThread(1), brief: { text: "Old assignment", artifact_ids: [] }, messages: [], turns: [], activities: [], related_items: [], has_more: true }, true);
+  const merged = mergeDetail(prior, { thread: makeThread(1), brief: { text: "Old assignment", artifact_ids: [] }, messages: [], turns: [], turn_timelines: [], activities: [], related_items: [], has_more: true }, true);
   expect(merged.brief).toEqual(prior.brief);
   expect(merged.activities).toEqual([activity]);
 });

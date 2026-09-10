@@ -27,6 +27,14 @@ upward report, reference links and parent follow-up share SQLite authority.
 Parent completion does not abandon children or settle any Thread. Hidden
 parents retain reports while automatic follow-up waits for visibility.
 
+A Turn's chronological prose, reasoning, code and tool timeline is durable
+Thread history rather than an ephemeral client projection. Every producer
+commits through one per-turn sequence before broadcast; live delivery and
+`open_thread` replay therefore share `(turn_id, seq)` identity. Tool rows retain
+bounded verbatim JSON input/result payloads with explicit truncation alongside
+their concise labels. Historical turns from before this contract continue to
+show only their truthful message, activity and tool-summary records.
+
 Reset changes history identity, drains owned runtime tasks and CLI work, clears
 session/bridge/View projections, and initializes fresh scoped sessions. Delayed
 View submissions and blob metadata carry their captured history. Blob directory

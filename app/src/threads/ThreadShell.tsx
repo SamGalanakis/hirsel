@@ -53,7 +53,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   const [loading, setLoading] = createSignal(false);
   let scroller: HTMLDivElement | undefined;
   let following = true;
-  createEffect(() => messages().length + pending().length + (threadState.streams[props.id] ?? []).length, (count) => {
+  createEffect(() => messages().length + pending().length + (history()?.turns.reduce((count, turn) => count + (threadState.turnDetails[turn.id]?.length ?? 0), 0) ?? 0), (count) => {
     if (following && count >= 0) requestAnimationFrame(() => { if (scroller) scroller.scrollTop = scroller.scrollHeight; });
   });
   onSettled(() => {

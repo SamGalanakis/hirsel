@@ -120,7 +120,7 @@ mod upgrade_tests;
 
 #[cfg(test)]
 use bridges::*;
-use condense::*;
+pub(crate) use condense::*;
 use executor::*;
 use lifecycle::*;
 use plugin::*;

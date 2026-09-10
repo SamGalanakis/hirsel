@@ -148,7 +148,7 @@ function handle(world, ws, frame) {
     case "open_thread": {
       const thread = threadFor(world, frame.thread_id);
       const rows = world.messages.filter(row => row.thread_id === thread.id && (frame.before_id == null || row.id < frame.before_id));
-      send(ws, { type: "thread_opened", client_id: frame.client_id, detail: { related_items: world.relatedItems.filter(item => item.thread_id === thread.id), brief: { text: "", artifact_ids: [] }, thread: summary(world, thread), messages: rows.slice(-100), turns: world.turns.filter(row => row.thread_id === thread.id), activities: world.activities.filter(row => row.thread_id === thread.id), has_more: rows.length > 100 } });
+      send(ws, { type: "thread_opened", client_id: frame.client_id, detail: { related_items: world.relatedItems.filter(item => item.thread_id === thread.id), brief: { text: "", artifact_ids: [] }, thread: summary(world, thread), messages: rows.slice(-100), turns: world.turns.filter(row => row.thread_id === thread.id), turn_timelines: [], activities: world.activities.filter(row => row.thread_id === thread.id), has_more: rows.length > 100 } });
       return;
     }
     case "add_thread_related":

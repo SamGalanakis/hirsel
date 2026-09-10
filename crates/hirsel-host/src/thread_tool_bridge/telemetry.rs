@@ -1,10 +1,9 @@
 //! Host-owned pairing of calls that passed the active execution start guard.
 use super::*;
-use hirsel_proto::{HostToClient, ToolCallSummary, TurnEventKind};
+use hirsel_proto::{ToolCallSummary, TurnEventKind};
 
 #[derive(Default)]
 pub(super) struct ToolTelemetry {
-    next_sequence: u64,
     order: Vec<String>,
     pending: HashMap<String, String>,
     completed: HashMap<String, ToolCallSummary>,
@@ -34,54 +33,81 @@ impl ToolTelemetry {
     }
 }
 impl BridgeState {
-    pub(super) async fn start_tool(&self, id: &str, name: &str) -> anyhow::Result<()> {
+    pub(super) async fn start_tool(
+        &self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         let mut telemetry = self.telemetry.lock().await;
-        // Hold SQL authority through broadcast and registration. Cancellation
+        // Hold SQL authority through durable publication and registration. Cancellation
         // cannot leave an emitted start outside the host's pending registry.
         let storage = self.tools.storage();
         let _guard = storage.execution_guard(&self.caller).await?;
-        let seq = telemetry.next_sequence;
-        telemetry.next_sequence += 1;
-        self.tools.broadcast(HostToClient::TurnEvent {
-            thread_id: self.caller.thread_id,
-            turn_id: self.caller.turn_id,
-            seq,
-            event: TurnEventKind::ToolStart {
+        let published = self.tools.publish_guarded_turn_event(
+            &_guard,
+            self.caller.thread_id,
+            self.caller.turn_id,
+            TurnEventKind::ToolStart {
                 id: id.into(),
                 name: name.into(),
                 summary: None,
+                input: Some(crate::lash_runtime::bounded_turn_payload(input)),
             },
-        });
+        );
+        drop(_guard);
+        if let Err(error) = published {
+            self.tools
+                .fail_turn_timeline_persistence(self.caller.turn_id, &error)
+                .await;
+            return Err(error);
+        }
         telemetry.start(id, name);
         Ok(())
     }
 
-    pub(super) async fn finish_tool(&self, id: &str, ok: bool, summary: Option<String>) {
+    pub(super) async fn finish_tool(
+        &self,
+        id: &str,
+        ok: bool,
+        summary: Option<String>,
+        result: &serde_json::Value,
+    ) {
         let mut telemetry = self.telemetry.lock().await;
         let Some(name) = telemetry.pending.get(id).cloned() else {
             return;
         };
+        // This invocation has produced its one real result. If timeline
+        // persistence fails below, `publish_turn_event` fails the turn; leaving
+        // the call pending would later fabricate an "interrupted" replacement
+        // for a result we actually received.
+        telemetry.pending.remove(id);
         let storage = self.tools.storage();
         // Completion is host telemetry only. Never use this guard to execute a
         // model operation, return a cached receipt or publish a new ToolStart.
         let Ok(_guard) = storage.execution_telemetry_guard(&self.caller).await else {
-            telemetry.pending.remove(id);
             return;
         };
-        telemetry.pending.remove(id);
-        let seq = telemetry.next_sequence;
-        telemetry.next_sequence += 1;
-        self.tools.broadcast(HostToClient::TurnEvent {
-            thread_id: self.caller.thread_id,
-            turn_id: self.caller.turn_id,
-            seq,
-            event: TurnEventKind::ToolDone {
+        let published = self.tools.publish_guarded_turn_event(
+            &_guard,
+            self.caller.thread_id,
+            self.caller.turn_id,
+            TurnEventKind::ToolDone {
                 id: id.into(),
                 name: name.clone(),
                 ok,
                 summary,
+                result: Some(crate::lash_runtime::bounded_turn_payload(result)),
             },
-        });
+        );
+        drop(_guard);
+        if let Err(error) = published {
+            self.tools
+                .fail_turn_timeline_persistence(self.caller.turn_id, &error)
+                .await;
+            tracing::warn!(turn_id=self.caller.turn_id, %error, "failed to persist tool completion timeline event");
+            return;
+        }
         telemetry.complete(id, name, ok);
     }
 
@@ -99,6 +125,7 @@ impl BridgeState {
                 &id,
                 false,
                 Some("Tool interrupted before a result was received".into()),
+                &serde_json::json!({"error":"Tool interrupted before a result was received"}),
             )
             .await;
         }

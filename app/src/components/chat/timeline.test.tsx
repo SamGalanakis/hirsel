@@ -24,7 +24,7 @@ describe("buildTimeline (fold)", () => {
     const items = buildTimeline(
       evs(
         { kind: "prose", text: "before" },
-        { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" },
+        { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null },
         { kind: "prose", text: "after" },
       ),
     );
@@ -36,25 +36,25 @@ describe("buildTimeline (fold)", () => {
   it("resolves a tool row in place on tool_done (does not add a row)", () => {
     const items = buildTimeline(
       evs(
-        { kind: "tool_start", id: "t1", name: "grep", summary: "TODO" },
-        { kind: "tool_done", id: "t1", name: "grep", ok: true, summary: "3 matches" },
+        { kind: "tool_start", id: "t1", name: "grep", summary: "TODO", input: null },
+        { kind: "tool_done", id: "t1", name: "grep", ok: true, summary: "3 matches", result: null },
       ),
     );
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       kind: "tool",
-      status: { state: "done", ok: true, result: "3 matches" },
+      status: { state: "done", ok: true, summary: "3 matches", result: null },
     });
   });
 
   it("renders an orphan tool_done as a completed row using its own name", () => {
-    const items = buildTimeline(evs({ kind: "tool_done", id: "ghost", name: "grep", ok: false, summary: "no match" }));
+    const items = buildTimeline(evs({ kind: "tool_done", id: "ghost", name: "grep", ok: false, summary: "no match", result: null }));
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       kind: "tool",
       name: "grep",
       summary: null,
-      status: { state: "done", ok: false, result: "no match" },
+      status: { state: "done", ok: false, summary: "no match", result: null },
     });
   });
 
@@ -78,7 +78,7 @@ describe("Timeline component", () => {
       <Timeline
         events={evs(
           { kind: "prose", text: "First I'll read the file." },
-          { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" },
+          { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null },
         )}
       />
     ));
@@ -92,7 +92,7 @@ describe("Timeline component", () => {
 
   it("shows a spinner while a tool is running, then a check when done", () => {
     const running = render(() => (
-      <Timeline events={evs({ kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" })} />
+      <Timeline events={evs({ kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null })} />
     ));
     expect(running.container.querySelector('[aria-label="running"]')).toBeTruthy();
     expect(running.container.querySelector('[aria-label="ok"]')).toBeNull();
@@ -100,8 +100,8 @@ describe("Timeline component", () => {
     const done = render(() => (
       <Timeline
         events={evs(
-          { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" },
-          { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 10 lines" },
+          { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null },
+          { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "read 10 lines", result: null },
         )}
       />
     ));
@@ -135,8 +135,8 @@ describe("Timeline component", () => {
     const { container, queryByText, getByText } = render(() => (
       <Timeline
         events={evs(
-          { kind: "tool_start", id: "t1", name: "grep", summary: "TODO" },
-          { kind: "tool_done", id: "t1", name: "grep", ok: true, summary: "line 1\nline 2\nline 3" },
+          { kind: "tool_start", id: "t1", name: "grep", summary: "TODO", input: null },
+          { kind: "tool_done", id: "t1", name: "grep", ok: true, summary: "line 1\nline 2\nline 3", result: null },
         )}
       />
     ));
@@ -154,10 +154,27 @@ describe("Timeline component", () => {
     expect(queryByText("secret")).toBeNull();
   });
 
+  it("expands bounded tool input and actual result with truthful truncation", () => {
+    const { container } = render(() => (
+      <Timeline events={evs(
+        { kind: "tool_start", id: "shell", name: "shell_run", summary: "cmd: printf", input: { text: "{\n  \"cmd\": \"printf hello\"\n}", truncated: false } },
+        { kind: "tool_done", id: "shell", name: "shell_run", ok: true, summary: "ok status 0", result: { text: "{\n  \"stdout\": \"hello\"\n}", truncated: true } },
+      )} />
+    ));
+    const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    fireEvent.click(within(row).getByRole("button"));
+    const payload = row.querySelector('[data-slot="tool-result"]') as HTMLElement;
+    expect(payload.textContent).toContain("Input");
+    expect(payload.textContent).toContain("printf hello");
+    expect(payload.textContent).toContain("Result");
+    expect(payload.textContent).toContain('"stdout": "hello"');
+    expect(payload.textContent).toContain("… truncated");
+  });
+
   it("shows a per-tool duration from the client arrival timestamps", () => {
     const withTiming = [
-      { seq: 1, at: 1000, event: { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" } },
-      { seq: 2, at: 3400, event: { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "ok" } },
+      { seq: 1, at: 1000, event: { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null } },
+      { seq: 2, at: 3400, event: { kind: "tool_done", id: "t1", name: "read_file", ok: true, summary: "ok", result: null } },
     ] as const;
     const { container } = render(() => <Timeline events={withTiming as never} />);
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
@@ -167,7 +184,7 @@ describe("Timeline component", () => {
 
   it("marks a delegation/sub-agent tool row with a distinct glyph", () => {
     const { container } = render(() => (
-      <Timeline events={evs({ kind: "tool_start", id: "d1", name: "spawn_subagent", summary: "review" })} />
+      <Timeline events={evs({ kind: "tool_start", id: "d1", name: "spawn_subagent", summary: "review", input: null })} />
     ));
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
     expect(row.querySelector('[aria-label="delegation"]')).toBeTruthy();
@@ -175,7 +192,7 @@ describe("Timeline component", () => {
 
   it("does not mark a plain read_file as a delegation", () => {
     const { container } = render(() => (
-      <Timeline events={evs({ kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts" })} />
+      <Timeline events={evs({ kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null })} />
     ));
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
     expect(row.querySelector('[aria-label="delegation"]')).toBeNull();
@@ -237,8 +254,8 @@ describe("committed turn details: agent code cells", () => {
       code: "finish(await subagents_list());",
       truncated: false,
     },
-    { kind: "tool_start", id: "t1", name: "subagents_list", summary: "" },
-    { kind: "tool_done", id: "t1", name: "subagents_list", ok: true, summary: "2 agents" },
+    { kind: "tool_start", id: "t1", name: "subagents_list", summary: "", input: null },
+    { kind: "tool_done", id: "t1", name: "subagents_list", ok: true, summary: "2 agents", result: null },
     { kind: "code_done", id: "code:1", ok: true, summary: "34ms" },
   );
 
@@ -306,7 +323,7 @@ describe("streaming reasoning block", () => {
   it("keeps earlier reasoning inline once a later event follows the run", () => {
     const { container, getByText } = render(() => (
       <Timeline
-        events={evs(thinking, { kind: "tool_start", id: "t1", name: "grep", summary: "resolve" })}
+        events={evs(thinking, { kind: "tool_start", id: "t1", name: "grep", summary: "resolve", input: null })}
         live
       />
     ));
@@ -342,7 +359,7 @@ describe("isReasoningTail (thinking-marker gate)", () => {
   it("is false for a tool tail, and for an empty turn", () => {
     expect(
       isReasoningTail(
-        evs({ kind: "reasoning", text: "hm" }, { kind: "tool_start", id: "t1", name: "grep", summary: "x" }),
+        evs({ kind: "reasoning", text: "hm" }, { kind: "tool_start", id: "t1", name: "grep", summary: "x", input: null }),
       ),
     ).toBe(false);
     expect(isReasoningTail([])).toBe(false);

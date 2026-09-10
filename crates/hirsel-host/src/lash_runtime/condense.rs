@@ -194,6 +194,20 @@ pub(super) fn clamp_code(code: &str) -> (String, bool) {
     (code[..end].to_string(), true)
 }
 
+pub(crate) fn bounded_turn_payload(value: &Value) -> hirsel_proto::TurnEventPayload {
+    let text = serde_json::to_string_pretty(value).expect("JSON value serializes");
+    let (text, truncated) = if text.len() <= TURN_EVENT_PAYLOAD_BYTES {
+        (text, false)
+    } else {
+        let mut end = TURN_EVENT_PAYLOAD_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (text[..end].to_string(), true)
+    };
+    hirsel_proto::TurnEventPayload { text, truncated }
+}
+
 /// The condensed counterpart to `clamp_code`: a cell's outcome is a one-liner
 /// (duration, plus the failure's first line), never its output.
 pub(super) fn code_done_summary(

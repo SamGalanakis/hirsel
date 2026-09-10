@@ -217,7 +217,7 @@ async fn serve_connection(stream: UnixStream, state: Arc<BridgeState>) -> anyhow
                         .cloned()
                         .unwrap_or_else(|| json!({}));
                     let event_id = format!("{}:{}", key.0, key.1);
-                    state.start_tool(&event_id, name).await?;
+                    state.start_tool(&event_id, name, &args).await?;
                     let facade = ScopedThreadTools {
                         tools: state.tools.clone(),
                         caller: caller.clone(),
@@ -232,7 +232,7 @@ async fn serve_connection(stream: UnixStream, state: Arc<BridgeState>) -> anyhow
                         }
                     };
                     let ok = result["isError"] == false;
-                    state.finish_tool(&event_id, ok, None).await;
+                    state.finish_tool(&event_id, ok, None, &result).await;
                     receipts.insert(key, (request.clone(), result.clone()));
                     Ok(result)
                 }

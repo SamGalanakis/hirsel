@@ -175,6 +175,7 @@ fn open_requires_matching_request_and_message_ownership() {
         thread: thread(1),
         messages: vec![message(1, 5, None), message(2, 9, None)],
         turns: vec![],
+        turn_timelines: vec![],
         activities: vec![],
         has_more: false,
     };
@@ -246,6 +247,7 @@ fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
             thread: thread(1),
             messages: vec![removed],
             turns: vec![],
+            turn_timelines: vec![],
             activities: vec![],
             has_more: false,
         },
@@ -376,6 +378,7 @@ fn current_brief_is_per_thread_and_survives_paginated_history() {
                 },
                 messages: vec![],
                 turns: vec![],
+                turn_timelines: vec![],
                 activities: vec![],
                 has_more: true,
             },
@@ -437,6 +440,7 @@ fn link_detail(revision: u64, links: Vec<hirsel_proto::ThreadRelatedItem>) -> Th
         related_items: links,
         messages: vec![],
         turns: vec![],
+        turn_timelines: vec![],
         activities: vec![],
         has_more: true,
     }

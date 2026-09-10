@@ -262,6 +262,34 @@ impl Storage {
             None => false,
         };
         let turns = super::thread_activity::turns(&tx, id)?;
+        let message_ids = messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut timeline_turn_ids = turns
+            .iter()
+            .filter(|turn| {
+                turn.owner_message_id
+                    .is_some_and(|message_id| message_ids.contains(&message_id))
+                    || turn
+                        .agent_message_id
+                        .is_some_and(|message_id| message_ids.contains(&message_id))
+                    || (before_id.is_none()
+                        && matches!(
+                            turn.state,
+                            hirsel_proto::ThreadTurnState::Queued
+                                | hirsel_proto::ThreadTurnState::Running
+                        ))
+                    || (before_id.is_none()
+                        && turn.owner_message_id.is_none()
+                        && turn.agent_message_id.is_none())
+            })
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>();
+        if timeline_turn_ids.len() > limit as usize {
+            timeline_turn_ids.drain(..timeline_turn_ids.len() - limit as usize);
+        }
+        let turn_timelines = super::thread_events::for_turns(&tx, &timeline_turn_ids)?;
         let activities = super::thread_activity::activities(&tx, id)?;
         let brief = super::thread_read::brief(&tx, id)?;
         let related_items = super::thread_related::list(&tx, id)?;
@@ -272,6 +300,7 @@ impl Storage {
             thread,
             messages,
             turns,
+            turn_timelines,
             activities,
             has_more,
         })

@@ -1,4 +1,4 @@
-import type { ChatMessage, ViewSpec } from "../protocol";
+import type { ChatMessage, ThreadTurnTimeline, ViewSpec } from "../protocol";
 export interface Thread {
   id: number;
   parent_thread_id: number | null;
@@ -55,6 +55,7 @@ export interface ThreadDetail {
   thread: Thread;
   messages: ChatMessage[];
   turns: ThreadTurn[];
+  turn_timelines: ThreadTurnTimeline[];
   activities: ThreadActivity[];
   has_more: boolean;
 }

@@ -22,10 +22,8 @@ export interface ThreadFailure { operation: "load" | "send" | "request"; detail:
 interface ThreadState {
   threads: Thread[];
   histories: Record<number, ThreadHistory>;
-  streams: Record<number, TimelineEvent[]>;
-  /** Finalized timeline records keyed by the durable turn ID. */
+  /** The one live-and-replayed timeline projection, keyed by durable turn ID. */
   turnDetails: Record<number, TimelineEvent[]>;
-  streamTurnIds: Record<number, number>;
   removedMessageIds: Record<number, true>;
   pending: PendingMessage[];
   focusedId: number | null;
@@ -62,7 +60,7 @@ function restoredSelection(threads: Thread[], currentHistory = historyId()): num
   const id = Number(saved); return threads.some(thread => thread.id === id) ? id : null;
 }
 export const [threadState, setThreadState] = createStore<ThreadState>({
-  threads: [], histories: {}, streams: {}, turnDetails: {}, streamTurnIds: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false,
+  threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false,
 });
 let historyGeneration = 0;
 let sendFrame: ((frame: ThreadClientMessage) => void) | null = null;
@@ -200,6 +198,26 @@ function removeMessage(id: number): void {
   }
   setThreadState(draft => { reconcile(Object.fromEntries(Object.entries(threadState.turnDetails).filter(([turnId]) => !removedTurnIds.has(Number(turnId)))))(draft["turnDetails"]); });
 }
+
+function mergeTimelineEvents(
+  turnId: number,
+  threadId: number,
+  incoming: TimelineEvent[],
+): void {
+  const prior = threadState.turnDetails[turnId] ?? [];
+  const bySequence = new Map(prior.map(row => [row.seq, row]));
+  for (const row of incoming) {
+    const existing = bySequence.get(row.seq);
+    if (existing) {
+      if (JSON.stringify(existing.event) !== JSON.stringify(row.event)) {
+        setThreadState(draft => { draft.error = { operation: "load", detail: `Conflicting timeline event for turn ${turnId}, sequence ${row.seq}.`, threadId }; });
+      }
+      continue;
+    }
+    bySequence.set(row.seq, row);
+  }
+  setThreadState(draft => { draft.turnDetails[turnId] = [...bySequence.values()].sort((a, b) => a.seq - b.seq); });
+}
 export function handleThreadMessage(message: ServerMessage): void {
   // Several protocol records can arrive before Solid commits its microtask.
   // A single draft scope reads its own writes, including nested message helpers.
@@ -246,6 +264,14 @@ export function handleThreadMessage(message: ServerMessage): void {
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.detail.thread), "id")(draft["threads"]); });
       const detail = { ...message.detail, messages: message.detail.messages.filter(row => !threadState.removedMessageIds[row.id]) };
       setThreadState(draft => { draft["histories"][id] = mergeDetail(threadState.histories[id] ?? emptyHistory(), detail, pending.beforeId !== null); });
+      for (const timeline of detail.turn_timelines) {
+        const turn = detail.turns.find(turn => turn.id === timeline.turn_id);
+        if (!turn || turn.thread_id !== id) {
+          setThreadState(draft => { draft.error = { operation: "load", detail: `Timeline turn ${timeline.turn_id} does not belong to Thread #${id}.`, threadId: id }; });
+          continue;
+        }
+        mergeTimelineEvents(timeline.turn_id, id, timeline.events);
+      }
       for (const row of message.detail.messages) if (row.client_id) acknowledgeMessage(row.client_id);
       pending.resolve(detail);
       break;
@@ -255,17 +281,7 @@ export function handleThreadMessage(message: ServerMessage): void {
     case "thread_turn": {
       const id = message.turn.thread_id;
       const prior = threadState.histories[id] ?? emptyHistory();
-      const previous = prior.turns.find(turn => turn.id === message.turn.id);
-      const currentTurnId = threadState.streamTurnIds[id];
-      if (message.turn.state === "running" && previous?.state !== "running" && (currentTurnId === undefined || message.turn.id > currentTurnId)) {
-        setThreadState(draft => { draft["streams"][id] = []; });
-        setThreadState(draft => { draft["streamTurnIds"][id] = message.turn.id; });
-      }
       setThreadState(draft => { draft["histories"][id] = { ...prior, turns: mergeTurns(prior.turns, [message.turn]) }; });
-      if (!["queued", "running"].includes(message.turn.state) && currentTurnId === message.turn.id) {
-        if ((threadState.streams[id]?.length ?? 0) > 0) setThreadState(draft => { draft.turnDetails[message.turn.id] = [...threadState.streams[id]]; });
-        setThreadState(draft => { draft.streams[id] = []; });
-      }
       break;
     }
     case "thread_activity": {
@@ -280,19 +296,7 @@ export function handleThreadMessage(message: ServerMessage): void {
       break;
     }
     case "turn_event":
-      {
-        {
-          const currentTurnId = threadState.streamTurnIds[message.thread_id];
-          const turn = threadState.histories[message.thread_id]?.turns.find(t => t.id === message.turn_id);
-          if ((currentTurnId !== undefined && message.turn_id < currentTurnId) || (turn && !["queued", "running"].includes(turn.state))) break;
-          if (threadState.streamTurnIds[message.thread_id] !== message.turn_id) {
-            setThreadState(draft => { draft["streams"][message.thread_id!] = []; });
-            setThreadState(draft => { draft["streamTurnIds"][message.thread_id!] = message.turn_id!; });
-          }
-        }
-        const prior = threadState.streams[message.thread_id] ?? [];
-        if (!prior.some(row => row.seq === message.seq)) setThreadState(draft => { draft["streams"][message.thread_id!] = [...prior, { seq: message.seq, event: message.event }].sort((a, b) => a.seq - b.seq); });
-      }
+      mergeTimelineEvents(message.turn_id, message.thread_id, [{ seq: message.seq, event: message.event }]);
       break;
     case "error": {
       if (message.client_id) {
@@ -318,6 +322,6 @@ export function resetThreads(): void {
   historyGeneration++;
   preservePendingDrafts(threadState.pending);
   disconnectThreads();
-  setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, streams: {}, turnDetails: {}, streamTurnIds: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });
+  setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });
   // Keep an incoming qualified destination until the next hello validates its history.
 }

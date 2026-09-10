@@ -244,6 +244,20 @@ impl LashAgentRuntime {
     ) -> anyhow::Result<()> {
         let active = self.anchors.lock().await.active.clone();
         if let Some(active) = active {
+            if output.is_some() {
+                let drain_id =
+                    self.active_turn_id.lock().await.clone().ok_or_else(|| {
+                        anyhow::anyhow!("active timeline commit identity is missing")
+                    })?;
+                if let Err(error) = self.timeline_commits.wait(&drain_id).await {
+                    if let Some(turn_id) = active.thread_turn_id {
+                        self.tools
+                            .fail_turn_timeline_integrity(turn_id, &error.to_string())
+                            .await;
+                    }
+                    return Err(error);
+                }
+            }
             let state = match output.map(|o| &o.result.outcome) {
                 Some(lash::TurnOutcome::Finished(_)) => ThreadTurnState::Completed,
                 Some(lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. })) => {

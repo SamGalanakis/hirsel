@@ -305,7 +305,7 @@ impl ScriptedAgentRuntime {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        self.emit_scripted_timeline(turn.thread_id).await;
+        self.emit_scripted_timeline(turn.thread_id).await?;
         let turn_text = owner_turn_text(turn, &self.tools.storage());
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
@@ -359,7 +359,7 @@ impl ScriptedAgentRuntime {
         Ok(Some("I received the Owner message. This scripted Agent mode is a deterministic test double; set HIRSEL_AGENT=lash for the real RLM runtime.".into()))
     }
 
-    pub(super) async fn emit_scripted_timeline(&self, thread_id: u64) {
+    pub(super) async fn emit_scripted_timeline(&self, thread_id: u64) -> anyhow::Result<()> {
         let turn_id = self
             .state
             .lock()
@@ -368,62 +368,53 @@ impl ScriptedAgentRuntime {
             .as_ref()
             .and_then(|a| a.turn_id);
         let Some(turn_id) = turn_id else {
-            return;
+            return Ok(());
         };
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::TurnEvent {
-                turn_id,
+        self.tools
+            .publish_turn_event(
                 thread_id,
-                seq: 1,
-                event: TurnEventKind::Prose {
+                turn_id,
+                TurnEventKind::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
                 },
-            },
-        );
+            )
+            .await?;
         tokio::time::sleep(Duration::from_millis(40)).await;
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::TurnEvent {
-                turn_id,
+        self.tools
+            .publish_turn_event(
                 thread_id,
-                seq: 2,
-                event: TurnEventKind::ToolStart {
+                turn_id,
+                TurnEventKind::ToolStart {
                     id: "scripted-tool-1".to_string(),
                     name: "scripted_double".to_string(),
                     summary: Some("deterministic branch".to_string()),
+                    input: Some(bounded_turn_payload(&json!({"branch":"deterministic"}))),
                 },
-            },
-        );
+            )
+            .await?;
         tokio::time::sleep(Duration::from_millis(40)).await;
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::TurnEvent {
-                turn_id,
+        self.tools
+            .publish_turn_event(
                 thread_id,
-                seq: 3,
-                event: TurnEventKind::ToolDone {
+                turn_id,
+                TurnEventKind::ToolDone {
                     id: "scripted-tool-1".to_string(),
                     name: "scripted_double".to_string(),
                     ok: true,
                     summary: Some("ok fixture selected".to_string()),
+                    result: Some(bounded_turn_payload(&json!({"fixture":"selected"}))),
                 },
-            },
-        );
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::TurnEvent {
-                turn_id,
+            )
+            .await?;
+        self.tools
+            .publish_turn_event(
                 thread_id,
-                seq: 4,
-                event: TurnEventKind::Prose {
+                turn_id,
+                TurnEventKind::Prose {
                     text: "The scripted response is ready.".to_string(),
                 },
-            },
-        );
+            )
+            .await?;
+        Ok(())
     }
 }

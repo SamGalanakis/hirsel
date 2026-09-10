@@ -40,7 +40,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   const owner = () => message()?.author === "owner";
   const activity = () => (props.entry as Extract<ConversationEntry, {kind:"activity"}>).activity;
   const activities = (id: number | undefined) => id === undefined ? [] : props.history.activities.filter(activity => activity.turn_id === id);
-  const events = () => turn() === undefined ? [] : threadState.turnDetails[turn()!.id] ?? (threadState.streamTurnIds[props.threadId] === turn()!.id ? threadState.streams[props.threadId] ?? [] : []);
+  const events = () => turn() === undefined ? [] : threadState.turnDetails[turn()!.id] ?? [];
   return <>
     <Show when={props.entry.kind !== "activity"}>
       <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} aria-label={owner() ? "You" : "Hirsel"} class={["flex items-start gap-3", owner() ? "flex-row-reverse" : ""]}>

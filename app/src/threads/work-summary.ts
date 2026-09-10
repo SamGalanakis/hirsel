@@ -20,7 +20,7 @@ export function mergePersistedToolCalls(events: TimelineEvent[], calls: ToolCall
   for (const call of calls) {
     const item = presentById.get(call.id);
     if (item?.status.state === "done") continue;
-    completions.push({ seq: ++seq, event: { kind: "tool_done", id: call.id, name: call.name, ok: call.ok, summary: null } });
+    completions.push({ seq: ++seq, event: { kind: "tool_done", id: call.id, name: call.name, ok: call.ok, summary: null, result: null } });
   }
   return completions.length > 0 ? [...events, ...completions] : events;
 }

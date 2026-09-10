@@ -6,9 +6,9 @@ import { makeThread } from "./fixtures";
 import { attachThreadTransport, createThread, disconnectThreads, handleThreadMessage, openThread, resetThreads, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
 import { setHistoryId } from "../lib/history";
 const sent: ThreadClientMessage[] = [];
-beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
+beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
 afterEach(() => { disconnectThreads(); vi.useRealTimers();vi.unstubAllGlobals(); });
-const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], activities: [], related_items: [], has_more: false });
+const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], turn_timelines: [], activities: [], related_items: [], has_more: false });
 describe("thread transport projection", () => {
   it("rejects delayed mutations captured from the history before an ID was reused", async () => {
     const capturedHistory = "test-history";
@@ -87,13 +87,35 @@ describe("thread transport projection", () => {
     handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 11, seq: 2, event: { kind: "prose", text: " next" } });
     flush();
     expect(threadState.threads.map(thread => thread.id).sort((a, b) => a - b)).toEqual([1, 2]);
-    expect(threadState.streams[1].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }, { kind: "prose", text: " next" }]);
-    expect(threadState.streamTurnIds[1]).toBe(11);
+    expect(threadState.turnDetails[11].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }, { kind: "prose", text: " next" }]);
+  });
+  it("merges a reconnect snapshot with newer live events by exact turn sequence", async () => {
+    const opening = openThread(1);
+    const frame = sent.at(-1);
+    if (frame?.type !== "open_thread") throw new Error("expected open command");
+    const turn = { requester_thread_id: null, requester_turn_id: null, id: 31, thread_id: 1, owner_message_id: 30, agent_message_id: null, state: "running" as const, started_at: "2026-09-10T10:00:00Z", finished_at: null };
+    const second = { seq: 2, event: { kind: "prose" as const, text: "newer live" } };
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 31, ...second }));
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
+      ...detail(1),
+      messages: [{ id: 30, thread_id: 1, author: "owner", body: "Reload", ref: null, ts: turn.started_at }],
+      turns: [turn],
+      turn_timelines: [{ turn_id: 31, events: [{ seq: 1, event: { kind: "reasoning", text: "persisted first" } }, second] }],
+    } }));
+    await opening;
+    expect(threadState.turnDetails[31]).toEqual([
+      { seq: 1, event: { kind: "reasoning", text: "persisted first" } },
+      second,
+    ]);
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 31, ...second }));
+    expect(threadState.turnDetails[31]).toHaveLength(2);
+    flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 31, seq: 2, event: { kind: "prose", text: "conflict" } }));
+    expect(threadState.error?.detail).toContain("Conflicting timeline event");
+    expect(threadState.turnDetails[31][1]).toEqual(second);
   });
   it("routes live timeline events only to their owning thread and binds instrument revision", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 2, turn_id: 1, seq: 1, event: { kind: "prose", text: "working" } }));
-    expect(threadState.streams[1]).toBeUndefined();
-    expect(threadState.streams[2]).toHaveLength(1);
+    expect(threadState.turnDetails[1]).toHaveLength(1);
     flush(() => threadAction("test-history", 2, "choose", { choice: "a" }, 7));
     expect(sent[0]).toMatchObject({ type: "thread_action", history_id: "test-history", thread_id: 2, action: "choose", data: { choice: "a" }, expected_revision: 7 });
   });
@@ -145,8 +167,8 @@ describe("thread transport projection", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 11, seq: 1, event: { kind: "prose", text: "new" } }));
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 2, event: { kind: "prose", text: "late" } }));
     flush(() => handleThreadMessage({ type: "thread_turn", turn: { requester_thread_id: null, requester_turn_id: null, id: 10, thread_id: 1, owner_message_id: 1, agent_message_id: 2, state: "completed", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:01Z" } }));
-    expect(threadState.streams[1].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }]);
-    expect(threadState.streamTurnIds[1]).toBe(11);
+    expect(threadState.turnDetails[11].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }]);
+    expect(threadState.turnDetails[10].map(row => row.event)).toEqual([{ kind: "prose", text: "old" }, { kind: "prose", text: "late" }]);
   });
   it("removes cancelled messages and rejects delayed echoes, open pages and reconnect snapshots", async () => {
     const cancelled: ChatMessage = { id: 9, thread_id: 1, author: "owner", body: "Cancelled work", ref: null, ts: "2026-09-09T10:00:00Z" };
@@ -200,13 +222,14 @@ describe("running turn with a newer queued request", () => {
     const turn = (id: number, state: "running" | "queued" | "completed" | "cancelled", agent_message_id: number | null = null) => ({ requester_thread_id: null, requester_turn_id: null, id, thread_id: 1, owner_message_id: id, agent_message_id, state, started_at: "2026-09-09T10:00:00Z", finished_at: state === "completed" || state === "cancelled" ? "2026-09-09T10:00:01Z" : null });
     const stream = (turn_id:number,seq:number,text:string) => handleThreadMessage({type:"turn_event",thread_id:1,turn_id,seq,event:{kind:"prose",text}});
     flush(() => { handleThreadMessage({type:"thread_turn",turn:turn(10,"running")}); stream(10,1,"first"); handleThreadMessage({type:"thread_turn",turn:turn(11,"queued")}); stream(10,2,"second"); });
-    expect(threadState.streams[1]).toHaveLength(2);
+    expect(threadState.turnDetails[10]).toHaveLength(2);
     flush(() => handleThreadMessage({type:"thread_turn",turn:turn(11,"cancelled")}));
-    expect(threadState.streams[1]).toHaveLength(2);
+    expect(threadState.turnDetails[10]).toHaveLength(2);
     flush(() => handleThreadMessage({type:"thread_turn",turn:turn(10,"completed",20)}));
     expect(threadState.turnDetails[10]).toHaveLength(2);
     flush(() => { handleThreadMessage({type:"thread_turn",turn:turn(12,"running")}); stream(12,1,"new"); stream(10,3,"late"); });
-    expect(threadState.streams[1].map(row=>row.event)).toEqual([{kind:"prose",text:"new"}]);
+    expect(threadState.turnDetails[12].map(row=>row.event)).toEqual([{kind:"prose",text:"new"}]);
+    expect(threadState.turnDetails[10]).toHaveLength(3);
   });
 
   it.each(["failed", "cancelled", "interrupted"] as const)("retains the exact live timeline when a turn ends %s without a final message", state => {
@@ -214,17 +237,15 @@ describe("running turn with a newer queued request", () => {
     flush(() => {
       handleThreadMessage({ type: "thread_turn", turn });
       handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 20, seq: 1, event: { kind: "reasoning", text: "Checking the page" } });
-      handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 20, seq: 2, event: { kind: "tool_done", id: "browser", name: "browser_check", ok: false, summary: "Page did not load" } });
+      handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 20, seq: 2, event: { kind: "tool_done", id: "browser", name: "browser_check", ok: false, summary: "Page did not load", result: { text: "Page did not load", truncated: false } } });
     });
 
     flush(() => handleThreadMessage({ type: "thread_turn", turn: { ...turn, state, finished_at: "2026-09-09T10:00:02Z" } }));
 
     expect(threadState.turnDetails[20].map(row => row.event)).toEqual([
       { kind: "reasoning", text: "Checking the page" },
-      { kind: "tool_done", id: "browser", name: "browser_check", ok: false, summary: "Page did not load" },
+      { kind: "tool_done", id: "browser", name: "browser_check", ok: false, summary: "Page did not load", result: { text: "Page did not load", truncated: false } },
     ]);
-    expect(threadState.streams[1]).toEqual([]);
-    expect(threadState.streamTurnIds[1]).toBe(20);
   });
 });
 

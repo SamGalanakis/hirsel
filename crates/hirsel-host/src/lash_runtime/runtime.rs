@@ -343,6 +343,7 @@ pub(super) struct LashAgentRuntime {
     pub(super) request_lock: Mutex<()>,
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
     pub(super) active_turn_id: Arc<Mutex<Option<String>>>,
+    pub(super) timeline_commits: TimelineCommitBarrier,
     pub(super) drain_seq: AtomicU64,
     pub(super) drain_boot_ms: u64,
     pub(super) drain_retry_scheduled: AtomicBool,

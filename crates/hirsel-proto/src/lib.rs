@@ -30,7 +30,9 @@ pub use providers::{
     DetectionStatus, MaskedSecret, ProviderInstance, ProviderKind, ProviderRoster,
     ProviderSelection,
 };
-pub use turn::{AgentActivityState, TurnEvent, TurnEventKind};
+pub use turn::{
+    AgentActivityState, ThreadTurnTimeline, TurnEvent, TurnEventKind, TurnEventPayload,
+};
 pub use view::ViewInstance;
 
 pub const IROH_OWNER_ALPN: &[u8] = b"hirsel/owner/1";

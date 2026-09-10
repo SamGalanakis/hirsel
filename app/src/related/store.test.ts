@@ -35,7 +35,7 @@ describe("Related request identity and snapshots", () => {
     receive(1,[]);expect(relatedState.lists[1].items).toEqual([link]);
     receive(2,[link]);expect(relatedState.lists[1].revision).toBe(2);
     trackRelatedRead({type:"open_thread",client_id:"read",thread_id:1,before_id:null});
-    flush(() => handleRelatedMessage({type:"thread_opened",client_id:"read",detail:{thread:makeThread(1,{revision:4}),related_items:[],brief:{text:"",artifact_ids:[]},messages:[],turns:[],activities:[],has_more:false}}));
+    flush(() => handleRelatedMessage({type:"thread_opened",client_id:"read",detail:{thread:makeThread(1,{revision:4}),related_items:[],brief:{text:"",artifact_ids:[]},messages:[],turns:[],turn_timelines:[],activities:[],has_more:false}}));
     expect(relatedState.lists[1].items).toEqual([]);expect(relatedState.lists[1].revision).toBe(4);
   });
   it("rejects old-history actions, broadcasts and delayed detail responses after reused IDs", async () => {
@@ -44,7 +44,7 @@ describe("Related request identity and snapshots", () => {
     flush(()=>{setHistoryId("history-b");resetRelated();});await rejected;
     await expect(addRelatedItem(origin,link.target,null)).rejects.toThrow("History changed");
     receive(30,[link]);
-    flush(()=>handleRelatedMessage({type:"thread_opened",client_id:"old-read",detail:{thread:makeThread(1,{revision:30}),related_items:[link],brief:{text:"",artifact_ids:[]},messages:[],turns:[],activities:[],has_more:false}}));
+    flush(()=>handleRelatedMessage({type:"thread_opened",client_id:"old-read",detail:{thread:makeThread(1,{revision:30}),related_items:[link],brief:{text:"",artifact_ids:[]},messages:[],turns:[],turn_timelines:[],activities:[],has_more:false}}));
     expect(relatedState.lists[1]).toBeUndefined();expect(frames).toHaveLength(1);
   });
   it("correlates errors and retries a load without losing existing links", async () => {
@@ -52,13 +52,13 @@ describe("Related request identity and snapshots", () => {
     flush(()=>handleRelatedMessage({type:"error",client_id:(frames[0] as {client_id:string}).client_id,detail:"Temporary read failure"}));await loading;flush();
     expect(relatedState.lists[1].items).toEqual([link]);expect(relatedState.lists[1].error).toContain("Temporary");
     const retry=loadRelated(origin);const id=(frames[1] as {client_id:string}).client_id;
-    flush(()=>handleRelatedMessage({type:"thread_opened",client_id:id,detail:{thread:makeThread(1,{revision:3}),related_items:[link],brief:{text:"",artifact_ids:[]},messages:[],turns:[],activities:[],has_more:false}}));await retry;flush();expect(relatedState.lists[1].error).toBeNull();
+    flush(()=>handleRelatedMessage({type:"thread_opened",client_id:id,detail:{thread:makeThread(1,{revision:3}),related_items:[link],brief:{text:"",artifact_ids:[]},messages:[],turns:[],turn_timelines:[],activities:[],has_more:false}}));await retry;flush();expect(relatedState.lists[1].error).toBeNull();
   });
   it("captures the authoritative hello history for a read before the history signal commits",()=>{
     flush(()=>setHistoryId(null));setHistoryId(origin.historyId);
     trackRelatedRead({type:"open_thread",client_id:"first-read",thread_id:1,before_id:null},origin.historyId);
     flush();
-    flush(()=>handleRelatedMessage({type:"thread_opened",client_id:"first-read",detail:{thread:makeThread(1,{revision:2}),related_items:[link],brief:{text:"",artifact_ids:[]},messages:[],turns:[],activities:[],has_more:false}}));
+    flush(()=>handleRelatedMessage({type:"thread_opened",client_id:"first-read",detail:{thread:makeThread(1,{revision:2}),related_items:[link],brief:{text:"",artifact_ids:[]},messages:[],turns:[],turn_timelines:[],activities:[],has_more:false}}));
     expect(relatedState.lists[1].items).toEqual([link]);
   });
 

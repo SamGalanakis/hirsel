@@ -450,21 +450,21 @@ export interface ProcessUpsertMsg {
 export type TurnEvent =
   | { kind: "prose"; text: string }
   | { kind: "reasoning"; text: string }
-  | { kind: "tool_start"; id: string; name: string; summary: string | null }
-  | { kind: "tool_done"; id: string; name: string; ok: boolean; summary: string | null }
+  | { kind: "tool_start"; id: string; name: string; summary: string | null; input: TurnEventPayload | null }
+  | { kind: "tool_done"; id: string; name: string; ok: boolean; summary: string | null; result: TurnEventPayload | null }
   | { kind: "code_start"; id: string; language: string; code: string; truncated: boolean }
   | { kind: "code_done"; id: string; ok: boolean; summary: string | null };
 
-/** v1.5: ephemeral timeline event streamed while the Agent's turn runs (like
- * agent_activity); never stored or replayed. `seq` strictly orders events
- * within a turn (gaps tolerated, redelivery idempotent). Replaces v1.4's
- * `agent_tool_call`. */
-export interface TurnEventMsg {
+export interface TurnEventPayload { text: string; truncated: boolean }
+export interface TurnEventRecord { seq: number; event: TurnEvent }
+export interface ThreadTurnTimeline { turn_id: number; events: TurnEventRecord[] }
+
+/** One durably appended timeline event streamed after its commit. `seq`
+ * strictly orders events within a turn; redelivery is idempotent. */
+export interface TurnEventMsg extends TurnEventRecord {
   turn_id: number;
   thread_id: number;
   type: "turn_event";
-  seq: number;
-  event: TurnEvent;
 }
 
 export interface ErrorMsg {

@@ -58,54 +58,81 @@ pub(super) fn test_turn_output(
 
 #[test]
 fn timeline_flushes_prose_before_tool_events() {
-    let broadcast_log = BroadcastLog::default();
-    let (broadcaster, _) = broadcast::channel(16);
     let mut timeline = TurnTimelineBridge {
         thread_id: Some(0),
         turn_id: Some(1),
         ..Default::default()
     };
 
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::ModelRequestStarted {
+    timeline.observe(&remote_turn_activity(
+        RemoteTurnEvent::ModelRequestStarted {
             protocol_iteration: 0,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::AssistantProseDelta {
+        },
+    ));
+    timeline.observe(&remote_turn_activity(
+        RemoteTurnEvent::AssistantProseDelta {
             text: "I will ".to_string(),
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::AssistantProseDelta {
+        },
+    ));
+    timeline.observe(&remote_turn_activity(
+        RemoteTurnEvent::AssistantProseDelta {
             text: "check now.".to_string(),
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    assert!(turn_events(&broadcast_log).is_empty());
+        },
+    ));
+    assert!(timeline.take_ready().is_empty());
 
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::ToolCallStarted {
-            call_id: Some("call-1".to_string()),
-            name: "shell_run".to_string(),
-            args: serde_json::json!({ "cmd": "true" }),
-            graph_key: None,
-            parent_call_id: None,
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::ToolCallStarted {
+        call_id: Some("call-1".to_string()),
+        name: "shell_run".to_string(),
+        args: serde_json::json!({ "cmd": "true" }),
+        graph_key: None,
+        parent_call_id: None,
+    }));
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::ToolCallCompleted {
+        call_id: Some("call-1".to_string()),
+        name: "shell_run".to_string(),
+        args: serde_json::json!({ "cmd": "true" }),
+        output: serde_json::json!({
+            "outcome": {
+                "status": "success",
+                "payload": {
+                    "status": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": false
+                }
+            }
         }),
-        &broadcast_log,
-        &broadcaster,
+        duration_ms: 12,
+        graph_key: None,
+        parent_call_id: None,
+    }));
+
+    let events = timeline.take_ready();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        TurnEventKind::Prose {
+            text: "I will check now.".to_string()
+        }
     );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::ToolCallCompleted {
-            call_id: Some("call-1".to_string()),
+    assert_eq!(
+        events[1],
+        TurnEventKind::ToolStart {
+            id: "call-1".to_string(),
             name: "shell_run".to_string(),
-            args: serde_json::json!({ "cmd": "true" }),
-            output: serde_json::json!({
+            summary: Some("cmd: true".to_string()),
+            input: Some(bounded_turn_payload(&serde_json::json!({ "cmd": "true" })))
+        }
+    );
+    assert_eq!(
+        events[2],
+        TurnEventKind::ToolDone {
+            id: "call-1".to_string(),
+            name: "shell_run".to_string(),
+            ok: true,
+            summary: Some("ok status 0".to_string()),
+            result: Some(bounded_turn_payload(&serde_json::json!({
                 "outcome": {
                     "status": "success",
                     "payload": {
@@ -115,49 +142,13 @@ fn timeline_flushes_prose_before_tool_events() {
                         "timed_out": false
                     }
                 }
-            }),
-            duration_ms: 12,
-            graph_key: None,
-            parent_call_id: None,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-
-    let events = turn_events(&broadcast_log);
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0].0, 1);
-    assert_eq!(
-        events[0].1,
-        TurnEventKind::Prose {
-            text: "I will check now.".to_string()
-        }
-    );
-    assert_eq!(events[1].0, 2);
-    assert_eq!(
-        events[1].1,
-        TurnEventKind::ToolStart {
-            id: "call-1".to_string(),
-            name: "shell_run".to_string(),
-            summary: Some("cmd: true".to_string())
-        }
-    );
-    assert_eq!(events[2].0, 3);
-    assert_eq!(
-        events[2].1,
-        TurnEventKind::ToolDone {
-            id: "call-1".to_string(),
-            name: "shell_run".to_string(),
-            ok: true,
-            summary: Some("ok status 0".to_string())
+            })))
         }
     );
 }
 
 #[test]
 fn code_blocks_stream_full_source_and_pair_with_their_completion() {
-    let broadcast_log = BroadcastLog::default();
-    let (broadcaster, _) = broadcast::channel(16);
     let mut timeline = TurnTimelineBridge {
         thread_id: Some(0),
         turn_id: Some(1),
@@ -165,35 +156,27 @@ fn code_blocks_stream_full_source_and_pair_with_their_completion() {
     };
     let source = "const x = await shell.run({ cmd: \"true\" });\nfinish(x);";
 
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::CodeBlockStarted {
-            language: "typescript".to_string(),
-            code: source.to_string(),
-            graph_key: None,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::CodeBlockCompleted {
-            language: "typescript".to_string(),
-            output: "ok".to_string(),
-            error: None,
-            success: true,
-            duration_ms: 42,
-            tool_call_ids: vec!["call-1".to_string()],
-            graph_key: None,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::CodeBlockStarted {
+        language: "typescript".to_string(),
+        code: source.to_string(),
+        graph_key: None,
+    }));
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::CodeBlockCompleted {
+        language: "typescript".to_string(),
+        output: "ok".to_string(),
+        error: None,
+        success: true,
+        duration_ms: 42,
+        tool_call_ids: vec!["call-1".to_string()],
+        graph_key: None,
+    }));
 
-    let events = turn_events(&broadcast_log);
+    let events = timeline.take_ready();
     assert_eq!(events.len(), 2);
     // The full program is carried verbatim — never through the 120-char
     // summary path that tool rows use.
     assert_eq!(
-        events[0].1,
+        events[0],
         TurnEventKind::CodeStart {
             id: "code:1".to_string(),
             language: "typescript".to_string(),
@@ -202,7 +185,7 @@ fn code_blocks_stream_full_source_and_pair_with_their_completion() {
         }
     );
     assert_eq!(
-        events[1].1,
+        events[1],
         TurnEventKind::CodeDone {
             id: "code:1".to_string(),
             ok: true,
@@ -894,17 +877,6 @@ fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEvent
             event,
         }),
     }
-}
-
-fn turn_events(broadcast_log: &BroadcastLog) -> Vec<(u64, TurnEventKind)> {
-    broadcast_log
-        .recent()
-        .into_iter()
-        .filter_map(|event| match event {
-            HostToClient::TurnEvent { seq, event, .. } => Some((seq, event)),
-            _ => None,
-        })
-        .collect()
 }
 
 #[test]

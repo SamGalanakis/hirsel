@@ -5,6 +5,8 @@ impl LashAgentRuntime {
         let session = self.session.clone();
         let broadcaster = self.broadcaster.clone();
         let broadcast_log = self.broadcast_log.clone();
+        let tools = self.tools.clone();
+        let timeline_commits = self.timeline_commits.clone();
         self.tasks.spawn(async move {
             let observable = session.observe();
             let current = observable.current_remote_observation();
@@ -26,28 +28,41 @@ impl LashAgentRuntime {
                         let flush_delay = timeline.flush_delay();
                         tokio::select! {
                             item = stream.next() => {
-                                route_observation(&item, &mut timeline, &broadcast_log, &broadcaster).await;
-                                handle_observation_stream_item(
+                                let committed = committed_turn_id(&item);
+                                route_observation(&item, &mut timeline, &tools).await;
+                                let keep = handle_observation_stream_item(
                                     item,
                                     &broadcast_log,
                                     &broadcaster,
+                                    &tools,
                                     &mut timeline,
-                                )
+                                ).await;
+                                if let Some(turn_id) = committed {
+                                    timeline_commits.record(turn_id).await;
+                                }
+                                keep
                             }
                             () = tokio::time::sleep(flush_delay) => {
-                                timeline.flush_pending(&broadcast_log, &broadcaster);
+                                timeline.flush_pending();
+                                publish_ready_timeline(&tools, &mut timeline).await;
                                 true
                             }
                         }
                     } else {
                         let item = stream.next().await;
-                        route_observation(&item, &mut timeline, &broadcast_log, &broadcaster).await;
-                        handle_observation_stream_item(
+                        let committed = committed_turn_id(&item);
+                        route_observation(&item, &mut timeline, &tools).await;
+                        let keep = handle_observation_stream_item(
                             item,
                             &broadcast_log,
                             &broadcaster,
+                            &tools,
                             &mut timeline,
-                        )
+                        ).await;
+                        if let Some(turn_id) = committed {
+                            timeline_commits.record(turn_id).await;
+                        }
+                        keep
                     };
                     cursor = stream.cursor();
                     if !keep_stream {
@@ -63,10 +78,22 @@ impl LashAgentRuntime {
     }
 }
 
-pub(super) fn handle_observation_stream_item<E>(
+fn committed_turn_id<E>(
+    item: &Option<Result<RemoteSessionObservationStreamItem, E>>,
+) -> Option<String> {
+    let Some(Ok(RemoteSessionObservationStreamItem::Event(event))) = item else {
+        return None;
+    };
+    matches!(event.event, RemoteSessionObservationEventPayload::Committed)
+        .then(|| event.turn_id.clone())
+        .flatten()
+}
+
+pub(super) async fn handle_observation_stream_item<E>(
     item: Option<Result<RemoteSessionObservationStreamItem, E>>,
     broadcast_log: &BroadcastLog,
     broadcaster: &broadcast::Sender<HostToClient>,
+    tools: &ToolSuite,
     timeline: &mut TurnTimelineBridge,
 ) -> bool
 where
@@ -78,7 +105,8 @@ where
                 &event.event,
                 RemoteSessionObservationEventPayload::Committed
             ) {
-                timeline.observe(&event.event, broadcast_log, broadcaster);
+                timeline.observe(&event.event);
+                publish_ready_timeline(tools, timeline).await;
                 if let (Some((state, text)), Some(thread_id), Some(turn_id)) = (
                     activity_from_observation(&event.event),
                     timeline.thread_id,
@@ -112,12 +140,14 @@ where
                         },
                     );
                 }
-                timeline.observe(&event.event, broadcast_log, broadcaster);
+                timeline.observe(&event.event);
+                publish_ready_timeline(tools, timeline).await;
             }
             true
         }
         Some(Ok(RemoteSessionObservationStreamItem::Gap { .. })) => {
-            timeline.finish_turn(broadcast_log, broadcaster);
+            timeline.finish_turn();
+            publish_ready_timeline(tools, timeline).await;
             if let (Some(thread_id), Some(turn_id)) = (timeline.thread_id, timeline.turn_id) {
                 publish(
                     broadcast_log,
@@ -133,12 +163,14 @@ where
             true
         }
         Some(Err(error)) => {
-            timeline.finish_turn(broadcast_log, broadcaster);
+            timeline.finish_turn();
+            publish_ready_timeline(tools, timeline).await;
             tracing::warn!(%error, "Lash observation stream failed");
             false
         }
         None => {
-            timeline.finish_turn(broadcast_log, broadcaster);
+            timeline.finish_turn();
+            publish_ready_timeline(tools, timeline).await;
             false
         }
     }
@@ -199,8 +231,7 @@ pub(super) fn activity_from_observation(
 async fn route_observation<E>(
     item: &Option<Result<RemoteSessionObservationStreamItem, E>>,
     timeline: &mut TurnTimelineBridge,
-    log: &BroadcastLog,
-    broadcaster: &broadcast::Sender<HostToClient>,
+    tools: &ToolSuite,
 ) {
     let Some(Ok(RemoteSessionObservationStreamItem::Event(event))) = item else {
         return;
@@ -212,9 +243,23 @@ async fn route_observation<E>(
         .map(|(thread, turn)| (Some(thread), Some(turn)))
         .unwrap_or((None, None));
     if timeline.thread_id != thread_id || timeline.turn_id != owning_turn_id {
-        timeline.finish_turn(log, broadcaster);
+        timeline.finish_turn();
+        publish_ready_timeline(tools, timeline).await;
         timeline.thread_id = thread_id;
         timeline.turn_id = owning_turn_id;
+    }
+}
+
+async fn publish_ready_timeline(tools: &ToolSuite, timeline: &mut TurnTimelineBridge) {
+    let (Some(thread_id), Some(turn_id)) = (timeline.thread_id, timeline.turn_id) else {
+        timeline.take_ready();
+        return;
+    };
+    for event in timeline.take_ready() {
+        if let Err(error) = tools.publish_turn_event(thread_id, turn_id, event).await {
+            tracing::warn!(turn_id, %error, "failed to persist observed turn timeline event");
+            break;
+        }
     }
 }
 

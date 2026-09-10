@@ -7,7 +7,7 @@ import { ThreadShell } from "./ThreadShell";
 import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
 import { closeThreadNavigation } from "./navigation";
-import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, sendThreadMessage, setThreadState, threadState } from "./store";
+import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
 const sent: ThreadClientMessage[] = [];
@@ -18,7 +18,7 @@ beforeEach(() => {
   flush(() => closeThreadNavigation());
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
-  flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
+  flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
   attachThreadTransport(frame => sent.push(frame));
 });
 afterEach(() => { disconnectThreads(); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -62,7 +62,7 @@ describe("thread workspace", () => {
     fireEvent.click(retry);
     const retryRequest = sent.findLast(frame => frame.type === "open_thread")!;
     if (retryRequest.type !== "open_thread") throw new Error("missing retry");
-    flush(() => handleThreadMessage({ type: "thread_opened", client_id: retryRequest.client_id, detail: { brief: { text: "", artifact_ids: [] }, thread: makeThread(1), messages: [], activities: [], turns: [], related_items: [], has_more: false } }));
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: retryRequest.client_id, detail: { brief: { text: "", artifact_ids: [] }, thread: makeThread(1), messages: [], activities: [], turns: [], turn_timelines: [], related_items: [], has_more: false } }));
     await waitFor(() => expect(view.queryByRole("button", { name: "Retry loading conversation" })).toBeNull());
     expect(view.container.querySelector("textarea")!.value).toBe("Keep this draft");
     expect(threadState.focusedId).toBe(1);
@@ -277,13 +277,41 @@ it("preserves the exact inline tool rows across message/activity updates", async
   expect(view.container.querySelector('[data-message-id="1"]')?.textContent).not.toContain('tool completed');
 });
 
+it("renders the exact persisted timeline from a fresh open_thread snapshot", async () => {
+  const opening = openThread(1);
+  const frame = sent.findLast(message => message.type === "open_thread");
+  if (frame?.type !== "open_thread") throw new Error("Missing open");
+  const owner = { id: 70, thread_id: 1, author: "owner" as const, body: "Inspect it", ref: null, ts: "2026-09-10T10:00:00Z" };
+  const agent = { id: 71, thread_id: 1, author: "agent" as const, body: "Inspection complete", ref: 70, ts: "2026-09-10T10:00:02Z", tool_calls: [{ id: "shell-1", name: "shell_run", ok: true }] };
+  const turn = { requester_thread_id: null, requester_turn_id: null, id: 72, thread_id: 1, owner_message_id: 70, agent_message_id: 71, state: "completed" as const, started_at: owner.ts, finished_at: agent.ts };
+  flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
+    ...({ brief: { text: "", artifact_ids: [] }, thread: makeThread(1), activities: [], related_items: [], has_more: false }),
+    messages: [owner, agent], turns: [turn],
+    turn_timelines: [{ turn_id: 72, events: [
+      { seq: 1, event: { kind: "reasoning", text: "Checking storage first." } },
+      { seq: 2, event: { kind: "tool_start", id: "shell-1", name: "shell_run", summary: "cmd: inspect", input: { text: "{\n  \"cmd\": \"inspect\"\n}", truncated: false } } },
+      { seq: 3, event: { kind: "tool_done", id: "shell-1", name: "shell_run", ok: true, summary: "ok status 0", result: { text: "{\n  \"stdout\": \"durable\"\n}", truncated: false } } },
+      { seq: 4, event: { kind: "prose", text: "Inspection complete" } },
+    ] }],
+  } }));
+  await opening;
+  const view = render(() => <ThreadShell />);
+  const article = view.container.querySelector('[data-message-id="71"]')!;
+  expect(article.querySelectorAll('[data-slot="timeline"] > li')).toHaveLength(2);
+  expect(article.textContent).toContain("Checking storage first.");
+  expect(article.textContent).toContain("Inspection complete");
+  fireEvent.click(within(article as HTMLElement).getByRole("button", { name: "shell_run — show result" }));
+  expect(article.textContent).toContain('"cmd": "inspect"');
+  expect(article.textContent).toContain('"stdout": "durable"');
+});
+
 it("keeps the same expanded tool result and focus when the live turn becomes its final message", async () => {
   const turn = { requester_thread_id: null, requester_turn_id: null, id: 91, thread_id: 1, owner_message_id: 90, agent_message_id: null, state: "running" as const, started_at: "2026-09-09T10:00:00Z", finished_at: null };
   flush(() => {
     handleThreadMessage({ type: "msg", message: { id: 90, thread_id: 1, author: "owner", body: "Check this file", ref: null, ts: turn.started_at } });
     handleThreadMessage({ type: "thread_turn", turn });
     handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 91, seq: 1, event: { kind: "reasoning", text: "Checking the requested file." } });
-    handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 91, seq: 2, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Exact file contents" } });
+    handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 91, seq: 2, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Exact file contents", result: null } });
     handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 91, seq: 3, event: { kind: "prose", text: "File checked" } });
   });
   const view = render(() => <ThreadShell />);
@@ -402,7 +430,7 @@ it("keeps current brief reachable beyond the visible history page without moving
   const assignment = { id: 10, thread_id: 1, turn_id: 9, kind: "delegation_received", artifact_ids: [44], data: { requester_thread_id: 0, requester_turn_id: null, brief: "Review only the keyboard flow." }, ts: "2026-09-01T10:00:00Z" };
   flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
     thread: makeThread(1, { parent_thread_id: 0 }), brief: { text: "Review only the keyboard flow.", artifact_ids: [44] }, related_items: [], has_more: true,
-    messages: [{ id: 100, thread_id: 1, author: "owner", body: "Latest conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], activities: [assignment],
+    messages: [{ id: 100, thread_id: 1, author: "owner", body: "Latest conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], turn_timelines: [], activities: [assignment],
   } }));
   expect(view.container.querySelector('[data-activity-id="10"]')).toBeNull();
   expect(view.container.querySelector('[data-slot="thread-brief"]')).toBeInTheDocument();

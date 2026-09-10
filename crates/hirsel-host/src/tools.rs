@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use hirsel_drivers::{AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SubagentDriver};
-use hirsel_proto::{HostToClient, SubagentModelCatalog};
+use hirsel_proto::{HostToClient, SubagentModelCatalog, ThreadTurnState, TurnEvent, TurnEventKind};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -101,6 +101,92 @@ impl ToolSuite {
     pub(crate) fn broadcast(&self, event: HostToClient) {
         self.broadcast_log.record(event.clone());
         let _ = self.broadcaster.send(event);
+    }
+
+    /// Commit a timeline event before exposing it. SQLite assigns the shared
+    /// per-turn sequence, so independent producers cannot collide or reorder
+    /// the durable and live views.
+    pub(crate) async fn publish_turn_event(
+        &self,
+        thread_id: u64,
+        turn_id: u64,
+        event: TurnEventKind,
+    ) -> anyhow::Result<TurnEvent> {
+        let stored = match self
+            .storage
+            .append_next_turn_event(thread_id, turn_id, event)
+            .await
+        {
+            Ok(stored) => stored,
+            Err(error) => {
+                self.fail_turn_timeline_persistence(turn_id, &error).await;
+                return Err(error);
+            }
+        };
+        self.broadcast_stored_turn_event(thread_id, turn_id, &stored);
+        Ok(stored)
+    }
+
+    /// Commit and broadcast without releasing an execution guard. This keeps
+    /// the event on the same side of cancellation/reset as its tool operation.
+    pub(crate) fn publish_guarded_turn_event(
+        &self,
+        guard: &tokio::sync::MutexGuard<'_, rusqlite::Connection>,
+        thread_id: u64,
+        turn_id: u64,
+        event: TurnEventKind,
+    ) -> anyhow::Result<TurnEvent> {
+        let stored = self
+            .storage
+            .append_next_turn_event_guarded(guard, thread_id, turn_id, event)?;
+        self.broadcast_stored_turn_event(thread_id, turn_id, &stored);
+        Ok(stored)
+    }
+
+    fn broadcast_stored_turn_event(&self, thread_id: u64, turn_id: u64, stored: &TurnEvent) {
+        self.broadcast(HostToClient::TurnEvent {
+            thread_id,
+            turn_id,
+            seq: stored.seq,
+            event: stored.event.clone(),
+        });
+    }
+
+    pub(crate) async fn fail_turn_timeline_persistence(&self, turn_id: u64, error: &anyhow::Error) {
+        self.fail_turn_timeline_integrity(
+            turn_id,
+            &format!("Turn timeline persistence failed: {error}"),
+        )
+        .await;
+    }
+
+    pub(crate) async fn fail_turn_timeline_integrity(&self, turn_id: u64, reason: &str) {
+        if let Err(terminal_error) = self.fail_turn_timeline(turn_id, reason).await {
+            tracing::error!(turn_id, %terminal_error, "failed to persist terminal timeline failure");
+        }
+    }
+
+    async fn fail_turn_timeline(&self, turn_id: u64, reason: &str) -> anyhow::Result<()> {
+        let history_id = self.storage.history_id().await?;
+        let completion = self
+            .storage
+            .complete_thread_turn_with_failure(
+                &history_id,
+                turn_id,
+                ThreadTurnState::Failed,
+                None,
+                Some(reason),
+            )
+            .await?;
+        anyhow::ensure!(
+            completion.turn.state == ThreadTurnState::Failed,
+            "timeline persistence failed after the turn was already terminal"
+        );
+        if let Some(activity) = completion.failure_activity {
+            self.publish_thread_activity(activity).await;
+        }
+        self.publish_thread_turn(completion.turn).await;
+        Ok(())
     }
 
     pub(crate) fn driver_for(&self, agent: AgentKind) -> Arc<dyn SubagentDriver> {

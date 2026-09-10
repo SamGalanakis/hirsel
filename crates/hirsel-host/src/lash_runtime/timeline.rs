@@ -14,15 +14,49 @@ pub(super) const TURN_EVENT_SUMMARY_CHARS: usize = 120;
 /// Agent programs are shown verbatim, so the only cap here is a safety valve
 /// against a pathological cell blowing up the ephemeral turn stream.
 pub(super) const TURN_EVENT_CODE_BYTES: usize = 64 * 1024;
+pub(super) const TURN_EVENT_PAYLOAD_BYTES: usize = 64 * 1024;
+#[cfg(not(test))]
+const TIMELINE_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const TIMELINE_COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Rendezvous between Lash's observation stream and Hirsel's terminal turn
+/// projection. A turn cannot become successful until its `Committed`
+/// observation has flushed every preceding timeline event to SQLite.
+#[derive(Clone, Default)]
+pub(super) struct TimelineCommitBarrier {
+    committed: Arc<Mutex<Option<String>>>,
+    notify: Arc<Notify>,
+}
+
+impl TimelineCommitBarrier {
+    pub(super) async fn record(&self, turn_id: String) {
+        *self.committed.lock().await = Some(turn_id);
+        self.notify.notify_waiters();
+    }
+
+    pub(super) async fn wait(&self, turn_id: &str) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + TIMELINE_COMMIT_TIMEOUT;
+        loop {
+            let notified = self.notify.notified();
+            if self.committed.lock().await.as_deref() == Some(turn_id) {
+                return Ok(());
+            }
+            tokio::time::timeout_at(deadline, notified)
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out waiting for durable timeline commit"))?;
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct TurnTimelineBridge {
     pub(super) turn_id: Option<u64>,
     pub(super) thread_id: Option<u64>,
-    pub(super) seq: u64,
     pub(super) in_turn: bool,
     pub(super) pending: Option<PendingTimelineText>,
     pub(super) code_id_seq: u64,
+    pub(super) ready: Vec<TurnEventKind>,
 }
 
 pub(super) struct PendingTimelineText {
@@ -49,12 +83,7 @@ impl TurnTimelineBridge {
             .unwrap_or(TURN_EVENT_BATCH_INTERVAL)
     }
 
-    pub(super) fn observe(
-        &mut self,
-        event: &RemoteSessionObservationEventPayload,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
+    pub(super) fn observe(&mut self, event: &RemoteSessionObservationEventPayload) {
         match event {
             RemoteSessionObservationEventPayload::TurnActivity { activity } => {
                 match &activity.event {
@@ -62,15 +91,10 @@ impl TurnTimelineBridge {
                         self.start_turn_if_needed();
                     }
                     RemoteTurnEvent::AssistantProseDelta { text } => {
-                        self.push_text(TimelineTextKind::Prose, text, broadcast_log, broadcaster);
+                        self.push_text(TimelineTextKind::Prose, text);
                     }
                     RemoteTurnEvent::ReasoningDelta { text } => {
-                        self.push_text(
-                            TimelineTextKind::Reasoning,
-                            text,
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.push_text(TimelineTextKind::Reasoning, text);
                     }
                     RemoteTurnEvent::CodeBlockStarted {
                         language,
@@ -78,19 +102,15 @@ impl TurnTimelineBridge {
                         graph_key,
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
+                        self.flush_pending();
                         let id = self.code_event_id(graph_key.as_deref());
                         let (code, truncated) = clamp_code(code);
-                        self.publish_event(
-                            TurnEventKind::CodeStart {
-                                id,
-                                language: language.clone(),
-                                code,
-                                truncated,
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.publish_event(TurnEventKind::CodeStart {
+                            id,
+                            language: language.clone(),
+                            code,
+                            truncated,
+                        });
                     }
                     RemoteTurnEvent::CodeBlockCompleted {
                         success,
@@ -100,21 +120,17 @@ impl TurnTimelineBridge {
                         ..
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
+                        self.flush_pending();
                         let id = self.code_event_id(graph_key.as_deref());
-                        self.publish_event(
-                            TurnEventKind::CodeDone {
-                                id,
-                                ok: *success,
-                                summary: code_done_summary(
-                                    *success,
-                                    error.as_ref().map(|failure| failure.message.as_str()),
-                                    *duration_ms,
-                                ),
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.publish_event(TurnEventKind::CodeDone {
+                            id,
+                            ok: *success,
+                            summary: code_done_summary(
+                                *success,
+                                error.as_ref().map(|failure| failure.message.as_str()),
+                                *duration_ms,
+                            ),
+                        });
                     }
                     RemoteTurnEvent::ToolCallStarted {
                         call_id,
@@ -123,19 +139,16 @@ impl TurnTimelineBridge {
                         ..
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
+                        self.flush_pending();
                         let Some(id) = call_id.clone() else {
                             return;
                         };
-                        self.publish_event(
-                            TurnEventKind::ToolStart {
-                                id,
-                                name: name.clone(),
-                                summary: condense_args(name, args),
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.publish_event(TurnEventKind::ToolStart {
+                            id,
+                            name: name.clone(),
+                            summary: condense_args(name, args),
+                            input: Some(bounded_turn_payload(args)),
+                        });
                     }
                     RemoteTurnEvent::ToolCallCompleted {
                         call_id,
@@ -145,26 +158,23 @@ impl TurnTimelineBridge {
                         ..
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
+                        self.flush_pending();
                         let Some(id) = call_id.clone() else {
                             return;
                         };
-                        self.publish_event(
-                            TurnEventKind::ToolDone {
-                                id,
-                                name: name.clone(),
-                                ok: tool_output_ok(output),
-                                summary: condense_result(name, args, output),
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.publish_event(TurnEventKind::ToolDone {
+                            id,
+                            name: name.clone(),
+                            ok: tool_output_ok(output),
+                            summary: condense_result(name, args, output),
+                            result: Some(bounded_turn_payload(output)),
+                        });
                     }
                     _ => {}
                 }
             }
             RemoteSessionObservationEventPayload::Committed => {
-                self.finish_turn(broadcast_log, broadcaster);
+                self.finish_turn();
             }
             _ => {}
         }
@@ -172,7 +182,6 @@ impl TurnTimelineBridge {
 
     pub(super) fn start_turn_if_needed(&mut self) {
         if !self.in_turn {
-            self.seq = 0;
             self.pending = None;
             self.in_turn = true;
             self.code_id_seq = 0;
@@ -192,22 +201,12 @@ impl TurnTimelineBridge {
         }
     }
 
-    pub(super) fn finish_turn(
-        &mut self,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
-        self.flush_pending(broadcast_log, broadcaster);
+    pub(super) fn finish_turn(&mut self) {
+        self.flush_pending();
         self.in_turn = false;
     }
 
-    pub(super) fn push_text(
-        &mut self,
-        kind: TimelineTextKind,
-        text: &str,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
+    pub(super) fn push_text(&mut self, kind: TimelineTextKind, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -217,7 +216,7 @@ impl TurnTimelineBridge {
             .as_ref()
             .is_some_and(|pending| pending.kind != kind)
         {
-            self.flush_pending(broadcast_log, broadcaster);
+            self.flush_pending();
         }
         let pending = self.pending.get_or_insert_with(|| PendingTimelineText {
             kind,
@@ -228,15 +227,11 @@ impl TurnTimelineBridge {
         if pending.text.chars().count() >= TURN_EVENT_BATCH_CHARS
             || pending.started_at.elapsed() >= TURN_EVENT_BATCH_INTERVAL
         {
-            self.flush_pending(broadcast_log, broadcaster);
+            self.flush_pending();
         }
     }
 
-    pub(super) fn flush_pending(
-        &mut self,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
+    pub(super) fn flush_pending(&mut self) {
         let Some(pending) = self.pending.take() else {
             return;
         };
@@ -247,29 +242,17 @@ impl TurnTimelineBridge {
             TimelineTextKind::Prose => TurnEventKind::Prose { text: pending.text },
             TimelineTextKind::Reasoning => TurnEventKind::Reasoning { text: pending.text },
         };
-        self.publish_event(event, broadcast_log, broadcaster);
+        self.publish_event(event);
     }
 
-    pub(super) fn publish_event(
-        &mut self,
-        event: TurnEventKind,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
-        let (Some(thread_id), Some(turn_id)) = (self.thread_id, self.turn_id) else {
-            return;
-        };
-        self.seq += 1;
-        publish(
-            broadcast_log,
-            broadcaster,
-            HostToClient::TurnEvent {
-                turn_id,
-                thread_id,
-                seq: self.seq,
-                event,
-            },
-        );
+    pub(super) fn publish_event(&mut self, event: TurnEventKind) {
+        if self.thread_id.is_some() && self.turn_id.is_some() {
+            self.ready.push(event);
+        }
+    }
+
+    pub(super) fn take_ready(&mut self) -> Vec<TurnEventKind> {
+        std::mem::take(&mut self.ready)
     }
 }
 

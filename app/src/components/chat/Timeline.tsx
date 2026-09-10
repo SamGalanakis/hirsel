@@ -80,12 +80,18 @@ function ReasoningRow(props: { text: string }) {
  * (spinner + full-strength name); once done it quiets down (dimmer name) so the
  * live cursor is always the running step. Carries a quiet right-aligned mono
  * duration once resolved, and — when it produced a result/error — click-to-
- * expand into a mono "well" showing the full, untruncated payload. */
+ * expand into a mono well showing the bounded input/result payload. */
 function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
-  const detail = () => done()?.result ?? props.item.summary;
-  const hasDetail = () => (detail() ?? "").length > 0;
+  const detail = () => done()?.summary ?? props.item.summary;
+  const payload = () => {
+    const sections: string[] = [];
+    if (props.item.input !== null) sections.push(`Input\n${props.item.input}${props.item.inputTruncated ? "\n… truncated" : ""}`);
+    if (done()?.result !== null && done()?.result !== undefined) sections.push(`Result\n${done()!.result}${done()!.resultTruncated ? "\n… truncated" : ""}`);
+    return sections.join("\n\n") || detail() || "";
+  };
+  const hasDetail = () => payload().length > 0;
   const running = () => done() === null && !props.settled;
   const failed = () => done()?.ok === false;
   const delegation = () => isDelegationTool(props.item.name);
@@ -169,7 +175,7 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
           class={["ml-4 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}
 
         >
-          {detail()}
+          {payload()}
         </pre>
       </Show>
     </li>

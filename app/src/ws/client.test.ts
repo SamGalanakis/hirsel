@@ -348,7 +348,7 @@ describe("current history boundary", () => {
     first.serverOpen(); first.serverSend({ ...HELLO_OK, threads: [thread] });
     flush(() => threads.focusThread(1, false));
     const firstOpen = first.sent.map(row => JSON.parse(row)).find(frame => frame.type === "open_thread");
-    first.serverSend({ type: "thread_opened", client_id: firstOpen.client_id, detail: { thread, brief: { text: "", artifact_ids: [] }, messages: [owner], turns: [running], activities: [], related_items: [], has_more: false } });
+    first.serverSend({ type: "thread_opened", client_id: firstOpen.client_id, detail: { thread, brief: { text: "", artifact_ids: [] }, messages: [owner], turns: [running], turn_timelines: [], activities: [], related_items: [], has_more: false } });
     expect(threads.threadState.histories[1].turns[0].state).toBe("running");
 
     first.serverClose(1006);
@@ -358,7 +358,7 @@ describe("current history boundary", () => {
     const reconnectOpen = reconnected.sent.map(row => JSON.parse(row)).find(frame => frame.type === "open_thread");
     const final = { id: 11, thread_id: 1, author: "agent" as const, body: "Done", ref: owner.id, ts: "2026-09-10T10:00:05Z" };
     const completed = { ...running, state: "completed" as const, agent_message_id: final.id, finished_at: final.ts };
-    reconnected.serverSend({ type: "thread_opened", client_id: reconnectOpen.client_id, detail: { thread: makeThread(1, { last_finished_turn: completed }), brief: { text: "", artifact_ids: [] }, messages: [owner, final], turns: [completed], activities: [], related_items: [], has_more: false } });
+    reconnected.serverSend({ type: "thread_opened", client_id: reconnectOpen.client_id, detail: { thread: makeThread(1, { last_finished_turn: completed }), brief: { text: "", artifact_ids: [] }, messages: [owner, final], turns: [completed], turn_timelines: [], activities: [], related_items: [], has_more: false } });
 
     expect(threads.threadState.histories[1].turns).toEqual([completed]);
     expect(conversationEntries(threads.threadState.histories[1])).toContainEqual({ key: "turn-1", kind: "message", message: final, turn: completed });

@@ -25,13 +25,29 @@ const TIMELINE_COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// observation has flushed every preceding timeline event to SQLite.
 #[derive(Clone, Default)]
 pub(super) struct TimelineCommitBarrier {
-    committed: Arc<Mutex<Option<String>>>,
+    state: Arc<Mutex<TimelineCommitState>>,
     notify: Arc<Notify>,
+}
+
+#[derive(Default)]
+struct TimelineCommitState {
+    committed: Option<String>,
+    failures: HashMap<String, String>,
 }
 
 impl TimelineCommitBarrier {
     pub(super) async fn record(&self, turn_id: String) {
-        *self.committed.lock().await = Some(turn_id);
+        self.state.lock().await.committed = Some(turn_id);
+        self.notify.notify_waiters();
+    }
+
+    pub(super) async fn fail(&self, turn_id: String, reason: String) {
+        self.state
+            .lock()
+            .await
+            .failures
+            .entry(turn_id)
+            .or_insert(reason);
         self.notify.notify_waiters();
     }
 
@@ -39,13 +55,26 @@ impl TimelineCommitBarrier {
         let deadline = tokio::time::Instant::now() + TIMELINE_COMMIT_TIMEOUT;
         loop {
             let notified = self.notify.notified();
-            if self.committed.lock().await.as_deref() == Some(turn_id) {
+            let state = self.state.lock().await;
+            if let Some(reason) = state.failures.get(turn_id) {
+                return Err(anyhow::anyhow!(reason.clone()));
+            }
+            if state.committed.as_deref() == Some(turn_id) {
                 return Ok(());
             }
+            drop(state);
             tokio::time::timeout_at(deadline, notified)
                 .await
                 .map_err(|_| anyhow::anyhow!("timed out waiting for durable timeline commit"))?;
         }
+    }
+
+    pub(super) async fn clear(&self, turn_id: &str) {
+        let mut state = self.state.lock().await;
+        if state.committed.as_deref() == Some(turn_id) {
+            state.committed = None;
+        }
+        state.failures.remove(turn_id);
     }
 }
 

@@ -605,6 +605,195 @@ async fn late_timeline_failure_wins_before_terminal_reply() {
     }));
 }
 
+fn remote_observation_event(
+    turn_id: &str,
+    event: RemoteSessionObservationEventPayload,
+) -> RemoteSessionObservationStreamItem {
+    RemoteSessionObservationStreamItem::Event(
+        lash::remote::observations::RemoteSessionObservationEvent {
+            session_id: "fixture-session".into(),
+            replay_incarnation_id: "fixture-replay".into(),
+            turn_id: Some(turn_id.into()),
+            revision: 1,
+            cursor: "fixture-cursor".into(),
+            event,
+        },
+    )
+}
+
+fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
+    RemoteSessionObservationEventPayload::TurnActivity {
+        activity: Box::new(lash::remote::usage::RemoteTurnActivity {
+            sequence: 1,
+            id: "fixture-activity".into(),
+            correlation_id: "fixture-turn".into(),
+            event,
+        }),
+    }
+}
+
+fn remote_observation_gap() -> RemoteSessionObservationStreamItem {
+    RemoteSessionObservationStreamItem::Gap {
+        observation: lash::remote::observations::RemoteSessionObservation {
+            session_id: "fixture-session".into(),
+            cursor: "latest-cursor".into(),
+            turn_index: 1,
+            usage: lash::remote::usage::RemoteUsage::default(),
+        },
+        gap: lash::remote::observations::RemoteLiveReplayGap {
+            session_id: "fixture-session".into(),
+            requested_cursor: "stale-cursor".into(),
+            latest_cursor: "latest-cursor".into(),
+            latest_revision: 1,
+            reason: lash::remote::observations::RemoteLiveReplayGapReason::Trimmed,
+        },
+    }
+}
+
+async fn process_observation_fixture(
+    runtime: &LashAgentRuntime,
+    timeline: &mut TurnTimelineBridge,
+    item: RemoteSessionObservationStreamItem,
+) {
+    assert!(
+        super::bridges::process_observation_stream_item::<std::convert::Infallible>(
+            Some(Ok(item)),
+            &runtime.broadcast_log,
+            &runtime.broadcaster,
+            &runtime.tools,
+            timeline,
+            &runtime.timeline_commits,
+            &runtime.active_turn_id,
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn observation_gap_midturn_fails_before_a_later_commit_can_publish_success() {
+    let (state, _dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let request = request(&state, "gap-midturn").await;
+    let runtime = runtime_lane(&state, Some(request.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
+    runtime.admit_next_thread_request().await.unwrap();
+    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let turn_id = runtime
+        .anchors
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .unwrap()
+        .thread_turn_id
+        .unwrap();
+    let mut timeline = TurnTimelineBridge::default();
+    process_observation_fixture(
+        &runtime,
+        &mut timeline,
+        remote_observation_event(
+            &drain_id,
+            remote_turn_activity(RemoteTurnEvent::ReasoningDelta {
+                text: "persisted before the gap".into(),
+            }),
+        ),
+    )
+    .await;
+    process_observation_fixture(&runtime, &mut timeline, remote_observation_gap()).await;
+    process_observation_fixture(
+        &runtime,
+        &mut timeline,
+        remote_observation_event(&drain_id, RemoteSessionObservationEventPayload::Committed),
+    )
+    .await;
+
+    let output = super::tests::test_turn_output(
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+            text: "must not be published".into(),
+        }),
+        "must not be published",
+        Vec::new(),
+    );
+    assert!(
+        runtime
+            .finish_thread_request(&request.client_id, Some(&output))
+            .await
+            .is_err()
+    );
+    runtime
+        .finish_thread_request(&request.client_id, None)
+        .await
+        .unwrap();
+
+    let detail = state
+        .storage
+        .thread_detail(request.thread_id, None, 30)
+        .await
+        .unwrap();
+    let turn = detail.turns.iter().find(|turn| turn.id == turn_id).unwrap();
+    assert_eq!(turn.state, ThreadTurnState::Failed);
+    assert!(turn.agent_message_id.is_none());
+    assert_eq!(detail.turn_timelines[0].events.len(), 1);
+    assert!(detail.activities.iter().any(|activity| {
+        activity.kind == "execution_failed"
+            && activity.data["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("observation replay window"))
+    }));
+}
+
+#[tokio::test]
+async fn observation_gap_across_commit_releases_only_a_failed_terminal_projection() {
+    let (state, _dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let request = request(&state, "gap-across-commit").await;
+    let runtime = runtime_lane(&state, Some(request.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
+    runtime.admit_next_thread_request().await.unwrap();
+    let turn_id = runtime
+        .anchors
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .unwrap()
+        .thread_turn_id
+        .unwrap();
+    let mut timeline = TurnTimelineBridge::default();
+    process_observation_fixture(&runtime, &mut timeline, remote_observation_gap()).await;
+
+    let output = super::tests::test_turn_output(
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+            text: "must not be published".into(),
+        }),
+        "must not be published",
+        Vec::new(),
+    );
+    let completion = tokio::time::timeout(
+        Duration::from_millis(250),
+        runtime.finish_thread_request(&request.client_id, Some(&output)),
+    )
+    .await
+    .expect("gap failure must release the commit barrier");
+    assert!(completion.is_err());
+    runtime
+        .finish_thread_request(&request.client_id, None)
+        .await
+        .unwrap();
+
+    let detail = state
+        .storage
+        .thread_detail(request.thread_id, None, 30)
+        .await
+        .unwrap();
+    let turn = detail.turns.iter().find(|turn| turn.id == turn_id).unwrap();
+    assert_eq!(turn.state, ThreadTurnState::Failed);
+    assert!(turn.agent_message_id.is_none());
+    assert!(detail.turn_timelines[0].events.is_empty());
+}
+
 #[test]
 fn delayed_observations_route_without_retaining_completed_turns() {
     assert_eq!(

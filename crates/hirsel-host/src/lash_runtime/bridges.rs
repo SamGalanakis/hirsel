@@ -2,15 +2,18 @@ use super::*;
 
 impl LashAgentRuntime {
     pub(super) fn spawn_observation_bridge(self: &Arc<Self>) {
-        let session = self.session.clone();
+        // Capture before the turn pump can run. Every later model event is then
+        // either delivered live or recovered from this cursor.
+        let observable = self.session.observe();
+        let current = observable.current_remote_observation();
+        let initial_cursor = RemoteSessionCursor::new(current.cursor);
         let broadcaster = self.broadcaster.clone();
         let broadcast_log = self.broadcast_log.clone();
         let tools = self.tools.clone();
         let timeline_commits = self.timeline_commits.clone();
+        let active_turn_id = self.active_turn_id.clone();
         self.tasks.spawn(async move {
-            let observable = session.observe();
-            let current = observable.current_remote_observation();
-            let mut cursor = RemoteSessionCursor::new(current.cursor);
+            let mut cursor = initial_cursor;
             let mut timeline = TurnTimelineBridge::default();
             let mut retry = ObservationRetryBackoff::default();
             loop {
@@ -28,19 +31,15 @@ impl LashAgentRuntime {
                         let flush_delay = timeline.flush_delay();
                         tokio::select! {
                             item = stream.next() => {
-                                let committed = committed_turn_id(&item);
-                                route_observation(&item, &mut timeline, &tools).await;
-                                let keep = handle_observation_stream_item(
+                                process_observation_stream_item(
                                     item,
                                     &broadcast_log,
                                     &broadcaster,
                                     &tools,
                                     &mut timeline,
-                                ).await;
-                                if let Some(turn_id) = committed {
-                                    timeline_commits.record(turn_id).await;
-                                }
-                                keep
+                                    &timeline_commits,
+                                    &active_turn_id,
+                                ).await
                             }
                             () = tokio::time::sleep(flush_delay) => {
                                 timeline.flush_pending();
@@ -50,19 +49,15 @@ impl LashAgentRuntime {
                         }
                     } else {
                         let item = stream.next().await;
-                        let committed = committed_turn_id(&item);
-                        route_observation(&item, &mut timeline, &tools).await;
-                        let keep = handle_observation_stream_item(
+                        process_observation_stream_item(
                             item,
                             &broadcast_log,
                             &broadcaster,
                             &tools,
                             &mut timeline,
-                        ).await;
-                        if let Some(turn_id) = committed {
-                            timeline_commits.record(turn_id).await;
-                        }
-                        keep
+                            &timeline_commits,
+                            &active_turn_id,
+                        ).await
                     };
                     cursor = stream.cursor();
                     if !keep_stream {
@@ -76,6 +71,36 @@ impl LashAgentRuntime {
             }
         });
     }
+}
+
+pub(super) async fn process_observation_stream_item<E>(
+    item: Option<Result<RemoteSessionObservationStreamItem, E>>,
+    broadcast_log: &BroadcastLog,
+    broadcaster: &broadcast::Sender<HostToClient>,
+    tools: &ToolSuite,
+    timeline: &mut TurnTimelineBridge,
+    timeline_commits: &TimelineCommitBarrier,
+    active_turn_id: &Mutex<Option<String>>,
+) -> bool
+where
+    E: std::fmt::Display,
+{
+    let committed = committed_turn_id(&item);
+    route_observation(&item, timeline, tools).await;
+    let keep = handle_observation_stream_item(
+        item,
+        broadcast_log,
+        broadcaster,
+        tools,
+        timeline,
+        timeline_commits,
+        active_turn_id,
+    )
+    .await;
+    if let Some(turn_id) = committed {
+        timeline_commits.record(turn_id).await;
+    }
+    keep
 }
 
 fn committed_turn_id<E>(
@@ -95,6 +120,8 @@ pub(super) async fn handle_observation_stream_item<E>(
     broadcaster: &broadcast::Sender<HostToClient>,
     tools: &ToolSuite,
     timeline: &mut TurnTimelineBridge,
+    timeline_commits: &TimelineCommitBarrier,
+    active_turn_id: &Mutex<Option<String>>,
 ) -> bool
 where
     E: std::fmt::Display,
@@ -145,10 +172,18 @@ where
             }
             true
         }
-        Some(Ok(RemoteSessionObservationStreamItem::Gap { .. })) => {
+        Some(Ok(RemoteSessionObservationStreamItem::Gap { gap, .. })) => {
             timeline.finish_turn();
             publish_ready_timeline(tools, timeline).await;
-            if let (Some(thread_id), Some(turn_id)) = (timeline.thread_id, timeline.turn_id) {
+            if let Some(drain_id) = active_turn_id.lock().await.clone()
+                && let Some((thread_id, turn_id)) = observation_thread_route(&drain_id)
+            {
+                let reason = format!(
+                    "Turn timeline is incomplete because the Lash observation replay window reported a {:?} gap",
+                    gap.reason
+                );
+                timeline_commits.fail(drain_id, reason.clone()).await;
+                tools.fail_turn_timeline_integrity(turn_id, &reason).await;
                 publish(
                     broadcast_log,
                     broadcaster,

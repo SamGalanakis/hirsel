@@ -266,7 +266,7 @@ impl Storage {
             .iter()
             .map(|message| message.id)
             .collect::<std::collections::HashSet<_>>();
-        let mut timeline_turn_ids = turns
+        let represented_turn_ids = turns
             .iter()
             .filter(|turn| {
                 turn.owner_message_id
@@ -274,21 +274,36 @@ impl Storage {
                     || turn
                         .agent_message_id
                         .is_some_and(|message_id| message_ids.contains(&message_id))
-                    || (before_id.is_none()
-                        && matches!(
-                            turn.state,
-                            hirsel_proto::ThreadTurnState::Queued
-                                | hirsel_proto::ThreadTurnState::Running
-                        ))
-                    || (before_id.is_none()
-                        && turn.owner_message_id.is_none()
-                        && turn.agent_message_id.is_none())
+            })
+            .map(|turn| turn.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut supplemental_turn_ids = turns
+            .iter()
+            .filter(|turn| {
+                before_id.is_none()
+                    && !represented_turn_ids.contains(&turn.id)
+                    && (matches!(
+                        turn.state,
+                        hirsel_proto::ThreadTurnState::Queued
+                            | hirsel_proto::ThreadTurnState::Running
+                    ) || (turn.owner_message_id.is_none() && turn.agent_message_id.is_none()))
             })
             .map(|turn| turn.id)
             .collect::<Vec<_>>();
-        if timeline_turn_ids.len() > limit as usize {
-            timeline_turn_ids.drain(..timeline_turn_ids.len() - limit as usize);
+        let supplemental_limit = limit.clamp(1, 100) as usize;
+        if supplemental_turn_ids.len() > supplemental_limit {
+            supplemental_turn_ids.drain(..supplemental_turn_ids.len() - supplemental_limit);
         }
+        let supplemental_turn_ids = supplemental_turn_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let timeline_turn_ids = turns
+            .iter()
+            .filter(|turn| {
+                represented_turn_ids.contains(&turn.id) || supplemental_turn_ids.contains(&turn.id)
+            })
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>();
         let turn_timelines = super::thread_events::for_turns(&tx, &timeline_turn_ids)?;
         let activities = super::thread_activity::activities(&tx, id)?;
         let brief = super::thread_read::brief(&tx, id)?;

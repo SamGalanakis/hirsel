@@ -538,6 +538,7 @@ impl LashAgentRuntime {
         let mut active = self.active_turn_id.lock().await;
         if active.as_deref() == Some(id) {
             *active = None;
+            self.timeline_commits.clear(id).await;
         }
     }
 

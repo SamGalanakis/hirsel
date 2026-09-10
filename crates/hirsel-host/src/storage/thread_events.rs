@@ -247,6 +247,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn newest_page_keeps_visible_message_timeline_beside_later_background_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let thread = storage
+            .create_thread(
+                "mixed-page",
+                "Mixed page",
+                "",
+                &json!({}),
+                ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
+        let older_background = storage.start_thread_turn(thread.id, None).await.unwrap();
+        storage
+            .append_next_turn_event(
+                thread.id,
+                older_background.id,
+                TurnEventKind::Reasoning {
+                    text: "older background outside the supplemental bound".into(),
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .finish_thread_turn(
+                older_background.id,
+                hirsel_proto::ThreadTurnState::Interrupted,
+                None,
+            )
+            .await
+            .unwrap();
+        let history = storage.history_id().await.unwrap();
+        let owner = storage
+            .append_thread_owner_message(
+                &history,
+                thread.id,
+                "owner",
+                "Keep this work visible",
+                None,
+                &[],
+                &[],
+                &[],
+            )
+            .await
+            .unwrap()
+            .0;
+        let visible_turn = storage
+            .queue_thread_turn(thread.id, Some(owner.id))
+            .await
+            .unwrap();
+        storage.run_thread_turn(visible_turn.id).await.unwrap();
+        let visible_event = storage
+            .append_next_turn_event(
+                thread.id,
+                visible_turn.id,
+                TurnEventKind::Reasoning {
+                    text: "durable visible work".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let reply = storage
+            .materialize_thread_reply(visible_turn.id, "Visible reply", Some(owner.id), vec![])
+            .await
+            .unwrap();
+        storage
+            .finish_thread_turn(
+                visible_turn.id,
+                hirsel_proto::ThreadTurnState::Completed,
+                Some(reply.id),
+            )
+            .await
+            .unwrap();
+
+        let mut background_turn_ids = Vec::new();
+        for text in ["first background", "second background"] {
+            let turn = storage.start_thread_turn(thread.id, None).await.unwrap();
+            storage
+                .append_next_turn_event(
+                    thread.id,
+                    turn.id,
+                    TurnEventKind::Reasoning { text: text.into() },
+                )
+                .await
+                .unwrap();
+            background_turn_ids.push(turn.id);
+            storage
+                .finish_thread_turn(turn.id, hirsel_proto::ThreadTurnState::Interrupted, None)
+                .await
+                .unwrap();
+        }
+
+        drop(storage);
+        let reopened = Storage::open(dir.path()).await.unwrap();
+        let detail = reopened.thread_detail(thread.id, None, 2).await.unwrap();
+
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![owner.id, reply.id]
+        );
+        assert_eq!(
+            detail
+                .turn_timelines
+                .iter()
+                .map(|timeline| timeline.turn_id)
+                .collect::<Vec<_>>(),
+            [vec![visible_turn.id], background_turn_ids].concat()
+        );
+        assert_eq!(detail.turn_timelines[0].events, vec![visible_event]);
+        assert_eq!(detail.turn_timelines.len(), 1 + 2);
+        assert!(
+            detail
+                .turn_timelines
+                .iter()
+                .all(|timeline| timeline.turn_id != older_background.id)
+        );
+    }
+
+    #[tokio::test]
     async fn interrupted_turn_keeps_partial_timeline_and_reverse_completion_order() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();

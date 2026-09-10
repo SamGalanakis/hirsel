@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use hirsel_drivers::{AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SubagentDriver};
 use hirsel_proto::{HostToClient, SubagentModelCatalog, ThreadTurnState, TurnEvent, TurnEventKind};
@@ -36,6 +40,9 @@ pub struct ToolSuite {
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
+    /// Volatile safety latch for event-loss failures whose durable failure
+    /// projection may be blocked by the same transient SQLite outage.
+    timeline_integrity_failures: Arc<Mutex<HashMap<u64, String>>>,
     /// Tools contributed by enabled plugins. Empty until the plugin host
     /// registers into it, and empty forever when no plugin is installed.
     plugin_tools: crate::plugins::PluginToolRegistry,
@@ -83,6 +90,7 @@ impl ToolSuite {
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
+            timeline_integrity_failures: Arc::new(Mutex::new(HashMap::new())),
             plugin_tools: crate::plugins::PluginToolRegistry::default(),
         }
     }
@@ -136,9 +144,19 @@ impl ToolSuite {
         turn_id: u64,
         event: TurnEventKind,
     ) -> anyhow::Result<TurnEvent> {
-        let stored = self
+        let stored = match self
             .storage
-            .append_next_turn_event_guarded(guard, thread_id, turn_id, event)?;
+            .append_next_turn_event_guarded(guard, thread_id, turn_id, event)
+        {
+            Ok(stored) => stored,
+            Err(error) => {
+                self.record_turn_timeline_integrity(
+                    turn_id,
+                    format!("Turn timeline persistence failed: {error}"),
+                );
+                return Err(error);
+            }
+        };
         self.broadcast_stored_turn_event(thread_id, turn_id, &stored);
         Ok(stored)
     }
@@ -161,9 +179,36 @@ impl ToolSuite {
     }
 
     pub(crate) async fn fail_turn_timeline_integrity(&self, turn_id: u64, reason: &str) {
-        if let Err(terminal_error) = self.fail_turn_timeline(turn_id, reason).await {
-            tracing::error!(turn_id, %terminal_error, "failed to persist terminal timeline failure");
+        self.record_turn_timeline_integrity(turn_id, reason.to_string());
+        match self.fail_turn_timeline(turn_id, reason).await {
+            Ok(()) => self.clear_turn_timeline_integrity_failure(turn_id),
+            Err(terminal_error) => {
+                tracing::error!(turn_id, %terminal_error, "failed to persist terminal timeline failure");
+            }
         }
+    }
+
+    pub(crate) fn record_turn_timeline_integrity(&self, turn_id: u64, reason: String) {
+        self.timeline_integrity_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(turn_id)
+            .or_insert(reason);
+    }
+
+    pub(crate) fn turn_timeline_integrity_failure(&self, turn_id: u64) -> Option<String> {
+        self.timeline_integrity_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&turn_id)
+            .cloned()
+    }
+
+    pub(crate) fn clear_turn_timeline_integrity_failure(&self, turn_id: u64) {
+        self.timeline_integrity_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&turn_id);
     }
 
     async fn fail_turn_timeline(&self, turn_id: u64, reason: &str) -> anyhow::Result<()> {
@@ -217,6 +262,10 @@ impl ToolSuite {
 
 impl ToolSuite {
     pub(crate) async fn reset_runtime_projections(&self) {
+        self.timeline_integrity_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.views
             .clear_all(
                 self.storage

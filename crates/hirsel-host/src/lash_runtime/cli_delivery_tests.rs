@@ -6,6 +6,71 @@ struct TerminalPeer {
     failed: bool,
     retired: AtomicBool,
 }
+
+struct ToolCallingPeer {
+    retired: AtomicBool,
+}
+#[async_trait::async_trait]
+impl SubagentDriver for ToolCallingPeer {
+    async fn spawn(&self, spec: SpawnSpec) -> DriverResult<SessionHandle> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let capability = tokio::fs::read_to_string(&spec.scoped_mcp.capability_file)
+            .await
+            .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&spec.scoped_mcp.socket_path)
+            .await
+            .unwrap();
+        let invocation = json!({
+            "capability": capability,
+            "bridge_instance": "timeline-failure-peer",
+            "invocation_id": "read",
+            "request": {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "threads_context", "arguments": {}}
+            }
+        });
+        stream
+            .write_all(format!("{invocation}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::io::BufReader::new(stream)
+            .read_line(&mut response)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        Ok(SessionHandle {
+            id: "tool-calling-peer".into(),
+            agent: spec.agent,
+        })
+    }
+    async fn prompt(&self, _: &SessionHandle, _: String) -> DriverResult<()> {
+        Ok(())
+    }
+    async fn interrupt(&self, _: &SessionHandle) -> DriverResult<()> {
+        Ok(())
+    }
+    async fn retire(&self, _: &SessionHandle) -> DriverResult<()> {
+        self.retired.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn events(&self, _: &SessionHandle) -> DriverResult<EventStream> {
+        Ok(Box::pin(futures_util::stream::iter([
+            SubagentEvent::AssistantOutput {
+                text: "must not be published".into(),
+            },
+            SubagentEvent::Terminal {
+                outcome: TerminalOutcome::Done {
+                    summary: "fixture complete".into(),
+                },
+            },
+        ])))
+    }
+}
 #[async_trait::async_trait]
 impl SubagentDriver for TerminalPeer {
     async fn spawn(&self, spec: SpawnSpec) -> DriverResult<SessionHandle> {
@@ -232,6 +297,139 @@ async fn terminal_delivery_retries_real_sql_failures_and_replays_exactly_once() 
         );
     }
 }
+
+#[tokio::test]
+async fn cli_tool_telemetry_retains_integrity_failure_until_failed_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let failed_request = request(&state).await;
+    let turn_id = failed_request.turn_id.unwrap();
+    let attempts = state.storage.track_completion_failures().await.unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_timeline_event BEFORE INSERT ON thread_turn_events WHEN NEW.seq=1 BEGIN SELECT terminal_delivery_probe(); SELECT RAISE(FAIL,'injected CLI timeline event failure'); END;
+         CREATE TRIGGER fail_timeline_terminal BEFORE UPDATE OF finished_at ON thread_turns WHEN NEW.finished_at IS NOT NULL BEGIN SELECT terminal_delivery_probe(); SELECT RAISE(FAIL,'injected CLI timeline terminal failure'); END;",
+    )
+    .unwrap();
+    let peer = Arc::new(ToolCallingPeer {
+        retired: AtomicBool::new(false),
+    });
+    let work = CliTurn::new(turn_id, peer.clone());
+    let tools = state.tools.clone();
+    let task = tokio::spawn(async move {
+        work.run(
+            &tools,
+            failed_request,
+            crate::storage::ThreadExecution::Cli {
+                agent: AgentKind::Claude,
+                model: "fixture".into(),
+                variant: "fixture".into(),
+                cwd: std::env::temp_dir(),
+            },
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while (!peer.retired.load(Ordering::SeqCst) || attempts.load(Ordering::SeqCst) < 2)
+            && !task.is_finished()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 2,
+        "both the ToolDone append and terminal failure write must reach SQLite"
+    );
+    assert!(peer.retired.load(Ordering::SeqCst));
+    assert!(!task.is_finished());
+    assert_eq!(
+        state.storage.thread_turn(turn_id).await.unwrap().state,
+        ThreadTurnState::Running
+    );
+    assert!(
+        state
+            .tools
+            .turn_timeline_integrity_failure(turn_id)
+            .is_some_and(|reason| reason.contains("CLI timeline event failure"))
+    );
+    conn.execute_batch("DROP TRIGGER fail_timeline_event; DROP TRIGGER fail_timeline_terminal;")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let detail = state
+        .storage
+        .thread_detail(
+            state.storage.thread_turn(turn_id).await.unwrap().thread_id,
+            None,
+            30,
+        )
+        .await
+        .unwrap();
+    let turn = detail.turns.iter().find(|turn| turn.id == turn_id).unwrap();
+    assert_eq!(turn.state, ThreadTurnState::Failed);
+    assert!(turn.agent_message_id.is_none());
+    assert!(
+        state
+            .tools
+            .turn_timeline_integrity_failure(turn_id)
+            .is_none()
+    );
+    assert!(detail.messages.is_empty());
+    assert_eq!(detail.turn_timelines[0].events.len(), 1);
+    assert!(matches!(
+        detail.turn_timelines[0].events[0].event,
+        hirsel_proto::TurnEventKind::ToolStart { .. }
+    ));
+    assert!(detail.activities.iter().any(|activity| {
+        activity.kind == "execution_failed"
+            && activity.data["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("CLI timeline event failure"))
+    }));
+    assert!(state.broadcast_log.recent().iter().all(|frame| {
+        !matches!(frame, hirsel_proto::HostToClient::ThreadTurn { turn } if turn.id == turn_id && turn.state == ThreadTurnState::Completed)
+            && !matches!(frame, hirsel_proto::HostToClient::Msg { message } if message.body == "must not be published")
+    }));
+
+    let unaffected = request(&state).await;
+    let unaffected_id = unaffected.turn_id.unwrap();
+    let (_peer, task) = start(&state, unaffected, false);
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state
+            .storage
+            .thread_turn(unaffected_id)
+            .await
+            .unwrap()
+            .state,
+        ThreadTurnState::Completed
+    );
+    state.tools.record_turn_timeline_integrity(
+        unaffected_id,
+        "must be cleared with the old history".into(),
+    );
+    state.agent.reset_history().await.unwrap();
+    assert!(
+        state
+            .tools
+            .turn_timeline_integrity_failure(unaffected_id)
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn terminal_delivery_retry_cannot_write_into_replaced_history() {
     let dir = tempfile::tempdir().unwrap();

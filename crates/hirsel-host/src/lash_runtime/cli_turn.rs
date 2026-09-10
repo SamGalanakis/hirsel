@@ -47,16 +47,24 @@ impl CliTurn {
             .await;
         // Provider lifetime ends independently of terminal storage availability.
         self.stop().await;
-        let (state, reason) = match result {
-            Ok(TerminalOutcome::Done { .. }) => (ThreadTurnState::Completed, None),
-            Ok(TerminalOutcome::Interrupted) => (ThreadTurnState::Cancelled, None),
-            Ok(TerminalOutcome::Failed { reason }) => (ThreadTurnState::Failed, Some(reason)),
-            Err(error) => (ThreadTurnState::Failed, Some(error.to_string())),
+        let integrity_failure = tools.turn_timeline_integrity_failure(self.turn_id);
+        let (state, reason) = match integrity_failure.clone() {
+            Some(reason) => (ThreadTurnState::Failed, Some(reason)),
+            None => match result {
+                Ok(TerminalOutcome::Done { .. }) => (ThreadTurnState::Completed, None),
+                Ok(TerminalOutcome::Interrupted) => (ThreadTurnState::Cancelled, None),
+                Ok(TerminalOutcome::Failed { reason }) => (ThreadTurnState::Failed, Some(reason)),
+                Err(error) => (ThreadTurnState::Failed, Some(error.to_string())),
+            },
         };
         // Do not synthesize a final assistant message from a process error/summary.
-        let output = output
-            .map(|text| (text, tool_calls.clone()))
-            .or_else(|| (!tool_calls.is_empty()).then_some((String::new(), tool_calls)));
+        let output = if integrity_failure.is_some() {
+            None
+        } else {
+            output
+                .map(|text| (text, tool_calls.clone()))
+                .or_else(|| (!tool_calls.is_empty()).then_some((String::new(), tool_calls)))
+        };
         let mut delay = Duration::from_millis(50);
         loop {
             match tools
@@ -71,6 +79,13 @@ impl CliTurn {
                 .await
             {
                 Ok(completion) => {
+                    if integrity_failure.is_some() {
+                        anyhow::ensure!(
+                            completion.turn.state == ThreadTurnState::Failed,
+                            "timeline integrity failure lost to an earlier terminal projection"
+                        );
+                        tools.clear_turn_timeline_integrity_failure(self.turn_id);
+                    }
                     if let Some(activity) = completion.failure_activity {
                         tools.publish_thread_activity(activity).await;
                     }

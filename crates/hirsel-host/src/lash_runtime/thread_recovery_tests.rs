@@ -595,6 +595,12 @@ async fn late_timeline_failure_wins_before_terminal_reply() {
     assert_eq!(turn.state, ThreadTurnState::Failed);
     assert!(turn.agent_message_id.is_none());
     assert!(
+        state
+            .tools
+            .turn_timeline_integrity_failure(turn_id)
+            .is_none()
+    );
+    assert!(
         detail
             .messages
             .iter()
@@ -792,6 +798,145 @@ async fn observation_gap_across_commit_releases_only_a_failed_terminal_projectio
     assert_eq!(turn.state, ThreadTurnState::Failed);
     assert!(turn.agent_message_id.is_none());
     assert!(detail.turn_timelines[0].events.is_empty());
+}
+
+#[tokio::test]
+async fn rlm_observer_retains_integrity_failure_until_recovery_and_failed_terminal() {
+    let (state, dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let failed_request = request(&state, "double-timeline-write-failure").await;
+    let runtime = runtime_lane(&state, Some(failed_request.thread_id)).await;
+    let _turn_pump = runtime.pump_lock.lock().await;
+    runtime.admit_next_thread_request().await.unwrap();
+    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let turn_id = runtime
+        .anchors
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .unwrap()
+        .thread_turn_id
+        .unwrap();
+    let attempts = state.storage.track_completion_failures().await.unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_timeline_event BEFORE INSERT ON thread_turn_events BEGIN SELECT terminal_delivery_probe(); SELECT RAISE(FAIL,'injected timeline event failure'); END;
+         CREATE TRIGGER fail_timeline_terminal BEFORE UPDATE OF finished_at ON thread_turns WHEN NEW.finished_at IS NOT NULL BEGIN SELECT terminal_delivery_probe(); SELECT RAISE(FAIL,'injected timeline terminal failure'); END;",
+    )
+    .unwrap();
+
+    let mut timeline = TurnTimelineBridge::default();
+    process_observation_fixture(
+        &runtime,
+        &mut timeline,
+        remote_observation_event(
+            &drain_id,
+            remote_turn_activity(RemoteTurnEvent::ReasoningDelta {
+                text: "lost event".into(),
+            }),
+        ),
+    )
+    .await;
+    process_observation_fixture(
+        &runtime,
+        &mut timeline,
+        remote_observation_event(&drain_id, RemoteSessionObservationEventPayload::Committed),
+    )
+    .await;
+    assert!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "both the event append and terminal failure write must reach SQLite"
+    );
+    assert_eq!(
+        state.storage.thread_turn(turn_id).await.unwrap().state,
+        ThreadTurnState::Running
+    );
+    assert!(
+        state
+            .tools
+            .turn_timeline_integrity_failure(turn_id)
+            .is_some_and(|reason| reason.contains("timeline event failure"))
+    );
+    conn.execute_batch("DROP TRIGGER fail_timeline_event; DROP TRIGGER fail_timeline_terminal;")
+        .unwrap();
+
+    let output = super::tests::test_turn_output(
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+            text: "must not be published".into(),
+        }),
+        "must not be published",
+        Vec::new(),
+    );
+    runtime
+        .finish_thread_request(&failed_request.client_id, Some(&output))
+        .await
+        .unwrap();
+
+    let detail = state
+        .storage
+        .thread_detail(failed_request.thread_id, None, 30)
+        .await
+        .unwrap();
+    let turn = detail.turns.iter().find(|turn| turn.id == turn_id).unwrap();
+    assert_eq!(turn.state, ThreadTurnState::Failed);
+    assert!(turn.agent_message_id.is_none());
+    assert!(
+        state
+            .tools
+            .turn_timeline_integrity_failure(turn_id)
+            .is_none()
+    );
+    assert!(detail.turn_timelines[0].events.is_empty());
+    assert!(detail.activities.iter().any(|activity| {
+        activity.kind == "execution_failed"
+            && activity.data["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("timeline event failure"))
+    }));
+    assert!(state.broadcast_log.recent().iter().all(|frame| {
+        !matches!(frame, HostToClient::ThreadTurn { turn } if turn.id == turn_id && turn.state == ThreadTurnState::Completed)
+            && !matches!(frame, HostToClient::Msg { message } if message.body == "must not be published")
+    }));
+
+    let unaffected = request(&state, "unaffected-after-timeline-failure").await;
+    let unaffected_runtime = runtime_lane(&state, Some(unaffected.thread_id)).await;
+    let _unaffected_pump = unaffected_runtime.pump_lock.lock().await;
+    unaffected_runtime
+        .admit_next_thread_request()
+        .await
+        .unwrap();
+    let unaffected_drain = unaffected_runtime
+        .active_turn_id
+        .lock()
+        .await
+        .clone()
+        .unwrap();
+    unaffected_runtime
+        .timeline_commits
+        .record(unaffected_drain)
+        .await;
+    let unaffected_output = super::tests::test_turn_output(
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+            text: "unaffected success".into(),
+        }),
+        "unaffected success",
+        Vec::new(),
+    );
+    unaffected_runtime
+        .finish_thread_request(&unaffected.client_id, Some(&unaffected_output))
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .storage
+            .thread_turn(unaffected.turn_id.unwrap())
+            .await
+            .unwrap()
+            .state,
+        ThreadTurnState::Completed
+    );
 }
 
 #[test]

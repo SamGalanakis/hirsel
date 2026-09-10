@@ -121,6 +121,7 @@ async function layoutMetrics(page) {
       const entryBox = entry?.getBoundingClientRect();
       const inventoryBox = inventory?.getBoundingClientRect();
       const actionsBox = actions?.getBoundingClientRect();
+      const actionButtons = actions ? [...actions.querySelectorAll('button')].filter(action => action.checkVisibility()) : [];
       const overlapsActions = !!actionsBox && box.left < actionsBox.right && box.right > actionsBox.left && box.top < actionsBox.bottom && box.bottom > actionsBox.top;
       return {
         text: node.textContent?.trim(), whiteSpace: style.whiteSpace, height: box.height,
@@ -130,9 +131,13 @@ async function layoutMetrics(page) {
         inventoryBounds: inventoryBox ? { left: inventoryBox.left, right: inventoryBox.right, width: inventoryBox.width } : null,
         clippedByEntry: !entryBox || box.left < entryBox.left - 0.5 || box.right > entryBox.right + 0.5,
         clippedByInventory: !inventoryBox || box.left < inventoryBox.left - 0.5 || box.right > inventoryBox.right + 0.5,
-        overlapsActions,
+        overlapsActions, actionsReachable: actionButtons.every(action => {
+          const actionBox = action.getBoundingClientRect();
+          return action.contains(document.elementFromPoint(actionBox.x + actionBox.width / 2, actionBox.y + actionBox.height / 2));
+        }),
       };
     });
+    const inventory = document.querySelector('nav[aria-label="Thread inventory"]');
     return {
       viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio },
       pageOverflow: document.documentElement.scrollWidth > window.innerWidth,
@@ -143,11 +148,28 @@ async function layoutMetrics(page) {
       artifact: bounds('[data-slot="artifact-preview"]'),
       artifactRole: document.querySelector('[data-slot="artifact-preview"]')?.getAttribute("role"),
       drawerRole: document.querySelector('[data-slot="thread-drawer"]')?.getAttribute("role"),
+      inventory: inventory ? { scrollWidth: inventory.scrollWidth, clientWidth: inventory.clientWidth, scrollLeft: inventory.scrollLeft } : null,
       status,
       focusedThreadId: document.querySelector('[data-thread-id]')?.getAttribute("data-thread-id") ?? null,
       artifactTitle: document.querySelector('[data-slot="artifact-preview"] h2')?.textContent?.trim() ?? null,
     };
   });
+}
+
+function assertStatuses(metrics, width) {
+  if (metrics.inventory) {
+    assert(metrics.inventory.scrollWidth <= metrics.inventory.clientWidth, `${width}: Thread inventory scrolls horizontally`);
+    assert.equal(metrics.inventory.scrollLeft, 0, `${width}: Thread inventory shifted horizontally`);
+  }
+  for (const row of metrics.status) {
+    assert.equal(row.whiteSpace, "nowrap", `${width}: status ${row.text} can wrap`);
+    assert.equal(row.clipped, false, `${width}: status ${row.text} is clipped`);
+    assert.equal(row.clippedByEntry, false, `${width}: status ${row.text} escapes its Thread row`);
+    assert.equal(row.clippedByInventory, false, `${width}: status ${row.text} escapes the Thread inventory`);
+    assert.equal(row.overlapsActions, false, `${width}: status ${row.text} overlaps Thread actions`);
+    assert.equal(row.actionsReachable, true, `${width}: Thread actions beside ${row.text} are unreachable`);
+    assert(row.height <= row.lineHeight * 1.5, `${width}: status ${row.text} spans multiple lines`);
+  }
 }
 
 function assertContained(metrics, width, selected) {
@@ -175,14 +197,7 @@ function assertContained(metrics, width, selected) {
     assert.equal(metrics.artifactRole, "dialog");
     assert(Math.abs(metrics.artifact.width - width) < 1, `${width}: artifact is not a full-width pane`);
   }
-  for (const row of metrics.status) {
-    assert.equal(row.whiteSpace, "nowrap", `${width}: status ${row.text} can wrap`);
-    assert.equal(row.clipped, false, `${width}: status ${row.text} is clipped`);
-    assert.equal(row.clippedByEntry, false, `${width}: status ${row.text} escapes its Thread row`);
-    assert.equal(row.clippedByInventory, false, `${width}: status ${row.text} escapes the Thread inventory`);
-    assert.equal(row.overlapsActions, false, `${width}: status ${row.text} overlaps Thread actions`);
-    assert(row.height <= row.lineHeight * 1.5, `${width}: status ${row.text} spans multiple lines`);
-  }
+  assertStatuses(metrics, width);
 }
 
 async function capture(page, width, label, selected) {
@@ -213,7 +228,27 @@ try {
   browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "/home/sam/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell" });
   const page = await browser.newPage({ viewport: { width: 2048, height: 900 } });
   const sockets = [];
-  await page.routeWebSocket("**/ws", socket => { socket.connectToServer(); sockets.push(socket); });
+  await page.routeWebSocket("**/ws", socket => {
+    const server = socket.connectToServer();
+    server.onMessage(message => {
+      const data = JSON.parse(String(message));
+      const injectRunningSummary = value => {
+        if (!value || typeof value !== "object") return;
+        if (value.id === thread.id && "running_turn" in value && "queued_turn_count" in value) {
+          value.running_turn = {
+            id: 9001, requester_thread_id: null, requester_turn_id: null, thread_id: thread.id,
+            owner_message_id: null, agent_message_id: null, state: "running",
+            started_at: new Date().toISOString(), finished_at: null,
+          };
+          value.queued_turn_count = 1;
+        }
+        for (const child of Object.values(value)) if (child && typeof child === "object") injectRunningSummary(child);
+      };
+      injectRunningSummary(data);
+      socket.send(JSON.stringify(data));
+    });
+    sockets.push(socket);
+  });
   page.on("pageerror", error => browserErrors.push({ type: "pageerror", message: error.message }));
   page.on("console", message => { if (message.type() === "error") browserErrors.push({ type: "console", message: message.text() }); });
   await page.addInitScript(({ ownerToken }) => {
@@ -240,7 +275,7 @@ try {
   await page.locator('[data-slot="artifact-preview"]').waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Conversation", exact: true }).click();
 
-  for (const width of [2048, 1440, 1024, 768, 390]) await capture(page, width, "selected", true);
+  for (const width of [2048, 1440, 1024, 768, 390, 320]) await capture(page, width, "selected", true);
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("button", { name: "Thread overview", exact: true }).click();
@@ -286,11 +321,22 @@ try {
   await page.context().setOffline(true);
   for (const socket of sockets) await socket.close({ code: 1001, reason: "responsive offline check" });
   await page.waitForFunction(() => [...document.querySelectorAll('[data-slot="thread-status-primary"]')].some(node => node.textContent?.includes("Last known:")));
-  await page.locator(`[data-thread-entry="tree:${thread.id}"] [data-slot="thread-status-primary"] span`).first().evaluate(node => {
-    node.textContent = "Last known: Working · 1 queued";
-  });
   const nestedOffline = await capture(page, 1440, "nested-offline", false);
   assert(nestedOffline.status.some(row => row.text?.includes("Last known: Working · 1 queued")), "longest offline nested Thread status was not exercised");
+  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.setViewportSize({ width: 320, height: 844 });
+  if (!await drawer.isVisible()) await trigger.click();
+  await drawer.waitFor({ state: "visible" });
+  const nestedStatus = page.locator(`[data-thread-entry="tree:${thread.id}"] [data-slot="thread-status-primary"]`);
+  await nestedStatus.scrollIntoViewIfNeeded();
+  const narrowNestedOffline = await layoutMetrics(page);
+  assert.equal(narrowNestedOffline.viewport.width, 320);
+  assert.equal(narrowNestedOffline.drawerRole, "dialog");
+  assert.equal(narrowNestedOffline.pageOverflow, false, "320: page overflows with nested Thread drawer open");
+  assertStatuses(narrowNestedOffline, 320);
+  assert(narrowNestedOffline.status.some(row => row.text?.includes("Last known: Working · 1 queued")), "320: running and queued offline summary was not exercised");
+  await page.screenshot({ path: join(evidenceDir, "nested-offline-320.png"), fullPage: true });
+  captures.push({ label: "nested-offline", ...narrowNestedOffline });
 
   assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
   await writeFile(join(evidenceDir, "result.json"), `${JSON.stringify({

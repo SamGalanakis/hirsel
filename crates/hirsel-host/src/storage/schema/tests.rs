@@ -98,6 +98,27 @@ async fn unsupported_store_is_rejected_without_modifying_bytes() {
 }
 
 #[tokio::test]
+async fn view_only_store_is_not_fresh_and_remains_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hirsel.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE VIEW unexpected AS SELECT 42 AS retained")
+        .unwrap();
+    drop(conn);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        Storage::open(dir.path())
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("fresh current store")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("hirsel.sqlite-wal").exists());
+}
+
+#[tokio::test]
 async fn explicit_debug_history_reset_changes_store_identity() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();

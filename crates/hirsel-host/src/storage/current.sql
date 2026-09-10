@@ -6,7 +6,9 @@ CREATE TABLE threads (
         description TEXT NOT NULL, instrument TEXT NOT NULL,
         attention TEXT NOT NULL CHECK(attention IN ('quiet','needs_owner')),
         settled_at TEXT, archived_at TEXT, snoozed_until TEXT, read INTEGER NOT NULL,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL, CHECK(parent_thread_id IS NULL OR parent_thread_id != id));
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL,
+        CHECK(parent_thread_id IS NULL OR parent_thread_id != id),
+        CHECK(parent_thread_id IS NULL OR pinned_at IS NULL));
 CREATE INDEX threads_parent ON threads(parent_thread_id,id);
         CREATE TABLE thread_action_receipts (client_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE thread_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,

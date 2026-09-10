@@ -27,23 +27,19 @@ fn validate_existing(conn: &Connection) -> anyhow::Result<()> {
 
 pub(super) fn initialize(conn: &mut Connection) -> anyhow::Result<()> {
     let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let tables: u64 = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type='table' AND substr(name,1,7) != 'sqlite_'",
-        [],
-        |r| r.get(0),
-    )?;
+    let fresh = catalog(conn)?.is_empty();
     anyhow::ensure!(
-        version == SCHEMA_VERSION || (version == 0 && tables == 0),
+        version == SCHEMA_VERSION || (version == 0 && fresh),
         "unsupported Hirsel history schema; back up the store and initialize a fresh current store"
     );
-    if tables != 0 || version != 0 {
+    if !fresh || version != 0 {
         validate_existing(conn)?;
     }
     // Validate schema and identity before any journal/schema writes.
     conn.execute_batch(
         "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;",
     )?;
-    if tables == 0 {
+    if fresh {
         let tx = conn.transaction()?;
         tx.execute_batch(include_str!("current.sql"))?;
         tx.execute(

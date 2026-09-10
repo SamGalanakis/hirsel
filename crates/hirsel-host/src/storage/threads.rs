@@ -14,13 +14,7 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     Ok(Thread {
         id: r.get(0)?,
         parent_thread_id,
-        // Older stores may contain child pins. They have no meaning in the
-        // root inventory; keep their stored data intact and project no pin.
-        pinned_at: if parent_thread_id.is_none() {
-            time(13)?
-        } else {
-            None
-        },
+        pinned_at: time(13)?,
         title: r.get(1)?,
         icon: r.get(14)?,
         showcased_artifact_id: r.get(15)?,
@@ -226,8 +220,8 @@ impl Storage {
         let c = self.conn.lock().await;
         let thread = get(&c, id)?;
         anyhow::ensure!(
-            !pinned || thread.parent_thread_id.is_none(),
-            "only top-level Threads can be pinned"
+            thread.parent_thread_id.is_none(),
+            "only top-level Threads can be pinned or unpinned"
         );
         c.execute(
             "UPDATE threads SET pinned_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",

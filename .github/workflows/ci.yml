@@ -91,6 +91,7 @@ jobs:
               - 'crates/hirsel-client-*/**'
               - 'crates/hirsel-proto/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
 
       - name: Set up JDK 21
         if: steps.changes.outputs.android == 'true'

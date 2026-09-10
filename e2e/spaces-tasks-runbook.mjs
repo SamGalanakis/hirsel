@@ -400,7 +400,7 @@ try {
   assert.equal(converted.detail.thread.id, conversionId, "round-trip conversion changed identity");
 
   await selectThread(page, rootSpace.id);
-  failures.push(await invalidMutation(page, frames, url, token, rootSpace.id, "Change to Task", /Space child|contains.*Space/i, storeSnapshot()));
+  failures.push(await invalidMutation(page, frames, url, token, rootSpace.id, "Change to Task", /cannot contain Spaces|Space child|contains.*Space/i, storeSnapshot()));
   checkpoints.invalidSpace = await capture(page, url, token, "30-invalid-space-to-task", rootSpace.id);
   await page.getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
 

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 mod provider_store;
 
+pub(crate) use provider_store::non_empty;
 use provider_store::seed_bootstrap;
 pub use provider_store::{EnvBootstrap, OPENAI_COMPATIBLE_KIND, StoredProvider};
 

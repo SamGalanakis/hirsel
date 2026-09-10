@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{io::Write, process::Stdio};
 
 use futures_util::StreamExt;
 use serde_json::json;
@@ -330,23 +330,82 @@ async fn fake_driver_replays_instant_terminal_to_late_subscriber() {
 
 #[tokio::test]
 async fn drains_spawned_cli_stderr_without_deadlock() {
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg("for _ in $(seq 1 20000); do printf 1234567890 >&2; done")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut blocked_child = stderr_writer_fixture();
+    let blocked_stderr = blocked_child.stderr.take().unwrap();
+
+    match timeout(Duration::from_millis(100), blocked_child.wait()).await {
+        Err(_) => kill_and_reap(&mut blocked_child).await,
+        Ok(Ok(status)) => panic!(
+            "the fixture must exceed pipe capacity and block without a stderr reader, but exited with {status}"
+        ),
+        Ok(Err(error)) => {
+            kill_and_reap(&mut blocked_child).await;
+            panic!("failed to wait for undrained stderr fixture: {error}");
+        }
+    }
+    drop(blocked_stderr);
+
+    let mut child = stderr_writer_fixture();
     let stderr = child.stderr.take().unwrap();
     let drain = tokio::spawn(drain_stderr(stderr));
 
-    let status = timeout(Duration::from_secs(2), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
+    let status = match timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            kill_and_reap(&mut child).await;
+            drain.await.unwrap();
+            panic!("failed to wait for stderr fixture: {error}");
+        }
+        Err(_) => {
+            kill_and_reap(&mut child).await;
+            drain.await.unwrap();
+            panic!("stderr drain did not let the fixture exit within two seconds");
+        }
+    };
 
-    assert!(status.success());
     drain.await.unwrap();
+    assert!(status.success());
+}
+
+fn stderr_writer_fixture() -> tokio::process::Child {
+    Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "tests::write_stderr_fixture",
+            "--nocapture",
+        ])
+        .env("HIRSEL_STDERR_FIXTURE_BYTES", (2 * 1024 * 1024).to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+}
+
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    timeout(Duration::from_secs(1), child.wait())
+        .await
+        .expect("owned stderr fixture did not reap after kill")
+        .expect("failed to reap owned stderr fixture");
+}
+
+#[test]
+#[ignore = "spawned as a hermetic stderr writer fixture"]
+fn write_stderr_fixture() {
+    let byte_count = std::env::var("HIRSEL_STDERR_FIXTURE_BYTES")
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let chunk = [b'x'; 64 * 1024];
+    let mut stderr = std::io::stderr().lock();
+    for _ in 0..byte_count / chunk.len() {
+        stderr.write_all(&chunk).unwrap();
+    }
+    stderr
+        .write_all(&chunk[..byte_count % chunk.len()])
+        .unwrap();
 }
 
 #[tokio::test]

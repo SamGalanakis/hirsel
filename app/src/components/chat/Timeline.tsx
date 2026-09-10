@@ -122,7 +122,7 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
   const primaryPayload = () => {
     const sections: string[] = [];
     const presentation = result();
-    if (presentation !== null) sections.push(presentation.primary);
+    if (presentation !== null) sections.push(`${presentation.primary}${done()?.resultTruncated && presentation.raw === null ? "\n… result truncated" : ""}`);
     else if (done()?.summary) sections.push(`Result\n${done()!.summary}`);
     if (props.item.input !== null) sections.push(`Input\n${props.item.input}${props.item.inputTruncated ? "\n… truncated" : ""}`);
     return sections.join("\n\n") || detail() || "";

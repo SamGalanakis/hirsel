@@ -179,6 +179,21 @@ describe("Timeline component", () => {
     expect(payload.textContent).toContain("… result truncated");
   });
 
+  it.each([
+    ["artifacts_create", "partial artifact output"],
+    ["shell_run", '{"outcome":'],
+    ["shell_run", '{"outcome":{"payload":null}}'],
+    ["shell_run", '{"outcome":{"payload":{}}}'],
+  ])("marks truncated %s fallback results", (name, text) => {
+    const { container } = render(() => <Timeline events={evs(
+      { kind: "tool_start", id: "partial", name, summary: null, input: null },
+      { kind: "tool_done", id: "partial", name, ok: true, summary: null, result: { text, truncated: true } },
+    )} />);
+    const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    fireEvent.click(within(row).getByRole("button"));
+    expect(row.querySelector('[data-slot="tool-result"]')?.textContent).toContain(`${text}\n… result truncated`);
+  });
+
   it("keeps completed shell rows distinguishable by their bounded start summaries", () => {
     const { container } = render(() => <Timeline events={evs(
       { kind: "tool_start", id: "first", name: "shell_run", summary: "cmd: printf first", input: null },

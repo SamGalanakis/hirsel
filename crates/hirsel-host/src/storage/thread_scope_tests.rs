@@ -2,11 +2,19 @@ use super::*;
 use hirsel_proto::{ThreadAttention, ThreadTurnState};
 use serde_json::json;
 async fn thread(s: &Storage, key: &str, parent: Option<u64>) -> u64 {
-    s.create_thread(key, key, "", &json!({}), ThreadAttention::Quiet, parent)
-        .await
-        .unwrap()
-        .0
-        .id
+    s.create_thread(
+        key,
+        key,
+        "",
+        &json!({}),
+        ThreadAttention::Quiet,
+        hirsel_proto::ThreadKind::Task,
+        parent,
+    )
+    .await
+    .unwrap()
+    .0
+    .id
 }
 async fn caller(s: &Storage, id: u64) -> ThreadCaller {
     let turn = s.start_thread_turn(id, None).await.unwrap();
@@ -323,6 +331,7 @@ async fn scoped_artifact_receipts_hide_peer_backlinks_and_cancelled_writes_have_
             &ThreadMutation::Create {
                 icon: None,
                 client_id: "late".into(),
+                kind: hirsel_proto::ThreadKind::Task,
                 title: "late".into(),
                 parent: ThreadRef::default(),
                 description: String::new(),

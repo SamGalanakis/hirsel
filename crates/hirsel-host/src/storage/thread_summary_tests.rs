@@ -15,6 +15,7 @@ async fn work(storage: &Storage) -> hirsel_proto::Thread {
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -220,6 +221,7 @@ async fn deleted_message_recency_recedes_to_remaining_facts_and_stays_thread_loc
                     "",
                     &json!({}),
                     ThreadAttention::Quiet,
+                    hirsel_proto::ThreadKind::Task,
                     None,
                 )
                 .await

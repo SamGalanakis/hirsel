@@ -40,6 +40,7 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
             "",
             &Value::Null,
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -223,6 +224,7 @@ async fn generated_action_labels_are_not_skill_commands() {
             "",
             &instrument,
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -245,7 +247,15 @@ async fn generated_action_labels_are_not_skill_commands() {
 async fn request(state: &crate::AppState, key: &str) -> OwnerTurn {
     let (thread, _) = state
         .storage
-        .create_thread(key, key, "", &Value::Null, ThreadAttention::Quiet, None)
+        .create_thread(
+            key,
+            key,
+            "",
+            &Value::Null,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
         .await
         .unwrap();
     let (_message, _) = state
@@ -1057,6 +1067,7 @@ async fn artifact_reference_identity_reaches_the_next_turn_context() {
             "",
             &Value::Null,
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -1110,6 +1121,7 @@ pub(super) async fn runtime_lane(
                     "",
                     &Value::Null,
                     ThreadAttention::Quiet,
+                    hirsel_proto::ThreadKind::Task,
                     None,
                 )
                 .await

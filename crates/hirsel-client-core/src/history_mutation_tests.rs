@@ -3,7 +3,7 @@ use crate::ConnectionState;
 
 fn thread() -> hirsel_proto::Thread {
     serde_json::from_value(serde_json::json!({
-        "id":5,"parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":null,
+        "id":5,"kind":"space","parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":null,
         "showcased_artifact_id":null,"description":"","instrument":null,"attention":"quiet",
         "settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,
         "created_at":"2026-09-10T10:00:00Z","updated_at":"2026-09-10T10:00:00Z","revision":1,
@@ -34,7 +34,12 @@ fn delayed_mutation_callbacks_keep_the_history_the_ui_displayed() {
     );
     assert!(
         client
-            .create_thread("history-a".into(), "Stale child".into(), Some(5))
+            .create_thread(
+                "history-a".into(),
+                "Stale child".into(),
+                hirsel_proto::ThreadKind::Task,
+                Some(5),
+            )
             .is_none()
     );
     assert!(
@@ -64,7 +69,12 @@ fn delayed_mutation_callbacks_keep_the_history_the_ui_displayed() {
     );
     assert!(
         client
-            .create_thread("history-b".into(), "Current child".into(), Some(5))
+            .create_thread(
+                "history-b".into(),
+                "Current child".into(),
+                hirsel_proto::ThreadKind::Task,
+                Some(5),
+            )
             .is_some()
     );
     assert!(

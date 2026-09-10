@@ -3,7 +3,7 @@ use super::{
     chat::{author_to_str, chat_message_from_row, get_chat_message, load_attachments_for_messages},
     threads,
 };
-use hirsel_proto::{ChatAuthor, ChatMessage, ThreadDetail, ToolCallSummary};
+use hirsel_proto::{ChatAuthor, ChatMessage, ThreadDetail, ThreadKind, ToolCallSummary};
 use rusqlite::{OptionalExtension, params};
 impl Storage {
     #[allow(clippy::too_many_arguments)]
@@ -141,30 +141,52 @@ impl Storage {
             threads::get(&tx, *mention)
                 .map_err(|error| anyhow::anyhow!("unknown mentioned Thread #{mention}: {error}"))?;
         }
-        if let Some(action) = action {
-            let expected = action
-                .get("thread")
-                .and_then(|t| t.get("revision"))
-                .and_then(serde_json::Value::as_u64);
+        let action_settles = if let Some(action) = action {
+            let context: crate::lash_runtime::ThreadActionContext =
+                serde_json::from_value(action.clone())?;
             let current = threads::get(&tx, thread_id)?;
             anyhow::ensure!(
-                expected == Some(current.revision),
+                context.thread.id == thread_id && context.thread.revision == current.revision,
                 "instrument changed; reload the thread before submitting this action"
             );
             anyhow::ensure!(
-                current.settled_at.is_none() && current.archived_at.is_none(),
+                current.settled_at.is_none()
+                    && current.archived_at.is_none()
+                    && current
+                        .snoozed_until
+                        .is_none_or(|until| until <= chrono::Utc::now()),
                 "thread is no longer active"
             );
-        }
+            let validated = crate::thread_instrument::validate_action(
+                &current.instrument,
+                &context.action,
+                &context.data,
+            )?;
+            anyhow::ensure!(
+                current.kind == ThreadKind::Task || !validated.settles,
+                "Spaces cannot be completed"
+            );
+            validated.settles
+        } else {
+            false
+        };
         if let Some(action) = action {
             tx.execute(
                 "INSERT INTO thread_action_receipts(client_id,payload) VALUES(?1,?2)",
                 params![client_id, serde_json::to_string(action)?],
             )?;
-            tx.execute(
-                "UPDATE threads SET revision=revision+1,updated_at=?2 WHERE id=?1",
-                params![thread_id, chrono::Utc::now().to_rfc3339()],
-            )?;
+            let now = chrono::Utc::now().to_rfc3339();
+            if action_settles {
+                tx.execute(
+                    "UPDATE threads SET settled_at=?2,revision=revision+1,updated_at=?2 WHERE id=?1",
+                    params![thread_id, now],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE threads SET revision=revision+1,updated_at=?2 WHERE id=?1",
+                    params![thread_id, now],
+                )?;
+            }
         }
         for artifact_id in &artifact_ids {
             let exists: bool = tx.query_row(

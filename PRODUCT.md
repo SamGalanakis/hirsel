@@ -1,31 +1,31 @@
 # Hirsel
 
-Hirsel coordinates work through durable **Threads**. The Owner usually talks to a project conversation, which is an ordinary Thread. Its agent can delegate focused work to child Threads. Each Thread has its own conversation, generated instrument, execution turns and factual activity. Humans can browse the whole tree.
+Hirsel coordinates work through conversational **Spaces** and **Tasks**. A Space is an ongoing place for context and organization; a Task is a finishable outcome. Both share one durable Thread identity, conversation, generated instrument, execution turns and factual activity. Humans can browse the whole tree.
 
 ## Work and conversation
 
-A Thread is an ongoing subject or unit of work. It has a stable numeric identity, title, description and optional instrument. It exists and appears in the inventory before any message, decision or execution is required. “Buy groceries” creates a Thread; the shopping list, store decision and progress all stay there.
+Each Space or Task has a stable numeric identity, title, description and optional instrument. It appears in the inventory before any message, decision or execution is required. “Household” can be a Space containing a “Buy groceries” Task; the shopping list, store decision and progress stay in that Task’s conversation. Thread names their common identity, not a third kind.
 
 The composer sends to the explicitly selected Thread. Messages belong to exactly one Thread. There is no reserved coordinator ID, default recipient, Project or Namespace entity. Every actual ID, including a retained ID 0, is an ordinary Thread. New histories start empty. A valid route or saved selection from the same history restores context; otherwise the Owner chooses or creates a Thread before composing.
 
-Each Thread has an immutable nullable parent. Only top-level Threads can be pinned; pinning keeps that root at the top of the list, appearing once with its children beneath it. Pinning does not change parentage, activity, read state or lifecycle. Nested conversations keep focused work under the conversation that requested it; a parent can continue while children run.
+Both kinds can exist at the top level. A Space may contain Spaces or Tasks; a Task may contain Tasks only. Each Thread has an immutable nullable parent. Only top-level Threads can be pinned; pinning keeps that root at the top of the list, appearing once with its children beneath it. Pinning does not change parentage, activity, read state or lifecycle. Nested conversations keep focused work under the conversation that requested it; a parent can continue while children run.
 
 Each Thread displays a small avatar. The Owner can choose an emoji or symbol through **Change icon** in the Thread menu, or restore the generated default. Agents can set `icon` when creating or updating an accessible Thread; omitting it preserves the current choice and `null` restores the default. Icon edits use revision checks and do not start execution or mark the conversation read.
 
 ## Independent state
 
 - **Pinning:** top-level Threads stay at the top of the list, ordered by pin time and independent of lifecycle.
-- **Settlement:** open or explicitly settled by the Owner. Reopening preserves history and identity.
+- **Task completion:** open or explicitly done by the Owner through **Mark done** / **Reopen**. Spaces have no completion state. Completing a child never completes its parent.
 - **Attention:** quiet or needs Owner input. It can change repeatedly during a Thread's lifetime.
 - **Visibility:** archived, snoozed or visible. Hiding a Thread never silently settles it.
 - **Read state:** seen or unseen; reading never completes work.
-- **Execution:** queued, running, completed, failed, cancelled or interrupted turns. Completing a turn never settles the Thread.
+- **Execution:** queued, running, completed, failed, cancelled or interrupted turns. Completing a turn never completes a Task. Idle Spaces do not retain a successful-turn completion badge; current execution, queues and needs-input remain visible.
 
 Thread inventory membership does not depend on whether content is information, a question or a digest. There is no separate Event/Ping work inventory.
 
 ## Instruments
 
-The Agent composes constrained JSON UI on an existing Thread. Updates preserve identity and conversation. A generated `continue` action runs the next stage in that Thread; a control explicitly marked to complete settles it. Reading, ordinary replies and progress are lifecycle-neutral. Only currently displayed actions are accepted, with revision checks preventing stale instruments from silently acting on newer state.
+The Agent composes constrained JSON UI on an existing Thread. Updates preserve identity and conversation. A generated `continue` action runs the next stage in that Thread; a control explicitly marked to complete is valid only on a Task and requires an Owner action. Reading, ordinary replies and progress are lifecycle-neutral. Only currently displayed actions are accepted, with revision checks preventing stale instruments from silently acting on newer state.
 
 ## Agent and processes
 
@@ -39,7 +39,7 @@ Lash, Claude and Codex remain supported execution choices. CLI processes and mon
 
 Web and native clients share the same Thread contract. The inventory, focused conversation, instrument and streaming activity use durable IDs. Reconnection obtains persisted Thread state, messages, turns and activity. Live frames carry owning Thread and turn identities so delayed activity cannot appear inside an unrelated conversation.
 
-[ADR 0016](docs/adr/0016-threads-own-conversation.md) records the conversation ownership cutover. Nested Threads extend that ownership with explicit parentage, scoped delegation and upward reports.
+[ADR 0016](docs/adr/0016-threads-own-conversation.md) records conversation ownership; [ADR 0018](docs/adr/0018-spaces-and-tasks.md) refines it with Spaces and Tasks. Kind is persisted and enforced by the Host for all clients and tools. The Owner can change kind without changing identity or conversation when the existing parent and immediate children permit it. A done Task must be reopened before becoming a Space. Conversion never moves or changes children, and agents cannot convert kinds or mark work done.
 
 ## Artifacts
 

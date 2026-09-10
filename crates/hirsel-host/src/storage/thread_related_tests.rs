@@ -300,6 +300,7 @@ async fn related_thread_targets_are_typed_scoped_and_never_grant_foreign_context
             &ThreadMutation::Create {
                 icon: None,
                 client_id: "child".into(),
+                kind: hirsel_proto::ThreadKind::Task,
                 title: "Child".into(),
                 parent: ThreadRef::default(),
                 description: String::new(),

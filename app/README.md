@@ -1,10 +1,10 @@
 # Hirsel web app
 
-SolidJS client for Threads: durable subjects with their own messages, turns, activity, and generated instruments. One globally aware Hirsel receives messages addressed to the focused Thread. Processes, Settings, and Canvas remain temporary utilities.
+SolidJS client for Spaces and Tasks: durable subjects with their own messages, turns, activity, and generated instruments. Spaces organize work; Tasks add explicit completion. One globally aware Hirsel receives messages addressed to the focused Thread. Processes, Settings, and Canvas remain temporary utilities.
 
 ## Development
 
-The in-memory mock seeds an ordinary groceries Thread. It accepts any non-empty token by default; set `MOCK_TOKEN` only for an explicit rejection test.
+The in-memory mock seeds an ordinary Home Space. It accepts any non-empty token by default; set `MOCK_TOKEN` only for an explicit rejection test.
 
 ```sh
 npm install
@@ -29,7 +29,7 @@ continues to require the exact configured token.
 `VITE_WS_URL=wss://your-host/ws` remains available for an explicit direct
 remote endpoint, but is not needed for the normal forwarded development path.
 
-The mock implements explicit root/child Thread creation, pinning, owned messages with explicit existing-artifact references, deterministic turns, explicit settlement/reopening, attachments, and same-token reconnect. It preserves client IDs for idempotent retries. `MOCK_SEED=none` starts with no Threads. Generated instrument continuation is verified against the real scripted Host.
+The mock implements explicit Space/Task creation and conversion, hierarchy validation, pinning, owned messages with explicit existing-artifact references, deterministic turns, Task-only settlement/reopening, attachments, and same-token reconnect. It preserves client IDs for idempotent retries. `MOCK_SEED=none` starts with no Threads. Generated instrument continuation is verified against the real scripted Host.
 
 ## Verification
 

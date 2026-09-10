@@ -5,11 +5,19 @@ use hirsel_proto::ThreadAttention;
 use serde_json::json;
 
 async fn thread(s: &Storage, key: &str, parent: Option<u64>) -> u64 {
-    s.create_thread(key, key, "", &Value::Null, ThreadAttention::Quiet, parent)
-        .await
-        .unwrap()
-        .0
-        .id
+    s.create_thread(
+        key,
+        key,
+        "",
+        &Value::Null,
+        ThreadAttention::Quiet,
+        hirsel_proto::ThreadKind::Task,
+        parent,
+    )
+    .await
+    .unwrap()
+    .0
+    .id
 }
 async fn caller(s: &Storage, id: u64) -> ThreadCaller {
     let turn = s.start_thread_turn(id, None).await.unwrap();

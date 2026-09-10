@@ -1,6 +1,6 @@
 use super::{Storage, common::parse_ts};
 use chrono::{DateTime, Utc};
-use hirsel_proto::{Thread, ThreadAttention};
+use hirsel_proto::{Thread, ThreadAttention, ThreadKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +24,7 @@ impl ThreadPublication {
     }
 }
 
-pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,showcased_artifact_id";
+pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,showcased_artifact_id,kind";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     let parent_thread_id = r.get::<_, Option<u64>>(12)?;
     let time = |i| -> rusqlite::Result<Option<DateTime<Utc>>> {
@@ -34,6 +34,21 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     };
     Ok(Thread {
         id: r.get(0)?,
+        kind: match r.get::<_, String>(16)?.as_str() {
+            "space" => ThreadKind::Space,
+            "task" => ThreadKind::Task,
+            kind => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    16,
+                    rusqlite::types::Type::Text,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid Thread kind `{kind}`"),
+                    )
+                    .into(),
+                ));
+            }
+        },
         parent_thread_id,
         pinned_at: time(13)?,
         title: r.get(1)?,
@@ -85,6 +100,12 @@ pub(super) fn attention(value: ThreadAttention) -> &'static str {
         ThreadAttention::NeedsOwner => "needs_owner",
     }
 }
+pub(super) fn kind_name(value: ThreadKind) -> &'static str {
+    match value {
+        ThreadKind::Space => "space",
+        ThreadKind::Task => "task",
+    }
+}
 pub(super) fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
     // An empty instrument is valid when ordinary work has no controls yet.
     if instrument.is_null()
@@ -106,6 +127,7 @@ pub(super) fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Res
                     !matches!(
                         action,
                         "set_icon"
+                            | "set_kind"
                             | "set_showcase"
                             | "settle"
                             | "reopen"
@@ -128,6 +150,7 @@ pub(super) fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Res
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_in_transaction(
     tx: &Transaction<'_>,
     client_id: &str,
@@ -135,6 +158,7 @@ fn create_in_transaction(
     description: &str,
     instrument: &serde_json::Value,
     needs: ThreadAttention,
+    kind: ThreadKind,
     parent_thread_id: Option<u64>,
 ) -> anyhow::Result<(Thread, bool)> {
     if let Some(id) = tx
@@ -150,13 +174,14 @@ fn create_in_transaction(
             thread.parent_thread_id == parent_thread_id,
             "creation key belongs to another parent"
         );
+        anyhow::ensure!(thread.kind == kind, "creation key belongs to another kind");
         return Ok((thread, false));
     }
     if let Some(parent) = parent_thread_id {
         get(tx, parent)?;
     }
     let now = Utc::now().to_rfc3339();
-    tx.execute("INSERT INTO threads(client_id,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,0,?6,?6,1,?7)",params![client_id,title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now,parent_thread_id])?;
+    tx.execute("INSERT INTO threads(client_id,kind,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,1,?8)",params![client_id,kind_name(kind),title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now,parent_thread_id])?;
     Ok((get(tx, tx.last_insert_rowid() as u64)?, true))
 }
 
@@ -219,6 +244,7 @@ impl Storage {
         super::thread_scope::validate_history(&c, expected_history)?;
         get(&c, id)
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_thread(
         &self,
         client_id: &str,
@@ -226,6 +252,7 @@ impl Storage {
         description: &str,
         instrument: &serde_json::Value,
         needs: ThreadAttention,
+        kind: ThreadKind,
         parent_thread_id: Option<u64>,
     ) -> anyhow::Result<(Thread, bool)> {
         validate_instrument(instrument)?;
@@ -240,6 +267,7 @@ impl Storage {
             description,
             instrument,
             needs,
+            kind,
             parent_thread_id,
         )?;
         tx.commit()?;
@@ -254,6 +282,7 @@ impl Storage {
         description: &str,
         instrument: &serde_json::Value,
         needs: ThreadAttention,
+        kind: ThreadKind,
         parent_thread_id: Option<u64>,
     ) -> anyhow::Result<(Thread, bool)> {
         validate_instrument(instrument)?;
@@ -269,6 +298,7 @@ impl Storage {
             description,
             instrument,
             needs,
+            kind,
             parent_thread_id,
         )?;
         tx.commit()?;
@@ -333,13 +363,22 @@ impl Storage {
         id: u64,
         settled: bool,
     ) -> anyhow::Result<Thread> {
-        self.set_addressed_thread_field(
-            expected_history,
-            id,
-            "settled_at",
-            settled.then(|| Utc::now().to_rfc3339()),
-        )
-        .await
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, expected_history)?;
+        let thread = get(&c, id)?;
+        anyhow::ensure!(
+            thread.kind == ThreadKind::Task,
+            "only Tasks can be completed or reopened"
+        );
+        c.execute(
+            "UPDATE threads SET settled_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                settled.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        get(&c, id)
     }
     pub(crate) async fn archive_addressed_thread(
         &self,
@@ -369,9 +408,70 @@ impl Storage {
         )
         .await
     }
-    pub async fn settle_thread(&self, id: u64, settled: bool) -> anyhow::Result<Thread> {
-        self.set_thread_field(id, "settled_at", settled.then(|| Utc::now().to_rfc3339()))
-            .await
+    #[cfg(test)]
+    pub(crate) async fn settle_thread(&self, id: u64, settled: bool) -> anyhow::Result<Thread> {
+        let c = self.conn.lock().await;
+        let thread = get(&c, id)?;
+        anyhow::ensure!(
+            thread.kind == ThreadKind::Task,
+            "only Tasks can be completed or reopened"
+        );
+        c.execute(
+            "UPDATE threads SET settled_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                settled.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        get(&c, id)
+    }
+
+    pub(crate) async fn set_addressed_thread_kind(
+        &self,
+        expected_history: &str,
+        id: u64,
+        new_kind: ThreadKind,
+        expected_revision: u64,
+    ) -> anyhow::Result<Thread> {
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        let current = get(&tx, id)?;
+        anyhow::ensure!(
+            current.revision == expected_revision,
+            "Thread changed; reload it before changing its kind"
+        );
+        if current.kind == new_kind {
+            tx.commit()?;
+            return Ok(current);
+        }
+        if new_kind == ThreadKind::Space {
+            anyhow::ensure!(
+                current.settled_at.is_none(),
+                "reopen a settled Task before converting it to a Space"
+            );
+            if let Some(parent_id) = current.parent_thread_id {
+                anyhow::ensure!(
+                    get(&tx, parent_id)?.kind == ThreadKind::Space,
+                    "a Task parent can only contain Tasks"
+                );
+            }
+        } else {
+            let has_space_child: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE parent_thread_id=?1 AND kind='space')",
+                [id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(!has_space_child, "a Task cannot contain Spaces");
+        }
+        tx.execute(
+            "UPDATE threads SET kind=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![id, kind_name(new_kind), Utc::now().to_rfc3339()],
+        )?;
+        let updated = get(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
     pub async fn archive_thread(&self, id: u64, archived: bool) -> anyhow::Result<Thread> {
         self.set_thread_field(id, "archived_at", archived.then(|| Utc::now().to_rfc3339()))

@@ -24,3 +24,7 @@ export function threadStatus(thread: Thread, now: number, connected: boolean) {
     age: state === "running" || state === "queued" ? null : age,
     timeLabel: state === "idle" ? "Last conversation activity" : "Turn finished", stale: !connected };
 }
+export function showThreadTurnStatus(thread: Thread, state: string, compact = false): boolean {
+  if (compact && state === "idle") return false;
+  return !(thread.kind === "space" && state === "completed");
+}

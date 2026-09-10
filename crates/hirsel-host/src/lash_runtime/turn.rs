@@ -72,7 +72,7 @@ pub(super) fn owner_turn_text(turn: &OwnerTurn, storage: &crate::storage::Storag
             )
             .unwrap_or_default(),
         );
-        text.push_str("\nUse threads.update to advance this same Thread's instrument or attention. Preserve identity. Continue is not settlement; only the Owner's explicit settle/complete action settles it.");
+        text.push_str("\nUse threads.update to advance this same Thread's instrument or attention. Preserve identity. Continue is not Task completion; only the Owner can explicitly complete a Task, and Spaces remain ongoing.");
     }
 
     text

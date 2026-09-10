@@ -123,6 +123,7 @@ impl TriageRunner for FakeRunner {
 
 fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
     hirsel_proto::Thread {
+        kind: hirsel_proto::ThreadKind::Task,
         icon: None,
         showcased_artifact_id: None,
         parent_thread_id: None,
@@ -185,6 +186,7 @@ async fn test_state(dir: &std::path::Path) -> crate::AppState {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

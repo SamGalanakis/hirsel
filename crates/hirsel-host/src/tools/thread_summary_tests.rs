@@ -28,6 +28,7 @@ async fn unopened_thread_receives_each_execution_transition_at_the_same_revision
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -98,6 +99,7 @@ async fn message_and_activity_publish_recency_without_changing_thread_lifecycle(
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -147,6 +149,7 @@ async fn coordinator_chat_and_scheduled_digest_refresh_inventory() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -193,6 +196,7 @@ async fn stale_pre_reset_thread_cannot_be_published_as_the_reused_current_id() {
             "Old private body",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -224,6 +228,7 @@ async fn stale_pre_reset_thread_cannot_be_published_as_the_reused_current_id() {
             "Current body",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

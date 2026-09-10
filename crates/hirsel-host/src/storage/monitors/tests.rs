@@ -17,6 +17,7 @@ async fn monitors_are_persisted_and_project_to_process_info() {
                     "",
                     &serde_json::Value::Null,
                     hirsel_proto::ThreadAttention::Quiet,
+                    hirsel_proto::ThreadKind::Task,
                     None,
                 )
                 .await
@@ -70,6 +71,7 @@ async fn current_schema_enforces_condition_shape_and_reads_validate_regex_syntax
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

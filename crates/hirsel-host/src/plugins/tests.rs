@@ -618,6 +618,7 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -650,11 +651,16 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
     }
     let thread_id = ctx
         .threads()
-        .create(NewThread::new("Buy groceries", "Shopping list"))
+        .create(NewThread::new(
+            hirsel_proto::ThreadKind::Task,
+            "Buy groceries",
+            "Shopping list",
+        ))
         .await
         .unwrap();
     let thread = storage.thread(thread_id).await.unwrap().unwrap();
     assert_eq!(thread.title, "Buy groceries");
+    assert_eq!(thread.kind, hirsel_proto::ThreadKind::Task);
     assert_eq!(thread.attention, hirsel_proto::ThreadAttention::Quiet);
     assert!(matches!(
         client.recv().await.unwrap(),
@@ -669,26 +675,6 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
         .await
         .unwrap();
     storage.mark_thread_read(thread_id).await.unwrap();
-    assert!(
-        storage
-            .thread(thread_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .settled_at
-            .is_none()
-    );
-    ctx.threads().settle(thread_id, true).await.unwrap();
-    assert!(
-        storage
-            .thread(thread_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .settled_at
-            .is_some()
-    );
-    ctx.threads().settle(thread_id, false).await.unwrap();
     assert!(
         storage
             .thread(thread_id)
@@ -987,7 +973,11 @@ async fn agent_plugin_resources_are_thread_scoped_and_old_callbacks_fail_after_r
     assert_eq!(peer.kv().get("secret").await.unwrap(), None);
     let child = own
         .threads()
-        .create(NewThread::new("Child", "Scoped plugin work"))
+        .create(NewThread::new(
+            hirsel_proto::ThreadKind::Task,
+            "Child",
+            "Scoped plugin work",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -1009,7 +999,6 @@ async fn agent_plugin_resources_are_thread_scoped_and_old_callbacks_fail_after_r
             .await
             .is_err()
     );
-    assert!(own.threads().settle(b.thread_id, true).await.is_err());
     assert!(
         storage
             .thread(b.thread_id)
@@ -1028,11 +1017,14 @@ async fn agent_plugin_resources_are_thread_scoped_and_old_callbacks_fail_after_r
     assert!(own.kv().get("secret").await.is_err());
     assert!(
         own.threads()
-            .create(NewThread::new("Late", "Must not appear"))
+            .create(NewThread::new(
+                hirsel_proto::ThreadKind::Task,
+                "Late",
+                "Must not appear",
+            ))
             .await
             .is_err()
     );
-    assert!(own.threads().settle(a.thread_id, true).await.is_err());
     assert!(fresh.kv().entries().await.unwrap().is_empty());
     fresh.kv().set("fresh", json!(true)).await.unwrap();
     assert_eq!(storage.thread_snapshot().await.unwrap().len(), 1);

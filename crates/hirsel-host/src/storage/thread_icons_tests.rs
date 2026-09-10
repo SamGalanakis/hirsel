@@ -46,6 +46,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
             "",
             &Value::Null,
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -70,7 +71,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     let created = tools
         .execute(
             "threads_create",
-            &json!({"client_id":"child","title":"Research","icon":"🔬"}),
+            &json!({"client_id":"child","kind":"task","title":"Research","icon":"🔬"}),
         )
         .await
         .unwrap();
@@ -79,7 +80,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     let replayed = tools
         .execute(
             "threads_create",
-            &json!({"client_id":"child","title":"Research","icon":"🔬"}),
+            &json!({"client_id":"child","kind":"task","title":"Research","icon":"🔬"}),
         )
         .await
         .unwrap();
@@ -212,7 +213,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
             tools
                 .execute(
                     "threads_create",
-                    &json!({"client_id":"bad","title":"Bad","icon":icon})
+                    &json!({"client_id":"bad","kind":"task","title":"Bad","icon":icon})
                 )
                 .await
                 .is_err()

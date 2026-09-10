@@ -164,6 +164,7 @@ impl Storage {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Space,
                 None,
             )
             .await

@@ -15,7 +15,7 @@ describe("thread transport projection", () => {
     flush(() => setHistoryId("replacement-history"));
 
     expect(() => sendThreadMessage(capturedHistory, 1, "stale", "send", [], [], [])).toThrow("History changed");
-    await expect(createThread(capturedHistory, "Stale child", 1)).rejects.toThrow("History changed");
+    await expect(createThread(capturedHistory, "Stale child", "task", 1)).rejects.toThrow("History changed");
     flush(() => threadAction(capturedHistory, 1, "archive"));
 
     expect(sent).toEqual([]);
@@ -23,9 +23,10 @@ describe("thread transport projection", () => {
     expect(threadState.error?.detail).toContain("History changed");
   });
   it("creates a visible thread before any message and accepts its duplicate broadcast once", async () => {
-    const promise = createThread("test-history", "Buy groceries", null);
+    const promise = createThread("test-history", "Buy groceries", "task", null);
     const frame = sent[0];
     if (frame.type !== "create_thread") throw new Error("wrong command");
+    expect(frame).toMatchObject({ title: "Buy groceries", kind: "task", parent_thread_id: null, history_id: "test-history" });
     flush(() => handleThreadMessage({ type: "thread_created", client_id: frame.client_id, thread: makeThread() }));
     await expect(promise).resolves.toMatchObject({ id: 1 });
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread() }));

@@ -1,6 +1,6 @@
 //! Historical instrument context captured when an Owner action is accepted.
 use chrono::{DateTime, Utc};
-use hirsel_proto::{Thread, ThreadAttention};
+use hirsel_proto::{Thread, ThreadAttention, ThreadKind};
 use serde_json::Value;
 
 /// Persisted requests retain the accepted instrument and lifecycle facts.
@@ -9,6 +9,7 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct ThreadActionSnapshot {
     pub id: u64,
+    pub kind: ThreadKind,
     pub title: String,
     pub description: String,
     pub instrument: Value,
@@ -26,6 +27,7 @@ impl From<Thread> for ThreadActionSnapshot {
     fn from(thread: Thread) -> Self {
         Self {
             id: thread.id,
+            kind: thread.kind,
             title: thread.title,
             description: thread.description,
             instrument: thread.instrument,
@@ -48,7 +50,7 @@ mod tests {
 
     fn historical_thread() -> Value {
         json!({
-            "id": 5, "title": "Accepted title", "description": "Accepted description",
+            "id": 5, "kind": "task", "title": "Accepted title", "description": "Accepted description",
             "instrument": {"type": "button", "label": "Advance", "action": "advance"},
             "attention": "needs_owner", "settled_at": null,
             "archived_at": null, "snoozed_until": "2026-09-09T09:00:00Z",

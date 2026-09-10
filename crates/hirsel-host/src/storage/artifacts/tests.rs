@@ -54,6 +54,7 @@ async fn explicit_artifact_is_atomic_replay_safe_and_globally_referenced() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

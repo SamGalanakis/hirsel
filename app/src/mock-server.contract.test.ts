@@ -117,7 +117,7 @@ describe("dev mock Thread contract", () => {
     });
     let connection = await hello(port);
     expect(connection.frame.threads).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 1, title: "Buy groceries", attention: "quiet", settled_at: null }),
+      expect.objectContaining({ id: 1, kind: "space", title: "Home", attention: "quiet", settled_at: null }),
     ]));
     const historyId = connection.frame.history_id as string;
     const addressed = (command: Record<string, unknown>) => ({ history_id: historyId, ...command });
@@ -131,7 +131,7 @@ describe("dev mock Thread contract", () => {
       connection.ws.send(JSON.stringify(frame));
       return response;
     };
-    const createCommand = { parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" };
+    const createCommand = { parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject", kind: "task" };
     const created = (await request(createCommand, "thread_created")).thread as Thread;
     expect(created.attention).toBe("quiet");
     expect((await request(createCommand, "thread_created")).thread).toEqual(created);
@@ -166,6 +166,7 @@ describe("dev mock Thread contract", () => {
     expect(await readAck).toMatchObject({ type: "thread_action_applied", client_id: "action-read", history_id: historyId, thread_id: created.id });
     const settled = (await request({ type: "thread_action", thread_id: created.id, action: "settle" }, "thread_upsert")).thread as Thread;
     expect(settled.settled_at).not.toBeNull();
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "settled-convert", thread_id: created.id, action: "set_kind", data: { kind: "space" }, expected_revision: settled.revision }), "Reopen this Task");
     expect(settled.icon).toBeNull();
     const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "👩🏽‍💻" }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
     expect(withIcon.icon).toBe("👩🏽‍💻");
@@ -188,9 +189,24 @@ describe("dev mock Thread contract", () => {
     const reopened = (await request({ type: "thread_action", thread_id: created.id, action: "reopen" }, "thread_upsert")).thread as Thread;
     expect(reopened).toMatchObject({ id: created.id, settled_at: null, read: true });
     await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-missing-thread", thread_id: 0, action: "settle" }), "does not exist");
-    await expectActionError(connection.ws, addressed({ type: "create_thread", client_id: "missing-parent", title: "Missing parent" }), "parent_thread_id");
-    const childThread = (await request({ type: "create_thread", client_id: "child", title: "Focused review", parent_thread_id: created.id }, "thread_created")).thread as Thread;
+    await expectActionError(connection.ws, addressed({ type: "create_thread", client_id: "missing-parent", title: "Missing parent", kind: "space" }), "parent_thread_id");
+    await expectActionError(connection.ws, addressed({ type: "create_thread", client_id: "missing-kind", title: "Missing kind", parent_thread_id: null }), "kind is required");
+    await expectActionError(connection.ws, addressed({ type: "create_thread", client_id: "invalid-space-child", title: "Invalid Space", kind: "space", parent_thread_id: created.id }), "Tasks can contain child Tasks only");
+    const childThread = (await request({ type: "create_thread", client_id: "child", title: "Focused review", kind: "task", parent_thread_id: created.id }, "thread_created")).thread as Thread;
     expect(childThread.parent_thread_id).toBe(created.id);
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "task-child-space", thread_id: childThread.id, action: "set_kind", data: { kind: "space" }, expected_revision: childThread.revision }), "Task cannot contain a Space");
+    const project = (await request({ type: "create_thread", client_id: "project", title: "Project", kind: "space", parent_thread_id: null }, "thread_created")).thread as Thread;
+    const area = (await request({ type: "create_thread", client_id: "area", title: "Area", kind: "space", parent_thread_id: project.id }, "thread_created")).thread as Thread;
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "space-parent-task", thread_id: project.id, action: "set_kind", data: { kind: "task" }, expected_revision: project.revision }), "child Spaces");
+    const convertedArea = (await request({ type: "thread_action", thread_id: area.id, action: "set_kind", data: { kind: "task" }, expected_revision: area.revision }, "thread_upsert")).thread as Thread;
+    expect(convertedArea).toMatchObject({ id: area.id, kind: "task", parent_thread_id: project.id });
+    const convertedProject = (await request({ type: "thread_action", thread_id: project.id, action: "set_kind", data: { kind: "task" }, expected_revision: project.revision }, "thread_upsert")).thread as Thread;
+    expect(convertedProject.kind).toBe("task");
+    const sameKindAck = waitForFrame(connection.ws, frame => frame.type === "thread_action_applied" && frame.client_id === "same-kind");
+    connection.ws.send(JSON.stringify(addressed({ type: "thread_action", client_id: "same-kind", thread_id: convertedProject.id, action: "set_kind", data: { kind: "task" }, expected_revision: convertedProject.revision })));
+    expect(await sameKindAck).toMatchObject({ thread_id: convertedProject.id });
+    const notes = (await request({ type: "create_thread", client_id: "notes", title: "Notes", kind: "space", parent_thread_id: null }, "thread_created")).thread as Thread;
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "space-settle", thread_id: notes.id, action: "settle" }), "Spaces cannot be marked done");
     await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-child-pin", thread_id: childThread.id, action: "pin", expected_revision: childThread.revision }), "Only top-level threads");
     const pinned = (await request({ type: "thread_action", thread_id: created.id, action: "pin", expected_revision: reopened.revision }, "thread_upsert")).thread as Thread;
     expect(pinned.pinned_at).not.toBeNull();
@@ -222,7 +238,7 @@ describe("dev mock Thread contract", () => {
     expect((await otherList).artifacts).toEqual([]);
     await close(other.ws);
 
-    const recipient=(await request({type:"create_thread",client_id:"artifact-recipient",title:"Unrelated artifact discussion",parent_thread_id:null},"thread_created")).thread as Thread;
+    const recipient=(await request({type:"create_thread",client_id:"artifact-recipient",title:"Unrelated artifact discussion",kind:"space",parent_thread_id:null},"thread_created")).thread as Thread;
     const beforeShare=(await request({type:"open_artifact",client_id:"preview-only",artifact_id:artifact.id},"artifact_opened")).artifact as {thread_ids:number[]};
     expect(beforeShare.thread_ids).not.toContain(recipient.id);
     const plainDone=waitForFrame(connection.ws,frame=>frame.type==="thread_turn"&&(frame.turn as {thread_id:number;state:string}).thread_id===recipient.id&&(frame.turn as {state:string}).state==="completed");

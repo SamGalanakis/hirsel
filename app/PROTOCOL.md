@@ -10,18 +10,20 @@ The required `hello_ok` snapshot contains `history_id`, `threads`, `processes`, 
 
 After hello, fetch the focused conversation with `open_thread`. A reconnect to the same history can retry unacknowledged Thread messages using their original `client_id`. A different history ID discards conversation/artifact caches, pending requests/uploads, queued actions and old focus before any replay. Plain unsent draft text remains available for explicit recovery. Drafts are keyed by history and Thread; text never silently follows a reused numeric ID into a different history.
 
-## Threads and messages
+## Spaces, Tasks and messages
 
-A Thread has an ID, title, description, mutable constrained instrument, revision, timestamps, independent attention/read/settlement/visibility, running turn, queue count, latest finished turn and factual activity recency. Settlement is explicit; completing execution or reading a Thread never settles it. Required `parent_thread_id:number|null` is immutable; `pinned_at:string|null` gives independent pin state and stable ordering. All IDs are ordinary, including retained 0. An empty Hello has no Threads.
+A Thread is explicitly either `kind:"space"` or `kind:"task"`. Both kinds may be roots. Spaces may contain Spaces and Tasks, while Tasks may contain Tasks only. A Thread also has an ID, title, description, mutable constrained instrument, revision, timestamps, independent attention/read/visibility, running turn, queue count, latest finished turn and factual activity recency. Tasks alone can be settled; completing execution or reading a Task never settles it. Required `parent_thread_id:number|null` is immutable; `pinned_at:string|null` gives independent pin state and stable ordering. All IDs are ordinary, including retained 0. An empty Hello has no Threads.
 
 | Client frame | Fields and result |
 | --- | --- |
-| `create_thread` | `client_id,history_id,title,parent_thread_id:number|null` → `thread_created {client_id,thread}` |
+| `create_thread` | `client_id,history_id,title,kind:"space"|"task",parent_thread_id:number|null` → `thread_created {client_id,thread}` |
 | `open_thread` | `client_id,thread_id,before_id:number|null` → `thread_opened {client_id,detail}` |
 | `send_thread_message` | `client_id,history_id,thread_id,body,attachments:string[],mentions:number[],artifact_ids:number[],mode:"send"|"next_turn"` → owning `msg` and turn updates |
 | `thread_action` | `client_id,history_id,thread_id,action,data,expected_revision?` → `thread_action_applied {client_id,history_id,thread_id}`; displayed instrument controls require their revision |
 | `cancel_turn` | required `history_id,thread_id` |
 | `cancel_queued` | accepted outgoing `client_id` |
+
+`thread_action` uses `action:"set_kind"`, required `expected_revision`, and `data:{kind}` for Owner conversion. A settled Task must reopen before conversion. Space to Task is invalid while it has a Space child, and Task to Space is invalid below a Task. Same-kind requests are revision-validated no-ops. `settle` and `reopen` apply only to Tasks. Generated instrument controls whose `settles` field is true or omitted are completion controls and are hidden on Spaces; controls with `settles:false` remain available.
 
 Thread detail carries required `brief:{text:string,artifact_ids:number[]}`, its Thread, a bounded message page, turns, activities and `has_more`. Every `ChatMessage` requires `thread_id,id,author,body,ref,ts`. Each tool summary requires the canonical call `id`, `name`, and `ok`; live and durable tool data join only by that ID. Optional client correlation, attachments, tool summaries, mentions and artifact references carry their current meaning. `ref` and `mentions` are citations, never message ownership. `msg_removed {id}` is authoritative even if its echo arrives later.
 

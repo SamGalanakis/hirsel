@@ -20,3 +20,17 @@ describe("portable Thread action copying",()=>{
   expect(toast).toHaveBeenCalledWith("Couldn’t copy the reference.",{variant:"error"});
  });
 });
+describe("Space and Task actions", () => {
+  it("offers revision-bound conversion and completion only where valid", () => {
+    const space = threadActions(makeThread(2, { kind: "space", revision: 7 }));
+    expect(space.map(action => action.label)).toContain("Change to Task");
+    expect(space.map(action => action.label)).not.toContain("Mark task done");
+
+    const task = threadActions(makeThread(2, { kind: "task", revision: 8 }));
+    expect(task.map(action => action.label)).toEqual(expect.arrayContaining(["New child task", "Mark task done", "Change to Space"]));
+
+    const done = threadActions(makeThread(2, { kind: "task", settled_at: "2026-09-10T10:00:00Z" }));
+    expect(done.map(action => action.label)).toContain("Reopen task");
+    expect(done.map(action => action.label)).not.toContain("Change to Space");
+  });
+});

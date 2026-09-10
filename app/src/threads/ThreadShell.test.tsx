@@ -41,7 +41,7 @@ beforeEach(() => {
   flush(() => closeThreadNavigation());
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
-  flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
+  flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { kind: "task", read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
   attachThreadTransport(frame => sent.push(frame));
 });
 afterEach(() => { disconnectThreads(); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -49,30 +49,30 @@ describe("thread workspace", () => {
   it("coordinates the wide dock with the modal drawer without stealing focus or losing the desktop choice", async () => {
     const resize = responsiveMedia(1440);
     const view = render(() => <ThreadShell />);
-    const dock = view.getByRole("complementary", { name: "Threads" });
+    const dock = view.getByRole("complementary", { name: "Spaces and Tasks" });
     expect(dock).toBeVisible();
     expect(dock.contains(document.activeElement)).toBe(false);
-    expect(view.getByRole("button", { name: "Threads" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.getByRole("button", { name: "Spaces and Tasks" })).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(view.container.querySelector('[data-thread-row="2"]')!);
     expect(threadState.focusedId).toBe(2);
-    expect(view.getByRole("complementary", { name: "Threads" })).toBeVisible();
+    expect(view.getByRole("complementary", { name: "Spaces and Tasks" })).toBeVisible();
     resize(1024);
-    expect(view.queryByRole("dialog", { name: "Threads" })).toBeNull();
+    expect(view.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
     resize(1440);
 
-    fireEvent.click(view.getByRole("button", { name: "Close threads" }));
-    expect(view.queryByRole("complementary", { name: "Threads" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
+    expect(view.queryByRole("complementary", { name: "Spaces and Tasks" })).toBeNull();
     expect(localStorage.getItem("hirsel.thread-navigation.desktop")).toBe("closed");
     resize(1024);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
-    expect(view.getByRole("dialog", { name: "Threads" })).toBeVisible();
-    fireEvent.click(view.getByRole("button", { name: "Close threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
+    expect(view.getByRole("dialog", { name: "Spaces and Tasks" })).toBeVisible();
+    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
     resize(1440);
-    expect(view.queryByRole("complementary", { name: "Threads" })).toBeNull();
+    expect(view.queryByRole("complementary", { name: "Spaces and Tasks" })).toBeNull();
 
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
-    const reopened = view.getByRole("complementary", { name: "Threads" });
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
+    const reopened = view.getByRole("complementary", { name: "Spaces and Tasks" });
     await waitFor(() => expect(reopened.querySelector('[data-thread-row="2"]')).toHaveFocus());
     expect(localStorage.getItem("hirsel.thread-navigation.desktop")).toBe("open");
   });
@@ -82,7 +82,7 @@ describe("thread workspace", () => {
     const screen = render(() => <ThreadShell />);
     expect(screen.getByText("Groceries only")).toBeInTheDocument();
     expect(screen.queryByText("Holiday only")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Threads" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(screen.container.querySelector('[data-thread-row="2"]')!);
     expect(screen.getByText("Holiday only")).toBeInTheDocument();
     expect(screen.queryByText("Groceries only")).toBeNull();
@@ -93,7 +93,7 @@ describe("thread workspace", () => {
     flush(() => setThreadState(draft => { draft.threads[1].title = title; }));
     const view = render(() => <ThreadShell />);
     fireEvent.click(within(view.getByRole("heading", { level: 1 })).getByRole("button", { name: title }));
-    const drawer = view.getByRole("dialog", { name: "Threads" });
+    const drawer = view.getByRole("dialog", { name: "Spaces and Tasks" });
     expect(drawer.querySelector('[data-thread-row="1"]')).toHaveTextContent(title);
   });
   it("does not invite starting an empty conversation while a turn is running", () => {
@@ -122,11 +122,11 @@ describe("thread workspace", () => {
   });
   it("opens row actions inside the modal without changing the addressed Thread", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     const row = view.container.querySelector<HTMLButtonElement>('[data-thread-row="2"]')!;
     row.focus(); fireEvent.keyDown(row, { key: "F10", shiftKey: true });
     const menu = await view.findByRole("menu", { name: "Actions for Holiday" });
-    expect(menu.closest("dialog")).toBe(view.getByRole("dialog", { name: "Threads" }));
+    expect(menu.closest("dialog")).toBe(view.getByRole("dialog", { name: "Spaces and Tasks" }));
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive thread" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 2, action: "archive" }));
     expect(threadState.focusedId).toBe(1);
@@ -134,7 +134,7 @@ describe("thread workspace", () => {
   });
   it("supports local row navigation and restores focus after a row leaves the filter", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     const row1 = view.container.querySelector<HTMLButtonElement>('[data-thread-row="1"]')!;
     const row2 = view.container.querySelector<HTMLButtonElement>('[data-thread-row="2"]')!;
     row1.focus(); fireEvent.keyDown(row1, { key: "End" }); expect(document.activeElement).toBe(row2);
@@ -151,13 +151,13 @@ describe("thread workspace", () => {
   });
   it("gives creation and browsing one deterministic initial focus owner", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "New thread" }));
-    const title = view.getByLabelText("New thread title");
+    fireEvent.click(view.getByRole("button", { name: "New Space or Task" }));
+    const title = view.getByLabelText("New space or task title");
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     expect(document.activeElement).toBe(title);
     fireEvent.input(title, { target: { value: "Immediate typing" } });
-    fireEvent.click(view.getByRole("button", { name: "Close threads" }));
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     await waitFor(() => expect(document.activeElement).toBe(view.container.querySelector('[data-thread-row="1"]')));
     expect(title).toHaveValue("Immediate typing");
   });
@@ -165,39 +165,39 @@ describe("thread workspace", () => {
     vi.useFakeTimers(); const now = Date.parse("2026-09-10T10:00:00Z"); vi.setSystemTime(now);
     flush(() => setThreadState(draft => { draft.threads = [makeThread(0, { attention: "needs_owner" }), makeThread(1, { attention: "needs_owner", read: true }), makeThread(2, { attention: "needs_owner", snoozed_until: new Date(now + 1000).toISOString() }), makeThread(3, { attention: "needs_owner", archived_at: new Date(now).toISOString() }), makeThread(4, { read: false })]; }));
     const view = render(() => <ThreadShell />);
-    const rail = view.getByRole("button", { name: "Threads" });
-    expect(rail).toHaveAccessibleDescription("2 threads need your attention");
+    const rail = view.getByRole("button", { name: "Spaces and Tasks" });
+    expect(rail).toHaveAccessibleDescription("2 items need your attention");
     flush(() => vi.advanceTimersByTime(1001));
-    expect(rail).toHaveAccessibleDescription("3 threads need your attention");
+    expect(rail).toHaveAccessibleDescription("3 items need your attention");
     expect(threadState.focusedId).toBe(1); expect(threadState.threads[2].read).toBe(false);
-    expect(view.queryByRole("dialog", { name: "Threads" })).toBeNull();
+    expect(view.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
   });
   it("keeps filter selection in a compact keyboard menu across reopening", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
-    const filter = view.getByRole("button", { name: "Filter threads: active" });
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
+    const filter = view.getByRole("button", { name: "Filter work: active" });
     fireEvent.keyDown(filter, { key: "ArrowDown" });
-    const settled = await view.findByRole("menuitemradio", { name: "settled" });
+    const settled = await view.findByRole("menuitemradio", { name: "done" });
     expect(view.getByRole("menuitemradio", { name: "active" })).toHaveAttribute("aria-checked", "true");
     fireEvent.click(settled);
-    expect(view.getByRole("button", { name: "Filter threads: settled" })).toBeTruthy();
-    fireEvent.click(view.getByRole("button", { name: "Close threads" }));
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
-    expect(view.getByRole("button", { name: "Filter threads: settled" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Filter work: done" })).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
+    expect(view.getByRole("button", { name: "Filter work: done" })).toBeTruthy();
     expect(view.queryByRole("button", { name: "active" })).toBeNull();
   });
   it("creates through the correlated host contract and focuses its visible row", async () => {
     const screen = render(() => <ThreadShell />);
-    fireEvent.click(screen.getByRole("button", { name: "Threads" }));
-    fireEvent.input(screen.getByLabelText("New thread title"), { target: { value: "Buy milk" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create thread" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
+    fireEvent.input(screen.getByLabelText("New space or task title"), { target: { value: "Buy milk" } });
+    fireEvent.click(screen.getByRole("button", { name: "New Space" }));
     const frame = sent.find(f => f.type === "create_thread");
     if (!frame || frame.type !== "create_thread") throw new Error("missing create");
-    expect(frame.title).toBe("Buy milk");
+    expect(frame).toMatchObject({ title: "Buy milk", kind: "space", parent_thread_id: null });
     flush(() => handleThreadMessage({ type: "thread_created", client_id: frame.client_id, thread: makeThread(3, { title: "Buy milk", read: true }) }));
     await waitFor(() => expect(threadState.focusedId).toBe(3));
     expect(screen.container.querySelector('[data-thread-id="3"]')).toBeInTheDocument();
-    expect(screen.queryByRole("dialog", { name: "Threads" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
   });
   it("keeps drafts separate and sends to explicit thread ownership", async () => {
     const screen = render(() => <ThreadShell />);
@@ -250,8 +250,8 @@ describe("thread workspace", () => {
     expect(threadState.focusedId).toBeNull();
     expect(location.pathname).toBe("/");
     expect(screen.container.querySelector("textarea")).toBeNull();
-    expect(screen.queryByRole("dialog", { name: "Threads" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Threads" }));
+    expect(screen.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(screen.container.querySelector('[data-thread-row="1"]')!);
     expect(screen.container.querySelector('[data-thread-id="1"]')).toHaveClass("thread-focus-frame");
   });
@@ -265,7 +265,7 @@ describe("thread workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "send_thread_message", thread_id: 1, body: "Follow up in groceries", mode: "send" }));
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Settle thread" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark task done" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 1, action: "settle" }));
   });
 
@@ -276,7 +276,7 @@ describe("thread workspace", () => {
       screen.getByRole("button", { name: "Thread overview" }).focus();
       fireEvent.keyDown(window, { key: "g" });
       fireEvent.keyDown(window, { key: "t" });
-      expect(screen.getByRole("dialog", { name: "Threads" })).toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "Spaces and Tasks" })).toBeInTheDocument();
       await waitFor(() => expect(screen.container.querySelector('[data-thread-row="1"]')).toHaveFocus());
     } finally { dispose(); }
   });
@@ -284,25 +284,25 @@ describe("thread workspace", () => {
   it("shows independent attention, unread and execution signals without changing inventory placement", () => {
     flush(() => setThreadState(draft => {
       draft.threads = [makeThread(0), makeThread(1, { read: false, attention: "needs_owner" }),
-        makeThread(2, { settled_at: "2026-09-09T10:00:00Z" }),
+        makeThread(2, { kind: "task", settled_at: "2026-09-09T10:00:00Z" }),
         makeThread(3, { snoozed_until: "2099-01-01T00:00:00Z" }),
         makeThread(4, { archived_at: "2026-09-09T10:00:00Z" })];
       draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [], activities: [], loaded: true, hasMore: false, turns: [{ requester_thread_id: null, requester_turn_id: null, id: 4, thread_id: 1, owner_message_id: null, agent_message_id: null, state: "running", started_at: "2026-09-09T10:00:00Z", finished_at: null }] };
     }));
     flush(() => setThreadState(draft => { draft.threads[1].running_turn = draft.histories[1].turns[0]; }));
     const screen = render(() => <ThreadShell />);
-    fireEvent.click(screen.getByRole("button", { name: "Threads" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
     const row = within(screen.container.querySelector<HTMLElement>('[data-thread-row="1"]')!);
     expect(row.getByRole("img", { name: "Unread" })).toBeInTheDocument();
     expect(row.getByText("Needs you")).toBeInTheDocument();
     expect(row.getByText(/Working/)).toBeInTheDocument();
-    for (const [section, id] of [["settled", 2], ["snoozed", 3], ["archived", 4]] as const) {
-      fireEvent.click(screen.getByRole("button", { name: /Filter threads:/ }));
+    for (const [section, id] of [["done", 2], ["snoozed", 3], ["archived", 4]] as const) {
+      fireEvent.click(screen.getByRole("button", { name: /Filter work:/ }));
       fireEvent.click(screen.getByRole("menuitemradio", { name: section }));
       expect(screen.container.querySelector(`[data-thread-row="${id}"]`)).toBeInTheDocument();
       expect(screen.container.querySelector('[data-thread-row="1"]')).toBeNull();
     }
-    fireEvent.click(screen.getByRole("button", { name: /Filter threads:/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Filter work:/ }));
     fireEvent.click(screen.getByRole("menuitemradio", { name: "active" }));
     expect(screen.container.querySelector('[data-thread-row="1"]')).toBeInTheDocument();
   });
@@ -310,12 +310,12 @@ describe("thread workspace", () => {
   it("settles only through explicit action, preserving read as independent state", () => {
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Settle thread" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark task done" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "settle", data: {}, expected_revision: undefined }));
     expect(threadState.threads.find(t => t.id === 1)?.settled_at).toBeNull();
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { settled_at: "2026-09-09T10:00:00Z", revision: 2 }) }));
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { kind: "task", settled_at: "2026-09-09T10:00:00Z", revision: 2 }) }));
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    expect(within(document.body).getByRole("menuitem", { name: "Reopen thread" })).toBeInTheDocument();
+    expect(within(document.body).getByRole("menuitem", { name: "Reopen task" })).toBeInTheDocument();
   });
 });
 
@@ -385,16 +385,30 @@ it("keeps the same expanded tool result and focus when the live turn becomes its
 });
 
 describe("nested Thread workspace", () => {
+  it("limits Task children to Tasks and emits revision-bound kind conversion", () => {
+    const view = render(() => <ThreadShell />);
+    fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Change to Space" }));
+    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 1, action: "set_kind", data: { kind: "space" }, expected_revision: 1 }));
+
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
+    fireEvent.click(view.getByRole("button", { name: "Actions for Buy groceries" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "New child task" }));
+    expect(view.queryByRole("button", { name: "New Space" })).toBeNull();
+    fireEvent.input(view.getByLabelText("New space or task title"), { target: { value: "Review" } });
+    fireEvent.click(view.getByRole("button", { name: "New Task" }));
+    expect(sent.findLast(frame => frame.type === "create_thread")).toMatchObject({ type: "create_thread", kind: "task", parent_thread_id: 1, title: "Review" });
+  });
   it("creates a child under the selected row even when the conversation changes", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(view.getByRole("button", { name: "Actions for Holiday" }));
-    fireEvent.click(view.getByRole("menuitem", { name: "New child thread" }));
+    fireEvent.click(view.getByRole("menuitem", { name: "New child" }));
     flush(() => focusThread(0));
-    fireEvent.input(view.getByLabelText("New thread title"), { target: { value: "Review" } });
-    fireEvent.click(view.getByRole("button", { name: "Create thread" }));
+    fireEvent.input(view.getByLabelText("New space or task title"), { target: { value: "Review" } });
+    fireEvent.click(view.getByRole("button", { name: "New Space" }));
     const frame = sent.findLast(frame => frame.type === "create_thread");
-    expect(frame).toMatchObject({ parent_thread_id: 2, title: "Review" });
+    expect(frame).toMatchObject({ kind: "space", parent_thread_id: 2, title: "Review" });
     if (frame?.type !== "create_thread") throw new Error("Missing create");
     flush(() => handleThreadMessage({ type: "thread_created", client_id: frame.client_id, thread: makeThread(9, { title: "Review", parent_thread_id: 2 }) }));
     await waitFor(() => expect(threadState.focusedId).toBe(9));
@@ -407,10 +421,10 @@ describe("nested Thread workspace", () => {
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Pin thread" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "pin", data: {}, expected_revision: 1 }));
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { read: true, pinned_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     expect(view.container.querySelectorAll('[data-thread-row="1"]')).toHaveLength(1);
     expect(view.container.querySelector("[data-thread-row]")).toHaveAttribute("data-thread-row", "1");
-    fireEvent.click(view.getByRole("button", { name: "Filter threads: active" }));
+    fireEvent.click(view.getByRole("button", { name: "Filter work: active" }));
     fireEvent.click(view.getByRole("menuitemradio", { name: "archived" }));
     expect(view.container.querySelector('[data-row-key="pin:1"]')).toBeNull();
     expect(view.container.querySelector('[data-row-key="tree:1"]')).toBeNull();
@@ -424,17 +438,17 @@ describe("nested Thread workspace", () => {
     expect(view.queryByRole("menuitem", { name: "Pin thread" })).toBeNull();
     expect(view.queryByRole("menuitem", { name: "Unpin thread" })).toBeNull();
     fireEvent.keyDown(window, { key: "Escape" });
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     const rows = view.container.querySelectorAll('[data-thread-row]');
     expect(Array.from(rows).map(row => row.getAttribute("data-thread-row"))).toEqual(["0", "1", "2"]);
     expect(view.container.querySelector('[data-thread-row="1"]')).not.toHaveTextContent("Pinned");
     expect(view.container.querySelector('[data-slot="thread-branch-guide"]')).toBeInTheDocument();
-    expect(view.getByRole("dialog", { name: "Threads" })).not.toHaveTextContent("No turns yet");
+    expect(view.getByRole("dialog", { name: "Spaces and Tasks" })).not.toHaveTextContent("No turns yet");
   });
   it("expands selected ancestry and navigates a tree without changing the composer", async () => {
     flush(() => setThreadState(draft => { draft.threads = [makeThread(1, { title: "Website" }), makeThread(2, { title: "Review", parent_thread_id: 1 }), makeThread(3, { title: "Review", parent_thread_id: 2 })]; draft.focusedId = 3; }));
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     const row = view.container.querySelector<HTMLButtonElement>('[data-row-key="tree:3"]')!;
     await waitFor(() => expect(row).toHaveFocus());
     fireEvent.keyDown(row, { key: "ArrowLeft" });
@@ -508,12 +522,12 @@ describe("contextual Thread errors", () => {
     flush(() => handleThreadMessage({type:"error",client_id:outgoing.client_id,detail:"Send unavailable"}));
     const main = view.container.querySelector("main")!;
     expect(within(main).getByRole("alert")).toHaveTextContent("Your message wasn’t confirmed");
-    fireEvent.click(view.getByRole("button", {name:"Threads"}));
-    const drawer = view.getByRole("dialog", {name:"Threads"});
+    fireEvent.click(view.getByRole("button", {name:"Spaces and Tasks"}));
+    const drawer = view.getByRole("dialog", {name:"Spaces and Tasks"});
     expect(within(drawer).queryByRole("alert")).toBeNull();
     expect(within(drawer).queryByText(/Use Retry beside/)).toBeNull();
     expect(threadState.pending[0].artifactIds).toEqual([44]);
-    fireEvent.click(within(drawer).getByRole("button", {name:"Close threads"}));
+    fireEvent.click(within(drawer).getByRole("button", {name:"Close Spaces and Tasks"}));
     fireEvent.click(within(main).getByRole("button", {name:"Retry"}));
     expect(sent.at(-1)).toEqual(outgoing);
     flush(() => handleThreadMessage({type:"msg",message:{id:40,thread_id:1,author:"owner",body:outgoing.body,client_id:outgoing.client_id,artifact_ids:[44],ref:null,ts:"2026-09-10T10:00:00Z"}}));
@@ -528,8 +542,8 @@ describe("contextual Thread errors", () => {
 
   it("shows a failed drawer action without attributing it to the current conversation", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", {name:"Threads"}));
-    const drawer = view.getByRole("dialog", {name:"Threads"});
+    fireEvent.click(view.getByRole("button", {name:"Spaces and Tasks"}));
+    const drawer = view.getByRole("dialog", {name:"Spaces and Tasks"});
     fireEvent.click(within(drawer).getByRole("button", {name:"Actions for Holiday"}));
     fireEvent.click(within(await view.findByRole("menu", {name:"Actions for Holiday"})).getByRole("menuitem", {name:"Archive thread"}));
     const action = sent.findLast(frame => frame.type === "thread_action");
@@ -569,8 +583,8 @@ describe("retry keyboard focus", () => {
     let target: HTMLElement | null = null;
     if (destination === "control") { target = view.getByRole("button", {name:"Thread actions"}); target.focus(); }
     if (destination === "drawer") {
-      fireEvent.click(view.getByRole("button", {name:"Threads"}));
-      const drawer = view.getByRole("dialog", {name:"Threads"});
+      fireEvent.click(view.getByRole("button", {name:"Spaces and Tasks"}));
+      const drawer = view.getByRole("dialog", {name:"Spaces and Tasks"});
       await waitFor(() => expect(drawer.contains(document.activeElement)).toBe(true));
       target = document.activeElement as HTMLElement;
     }

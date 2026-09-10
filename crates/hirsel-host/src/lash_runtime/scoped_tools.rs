@@ -162,6 +162,8 @@ impl ScopedThreadTools {
             "threads_create" => {
                 let mutation = crate::storage::ThreadMutation::Create {
                     client_id: required_string(args, "client_id")?,
+                    kind: serde_json::from_value(args.get("kind").cloned().ok_or("kind required")?)
+                        .map_err(|e| e.to_string())?,
                     title: required_string(args, "title")?,
                     icon: crate::storage::parse_icon(args)
                         .map_err(|e| e.to_string())?

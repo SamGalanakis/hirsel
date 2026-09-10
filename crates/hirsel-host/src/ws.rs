@@ -108,6 +108,7 @@ mod tests {
                         "",
                         &serde_json::Value::Null,
                         hirsel_proto::ThreadAttention::Quiet,
+                        hirsel_proto::ThreadKind::Task,
                         None,
                     )
                     .await
@@ -225,6 +226,7 @@ mod tests {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -345,6 +347,7 @@ mod tests {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -461,6 +464,7 @@ mod tests {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -516,6 +520,7 @@ mod tests {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -566,6 +571,7 @@ mod tests {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -579,6 +585,7 @@ mod tests {
                 "",
                 &serde_json::json!({}),
                 hirsel_proto::ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await

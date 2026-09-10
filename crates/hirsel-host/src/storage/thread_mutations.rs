@@ -1,6 +1,6 @@
 //! Agent Thread writes validate the execution and replay input inside the write transaction.
 use super::{Storage, ThreadCaller, ThreadRef, thread_scope, threads};
-use hirsel_proto::ThreadAttention;
+use hirsel_proto::{ThreadAttention, ThreadKind};
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -28,6 +28,7 @@ pub(crate) enum ThreadMutation {
     },
     Create {
         client_id: String,
+        kind: ThreadKind,
         title: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         icon: Option<String>,
@@ -112,6 +113,7 @@ impl Storage {
             }
             ThreadMutation::Create {
                 client_id,
+                kind,
                 title,
                 icon,
                 parent,
@@ -127,7 +129,7 @@ impl Storage {
                 threads::validate_instrument(instrument)?;
                 let parent = thread_scope::resolve(&tx, caller.thread_id, parent)?;
                 let key = format!("agent:{}:{operation_id}:{client_id}", caller.turn_id);
-                tx.execute("INSERT INTO threads(client_id,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision,icon) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,1,?8)",params![key,parent,title.trim(),description,serde_json::to_string(instrument)?,threads::attention(*attention),now,icon])?;
+                tx.execute("INSERT INTO threads(client_id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision,icon) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?8,1,?9)",params![key,threads::kind_name(*kind),parent,title.trim(),description,serde_json::to_string(instrument)?,threads::attention(*attention),now,icon])?;
                 let thread = threads::get(&tx, tx.last_insert_rowid() as u64)?;
                 json!({"thread_id":thread.id,"thread":thread})
             }
@@ -192,27 +194,5 @@ impl Storage {
         tx.execute("INSERT INTO thread_mutation_receipts(turn_id,operation_id,payload,result) VALUES(?1,?2,?3,?4)",params![caller.turn_id,operation_id,payload,serde_json::to_string(&result)?])?;
         tx.commit()?;
         Ok(result)
-    }
-}
-
-impl Storage {
-    pub(crate) async fn settle_scoped_thread(
-        &self,
-        caller: &ThreadCaller,
-        id: u64,
-        settled: bool,
-    ) -> anyhow::Result<hirsel_proto::Thread> {
-        let c = self.conn.lock().await;
-        thread_scope::validate_caller(&c, caller)?;
-        thread_scope::authorize(&c, caller.thread_id, id)?;
-        c.execute(
-            "UPDATE threads SET settled_at=?2,revision=revision+1,updated_at=?3 WHERE id=?1",
-            params![
-                id,
-                settled.then(|| chrono::Utc::now().to_rfc3339()),
-                chrono::Utc::now().to_rfc3339()
-            ],
-        )?;
-        threads::get(&c, id)
     }
 }

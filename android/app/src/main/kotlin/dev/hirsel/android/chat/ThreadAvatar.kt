@@ -30,6 +30,7 @@ import dev.hirsel.android.HirselField
 import dev.hirsel.android.pairing.Connection
 import dev.hirsel.android.ui.LocalHirselColors
 import dev.hirsel.core.Thread
+import dev.hirsel.core.ThreadKind
 
 internal fun threadIconText(thread: Thread): String = thread.icon
     ?: thread.title.trim().let { if (it.isEmpty()) "#" else String(Character.toChars(it.codePointAt(0))).uppercase() }
@@ -48,7 +49,8 @@ internal fun threadIconError(icon: String?): String? {
 internal fun ThreadAvatar(thread: Thread) {
     val c = LocalHirselColors.current
     val tones = listOf(c.StatusSuccess, c.StatusAttention, c.Accent, c.StatusDanger, c.MutedForeground)
-    Box(Modifier.size(28.dp).background(tones[(thread.id % 5uL).toInt()].copy(alpha = .16f), RoundedCornerShape(6.dp)).clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
+    val shape = if (thread.kind == ThreadKind.SPACE) RoundedCornerShape(6.dp) else RoundedCornerShape(50)
+    Box(Modifier.size(28.dp).background(tones[(thread.id % 5uL).toInt()].copy(alpha = .16f), shape).clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
         Text(threadIconText(thread), color = c.Foreground, fontSize = 14.sp, maxLines = 1)
     }
 }

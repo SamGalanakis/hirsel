@@ -93,7 +93,7 @@ impl Storage {
             id
         } else {
             let now = chrono::Utc::now().to_rfc3339();
-            tx.execute("INSERT INTO threads(parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES(?1,?2,'','{}','quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
+            tx.execute("INSERT INTO threads(kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES('task',?1,?2,'','{}','quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
             tx.last_insert_rowid() as u64
         };
         if let Some(execution) = &assignment.execution {

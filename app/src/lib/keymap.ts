@@ -88,11 +88,11 @@ export interface Shortcut {
    * a chord (`g` then `t`); a comma in a single token means "or". */
   keys: string[];
   label: string;
-  group: "Threads" | "General" | "Focus" | "Hirsel";
+  group: "Spaces & Tasks" | "General" | "Focus" | "Hirsel";
 }
 
 export const SHORTCUTS: Shortcut[] = [
-  { keys: ["⌘", "K"], label: "Search commands and threads", group: "General" },
+  { keys: ["⌘", "K"], label: "Search commands, Spaces and Tasks", group: "General" },
   // Two routes to the same sheet, listed adjacently: ⌘/ reaches it mid-type,
   // `?` is the bare-key one you find by accident.
   { keys: ["⌘", "/"], label: "Keyboard shortcuts", group: "General" },
@@ -108,7 +108,7 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: ["Hold Send"], label: "Queue for next turn (touch)", group: "Hirsel" },
   { keys: ["Esc"], label: "Stop active turn (composer focused)", group: "Hirsel" },
   { keys: ["#"], label: "Cite a thread", group: "Hirsel" },
-  { keys: ["g", "t"], label: "Open threads", group: "Focus" },
+  { keys: ["g", "t"], label: "Open Spaces and Tasks", group: "Focus" },
   { keys: ["g", "h"], label: "Focus conversation", group: "Focus" },
   { keys: ["g", "p"], label: "Processes", group: "Focus" },
   { keys: ["g", "s"], label: "Settings", group: "Focus" },

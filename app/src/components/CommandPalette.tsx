@@ -75,7 +75,7 @@ export const CommandPalette: Component<{
       },
       {
         id: "go-threads",
-        label: "Open threads",
+        label: "Open Spaces and Tasks",
         hint: ["g", "t"],
         keywords: "threads work needs you",
         icon: <Layers class={iconClass} aria-hidden="true" />,
@@ -181,14 +181,14 @@ export const CommandPalette: Component<{
               <input
                 type="text"
                 role="combobox"
-                aria-label={props.intent === "threads" ? "Search threads" : "Search commands or threads"}
+                aria-label={props.intent === "threads" ? "Search Spaces and Tasks" : "Search commands, Spaces and Tasks"}
                 aria-expanded="true"
                 aria-controls="command-palette-list"
                 aria-activedescendant={filtered()[activeIndex()]?.id}
                 autocomplete="off"
                 autocorrect="off"
                 spellcheck={false}
-                placeholder={props.intent === "threads" ? "Search threads…" : "Search commands or threads…"}
+                placeholder={props.intent === "threads" ? "Search Spaces and Tasks…" : "Search commands, Spaces and Tasks…"}
                 class="h-11 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
                 value={query()}
                 onInput={(e) => {
@@ -204,7 +204,7 @@ export const CommandPalette: Component<{
               <Show
                 when={filtered().length > 0}
                 fallback={
-                  <div class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands or threads</div>
+                  <div class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands, Spaces or Tasks</div>
                 }
               >
                 <For each={filtered()}>
@@ -238,7 +238,7 @@ export const CommandPalette: Component<{
 
 // ---- Shortcut cheat-sheet (`?`) --------------------------------------------
 
-const GROUP_ORDER = ["General", "Threads", "Focus", "Hirsel"] satisfies Array<(typeof SHORTCUTS)[number]["group"]>;
+const GROUP_ORDER = ["General", "Spaces & Tasks", "Focus", "Hirsel"] satisfies Array<(typeof SHORTCUTS)[number]["group"]>;
 
 export const ShortcutHelp: Component<{
   open: boolean;

@@ -1,6 +1,6 @@
 # hirsel-client-core
 
-Shared Rust transport and state for Hirsel clients. Durable Threads own messages,
+Shared Rust transport and state for Hirsel clients. Durable Spaces and Tasks own messages,
 turns and activity. Citations (`mentions`) navigate to other Threads and never
 change message ownership. Thread 0 is the globally aware Orchestrator.
 
@@ -11,8 +11,10 @@ ID of any still-pending open. Message echoes reconcile by client ID and Thread I
 including offline retries and attachment IDs. Streams
 use durable turn IDs and sequence numbers to reject late or duplicate deltas.
 
-Native commands create/open Threads, send owned messages, submit revision-bound
-instrument actions, settle/reopen/read/snooze/archive, and stop an addressed turn.
+Native commands create/open Threads with an explicit kind, send owned messages,
+submit revision-bound instrument actions, settle/reopen Tasks, read/snooze/archive,
+and stop an addressed turn. Spaces may contain Spaces or Tasks; Tasks may contain
+Tasks only.
 UniFFI exposes the same state without interpreting instrument semantics. Android
 renders the constrained text, metadata, form and choice catalog; embedded custom
 views explicitly require the web app. Blob uploading remains a separate transport

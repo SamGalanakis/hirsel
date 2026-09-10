@@ -5,7 +5,7 @@ import { createStore, reconcile } from "solid-js";
 import type { Blob, ChatMessage, SendMode, ServerMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
-import type { Thread, ThreadClientMessage } from "./types";
+import type { Thread, ThreadClientMessage, ThreadKind } from "./types";
 
 interface PendingMessage {
   clientId: string;
@@ -102,10 +102,10 @@ function request(frame: Extract<ThreadClientMessage, { client_id: string }>, kin
     sendFrame(frame);
   });
 }
-export async function createThread(expectedHistory: string, title: string, parentId: number | null): Promise<Thread> {
+export async function createThread(expectedHistory: string, title: string, kind: ThreadKind, parentId: number | null): Promise<Thread> {
   if (!threadState.ready) throw new Error("Reconnect before creating a Thread.");
   if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this control and try again.");
-  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, parent_thread_id: parentId }, "create", undefined, null, expectedHistory) as Thread;
+  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, kind, parent_thread_id: parentId }, "create", undefined, null, expectedHistory) as Thread;
 }
 export async function openThread(id: number, beforeId: number | null = null): Promise<void> {
   const generation = historyGeneration;

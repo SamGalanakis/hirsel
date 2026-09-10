@@ -39,7 +39,7 @@ export function ThreadRefPicker(props: {
       >
         <For each={props.candidates}>
           {(thread, index) => {
-            const status = () => thread.settled_at ? "Settled" : thread.attention === "needs_owner" ? "Needs you" : "";
+            const status = () => thread.kind === "task" && thread.settled_at ? "Done" : thread.attention === "needs_owner" ? "Needs you" : "";
             return (
               <div
                 id={`${THREAD_REF_PICKER_ID}-option-${thread.id}`}

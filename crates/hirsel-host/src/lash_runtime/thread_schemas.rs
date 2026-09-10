@@ -9,7 +9,7 @@ pub(super) fn thread_ref_schema() -> Value {
     json!({"oneOf":[{"type":"integer","minimum":0},{"type":"string","pattern":"^(\\.|\\./[0-9]+(/[0-9]+)*)$"}],"description":"Self (.), a descendant numeric ID, or actual direct-child hops ./id/id. IDs never bypass scope."})
 }
 pub(super) fn thread_create_schema() -> Value {
-    json!({"type":"object","additionalProperties":false,"required":["client_id","title"],"properties":{"client_id":{"type":"string","minLength":1},"title":{"type":"string","minLength":1},"parent":thread_ref_schema(),"description":{"type":"string"},"icon":icon_schema(),"instrument":{"type":["object","null"]},"attention":attention_schema()}})
+    json!({"type":"object","additionalProperties":false,"required":["client_id","kind","title"],"properties":{"client_id":{"type":"string","minLength":1},"kind":{"type":"string","enum":["space","task"]},"title":{"type":"string","minLength":1},"parent":thread_ref_schema(),"description":{"type":"string"},"icon":icon_schema(),"instrument":{"type":["object","null"]},"attention":attention_schema()}})
 }
 pub(super) fn thread_update_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{"thread":thread_ref_schema(),"title":{"type":"string","minLength":1},"description":{"type":"string"},"icon":icon_schema(),"showcased_artifact_id":{"type":["integer","null"],"minimum":1,"description":"Show one accessible artifact beside this Thread chat. Omit to preserve; null removes. Self or descendants only. This explicit reference grants the target scope read access while showcased; it creates no conversation card."},"instrument":{"type":["object","null"]},"attention":attention_schema()}})

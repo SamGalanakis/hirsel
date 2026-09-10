@@ -18,8 +18,8 @@ pub use store::{
 
 pub use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, HelloAuth, ProcessInfo, ProcessKind,
-    ProcessState, Thread, ThreadActivity, ThreadAttention, ThreadRelatedItem, ThreadRelatedTarget,
-    ThreadTurn, ThreadTurnState, ToolCallSummary,
+    ProcessState, Thread, ThreadActivity, ThreadAttention, ThreadKind, ThreadRelatedItem,
+    ThreadRelatedTarget, ThreadTurn, ThreadTurnState, ToolCallSummary,
 };
 
 #[cfg(test)]

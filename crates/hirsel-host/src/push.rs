@@ -546,6 +546,7 @@ mod tests {
                 "Decision",
                 &serde_json::json!({}),
                 ThreadAttention::NeedsOwner,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await

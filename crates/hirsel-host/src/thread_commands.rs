@@ -4,7 +4,7 @@ use crate::{
     lash_runtime::{OwnerTurn, ThreadActionContext},
     validate_empty_lifecycle_data, validate_snooze_lifecycle_data,
 };
-use hirsel_proto::{HostToClient, SendMode, Thread};
+use hirsel_proto::{HostToClient, SendMode, Thread, ThreadKind};
 impl AppState {
     /// Deduplicate before reading local skills: a retry must still acknowledge
     /// its accepted message after the invoked skill has been edited or removed.
@@ -161,6 +161,23 @@ impl AppState {
                     .await?
             }
 
+            "set_kind" => {
+                let object = data
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("set_kind data must be an object"))?;
+                anyhow::ensure!(
+                    object.len() == 1 && object.contains_key("kind"),
+                    "set_kind requires only kind"
+                );
+                let kind: ThreadKind =
+                    serde_json::from_value(object.get("kind").cloned().expect("required field"))?;
+                let revision = expected_revision
+                    .ok_or_else(|| anyhow::anyhow!("expected_revision is required for set_kind"))?;
+                self.storage
+                    .set_addressed_thread_kind(expected_history, id, kind, revision)
+                    .await?
+            }
+
             "pin" | "unpin" => {
                 validate_empty_lifecycle_data(&action, &data)?;
                 self.storage
@@ -227,6 +244,10 @@ impl AppState {
                     generated,
                     &data,
                 )?;
+                anyhow::ensure!(
+                    current.kind == ThreadKind::Task || !validated.settles,
+                    "Spaces cannot be completed"
+                );
                 let body = validated
                     .choice_label
                     .as_deref()
@@ -249,13 +270,7 @@ impl AppState {
                     Vec::new(),
                 )
                 .await?;
-                if validated.settles {
-                    self.storage
-                        .settle_addressed_thread(expected_history, id, true)
-                        .await?
-                } else {
-                    self.storage.addressed_thread(expected_history, id).await?
-                }
+                self.storage.addressed_thread(expected_history, id).await?
             }
         };
         if action == "set_showcase" {
@@ -277,7 +292,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use hirsel_proto::ThreadAttention;
+    use hirsel_proto::{ThreadAttention, ThreadKind};
     use serde_json::json;
     #[tokio::test]
     async fn generated_continue_preserves_identity_and_rejects_stale_instrument() {
@@ -294,6 +309,7 @@ mod tests {
                 "",
                 &instrument,
                 ThreadAttention::NeedsOwner,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -360,5 +376,115 @@ mod tests {
                 .any(|m| m.author == hirsel_proto::ChatAuthor::Owner && m.thread_id == thread.id)
         );
         assert!(state.storage.thread(0).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn owner_kind_and_completion_actions_enforce_task_semantics_without_partial_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::build_state(crate::tests::test_config(dir.path()))
+            .await
+            .unwrap();
+        let history = state.storage.history_id().await.unwrap();
+        let settling = json!({"type":"submit","action":"complete","label":"Complete"});
+        let (space, _) = state
+            .storage
+            .create_thread(
+                "space",
+                "Ongoing",
+                "",
+                &settling,
+                ThreadAttention::Quiet,
+                ThreadKind::Space,
+                None,
+            )
+            .await
+            .unwrap();
+        let before = state
+            .storage
+            .thread_detail(space.id, None, 100)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .handle_addressed_thread_action(
+                    &history,
+                    space.id,
+                    "complete".into(),
+                    json!({}),
+                    Some(space.revision),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state
+                .storage
+                .thread_detail(space.id, None, 100)
+                .await
+                .unwrap(),
+            before,
+            "a settling Space instrument must fail before writing a message, request, or revision"
+        );
+        assert!(
+            state
+                .storage
+                .pending_thread_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .handle_addressed_thread_action(
+                    &history,
+                    space.id,
+                    "settle".into(),
+                    json!({}),
+                    None,
+                )
+                .await
+                .is_err()
+        );
+
+        let task = state
+            .handle_addressed_thread_action(
+                &history,
+                space.id,
+                "set_kind".into(),
+                json!({"kind":"task"}),
+                Some(space.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.kind, ThreadKind::Task);
+        let completed = state
+            .handle_addressed_thread_action(
+                &history,
+                task.id,
+                "complete".into(),
+                json!({}),
+                Some(task.revision),
+            )
+            .await
+            .unwrap();
+        assert!(completed.settled_at.is_some());
+        assert_eq!(completed.revision, task.revision + 1);
+        assert!(
+            state
+                .handle_addressed_thread_action(
+                    &history,
+                    task.id,
+                    "set_kind".into(),
+                    json!({"kind":"space"}),
+                    Some(completed.revision),
+                )
+                .await
+                .is_err()
+        );
+        let reopened = state
+            .handle_addressed_thread_action(&history, task.id, "reopen".into(), json!({}), None)
+            .await
+            .unwrap();
+        assert!(reopened.settled_at.is_none());
     }
 }

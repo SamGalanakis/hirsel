@@ -1,5 +1,7 @@
 # Ongoing conversations and finishable work
 
+> **Adoption note (2026-09-10):** [#51](https://github.com/SamGalanakis/hirsel/issues/51) adopts **Spaces and Tasks** sharing one Thread identity, with Spaces containing either kind and Tasks containing Tasks only. [ADR 0018](../../adr/0018-spaces-and-tasks.md) records the decision. The unrestricted optional-tracking recommendation below remains historical and was not adopted unchanged.
+
 Research for [#50](https://github.com/SamGalanakis/hirsel/issues/50), 2026-09-10. **Recommendation, not an adopted decision or implementation approval.** Hirsel source baseline: `bbca7831bf6224535aba58b5bd3b4c927a608c1b`.
 
 Keep one Thread identity and make task tracking optional. A conversation can organize other conversations, carry a bounded outcome, or do both. The useful distinction is whether someone has committed to an outcome—not whether the Thread is a root, has children, or has just finished an agent turn.

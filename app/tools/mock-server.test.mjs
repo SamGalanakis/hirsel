@@ -37,7 +37,7 @@ test("Thread mock preserves identity, owned history and lifecycle across reconne
     assert.ok(grant.expires_at > Date.now() / 1000);
     assert.equal(await (await fetch(`http://127.0.0.1:${port}${grant.url}`)).text(), "milk");
     assert.equal((await fetch(`http://127.0.0.1:${port}/blob/${blob.id}?token=a`)).status, 403);
-    const create = addressed({ type: "create_thread", parent_thread_id: null, client_id: "create", title: "Buy groceries" });
+    const create = addressed({ type: "create_thread", parent_thread_id: null, client_id: "create", title: "Buy groceries", kind: "task" });
     a.send(create);
     const thread = (await a.next("thread_created")).thread;
     assert.equal(thread.attention, "quiet");
@@ -59,9 +59,9 @@ test("Thread mock preserves identity, owned history and lifecycle across reconne
     assert.deepEqual(completedReplay.last_finished_turn, completed.turn, "a duplicate create after completion reflects the terminal turn");
     a.send(addressed({ type: "send_thread_message", artifact_ids: [], client_id: "message", thread_id: thread.id, body: "Milk" }));
     assert.equal((await a.next("msg", frame => frame.message.author === "owner")).message.id, owner.id);
-    a.send(addressed({ type: "thread_action", thread_id: thread.id, action: "read" }));
+    a.send(addressed({ type: "thread_action", client_id: "read", thread_id: thread.id, action: "read" }));
     assert.equal((await a.next("thread_upsert", frame => frame.thread.read)).thread.settled_at, null);
-    a.send(addressed({ type: "thread_action", thread_id: thread.id, action: "settle" }));
+    a.send(addressed({ type: "thread_action", client_id: "settle", thread_id: thread.id, action: "settle" }));
     const settled = await a.next("thread_upsert", frame => frame.thread.settled_at !== null);
     a.send(create);
     const settledReplay = (await a.next("thread_created")).thread;

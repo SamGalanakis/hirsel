@@ -818,7 +818,7 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         results.insert(name, vec![json!({"id":1,"content":"result"})]);
     }
     results.insert("artifacts_list", vec![json!({"artifacts":[]})]);
-    let thread = json!({"id":1,"title":"Buy groceries","description":"","instrument":null,"attention":"quiet","settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,"created_at":now,"updated_at":now,"revision":1});
+    let thread = json!({"id":1,"kind":"task","title":"Buy groceries","description":"","instrument":null,"attention":"quiet","settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,"created_at":now,"updated_at":now,"revision":1});
     results.insert(
         "threads_create",
         vec![json!({"thread_id":1,"thread":thread})],
@@ -1313,6 +1313,7 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
             "Choose stable or beta",
             &Value::Null,
             hirsel_proto::ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

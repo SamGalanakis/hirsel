@@ -11,8 +11,8 @@ function request(frame, expected) { return new Promise((resolve,reject)=>{
  ws.on('message',raw=>{const value=JSON.parse(raw.toString());if(value.type==='hello_ok'){currentHistory=value.history_id;ws.send(JSON.stringify(frame));}else if(value.type===expected){clearTimeout(timer);ws.close();resolve(value)}});
 }); }
 async function publish(threadId,id,draft){const response=await fetch(`${base}/debug/publish-artifact`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({operation_id:crypto.randomUUID(),thread_id:threadId,artifact_id:id,draft})});if(!response.ok)throw new Error(await response.text());return response.json()}
-const a=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion A ${Date.now()}`},'thread_created')).thread;
-const b=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion B ${Date.now()}`},'thread_created')).thread;
+const a=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion A ${Date.now()}`,kind:'space'},'thread_created')).thread;
+const b=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion B ${Date.now()}`,kind:'space'},'thread_created')).thread;
 const draft=(start,title)=>({title,kind:'solid',mime:'text/jsx',filename:'counter.jsx',content:`import {createSignal} from 'solid-js'; export default function App(){const [n,setN]=createSignal(${start});return <button onClick={()=>setN(n()+1)}>Count {n()}</button>}`});
 const artifact=await publish(a.id,undefined,draft(0,'Shared counter'));
 const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? '/home/sam/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});

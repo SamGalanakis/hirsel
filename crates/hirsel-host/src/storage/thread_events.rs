@@ -108,6 +108,7 @@ mod tests {
                 "",
                 &json!({}),
                 ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -166,6 +167,7 @@ mod tests {
                 "",
                 &json!({}),
                 ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -257,6 +259,7 @@ mod tests {
                 "",
                 &json!({}),
                 ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await
@@ -383,6 +386,7 @@ mod tests {
                 "",
                 &json!({}),
                 ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await

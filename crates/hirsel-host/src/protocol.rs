@@ -337,6 +337,7 @@ where
         ClientToHost::CreateThread {
             client_id,
             history_id,
+            kind,
             title,
             parent_thread_id,
         } => {
@@ -349,6 +350,7 @@ where
                     "",
                     &serde_json::json!({}),
                     hirsel_proto::ThreadAttention::Quiet,
+                    kind,
                     parent_thread_id,
                 )
                 .await?;
@@ -665,6 +667,7 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
                         "",
                         &serde_json::Value::Null,
                         hirsel_proto::ThreadAttention::Quiet,
+                        hirsel_proto::ThreadKind::Task,
                         None,
                     )
                     .await

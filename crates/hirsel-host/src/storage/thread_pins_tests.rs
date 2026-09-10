@@ -16,6 +16,7 @@ async fn root_pin_actions_advance_revision_without_changing_history() {
             "",
             &json!(null),
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -28,6 +29,7 @@ async fn root_pin_actions_advance_revision_without_changing_history() {
             "",
             &json!(null),
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             Some(root.id),
         )
         .await
@@ -90,6 +92,7 @@ async fn schema_rejects_child_pins_and_reparenting_pinned_roots() {
             "",
             &json!(null),
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -102,6 +105,7 @@ async fn schema_rejects_child_pins_and_reparenting_pinned_roots() {
             "",
             &json!(null),
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             Some(root.id),
         )
         .await

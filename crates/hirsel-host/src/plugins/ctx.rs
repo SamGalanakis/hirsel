@@ -36,6 +36,7 @@ impl PluginThreads for HostThreads {
                 } else {
                     ThreadAttention::Quiet
                 },
+                input.kind,
                 None,
             )
             .await
@@ -70,16 +71,6 @@ impl PluginThreads for HostThreads {
         };
         self.tools.publish_thread_activity(activity).await;
         Ok(receipt)
-    }
-
-    async fn settle(&self, thread_id: u64, settled: bool) -> Result<(), String> {
-        let thread = self
-            .storage
-            .settle_thread(thread_id, settled)
-            .await
-            .map_err(stringify)?;
-        self.tools.publish_thread_summary(thread.id).await;
-        Ok(())
     }
 }
 

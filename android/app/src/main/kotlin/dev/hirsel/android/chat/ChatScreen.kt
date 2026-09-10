@@ -79,6 +79,7 @@ import dev.hirsel.core.Blob
 import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ToolCall
+import dev.hirsel.core.ThreadKind
 import kotlinx.coroutines.launch
 
 /** Durable thread inventory and focused, independently owned conversation. */
@@ -109,8 +110,8 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
     }
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            if (focused != null) Button(onClick = { connection.focusedThreadId = null }) { Text("Threads") }
-            else Text("Threads", color = c.Foreground, fontSize = 20.sp)
+            if (focused != null) Button(onClick = { connection.focusedThreadId = null }) { Text("Spaces & Tasks") }
+            else Text("Spaces & Tasks", color = c.Foreground, fontSize = 20.sp)
             Spacer(Modifier.weight(1f))
             ConnectionPill(connection.phase)
             GearButton(onOpenSettings)
@@ -137,12 +138,15 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
             }
         }
         if (focused == null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New thread", testTag = "new-thread-title", singleLine = true) }
-                Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), null) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null) { Text("Create") }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                HirselField(value = title, onValueChange = { title = it }, placeholder = "Name this Space or Task", testTag = "new-thread-title", singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), ThreadKind.SPACE, null) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null, modifier = Modifier.weight(1f)) { Text("New Space") }
+                    Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), ThreadKind.TASK, null) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null, modifier = Modifier.weight(1f)) { Text("New Task") }
+                }
             }
             FlowRow {
-                listOf("Active", "Settled", "Snoozed", "Archived").forEach { filter ->
+                listOf("Active", "Done", "Snoozed", "Archived").forEach { filter ->
                     ReplyChip(if (inventory == filter) "• $filter" else filter) { inventory = filter }
                 }
             }
@@ -150,14 +154,14 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 items(threadRows(snapshot?.threads.orEmpty().filter { t ->
                     when (inventory) {
                         "Archived" -> t.archivedAt != null
-                        "Settled" -> t.archivedAt == null && t.settledAt != null
+                        "Done" -> t.archivedAt == null && t.kind == ThreadKind.TASK && t.settledAt != null
                         "Snoozed" -> t.archivedAt == null && t.settledAt == null && isSnoozed(t.snoozedUntil)
                         else -> t.archivedAt == null && t.settledAt == null && !isSnoozed(t.snoozedUntil)
                     }
                 }), key = { it.thread.id.toString() }) { row ->
                     val t = row.thread
                     Column(Modifier.fillMaxWidth().clickable { connection.openThread(t.id) }.padding(start = (row.depth.coerceAtMost(6) * 12).dp, top = 12.dp, bottom = 12.dp).testTag("thread-${t.id}")) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) { ThreadAvatar(t); Text(t.title, color = c.Foreground, fontWeight = FontWeight.SemiBold) }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) { ThreadAvatar(t); Text(t.title, color = c.Foreground, fontWeight = FontWeight.SemiBold); Text(if (t.kind == ThreadKind.SPACE) "Space" else "Task", color = c.MutedForeground, fontSize = 12.sp) }
                         t.parentThreadId?.let { parent -> Text("In ${snapshot?.threads?.find { it.id == parent }?.title ?: "Thread #$parent"}", color = c.MutedForeground) }
                         if (t.parentThreadId == null && t.pinnedAt != null) Text("Pinned", color = c.MutedForeground)
                         Text(if (t.needsOwner) "Needs you" else if (!t.read) "Unread" else "Open", color = c.MutedForeground)
@@ -169,13 +173,16 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (thread != null) ThreadAvatar(thread)
                 Text(thread?.title ?: "Thread #$focused", color = c.Foreground, fontSize = 18.sp)
+                if (thread != null) Text(if (thread.kind == ThreadKind.SPACE) "Space" else "Task", color = c.MutedForeground, fontSize = 12.sp)
             }
             if (thread != null) {
                 FlowRow {
-                    ReplyChip("Change thread icon") { snapshot.historyId?.let { iconTarget = it to thread.copy() } }
+                    ReplyChip("Change ${if (thread.kind == ThreadKind.SPACE) "space" else "task"} icon") { snapshot.historyId?.let { iconTarget = it to thread.copy() } }
                     thread.parentThreadId?.let { parent -> ReplyChip("Parent: ${snapshot.threads.find { it.id == parent }?.title ?: "#$parent"}") { connection.openThread(parent) } }
                     if (thread.parentThreadId == null) ReplyChip(if (thread.pinnedAt == null) "Pin" else "Unpin") { displayedHistory?.let { connection.action(it, focused, if (thread.pinnedAt == null) "pin" else "unpin", revision = thread.revision) } }
-                    ReplyChip(if (thread.settledAt == null) "Settle" else "Reopen") { displayedHistory?.let { connection.action(it, focused, if (thread.settledAt == null) "settle" else "reopen") } }
+                    if (thread.kind == ThreadKind.TASK) ReplyChip(if (thread.settledAt == null) "Mark done" else "Reopen") { displayedHistory?.let { connection.action(it, focused, if (thread.settledAt == null) "settle" else "reopen") } }
+                    if (thread.kind == ThreadKind.SPACE) ReplyChip("Change to Task") { displayedHistory?.let { connection.action(it, focused, "set_kind", org.json.JSONObject().put("kind", "task").toString(), thread.revision) } }
+                    if (thread.kind == ThreadKind.TASK && thread.settledAt == null) ReplyChip("Change to Space") { displayedHistory?.let { connection.action(it, focused, "set_kind", org.json.JSONObject().put("kind", "space").toString(), thread.revision) } }
                     if (!thread.read) ReplyChip("Mark read") { displayedHistory?.let { connection.action(it, focused, "read") } }
                     ReplyChip(if (thread.archivedAt == null) "Archive" else "Unarchive") { displayedHistory?.let { connection.action(it, focused, if (thread.archivedAt == null) "archive" else "unarchive") } }
                     ReplyChip(if (isSnoozed(thread.snoozedUntil)) "Unsnooze" else "Snooze 1h") {
@@ -184,9 +191,12 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New child thread", testTag = "new-child-title", singleLine = true) }
-                Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), focused) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null) { Text("Create child") }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                HirselField(value = title, onValueChange = { title = it }, placeholder = if (thread?.kind == ThreadKind.TASK) "Name this Task" else "Name this child", testTag = "new-child-title", singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (thread?.kind == ThreadKind.SPACE) Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), ThreadKind.SPACE, focused) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null, modifier = Modifier.weight(1f)) { Text("New Space") }
+                    Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), ThreadKind.TASK, focused) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null, modifier = Modifier.weight(1f)) { Text("New Task") }
+                }
             }
             FlowRow { snapshot?.threads.orEmpty().filter { it.parentThreadId == focused }.forEach { child -> ReplyChip("${threadIconText(child)} ${child.title}") { connection.openThread(child.id) } } }
             LazyColumn(Modifier.weight(1f).testTag("chat-list")) {

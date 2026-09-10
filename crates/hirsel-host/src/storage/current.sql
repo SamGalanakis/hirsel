@@ -1,5 +1,6 @@
 CREATE TABLE threads (
         id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT UNIQUE,
+        kind TEXT NOT NULL CHECK(kind IN ('space','task')),
         parent_thread_id INTEGER REFERENCES threads(id), pinned_at TEXT,
         title TEXT NOT NULL, icon TEXT,
         showcased_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
@@ -7,9 +8,37 @@ CREATE TABLE threads (
         attention TEXT NOT NULL CHECK(attention IN ('quiet','needs_owner')),
         settled_at TEXT, archived_at TEXT, snoozed_until TEXT, read INTEGER NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL,
+        CHECK(kind = 'task' OR settled_at IS NULL),
         CHECK(parent_thread_id IS NULL OR parent_thread_id != id),
         CHECK(parent_thread_id IS NULL OR pinned_at IS NULL));
 CREATE INDEX threads_parent ON threads(parent_thread_id,id);
+CREATE TRIGGER threads_parent_immutable
+BEFORE UPDATE OF parent_thread_id ON threads
+WHEN NEW.parent_thread_id IS NOT OLD.parent_thread_id
+BEGIN
+    SELECT RAISE(ABORT, 'Thread parent is immutable');
+END;
+CREATE TRIGGER threads_kind_parent_insert
+BEFORE INSERT ON threads
+WHEN NEW.parent_thread_id IS NOT NULL
+BEGIN
+    SELECT CASE WHEN (SELECT kind FROM threads WHERE id=NEW.parent_thread_id)='task'
+                          AND NEW.kind!='task'
+        THEN RAISE(ABORT, 'Task Threads can only contain Tasks') END;
+END;
+CREATE TRIGGER threads_kind_update
+BEFORE UPDATE OF kind ON threads
+WHEN NEW.kind IS NOT OLD.kind
+BEGIN
+    SELECT CASE WHEN NEW.kind='space' AND OLD.settled_at IS NOT NULL
+        THEN RAISE(ABORT, 'reopen a settled Task before converting it to a Space') END;
+    SELECT CASE WHEN NEW.kind='space' AND
+        (SELECT kind FROM threads WHERE id=OLD.parent_thread_id)='task'
+        THEN RAISE(ABORT, 'a Task parent can only contain Tasks') END;
+    SELECT CASE WHEN NEW.kind='task' AND EXISTS(
+        SELECT 1 FROM threads WHERE parent_thread_id=OLD.id AND kind='space'
+    ) THEN RAISE(ABORT, 'a Task cannot contain Spaces') END;
+END;
         CREATE TABLE thread_action_receipts (client_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE thread_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
             thread_id INTEGER GENERATED ALWAYS AS (json_extract(payload,'$.thread_id')) STORED NOT NULL REFERENCES threads(id),

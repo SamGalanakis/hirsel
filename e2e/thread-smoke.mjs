@@ -9,8 +9,8 @@ const artifacts = process.env.HIRSEL_THREAD_SMOKE_ARTIFACTS;
 if (artifacts) await mkdir(artifacts, { recursive: true });
 const evidence = [];
 async function inventory(page) {
-  await page.getByRole("button", { name: "Threads", exact: true }).click();
-  await page.getByLabel("New thread title", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
+  await page.getByLabel("New space or task title", { exact: true }).waitFor();
 }
 async function chooseLifecycle(page, label) {
   await page.getByRole("button", { name: "Thread actions", exact: true }).click();
@@ -47,10 +47,10 @@ try {
       await page.locator('[data-slot="thread-context"] h1').filter({ hasText: "buy-groceries" }).waitFor();
       if (artifacts) await page.screenshot({ path: `${artifacts}/imported-groceries-${viewport.width}.png`, fullPage: true });
     }
-    const title = `Thread smoke ${viewport.width} ${Date.now()}`;
+    const title = `Task smoke ${viewport.width} ${Date.now()}`;
     await inventory(page);
-    await page.getByLabel("New thread title").fill(title);
-    await page.getByRole("button", { name: "Create thread", exact: true }).click();
+    await page.getByLabel("New space or task title").fill(title);
+    await page.getByRole("button", { name: "New Task", exact: true }).click();
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
     const path = new URL(page.url()).pathname + new URL(page.url()).search;
     const threadId = Number(path.split("/").at(-1));
@@ -75,12 +75,12 @@ try {
     if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into overview");
     await page.goto(`${url}${path}`);
     await page.getByText(body, { exact: true }).waitFor();
-    await chooseLifecycle(page, "Settle thread");
-    await expectLifecycle(page, "Reopen thread");
+    await chooseLifecycle(page, "Mark task done");
+    await expectLifecycle(page, "Reopen task");
     await page.reload();
-    await expectLifecycle(page, "Reopen thread");
-    await chooseLifecycle(page, "Reopen thread");
-    await expectLifecycle(page, "Settle thread");
+    await expectLifecycle(page, "Reopen task");
+    await chooseLifecycle(page, "Reopen task");
+    await expectLifecycle(page, "Mark task done");
     const dimensions = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
     if (dimensions.scroll > dimensions.width) throw new Error("Horizontal overflow");
     if (errors.length) throw new Error(`Browser errors: ${errors.join("; ")}`);
@@ -97,12 +97,12 @@ try {
     page.on("websocket", ws => ws.on("framesent", event => sent.push(JSON.parse(event.payload.toString()))));
     await page.addInitScript(value => { if (window === window.top) localStorage.setItem("hirsel.token", value); }, token);
     await page.goto(url);
-    await page.getByRole("button", {name:"Threads",exact:true}).click();
+    await page.getByRole("button", {name:"Spaces and Tasks",exact:true}).click();
     await page.locator(`[data-thread-row="${thread.id}"]`).click();
     await page.getByLabel("Confirmation").fill("ready");
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await page.getByRole("heading", { name: "Adaptive host proof advanced", exact: true }).waitFor();
-    await expectLifecycle(page, "Settle thread");
+    await expectLifecycle(page, "Mark task done");
     const action = sent.find(frame => frame.type === "thread_action" && frame.action === "advance");
     if (!action?.expected_revision) throw new Error("Generated action did not carry the displayed revision");
     const request = (frame, expected) => new Promise((resolve, reject) => {
@@ -126,5 +126,5 @@ try {
     await page.close();
   }
   if (artifacts) await writeFile(`${artifacts}/thread-smoke-evidence.json`, JSON.stringify(evidence, null, 2));
-  console.log("Thread create, focus, draft isolation, settle/reopen and reconnect smoke passed on desktop and phone.");
+  console.log("Task create, focus, draft isolation, done/reopen and reconnect smoke passed on desktop and phone.");
 } finally { await browser.close(); }

@@ -2,6 +2,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Durable product semantics for a Thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadKind {
+    Space,
+    Task,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadAttention {
@@ -13,6 +21,7 @@ pub enum ThreadAttention {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thread {
     pub id: u64,
+    pub kind: ThreadKind,
     pub parent_thread_id: Option<u64>,
     pub pinned_at: Option<DateTime<Utc>>,
     pub title: String,

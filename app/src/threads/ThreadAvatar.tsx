@@ -6,10 +6,10 @@ const tones = [
   "bg-rose-100 text-rose-900 dark:bg-rose-950 dark:text-rose-200",
   "bg-violet-100 text-violet-900 dark:bg-violet-950 dark:text-violet-200",
 ];
-export interface ThreadAvatarIdentity { id: number; title: string; icon?: string | null }
+export interface ThreadAvatarIdentity { id: number; kind: "space" | "task"; title: string; icon?: string | null }
 export function ThreadAvatar(props: { thread: ThreadAvatarIdentity; small?: boolean }) {
   return <span aria-hidden="true" data-slot="thread-avatar" data-thread-avatar={props.thread.id}
-    class={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden rounded-md align-middle font-medium leading-none ${props.small ? "size-5 text-xs" : "size-7 text-sm"} ${tones[Math.abs(props.thread.id) % tones.length]}`}>
+    data-thread-kind={props.thread.kind} class={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden align-middle font-medium leading-none ${props.thread.kind === "space" ? "rounded-md" : "rounded-full"} ${props.small ? "size-5 text-xs" : "size-7 text-sm"} ${tones[Math.abs(props.thread.id) % tones.length]}`}>
     {props.thread.icon ?? (Array.from(props.thread.title.trim())[0]?.toLocaleUpperCase() || "#")}
   </span>;
 }

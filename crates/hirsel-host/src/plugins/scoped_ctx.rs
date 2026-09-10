@@ -64,6 +64,7 @@ impl PluginThreads for ScopedThreads {
                 &ThreadMutation::Create {
                     icon: None,
                     client_id: key.clone(),
+                    kind: input.kind,
                     title: input.title,
                     parent: ThreadRef::default(),
                     description: input.description,
@@ -108,18 +109,6 @@ impl PluginThreads for ScopedThreads {
         };
         self.tools.publish_thread_activity(activity).await;
         Ok(receipt)
-    }
-    async fn settle(&self, id: u64, settled: bool) -> Result<(), String> {
-        let thread = self
-            .tools
-            .storage()
-            .settle_scoped_thread(&self.caller, id, settled)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.tools
-            .publish_thread(&self.caller.history_id, thread)
-            .await;
-        Ok(())
     }
 }
 struct ScopedKv {

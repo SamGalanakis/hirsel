@@ -49,7 +49,7 @@ function stubAttachments(): AttachmentsController {
   };
 }
 
-function thread(id: number, title: string): RefTarget { return { id, title }; }
+function thread(id: number, title: string): RefTarget { return { id, kind: "space", title }; }
 
 const FIELD = [thread(1, "deploy-4821"), thread(2, "auth-pr"), thread(3, "nightly-backup")];
 

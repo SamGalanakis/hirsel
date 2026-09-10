@@ -117,6 +117,7 @@ async fn request(state: &crate::AppState) -> OwnerTurn {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

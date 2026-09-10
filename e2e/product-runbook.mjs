@@ -191,12 +191,12 @@ async function capture(label, context) {
 }
 
 async function createThread(page, nonce) {
-  await page.getByRole("button", { name: "Threads", exact: true }).click();
+  await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
   const drawer = page.locator('[data-slot="thread-drawer"]');
-  await drawer.getByLabel("New thread title", { exact: true }).waitFor();
+  await drawer.getByLabel("New space or task title", { exact: true }).waitFor();
   const title = `Runbook ${nonce}`;
-  await drawer.getByLabel("New thread title", { exact: true }).fill(title);
-  await drawer.getByRole("button", { name: "Create thread", exact: true }).click();
+  await drawer.getByLabel("New space or task title", { exact: true }).fill(title);
+  await drawer.getByRole("button", { name: "New Space", exact: true }).click();
   await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
   const match = new URL(page.url()).pathname.match(/^\/t\/(\d+)$/);
   assert(match, `Thread creation did not navigate: ${page.url()}`);

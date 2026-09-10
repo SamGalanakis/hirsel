@@ -1,7 +1,30 @@
 use hirsel_client_core as core;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ThreadKind {
+    Space,
+    Task,
+}
+impl From<core::ThreadKind> for ThreadKind {
+    fn from(kind: core::ThreadKind) -> Self {
+        match kind {
+            core::ThreadKind::Space => Self::Space,
+            core::ThreadKind::Task => Self::Task,
+        }
+    }
+}
+impl From<ThreadKind> for core::ThreadKind {
+    fn from(kind: ThreadKind) -> Self {
+        match kind {
+            ThreadKind::Space => Self::Space,
+            ThreadKind::Task => Self::Task,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Thread {
+    pub kind: ThreadKind,
     pub parent_thread_id: Option<u64>,
     pub pinned_at: Option<String>,
     pub id: u64,
@@ -26,6 +49,7 @@ pub struct Thread {
 impl From<core::Thread> for Thread {
     fn from(t: core::Thread) -> Self {
         Self {
+            kind: t.kind.into(),
             parent_thread_id: t.parent_thread_id,
             pinned_at: t.pinned_at.map(|t| t.to_rfc3339()),
             id: t.id,
@@ -141,9 +165,10 @@ mod tests {
     use super::*;
     #[test]
     fn thread_ffi_keeps_lifecycle_instrument_and_revision() {
-        let wire = serde_json::json!({"id":5,"parent_thread_id":2,"pinned_at":"2026-09-09T10:00:00Z","title":"Groceries","icon":"🧑🏽‍💻","showcased_artifact_id":42,"description":"Milk","instrument":{"type":"text","text":"Milk"},"attention":"needs_owner","settled_at":null,"archived_at":null,"snoozed_until":null,"read":true,"created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z","revision":8,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":"2026-09-09T10:00:00Z"});
+        let wire = serde_json::json!({"id":5,"kind":"task","parent_thread_id":2,"pinned_at":"2026-09-09T10:00:00Z","title":"Groceries","icon":"🧑🏽‍💻","showcased_artifact_id":42,"description":"Milk","instrument":{"type":"text","text":"Milk"},"attention":"needs_owner","settled_at":null,"archived_at":null,"snoozed_until":null,"read":true,"created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z","revision":8,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":"2026-09-09T10:00:00Z"});
         let thread = Thread::from(serde_json::from_value::<core::Thread>(wire).unwrap());
         assert_eq!(thread.id, 5);
+        assert_eq!(thread.kind, ThreadKind::Task);
         assert_eq!(thread.showcased_artifact_id, Some(42));
         assert_eq!(thread.icon.as_deref(), Some("🧑🏽‍💻"));
         assert_eq!(thread.parent_thread_id, Some(2));
@@ -164,7 +189,7 @@ mod tests {
     fn thread_ffi_preserves_execution_timing_and_terminal_outcomes_independently() {
         for outcome in ["completed", "failed", "cancelled", "interrupted"] {
             let wire = serde_json::json!({
-                "id": 5, "parent_thread_id":2,"pinned_at":null, "title": "Groceries", "description": "Milk", "instrument": null,
+                "id": 5, "kind":"task", "parent_thread_id":2,"pinned_at":null, "title": "Groceries", "description": "Milk", "instrument": null,
                 "attention": "needs_owner", "settled_at": null, "archived_at": null,
                 "snoozed_until": null, "read": true, "revision": 8,
                 "created_at": "2026-09-09T10:00:00Z", "updated_at": "2026-09-09T12:00:00Z",

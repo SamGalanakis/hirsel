@@ -329,6 +329,7 @@ async fn seed_adaptive_thread(State(state): State<AppState>) -> Result<Json<Thre
             "Advance this Thread through the real Host action contract",
             &instrument,
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await?;

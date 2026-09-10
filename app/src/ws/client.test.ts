@@ -262,6 +262,33 @@ describe("HirselWsClient auth rejection (C5)", () => {
   });
 
 
+  it("gates when a reconnect receives a pre-auth error after an earlier success", async () => {
+    vi.useFakeTimers();
+    const { client } = await load();
+    localStorage.setItem("hirsel.token", "rotated");
+    const onAuthReject = vi.fn();
+    client.startClient("wss://host/ws", "rotated", { onAuthReject });
+    const ws1 = FakeWebSocket.instances[0];
+    ws1.serverOpen();
+    ws1.serverSend(HELLO_OK);
+
+    ws1.serverClose(1006);
+    vi.advanceTimersByTime(2000);
+    flush();
+    const ws2 = FakeWebSocket.instances[1];
+    ws2.serverOpen();
+    ws2.serverSend({ type: "error", detail: "invalid hello: rotated token" });
+
+    expect(onAuthReject).toHaveBeenCalledOnce();
+    expect(onAuthReject.mock.calls[0][0]).toBe("invalid hello: rotated token");
+    expect(client.getStoredToken()).toBeNull();
+
+    ws2.serverClose(1000);
+    vi.runAllTimers();
+    expect(onAuthReject).toHaveBeenCalledOnce();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
 
   it("does NOT gate a mid-session drop once the token has authenticated", async () => {
     vi.useFakeTimers();

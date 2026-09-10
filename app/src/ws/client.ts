@@ -84,8 +84,6 @@ class HirselWsClient {
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
   /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
   private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
-  /** Distinguish initial auth errors from later operational failures. */
-  private everAuthed = false;
   private handlers: ClientHandlers;
 
   constructor(url: string, token: string, handlers: ClientHandlers = {}) {
@@ -376,8 +374,6 @@ class HirselWsClient {
     handleThreadMessage(message);
     switch (message.type) {
       case "hello_ok": {
-        // This socket now addresses the authenticated current history.
-        this.everAuthed = true;
         dispatch({ type: "hello_ok", payload: message });
         dispatch({ type: "connection_status", status: "connected" });
         this.reconnectAttempt = 0;
@@ -442,12 +438,12 @@ class HirselWsClient {
       case "error": {
         // C5: the host rejects a bad hello with a plain `error` frame carrying a
         // reason and NO client_id, then closes the socket (no numeric close
-        // code). Before this client has ever authenticated, that is an auth
+        // code). Before the current socket has authenticated, that is an auth
         // rejection — act on it immediately (precise + instant) rather than
         // waiting for the socket close. A correlated error
         // (upload/blob) always has a client_id and is handled below; a global
         // error that arrives AFTER authentication is a normal runtime error.
-        if (!this.everAuthed && !message.client_id) {
+        if (!this.authenticated && !message.client_id) {
           this.handleAuthReject(message.detail);
           break;
         }

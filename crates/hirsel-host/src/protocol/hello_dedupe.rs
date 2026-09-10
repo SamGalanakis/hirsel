@@ -56,7 +56,101 @@ impl HelloBroadcastDedupe {
                     || snapshot.placement != *placement
                     || snapshot.spec != *spec
             }),
+            HostToClient::ViewRemoved { instance_id } => {
+                self.views.remove(instance_id);
+                true
+            }
             _ => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hirsel_proto::{HostToClient, ViewInstance};
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    use super::HelloBroadcastDedupe;
+    use crate::{
+        BroadcastLog,
+        templates::{TemplateStore, ViewManager},
+    };
+
+    fn view(spec: serde_json::Value) -> ViewInstance {
+        ViewInstance {
+            thread_id: 7,
+            instance_id: "status".to_string(),
+            placement: "canvas".to_string(),
+            spec,
+        }
+    }
+
+    fn upsert(view: &ViewInstance) -> HostToClient {
+        HostToClient::ViewUpsert {
+            thread_id: view.thread_id,
+            instance_id: view.instance_id.clone(),
+            placement: view.placement.clone(),
+            spec: view.spec.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn removed_snapshot_view_can_be_recreated_with_identical_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(4);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+        let spec = json!({ "type": "text", "text": "Ready" });
+        let original = views
+            .show(
+                "fixture-history",
+                7,
+                None,
+                Some(spec.clone()),
+                None,
+                Some("status".to_string()),
+                "canvas".to_string(),
+            )
+            .await
+            .unwrap();
+        let initial_upsert = broadcasts.recv().await.unwrap();
+        let snapshot = views.snapshot().await;
+
+        let mut duplicate_dedupe = HelloBroadcastDedupe::new(snapshot.clone());
+        assert!(!duplicate_dedupe.should_send(&initial_upsert));
+
+        let mut dedupe = HelloBroadcastDedupe::new(snapshot);
+        views.clear("fixture-history", 7, "status").await.unwrap();
+        assert!(dedupe.should_send(&broadcasts.recv().await.unwrap()));
+
+        let recreated = views
+            .show(
+                "fixture-history",
+                7,
+                None,
+                Some(spec),
+                None,
+                Some("status".to_string()),
+                "canvas".to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recreated, original);
+        assert!(dedupe.should_send(&broadcasts.recv().await.unwrap()));
+    }
+
+    #[test]
+    fn changed_snapshot_view_is_still_delivered() {
+        let original = view(json!({ "type": "text", "text": "Ready" }));
+        let changed = view(json!({ "type": "text", "text": "Done" }));
+        let mut dedupe = HelloBroadcastDedupe::new(vec![original]);
+
+        assert!(dedupe.should_send(&upsert(&changed)));
     }
 }

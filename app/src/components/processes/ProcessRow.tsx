@@ -91,8 +91,8 @@ export function ProcessRow(props: Props) {
   const isSubagent = () => p().kind === "subagent";
   const isMonitor = () => p().kind === "monitor";
   const running = () => p().state === "running";
-  // A monitor has "fired" once its last event is distinct from its start.
-  const hasFired = () => p().last_event_ts !== p().started_ts;
+  // A monitor has activity once its last event is distinct from its start.
+  const hasActivity = () => p().last_event_ts !== p().started_ts;
   // Resting (finished) processes render as dense hairline rows; the active
   // (running) process — or one the Owner taps open — is promoted to a card.
   const asCard = () => running() || expanded();
@@ -194,12 +194,12 @@ export function ProcessRow(props: Props) {
             </span>
           </Show>
 
-          {/* Meta line: relative start (+ last-fired for a monitor that fired). */}
+          {/* Meta line: relative start (+ latest activity for a monitor with activity). */}
           <span class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
             <span>started {formatRelativeTime(p().started_ts)}</span>
-            <Show when={isMonitor() && hasFired()}>
+            <Show when={isMonitor() && hasActivity()}>
               <span aria-hidden="true">·</span>
-              <span>last fired {formatRelativeTime(p().last_event_ts)}</span>
+              <span>last updated {formatRelativeTime(p().last_event_ts)}</span>
             </Show>
           </span>
 

@@ -127,21 +127,28 @@ mod tests {
             pid_file.display()
         );
 
-        // Generous timeout: the child must reach `echo $! > pidfile` before the
-        // timeout fires. A tight 100ms races on a cold/loaded CI runner (bash
-        // startup + fork), leaving the pidfile unwritten. 999s sleep still times out.
-        let output = run_bash_command(cmd, None, Duration::from_secs(2))
-            .await
-            .unwrap();
+        let running = start_bash_command(cmd, None).unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match tokio::fs::read_to_string(&pid_file).await {
+                    Ok(pid) if !pid.trim().is_empty() => break pid.trim().to_string(),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("failed to read shell child pid: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shell fixture did not become ready");
+
+        // Measure the runtime timeout only after the child is ready. Login-shell
+        // startup is outside this test's behavior and can be delayed on loaded runners.
+        let output = running.finish(Duration::from_secs(2)).await.unwrap();
 
         assert!(output.timed_out);
         assert_eq!(output.stdout, b"partial-output");
         assert_eq!(output.stderr, b"partial-error");
-        let pid = tokio::fs::read_to_string(&pid_file)
-            .await
-            .unwrap()
-            .trim()
-            .to_string();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
             !std::process::Command::new("kill")

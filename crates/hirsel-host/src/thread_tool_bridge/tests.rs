@@ -362,13 +362,13 @@ async fn start_held_call(
         )
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while turn_events(state, &active.caller).is_empty() || !marker.exists() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("held shell fixture did not become ready");
     frames
 }
 

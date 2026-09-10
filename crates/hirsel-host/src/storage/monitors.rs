@@ -8,11 +8,15 @@ use chrono::Utc;
 use hirsel_proto::ProcessInfo;
 use hirsel_proto::ProcessKind;
 use hirsel_proto::ProcessState;
+use regex::Regex;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
+use rusqlite::types::Type;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 use uuid::Uuid;
 
 impl Storage {
@@ -21,8 +25,7 @@ impl Storage {
         thread_id: u64,
         cmd: impl Into<String>,
         every_secs: u64,
-        wake_on: MonitorWakeOn,
-        pattern: Option<String>,
+        condition: MonitorCondition,
         label: impl Into<String>,
     ) -> anyhow::Result<MonitorRecord> {
         let now = Utc::now();
@@ -31,8 +34,7 @@ impl Storage {
             id: format!("mon-{}", Uuid::new_v4()),
             cmd: cmd.into(),
             every_secs: every_secs.max(30),
-            wake_on,
-            pattern,
+            condition,
             label: label.into(),
             created_ts: now,
             last_event_ts: now,
@@ -52,8 +54,7 @@ impl Storage {
         caller: &super::ThreadCaller,
         cmd: String,
         every_secs: u64,
-        wake_on: MonitorWakeOn,
-        pattern: Option<String>,
+        condition: MonitorCondition,
         label: String,
     ) -> anyhow::Result<MonitorRecord> {
         let now = Utc::now();
@@ -62,8 +63,7 @@ impl Storage {
             id: format!("mon-{}", Uuid::new_v4()),
             cmd,
             every_secs: every_secs.max(30),
-            wake_on,
-            pattern,
+            condition,
             label,
             created_ts: now,
             last_event_ts: now,
@@ -101,8 +101,8 @@ fn insert_monitor(conn: &Connection, record: &MonitorRecord) -> anyhow::Result<M
             record.id,
             record.cmd,
             record.every_secs,
-            monitor_wake_on_to_str(record.wake_on),
-            record.pattern,
+            record.condition.wake_on(),
+            record.condition.pattern(),
             record.label,
             record.created_ts.to_rfc3339(),
             record.last_event_ts.to_rfc3339(),
@@ -217,13 +217,112 @@ impl Storage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MonitorWakeOn {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "wake_on", content = "pattern", rename_all = "snake_case")]
+pub enum MonitorCondition {
     Changed,
     ExitZero,
     ExitNonzero,
-    Regex,
+    Regex(MonitorRegex),
+}
+
+impl MonitorCondition {
+    pub fn parse(wake_on: &str, pattern: Option<String>) -> Result<Self, MonitorConditionError> {
+        match wake_on {
+            "changed" => Self::without_pattern(Self::Changed, pattern),
+            "exit_zero" => Self::without_pattern(Self::ExitZero, pattern),
+            "exit_nonzero" => Self::without_pattern(Self::ExitNonzero, pattern),
+            "regex" => {
+                let pattern = pattern.ok_or(MonitorConditionError::MissingRegexPattern)?;
+                Ok(Self::Regex(MonitorRegex::new(pattern)?))
+            }
+            other => Err(MonitorConditionError::UnknownWakeOn(other.to_string())),
+        }
+    }
+
+    fn without_pattern(
+        condition: Self,
+        pattern: Option<String>,
+    ) -> Result<Self, MonitorConditionError> {
+        if pattern.is_some() {
+            return Err(MonitorConditionError::UnexpectedPattern);
+        }
+        Ok(condition)
+    }
+
+    pub fn wake_on(&self) -> &'static str {
+        match self {
+            Self::Changed => "changed",
+            Self::ExitZero => "exit_zero",
+            Self::ExitNonzero => "exit_nonzero",
+            Self::Regex(_) => "regex",
+        }
+    }
+
+    pub fn pattern(&self) -> Option<&str> {
+        match self {
+            Self::Regex(pattern) => Some(pattern.as_str()),
+            Self::Changed | Self::ExitZero | Self::ExitNonzero => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MonitorConditionError {
+    #[error("monitor pattern is required for regex wake_on")]
+    MissingRegexPattern,
+    #[error("monitor pattern is only allowed for regex wake_on")]
+    UnexpectedPattern,
+    #[error("invalid monitor regex: {0}")]
+    InvalidRegex(#[from] regex::Error),
+    #[error("wake_on must be changed, exit_zero, exit_nonzero, or regex, got `{0}`")]
+    UnknownWakeOn(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct MonitorRegex(Regex);
+
+impl MonitorRegex {
+    fn new(pattern: String) -> Result<Self, MonitorConditionError> {
+        if pattern.trim().is_empty() {
+            return Err(MonitorConditionError::MissingRegexPattern);
+        }
+        Ok(Self(Regex::new(&pattern)?))
+    }
+
+    pub(crate) fn is_match(&self, text: &str) -> bool {
+        self.0.is_match(text)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl PartialEq for MonitorRegex {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for MonitorRegex {}
+
+impl Serialize for MonitorRegex {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MonitorRegex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        MonitorRegex::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -232,9 +331,8 @@ pub struct MonitorRecord {
     pub id: String,
     pub cmd: String,
     pub every_secs: u64,
-    pub wake_on: MonitorWakeOn,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
+    #[serde(flatten)]
+    pub condition: MonitorCondition,
     pub label: String,
     pub created_ts: DateTime<Utc>,
     pub last_event_ts: DateTime<Utc>,
@@ -279,11 +377,6 @@ fn validate_monitor_record(record: &MonitorRecord) -> anyhow::Result<()> {
     if record.label.trim().is_empty() {
         anyhow::bail!("monitor label is required");
     }
-    if matches!(record.wake_on, MonitorWakeOn::Regex)
-        && record.pattern.as_deref().is_none_or(str::is_empty)
-    {
-        anyhow::bail!("monitor pattern is required for regex wake_on");
-    }
     Ok(())
 }
 
@@ -310,6 +403,7 @@ fn get_monitor_optional(
 
 fn monitor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MonitorRecord> {
     let wake_on: String = row.get(3)?;
+    let pattern: Option<String> = row.get(4)?;
     let created_ts: String = row.get(6)?;
     let last_event_ts: String = row.get(7)?;
     let last_run_ts: Option<String> = row.get(8)?;
@@ -319,8 +413,9 @@ fn monitor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MonitorRecord> 
         id: row.get(0)?,
         cmd: row.get(1)?,
         every_secs: u64_from_row(row, 2)?,
-        wake_on: monitor_wake_on_from_str(&wake_on)?,
-        pattern: row.get(4)?,
+        condition: MonitorCondition::parse(&wake_on, pattern).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+        })?,
         label: row.get(5)?,
         created_ts: parse_ts(&created_ts)?,
         last_event_ts: parse_ts(&last_event_ts)?,
@@ -329,25 +424,6 @@ fn monitor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MonitorRecord> 
         summary: row.get(10)?,
         cancelled_ts: cancelled_ts.as_deref().map(parse_ts).transpose()?,
     })
-}
-
-fn monitor_wake_on_to_str(wake_on: MonitorWakeOn) -> &'static str {
-    match wake_on {
-        MonitorWakeOn::Changed => "changed",
-        MonitorWakeOn::ExitZero => "exit_zero",
-        MonitorWakeOn::ExitNonzero => "exit_nonzero",
-        MonitorWakeOn::Regex => "regex",
-    }
-}
-
-fn monitor_wake_on_from_str(value: &str) -> rusqlite::Result<MonitorWakeOn> {
-    match value {
-        "changed" => Ok(MonitorWakeOn::Changed),
-        "exit_zero" => Ok(MonitorWakeOn::ExitZero),
-        "exit_nonzero" => Ok(MonitorWakeOn::ExitNonzero),
-        "regex" => Ok(MonitorWakeOn::Regex),
-        _ => Err(rusqlite::Error::InvalidQuery),
-    }
 }
 
 #[cfg(test)]

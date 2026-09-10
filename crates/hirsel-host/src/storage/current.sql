@@ -74,7 +74,12 @@ CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='r
                 last_run_ts TEXT NULL,
                 last_output TEXT NULL,
                 summary TEXT NULL,
-                cancelled_ts TEXT NULL
+                cancelled_ts TEXT NULL,
+                CHECK (
+                    (wake_on = 'regex' AND pattern IS NOT NULL AND length(trim(pattern)) > 0)
+                    OR
+                    (wake_on IN ('changed', 'exit_zero', 'exit_nonzero') AND pattern IS NULL)
+                )
             );
 
             CREATE TABLE push_tokens (

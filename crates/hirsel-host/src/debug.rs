@@ -22,7 +22,7 @@ use crate::{
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
     auth::owner_bearer_matches,
     push::RecordedPush,
-    storage::{Device, MonitorRecord, MonitorWakeOn, PushToken},
+    storage::{Device, MonitorCondition, MonitorRecord, PushToken},
 };
 
 const PAIRING_CODE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -133,10 +133,46 @@ struct CreateMonitorRequest {
     cmd: String,
     #[serde(default)]
     every_secs: Option<u64>,
-    wake_on: MonitorWakeOn,
-    #[serde(default)]
-    pattern: Option<String>,
+    #[serde(flatten)]
+    condition: MonitorCondition,
     label: String,
+}
+
+#[cfg(test)]
+mod monitor_request_tests {
+    use super::*;
+
+    #[test]
+    fn debug_monitor_request_deserializes_only_valid_conditions() {
+        let valid: CreateMonitorRequest = serde_json::from_value(serde_json::json!({
+            "thread_id": 1,
+            "cmd": "printf ready",
+            "wake_on": "regex",
+            "pattern": "ready",
+            "label": "ready"
+        }))
+        .unwrap();
+        assert_eq!(valid.condition.pattern(), Some("ready"));
+
+        for invalid in [
+            serde_json::json!({
+                "thread_id": 1,
+                "cmd": "printf ready",
+                "wake_on": "regex",
+                "pattern": "[",
+                "label": "ready"
+            }),
+            serde_json::json!({
+                "thread_id": 1,
+                "cmd": "printf ready",
+                "wake_on": "changed",
+                "pattern": "ignored",
+                "label": "ready"
+            }),
+        ] {
+            assert!(serde_json::from_value::<CreateMonitorRequest>(invalid).is_err());
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,8 +523,7 @@ async fn create_monitor(
             request.thread_id,
             request.cmd,
             request.every_secs.unwrap_or(30),
-            request.wake_on,
-            request.pattern,
+            request.condition,
             request.label,
         )
         .await?;

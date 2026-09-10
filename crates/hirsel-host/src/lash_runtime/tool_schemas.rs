@@ -42,6 +42,42 @@ pub(super) fn views_list_templates_output_schema() -> Value {
     })
 }
 
+pub(super) fn monitors_create_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            monitor_create_input_variant("changed", false),
+            monitor_create_input_variant("exit_zero", false),
+            monitor_create_input_variant("exit_nonzero", false),
+            monitor_create_input_variant("regex", true)
+        ]
+    })
+}
+
+fn monitor_create_input_variant(wake_on: &str, regex: bool) -> Value {
+    let mut required = vec!["cmd", "wake_on", "label"];
+    let mut properties = json!({
+        "cmd": { "type": "string", "minLength": 1 },
+        "every_secs": { "type": "integer", "minimum": 30 },
+        "wake_on": { "const": wake_on },
+        "label": { "type": "string", "minLength": 1 }
+    });
+    if regex {
+        required.push("pattern");
+        properties["pattern"] = json!({
+            "type": "string",
+            "minLength": 1,
+            "description": "A valid regular expression matched against command output."
+        });
+    }
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties
+    })
+}
+
 pub(super) fn monitors_create_output_schema() -> Value {
     json!({
         "type": "object",
@@ -71,35 +107,49 @@ pub(super) fn monitors_list_output_schema() -> Value {
 pub(super) fn monitor_output_schema() -> Value {
     json!({
         "type": "object",
+        "oneOf": [
+            monitor_output_variant("changed", false),
+            monitor_output_variant("exit_zero", false),
+            monitor_output_variant("exit_nonzero", false),
+            monitor_output_variant("regex", true)
+        ]
+    })
+}
+
+fn monitor_output_variant(wake_on: &str, regex: bool) -> Value {
+    let mut required = vec![
+        "monitor_id",
+        "thread_id",
+        "cmd",
+        "every_secs",
+        "wake_on",
+        "label",
+        "created_ts",
+        "last_event_ts",
+    ];
+    let mut properties = json!({
+        "monitor_id": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "integer", "minimum": 0 },
+        "cmd": { "type": "string" },
+        "every_secs": { "type": "integer", "minimum": 30 },
+        "wake_on": { "const": wake_on },
+        "label": { "type": "string" },
+        "created_ts": timestamp_output_schema(),
+        "last_event_ts": timestamp_output_schema(),
+        "last_run_ts": timestamp_output_schema(),
+        "last_output": { "type": "string" },
+        "summary": { "type": "string" },
+        "cancelled_ts": timestamp_output_schema()
+    });
+    if regex {
+        required.push("pattern");
+        properties["pattern"] = json!({ "type": "string", "minLength": 1 });
+    }
+    json!({
+        "type": "object",
         "additionalProperties": false,
-        "required": [
-            "monitor_id",
-            "thread_id",
-            "cmd",
-            "every_secs",
-            "wake_on",
-            "label",
-            "created_ts",
-            "last_event_ts"
-        ],
-        "properties": {
-            "monitor_id": { "type": "string", "minLength": 1 },
-            "thread_id": { "type": "integer", "minimum": 0 },
-            "cmd": { "type": "string" },
-            "every_secs": { "type": "integer", "minimum": 30 },
-            "wake_on": {
-                "type": "string",
-                "enum": ["changed", "exit_zero", "exit_nonzero", "regex"]
-            },
-            "pattern": { "type": "string" },
-            "label": { "type": "string" },
-            "created_ts": timestamp_output_schema(),
-            "last_event_ts": timestamp_output_schema(),
-            "last_run_ts": timestamp_output_schema(),
-            "last_output": { "type": "string" },
-            "summary": { "type": "string" },
-            "cancelled_ts": timestamp_output_schema()
-        }
+        "required": required,
+        "properties": properties
     })
 }
 

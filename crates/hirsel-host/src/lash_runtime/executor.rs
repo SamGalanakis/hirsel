@@ -158,14 +158,8 @@ pub(super) fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
     }
 }
 
-pub(super) fn parse_monitor_wake_on(value: &str) -> Result<MonitorWakeOn, String> {
-    match value {
-        "changed" => Ok(MonitorWakeOn::Changed),
-        "exit_zero" => Ok(MonitorWakeOn::ExitZero),
-        "exit_nonzero" => Ok(MonitorWakeOn::ExitNonzero),
-        "regex" => Ok(MonitorWakeOn::Regex),
-        other => Err(format!(
-            "wake_on must be changed, exit_zero, exit_nonzero, or regex, got `{other}`"
-        )),
-    }
+pub(super) fn parse_monitor_condition(args: &Value) -> Result<MonitorCondition, String> {
+    let wake_on = required_string(args, "wake_on")?;
+    let pattern = optional_string(args, "pattern")?;
+    MonitorCondition::parse(&wake_on, pattern).map_err(|error| error.to_string())
 }

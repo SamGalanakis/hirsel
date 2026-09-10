@@ -1,6 +1,52 @@
 use super::*;
 
 #[tokio::test]
+async fn monitor_create_accepts_only_valid_condition_variants() {
+    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
+    let caller = storage.test_running_caller().await;
+    let mut tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "invalid-regex".into(),
+    };
+
+    for (name, condition) in [
+        ("missing", json!({"wake_on": "regex"})),
+        ("empty", json!({"wake_on": "regex", "pattern": ""})),
+        ("malformed", json!({"wake_on": "regex", "pattern": "["})),
+        (
+            "irrelevant",
+            json!({"wake_on": "changed", "pattern": "ignored"}),
+        ),
+    ] {
+        tools.operation_id = format!("invalid-{name}");
+        let mut args = condition;
+        args["cmd"] = json!("printf ready");
+        args["label"] = json!(format!("invalid {name}"));
+        args["every_secs"] = json!(30);
+        let error = tools.execute("monitors_create", &args).await.unwrap_err();
+        assert!(!error.is_empty());
+        assert!(storage.active_monitors().await.unwrap().is_empty());
+        assert!(storage.monitor_snapshot().await.unwrap().is_empty());
+    }
+
+    for (name, condition) in [
+        ("changed", json!({"wake_on": "changed"})),
+        ("exit-zero", json!({"wake_on": "exit_zero"})),
+        ("exit-nonzero", json!({"wake_on": "exit_nonzero"})),
+        ("regex", json!({"wake_on": "regex", "pattern": "ready"})),
+    ] {
+        tools.operation_id = format!("valid-{name}");
+        let mut args = condition;
+        args["cmd"] = json!("printf ready");
+        args["label"] = json!(format!("valid {name}"));
+        args["every_secs"] = json!(30);
+        tools.execute("monitors_create", &args).await.unwrap();
+    }
+    assert_eq!(storage.active_monitors().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
 async fn scoped_views_monitors_and_shell_reject_foreign_or_cancelled_execution() {
     let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
     let a = storage.test_running_caller().await;

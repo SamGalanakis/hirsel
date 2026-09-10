@@ -308,21 +308,7 @@ pub(super) fn hirsel_tool_definitions(
             "hirsel.monitors_create",
             "monitors_create",
             "Create a persisted host monitor that wakes the Agent when its condition fires. Monitors and timers are the way to watch for a condition instead of polling in-turn.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["cmd", "wake_on", "label"],
-                "properties": {
-                    "cmd": { "type": "string" },
-                    "every_secs": { "type": "integer", "minimum": 30 },
-                    "wake_on": {
-                        "type": "string",
-                        "enum": ["changed", "exit_zero", "exit_nonzero", "regex"]
-                    },
-                    "pattern": { "type": "string" },
-                    "label": { "type": "string" }
-                }
-            }),
+            monitors_create_input_schema(),
             monitors_create_output_schema(),
             ["monitors"],
             "create",

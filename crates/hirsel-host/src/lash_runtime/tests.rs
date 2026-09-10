@@ -692,8 +692,7 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         id: "monitor-1".to_string(),
         cmd: "test -f done".to_string(),
         every_secs: 30,
-        wake_on: MonitorWakeOn::Regex,
-        pattern: Some("ready".to_string()),
+        condition: MonitorCondition::parse("regex", Some("ready".to_string())).unwrap(),
         label: "build ready".to_string(),
         created_ts: now,
         last_event_ts: now,
@@ -702,6 +701,9 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         summary: Some("matched".to_string()),
         cancelled_ts: Some(now),
     };
+    let mut changed_monitor = monitor.clone();
+    changed_monitor.id = "monitor-2".to_string();
+    changed_monitor.condition = MonitorCondition::Changed;
     let mut results = BTreeMap::<&str, Vec<Value>>::new();
     for name in ["artifacts_create", "artifacts_edit", "artifacts_show"] {
         results.insert(name, vec![json!({"id":1,"content":"result"})]);
@@ -740,11 +742,14 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     );
     results.insert(
         "monitors_create",
-        vec![monitors_create_result(&monitor).unwrap()],
+        vec![
+            monitors_create_result(&monitor).unwrap(),
+            monitors_create_result(&changed_monitor).unwrap(),
+        ],
     );
     results.insert(
         "monitors_list",
-        vec![monitors_list_result(std::slice::from_ref(&monitor)).unwrap()],
+        vec![monitors_list_result(&[monitor.clone(), changed_monitor]).unwrap()],
     );
     results.insert("monitors_cancel", vec![monitors_cancel_result("monitor-1")]);
     results.insert(
@@ -824,6 +829,59 @@ async fn every_executor_result_matches_its_declared_output_schema() {
             }
         }
     }
+}
+
+#[test]
+fn monitor_create_schema_and_parser_share_the_condition_contract() {
+    let definition = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+        .into_iter()
+        .find(|definition| definition.name() == "monitors_create")
+        .unwrap();
+    let schema = jsonschema::JSONSchema::compile(definition.contract.input_schema.canonical())
+        .expect("monitor input schema compiles");
+    let base = json!({"cmd":"printf ready","label":"ready","every_secs":30});
+
+    for condition in [
+        json!({"wake_on":"changed"}),
+        json!({"wake_on":"exit_zero"}),
+        json!({"wake_on":"exit_nonzero"}),
+        json!({"wake_on":"regex","pattern":"ready"}),
+    ] {
+        let mut input = base.clone();
+        input.as_object_mut().unwrap().extend(
+            condition
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        assert!(schema.is_valid(&input), "schema rejected {input}");
+        parse_monitor_condition(&input).unwrap();
+    }
+
+    for condition in [
+        json!({"wake_on":"regex"}),
+        json!({"wake_on":"regex","pattern":""}),
+        json!({"wake_on":"changed","pattern":"ignored"}),
+        json!({"wake_on":"unknown"}),
+    ] {
+        let mut input = base.clone();
+        input.as_object_mut().unwrap().extend(
+            condition
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        assert!(!schema.is_valid(&input), "schema accepted {input}");
+        assert!(parse_monitor_condition(&input).is_err());
+    }
+
+    let mut malformed = base;
+    malformed["wake_on"] = json!("regex");
+    malformed["pattern"] = json!("[");
+    assert!(schema.is_valid(&malformed));
+    assert!(parse_monitor_condition(&malformed).is_err());
 }
 
 fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
@@ -1056,8 +1114,7 @@ fn engine_start_requests_declare_a_captured_execution_env() {
         id: "monitor-1".to_string(),
         cmd: "test -f done".to_string(),
         every_secs: 30,
-        wake_on: MonitorWakeOn::Regex,
-        pattern: Some("ready".to_string()),
+        condition: MonitorCondition::parse("regex", Some("ready".to_string())).unwrap(),
         label: "build ready".to_string(),
         created_ts: now,
         last_event_ts: now,

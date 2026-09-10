@@ -60,7 +60,7 @@ use crate::{
     monitors::{output_tail, run_monitor_tick},
     prompt_config::PromptConfig,
     providers::ProviderRosterState,
-    storage::{MonitorRecord, MonitorWakeOn},
+    storage::{MonitorCondition, MonitorRecord},
     tools::ToolSuite,
 };
 

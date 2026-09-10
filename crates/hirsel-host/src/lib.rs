@@ -51,7 +51,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     config::Config,
     lash_runtime::{AgentRuntime, CancelQueuedResult},
-    storage::{MonitorRecord, MonitorWakeOn, Storage, monitor_process_info},
+    storage::{MonitorCondition, MonitorRecord, Storage, monitor_process_info},
     tools::{ToolSuite, ToolsConfig},
 };
 
@@ -538,13 +538,12 @@ impl AppState {
         thread_id: u64,
         cmd: String,
         every_secs: u64,
-        wake_on: MonitorWakeOn,
-        pattern: Option<String>,
+        condition: MonitorCondition,
         label: String,
     ) -> anyhow::Result<MonitorRecord> {
         let record = self
             .storage
-            .create_monitor(thread_id, cmd, every_secs, wake_on, pattern, label)
+            .create_monitor(thread_id, cmd, every_secs, condition, label)
             .await?;
         self.broadcast_monitor(&record);
         self.agent.start_monitor_process(&record).await?;

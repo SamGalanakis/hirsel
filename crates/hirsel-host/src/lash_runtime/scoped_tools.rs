@@ -103,8 +103,7 @@ impl ScopedThreadTools {
                         &self.caller,
                         required_string(args, "cmd")?,
                         args.get("every_secs").and_then(Value::as_u64).unwrap_or(30),
-                        parse_monitor_wake_on(&required_string(args, "wake_on")?)?,
-                        optional_string(args, "pattern")?,
+                        parse_monitor_condition(args)?,
                         required_string(args, "label")?,
                     )
                     .await

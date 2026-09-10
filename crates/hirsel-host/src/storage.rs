@@ -50,7 +50,8 @@ pub(crate) use artifacts::ArtifactDraft;
 pub use blobs::StoredBlob;
 pub use chat::HelloSnapshot;
 pub use devices::Device;
-pub use monitors::{MonitorRecord, MonitorWakeOn, monitor_process_info};
+pub(crate) use monitors::monitor_process_info;
+pub use monitors::{MonitorCondition, MonitorRecord};
 pub use push_tokens::PushToken;
 
 #[derive(Clone)]

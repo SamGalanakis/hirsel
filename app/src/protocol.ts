@@ -470,9 +470,8 @@ export interface TurnEventMsg {
 export interface ErrorMsg {
   type: "error";
   detail: string;
-  /** Optional correlation id echoed for upload_blob / cancel_queued failures,
-   * so the client can mark the right chip/bubble. Not in the canonical doc's
-   * minimal error shape, but hosts may include it; absent for global errors. */
+  /** Optional correlation id echoed for request failures, including Thread
+   * actions, so the client can settle the exact owning operation. */
   client_id?: string;
 }
 

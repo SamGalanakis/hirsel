@@ -379,6 +379,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
             title: "Wrong child".into(),
         },
         ClientToHost::ThreadAction {
+            client_id: "stale-action".into(),
             history_id: old_history.clone(),
             thread_id: fresh.id,
             action: "archive".into(),
@@ -431,6 +432,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
         &state,
         &mut channel,
         ClientToHost::ThreadAction {
+            client_id: "current-action".into(),
             history_id: new_history.clone(),
             thread_id: fresh.id,
             action: "archive".into(),

@@ -79,7 +79,7 @@ internal fun ThreadIconPicker(thread: Thread, history: String, connection: Conne
         }
     }, confirmButton = {
         TextButton(enabled = error == null && connection.isOnline, onClick = {
-            val accepted = runCatching { connection.client?.updateThreadIcon(history, thread.id, icon, thread.revision) == true }
+            val accepted = runCatching { connection.updateThreadIcon(history, thread.id, icon, thread.revision) }
             if (accepted.getOrDefault(false)) onClose()
             else saveError = accepted.exceptionOrNull()?.message ?: "Thread or connection changed. Close and reopen the icon picker to try again."
         }) { Text("Save icon") }

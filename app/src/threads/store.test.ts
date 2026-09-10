@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../protocol";
 import type { ThreadClientMessage, ThreadDetail } from "./types";
 import { makeThread } from "./fixtures";
-import { attachThreadTransport, createThread, disconnectThreads, handleThreadMessage, openThread, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
+import { attachThreadTransport, createThread, disconnectThreads, handleThreadMessage, openThread, resetThreads, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
 import { setHistoryId } from "../lib/history";
 const sent: ThreadClientMessage[] = [];
 beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
@@ -95,7 +95,50 @@ describe("thread transport projection", () => {
     expect(threadState.streams[1]).toBeUndefined();
     expect(threadState.streams[2]).toHaveLength(1);
     flush(() => threadAction("test-history", 2, "choose", { choice: "a" }, 7));
-    expect(sent[0]).toEqual({ type: "thread_action", history_id: "test-history", thread_id: 2, action: "choose", data: { choice: "a" }, expected_revision: 7 });
+    expect(sent[0]).toMatchObject({ type: "thread_action", history_id: "test-history", thread_id: 2, action: "choose", data: { choice: "a" }, expected_revision: 7 });
+  });
+  it("settles only the exact correlated action on success, failure and timeout", async () => {
+    vi.useFakeTimers();
+    flush(() => threadAction("test-history", 2, "archive"));
+    flush(() => threadAction("test-history", 2, "read"));
+    const [archive, read] = sent.filter(frame => frame.type === "thread_action");
+    if (archive?.type !== "thread_action" || read?.type !== "thread_action") throw new Error("Missing actions");
+    expect(archive.client_id).not.toBe(read.client_id);
+
+    flush(() => handleThreadMessage({ type: "error", client_id: archive.client_id, detail: "Archive rejected" }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(threadState.error).toMatchObject({ operation: "request", detail: "Archive rejected", threadId: 2, clientId: archive.client_id });
+
+    flush(() => handleThreadMessage({ type: "thread_action_applied", client_id: read.client_id, history_id: read.history_id, thread_id: read.thread_id }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(threadState.error?.clientId).toBe(archive.client_id);
+
+    flush(() => threadAction("test-history", 2, "settle"));
+    const timedOut = sent.findLast(frame => frame.type === "thread_action");
+    if (timedOut?.type !== "thread_action") throw new Error("Missing timeout action");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(threadState.error).toMatchObject({ detail: "Thread request timed out", threadId: 2, clientId: timedOut.client_id });
+    flush(() => handleThreadMessage({ type: "thread_action_applied", client_id: timedOut.client_id, history_id: timedOut.history_id, thread_id: timedOut.thread_id }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(threadState.error?.clientId).toBe(timedOut.client_id);
+  });
+  it("drops old-history and duplicate action results while preserving global errors", async () => {
+    flush(() => threadAction("test-history", 2, "archive"));
+    const old = sent.at(-1);
+    if (old?.type !== "thread_action") throw new Error("Missing old action");
+    flush(() => resetThreads());
+    flush(() => setHistoryId("replacement-history"));
+    flush(() => handleThreadMessage({ type: "thread_action_applied", client_id: old.client_id, history_id: old.history_id, thread_id: old.thread_id }));
+    flush(() => handleThreadMessage({ type: "error", client_id: old.client_id, detail: "Late old failure" }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(threadState.error).toBeNull();
+
+    flush(() => handleThreadMessage({ type: "error", detail: "Host storage unavailable" }));
+    expect(threadState.error).toEqual({ operation: "request", detail: "Host storage unavailable" });
   });
   it("resets sequence on a new turn and rejects late events or completion from the previous turn", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 1, event: { kind: "prose", text: "old" } }));

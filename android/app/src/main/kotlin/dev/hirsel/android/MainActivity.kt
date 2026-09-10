@@ -202,7 +202,7 @@ private fun HirselRoot(
         if (id != null && connection.isOnline && connection.snapshot?.historyId != null) {
             val destination = notificationDestination(notificationHistoryId, id, connection.snapshot?.historyId, connection.snapshot?.threads.orEmpty().map { it.id })
             if (destination != null) connection.openThread(destination)
-            else connection.actionError = "This Thread is no longer available."
+            else connection.actionError = dev.hirsel.android.pairing.ActionFailure("This Thread is no longer available.")
             onNotificationHandled()
         }
     }

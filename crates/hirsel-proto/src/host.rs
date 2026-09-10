@@ -83,6 +83,11 @@ pub enum HostToClient {
         client_id: String,
         thread: crate::Thread,
     },
+    ThreadActionApplied {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+    },
     ThreadActivity {
         activity: crate::ThreadActivity,
     },
@@ -122,8 +127,8 @@ pub enum HostToClient {
     },
     Error {
         detail: String,
-        /// Correlates the error to a specific client request (upload_blob,
-        /// cancel_queued) so the client can mark the exact chip/bubble.
+        /// Correlates the error to a specific client request so the client can
+        /// settle the exact owning action, chip, bubble, or request surface.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
     },

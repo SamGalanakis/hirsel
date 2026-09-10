@@ -574,26 +574,55 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
         )
         .await;
         let action = receive_client(&mut socket).await;
-        assert_eq!(
-            action,
+        let first_action_id = match action {
             ClientToHost::ThreadAction {
+                client_id,
+                history_id,
+                thread_id: 5,
+                action,
+                data,
+                expected_revision: Some(1),
+            } if history_id == "test-store-a"
+                && action == "choose"
+                && data == serde_json::json!({"choice":"milk","label":"Milk"}) =>
+            {
+                client_id
+            }
+            other => panic!("unexpected first action: {other:?}"),
+        };
+        send_server(
+            &mut socket,
+            &HostToClient::ThreadActionApplied {
+                client_id: first_action_id.clone(),
                 history_id: "test-store-a".into(),
                 thread_id: 5,
-                action: "choose".into(),
-                data: serde_json::json!({"choice":"milk","label":"Milk"}),
-                expected_revision: Some(1)
-            }
-        );
-        assert_eq!(
-            receive_client(&mut socket).await,
+            },
+        )
+        .await;
+        let second_action_id = match receive_client(&mut socket).await {
             ClientToHost::ThreadAction {
-                history_id: "test-store-a".into(),
+                client_id,
+                history_id,
                 thread_id: 5,
-                action: "read".into(),
-                data: serde_json::json!({}),
-                expected_revision: None
+                action,
+                data,
+                expected_revision: None,
+            } if history_id == "test-store-a"
+                && action == "read"
+                && data == serde_json::json!({}) =>
+            {
+                client_id
             }
-        );
+            other => panic!("unexpected second action: {other:?}"),
+        };
+        send_server(
+            &mut socket,
+            &HostToClient::Error {
+                detail: "Read rejected".into(),
+                client_id: Some(second_action_id.clone()),
+            },
+        )
+        .await;
         assert_eq!(
             receive_client(&mut socket).await,
             ClientToHost::CancelTurn {
@@ -601,10 +630,12 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
                 thread_id: 5,
             }
         );
-        ready_tx.send(()).unwrap();
+        ready_tx.send((first_action_id, second_action_id)).unwrap();
         let _ = release_rx.await;
     });
     let client = Client::new(test_config(address)).unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    client.set_observer(Some(observer.clone()));
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
     let created = client
@@ -619,25 +650,54 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     assert_eq!(snapshot.threads[0].id, 5);
     client.open_thread(5, None);
     wait_for_snapshot(&client, |s| s.opened_threads.contains(&5)).await;
-    client.thread_action(
-        "test-store-a".into(),
-        5,
-        "choose".into(),
-        serde_json::json!({"choice":"milk","label":"Milk"}),
-        Some(1),
-    );
-    client.thread_action(
-        "test-store-a".into(),
-        5,
-        "read".into(),
-        serde_json::json!({}),
-        None,
-    );
+    let first_action = client
+        .thread_action(
+            "test-store-a".into(),
+            5,
+            "choose".into(),
+            serde_json::json!({"choice":"milk","label":"Milk"}),
+            Some(1),
+        )
+        .unwrap();
+    let second_action = client
+        .thread_action(
+            "test-store-a".into(),
+            5,
+            "read".into(),
+            serde_json::json!({}),
+            None,
+        )
+        .unwrap();
     client.cancel_turn("test-store-a".into(), 5);
-    timeout(Duration::from_secs(3), ready_rx)
+    let (first_action_id, second_action_id) = timeout(Duration::from_secs(3), ready_rx)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(first_action.client_id, first_action_id);
+    assert_eq!(second_action.client_id, second_action_id);
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let events = observer.lifecycle.lock().unwrap().clone();
+            let applied = events.iter().any(|event| {
+                matches!(event,
+                    LifecycleEvent::ThreadActionApplied { client_id, history_id, thread_id: 5 }
+                        if client_id == &first_action.client_id && history_id == "test-store-a"
+                )
+            });
+            let failed = events.iter().any(|event| {
+                matches!(event,
+                    LifecycleEvent::ProtocolError { client_id: Some(client_id), detail }
+                        if client_id == &second_action.client_id && detail == "Read rejected"
+                )
+            });
+            if applied && failed {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     let snapshot = client.snapshot();
     assert!(snapshot.threads[0].settled_at.is_none());
     assert!(

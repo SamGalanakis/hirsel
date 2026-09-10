@@ -74,7 +74,7 @@ fn thread_mutations_require_captured_history_on_the_wire() {
     for value in [
         json!({"type":"create_thread","client_id":"create","history_id":"history-a","title":"Child","parent_thread_id":1}),
         json!({"type":"send_thread_message","client_id":"send","history_id":"history-a","thread_id":1,"body":"Hello","attachments":[],"mentions":[],"mode":"send","artifact_ids":[]}),
-        json!({"type":"thread_action","history_id":"history-a","thread_id":1,"action":"archive","data":{},"expected_revision":null}),
+        json!({"type":"thread_action","client_id":"action","history_id":"history-a","thread_id":1,"action":"archive","data":{},"expected_revision":null}),
         json!({"type":"cancel_turn","history_id":"history-a","thread_id":1}),
     ] {
         let command: ClientToHost = serde_json::from_value(value.clone()).unwrap();
@@ -86,6 +86,25 @@ fn thread_mutations_require_captured_history_on_the_wire() {
             .remove("history_id");
         assert!(serde_json::from_value::<ClientToHost>(missing_history).is_err());
     }
+
+    let mut missing_client_id = json!({"type":"thread_action","client_id":"action","history_id":"history-a","thread_id":1,"action":"archive","data":{},"expected_revision":null});
+    missing_client_id
+        .as_object_mut()
+        .unwrap()
+        .remove("client_id");
+    assert!(serde_json::from_value::<ClientToHost>(missing_client_id).is_err());
+
+    let applied = HostToClient::ThreadActionApplied {
+        client_id: "action".into(),
+        history_id: "history-a".into(),
+        thread_id: 1,
+    };
+    let value = json!({"type":"thread_action_applied","client_id":"action","history_id":"history-a","thread_id":1});
+    assert_eq!(serde_json::to_value(&applied).unwrap(), value);
+    assert_eq!(
+        serde_json::from_value::<HostToClient>(value).unwrap(),
+        applied
+    );
 }
 
 #[test]

@@ -412,6 +412,19 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 store.upsert_thread(thread);
                 true
             }
+            HostToClient::ThreadActionApplied {
+                client_id,
+                history_id,
+                thread_id,
+            } => {
+                drop(store);
+                client.notify_lifecycle(LifecycleEvent::ThreadActionApplied {
+                    client_id,
+                    history_id,
+                    thread_id,
+                });
+                false
+            }
             HostToClient::ThreadOpened { client_id, detail } => {
                 store.apply_detail(&client_id, detail);
                 true

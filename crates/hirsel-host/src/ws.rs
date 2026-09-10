@@ -555,6 +555,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_thread_actions_return_their_exact_request_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(test_config(dir.path())).await.unwrap();
+        let first = state
+            .storage
+            .create_thread(
+                "first",
+                "First",
+                "",
+                &serde_json::json!({}),
+                hirsel_proto::ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
+        let second = state
+            .storage
+            .create_thread(
+                "second",
+                "Second",
+                "",
+                &serde_json::json!({}),
+                hirsel_proto::ThreadAttention::Quiet,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
+        let history_id = state.storage.history_id().await.unwrap();
+        let app = router_from_state(state);
+        let addr = spawn_app(app).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        send_hello(&mut ws).await;
+        let _ = read_hello_ok(&mut ws).await;
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "thread_action",
+                "client_id": "second-failure",
+                "history_id": history_id,
+                "thread_id": second.id,
+                "action": "set_icon",
+                "data": {"icon": "x"}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        match read_error(&mut ws).await {
+            HostToClient::Error { detail, client_id } => {
+                assert!(detail.contains("expected_revision is required"), "{detail}");
+                assert_eq!(client_id.as_deref(), Some("second-failure"));
+            }
+            other => panic!("unexpected action error: {other:?}"),
+        }
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "thread_action",
+                "client_id": "first-success",
+                "history_id": history_id,
+                "thread_id": first.id,
+                "action": "read",
+                "data": {}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        match read_until(&mut ws, |response| {
+            matches!(response, HostToClient::ThreadActionApplied { .. })
+        })
+        .await
+        {
+            HostToClient::ThreadActionApplied {
+                client_id,
+                history_id: applied_history,
+                thread_id,
+            } => {
+                assert_eq!(client_id, "first-success");
+                assert_eq!(applied_history, history_id);
+                assert_eq!(thread_id, first.id);
+            }
+            other => panic!("unexpected action result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn websocket_upload_rejects_over_size_payload() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();

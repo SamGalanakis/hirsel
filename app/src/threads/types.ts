@@ -62,6 +62,7 @@ export type ThreadServerMessage =
   | { type: "thread_related_changed"; client_id: string | null; history_id: string; thread_id: number; revision: number; items: ThreadRelatedItem[] }
   | { type: "thread_upsert"; thread: Thread }
   | { type: "thread_created"; client_id: string; thread: Thread }
+  | { type: "thread_action_applied"; client_id: string; history_id: string; thread_id: number }
   | { type: "thread_opened"; client_id: string; detail: ThreadDetail }
   | { type: "thread_activity"; activity: ThreadActivity }
   | { type: "thread_turn"; turn: ThreadTurn };
@@ -71,4 +72,4 @@ export type ThreadClientMessage =
   | { type: "create_thread"; client_id: string; history_id: string; title: string; parent_thread_id: number | null }
   | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null }
   | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }
-  | { type: "thread_action"; history_id: string; thread_id: number; action: string; data: unknown; expected_revision?: number };
+  | { type: "thread_action"; client_id: string; history_id: string; thread_id: number; action: string; data: unknown; expected_revision?: number };

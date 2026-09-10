@@ -220,8 +220,10 @@ function handle(world, ws, frame) {
       return;
     }
     case "thread_action": {
+      if (typeof frame.client_id !== "string" || !frame.client_id) throw new Error("client_id is required");
       if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       const thread = threadFor(world, frame.thread_id);
+      const acknowledge = () => send(ws, { type: "thread_action_applied", client_id: frame.client_id, history_id: frame.history_id, thread_id: frame.thread_id });
       if (frame.action === "pin" && thread.parent_thread_id !== null) throw new Error("Only top-level threads can be pinned");
       if (["pin", "unpin", "set_icon", "set_showcase"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
       if (frame.action === "set_showcase") {
@@ -230,26 +232,26 @@ function handle(world, ws, frame) {
         if (id !== null && (!Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid artifact ID");
         if (id !== null) artifactFor(world, id);
         const previous = thread.showcased_artifact_id;
-        if (id === previous) return;
+        if (id === previous) { acknowledge(); return; }
         updateThread(world, thread, { showcased_artifact_id: id });
         for (const affected of new Set([previous, id])) if (affected != null) {
           const artifact = artifactFor(world, affected); artifact.updated_at = now();
           broadcast(world, { type: "artifact_upsert", artifact: artifactSummary(world, artifact) });
         }
-        return;
+        acknowledge(); return;
       }
       if (frame.action === "set_icon") {
         const patch = {};
-        if (!Object.hasOwn(frame.data ?? {}, "icon")) return;
+        if (!Object.hasOwn(frame.data ?? {}, "icon")) { acknowledge(); return; }
         if (Object.hasOwn(frame.data ?? {}, "icon")) {
           const icon = frame.data.icon;
           if (icon !== null && (typeof icon !== "string" || !icon.trim() || /\p{Cc}|\u2028|\u2029/u.test(icon) || Array.from(icon).length > 16 || Buffer.byteLength(icon, "utf8") > 64)) throw new Error("Invalid thread icon");
           patch.icon = icon;
         }
-        updateThread(world, thread, patch); return;
+        updateThread(world, thread, patch); acknowledge(); return;
       }
       const patches = { pin: { pinned_at: thread.pinned_at ?? now() }, unpin: { pinned_at: null }, settle: { settled_at: now() }, reopen: { settled_at: null }, archive: { archived_at: now() }, unarchive: { archived_at: null }, read: { read: true }, snooze: { snoozed_until: frame.data?.until }, unsnooze: { snoozed_until: null } };
-      if (patches[frame.action]) { updateThread(world, thread, patches[frame.action]); return; }
+      if (patches[frame.action]) { updateThread(world, thread, patches[frame.action]); acknowledge(); return; }
       if (frame.expected_revision !== thread.revision) throw new Error("This instrument has changed. Refresh before acting.");
       throw new Error("This mock thread has no generated action; use the scripted Rust host to test instruments.");
     }

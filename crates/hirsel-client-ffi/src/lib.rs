@@ -230,6 +230,11 @@ pub enum LifecycleEvent {
         detail: String,
         client_id: Option<String>,
     },
+    ThreadActionApplied {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+    },
     ThreadRelatedChanged {
         history_id: String,
         thread_id: u64,
@@ -246,6 +251,15 @@ impl From<core::LifecycleEvent> for LifecycleEvent {
             core::LifecycleEvent::ProtocolError { detail, client_id } => {
                 Self::ProtocolError { detail, client_id }
             }
+            core::LifecycleEvent::ThreadActionApplied {
+                client_id,
+                history_id,
+                thread_id,
+            } => Self::ThreadActionApplied {
+                client_id,
+                history_id,
+                thread_id,
+            },
             core::LifecycleEvent::ThreadRelatedChanged {
                 history_id,
                 thread_id,
@@ -427,14 +441,17 @@ impl Client {
         action: String,
         data_json: String,
         expected_revision: Option<u64>,
-    ) -> Result<bool, ClientError> {
+    ) -> Result<Option<SendReceipt>, ClientError> {
         let data =
             serde_json::from_str(&data_json).map_err(|error| ClientError::InvalidAction {
                 detail: error.to_string(),
             })?;
         Ok(self
             .core
-            .thread_action(history_id, thread_id, action, data, expected_revision))
+            .thread_action(history_id, thread_id, action, data, expected_revision)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            }))
     }
 
     pub fn open_related_thread(&self, target: ThreadRelatedTarget) -> Option<SendReceipt> {
@@ -480,9 +497,12 @@ impl Client {
         thread_id: u64,
         icon: Option<String>,
         expected_revision: u64,
-    ) -> bool {
+    ) -> Option<SendReceipt> {
         self.core
             .update_thread_icon(expected_history, thread_id, icon, expected_revision)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
     }
 
     pub fn update_thread_showcase(
@@ -491,13 +511,12 @@ impl Client {
         thread_id: u64,
         artifact_id: Option<u64>,
         expected_revision: u64,
-    ) -> bool {
-        self.core.update_thread_showcase(
-            expected_history,
-            thread_id,
-            artifact_id,
-            expected_revision,
-        )
+    ) -> Option<SendReceipt> {
+        self.core
+            .update_thread_showcase(expected_history, thread_id, artifact_id, expected_revision)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
     }
 
     pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {

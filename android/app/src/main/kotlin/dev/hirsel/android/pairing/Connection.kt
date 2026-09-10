@@ -43,6 +43,13 @@ sealed interface Phase {
 
 /** An outbound message that never reached the host, kept so the UI can offer a retry. */
 data class FailedSend(val id: Long, val body: String, val threadId: ULong, val artifactIds: List<ULong>, val historyId: String)
+data class ActionFailure(val detail: String, val historyId: String? = null, val threadId: ULong? = null, val clientId: String? = null)
+internal fun ActionFailure.visibleIn(historyId: String?, threadId: ULong?): Boolean =
+    this.threadId == null || this.historyId == historyId && this.threadId == threadId
+
+private data class PendingAction(val historyId: String, val threadId: ULong)
+private const val ACTION_TIMEOUT_MS = 20_000L
+private const val SETTLED_ACTION_LIMIT = 256
 
 /**
  * Live, observable state of a single native [Client]. Callbacks arrive on native
@@ -71,7 +78,9 @@ class Connection internal constructor(
     val drafts = mutableStateMapOf<ULong, String>()
     val recoveredDrafts = mutableStateListOf<String>()
     var creatingClientId by mutableStateOf<String?>(null)
-    var actionError by mutableStateOf<String?>(null)
+    var actionError by mutableStateOf<ActionFailure?>(null)
+    private val pendingActions = mutableMapOf<String, PendingAction>()
+    private val settledActionIds = linkedSetOf<String>()
 
     fun openThread(id: ULong) {
         focusedThreadId = id
@@ -83,8 +92,63 @@ class Connection internal constructor(
     }
 
     fun action(historyId: String, threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
-        runCatching { client?.threadAction(historyId, threadId, action, data, revision) }
-            .onFailure { actionError = it.message ?: "Action failed" }
+        val receipt = runCatching { client?.threadAction(historyId, threadId, action, data, revision) }
+            .getOrElse {
+                actionError = ActionFailure(it.message ?: "Action failed", historyId, threadId)
+                return
+            }
+        if (receipt == null) {
+            actionError = ActionFailure("Thread or history changed. Reopen this control and try again.", historyId, threadId)
+            return
+        }
+        trackAction(receipt, historyId, threadId)
+    }
+
+    fun updateThreadIcon(historyId: String, threadId: ULong, icon: String?, revision: ULong): Boolean {
+        val receipt = client?.updateThreadIcon(historyId, threadId, icon, revision) ?: return false
+        trackAction(receipt, historyId, threadId)
+        return true
+    }
+
+    private fun trackAction(receipt: SendReceipt, historyId: String, threadId: ULong) {
+        settledActionIds.remove(receipt.clientId)
+        pendingActions[receipt.clientId] = PendingAction(historyId, threadId)
+        mainHandler.postDelayed({
+            if (pendingActions.remove(receipt.clientId) != null) {
+                rememberSettledAction(receipt.clientId)
+                actionError = ActionFailure("Thread request timed out", historyId, threadId, receipt.clientId)
+            }
+        }, ACTION_TIMEOUT_MS)
+    }
+
+    internal fun clearPendingActions() {
+        pendingActions.keys.forEach(::rememberSettledAction)
+        pendingActions.clear()
+    }
+
+    internal fun acceptAction(clientId: String, historyId: String, threadId: ULong) {
+        val pending = pendingActions[clientId]
+        if (pending?.historyId != historyId || pending.threadId != threadId) return
+        pendingActions.remove(clientId)
+        rememberSettledAction(clientId)
+        if (actionError?.clientId == clientId) actionError = null
+    }
+
+    internal fun receiveProtocolError(detail: String, clientId: String?) {
+        val pending = clientId?.let(pendingActions::remove)
+        if (pending != null) {
+            rememberSettledAction(requireNotNull(clientId))
+            actionError = ActionFailure(detail, pending.historyId, pending.threadId, clientId)
+        } else if (clientId == null || clientId !in settledActionIds) {
+            actionError = ActionFailure(detail)
+        }
+    }
+
+    private fun rememberSettledAction(clientId: String) {
+        settledActionIds.add(clientId)
+        while (settledActionIds.size > SETTLED_ACTION_LIMIT) {
+            settledActionIds.remove(settledActionIds.first())
+        }
     }
 
     // Callers capture historyId with the addressed Thread, before any delayed UI action.
@@ -113,7 +177,7 @@ class Connection internal constructor(
     fun send(body: String, threadId: ULong, expectedHistoryId: String?, artifactIds: List<ULong> = emptyList()) {
         if (expectedHistoryId == null || expectedHistoryId != snapshot?.historyId) {
             recoveredDrafts.add(body)
-            actionError = "History changed. Restore this text to a current Thread before sending."
+            actionError = ActionFailure("History changed. Restore this text to a current Thread before sending.", expectedHistoryId, threadId)
             return
         }
         val c = client ?: run { recordFailure(body, threadId, artifactIds, expectedHistoryId); return }
@@ -187,7 +251,8 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                     conn.failedSends.clear()
                     conn.focusedThreadId = null
                     conn.creatingClientId = null
-                    conn.actionError = "History changed. Unsent text is available in recovered drafts."
+                    conn.clearPendingActions()
+                    conn.actionError = ActionFailure("History changed. Unsent text is available in recovered drafts.")
                 }
                 val priorRecovered = old?.recoveredDrafts.orEmpty().toSet()
                 conn.recoveredDrafts.addAll(snapshot.recoveredDrafts.filter { it !in priorRecovered })
@@ -211,7 +276,14 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                     is LifecycleEvent.Online -> Phase.Online
                     is LifecycleEvent.Offline -> Phase.Offline(event.reason)
                     is LifecycleEvent.ThreadRelatedChanged -> conn.phase
-                    is LifecycleEvent.ProtocolError -> { conn.actionError = event.detail; conn.phase }
+                    is LifecycleEvent.ThreadActionApplied -> {
+                        conn.acceptAction(event.clientId, event.historyId, event.threadId)
+                        conn.phase
+                    }
+                    is LifecycleEvent.ProtocolError -> {
+                        conn.receiveProtocolError(event.detail, event.clientId)
+                        conn.phase
+                    }
                 }
             }
         }

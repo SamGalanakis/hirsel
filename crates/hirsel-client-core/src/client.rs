@@ -336,12 +336,14 @@ impl Client {
         action: String,
         data: serde_json::Value,
         expected_revision: Option<u64>,
-    ) -> bool {
+    ) -> Option<SendReceipt> {
         let store = self.inner.read_store();
         if store.history_id.as_deref() != Some(&history_id) {
-            return false;
+            return None;
         }
+        let client_id = Uuid::new_v4().to_string();
         self.queue_frame(ClientToHost::ThreadAction {
+            client_id: client_id.clone(),
             history_id,
             thread_id,
             action,
@@ -349,7 +351,7 @@ impl Client {
             expected_revision,
         });
         drop(store);
-        true
+        Some(SendReceipt { client_id })
     }
 
     /// Save a typed reference in the history the caller was viewing when it chose the Thread.
@@ -399,7 +401,7 @@ impl Client {
         thread_id: u64,
         icon: Option<String>,
         expected_revision: u64,
-    ) -> bool {
+    ) -> Option<SendReceipt> {
         self.update_thread_presentation(
             expected_history,
             thread_id,
@@ -415,7 +417,7 @@ impl Client {
         thread_id: u64,
         artifact_id: Option<u64>,
         expected_revision: u64,
-    ) -> bool {
+    ) -> Option<SendReceipt> {
         let data = serde_json::json!({"artifact_id": artifact_id});
         self.update_thread_presentation(
             expected_history,
@@ -433,7 +435,7 @@ impl Client {
         action: &str,
         data: serde_json::Value,
         expected_revision: u64,
-    ) -> bool {
+    ) -> Option<SendReceipt> {
         let store = self.inner.read_store();
         if store.history_id.as_deref() != Some(expected_history.as_str())
             || store.connection != crate::ConnectionState::Online
@@ -442,9 +444,11 @@ impl Client {
                 .iter()
                 .any(|thread| thread.id == thread_id && thread.revision == expected_revision)
         {
-            return false;
+            return None;
         }
+        let client_id = Uuid::new_v4().to_string();
         self.queue_frame(ClientToHost::ThreadAction {
+            client_id: client_id.clone(),
             history_id: expected_history,
             thread_id,
             action: action.into(),
@@ -452,7 +456,7 @@ impl Client {
             expected_revision: Some(expected_revision),
         });
         drop(store);
-        true
+        Some(SendReceipt { client_id })
     }
 
     pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {

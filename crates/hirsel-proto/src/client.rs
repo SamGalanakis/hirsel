@@ -95,6 +95,7 @@ pub enum ClientToHost {
         artifact_ids: Vec<u64>,
     },
     ThreadAction {
+        client_id: String,
         history_id: String,
         thread_id: u64,
         action: String,

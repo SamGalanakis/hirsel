@@ -442,6 +442,7 @@ where
             }
         }
         ClientToHost::ThreadAction {
+            client_id,
             history_id,
             thread_id,
             action,
@@ -456,6 +457,13 @@ where
                     data,
                     expected_revision,
                 )
+                .await?;
+            channel
+                .send(&HostToClient::ThreadActionApplied {
+                    client_id,
+                    history_id,
+                    thread_id,
+                })
                 .await?;
         }
 

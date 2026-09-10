@@ -5,7 +5,7 @@ import { createStore, reconcile } from "solid-js";
 import type { Blob, ChatMessage, SendMode, ServerMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
-import type { Thread, ThreadClientMessage, ThreadDetail } from "./types";
+import type { Thread, ThreadClientMessage } from "./types";
 
 interface PendingMessage {
   clientId: string;
@@ -68,13 +68,25 @@ let historyGeneration = 0;
 let sendFrame: ((frame: ThreadClientMessage) => void) | null = null;
 const messageTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const MESSAGE_ACK_TIMEOUT_MS = 20_000;
-const requests = new Map<string, { threadId?: number; beforeId: number | null; resolve: (result: Thread | ThreadDetail) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+type RequestKind = "create" | "open" | "action";
+interface PendingRequest {
+  kind: RequestKind;
+  historyId?: string;
+  threadId?: number;
+  beforeId: number | null;
+  onFailure?: (detail: string) => void;
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+const requests = new Map<string, PendingRequest>();
 export function attachThreadTransport(send: (frame: ThreadClientMessage) => void): void { sendFrame = send; }
 function failRequest(id: string, detail: string): void {
   const request = requests.get(id);
   if (!request) return;
   clearTimeout(request.timer);
   requests.delete(id);
+  request.onFailure?.(detail);
   request.reject(new Error(detail));
 }
 export function disconnectThreads(): void {
@@ -84,23 +96,23 @@ export function disconnectThreads(): void {
   for (const timer of messageTimers.values()) clearTimeout(timer);
   messageTimers.clear();
 }
-function request(frame: Extract<ThreadClientMessage, { client_id: string }>, threadId?: number, beforeId: number | null = null): Promise<Thread | ThreadDetail> {
+function request(frame: Extract<ThreadClientMessage, { client_id: string }>, kind: RequestKind, threadId?: number, beforeId: number | null = null, history?: string, onFailure?: (detail: string) => void): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!sendFrame) { reject(new Error("Not connected")); return; }
     const timer = setTimeout(() => failRequest(frame.client_id, "Thread request timed out"), 20_000);
-    requests.set(frame.client_id, { threadId, beforeId, resolve, reject, timer });
+    requests.set(frame.client_id, { kind, historyId: history, threadId, beforeId, onFailure, resolve, reject, timer });
     sendFrame(frame);
   });
 }
 export async function createThread(expectedHistory: string, title: string, parentId: number | null): Promise<Thread> {
   if (!threadState.ready) throw new Error("Reconnect before creating a Thread.");
   if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this control and try again.");
-  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, parent_thread_id: parentId }) as Thread;
+  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, parent_thread_id: parentId }, "create", undefined, null, expectedHistory) as Thread;
 }
 export async function openThread(id: number, beforeId: number | null = null): Promise<void> {
   const generation = historyGeneration;
   try {
-    await request({ type: "open_thread", client_id: crypto.randomUUID(), thread_id: id, before_id: beforeId }, id, beforeId);
+    await request({ type: "open_thread", client_id: crypto.randomUUID(), thread_id: id, before_id: beforeId }, "open", id, beforeId);
     setThreadState(draft => { if (draft.error?.operation === "load" && draft.error.threadId === id) draft.error = null; });
   } catch (error) {
     if (generation === historyGeneration && threadState.focusedId === id) setThreadState(draft => { draft.error = { operation: "load", detail: error instanceof Error ? error.message : String(error), threadId: id, beforeId }; });
@@ -121,7 +133,14 @@ export function focusThread(id: number | null, updateUrl = true, currentHistory 
 export function threadAction(expectedHistory: string, id: number, action: string, data: unknown = {}, expectedRevision?: number): void {
   if (!sendFrame) { setThreadState(draft => { draft["error"] = { operation: "request", detail: "Reconnect before changing this thread.", threadId: id }; }); return; }
   if (!threadState.ready || historyId() !== expectedHistory) { setThreadState(draft => { draft["error"] = { operation: "request", detail: "History changed. Reopen this control and try again.", threadId: id }; }); return; }
-  sendFrame({ type: "thread_action", history_id: expectedHistory, thread_id: id, action, data, expected_revision: expectedRevision });
+  const clientId = crypto.randomUUID();
+  const generation = historyGeneration;
+  const onFailure = (detail: string) => {
+    if (generation === historyGeneration && historyId() === expectedHistory) setThreadState(draft => {
+      draft.error = { operation: "request", detail, threadId: id, clientId };
+    });
+  };
+  void request({ type: "thread_action", client_id: clientId, history_id: expectedHistory, thread_id: id, action, data, expected_revision: expectedRevision }, "action", id, null, expectedHistory, onFailure).catch(() => {});
 }
 function pendingFrame(pending: PendingMessage): ThreadClientMessage {
   return { type: "send_thread_message", client_id: pending.clientId, history_id: pending.historyId, thread_id: pending.threadId,
@@ -206,12 +225,22 @@ export function handleThreadMessage(message: ServerMessage): void {
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.thread), "id")(draft["threads"]); });
       if (message.type === "thread_created") {
         const pending = requests.get(message.client_id);
-        if (pending) { clearTimeout(pending.timer); requests.delete(message.client_id); pending.resolve(message.thread); }
+        if (pending?.kind === "create") { clearTimeout(pending.timer); requests.delete(message.client_id); pending.resolve(message.thread); }
       }
       break;
+    case "thread_action_applied": {
+      const pending = requests.get(message.client_id);
+      if (pending?.kind !== "action" || pending.historyId !== message.history_id || pending.threadId !== message.thread_id) break;
+      clearTimeout(pending.timer); requests.delete(message.client_id);
+      setThreadState(draft => {
+        if (draft.error?.operation === "request" && draft.error.clientId === message.client_id) draft.error = null;
+      });
+      pending.resolve(undefined);
+      break;
+    }
     case "thread_opened": {
       const pending = requests.get(message.client_id);
-      if (!pending || pending.threadId !== message.detail.thread.id) break;
+      if (pending?.kind !== "open" || pending.threadId !== message.detail.thread.id) break;
       clearTimeout(pending.timer); requests.delete(message.client_id);
       const id = message.detail.thread.id;
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.detail.thread), "id")(draft["threads"]); });

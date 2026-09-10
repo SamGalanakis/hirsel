@@ -37,13 +37,17 @@ fn delayed_mutation_callbacks_keep_the_history_the_ui_displayed() {
             .create_thread("history-a".into(), "Stale child".into(), Some(5))
             .is_none()
     );
-    assert!(!client.thread_action(
-        "history-a".into(),
-        5,
-        "archive".into(),
-        serde_json::json!({}),
-        None,
-    ));
+    assert!(
+        client
+            .thread_action(
+                "history-a".into(),
+                5,
+                "archive".into(),
+                serde_json::json!({}),
+                None,
+            )
+            .is_none()
+    );
     assert!(!client.cancel_turn("history-a".into(), 5));
     assert!(client.inner.read_store().messages.is_empty());
     assert!(client.inner.read_store().pending_creates.is_empty());
@@ -63,13 +67,17 @@ fn delayed_mutation_callbacks_keep_the_history_the_ui_displayed() {
             .create_thread("history-b".into(), "Current child".into(), Some(5))
             .is_some()
     );
-    assert!(client.thread_action(
-        "history-b".into(),
-        5,
-        "archive".into(),
-        serde_json::json!({}),
-        None,
-    ));
+    assert!(
+        client
+            .thread_action(
+                "history-b".into(),
+                5,
+                "archive".into(),
+                serde_json::json!({}),
+                None,
+            )
+            .is_some()
+    );
     assert!(client.cancel_turn("history-b".into(), 5));
     assert_eq!(client.inner.read_store().pending_sends().count(), 1);
     assert_eq!(client.inner.read_store().pending_creates.len(), 1);

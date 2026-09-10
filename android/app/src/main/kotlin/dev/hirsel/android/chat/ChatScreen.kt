@@ -70,6 +70,7 @@ import dev.hirsel.android.microLabel
 import dev.hirsel.android.pairing.Connection
 import dev.hirsel.android.pairing.FailedSend
 import dev.hirsel.android.pairing.Phase
+import dev.hirsel.android.pairing.visibleIn
 import dev.hirsel.android.ui.ErrorCopy
 import dev.hirsel.android.ui.HirselMono
 import dev.hirsel.android.ui.LocalHirselColors
@@ -114,8 +115,8 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
             ConnectionPill(connection.phase)
             GearButton(onOpenSettings)
         }
-        connection.actionError?.let { error ->
-            Text(error, color = c.StatusDanger, modifier = Modifier.clickable { connection.actionError = null })
+        connection.actionError?.takeIf { it.visibleIn(displayedHistory, focused) }?.let { error ->
+            Text(error.detail, color = c.StatusDanger, modifier = Modifier.clickable { connection.actionError = null })
         }
         when (val phase = connection.phase) {
             is Phase.Reconnecting -> ConnectionBanner("Reconnecting to your host…")

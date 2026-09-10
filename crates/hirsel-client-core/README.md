@@ -17,6 +17,12 @@ renders the constrained text, metadata, form and choice catalog; embedded custom
 views explicitly require the web app. Blob uploading remains a separate transport
 capability; received attachment metadata and outbound attachment IDs are retained.
 
+Thread actions return a client request ID and carry the caller-captured history and
+Thread. The host acknowledges an applied action with that same ID and address, and
+echoes the ID on failure. Native lifecycle events expose successful acknowledgements;
+protocol errors retain their request ID so UI shells can display a failure only in
+the action's owning context. Uncorrelated protocol errors remain global.
+
 Explicitly saved URL and Thread references are exposed as `ClientSnapshot.related_items`,
 separate from canonical artifact references. Opening or reconnecting loads the
 complete per-Thread list independently of message pagination; live snapshots

@@ -260,6 +260,18 @@ mod tests {
             }]
         );
         assert_eq!(
+            crate::LifecycleEvent::from(core::LifecycleEvent::ThreadActionApplied {
+                client_id: "action".into(),
+                history_id: "A".into(),
+                thread_id: 5,
+            }),
+            crate::LifecycleEvent::ThreadActionApplied {
+                client_id: "action".into(),
+                history_id: "A".into(),
+                thread_id: 5,
+            }
+        );
+        assert_eq!(
             crate::LifecycleEvent::from(core::LifecycleEvent::ThreadRelatedChanged {
                 history_id: "A".into(),
                 thread_id: 5,

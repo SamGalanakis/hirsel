@@ -16,11 +16,11 @@ A Thread has an ID, title, description, mutable constrained instrument, revision
 
 | Client frame | Fields and result |
 | --- | --- |
-| `create_thread` | `client_id,title,parent_thread_id:number|null` → `thread_created {client_id,thread}` |
+| `create_thread` | `client_id,history_id,title,parent_thread_id:number|null` → `thread_created {client_id,thread}` |
 | `open_thread` | `client_id,thread_id,before_id:number|null` → `thread_opened {client_id,detail}` |
-| `send_thread_message` | `client_id,thread_id,body,attachments:string[],mentions:number[],artifact_ids:number[],mode:"send"|"next_turn"` → owning `msg` and turn updates |
-| `thread_action` | `thread_id,action,data,expected_revision?` → current Thread updates; displayed instrument controls require their revision |
-| `cancel_turn` | required `thread_id` |
+| `send_thread_message` | `client_id,history_id,thread_id,body,attachments:string[],mentions:number[],artifact_ids:number[],mode:"send"|"next_turn"` → owning `msg` and turn updates |
+| `thread_action` | `client_id,history_id,thread_id,action,data,expected_revision?` → `thread_action_applied {client_id,history_id,thread_id}`; displayed instrument controls require their revision |
+| `cancel_turn` | required `history_id,thread_id` |
 | `cancel_queued` | accepted outgoing `client_id` |
 
 Thread detail carries required `brief:{text:string,artifact_ids:number[]}`, its Thread, a bounded message page, turns, activities and `has_more`. Every `ChatMessage` requires `thread_id,id,author,body,ref,ts`. Each tool summary requires the canonical call `id`, `name`, and `ok`; live and durable tool data join only by that ID. Optional client correlation, attachments, tool summaries, mentions and artifact references carry their current meaning. `ref` and `mentions` are citations, never message ownership. `msg_removed {id}` is authoritative even if its echo arrives later.
@@ -43,7 +43,7 @@ Current host-authored Canvas Views retain `view_upsert {instance_id,thread_id,sp
 
 ProcessInfo requires `thread_id`; processes use `process_upsert {process}`. Views are Canvas-only and the conversation Canvas filters them by selected Thread. Settings use set_model, set_subagent_model, set_agent_prompt, set_fork_prompt, set_fork_model, set_agent_provider, add_provider, update_provider, remove_provider and redetect_provider. Authoritative model_changed, subagent_models_changed, prompts_changed and providers_changed snapshots acknowledge updates. Provider capability nullability is distinct from compatibility support.
 
-`upload_blob {client_id,name,mime,data_b64}` returns `blob_ok {client_id,blob}`. `get_blob_url {client_id,blob_id}` returns `blob_url {client_id,blob_id,url,expires_at}` with a short-lived signed relative URL. Upload and retrieval requests are bounded and fail visibly. Authenticated plugin HTTP and `plugin_push {plugin,topic,data}` remain current operational contracts. `error {detail,client_id?}` correlates failures where applicable; a pre-auth failure returns to authentication.
+`upload_blob {client_id,name,mime,data_b64}` returns `blob_ok {client_id,blob}`. `get_blob_url {client_id,blob_id}` returns `blob_url {client_id,blob_id,url,expires_at}` with a short-lived signed relative URL. Upload and retrieval requests are bounded and fail visibly. Authenticated plugin HTTP and `plugin_push {plugin,topic,data}` remain current operational contracts. `error {detail,client_id?}` echoes the request ID for action and other request failures; errors without a client ID remain global. Action clients retain the captured history and Thread until the matching success, error or timeout, and discard late or duplicate results after settlement or reset. A pre-auth failure returns to authentication.
 
 ## Nested coordination
 

@@ -51,6 +51,7 @@ class RelatedItemsBindingTest {
 
     @Test fun commandCallbacksPreserveRequestAndHistoryIdentity() {
         val events = listOf(
+            LifecycleEvent.ThreadActionApplied(clientId = "action", historyId = "A", threadId = 5uL),
             LifecycleEvent.ThreadRelatedChanged(historyId = "A", threadId = 5uL, clientId = "saved"),
             LifecycleEvent.ThreadRelatedChanged(historyId = "A", threadId = 5uL, clientId = null),
             LifecycleEvent.ProtocolError(detail = "History changed", clientId = "delayed"),
@@ -62,6 +63,16 @@ class RelatedItemsBindingTest {
             assertEquals(expected, FfiConverterTypeLifecycleEvent.read(buffer))
             assertFalse(buffer.hasRemaining())
         }
+    }
+}
+
+class ActionFailureOwnershipTest {
+    @Test fun targetedFailuresOnlyRenderInTheirOwningHistoryAndThread() {
+        val targeted = ActionFailure("Archive rejected", "A", 5uL, "action")
+        assertEquals(true, targeted.visibleIn("A", 5uL))
+        assertEquals(false, targeted.visibleIn("A", 6uL))
+        assertEquals(false, targeted.visibleIn("B", 5uL))
+        assertEquals(true, ActionFailure("Host unavailable").visibleIn("B", 6uL))
     }
 }
 

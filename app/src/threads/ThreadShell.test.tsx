@@ -255,7 +255,7 @@ describe("thread workspace", () => {
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Settle thread" }));
-    expect(sent).toContainEqual({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "settle", data: {}, expected_revision: undefined });
+    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "settle", data: {}, expected_revision: undefined }));
     expect(threadState.threads.find(t => t.id === 1)?.settled_at).toBeNull();
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { settled_at: "2026-09-09T10:00:00Z", revision: 2 }) }));
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
@@ -320,7 +320,7 @@ describe("nested Thread workspace", () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Pin thread" }));
-    expect(sent).toContainEqual({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "pin", data: {}, expected_revision: 1 });
+    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "pin", data: {}, expected_revision: 1 }));
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { read: true, pinned_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
     fireEvent.click(view.getByRole("button", { name: "Threads" }));
     expect(view.container.querySelectorAll('[data-thread-row="1"]')).toHaveLength(1);
@@ -446,10 +446,13 @@ describe("contextual Thread errors", () => {
     fireEvent.click(view.getByRole("button", {name:"Threads"}));
     const drawer = view.getByRole("dialog", {name:"Threads"});
     fireEvent.click(within(drawer).getByRole("button", {name:"Actions for Holiday"}));
-    disconnectThreads();
     fireEvent.click(within(await view.findByRole("menu", {name:"Actions for Holiday"})).getByRole("menuitem", {name:"Archive thread"}));
-    expect(within(drawer).getByRole("alert")).toHaveTextContent("Hirsel couldn’t complete that request");
-    expect(threadState.error).toMatchObject({operation:"request",threadId:2});
+    const action = sent.findLast(frame => frame.type === "thread_action");
+    if (action?.type !== "thread_action") throw new Error("Missing action");
+    expect(action).toMatchObject({history_id:"test-history",thread_id:2,action:"archive"});
+    flush(() => handleThreadMessage({type:"error",client_id:action.client_id,detail:"Archive rejected"}));
+    await waitFor(() => expect(within(drawer).getByRole("alert")).toHaveTextContent("Hirsel couldn’t complete that request"));
+    expect(threadState.error).toMatchObject({operation:"request",threadId:2,clientId:action.client_id,detail:"Archive rejected"});
     expect(within(view.container.querySelector("main")!).queryByRole("alert")).toBeNull();
     fireEvent.click(within(drawer).getByRole("button", {name:"Dismiss"}));
     expect(within(drawer).queryByRole("alert")).toBeNull();

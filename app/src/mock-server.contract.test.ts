@@ -95,7 +95,7 @@ async function expectActionError(
     (frame) => frame.type === "error" && String(frame.detail).includes(detail),
   );
   ws.send(JSON.stringify(action));
-  expect(await rejected).toMatchObject({ type: "error" });
+  expect(await rejected).toMatchObject({ type: "error", client_id: action.client_id });
 }
 
 describe("dev mock Thread contract", () => {
@@ -121,9 +121,13 @@ describe("dev mock Thread contract", () => {
     ]));
     const historyId = connection.frame.history_id as string;
     const addressed = (command: Record<string, unknown>) => ({ history_id: historyId, ...command });
+    let nextActionId = 0;
     const request = async (command: Record<string, unknown>, type: string) => {
       const response = waitForFrame(connection.ws, frame => frame.type === type);
-      const frame = ["create_thread", "send_thread_message", "thread_action", "cancel_turn"].includes(String(command.type)) ? addressed(command) : command;
+      const correlated = command.type === "thread_action" && command.client_id == null
+        ? { client_id: `action-${++nextActionId}`, ...command }
+        : command;
+      const frame = ["create_thread", "send_thread_message", "thread_action", "cancel_turn"].includes(String(command.type)) ? addressed(correlated) : correlated;
       connection.ws.send(JSON.stringify(frame));
       return response;
     };
@@ -155,16 +159,18 @@ describe("dev mock Thread contract", () => {
     const earlier = (await request({ type: "open_thread", client_id: "earlier", thread_id: created.id, before_id: detail.messages[1].id }, "thread_opened")).detail as ThreadDetail;
     expect(earlier.messages).toEqual([owner]);
     expect(earlier.has_more).toBe(false);
-    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "invented", expected_revision: 0 }), "changed");
-    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "invented", expected_revision: created.revision }), "no generated action");
-    expect((await request({ type: "thread_action", thread_id: created.id, action: "read" }, "thread_upsert")).thread).toMatchObject({ id: created.id, read: true, settled_at: null });
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-stale", thread_id: created.id, action: "invented", expected_revision: 0 }), "changed");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-unsupported", thread_id: created.id, action: "invented", expected_revision: created.revision }), "no generated action");
+    const readAck = waitForFrame(connection.ws, frame => frame.type === "thread_action_applied" && frame.client_id === "action-read");
+    expect((await request({ type: "thread_action", client_id: "action-read", thread_id: created.id, action: "read" }, "thread_upsert")).thread).toMatchObject({ id: created.id, read: true, settled_at: null });
+    expect(await readAck).toMatchObject({ type: "thread_action_applied", client_id: "action-read", history_id: historyId, thread_id: created.id });
     const settled = (await request({ type: "thread_action", thread_id: created.id, action: "settle" }, "thread_upsert")).thread as Thread;
     expect(settled.settled_at).not.toBeNull();
     expect(settled.icon).toBeNull();
     const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "👩🏽‍💻" }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
     expect(withIcon.icon).toBe("👩🏽‍💻");
-    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "🌱" }, expected_revision: settled.revision }), "changed");
-    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "x\n" }, expected_revision: withIcon.revision }), "Invalid thread icon");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-stale", thread_id: created.id, action: "set_icon", data: { icon: "🌱" }, expected_revision: settled.revision }), "changed");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-invalid", thread_id: created.id, action: "set_icon", data: { icon: "x\n" }, expected_revision: withIcon.revision }), "Invalid thread icon");
     const reset = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: null }, expected_revision: withIcon.revision }, "thread_upsert")).thread as Thread;
     expect(reset.icon).toBeNull();
     await close(connection.ws);
@@ -181,11 +187,11 @@ describe("dev mock Thread contract", () => {
     expect(replay.messages).toEqual(detail.messages);
     const reopened = (await request({ type: "thread_action", thread_id: created.id, action: "reopen" }, "thread_upsert")).thread as Thread;
     expect(reopened).toMatchObject({ id: created.id, settled_at: null, read: true });
-    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: 0, action: "settle" }), "does not exist");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-missing-thread", thread_id: 0, action: "settle" }), "does not exist");
     await expectActionError(connection.ws, addressed({ type: "create_thread", client_id: "missing-parent", title: "Missing parent" }), "parent_thread_id");
     const childThread = (await request({ type: "create_thread", client_id: "child", title: "Focused review", parent_thread_id: created.id }, "thread_created")).thread as Thread;
     expect(childThread.parent_thread_id).toBe(created.id);
-    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: childThread.id, action: "pin", expected_revision: childThread.revision }), "Only top-level threads");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-child-pin", thread_id: childThread.id, action: "pin", expected_revision: childThread.revision }), "Only top-level threads");
     const pinned = (await request({ type: "thread_action", thread_id: created.id, action: "pin", expected_revision: reopened.revision }, "thread_upsert")).thread as Thread;
     expect(pinned.pinned_at).not.toBeNull();
     expect(pinned.last_activity_at).toBe(reopened.last_activity_at);

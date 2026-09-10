@@ -26,17 +26,35 @@ fn icon_edits_reject_reused_thread_identity_after_history_change() {
         // Native has already received a reset while the UI still has history A.
         store.apply_hello_ok("history-b".into(), vec![thread], vec![], "test".into());
     }
-    assert!(!client.update_thread_icon("history-a".into(), 5, Some("🔬".into()), 7));
-    assert!(!client.update_thread_icon("history-b".into(), 5, Some("🔬".into()), 6));
-    assert!(!client.update_thread_icon("history-b".into(), 99, Some("🔬".into()), 7));
+    assert!(
+        client
+            .update_thread_icon("history-a".into(), 5, Some("🔬".into()), 7)
+            .is_none()
+    );
+    assert!(
+        client
+            .update_thread_icon("history-b".into(), 5, Some("🔬".into()), 6)
+            .is_none()
+    );
+    assert!(
+        client
+            .update_thread_icon("history-b".into(), 99, Some("🔬".into()), 7)
+            .is_none()
+    );
     client.inner.write_store().connection = ConnectionState::Offline;
-    assert!(!client.update_thread_icon("history-b".into(), 5, Some("🔬".into()), 7));
+    assert!(
+        client
+            .update_thread_icon("history-b".into(), 5, Some("🔬".into()), 7)
+            .is_none()
+    );
     assert!(client.inner.pending_frames.lock().unwrap().is_empty());
     client.inner.write_store().connection = ConnectionState::Online;
-    assert!(client.update_thread_icon("history-b".into(), 5, None, 7));
+    let receipt = client
+        .update_thread_icon("history-b".into(), 5, None, 7)
+        .unwrap();
     let frames = client.inner.pending_frames.lock().unwrap();
     assert_eq!(frames.len(), 1);
     assert!(
-        matches!(&frames[0], ClientToHost::ThreadAction { history_id, thread_id:5, action, data, expected_revision:Some(7) } if history_id == "history-b" && action == "set_icon" && data == &json!({"icon":null}))
+        matches!(&frames[0], ClientToHost::ThreadAction { client_id, history_id, thread_id:5, action, data, expected_revision:Some(7) } if client_id == &receipt.client_id && history_id == "history-b" && action == "set_icon" && data == &json!({"icon":null}))
     );
 }

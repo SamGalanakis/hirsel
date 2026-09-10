@@ -429,13 +429,13 @@ variant = "default"
         "ok"
     );
     assert!(
-        !db.prepare("PRAGMA foreign_key_check")
+        db.prepare("PRAGMA foreign_key_check")
             .unwrap()
             .query([])
             .unwrap()
             .next()
             .unwrap()
-            .is_some()
+            .is_none()
     );
     ws.close(None).await.unwrap();
     // Only this test's freshly spawned host is stopped; no process discovery/signals.

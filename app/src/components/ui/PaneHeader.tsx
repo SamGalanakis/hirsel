@@ -31,7 +31,7 @@ interface Props {
   onClose?: () => void;
   /** Accessible label for the close control (e.g. "Close Settings"). */
   closeLabel?: string;
-  /** A trailing accessory for a non-dismissible pane. */
+  /** A trailing accessory, shown alongside the close control when provided. */
   badge?: JSX.Element;
   class?: string;
   /** Overrides on the header's INNER row — the box the icon, title and × line
@@ -62,7 +62,8 @@ export function PaneHeader(props: Props) {
         >
           {props.title}
         </span>
-        <Show when={props.onClose} fallback={props.badge}>
+        <Show when={props.badge}>{props.badge}</Show>
+        <Show when={props.onClose}>
           <button
             type="button"
             class="-mr-1 grid size-8 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [@media(pointer:coarse)]:size-11"

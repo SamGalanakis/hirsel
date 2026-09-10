@@ -48,6 +48,27 @@ describe("PaneHeader: one slot, close parity", () => {
     expect((container.firstChild as HTMLElement).className).toContain("h-14");
   });
 
+  it("renders a badge alongside the close control when both are supplied", () => {
+    const onClose = vi.fn();
+    const { container, getByLabelText } = render(() => (
+      <PaneHeader
+        icon={<span data-slot="icon" />}
+        title="Prompt"
+        onClose={onClose}
+        closeLabel="Close Prompt"
+        badge={<span data-slot="saving-badge">Saving</span>}
+      />
+    ));
+
+    const badge = container.querySelector('[data-slot="saving-badge"]');
+    const close = getByLabelText("Close Prompt");
+    expect(badge?.textContent).toBe("Saving");
+    expect(badge?.parentElement).toBe(close.parentElement);
+
+    close.click();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("is the one header at every width: sticky, safe-area padded, close-not-back", () => {
     const onClose = vi.fn();
     const { container, getByLabelText, queryByText } = render(() => (

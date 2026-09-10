@@ -306,7 +306,7 @@ impl ScriptedAgentRuntime {
             return Ok(None);
         }
         self.emit_scripted_timeline(turn.thread_id).await;
-        let turn_text = owner_turn_text(turn);
+        let turn_text = owner_turn_text(turn, &self.tools.storage());
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             let turn_id = turn

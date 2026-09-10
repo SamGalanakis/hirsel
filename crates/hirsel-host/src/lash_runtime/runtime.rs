@@ -22,7 +22,7 @@ pub struct OwnerTurn {
     pub client_id: String,
     pub body: String,
     pub anchor: Option<u64>,
-    pub attachments: Vec<StoredBlob>,
+    pub attachments: Vec<Blob>,
     pub mode: SendMode,
 }
 

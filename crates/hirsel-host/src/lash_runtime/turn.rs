@@ -10,22 +10,26 @@ pub(super) fn render_final_value(value: &serde_json::Value) -> String {
     }
 }
 
-pub(super) async fn owner_turn_input(turn: &OwnerTurn) -> anyhow::Result<TurnInput> {
-    let mut items = vec![InputItem::text(owner_turn_text(turn))];
+pub(super) async fn owner_turn_input(
+    turn: &OwnerTurn,
+    storage: &crate::storage::Storage,
+) -> anyhow::Result<TurnInput> {
+    let mut items = vec![InputItem::text(owner_turn_text(turn, storage))];
 
     // Image bytes travel inside the item itself now: a turn no longer carries a
     // side table of blobs keyed by id, so the id-and-lookup pair collapses into
     // one inline attachment source.
     for attachment in &turn.attachments {
-        let Ok(media_type) = lash::attachments::MediaType::parse(&attachment.blob.mime) else {
+        let Ok(media_type) = lash::attachments::MediaType::parse(&attachment.mime) else {
             continue;
         };
         if !media_type.is_image() {
             continue;
         }
-        let bytes = tokio::fs::read(&attachment.path)
+        let bytes = storage
+            .read_blob(&attachment.id)
             .await
-            .with_context(|| format!("read image attachment {}", attachment.path.display()))?;
+            .with_context(|| format!("read image attachment {}", attachment.id))?;
         items.push(InputItem::attachment(
             lash::direct::AttachmentSource::inline(media_type, bytes),
         ));
@@ -38,7 +42,7 @@ pub(super) fn owner_turn_source_key(client_id: &str) -> String {
     format!("host:{client_id}")
 }
 
-pub(super) fn owner_turn_text(turn: &OwnerTurn) -> String {
+pub(super) fn owner_turn_text(turn: &OwnerTurn, storage: &crate::storage::Storage) -> String {
     let mut text = match turn.anchor {
         Some(anchor) => format!("Owner replied to message {anchor}.\n\n{}", turn.body),
         None => turn.body.clone(),
@@ -47,10 +51,10 @@ pub(super) fn owner_turn_text(turn: &OwnerTurn) -> String {
         text.push('\n');
         text.push_str(&format!(
             "[attachment stored at {}: {} ({}, {} bytes)]",
-            attachment.path.display(),
-            attachment.blob.name,
-            attachment.blob.mime,
-            attachment.blob.size
+            storage.blob_path(&attachment.id).display(),
+            attachment.name,
+            attachment.mime,
+            attachment.size
         ));
     }
     text.insert_str(0, &format!("[Owning Thread #{}; answer only within this Thread. Use threads.read to inspect other conversations.]\n", turn.thread_id));

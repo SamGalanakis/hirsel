@@ -1,7 +1,7 @@
 use super::super::Storage;
 
 #[tokio::test]
-async fn blobs_are_stored_as_raw_files_and_idempotent_by_client_id() {
+async fn blobs_store_only_metadata_and_are_idempotent_by_client_id() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
 
@@ -34,11 +34,133 @@ async fn blobs_are_stored_as_raw_files_and_idempotent_by_client_id() {
         Some(first.blob.id.as_str())
     );
     assert!(first.path.is_absolute());
+    let columns = storage
+        .conn
+        .lock()
+        .await
+        .prepare("SELECT name FROM pragma_table_xinfo('blobs') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(columns, ["id", "name", "mime", "size", "created_ts"]);
     let files = std::fs::read_dir(dir.path().join("blobs"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
     assert_eq!(files, vec![first.path]);
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn stopped_data_directory_relocation_keeps_blob_and_queued_image_ownership() {
+    let roots = tempfile::tempdir().unwrap();
+    let old = roots.path().join("old");
+    let new = roots.path().join("new");
+    let storage = Storage::open(&old).await.unwrap();
+    let thread = storage
+        .create_thread(
+            "relocation",
+            "Relocation",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let image = storage
+        .store_blob(
+            "relocated-image",
+            "tiny.png",
+            "image/png",
+            vec![137, 80, 78, 71],
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_owner_request(
+            &storage.history_id().await.unwrap(),
+            thread.id,
+            "queued-image",
+            "inspect image".into(),
+            std::slice::from_ref(&image.blob.id),
+            &[],
+            &[],
+            &serde_json::json!({"mode":"next_turn","thread_action":null}),
+        )
+        .await
+        .unwrap();
+    drop(storage);
+
+    copy_tree(&old, &new);
+    std::fs::remove_dir_all(&old).unwrap();
+    let storage = Storage::open(&new).await.unwrap();
+    let relocated = storage.blob(&image.blob.id).await.unwrap().unwrap();
+    assert_eq!(relocated.path, new.join("blobs").join(&image.blob.id));
+    assert_eq!(
+        tokio::fs::read(&relocated.path).await.unwrap(),
+        [137, 80, 78, 71]
+    );
+    let orphan = new.join("blobs/orphan-file");
+    tokio::fs::write(&orphan, b"orphan").await.unwrap();
+    assert_eq!(storage.orphaned_blob_paths().await.unwrap(), vec![orphan]);
+
+    let request = storage
+        .thread_request("queued-image")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        request["attachments"],
+        serde_json::json!([image.blob.clone()])
+    );
+    let turn: crate::lash_runtime::OwnerTurn = serde_json::from_value(request).unwrap();
+    let input = crate::lash_runtime::test_owner_turn_input(&turn, &storage)
+        .await
+        .unwrap();
+    let lash::InputItem::Attachment {
+        source: lash::direct::AttachmentSource::Inline { media_type, bytes },
+    } = &input.items[1]
+    else {
+        panic!("the relocated queued image should execute as inline model input");
+    };
+    assert_eq!(media_type.as_str(), "image/png");
+    assert_eq!(bytes.as_slice(), &[137, 80, 78, 71]);
+    drop(storage);
+
+    let state = crate::build_state(crate::tests::test_config(&new))
+        .await
+        .unwrap();
+    let app = crate::router_from_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/blob/{}", image.blob.id))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(response.bytes().await.unwrap().as_ref(), [137, 80, 78, 71]);
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]

@@ -4,7 +4,9 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+        header::{
+            CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+        },
     },
     response::{IntoResponse, Response},
 };
@@ -113,7 +115,7 @@ pub async fn blob_handler(
     let Some(stored) = state.storage.blob(&id).await? else {
         return Err(BlobRouteError::new(StatusCode::NOT_FOUND, "blob not found"));
     };
-    let data = tokio::fs::read(&stored.path).await?;
+    let data = state.storage.read_blob(&stored.blob.id).await?;
 
     let mut response = Response::new(Body::from(data));
     let response_headers = response.headers_mut();
@@ -121,6 +123,11 @@ pub async fn blob_handler(
     response_headers.insert(
         CONTENT_DISPOSITION,
         content_disposition_header(&stored.blob.name, &stored.blob.mime),
+    );
+    response_headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    response_headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox; default-src 'none'"),
     );
     Ok(response)
 }
@@ -139,13 +146,20 @@ fn content_type_header(mime: &str) -> HeaderValue {
 }
 
 fn content_disposition_header(name: &str, mime: &str) -> HeaderValue {
-    let disposition = if mime.starts_with("image/") {
+    let disposition = if is_safe_inline_image(mime) {
         "inline"
     } else {
         "attachment"
     };
     let value = format!("{disposition}; filename=\"{}\"", quoted_filename(name));
     HeaderValue::from_str(&value).unwrap_or_else(|_| HeaderValue::from_static("attachment"))
+}
+
+fn is_safe_inline_image(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp"
+    )
 }
 
 fn quoted_filename(name: &str) -> String {
@@ -215,6 +229,22 @@ mod tests {
         assert_eq!(
             header.to_str().unwrap(),
             "attachment; filename=\"note.txt\""
+        );
+    }
+
+    #[test]
+    fn active_and_unknown_image_types_are_downloads() {
+        assert_eq!(
+            content_disposition_header("active.svg", "image/svg+xml")
+                .to_str()
+                .unwrap(),
+            "attachment; filename=\"active.svg\""
+        );
+        assert_eq!(
+            content_disposition_header("future.img", "image/vnd.future")
+                .to_str()
+                .unwrap(),
+            "attachment; filename=\"future.img\""
         );
     }
 

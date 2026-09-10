@@ -269,7 +269,7 @@ async fn accepted_lash_input_survives_admission_retry_with_changed_thread_contex
     // Fault boundary: Lash accepted the input, Hirsel has not marked its turn running.
     runtime
         .session
-        .enqueue(owner_turn_input(&turn).await.unwrap())
+        .enqueue(owner_turn_input(&turn, &state.storage).await.unwrap())
         .id(turn.client_id.clone())
         .ingress(TurnInputIngress::next_turn())
         .send()
@@ -313,7 +313,7 @@ async fn cancelling_between_lash_acceptance_and_hirsel_admission_removes_both_qu
     let _turn_pump = runtime.pump_lock.lock().await;
     runtime
         .session
-        .enqueue(owner_turn_input(&turn).await.unwrap())
+        .enqueue(owner_turn_input(&turn, &state.storage).await.unwrap())
         .id(turn.client_id.clone())
         .ingress(TurnInputIngress::next_turn())
         .send()
@@ -600,7 +600,7 @@ async fn cancellation_intent_survives_crash_before_lash_cleanup() {
     let _turn_pump = runtime.pump_lock.lock().await;
     runtime
         .session
-        .enqueue(owner_turn_input(&turn).await.unwrap())
+        .enqueue(owner_turn_input(&turn, &state.storage).await.unwrap())
         .id(turn.client_id.clone())
         .ingress(TurnInputIngress::next_turn())
         .send()

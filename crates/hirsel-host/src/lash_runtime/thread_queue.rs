@@ -159,7 +159,7 @@ impl LashAgentRuntime {
                 })
                 .await?;
         }
-        let input = owner_turn_input(&turn).await?;
+        let input = owner_turn_input(&turn, &self.tools.storage()).await?;
         let source_key = owner_turn_source_key(&client_id);
         let anchors = TurnAnchors {
             request_id: Some(client_id.clone()),

@@ -144,10 +144,7 @@ pub(super) fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<C
         )
         .optional()?;
     message.artifact_ids = super::artifacts::message_artifacts(conn, id)?;
-    message.attachments = message_attachments(conn, id)?
-        .into_iter()
-        .map(|stored| stored.blob)
-        .collect();
+    message.attachments = message_attachments(conn, id)?;
     Ok(message)
 }
 
@@ -164,10 +161,7 @@ pub(super) fn load_attachments_for_messages(
             )
             .optional()?;
         message.artifact_ids = super::artifacts::message_artifacts(conn, message.id)?;
-        message.attachments = message_attachments(conn, message.id)?
-            .into_iter()
-            .map(|stored| stored.blob)
-            .collect();
+        message.attachments = message_attachments(conn, message.id)?;
     }
     Ok(())
 }

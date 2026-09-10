@@ -549,6 +549,16 @@ mod tests {
             )
             .await
             .unwrap();
+        let svg = state
+            .storage
+            .store_blob(
+                "svg-upload",
+                "active.svg",
+                "image/svg+xml",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_vec(),
+            )
+            .await
+            .unwrap();
         let signed_text = state.blob_signer.mint(&text.blob.id).unwrap();
         let app = router_from_state(state);
         let addr = spawn_app(app).await;
@@ -608,8 +618,52 @@ mod tests {
             "inline; filename=\"tiny.png\""
         );
         assert_eq!(
+            image_response
+                .headers()
+                .get("x-content-type-options")
+                .unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            image_response
+                .headers()
+                .get("content-security-policy")
+                .unwrap(),
+            "sandbox; default-src 'none'"
+        );
+        assert_eq!(
             image_response.bytes().await.unwrap().as_ref(),
             &[137, 80, 78, 71]
+        );
+
+        let svg_response = client
+            .get(format!("http://{addr}/blob/{}", svg.blob.id))
+            .bearer_auth("test-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(svg_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            svg_response.headers().get(CONTENT_TYPE).unwrap(),
+            "image/svg+xml"
+        );
+        assert_eq!(
+            svg_response.headers().get(CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"active.svg\""
+        );
+        assert_eq!(
+            svg_response
+                .headers()
+                .get("x-content-type-options")
+                .unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            svg_response
+                .headers()
+                .get("content-security-policy")
+                .unwrap(),
+            "sandbox; default-src 'none'"
         );
     }
 

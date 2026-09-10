@@ -49,7 +49,6 @@ CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='r
                 name TEXT NOT NULL,
                 mime TEXT NOT NULL,
                 size INTEGER NOT NULL,
-                path TEXT NOT NULL,
                 created_ts TEXT NOT NULL
             );
             CREATE TABLE client_blobs (

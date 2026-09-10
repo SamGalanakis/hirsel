@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{
-    AgentActivityState, HostToClient, ModelSelection, ModelSnapshot, SendMode,
+    AgentActivityState, Blob, HostToClient, ModelSelection, ModelSnapshot, SendMode,
     SubagentModelCatalog, ToolCallSummary, TurnEventKind,
 };
 use lash::{
@@ -60,7 +60,7 @@ use crate::{
     monitors::{output_tail, run_monitor_tick},
     prompt_config::PromptConfig,
     providers::ProviderRosterState,
-    storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
+    storage::{MonitorRecord, MonitorWakeOn},
     tools::ToolSuite,
 };
 
@@ -137,6 +137,14 @@ use turn::*;
 pub use provider::RuntimeConfig;
 pub(crate) use provider::agent_host_section;
 pub use runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn, ThreadActionContext};
+
+#[cfg(test)]
+pub(crate) async fn test_owner_turn_input(
+    turn: &OwnerTurn,
+    storage: &crate::storage::Storage,
+) -> anyhow::Result<TurnInput> {
+    turn::owner_turn_input(turn, storage).await
+}
 
 mod runtime_tasks;
 pub(crate) use runtime_tasks::RuntimeTasks;

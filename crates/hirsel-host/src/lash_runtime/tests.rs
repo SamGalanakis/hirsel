@@ -5,7 +5,7 @@ use crate::{
     tools::{ShellRunOutput, ToolsConfig},
 };
 use chrono::Utc;
-use hirsel_proto::{Blob, ChatAuthor, ThreadTurnState};
+use hirsel_proto::{ChatAuthor, ThreadTurnState};
 use lash_core::{
     ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
     TriggerInputBinding, TriggerSubscriptionRecord,
@@ -381,14 +381,20 @@ fn tool_result_summaries_include_status_and_error_hint() {
 #[tokio::test]
 async fn owner_turn_input_notes_all_attachments_and_references_images() {
     let dir = tempfile::tempdir().unwrap();
-    let text_path = dir.path().join("text-blob");
-    let image_path = dir.path().join("image-blob");
-    tokio::fs::write(&text_path, b"hello").await.unwrap();
-    tokio::fs::write(&image_path, [137, 80, 78, 71])
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let text = storage
+        .store_blob("text-upload", "note.txt", "text/plain", b"hello".to_vec())
         .await
         .unwrap();
-    let text = stored_blob("text-1", "note.txt", "text/plain", 5, text_path);
-    let image = stored_blob("image-1", "tiny.png", "image/png", 4, image_path);
+    let image = storage
+        .store_blob(
+            "image-upload",
+            "tiny.png",
+            "image/png",
+            vec![137, 80, 78, 71],
+        )
+        .await
+        .unwrap();
     let turn = OwnerTurn {
         history_id: "fixture-history".into(),
         turn_id: None,
@@ -399,12 +405,12 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
         client_id: "client-1".to_string(),
         body: "see attached".to_string(),
         anchor: None,
-        attachments: vec![text.clone(), image.clone()],
+        attachments: vec![text.blob.clone(), image.blob.clone()],
 
         mode: SendMode::Send,
     };
 
-    let rendered = owner_turn_text(&turn);
+    let rendered = owner_turn_text(&turn, &storage);
     assert!(rendered.contains(&format!(
         "[attachment stored at {}: note.txt (text/plain, 5 bytes)]",
         text.path.display()
@@ -414,7 +420,7 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
         image.path.display()
     )));
 
-    let input = owner_turn_input(&turn).await.unwrap();
+    let input = owner_turn_input(&turn, &storage).await.unwrap();
     assert_eq!(input.items.len(), 2);
     assert!(matches!(input.items[0], InputItem::Text { .. }));
     let InputItem::Attachment {
@@ -903,19 +909,6 @@ fn digest_timer_labels_select_the_scheduled_event_producer() {
     );
     assert_eq!(scheduled_digest_label("digest:   "), None);
     assert_eq!(scheduled_digest_label("ordinary timer"), None);
-}
-
-fn stored_blob(id: &str, name: &str, mime: &str, size: u64, path: PathBuf) -> StoredBlob {
-    StoredBlob {
-        blob: Blob {
-            id: id.to_string(),
-            name: name.to_string(),
-            mime: mime.to_string(),
-            size,
-        },
-        path,
-        created_ts: Utc::now(),
-    }
 }
 
 fn timer_registration(value: Value, created_at_ms: u64) -> TriggerSubscriptionRecord {

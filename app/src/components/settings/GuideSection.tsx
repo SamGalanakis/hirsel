@@ -149,8 +149,8 @@ export function GuideSection(): JSX.Element {
 
         <SectionHeader>Where to poke around</SectionHeader>
         <P>
-          The activity icon in the rail opens Processes, where you can inspect sub-agents and
-          monitors. Ask Hirsel to stop a process when you no longer need it.
+          The activity icon in the rail opens Processes, where you can inspect monitors and their
+          latest summaries.
         </P>
         <P>
           Settings → Agents is where the models, reasoning levels and system prompts live, and

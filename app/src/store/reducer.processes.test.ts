@@ -6,10 +6,10 @@ import type { ProcessInfo } from "../protocol";
 function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
   return { thread_id: 1,
     id: "proc-1",
-    kind: "subagent",
+    kind: "monitor",
     label: "Do the thing",
-    agent: "code-reviewer",
-    model: "gpt-5.5",
+    agent: null,
+    model: null,
     state: "running",
     started_ts: "2026-07-09T00:00:00Z",
     last_event_ts: "2026-07-09T00:00:00Z",
@@ -20,7 +20,7 @@ function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
 
 describe("hello_ok seeds processes", () => {
   it("seeds processes from the payload (and defaults to [])", () => {
-    const withProcs = reduce(initialState(), { type: "hello_ok", payload: { type: "hello_ok", processes: [proc(), proc({ id: "proc-2", kind: "monitor" })], history_id: "test-history", threads: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null } });
+    const withProcs = reduce(initialState(), { type: "hello_ok", payload: { type: "hello_ok", processes: [proc(), proc({ id: "proc-2" })], history_id: "test-history", threads: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null } });
     expect(withProcs.processes.map((p) => p.id)).toEqual(["proc-1", "proc-2"]);
 
     const withoutProcs = reduce(initialState(), { type: "hello_ok", payload: { type: "hello_ok", history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null } });
@@ -51,7 +51,7 @@ describe("process_upsert", () => {
 
     const s3 = reduce(s2, {
       type: "process_upsert",
-      payload: { type: "process_upsert", process: proc({ id: "proc-2", kind: "monitor" }) },
+      payload: { type: "process_upsert", process: proc({ id: "proc-2" }) },
     });
     expect(s3.processes.map((p) => p.id)).toEqual(["proc-1", "proc-2"]);
   });

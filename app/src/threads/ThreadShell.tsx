@@ -27,7 +27,7 @@ import { SettingsSheet } from "../components/settings/SettingsSheet";
 import { ProcessesSheet } from "../components/processes/ProcessesSheet";
 import { CanvasRail, CanvasSheet, CanvasButton } from "../components/views/CanvasSurface";
 import { ConnectionPill } from "../components/ConnectionPill";
-import { clearComposerPrefill, openProcesses, openSettings, state } from "../store/store";
+import { openProcesses, openSettings, state } from "../store/store";
 import { ThreadInstrument } from "../views/ThreadInstrument";
 import { getClient } from "../ws/client";
 import { ThreadNavigation } from "./ThreadNavigation";
@@ -112,7 +112,7 @@ function ThreadConversation(props: { id: number; attachments: AttachmentsControl
       </Show>
     </div>
     <ThreadError threadId={props.id} />
-    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} prefill={state.composerPrefill} onConsumePrefill={clearComposerPrefill} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
+    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
         sendThreadMessage(props.id, body, mode, blobs, mentions, artifactIds);
       }}

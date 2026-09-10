@@ -10,7 +10,7 @@ import {
   Square,
   X,
 } from "@/components/ui/icons";
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
@@ -52,9 +52,6 @@ interface Props {
   draftKey?: string;
   attachments: AttachmentsController;
   thinking: boolean;
-  /** One-shot composer pre-fill (v1.4 "Ask Hirsel to stop"); consumed once then cleared. */
-  prefill?: string | null;
-  onConsumePrefill?: () => void;
   onSend: (
     body: string,
     mode: SendMode,
@@ -98,16 +95,6 @@ export function Composer(props: Props) {
   });
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressed = false;
-
-  // Consume a one-shot pre-fill (v1.4 "Ask Hirsel to stop"): drop the text into the
-  // draft, move the caret to the end, focus, then clear so it fires once.
-  createEffect(() => props.prefill, (pre) => {
-    if (!pre) return;
-    setValue(pre);
-    focus();
-    caretToEnd();
-    props.onConsumePrefill?.();
-  });
 
   async function submit(mode: SendMode) {
     const body = value().trim();

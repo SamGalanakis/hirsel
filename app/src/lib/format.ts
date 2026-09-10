@@ -27,14 +27,6 @@ export function formatRelativeTime(ts: string, now: number = Date.now()): string
   return `${days}d ago`;
 }
 
-/** One-line, whitespace-collapsed, ellipsis-truncated preview of a body of
- * text — shared by a Thread's reply quote, the Processes "Ask Hirsel to stop"
- * pre-fill. */
-export function snippet(body: string, maxLen = 80): string {
-  const oneLine = body.replace(/\s+/g, " ").trim();
-  return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
-}
-
 /** Read a File as a bare base64 string (no data: prefix) for upload_blob. */
 export function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

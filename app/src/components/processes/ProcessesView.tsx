@@ -1,23 +1,13 @@
 import { Activity } from "@/components/ui/icons";
 import { createMemo, For, Show } from "solid-js";
 
-import type { ProcessInfo } from "../../protocol";
 import { partitionProcesses } from "../../store/selectors";
-import { closeRightRegion, prefillComposer, state } from "../../store/store";
-import { focusThread } from "../../threads/store";
-import { snippet } from "../../lib/format";
+import { state } from "../../store/store";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { ProcessRow } from "./ProcessRow";
 
 export function ProcessesView() {
   const groups = createMemo(() => partitionProcesses(state.processes));
-
-  // Process requests address the recorded origin conversation.
-  function handleAskToStop(process: ProcessInfo) {
-    closeRightRegion();
-    focusThread(process.thread_id);
-    prefillComposer(`stop process ${process.id} (${snippet(process.label, 48)})`);
-  }
 
   return (
     <Show
@@ -29,9 +19,9 @@ export function ProcessesView() {
               <EmptyMedia variant="icon">
                 <Activity />
               </EmptyMedia>
-              <EmptyTitle>Nothing running</EmptyTitle>
+              <EmptyTitle>No monitors</EmptyTitle>
               <EmptyDescription>
-                Thread execution processes and monitors appear here.
+                Monitors will appear here when the Agent creates them.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -45,7 +35,7 @@ export function ProcessesView() {
               Running ({groups().running.length})
             </h2>
             <For each={groups().running}>
-              {(process) => <ProcessRow process={process} onAskToStop={handleAskToStop} />}
+              {(process) => <ProcessRow process={process} />}
             </For>
           </section>
         </Show>
@@ -56,7 +46,7 @@ export function ProcessesView() {
               Finished ({groups().finished.length})
             </h2>
             <For each={groups().finished}>
-              {(process) => <ProcessRow process={process} onAskToStop={handleAskToStop} />}
+              {(process) => <ProcessRow process={process} />}
             </For>
           </section>
         </Show>

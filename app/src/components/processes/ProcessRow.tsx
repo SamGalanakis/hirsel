@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, OctagonX, Radar } from "@/components/ui/icons";
+import { ChevronDown, Radar } from "@/components/ui/icons";
 import { createSignal, Show } from "solid-js";
 
 import type { ProcessInfo, ProcessState } from "../../protocol";
@@ -8,9 +8,6 @@ import { Card } from "../ui/card";
 
 interface Props {
   process: ProcessInfo;
-  /** "Ask Hirsel to stop": return to Threads with the composer pre-filled. Subagent only,
-   * while running — interrupts route through Hirsel, never a direct kill. */
-  onAskToStop: (process: ProcessInfo) => void;
 }
 
 const STATE_LABEL: Record<ProcessState, string> = {
@@ -88,8 +85,6 @@ function DisclosureChevron(props: { expanded: boolean; class?: string }) {
 export function ProcessRow(props: Props) {
   const [expanded, setExpanded] = createSignal(false);
   const p = () => props.process;
-  const isSubagent = () => p().kind === "subagent";
-  const isMonitor = () => p().kind === "monitor";
   const running = () => p().state === "running";
   // A monitor has activity once its last event is distinct from its start.
   const hasActivity = () => p().last_event_ts !== p().started_ts;
@@ -112,21 +107,12 @@ export function ProcessRow(props: Props) {
         onClick={() => setExpanded((v) => !v)}
       >
         <span class="shrink-0 text-muted-foreground">
-          <Show when={isSubagent()} fallback={<Radar class="size-4" aria-label="Monitor" />}>
-            <Bot class="size-4" aria-label="Thread execution" />
-          </Show>
+          <Radar class="size-4" aria-label="Monitor" />
         </span>
-        <Show
-          when={isMonitor()}
-          fallback={
-            <span class="min-w-0 flex-1 truncate text-sm text-muted-foreground">{p().label}</span>
-          }
-        >
-          <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-meta text-muted-foreground">
-            {p().label}
-          </code>
-        </Show>
-        {/* Started-at, in row mode too: two runs of the same agent carry the
+        <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-meta text-muted-foreground">
+          {p().label}
+        </code>
+        {/* Started-at, in row mode too: two runs of the same monitor carry the
             SAME label, so without it the list is a wall of identical rows with
             no order. It is the one meta that makes them tellable apart. */}
         <span class="shrink-0 text-meta tabular-nums text-muted-foreground">
@@ -154,50 +140,22 @@ export function ProcessRow(props: Props) {
         onClick={() => setExpanded((v) => !v)}
       >
         <span class="mt-0.5 shrink-0 text-muted-foreground">
-          <Show when={isSubagent()} fallback={<Radar class="size-4" aria-label="Monitor" />}>
-            <Bot class="size-4" aria-label="Thread execution" />
-          </Show>
+          <Radar class="size-4" aria-label="Monitor" />
         </span>
 
         <span class="flex min-w-0 flex-1 flex-col gap-1">
-          {/* Title line: label (prompt snippet for subagents; cmd, code-style,
-              for monitors) + state chip. */}
+          {/* Title line: monitor label, code-style, plus state chip. */}
           <span class="flex items-start justify-between gap-2">
-            <Show
-              when={isMonitor()}
-              fallback={
-                <span class="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                  {p().label}
-                </span>
-              }
-            >
-              <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-meta text-foreground/90">
-                {p().label}
-              </code>
-            </Show>
+            <code class="min-w-0 flex-1 truncate rounded bg-muted px-1 py-0.5 font-mono text-meta text-foreground/90">
+              {p().label}
+            </code>
             <StateChip state={p().state} />
           </span>
-
-          {/* Sub-agent chips: agent + model. */}
-          <Show when={isSubagent() && (p().agent || p().model)}>
-            <span class="flex flex-wrap items-center gap-1">
-              <Show when={p().agent}>
-                <span class="rounded bg-muted px-1.5 py-px text-xs font-medium text-muted-foreground">
-                  {p().agent}
-                </span>
-              </Show>
-              <Show when={p().model}>
-                <span class="rounded bg-muted px-1.5 py-px text-xs text-muted-foreground">
-                  {p().model}
-                </span>
-              </Show>
-            </span>
-          </Show>
 
           {/* Meta line: relative start (+ latest activity for a monitor with activity). */}
           <span class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
             <span>started {formatRelativeTime(p().started_ts)}</span>
-            <Show when={isMonitor() && hasActivity()}>
+            <Show when={hasActivity()}>
               <span aria-hidden="true">·</span>
               <span>last updated {formatRelativeTime(p().last_event_ts)}</span>
             </Show>
@@ -217,17 +175,10 @@ export function ProcessRow(props: Props) {
       <Show when={expanded()}>
         <div class="ml-6 flex flex-col gap-2 border-l border-border/60 pl-3 pt-1">
           <div class="flex flex-col gap-0.5">
-            <span class="text-xs font-medium text-muted-foreground">
-              {isMonitor() ? "Probe" : "Prompt"}
-            </span>
-            <Show
-              when={isMonitor()}
-              fallback={<span class="text-sm text-foreground">{p().label}</span>}
-            >
-              <code class="rounded bg-muted px-1.5 py-1 font-mono text-meta text-foreground/90 wrap-break-word">
-                {p().label}
-              </code>
-            </Show>
+            <span class="text-xs font-medium text-muted-foreground">Probe</span>
+            <code class="rounded bg-muted px-1.5 py-1 font-mono text-meta text-foreground/90 wrap-break-word">
+              {p().label}
+            </code>
           </div>
 
           <Show when={p().summary}>
@@ -243,19 +194,6 @@ export function ProcessRow(props: Props) {
             <span>Started {formatRelativeTime(p().started_ts)}</span>
             <span>Updated {formatRelativeTime(p().last_event_ts)}</span>
           </div>
-
-          {/* "Ask Hirsel to stop" — subagent, while running. Routes the interrupt
-              through Hirsel (composer pre-fill), never a direct host kill. */}
-          <Show when={isSubagent() && running()}>
-            <button
-              type="button"
-              class="mt-0.5 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-md border border-border px-3 text-meta font-medium text-foreground transition-colors hover:border-status-danger/60 hover:text-status-danger"
-              onClick={() => props.onAskToStop(p())}
-            >
-              <OctagonX class="size-3.5" aria-hidden="true" />
-              Ask Hirsel to stop
-            </button>
-          </Show>
         </div>
       </Show>
     </Card>

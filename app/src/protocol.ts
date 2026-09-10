@@ -40,9 +40,9 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
 }
 
-/** A host-tracked background process the Agent has running (v1.4): a delegated
- * sub-agent, or a monitor probe. Surfaced in the Processes tab. */
-export type ProcessKind = "subagent" | "monitor";
+/** A host-tracked monitor probe the Agent has running (v1.4). Surfaced in the
+ * Processes tab. */
+export type ProcessKind = "monitor";
 
 /** `running` is the only non-terminal state; the rest are terminal. `failed` /
  * `abandoned` get a warning tint in the UI. */
@@ -53,7 +53,7 @@ export interface ProcessInfo {
   id: string;
   kind: ProcessKind;
   label: string;
-  /** subagent kind only: the acting agent + model, shown as small chips. */
+  /** Nullable wire metadata retained for current server/native clients. */
   agent: string | null;
   model: string | null;
   state: ProcessState;

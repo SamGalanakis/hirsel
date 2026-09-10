@@ -3,8 +3,8 @@ import { reduce } from "./reducer";
 import { type Action, type AppState, initialState } from "./types";
 export type RightRegion = "none" | "canvas" | "processes" | "settings";
 export type SettingsTab = "appearance" | "agents" | "providers" | "connection" | "notifications" | "guide" | "about" | "plugins";
-interface UiState { rightRegion: RightRegion; composerPrefill: string | null; protocolError: string | null; settingsTab: SettingsTab | null; promptsRevision: number; providersRevision: number }
-const [state, setState] = createStore<AppState & UiState>({ ...initialState(), rightRegion: "none", composerPrefill: null, protocolError: null, settingsTab: null, promptsRevision: 0, providersRevision: 0 });
+interface UiState { rightRegion: RightRegion; protocolError: string | null; settingsTab: SettingsTab | null; promptsRevision: number; providersRevision: number }
+const [state, setState] = createStore<AppState & UiState>({ ...initialState(), rightRegion: "none", protocolError: null, settingsTab: null, promptsRevision: 0, providersRevision: 0 });
 export function dispatch(action: Action): void {
   untrack(() => setState(draft => {
     const next = reduce(state, action);
@@ -47,15 +47,6 @@ export function setProtocolError(detail: string): void {
 
 export function clearProtocolError(): void {
   setState(draft => { draft["protocolError"] = null; });
-}
-
-export function clearComposerPrefill(): void {
-  setState(draft => { draft["composerPrefill"] = null; });
-}
-
-/** Seed the always-mounted Hirsel composer without changing its Thread subject. */
-export function prefillComposer(text: string): void {
-  setState(draft => { draft["composerPrefill"] = text; });
 }
 
 /** The reactive store proxy: components read `state.processes`, `state.connection`,

@@ -28,7 +28,8 @@
       "state": "implemented",
       "commit": "aecbba8be9b129adfdc072ac95ea93696386a67c",
       "followup_commits": [
-        "7bf1587911dce6c58803cd68603cac16197c6ffa"
+        "7bf1587911dce6c58803cd68603cac16197c6ffa",
+        "b0724302fc9b90fa74d2fa39dcbaccee268dde24"
       ]
     },
     "F06": {

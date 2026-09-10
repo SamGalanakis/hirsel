@@ -323,11 +323,19 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                         .unwrap_or_else(|e| e.into_inner())
                         .clear();
                 }
-                let mut reopen = store.opened_threads.clone();
-                reopen.extend(store.requests.iter().map(|(_, id)| *id));
-                reopen.sort_unstable();
-                reopen.dedup();
-                store.requests.clear();
+                let pending_thread_ids = store
+                    .requests
+                    .iter()
+                    .map(|(_, thread_id)| *thread_id)
+                    .collect::<HashSet<_>>();
+                let mut restore = store
+                    .opened_threads
+                    .iter()
+                    .copied()
+                    .filter(|thread_id| !pending_thread_ids.contains(thread_id))
+                    .collect::<Vec<_>>();
+                restore.sort_unstable();
+                restore.dedup();
                 let mut frames = client
                     .pending_frames
                     .lock()
@@ -335,7 +343,14 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 frames.retain(|frame| {
                     !matches!(frame, hirsel_proto::ClientToHost::OpenThread { .. })
                 });
-                for thread_id in reopen {
+                for (client_id, thread_id) in &store.requests {
+                    frames.push_back(hirsel_proto::ClientToHost::OpenThread {
+                        client_id: client_id.clone(),
+                        thread_id: *thread_id,
+                        before_id: None,
+                    });
+                }
+                for thread_id in restore {
                     let client_id = uuid::Uuid::new_v4().to_string();
                     store.requests.push((client_id.clone(), thread_id));
                     frames.push_back(hirsel_proto::ClientToHost::OpenThread {

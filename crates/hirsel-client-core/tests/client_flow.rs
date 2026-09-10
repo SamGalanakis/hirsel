@@ -764,6 +764,180 @@ async fn lost_create_ack_retries_same_identity_after_reconnect() {
 }
 
 #[tokio::test]
+async fn lost_open_ack_retries_same_identity_after_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut first = accept_async(stream).await.unwrap();
+        receive_client(&mut first).await;
+        send_hello(&mut first, vec![], vec![thread(5, false, false)], vec![]).await;
+        let ClientToHost::OpenThread {
+            client_id: original_id,
+            thread_id: 5,
+            before_id: None,
+        } = receive_client(&mut first).await
+        else {
+            panic!("initial open")
+        };
+        first.close(None).await.unwrap();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut second = accept_async(stream).await.unwrap();
+        receive_client(&mut second).await;
+        send_hello(&mut second, vec![], vec![thread(5, false, false)], vec![]).await;
+        let ClientToHost::OpenThread {
+            client_id: retry_id,
+            thread_id: 5,
+            before_id: None,
+        } = receive_client(&mut second).await
+        else {
+            panic!("open retry")
+        };
+        assert_eq!(retry_id, original_id);
+        send_server(
+            &mut second,
+            &HostToClient::ThreadOpened {
+                client_id: retry_id,
+                detail: hirsel_proto::ThreadDetail {
+                    related_items: vec![],
+                    brief: hirsel_proto::ThreadBrief {
+                        text: "Retried open".into(),
+                        artifact_ids: vec![],
+                    },
+                    thread: thread(5, false, false),
+                    messages: vec![],
+                    turns: vec![],
+                    activities: vec![],
+                    has_more: false,
+                },
+            },
+        )
+        .await;
+        let _ = release_rx.await;
+    });
+    let client = Client::new(test_config(address)).unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    client.set_observer(Some(observer.clone()));
+    client.connect().await.unwrap();
+    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    let receipt = client.open_thread(5, None);
+    wait_for_snapshot(&client, |s| {
+        s.briefs.iter().any(|brief| brief.text == "Retried open")
+    })
+    .await;
+    assert!(observer.lifecycle.lock().unwrap().iter().any(|event| {
+        matches!(event, LifecycleEvent::ThreadOpened { client_id, thread_id: 5 } if client_id == &receipt.client_id)
+    }));
+    release_tx.send(()).unwrap();
+    client.disconnect().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn lost_paginated_open_error_retries_same_identity_without_background_duplicate() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut first = accept_async(stream).await.unwrap();
+        receive_client(&mut first).await;
+        send_hello(&mut first, vec![], vec![thread(5, false, false)], vec![]).await;
+        let ClientToHost::OpenThread {
+            client_id,
+            thread_id: 5,
+            before_id: None,
+        } = receive_client(&mut first).await
+        else {
+            panic!("initial open")
+        };
+        send_server(
+            &mut first,
+            &HostToClient::ThreadOpened {
+                client_id,
+                detail: hirsel_proto::ThreadDetail {
+                    related_items: vec![],
+                    brief: hirsel_proto::ThreadBrief {
+                        text: "Initial detail".into(),
+                        artifact_ids: vec![],
+                    },
+                    thread: thread(5, false, false),
+                    messages: vec![],
+                    turns: vec![],
+                    activities: vec![],
+                    has_more: true,
+                },
+            },
+        )
+        .await;
+        let ClientToHost::OpenThread {
+            client_id: pagination_id,
+            thread_id: 5,
+            before_id: Some(10),
+        } = receive_client(&mut first).await
+        else {
+            panic!("pagination open")
+        };
+        first.close(None).await.unwrap();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut second = accept_async(stream).await.unwrap();
+        receive_client(&mut second).await;
+        send_hello(&mut second, vec![], vec![thread(5, false, false)], vec![]).await;
+        let ClientToHost::OpenThread {
+            client_id: retry_id,
+            thread_id: 5,
+            before_id: None,
+        } = receive_client(&mut second).await
+        else {
+            panic!("pagination retry")
+        };
+        assert_eq!(retry_id, pagination_id);
+        assert!(
+            timeout(Duration::from_millis(150), second.next())
+                .await
+                .is_err(),
+            "pending pagination generated a second background reopen"
+        );
+        send_server(
+            &mut second,
+            &HostToClient::Error {
+                detail: "Pagination rejected".into(),
+                client_id: Some(retry_id),
+            },
+        )
+        .await;
+        let _ = release_rx.await;
+    });
+    let client = Client::new(test_config(address)).unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    client.set_observer(Some(observer.clone()));
+    client.connect().await.unwrap();
+    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    client.open_thread(5, None);
+    wait_for_snapshot(&client, |s| s.opened_threads.contains(&5)).await;
+    let receipt = client.open_thread(5, Some(10));
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if observer.lifecycle.lock().unwrap().iter().any(|event| {
+                matches!(event, LifecycleEvent::ProtocolError { detail, client_id: Some(client_id) }
+                    if detail == "Pagination rejected" && client_id == &receipt.client_id)
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    release_tx.send(()).unwrap();
+    client.disconnect().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn new_history_discards_pending_transport_actions_and_recovers_unsent_text() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

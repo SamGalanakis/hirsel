@@ -136,20 +136,3 @@ class ActionFailureOwnershipTest {
         assertEquals(null, requests.fail("Late timeout failure", "timeout"))
     }
 }
-
-class RelatedNavigationTest {
-    @Test fun typedNavigationRequiresOnlineMatchingHistoryAndExistingTarget() {
-        val target = ThreadRelatedTarget.Thread(historyId = "A", threadId = 0uL)
-        assertEquals(0uL, relatedThreadDestination(target, ConnectionState.ONLINE, "A", listOf(0uL, 5uL)))
-        assertEquals(null, relatedThreadDestination(target, ConnectionState.ONLINE, "B", listOf(0uL, 5uL)))
-        assertEquals(null, relatedThreadDestination(target, ConnectionState.ONLINE, null, listOf(0uL)))
-        assertEquals(null, relatedThreadDestination(target, ConnectionState.ONLINE, "A", listOf(5uL)))
-        for (state in listOf(ConnectionState.CONNECTING, ConnectionState.OFFLINE)) {
-            assertEquals(null, relatedThreadDestination(target, state, "A", listOf(0uL)))
-        }
-        assertEquals(null, relatedThreadDestination(
-            ThreadRelatedTarget.Url("https://example.com/t/0?history=A"),
-            ConnectionState.ONLINE, "A", listOf(0uL),
-        ))
-    }
-}

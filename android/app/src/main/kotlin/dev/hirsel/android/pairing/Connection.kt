@@ -194,17 +194,6 @@ class Connection internal constructor(
             trackRequest(it, PendingRequestKind.Related, historyId, threadId)
         }
 
-    fun openRelatedThread(target: ThreadRelatedTarget): Boolean {
-        val current = snapshot ?: return false
-        val destination = relatedThreadDestination(
-            target, current.connection, current.historyId, current.threads.map { it.id },
-        ) ?: return false
-        // Native state can already have advanced beyond this queued UI snapshot.
-        client?.openRelatedThread(target) ?: return false
-        focusedThreadId = destination
-        return true
-    }
-
     fun stop(historyId: String, threadId: ULong) { client?.cancelTurn(historyId, threadId) }
 
     val isOnline: Boolean get() = phase is Phase.Online

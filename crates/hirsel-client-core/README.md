@@ -6,8 +6,9 @@ change message ownership. Thread 0 is the globally aware Orchestrator.
 
 The core preserves complete Thread instruments and independent lifecycle,
 attention and read state. Open responses are request-correlated and filtered by
-message ownership; reconnect refreshes opened histories. Message echoes reconcile
-by client ID and Thread ID, including offline retries and attachment IDs. Streams
+message ownership; reconnect refreshes opened histories while retaining the request
+ID of any still-pending open. Message echoes reconcile by client ID and Thread ID,
+including offline retries and attachment IDs. Streams
 use durable turn IDs and sequence numbers to reject late or duplicate deltas.
 
 Native commands create/open Threads, send owned messages, submit revision-bound
@@ -45,9 +46,11 @@ errors. Agent changes have no client request ID. These operations do not send
 messages, start work, or change artifact identity.
 
 `ThreadRelatedTarget` is either a URL or the `(history_id, thread_id)` tuple.
-Thread targets do not change hierarchy or access. Native in-app navigation requires
-an online snapshot, exact history match and an existing target, using the same guard
-as notifications. Canonical textual references are ordinary relative Markdown
+Thread targets do not change hierarchy or access. Native `open_related_thread`
+requires an online snapshot, exact history match and an existing target, and returns
+the resulting open receipt to its caller. Android has no separate Related-navigation
+producer; its current navigation paths use the same tracked open path. Canonical
+textual references are ordinary relative Markdown
 links such as `[Thread #0](/t/0?history=550e8400-e29b-41d4-a716-446655440000)`.
 The client has no configured reachable web base and does not construct absolute
 share URLs, re-pair from references or register a new native link scheme.

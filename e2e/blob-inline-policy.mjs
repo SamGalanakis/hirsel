@@ -27,7 +27,7 @@ function startProcess(children, command, args, options = {}, logs = []) {
 
 async function startBlobHost({ root, children, logs, port, token, env = {} }) {
   const dataDir = await mkdtemp(join(tmpdir(), "hirsel-blob-policy-"));
-  const build = spawnSync("cargo", ["build", "-p", "hirsel-host", "--bin", "hirsel-host"], { cwd: root, encoding: "utf8" });
+  const build = spawnSync("cargo", ["build", "--workspace", "--all-targets"], { cwd: root, encoding: "utf8" });
   if (build.status !== 0) throw new Error(`Host build failed: ${build.stderr || build.stdout}`);
   const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], { cwd: root, encoding: "utf8" });
   if (metadata.status !== 0) throw new Error(`Cargo metadata failed: ${metadata.stderr || metadata.stdout}`);

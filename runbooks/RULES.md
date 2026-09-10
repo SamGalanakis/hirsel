@@ -32,9 +32,10 @@ surfaces is a failure even if each surface looks internally consistent.
 - Use the configured real provider and record the model and reasoning variant
   from `hello_ok`. Missing or unusable provider authentication is a blocker,
   not permission to substitute a fake response.
-- The complete battery is bounded to six initial turns: two chronology turns,
-  two tool turns, one exact artifact turn, and the explicitly authorized
-  natural cat artifact turn. Rerun only a failed scenario after a relevant fix.
+- The complete battery is bounded to seven initial turns: two chronology turns,
+  two tool turns, one exact artifact turn, the explicitly authorized natural
+  cat artifact turn, and one controlled four-format presentation turn. Rerun
+  only a failed scenario after a relevant fix.
   Do not add retries that spend more model calls.
 - Preserve only sanitized evidence. Never record auth frames, tokens, provider
   credentials, or unrelated configuration.
@@ -77,8 +78,9 @@ just product-runbook all
 just product-runbook chat-chronology
 just product-runbook tool-execution
 just product-runbook artifact-creation
+just product-runbook artifact-presentation
 ```
 
-`all` uses three separate empty stores and no more than six model turns. Set
+`all` uses four separate empty stores and no more than seven model turns. Set
 `HIRSEL_RUNBOOK_ARTIFACTS` to choose the evidence root. The runner prints that
 path even when a scenario aborts.

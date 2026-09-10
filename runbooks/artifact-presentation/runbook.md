@@ -22,6 +22,10 @@ Use isolated disposable Host data and the production web build. Create real
 HTML, Markdown, SVG, and Solid artifacts with distinctive leading whitespace,
 HTML-looking text, and a trailing newline. Do not use port 3076.
 
+Run `just product-runbook artifact-presentation`. The scenario uses one Owner
+turn and requires four successful real `artifacts.create` calls; scripted
+publication or direct database mutation does not satisfy it.
+
 For each format in the ordinary viewer and showcase:
 
 1. Open the artifact and require `Rendered` to be selected by default. Verify

@@ -11,9 +11,9 @@ import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const requested = process.argv[2] ?? "all";
 const scenarios = requested === "all"
-  ? ["chat-chronology", "tool-execution", "artifact-creation"]
+  ? ["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]
   : [requested];
-const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation"]);
+const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]);
 for (const scenario of scenarios) assert(knownScenarios.has(scenario), `Unknown product runbook: ${scenario}`);
 
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
@@ -316,6 +316,21 @@ function assertTimelineRendered(dom, turn, events) {
   assert.deepEqual(entry.timeline.filter(row => row.slot === "timeline-tool").map(row => row.toolCallId), expectedToolIds, `turn ${turn.id} rendered tool row order differs from its canonical events`);
 }
 
+function assertReasoningIntegrity(dom, turn, events) {
+  const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
+  assert(entry, `turn ${turn.id} has no rendered completed entry`);
+  const reasoning = events
+    .filter(({ event }) => event.kind === "reasoning" && event.text.trim())
+    .map(({ event }) => {
+      assert.equal(event.text.includes("****"), false, `turn ${turn.id} reasoning contains joined duplicate emphasis`);
+      return renderedMarkdownText(event.text);
+    });
+  const rendered = entry.timeline
+    .filter(row => row.slot === "timeline-reasoning")
+    .map(row => row.text);
+  assert.deepEqual(rendered, reasoning, `turn ${turn.id} does not render each reasoning phrase exactly once`);
+}
+
 function toolPair(frames, turnId, namePattern) {
   const events = turnEvents(frames, turnId);
   const started = events.find(frame => frame.event.kind === "tool_start" && namePattern.test(frame.event.name));
@@ -413,6 +428,8 @@ async function runChat(context) {
   assertTimelineSurfaces(settledExpanded, frames, [first.turnId, secondTurn.id]);
   assertTimelineRendered(settledExpanded.dom, firstTerminal, durableTimeline(settledExpanded.detail, first.turnId));
   assertTimelineRendered(settledExpanded.dom, secondTerminal, durableTimeline(settledExpanded.detail, secondTurn.id));
+  assertReasoningIntegrity(settledExpanded.dom, firstTerminal, durableTimeline(settledExpanded.detail, first.turnId));
+  assertReasoningIntegrity(settledExpanded.dom, secondTerminal, durableTimeline(settledExpanded.detail, secondTurn.id));
   const before = timelineProjection(settledExpanded.dom);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`[data-message-id="${secondTerminal.agent_message_id}"]`).getByText(secondMarker, { exact: false }).waitFor();
@@ -425,6 +442,8 @@ async function runChat(context) {
   assertTimelineSurfaces(reloaded, frames, [first.turnId, secondTurn.id]);
   assertTimelineRendered(reloaded.dom, firstTerminal, durableTimeline(reloaded.detail, first.turnId));
   assertTimelineRendered(reloaded.dom, secondTerminal, durableTimeline(reloaded.detail, secondTurn.id));
+  assertReasoningIntegrity(reloaded.dom, firstTerminal, durableTimeline(reloaded.detail, first.turnId));
+  assertReasoningIntegrity(reloaded.dom, secondTerminal, durableTimeline(reloaded.detail, secondTurn.id));
   return {
     markers: [firstMarker, secondMarker],
     turnIds: [first.turnId, secondTurn.id],
@@ -583,6 +602,214 @@ async function runArtifact(context) {
   };
 }
 
+function presentationArtifacts(nonce) {
+  const marker = `HIRSEL-PRESENTATION-${nonce}`;
+  return [
+    {
+      format: "html",
+      title: `Presentation HTML ${nonce}`,
+      kind: "html",
+      mime: "text/html",
+      filename: `presentation-${nonce}.html`,
+      content: ` \n<!doctype html><html><body><main><h1>${marker}-HTML</h1><script>parent.postMessage("${marker}-HTML-RENDERED","*")</script></main></body></html>\n`,
+      renderedText: `${marker}-HTML`,
+      sideEffect: `${marker}-HTML-RENDERED`,
+    },
+    {
+      format: "markdown",
+      title: `Presentation Markdown ${nonce}`,
+      kind: "file",
+      mime: "text/markdown",
+      filename: `presentation-${nonce}.md`,
+      content: ` \n# ${marker}-MARKDOWN\n\n**Rendered** markdown with <literal-source>.\n`,
+      renderedText: `${marker}-MARKDOWN`,
+    },
+    {
+      format: "svg",
+      title: `Presentation SVG ${nonce}`,
+      kind: "file",
+      mime: "image/svg+xml",
+      filename: `presentation-${nonce}.svg`,
+      content: ` \n<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80"><title>${marker}-SVG</title><rect width="120" height="80" rx="12" fill="#17324d"/><circle cx="38" cy="40" r="19" fill="#f5b942"/><path d="M67 56L88 22l20 34z" fill="#64c4a6"/></svg>\n`,
+      renderedText: `${marker}-SVG`,
+      size: { width: 120, height: 80 },
+    },
+    {
+      format: "solid",
+      title: `Presentation Solid ${nonce}`,
+      kind: "solid",
+      mime: "text/jsx",
+      filename: `presentation-${nonce}.jsx`,
+      content: ` \nexport default function App(){parent.postMessage("${marker}-SOLID-RENDERED","*");return <main><h1>${marker}-SOLID</h1><button onClick={e=>e.currentTarget.textContent="Pressed"}>Ready</button></main>}\n`,
+      renderedText: `${marker}-SOLID`,
+      sideEffect: `${marker}-SOLID-RENDERED`,
+    },
+  ];
+}
+
+async function presentationRendered(panel, expected) {
+  const frame = panel.frameLocator("iframe");
+  if (expected.format === "svg") {
+    const image = frame.locator(`img[alt="${expected.title}"]`);
+    await image.waitFor({ state: "visible" });
+    assert.deepEqual(await image.evaluate(node => ({ width: node.naturalWidth, height: node.naturalHeight })), expected.size);
+  } else {
+    await frame.getByRole("heading", { name: expected.renderedText, exact: true }).waitFor({ state: "visible" });
+  }
+}
+
+async function presentationDownload(page, panel, buttonName, expected, suffix) {
+  const pending = page.waitForEvent("download");
+  await panel.getByRole("button", { name: buttonName, exact: true }).click();
+  const download = await pending;
+  assert.equal(download.suggestedFilename(), expected.filename);
+  const path = join(page.__presentationEvidenceDir, `${suffix}-${expected.filename}`);
+  await download.saveAs(path);
+  assert.deepEqual(await readFile(path), Buffer.from(expected.content), `${expected.format} download bytes differ`);
+  return path;
+}
+
+async function presentationFit(page, panel) {
+  const metrics = await panel.evaluate(node => ({
+    pageOverflow: document.documentElement.scrollWidth > window.innerWidth,
+    panelOverflow: node.scrollWidth > node.clientWidth,
+    viewportWidth: window.innerWidth,
+    controls: [...node.querySelectorAll("header button")]
+      .filter(button => button.getClientRects().length > 0)
+      .map(button => { const box = button.getBoundingClientRect(); return { label: button.getAttribute("aria-label") ?? button.textContent?.trim(), left: box.left, right: box.right }; }),
+  }));
+  assert.equal(metrics.pageOverflow, false, "presentation page has horizontal overflow");
+  assert.equal(metrics.panelOverflow, false, "presentation panel has horizontal overflow");
+  for (const control of metrics.controls) assert(control.left >= 0 && control.right <= metrics.viewportWidth, `${control.label} is outside the viewport`);
+  return metrics;
+}
+
+async function exercisePresentationSurface(page, panel, expected, label, buttonName, sideEffects, workerRequests) {
+  const rendered = panel.getByRole("button", { name: "Rendered", exact: true });
+  const source = panel.getByRole("button", { name: "Source", exact: true });
+  await rendered.waitFor({ state: "visible" });
+  assert.equal(await rendered.getAttribute("aria-pressed"), "true", `${label} did not default to Rendered`);
+  await presentationRendered(panel, expected);
+  if (expected.sideEffect) await poll(`${label} rendered side effect`, () => sideEffects.includes(expected.sideEffect), 5_000);
+  await page.screenshot({ path: join(page.__presentationEvidenceDir, `${label}-rendered.png`), fullPage: true });
+  const renderedDownload = await presentationDownload(page, panel, buttonName, expected, `${label}-rendered`);
+
+  const effectsBeforeSource = sideEffects.length;
+  const workersBeforeSource = workerRequests.length;
+  await source.focus();
+  await source.press("Enter");
+  assert.equal(await source.getAttribute("aria-pressed"), "true");
+  assert.equal(await source.evaluate(node => node === document.activeElement), true, `${label} Source lost keyboard focus`);
+  const pre = panel.locator('[data-slot="artifact-source"]');
+  await pre.waitFor({ state: "visible" });
+  assert.equal(await pre.textContent(), expected.content, `${label} Source differs from exact stored content`);
+  assert.equal(await panel.locator("iframe").count(), 0, `${label} Source mounted a renderer`);
+  assert.equal(await pre.locator("html,svg,script,img,canvas,button").count(), 0, `${label} Source interpreted markup`);
+  assert.equal(sideEffects.length, effectsBeforeSource, `${label} Source executed an artifact side effect`);
+  assert.equal(workerRequests.length, workersBeforeSource, `${label} Source started the compiler worker`);
+  await page.screenshot({ path: join(page.__presentationEvidenceDir, `${label}-source.png`), fullPage: true });
+  const sourceDownload = await presentationDownload(page, panel, buttonName, expected, `${label}-source`);
+  const fit = await presentationFit(page, panel);
+
+  await rendered.focus();
+  await rendered.press("Enter");
+  assert.equal(await rendered.getAttribute("aria-pressed"), "true");
+  assert.equal(await rendered.evaluate(node => node === document.activeElement), true, `${label} Rendered lost keyboard focus`);
+  await presentationRendered(panel, expected);
+  return { renderedDownload, sourceDownload, fit };
+}
+
+async function runArtifactPresentation(context) {
+  const { page, frames, nonce, threadId, scenarioDir } = context;
+  page.__presentationEvidenceDir = scenarioDir;
+  const expected = presentationArtifacts(nonce);
+  const prompt = `Create exactly four reusable artifacts by calling artifacts.create exactly four times. Use these exact JSON fields and exact UTF-8 content, including leading whitespace and trailing newlines: ${JSON.stringify(expected.map(({ format: _format, renderedText: _renderedText, sideEffect: _sideEffect, size: _size, ...artifact }) => artifact))}. Do not edit, show, or merely describe them. After all four calls succeed, confirm briefly.`;
+  const offset = frames.length;
+  const request = await sendMessage(page, frames, threadId, prompt);
+  const completed = await waitForTurn(frames, request.turnId, turn => terminal(turn.state), "presentation artifact turn terminal");
+  assert.equal(completed.state, "completed");
+  const events = turnEvents(frames, request.turnId);
+  const starts = events.filter(frame => frame.event.kind === "tool_start" && /artifacts[._]create/.test(frame.event.name));
+  const dones = events.filter(frame => frame.event.kind === "tool_done" && starts.some(start => start.event.id === frame.event.id));
+  assert.equal(starts.length, 4, "presentation turn did not call artifacts.create exactly four times");
+  assert.equal(dones.length, 4, "presentation turn did not finish four artifacts.create calls");
+  assert(dones.every(frame => frame.event.ok), "a presentation artifacts.create call failed");
+  const upserts = [...new Map(frames.slice(offset)
+    .filter(row => row.direction === "received" && row.frame.type === "artifact_upsert")
+    .map(row => [row.frame.artifact.id, row.frame.artifact])).values()];
+  assert.equal(upserts.length, 4, "presentation turn did not emit exactly four artifact upserts");
+  await expandInlineTools(page, starts.map(frame => frame.event.id));
+  const initial = await capture("10-created-formats", context);
+  const stored = expected.map(item => {
+    const artifact = initial.store.artifacts.find(candidate => candidate.title === item.title);
+    assert(artifact, `${item.format} artifact is absent from SQLite`);
+    assert.deepEqual(
+      { title: artifact.title, kind: artifact.kind, mime: artifact.mime, filename: artifact.filename, content: artifact.content },
+      { title: item.title, kind: item.kind, mime: item.mime, filename: item.filename, content: item.content },
+    );
+    return { ...item, id: artifact.id };
+  });
+  assertTimelineSurfaces(initial, frames, [request.turnId]);
+  assertTimelineRendered(initial.dom, completed, durableTimeline(initial.detail, request.turnId));
+  assertReasoningIntegrity(initial.dom, completed, durableTimeline(initial.detail, request.turnId));
+
+  const sideEffects = [];
+  const workerRequests = [];
+  page.on("console", () => {});
+  await page.exposeFunction("recordPresentationSideEffect", value => sideEffects.push(value));
+  await page.evaluate(() => addEventListener("message", event => window.recordPresentationSideEffect(event.data)));
+  page.on("request", requestEvent => { if (/compiler\.worker/i.test(requestEvent.url())) workerRequests.push(requestEvent.url()); });
+  const results = [];
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    const phone = viewport.width < 1024;
+    for (const artifact of stored) {
+      const card = page.locator(`[data-artifact-ref="${artifact.id}"]`).first();
+      await card.waitFor({ state: "visible" });
+      await card.click();
+      let panel = page.locator('[data-slot="artifact-preview"]');
+      await panel.waitFor({ state: "visible" });
+      const preview = await exercisePresentationSurface(page, panel, artifact, `${phone ? "phone" : "desktop"}-${artifact.format}-preview`, "Download", sideEffects, workerRequests);
+      await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      await card.click();
+      panel = page.locator('[data-slot="artifact-preview"]');
+      await panel.waitFor({ state: "visible" });
+      assert.equal(await panel.getByRole("button", { name: "Rendered", exact: true }).getAttribute("aria-pressed"), "true", `${artifact.format} reopened preview did not reset to Rendered`);
+      await presentationRendered(panel, artifact);
+      await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
+
+      await card.locator("..").getByRole("button", { name: "Artifact actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Showcase in this thread", exact: true }).click();
+      if (phone) await page.getByRole("button", { name: "Show showcase", exact: true }).click();
+      panel = page.locator('[data-slot="thread-showcase"]');
+      await panel.waitFor({ state: "visible" });
+      const showcase = await exercisePresentationSurface(page, panel, artifact, `${phone ? "phone" : "desktop"}-${artifact.format}-showcase`, "Download showcase", sideEffects, workerRequests);
+      if (phone) await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      results.push({ viewport, format: artifact.format, artifactId: artifact.id, preview, showcase });
+    }
+  }
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const last = stored.at(-1);
+  const lastCard = page.locator(`[data-artifact-ref="${last.id}"]`).first();
+  await lastCard.waitFor({ state: "visible" });
+  await lastCard.click();
+  let panel = page.locator('[data-slot="artifact-preview"]');
+  await panel.waitFor({ state: "visible" });
+  assert.equal(await panel.getByRole("button", { name: "Rendered", exact: true }).getAttribute("aria-pressed"), "true");
+  await presentationRendered(panel, last);
+  await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Show showcase", exact: true }).click();
+  panel = page.locator('[data-slot="thread-showcase"]');
+  await panel.waitFor({ state: "visible" });
+  assert.equal(await panel.getByRole("button", { name: "Rendered", exact: true }).getAttribute("aria-pressed"), "true");
+  await presentationRendered(panel, last);
+  await page.screenshot({ path: join(scenarioDir, "90-phone-reloaded.png"), fullPage: true });
+  const final = await capture("91-final-crosscheck", context);
+  assertTimelineSurfaces(final, frames, [request.turnId]);
+  return { turnId: request.turnId, toolCallIds: starts.map(frame => frame.event.id), artifacts: stored, results, sideEffects, workerRequests };
+}
+
 async function stopProcess(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   try { process.kill(-child.pid, "SIGTERM"); } catch { return; }
@@ -642,7 +869,7 @@ async function runScenario(scenario) {
     url,
     port,
     dataDir,
-    initialModelCallBudget: 2,
+    initialModelCallBudget: scenario === "artifact-presentation" ? 1 : 2,
   };
   await writeFile(join(scenarioDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const result = {
@@ -695,13 +922,15 @@ async function runScenario(scenario) {
     assert.equal(empty.store.schemaVersion, 5);
     assert.deepEqual(empty.store.timelineEvents, []);
     assert.deepEqual(empty.detail.turn_timelines, []);
-    if (scenario === "artifact-creation") assert.equal(empty.store.artifacts.length, 0);
+    if (scenario === "artifact-creation" || scenario === "artifact-presentation") assert.equal(empty.store.artifacts.length, 0);
 
     result.detail = scenario === "chat-chronology"
       ? await runChat(context)
       : scenario === "tool-execution"
         ? await runTools(context)
-        : await runArtifact(context);
+        : scenario === "artifact-creation"
+          ? await runArtifact(context)
+          : await runArtifactPresentation(context);
     assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
     result.objectiveStatus = "OBJECTIVE_PASS";
   } catch (error) {

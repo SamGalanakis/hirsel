@@ -77,7 +77,7 @@ product-runbook scenario="all":
     #!/usr/bin/env bash
     set -euo pipefail
     ( cd app && npm run build )
-    cargo build -p hirsel-host
+    cargo build --workspace --all-targets
     cd app && npm run e2e:product-runbook -- "{{ scenario }}"
 
 # Regenerate the plugin aggregator from the folders under plugins/. Run after

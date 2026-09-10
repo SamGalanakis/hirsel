@@ -6,7 +6,7 @@
 the real Agent actually calls `artifacts.create`, and the exact result becomes
 listed, previewable, and downloadable.
 
-**Real model calls:** one.
+**Real model calls:** two.
 
 ## Named natural-language regression
 
@@ -18,10 +18,11 @@ tool catalog. The sanitized evidence is
 `/tmp/hirsel-artifact-failure-trace.json` (SHA-256
 `16475bb862148db73d628cab958584c8dc978d5e9b2a5fb03e001f75999a8a9d`).
 
-That evidence is reused for this named regression; the automated scenario
-below spends its single turn on an exact file receipt so content, preview, and
-download have deterministic answer keys. Do not spend an extra model call on
-the cat request in the five-turn battery.
+The automated scenario first spends one turn on an exact file receipt so
+content, preview, and download have deterministic answer keys. It then spends
+the explicitly authorized sixth battery turn on the exact ordinary request
+`Make a picture of a cat artifact`; the old failure evidence does not satisfy
+that final acceptance gate.
 
 ## Golden rules
 
@@ -69,6 +70,18 @@ the downloaded file.
 **Expect:** the same artifact card ID is still attached to the Agent message
 and opens the same content. Save `30-reloaded.png` and `result.json`.
 
+## Phase 4 — natural cat artifact
+
+**Do:** Send exactly `Make a picture of a cat artifact` through the composer.
+
+**Expect:** the real Agent emits a matched `artifacts.create` start/done pair
+and creates exactly one new rendered artifact. Its durable content contains a
+graphical image surface, the Agent reply references the same artifact ID, and
+opening its card through the UI shows an actual SVG, canvas, or image rather
+than escaped source text. The kind and MIME are evidence, but the rendered
+browser result is the deciding gate. Save `40-natural-cat-preview.png` and
+`41-natural-cat-*`.
+
 ## Scorecard
 
 | Item | Objective gate | Verdict | Evidence |
@@ -79,6 +92,7 @@ and opens the same content. Save `30-reloaded.png` and `result.json`.
 | Global listing | exact artifact appears in All artifacts | | `20-listed.png` |
 | Preview/download | exact text renders and downloaded bytes match | | `21-preview.png`, download |
 | Reload identity | same message/card/artifact IDs and content survive reload | | `30-*`, `result.json` |
+| Natural cat | exact ordinary request creates one referenced, durable, viewable cat artifact | | `40-*`, `41-*`, frames |
 
 **Aggregate:** did an ordinary Owner chat request produce a real, exact,
 reusable artifact rather than a prose claim that a tool failed or completed?

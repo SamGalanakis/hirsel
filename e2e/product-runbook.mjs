@@ -120,9 +120,13 @@ function sqliteJson(database, sql) {
 
 function storeSnapshot(dataDir, threadId) {
   const database = join(dataDir, "hirsel.sqlite");
+  const timelineEvents = sqliteJson(database, `SELECT e.turn_id,e.seq,e.event FROM thread_turn_events e JOIN thread_turns t ON t.id=e.turn_id WHERE t.thread_id=${threadId} ORDER BY e.turn_id,e.seq`)
+    .map(row => ({ turn_id: row.turn_id, seq: row.seq, event: JSON.parse(row.event) }));
   return {
+    schemaVersion: sqliteJson(database, "SELECT user_version AS version FROM pragma_user_version")[0]?.version,
     messages: sqliteJson(database, `SELECT id,thread_id,author,body,ref,ts,tool_calls FROM chat_messages WHERE thread_id=${threadId} ORDER BY id`),
     turns: sqliteJson(database, `SELECT id,thread_id,owner_message_id,agent_message_id,state,started_at,finished_at FROM thread_turns WHERE thread_id=${threadId} ORDER BY id`),
+    timelineEvents,
     activities: sqliteJson(database, `SELECT id,thread_id,turn_id,kind,data,ts FROM thread_activities WHERE thread_id=${threadId} ORDER BY id`),
     artifacts: sqliteJson(database, `SELECT a.id,a.title,json_extract(a.kind,'$') AS kind,a.mime,a.filename,a.content,a.created_at,a.updated_at FROM artifacts a WHERE EXISTS (SELECT 1 FROM message_artifacts ma JOIN chat_messages m ON m.id=ma.message_id WHERE ma.artifact_id=a.id AND m.thread_id=${threadId}) ORDER BY a.id`),
     messageArtifacts: sqliteJson(database, `SELECT ma.message_id,ma.artifact_id FROM message_artifacts ma JOIN chat_messages m ON m.id=ma.message_id WHERE m.thread_id=${threadId} ORDER BY ma.message_id,ma.artifact_id`),
@@ -151,6 +155,7 @@ async function domSnapshot(page) {
           toolCallId: row.getAttribute("data-tool-call-id"),
           text: row.textContent?.trim() ?? "",
           visible: visible(row),
+          result: row.querySelector('[data-slot="tool-result"]')?.textContent?.trim() ?? null,
         })),
       }));
     return {
@@ -234,6 +239,33 @@ function turnEvents(frames, turnId) {
     .map(row => row.frame);
 }
 
+function liveTimeline(frames, turnId) {
+  return turnEvents(frames, turnId).map(({ seq, event }) => ({ seq, event }));
+}
+
+function durableTimeline(detail, turnId) {
+  const timeline = detail.turn_timelines.find(candidate => candidate.turn_id === turnId);
+  assert(timeline, `turn ${turnId} has no canonical durable timeline`);
+  return timeline.events;
+}
+
+function storeTimeline(store, turnId) {
+  return store.timelineEvents
+    .filter(record => record.turn_id === turnId)
+    .map(({ seq, event }) => ({ seq, event }));
+}
+
+function assertTimelineSurfaces(snapshot, frames, turnIds) {
+  assert.equal(snapshot.store.schemaVersion, 5, "runbook store is not durable schema 5");
+  for (const turnId of turnIds) {
+    const live = liveTimeline(frames, turnId);
+    assert(live.length > 0, `turn ${turnId} streamed no timeline events`);
+    assert.deepEqual(live.map(record => record.seq), [...new Set(live.map(record => record.seq))].sort((a, b) => a - b), `turn ${turnId} live event sequence is duplicated or unordered`);
+    assert.deepEqual(durableTimeline(snapshot.detail, turnId), live, `turn ${turnId} open_thread timeline differs from the live stream`);
+    assert.deepEqual(storeTimeline(snapshot.store, turnId), live, `turn ${turnId} SQLite timeline differs from the live stream`);
+  }
+}
+
 function agentReply(detail, turn) {
   const message = detail.messages.find(candidate => candidate.id === turn.agent_message_id);
   assert(message?.author === "agent", `turn ${turn.id} has no durable Agent reply`);
@@ -247,6 +279,41 @@ function timelineProjection(dom) {
     activityId: entry.activityId,
     timeline: entry.timeline,
   }));
+}
+
+function renderedMarkdownText(text) {
+  return text.trim().replace(/^(\*{1,3}|_{1,3})([\s\S]*)\1$/, "$2");
+}
+
+async function expandInlineTools(page, callIds) {
+  for (const callId of callIds) {
+    const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
+    await row.waitFor({ state: "visible", timeout: 10_000 });
+    const toggle = row.locator("button[aria-expanded]").first();
+    if (await toggle.count() && await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  }
+}
+
+function assertTimelineRendered(dom, turn, events) {
+  const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
+  assert(entry, `turn ${turn.id} has no rendered completed entry`);
+  const expectedToolIds = [];
+  for (const { event } of events) {
+    if (event.kind === "tool_start" && !expectedToolIds.includes(event.id)) expectedToolIds.push(event.id);
+    if (event.kind === "tool_done" && !expectedToolIds.includes(event.id)) expectedToolIds.push(event.id);
+    if ((event.kind === "reasoning" || event.kind === "prose") && event.text.trim()) {
+      assert(entry.text.includes(renderedMarkdownText(event.text)), `turn ${turn.id} omits ${event.kind} content from the DOM`);
+    }
+    if (event.kind === "tool_start" && event.input?.text) {
+      const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
+      assert(row?.result?.includes(event.input.text), `tool ${event.id} input payload is absent from the expanded DOM row`);
+    }
+    if (event.kind === "tool_done" && event.result?.text) {
+      const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
+      assert(row?.result?.includes(event.result.text), `tool ${event.id} result payload is absent from the expanded DOM row`);
+    }
+  }
+  assert.deepEqual(entry.timeline.filter(row => row.slot === "timeline-tool").map(row => row.toolCallId), expectedToolIds, `turn ${turn.id} rendered tool row order differs from its canonical events`);
 }
 
 function toolPair(frames, turnId, namePattern) {
@@ -266,6 +333,13 @@ async function requireInlineTool(page, callId, expectedText) {
   const toggle = row.locator("button").first();
   if (await toggle.count() && !(await row.getByText(expectedText, { exact: false }).count())) await toggle.click();
   await row.getByText(expectedText, { exact: false }).waitFor({ timeout: 10_000 });
+}
+
+function payloadText(event, field) {
+  const payload = event[field];
+  assert(payload && typeof payload.text === "string" && typeof payload.truncated === "boolean", `${event.kind}.${field} is not a bounded payload`);
+  assert.equal(payload.truncated, false, `${event.kind}.${field} was truncated`);
+  return payload.text;
 }
 
 async function waitForStableDom(page) {
@@ -315,7 +389,7 @@ async function runChat(context) {
   const secondTerminal = await waitForTurn(frames, secondTurn.id, turn => terminal(turn.state), "second turn terminal");
   assert.equal(secondTerminal.state, "completed");
   await page.getByText(secondMarker, { exact: false }).last().waitFor();
-  const stable = await waitForStableDom(page);
+  await waitForStableDom(page);
   const settled = await capture("30-settled", context);
   assert.equal(settled.detail.messages.filter(message => message.author === "owner").length, 2);
   assert.equal(settled.detail.messages.filter(message => message.author === "agent").length, 2);
@@ -329,22 +403,35 @@ async function runChat(context) {
     [secondTerminal, secondMarker, secondTool],
   ]) {
     assert.equal(tool.done.event.ok, true);
-    assert.match(tool.done.event.summary ?? "", new RegExp(marker));
+    assert.match(payloadText(tool.started.event, "input"), new RegExp(marker));
+    assert.match(payloadText(tool.done.event, "result"), new RegExp(marker));
     assert.match(agentReply(settled.detail, turn).body, new RegExp(marker));
   }
-  const before = timelineProjection(stable);
+  await expandInlineTools(page, [firstTool.started.event.id, secondTool.started.event.id]);
+  await waitForStableDom(page);
+  const settledExpanded = await capture("30-settled-expanded", context);
+  assertTimelineSurfaces(settledExpanded, frames, [first.turnId, secondTurn.id]);
+  assertTimelineRendered(settledExpanded.dom, firstTerminal, durableTimeline(settledExpanded.detail, first.turnId));
+  assertTimelineRendered(settledExpanded.dom, secondTerminal, durableTimeline(settledExpanded.detail, secondTurn.id));
+  const before = timelineProjection(settledExpanded.dom);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`[data-message-id="${secondTerminal.agent_message_id}"]`).getByText(secondMarker, { exact: false }).waitFor();
+  await expandInlineTools(page, [firstTool.started.event.id, secondTool.started.event.id]);
   const reloaded = await capture("31-reloaded", context);
   const after = timelineProjection(reloaded.dom);
   assert.deepEqual(after, before);
-  assert.deepEqual(reloaded.detail.activities, settled.detail.activities);
+  assert.deepEqual(reloaded.detail.turn_timelines, settledExpanded.detail.turn_timelines);
+  assert.deepEqual(reloaded.store.timelineEvents, settledExpanded.store.timelineEvents);
+  assertTimelineSurfaces(reloaded, frames, [first.turnId, secondTurn.id]);
+  assertTimelineRendered(reloaded.dom, firstTerminal, durableTimeline(reloaded.detail, first.turnId));
+  assertTimelineRendered(reloaded.dom, secondTerminal, durableTimeline(reloaded.detail, secondTurn.id));
   return {
     markers: [firstMarker, secondMarker],
     turnIds: [first.turnId, secondTurn.id],
     orderedTimeline: after,
     liveTurnEvents: [first.turnId, secondTurn.id].map(turnId => ({ turnId, events: turnEvents(frames, turnId) })),
-    durableActivities: reloaded.detail.activities,
+    durableTurnTimelines: reloaded.detail.turn_timelines,
+    durableStoreEvents: reloaded.store.timelineEvents,
   };
 }
 
@@ -359,7 +446,8 @@ async function runTools(context) {
   assert.match(agentReply(successCapture.detail, successTerminal).body, new RegExp(successMarker));
   const successTool = toolPair(frames, success.turnId, /shell[._]run/);
   assert.equal(successTool.done.event.ok, true);
-  assert.match(successTool.done.event.summary ?? "", new RegExp(successMarker));
+  assert.match(payloadText(successTool.started.event, "input"), new RegExp(successMarker));
+  assert.match(payloadText(successTool.done.event, "result"), new RegExp(successMarker));
   await requireInlineTool(page, successTool.started.event.id, successMarker);
 
   const failureMarker = `HIRSEL-TOOL-EXPECTED-FAILURE-${nonce}`;
@@ -372,8 +460,11 @@ async function runTools(context) {
   assert.match(agentReply(failureCapture.detail, failureTerminal).body, new RegExp(failureMarker));
   const failureTool = toolPair(frames, failure.turnId, /shell[._]run/);
   assert.equal(failureTool.done.event.ok, false);
+  assert.match(payloadText(failureTool.started.event, "input"), new RegExp(missingDir));
+  assert.match(payloadText(failureTool.done.event, "result"), /No such file or directory/);
   await requireInlineTool(page, failureTool.started.event.id, "No such file or directory");
 
+  await expandInlineTools(page, [successTool.started.event.id, failureTool.started.event.id]);
   const final = await capture("30-crosscheck", context);
   assert.equal(final.detail.messages.filter(message => message.author === "owner").length, 2);
   assert.equal(final.detail.messages.filter(message => message.author === "agent").length, 2);
@@ -382,6 +473,9 @@ async function runTools(context) {
   for (const pair of [successTool, failureTool]) {
     assert(durableCalls.some(call => call.id === pair.started.event.id && call.ok === pair.done.event.ok));
   }
+  assertTimelineSurfaces(final, frames, [success.turnId, failure.turnId]);
+  assertTimelineRendered(final.dom, successTerminal, durableTimeline(final.detail, success.turnId));
+  assertTimelineRendered(final.dom, failureTerminal, durableTimeline(final.detail, failure.turnId));
   return {
     successMarker,
     failureMarker,
@@ -402,6 +496,8 @@ async function runArtifact(context) {
   await capture("10-created", context);
   const tool = toolPair(frames, turn.turnId, /artifacts[._]create/);
   assert.equal(tool.done.event.ok, true);
+  assert.match(payloadText(tool.started.event, "input"), new RegExp(title));
+  assert.match(payloadText(tool.done.event, "result"), new RegExp(title));
   const upsert = latestFrame(frames, frame => frame.type === "artifact_upsert" && frame.artifact.title === title)?.frame.artifact;
   assert(upsert, "creation emitted no matching artifact_upsert");
   const created = await openThread(context.url, context.token, threadId);
@@ -432,13 +528,59 @@ async function runArtifact(context) {
   await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`[data-message-id="${agent.id}"] [data-artifact-ref="${upsert.id}"]`).waitFor();
+  await expandInlineTools(page, [tool.started.event.id]);
   const reloaded = await capture("30-reloaded", context);
   const stored = reloaded.store.artifacts.find(artifact => artifact.id === upsert.id);
   assert.deepEqual(
     { title: stored?.title, kind: stored?.kind, mime: stored?.mime, filename: stored?.filename, content: stored?.content },
     { title, kind: "file", mime: "text/plain", filename, content },
   );
-  return { turnId: turn.turnId, toolCallId: tool.started.event.id, artifactId: upsert.id, title, filename, content, downloadPath };
+  assertTimelineSurfaces(reloaded, frames, [turn.turnId]);
+  assertTimelineRendered(reloaded.dom, completed, durableTimeline(reloaded.detail, turn.turnId));
+
+  const naturalOffset = frames.length;
+  const natural = await sendMessage(page, frames, threadId, "Make a picture of a cat artifact");
+  const naturalCompleted = await waitForTurn(frames, natural.turnId, value => terminal(value.state), "natural cat artifact turn terminal");
+  assert.equal(naturalCompleted.state, "completed");
+  const naturalTool = toolPair(frames, natural.turnId, /artifacts[._]create/);
+  assert.equal(naturalTool.done.event.ok, true);
+  const naturalUpserts = frames.slice(naturalOffset)
+    .filter(row => row.direction === "received" && row.frame.type === "artifact_upsert")
+    .map(row => row.frame.artifact)
+    .filter(artifact => artifact.id !== upsert.id);
+  const naturalArtifacts = [...new Map(naturalUpserts.map(artifact => [artifact.id, artifact])).values()];
+  assert.equal(naturalArtifacts.length, 1, "natural cat request did not create exactly one new artifact");
+  const cat = naturalArtifacts[0];
+  assert.match(payloadText(naturalTool.started.event, "input"), /cat/i);
+  assert.match(payloadText(naturalTool.done.event, "result"), new RegExp(cat.title));
+  const catDetail = await openThread(context.url, context.token, threadId);
+  const catAgent = agentReply(catDetail, naturalCompleted);
+  assert(catAgent.artifact_ids?.includes(cat.id), "natural cat Agent reply does not reference its artifact");
+  const storedCatBeforePreview = storeSnapshot(context.dataDir, threadId).artifacts.find(artifact => artifact.id === cat.id);
+  assert(storedCatBeforePreview, "natural cat artifact is absent from SQLite");
+  assert(/<svg\b|<canvas\b|<img\b|createElement\s*\(\s*["'](?:svg|canvas|img)["']/i.test(storedCatBeforePreview.content), "natural cat artifact has no graphical image surface");
+  const catCard = page.locator(`[data-message-id="${catAgent.id}"] [data-artifact-ref="${cat.id}"]`);
+  await catCard.waitFor({ state: "visible" });
+  await catCard.click();
+  const catPreview = page.locator('[data-slot="artifact-preview"]');
+  await catPreview.waitFor({ state: "visible" });
+  await page.frameLocator('[data-slot="artifact-preview"] iframe').locator("body").waitFor({ state: "visible" });
+  await page.screenshot({ path: join(scenarioDir, "40-natural-cat-preview.png"), fullPage: true });
+  assert(await page.frameLocator('[data-slot="artifact-preview"] iframe').locator("svg, canvas, img").count() > 0, `natural cat preview rendered ${cat.kind}/${cat.mime} as source instead of an image surface`);
+  await catPreview.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await expandInlineTools(page, [tool.started.event.id, naturalTool.started.event.id]);
+  const naturalCapture = await capture("41-natural-cat", context);
+  const storedCat = naturalCapture.store.artifacts.find(artifact => artifact.id === cat.id);
+  assert.deepEqual(
+    { id: storedCat?.id, title: storedCat?.title, kind: storedCat?.kind, mime: storedCat?.mime, content: storedCat?.content },
+    { id: cat.id, title: cat.title, kind: cat.kind, mime: cat.mime, content: storedCatBeforePreview.content },
+  );
+  assertTimelineSurfaces(naturalCapture, frames, [turn.turnId, natural.turnId]);
+  assertTimelineRendered(naturalCapture.dom, naturalCompleted, durableTimeline(naturalCapture.detail, natural.turnId));
+  return {
+    exact: { turnId: turn.turnId, toolCallId: tool.started.event.id, artifactId: upsert.id, title, filename, content, downloadPath },
+    naturalCat: { prompt: "Make a picture of a cat artifact", turnId: natural.turnId, toolCallId: naturalTool.started.event.id, artifactId: cat.id, title: cat.title, kind: cat.kind, mime: cat.mime },
+  };
 }
 
 async function stopProcess(child) {
@@ -500,7 +642,7 @@ async function runScenario(scenario) {
     url,
     port,
     dataDir,
-    initialModelCallBudget: scenario === "chat-chronology" || scenario === "tool-execution" ? 2 : 1,
+    initialModelCallBudget: 2,
   };
   await writeFile(join(scenarioDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const result = {
@@ -550,6 +692,9 @@ async function runScenario(scenario) {
     assert.equal(empty.detail.turns.length, 0);
     assert.equal(empty.store.messages.length, 0);
     assert.equal(empty.store.turns.length, 0);
+    assert.equal(empty.store.schemaVersion, 5);
+    assert.deepEqual(empty.store.timelineEvents, []);
+    assert.deepEqual(empty.detail.turn_timelines, []);
     if (scenario === "artifact-creation") assert.equal(empty.store.artifacts.length, 0);
 
     result.detail = scenario === "chat-chronology"

@@ -159,8 +159,8 @@ async fn run_one_triage_turn(
 
 /// Drop every catalog member that is not one of the fork's exits.
 ///
-/// The core advertises the main Agent's whole catalog — `subagents_spawn`,
-/// `pings_send`, `shell_run`, plugin tools — to every session it opens. A fork
+/// The core advertises the main Agent's whole catalog — `threads_delegate`,
+/// `threads_create`, `shell_run`, plugin tools — to every session it opens. A fork
 /// must see none of it, and "must not" here is capability: membership is
 /// lash's execution gate, so a non-member is neither advertised nor callable.
 ///

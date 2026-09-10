@@ -1,14 +1,15 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{collections::VecDeque, net::Ipv4Addr, time::Duration};
 
 use async_trait::async_trait;
-use hirsel_proto::{ChatAuthor, ClientToHost, EventStatus, HelloAuth, HostToClient};
+use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
 use serde_json::json;
 
 use super::{
-    IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, Peer, ProtocolChannel,
+    IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
     authenticate, build_snapshot, handle_client_frame, run_protocol,
 };
 use crate::{
+    auth::AuthPeer,
     build_state,
     config::{AgentMode, Config, DriverMode, ProviderMode},
 };
@@ -31,7 +32,6 @@ async fn pairing_uses_the_apps_device_label() {
         fake_fixture: None,
         listen: "127.0.0.1:0".parse().unwrap(),
         debug: true,
-        compat_side_session_ttl_secs: Some(86_400),
     })
     .await
     .unwrap();
@@ -47,9 +47,7 @@ async fn pairing_uses_the_apps_device_label() {
             code,
             device_label: "App-chosen label".to_string(),
         },
-        &Peer::Iroh {
-            node_id: "node-a".to_string(),
-        },
+        &AuthPeer::Iroh("node-a".to_string()),
     )
     .await
     .unwrap()
@@ -83,7 +81,6 @@ async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
         fake_fixture: None,
         listen: "127.0.0.1:0".parse().unwrap(),
         debug: false,
-        compat_side_session_ttl_secs: Some(86_400),
     })
     .await
     .unwrap();
@@ -92,7 +89,7 @@ async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
         authenticate(
             &state,
             HelloAuth::StaticToken(String::new()),
-            &Peer::WebSocket { addr: None }
+            &AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into())
         )
         .await
         .is_err()
@@ -101,7 +98,7 @@ async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
         authenticate(
             &state,
             HelloAuth::StaticToken("real-token".to_string()),
-            &Peer::WebSocket { addr: None }
+            &AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into())
         )
         .await
         .is_ok()
@@ -114,9 +111,7 @@ async fn websocket_rejects_iroh_only_auth() {
     let state = build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
-    let peer = Peer::WebSocket {
-        addr: Some("127.0.0.1:1234".to_string()),
-    };
+    let peer = AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into());
 
     assert_eq!(
         authenticate(
@@ -161,38 +156,52 @@ async fn full_resync_snapshot_replays_all_chat() {
         fake_fixture: None,
         listen: "127.0.0.1:0".parse().unwrap(),
         debug: false,
-        compat_side_session_ttl_secs: Some(86_400),
     })
     .await
     .unwrap();
     state
         .storage
-        .append_chat(ChatAuthor::Agent, "missed", None)
+        .append_thread_chat(
+            state
+                .storage
+                .create_thread(
+                    "fixture-Conversation",
+                    "Conversation",
+                    "",
+                    &serde_json::Value::Null,
+                    hirsel_proto::ThreadAttention::Quiet,
+                    None,
+                )
+                .await
+                .unwrap()
+                .0
+                .id,
+            ChatAuthor::Agent,
+            "missed",
+            None,
+            vec![],
+        )
         .await
         .unwrap();
     state
         .views
         .show(
+            &state.storage.history_id().await.unwrap(),
+            1,
             None,
             Some(json!({ "type": "text", "text": "Still active" })),
             None,
             Some("view-reconnect".to_string()),
-            "chat".to_string(),
         )
         .await
         .unwrap();
 
-    let (frame, _) = build_snapshot(&state, None).await.unwrap();
+    let (frame, _) = build_snapshot(&state).await.unwrap();
     match frame {
         HostToClient::HelloOk {
-            latest_msg_id,
-            messages,
-            views,
-            ..
+            history_id, views, ..
         } => {
-            assert_eq!(latest_msg_id, 1);
-            assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].body, "missed");
+            assert!(!history_id.is_empty());
             assert_eq!(views.len(), 1);
             assert_eq!(views[0].instance_id, "view-reconnect");
         }
@@ -233,7 +242,10 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
         incoming: VecDeque::new(),
         sent: Vec::new(),
     };
+    let history_id = state.storage.history_id().await.unwrap();
     let frame = ClientToHost::CreateThread {
+        history_id,
+        parent_thread_id: None,
         client_id: "groceries-create".into(),
         title: "Buy groceries".into(),
     };
@@ -256,8 +268,8 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
     handle_client_frame(&state, &mut channel, frame)
         .await
         .unwrap();
-    assert_eq!(state.storage.thread_snapshot().await.unwrap().len(), 2);
-    let (snapshot, mut dedupe) = build_snapshot(&state, None).await.unwrap();
+    assert_eq!(state.storage.thread_snapshot().await.unwrap().len(), 1);
+    let (snapshot, mut dedupe) = build_snapshot(&state).await.unwrap();
     let HostToClient::HelloOk { threads, .. } = snapshot else {
         panic!("missing snapshot")
     };
@@ -287,94 +299,173 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
 }
 
 #[tokio::test]
-async fn fetch_messages_frame_returns_a_correlated_bounded_page() {
+async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
-    for id in 1..=3 {
-        state
-            .storage
-            .append_chat(ChatAuthor::Agent, format!("m{id}"), None)
-            .await
-            .unwrap();
-    }
+    let old_history = state.storage.history_id().await.unwrap();
+    let old = state
+        .storage
+        .create_thread(
+            "old-thread",
+            "Old",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    state.agent.reset_history().await.unwrap();
+    let new_history = state.storage.history_id().await.unwrap();
+    let fresh = state
+        .storage
+        .create_thread(
+            "fresh-thread",
+            "Fresh",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(old.id, fresh.id, "reset must exercise numeric ID reuse");
+
     let mut channel = TestChannel {
         incoming: VecDeque::new(),
         sent: Vec::new(),
     };
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::SendThreadMessage {
+            history_id: new_history.clone(),
+            client_id: "current-send".into(),
+            thread_id: fresh.id,
+            body: "slow:5".into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            mode: hirsel_proto::SendMode::Send,
+            artifact_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if state
+                .storage
+                .thread(fresh.id)
+                .await
+                .unwrap()
+                .is_some_and(|thread| thread.running_turn.is_some())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for stale in [
+        ClientToHost::CreateThread {
+            history_id: old_history.clone(),
+            parent_thread_id: Some(fresh.id),
+            client_id: "stale-child".into(),
+            title: "Wrong child".into(),
+        },
+        ClientToHost::ThreadAction {
+            client_id: "stale-action".into(),
+            history_id: old_history.clone(),
+            thread_id: fresh.id,
+            action: "archive".into(),
+            data: json!({}),
+            expected_revision: None,
+        },
+        ClientToHost::SendThreadMessage {
+            history_id: old_history.clone(),
+            client_id: "stale-send".into(),
+            thread_id: fresh.id,
+            body: "Wrong history".into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            mode: hirsel_proto::SendMode::Send,
+            artifact_ids: Vec::new(),
+        },
+        ClientToHost::CancelTurn {
+            history_id: old_history,
+            thread_id: fresh.id,
+        },
+    ] {
+        let error = handle_client_frame(&state, &mut channel, stale)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("history"),
+            "stale frame failed for the wrong reason: {error}"
+        );
+    }
+    let unchanged = state.storage.thread(fresh.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.title, "Fresh");
+    assert!(unchanged.archived_at.is_none());
+    assert!(unchanged.running_turn.is_some());
+    assert_eq!(state.storage.thread_snapshot().await.unwrap().len(), 1);
+    assert_eq!(state.storage.all_chat().await.unwrap().len(), 1);
 
     handle_client_frame(
         &state,
         &mut channel,
-        ClientToHost::FetchMessages {
-            client_id: "history-1".to_string(),
-            before_id: 3,
-            limit: 1,
+        ClientToHost::CreateThread {
+            history_id: new_history.clone(),
+            parent_thread_id: Some(fresh.id),
+            client_id: "current-child".into(),
+            title: "Current child".into(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::ThreadAction {
+            client_id: "current-action".into(),
+            history_id: new_history.clone(),
+            thread_id: fresh.id,
+            action: "archive".into(),
+            data: json!({}),
+            expected_revision: None,
+        },
+    )
+    .await
+    .unwrap();
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::CancelTurn {
+            history_id: new_history,
+            thread_id: fresh.id,
         },
     )
     .await
     .unwrap();
 
-    assert!(matches!(
-        channel.sent.as_slice(),
-        [HostToClient::Messages {
-            client_id,
-            before_id: 3,
-            messages,
-            has_more: true,
-        }] if client_id == "history-1" && messages.len() == 1 && messages[0].id == 2
-    ));
-}
-
-#[tokio::test]
-async fn clear_finished_events_archives_with_timestamp_and_broadcasts_upsert() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = build_state(crate::tests::test_config(dir.path()))
-        .await
-        .unwrap();
-    let anchor = state
-        .storage
-        .append_chat(ChatAuthor::Agent, "Finished", None)
-        .await
-        .unwrap();
-    let finished = state
-        .storage
-        .create_ping(
-            "finished",
-            "Finished",
-            "Finished",
-            anchor.id,
-            true,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    state.storage.resolve_ping(finished.id).await.unwrap();
-    let open = state
-        .storage
-        .create_ping("open", "Open", "Open", anchor.id, true, Vec::new())
-        .await
-        .unwrap();
-    let mut channel = TestChannel {
-        incoming: VecDeque::new(),
-        sent: Vec::new(),
-    };
-
-    handle_client_frame(&state, &mut channel, ClientToHost::ClearFinishedEvents {})
-        .await
-        .unwrap();
-
-    let finished = state.storage.ping(finished.id).await.unwrap().unwrap();
-    assert_eq!(finished.status, EventStatus::Done);
-    assert!(finished.archived);
-    assert!(finished.archived_at.is_some());
-    assert!(!state.storage.ping(open.id).await.unwrap().unwrap().archived);
-    assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::EventUpsert { event }
-            if event.id == finished.id && event.archived_at.is_some()
-    )));
+    let threads = state.storage.thread_snapshot().await.unwrap();
+    assert_eq!(threads.len(), 2);
+    assert_eq!(threads[1].parent_thread_id, Some(fresh.id));
+    assert!(threads[0].archived_at.is_some());
+    assert!(
+        state
+            .storage
+            .all_chat()
+            .await
+            .unwrap()
+            .iter()
+            .any(|message| message.client_id.as_deref() == Some("current-send"))
+    );
 }
 
 #[tokio::test]
@@ -395,7 +486,6 @@ async fn snapshot_failure_sends_error_instead_of_empty_hello() {
         fake_fixture: None,
         listen: "127.0.0.1:0".parse().unwrap(),
         debug: false,
-        compat_side_session_ttl_secs: Some(86_400),
     })
     .await
     .unwrap();
@@ -404,14 +494,18 @@ async fn snapshot_failure_sends_error_instead_of_empty_hello() {
         incoming: VecDeque::from([IncomingFrame::Message {
             frame: ClientToHost::Hello {
                 auth: HelloAuth::StaticToken("test-token".to_string()),
-                last_seen_msg_id: None,
             },
             client_id: None,
         }]),
         sent: Vec::new(),
     };
 
-    run_protocol(&mut channel, state, Peer::WebSocket { addr: None }).await;
+    run_protocol(
+        &mut channel,
+        state,
+        AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into()),
+    )
+    .await;
 
     assert_eq!(channel.sent.len(), 1);
     assert!(matches!(
@@ -426,12 +520,25 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
     let state = build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "artifact-thread",
+            "Artifact",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
     let (artifact, card) = state
         .storage
-        .publish_artifact(
+        .publish_artifact_human(
             "protocol-artifact",
             &json!({"create":"result"}),
-            0,
+            thread.id,
             None,
             Some(crate::storage::ArtifactDraft {
                 title: "Result".into(),
@@ -453,7 +560,7 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
         &mut channel,
         ClientToHost::ListArtifacts {
             client_id: "list".into(),
-            thread_id: Some(0),
+            thread_id: Some(thread.id),
         },
     )
     .await
@@ -474,9 +581,17 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
     assert!(
         matches!(channel.sent.last(),Some(HostToClient::ArtifactOpened{client_id,artifact:a}) if client_id=="open" && a.content=="Hello")
     );
-    let (snapshot, _) = build_snapshot(&state, None).await.unwrap();
+    let detail = state
+        .storage
+        .thread_detail(thread.id, None, 100)
+        .await
+        .unwrap();
     assert!(
-        matches!(snapshot,HostToClient::HelloOk{messages,..} if messages.iter().any(|m|m.id==card.as_ref().unwrap().id && m.artifact_ids==vec![artifact.summary.id]))
+        detail
+            .messages
+            .iter()
+            .any(|m| m.id == card.as_ref().unwrap().id
+                && m.artifact_ids == vec![artifact.summary.id])
     );
 }
 
@@ -495,10 +610,11 @@ async fn thread_summary_updates_survive_same_revision_and_reconnect_without_stal
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            None,
         )
         .await
         .unwrap();
-    let (hello, mut dedupe) = build_snapshot(&state, None).await.unwrap();
+    let (hello, mut dedupe) = build_snapshot(&state).await.unwrap();
     let HostToClient::HelloOk { threads, .. } = hello else {
         panic!("hello");
     };
@@ -535,7 +651,7 @@ async fn thread_summary_updates_survive_same_revision_and_reconnect_without_stal
     assert_eq!(completed.last_finished_turn, Some(finished));
     assert_eq!(completed.revision, thread.revision);
     assert!(completed.settled_at.is_none());
-    let (_, mut reconnect_dedupe) = build_snapshot(&state, None).await.unwrap();
+    let (_, mut reconnect_dedupe) = build_snapshot(&state).await.unwrap();
     let refreshed = super::refresh_thread_upsert(&state, stale_running)
         .await
         .unwrap();
@@ -556,14 +672,45 @@ async fn same_revision_message_removal_refresh_can_reduce_activity_after_hello()
     let state = build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
-    let original = state.storage.thread(0).await.unwrap().unwrap();
+    let original = state
+        .storage
+        .create_thread(
+            "fixture-Conversation",
+            "Conversation",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
     let message = state
         .storage
-        .append_chat(ChatAuthor::Agent, "Removed", None)
+        .append_thread_chat(
+            state
+                .storage
+                .create_thread(
+                    "fixture-Conversation",
+                    "Conversation",
+                    "",
+                    &serde_json::Value::Null,
+                    hirsel_proto::ThreadAttention::Quiet,
+                    None,
+                )
+                .await
+                .unwrap()
+                .0
+                .id,
+            ChatAuthor::Agent,
+            "Removed",
+            None,
+            vec![],
+        )
         .await
         .unwrap();
-    let stale = state.storage.thread(0).await.unwrap().unwrap();
-    let (_, mut dedupe) = build_snapshot(&state, None).await.unwrap();
+    let stale = state.storage.thread(original.id).await.unwrap().unwrap();
+    let (_, mut dedupe) = build_snapshot(&state).await.unwrap();
     state.storage.delete_chat_message(message.id).await.unwrap();
     let updated =
         super::refresh_thread_upsert(&state, HostToClient::ThreadUpsert { thread: stale })
@@ -591,6 +738,7 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
             "",
             &json!({}),
             ThreadAttention::Quiet,
+            None,
         )
         .await
         .unwrap();
@@ -601,11 +749,13 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
             before_id: None,
         },
         ClientToHost::CreateThread {
+            history_id: state.storage.history_id().await.unwrap(),
+            parent_thread_id: None,
             client_id: "direct-summary".into(),
             title: "Retry".into(),
         },
     ] {
-        let (_, mut dedupe) = build_snapshot(&state, None).await.unwrap();
+        let (_, mut dedupe) = build_snapshot(&state).await.unwrap();
         let message = state
             .storage
             .append_thread_chat(

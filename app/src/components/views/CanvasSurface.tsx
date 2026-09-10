@@ -6,15 +6,16 @@ import {
   createMediaFlag,
   phoneUtilityRestoreTarget,
 } from "../../lib/focus";
+import { threadState } from "../../threads/store";
 import { canvasViews } from "../../store/selectors";
 import { closeRightRegion, showCanvas, state } from "../../store/store";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { PaneHeader } from "../ui/PaneHeader";
 
-// Canvas: the shared right-context surface for `canvas`-placed generative
-// views. On desktop (`rail`) it is an in-flow right column that takes the slot
-// otherwise occupied by the task field; on phone
-// it is a full-screen `fixed` sheet over the task world. The newest canvas view leads
+// Canvas: the shared right-context surface for generative views. On desktop
+// (`rail`) it is an in-flow right column that takes the slot
+// otherwise occupied by the conversation; on phone
+// it is a full-screen `fixed` sheet over the Thread workspace. The newest canvas view leads
 // when explicitly summoned; older
 // canvas views stack beneath so nothing an agent drew is lost.
 
@@ -25,12 +26,12 @@ const RAIL_MQ = "(min-width: 1100px)";
  * automatic — Canvas shows only while it owns the region. Same predicate drives
  * the desktop in-flow rail and the phone full-screen sheet. */
 export function canvasActive(): boolean {
-  return state.rightRegion === "canvas" && canvasViews(state.views).length > 0;
+  return state.rightRegion === "canvas" && canvasViews(state.views, threadState.focusedId).length > 0;
 }
 
 /** Newest-first canvas views. */
 function orderedCanvasViews() {
-  return canvasViews(state.views).slice().reverse();
+  return canvasViews(state.views, threadState.focusedId).slice().reverse();
 }
 
 function CanvasBody() {
@@ -38,7 +39,7 @@ function CanvasBody() {
     <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
       <For each={orderedCanvasViews()}>
         {(v) => (
-          <ViewRenderer spec={v.spec} instanceId={v.instance_id} placement={v.placement} />
+          <ViewRenderer spec={v.spec} instanceId={v.instance_id} />
         )}
       </For>
     </div>
@@ -102,7 +103,7 @@ function CanvasPhonePanel() {
           aria-label="Close Canvas"
         >
           <ChevronLeft class="size-5" aria-hidden="true" />
-          <span>Tasks</span>
+          <span>Threads</span>
         </button>
         <h1
           id="canvas-sheet-heading"
@@ -133,7 +134,7 @@ export function CanvasSheet() {
  * overflow. */
 export function CanvasButton() {
   return (
-    <Show when={canvasViews(state.views).length > 0 && state.rightRegion !== "canvas"}>
+    <Show when={canvasViews(state.views, threadState.focusedId).length > 0 && state.rightRegion !== "canvas"}>
       <button
         type="button"
         class="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"

@@ -16,6 +16,14 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[path = "claude_config.rs"]
+mod config;
+#[path = "claude_events.rs"]
+mod events;
+use events::ClaudeOutput;
+#[cfg(test)]
+pub(crate) use events::claude_terminal_outcome;
+
 use crate::{
     shared::{
         EventHub, ProcessGroup, SessionRegistry, drain_stderr, lock, short_line,
@@ -45,6 +53,8 @@ struct ProcessSession {
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     pending: Mutex<HashMap<String, PendingRequest>>,
     process_group: ProcessGroup,
+    output: Mutex<ClaudeOutput>,
+    ready: tokio::sync::Notify,
 }
 
 // A cancelled request cannot leave a pending waiter alive in the session.
@@ -95,6 +105,39 @@ impl ProcessSession {
                 .into(),
             )
         })?
+    }
+
+    async fn interrupt_with_timeout(&self, id: String, limit: Duration) -> DriverResult<()> {
+        let result = self
+            .request(
+                json!({"type":"control_request", "request_id":id,
+                    "request":{"subtype":"interrupt"}}),
+                id,
+                false,
+                limit,
+            )
+            .await;
+        let completed = if result.is_ok() {
+            timeout(limit, self.events.wait_terminal())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(DriverError::RequestTimeout(
+                        "claude interrupt completion".into(),
+                    ))
+                })
+        } else {
+            result
+        };
+        if completed.is_err() {
+            self.process_group.kill_group();
+            self.reject_pending(false);
+            self.events.complete(TerminalOutcome::Interrupted, None)?;
+        }
+        // A result ends this execution even if the CLI keeps its input loop open.
+        self.process_group.kill_group();
+        self.reject_pending(false);
+        drop(self.stdin.lock().await.take());
+        completed
     }
 
     fn reject_pending(&self, inputs_only: bool) {
@@ -150,12 +193,18 @@ impl ProcessSession {
         {
             let _ = request.sender.send(result);
         }
-        for event in claude_events(value) {
-            let terminal = matches!(event, SubagentEvent::Terminal { .. });
-            let _ = self.events.emit(event);
-            if terminal {
-                self.reject_pending(true);
-            }
+        let result = lock(&self.output).and_then(|mut output| output.handle(value, &self.events));
+        if let Err(error) = result {
+            let _ = self.events.complete(
+                TerminalOutcome::Failed {
+                    reason: error.to_string(),
+                },
+                None,
+            );
+        }
+        self.ready.notify_one();
+        if self.events.is_terminal() {
+            self.reject_pending(true);
         }
     }
 }
@@ -167,6 +216,8 @@ impl ClaudeCodeDriver {
         mut command: Command,
         limit: Duration,
     ) -> DriverResult<SessionHandle> {
+        config::preflight(&task.scoped_mcp, limit).await?;
+        config::configure(&mut command, &task)?;
         command
             .arg("-p")
             .arg("--input-format")
@@ -174,6 +225,7 @@ impl ClaudeCodeDriver {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--replay-user-messages")
+            .arg("--include-partial-messages")
             .arg("--dangerously-skip-permissions")
             .arg("--verbose")
             .current_dir(&task.cwd)
@@ -208,6 +260,8 @@ impl ClaudeCodeDriver {
             stdin: tokio::sync::Mutex::new(Some(stdin)),
             pending: Mutex::new(HashMap::new()),
             process_group,
+            output: Mutex::new(ClaudeOutput::new(&task.scoped_mcp.expected_tools)),
+            ready: tokio::sync::Notify::new(),
         });
         tokio::spawn(read_claude_stdout(
             stdout,
@@ -221,6 +275,21 @@ impl ClaudeCodeDriver {
         session
             .request(claude_user_message(&task.prompt, &id), id, true, limit)
             .await?;
+        timeout(limit, async {
+            loop {
+                if lock(&session.output)?.initialized() {
+                    return Ok(());
+                }
+                if session.events.is_terminal() {
+                    return Err(DriverError::Protocol(
+                        "Claude failed before scoped initialization".into(),
+                    ));
+                }
+                session.ready.notified().await;
+            }
+        })
+        .await
+        .map_err(|_| DriverError::RequestTimeout("claude scoped initialization".into()))??;
         let handle = SessionHandle {
             id: Uuid::new_v4().to_string(),
             agent: AgentKind::Claude,
@@ -248,20 +317,18 @@ impl SubagentDriver for ClaudeCodeDriver {
     async fn interrupt(&self, handle: &SessionHandle) -> DriverResult<()> {
         let session = self.sessions.get(handle)?;
         let id = Uuid::new_v4().to_string();
-        session
-            .request(
-                json!({"type":"control_request", "request_id":id,
-            "request":{"subtype":"interrupt"}}),
-                id,
-                false,
-                REQUEST_TIMEOUT,
-            )
-            .await
+        if session.events.is_terminal() {
+            return Err(DriverError::SessionClosed);
+        }
+        session.interrupt_with_timeout(id, REQUEST_TIMEOUT).await
     }
 
     async fn retire(&self, handle: &SessionHandle) -> DriverResult<()> {
         if let Some(session) = self.sessions.remove(handle)? {
             session.process_group.kill_group();
+            session
+                .events
+                .complete(TerminalOutcome::Interrupted, None)?;
             session.reject_pending(false);
             drop(session.stdin.lock().await.take());
         }
@@ -329,112 +396,15 @@ async fn read_claude_stdout(
             Some(Err(error)) => format!("claude wait failed: {error}"),
             None => "claude stream ended without terminal result".into(),
         });
-        let _ = events.emit(SubagentEvent::Terminal {
-            outcome: TerminalOutcome::Failed { reason },
-        });
+        let output = session
+            .upgrade()
+            .and_then(|session| lock(&session.output).ok()?.take_final());
+        let _ = events.complete(TerminalOutcome::Failed { reason }, output);
     }
     if let Some(session) = session.upgrade() {
         session.reject_pending(false);
     }
     stderr_task.abort();
-}
-
-fn claude_events(value: &Value) -> Vec<SubagentEvent> {
-    let Some(kind) = value.get("type").and_then(Value::as_str) else {
-        return Vec::new();
-    };
-    match kind {
-        "system" if value.get("subtype").and_then(Value::as_str) == Some("init") => value
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(|external_id| SubagentEvent::Started {
-                external_id: external_id.to_string(),
-            })
-            .into_iter()
-            .collect(),
-        "assistant" => claude_assistant_progress(value)
-            .into_iter()
-            .map(|summary| SubagentEvent::Progress { summary })
-            .collect(),
-        "user" => claude_tool_result(value)
-            .into_iter()
-            .map(|summary| SubagentEvent::Progress { summary })
-            .collect(),
-        "result" => vec![SubagentEvent::Terminal {
-            outcome: claude_terminal_outcome(value),
-        }],
-        "rate_limit_event" => vec![SubagentEvent::Progress {
-            summary: "claude rate limit status updated".to_string(),
-        }],
-        _ => Vec::new(),
-    }
-}
-
-fn claude_assistant_progress(value: &Value) -> Vec<String> {
-    value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(
-            |content| match content.get("type").and_then(Value::as_str) {
-                Some("text") => content.get("text").and_then(Value::as_str).map(short_line),
-                Some("tool_use") => {
-                    let name = content
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool");
-                    let detail = content
-                        .pointer("/input/command")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| content.get("input").map(Value::to_string))
-                        .unwrap_or_default();
-                    Some(short_line(format!("tool {name}: {detail}")))
-                }
-                _ => None,
-            },
-        )
-        .collect()
-}
-
-fn claude_tool_result(value: &Value) -> Option<String> {
-    value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-        .and_then(|content| content.first())
-        .and_then(|content| content.get("content"))
-        .and_then(Value::as_str)
-        .map(|content| short_line(format!("tool result: {content}")))
-}
-
-pub(crate) fn claude_terminal_outcome(value: &Value) -> TerminalOutcome {
-    let summary = value
-        .get("result")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| "claude turn completed".to_string());
-    let is_error = value
-        .get("is_error")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !is_error {
-        TerminalOutcome::Done {
-            summary: terminal_message(summary),
-        }
-    } else if value.get("terminal_reason").and_then(Value::as_str) == Some("aborted_streaming") {
-        TerminalOutcome::Interrupted
-    } else {
-        let reason = value
-            .get("terminal_reason")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("stop_reason").and_then(Value::as_str))
-            .map(|reason| format!("{reason}: {summary}"))
-            .unwrap_or(summary);
-        TerminalOutcome::Failed {
-            reason: terminal_message(reason),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::Write,
     path::Path,
     process::{Command, Stdio},
@@ -11,10 +11,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use hirsel_proto::{Event, EventKind};
+use hirsel_proto::ThreadAttention;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::Storage;
+use crate::storage::{Storage, ThreadPublication};
 
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -30,8 +30,9 @@ pub struct PushPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PushData {
-    pub event_id: u64,
-    pub name: String,
+    pub history_id: String,
+    pub thread_id: u64,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,7 +72,7 @@ impl PushSender for RecordingPushSender {
     async fn send(&self, tokens: &[String], payload: &PushPayload) -> anyhow::Result<()> {
         tracing::info!(
             token_count = tokens.len(),
-            event_id = payload.data.event_id,
+            thread_id = payload.data.thread_id,
             "FCM not configured — would send push"
         );
         self.pushes
@@ -168,19 +169,7 @@ impl FcmPushSender {
             .client
             .post(endpoint)
             .bearer_auth(access_token)
-            .json(&serde_json::json!({
-                "message": {
-                    "token": token,
-                    "notification": {
-                        "title": payload.title,
-                        "body": payload.body,
-                    },
-                    "data": {
-                        "event_id": payload.data.event_id.to_string(),
-                        "name": payload.data.name,
-                    }
-                }
-            }))
+            .json(&fcm_request(token, payload))
             .send()
             .await
             .context("send FCM message")?;
@@ -194,6 +183,23 @@ impl FcmPushSender {
         }
         Ok(())
     }
+}
+
+fn fcm_request(token: &str, payload: &PushPayload) -> serde_json::Value {
+    serde_json::json!({
+        "message": {
+            "token": token,
+            "notification": {
+                "title": payload.title,
+                "body": payload.body,
+            },
+            "data": {
+                "history_id": payload.data.history_id,
+                "thread_id": payload.data.thread_id.to_string(),
+                "title": payload.data.title,
+            }
+        }
+    })
 }
 
 fn token_suffix(token: &str) -> String {
@@ -240,8 +246,10 @@ pub struct PushGateway {
 
 #[derive(Default)]
 struct PushDeliveryState {
-    in_flight: HashSet<u64>,
-    delivered: HashSet<u64>,
+    history_id: String,
+    episodes: HashMap<u64, (bool, u64)>,
+    in_flight: HashSet<(u64, u64)>,
+    delivered: HashSet<(u64, u64)>,
 }
 
 impl PushGateway {
@@ -302,13 +310,16 @@ impl PushGateway {
         }
     }
 
-    pub(crate) async fn enqueue_event(&self, event: &Event) {
-        if !matches!(event.kind, EventKind::Judgment) || !Storage::is_live(event, Utc::now()) {
+    pub(crate) async fn enqueue_thread(&self, publication: &ThreadPublication) {
+        let history_id = publication.history_id().to_owned();
+        let thread = publication.thread();
+        let eligible = thread.attention == ThreadAttention::NeedsOwner
+            && thread.settled_at.is_none()
+            && thread.archived_at.is_none()
+            && thread.snoozed_until.is_none_or(|until| until <= Utc::now());
+        let Some(delivery) = self.claim_delivery(&history_id, thread.id, eligible) else {
             return;
-        }
-        if !self.claim_delivery(event.id) {
-            return;
-        }
+        };
 
         let tokens = match self.storage.push_tokens().await {
             Ok(tokens) => tokens
@@ -316,77 +327,88 @@ impl PushGateway {
                 .map(|registered| registered.token)
                 .collect::<Vec<_>>(),
             Err(error) => {
-                tracing::warn!(event_id = event.id, %error, "failed to load push tokens");
-                self.release_delivery(event.id);
+                tracing::warn!(thread_id = thread.id, %error, "failed to load push tokens");
+                self.release_delivery(delivery);
                 return;
             }
         };
         if tokens.is_empty() {
-            self.release_delivery(event.id);
+            self.release_delivery(delivery);
             return;
         }
 
         let payload = PushPayload {
             title: OWNER_APP_NAME.to_string(),
-            body: if event.description.trim().is_empty() {
-                event.name.clone()
+            body: if thread.description.trim().is_empty() {
+                thread.title.clone()
             } else {
-                event.description.clone()
+                thread.description.clone()
             },
             data: PushData {
-                event_id: event.id,
-                name: event.name.clone(),
+                history_id: history_id.clone(),
+                thread_id: thread.id,
+                title: thread.title.clone(),
             },
         };
         let sender = self.sender.clone();
         let delivery_state = Arc::clone(&self.delivery_state);
-        let event_id = event.id;
+        let thread_id = thread.id;
         tokio::spawn(async move {
             let result = send_with_retry(sender.as_ref(), &tokens, &payload).await;
             let mut state = delivery_state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            state.in_flight.remove(&event_id);
+            if state.history_id != history_id {
+                return;
+            }
+            state.in_flight.remove(&delivery);
             if result.is_ok() {
-                state.delivered.insert(event_id);
+                if state.episodes.get(&thread_id) == Some(&(true, delivery.1)) {
+                    state.delivered.insert(delivery);
+                }
             } else if let Err(error) = result {
-                tracing::warn!(event_id, %error, "push delivery failed after retries");
+                tracing::warn!(thread_id, %error, "push delivery failed after retries");
             }
         });
     }
 
-    #[cfg(test)]
-    pub(crate) async fn enqueue_ping(&self, event: &Event) {
-        self.enqueue_event(event).await;
-    }
-
-    pub(crate) async fn reenqueue_event(&self, event: &Event) {
-        self.delivery_state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .delivered
-            .remove(&event.id);
-        self.enqueue_event(event).await;
-    }
-
-    fn claim_delivery(&self, ping_id: u64) -> bool {
+    fn claim_delivery(
+        &self,
+        history_id: &str,
+        thread_id: u64,
+        eligible: bool,
+    ) -> Option<(u64, u64)> {
         let mut state = self
             .delivery_state
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if state.delivered.contains(&ping_id) || state.in_flight.contains(&ping_id) {
-            return false;
+            .unwrap_or_else(|p| p.into_inner());
+        if state.history_id != history_id {
+            *state = PushDeliveryState {
+                history_id: history_id.to_owned(),
+                ..Default::default()
+            };
         }
-        state.in_flight.insert(ping_id);
-        true
+        let episode = state.episodes.entry(thread_id).or_insert((false, 0));
+        if episode.0 != eligible {
+            episode.0 = eligible;
+            episode.1 += 1;
+        }
+        let key = (thread_id, episode.1);
+        state
+            .delivered
+            .retain(|old| old.0 != thread_id || *old == key);
+        if !eligible || state.delivered.contains(&key) || !state.in_flight.insert(key) {
+            return None;
+        }
+        Some(key)
     }
 
-    fn release_delivery(&self, ping_id: u64) {
+    fn release_delivery(&self, delivery: (u64, u64)) {
         self.delivery_state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .in_flight
-            .remove(&ping_id);
+            .remove(&delivery);
     }
 
     pub fn recorded_pushes(&self) -> Vec<RecordedPush> {
@@ -396,6 +418,10 @@ impl PushGateway {
     }
 
     pub fn clear_recorded_pushes(&self) {
+        *self
+            .delivery_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = PushDeliveryState::default();
         if let Some(recording) = &self.recording {
             recording.clear();
         }
@@ -493,7 +519,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use hirsel_proto::{PingStatus, PushPlatform};
+    use hirsel_proto::{PushPlatform, Thread};
 
     use super::*;
 
@@ -512,50 +538,187 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn failed_push_is_retried_before_marking_delivered() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path()).await.unwrap();
+    async fn attention_thread(storage: &Storage) -> Thread {
         storage
-            .register_push_token(PushPlatform::Android, "device-token")
+            .create_thread(
+                "push-test",
+                "Choose",
+                "Decision",
+                &serde_json::json!({}),
+                ThreadAttention::NeedsOwner,
+                None,
+            )
             .await
-            .unwrap();
-        let sender = Arc::new(FailOnceSender::default());
-        let gateway = PushGateway::new(storage, sender.clone(), None);
-        let ping = Event {
-            id: 42,
-            kind: EventKind::Judgment,
-            source: hirsel_proto::EventSource {
-                kind: hirsel_proto::EventSourceKind::Agent,
-                r#ref: None,
-            },
-            name: "decision".to_string(),
-            description: "Choose".to_string(),
-            ui: serde_json::json!({ "type": "card", "children": [] }),
-            anchor: 1,
-            requires_response: true,
-            quick_replies: Vec::new(),
-            status: PingStatus::Open,
-            read: false,
-            archived: false,
-            snoozed_until: None,
-            archived_at: None,
-            fork_sc: None,
-            ts: Utc::now(),
-        };
+            .unwrap()
+            .0
+    }
 
-        gateway.enqueue_ping(&ping).await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while sender.attempts.load(Ordering::SeqCst) < 2 {
+    async fn enqueue_current(gateway: &PushGateway, storage: &Storage, thread: &Thread) {
+        gateway
+            .enqueue_thread(&ThreadPublication::test(
+                storage.history_id().await.unwrap(),
+                thread.clone(),
+            ))
+            .await;
+    }
+
+    async fn wait_attempts(attempts: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while attempts.load(Ordering::SeqCst) < expected {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        gateway.enqueue_ping(&ping).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
+    #[test]
+    fn fcm_request_projects_the_captured_destination_as_string_data() {
+        let payload = PushPayload {
+            title: "Hirsel".to_string(),
+            body: "Decision".to_string(),
+            data: PushData {
+                history_id: "history-a".to_string(),
+                thread_id: 42,
+                title: "Choose".to_string(),
+            },
+        };
+
+        assert_eq!(
+            fcm_request("device-token", &payload),
+            serde_json::json!({
+                "message": {
+                    "token": "device-token",
+                    "notification": {
+                        "title": "Hirsel",
+                        "body": "Decision",
+                    },
+                    "data": {
+                        "history_id": "history-a",
+                        "thread_id": "42",
+                        "title": "Choose",
+                    },
+                },
+            })
+        );
+    }
+
+    async fn wait_recorded(gateway: &PushGateway, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gateway.recorded_pushes().len() < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_reset_retains_registration_for_new_history_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(PushPlatform::Android, "durable-token")
+            .await
+            .unwrap();
+        let (gateway, _) = PushGateway::recording(storage.clone());
+
+        let old_history = storage.history_id().await.unwrap();
+        enqueue_current(&gateway, &storage, &attention_thread(&storage).await).await;
+        wait_recorded(&gateway, 1).await;
+
+        storage.reset().await.unwrap();
+        let new_history = storage.history_id().await.unwrap();
+        assert_ne!(new_history, old_history);
+        assert_eq!(
+            storage
+                .push_tokens()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec!["durable-token"]
+        );
+
+        enqueue_current(&gateway, &storage, &attention_thread(&storage).await).await;
+        wait_recorded(&gateway, 2).await;
+        let pushes = gateway.recorded_pushes();
+        assert_eq!(pushes[0].payload.data.history_id, old_history);
+        assert_eq!(pushes[1].payload.data.history_id, new_history);
+        assert_eq!(pushes[1].tokens, vec!["durable-token"]);
+    }
+
+    #[tokio::test]
+    async fn current_thread_delivery_retries_then_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(PushPlatform::Android, "test-token")
+            .await
+            .unwrap();
+        let sender = Arc::new(FailOnceSender::default());
+        let gateway = PushGateway::new(storage.clone(), sender.clone(), None);
+        let thread = attention_thread(&storage).await;
+        enqueue_current(&gateway, &storage, &thread).await;
+        wait_attempts(&sender.attempts, 2).await;
+        enqueue_current(&gateway, &storage, &thread).await;
         assert_eq!(sender.attempts.load(Ordering::SeqCst), 2);
+    }
+    struct HeldSender {
+        attempts: AtomicUsize,
+        release: tokio::sync::Semaphore,
+    }
+    #[async_trait]
+    impl PushSender for HeldSender {
+        async fn send(&self, _: &[String], _: &PushPayload) -> anyhow::Result<()> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.release.acquire().await.unwrap().forget();
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn new_attention_episode_survives_older_in_flight_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        storage
+            .register_push_token(PushPlatform::Android, "test-token")
+            .await
+            .unwrap();
+        let sender = Arc::new(HeldSender {
+            attempts: AtomicUsize::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let gateway = PushGateway::new(storage.clone(), sender.clone(), None);
+        let mut thread = attention_thread(&storage).await;
+        enqueue_current(&gateway, &storage, &thread).await;
+        wait_attempts(&sender.attempts, 1).await;
+        thread.attention = ThreadAttention::Quiet;
+        enqueue_current(&gateway, &storage, &thread).await;
+        thread.attention = ThreadAttention::NeedsOwner;
+        enqueue_current(&gateway, &storage, &thread).await;
+        wait_attempts(&sender.attempts, 2).await;
+        sender.release.add_permits(2);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if gateway.delivery_state.lock().unwrap().in_flight.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Ordinary revisions/read changes stay in the same attention episode.
+        thread.revision += 1;
+        thread.read = true;
+        enqueue_current(&gateway, &storage, &thread).await;
+        assert_eq!(sender.attempts.load(Ordering::SeqCst), 2);
+        thread.snoozed_until = Some(Utc::now() + chrono::Duration::hours(1));
+        enqueue_current(&gateway, &storage, &thread).await;
+        thread.snoozed_until = None;
+        enqueue_current(&gateway, &storage, &thread).await;
+        wait_attempts(&sender.attempts, 3).await;
+        sender.release.add_permits(1);
     }
 }

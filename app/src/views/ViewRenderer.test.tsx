@@ -11,7 +11,7 @@ type EmittedEvent = { instanceId: string; action: string; data: unknown };
 
 function renderSpec(spec: ViewSpec, onEvent?: (e: EmittedEvent) => void) {
   return render(() => (
-    <ViewRenderer spec={spec} instanceId="view-1" placement="canvas" onEvent={onEvent} />
+    <ViewRenderer spec={spec} instanceId="view-1" onEvent={onEvent} />
   ));
 }
 
@@ -267,6 +267,31 @@ describe("ViewRenderer — event round-trip", () => {
     });
   });
 
+  it("submits independently edited values for distinct field names", async () => {
+    const onEvent = vi.fn();
+    const screen = renderSpec(
+      {
+        type: "form",
+        action: "submit_answers",
+        fields: [
+          { type: "field", name: "first", label: "First answer", kind: "text" },
+          { type: "field", name: "second", label: "Second answer", kind: "text" },
+        ],
+      },
+      onEvent,
+    );
+
+    await userEvent.type(screen.getByLabelText(/First answer/) as HTMLInputElement, "one");
+    await userEvent.type(screen.getByLabelText(/Second answer/) as HTMLInputElement, "two");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    expect(onEvent).toHaveBeenCalledWith({
+      instanceId: "view-1",
+      action: "submit_answers",
+      data: { first: "one", second: "two" },
+    });
+  });
+
   it("form seeds values from declared field defaults", async () => {
     const onEvent = vi.fn();
     const screen = renderSpec(
@@ -331,7 +356,7 @@ describe("ViewRenderer — update in place", () => {
       label: "Step 1",
     });
     const screen = render(() => (
-      <ViewRenderer spec={spec()} instanceId="view-1" placement="canvas" />
+      <ViewRenderer spec={spec()} instanceId="view-1" />
     ));
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("20");
     expect(screen.getByText("Step 1")).toBeTruthy();
@@ -344,7 +369,7 @@ describe("ViewRenderer — update in place", () => {
   it("re-renders across a root component type change on the same instance", () => {
     const [spec, setSpec] = createSignal<ViewSpec>({ type: "text", text: "before" });
     const screen = render(() => (
-      <ViewRenderer spec={spec()} instanceId="view-1" placement="canvas" />
+      <ViewRenderer spec={spec()} instanceId="view-1" />
     ));
     expect(screen.getByText("before")).toBeTruthy();
     flush(() => setSpec({ type: "badge", label: "after", tone: "success" }));
@@ -354,10 +379,10 @@ describe("ViewRenderer — update in place", () => {
 });
 
 describe("ViewRenderer — structure", () => {
-  it("tags the view root with its placement", () => {
+  it("tags the view root as a view", () => {
     const screen = renderSpec({ type: "text", text: "hi" });
     const root = screen.container.querySelector('[data-slot="view"]');
-    expect(root?.getAttribute("data-placement")).toBe("canvas");
+    expect(root).toBeTruthy();
     within(root as HTMLElement).getByText("hi");
   });
 });

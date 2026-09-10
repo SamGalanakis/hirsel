@@ -1,7 +1,7 @@
 // Settings → Guide: one page explaining what hirsel is and how to drive it.
 // Static prose — no wire calls, no state, nothing to save. Every claim here is
 // checked against the code that implements it (keymap.ts, Composer.tsx,
-// task-ref.ts, ThreadShell.tsx, ThreadNavigation.tsx); when the app changes, this
+// thread-ref.ts, ThreadShell.tsx, ThreadNavigation.tsx); when the app changes, this
 // page changes with it.
 import { For } from "solid-js";
 import { type JSX } from "@solidjs/web";
@@ -55,20 +55,22 @@ export function GuideSection(): JSX.Element {
           everything that happens comes back to this one place.
         </P>
 
-        <SectionHeader>The home screen</SectionHeader>
+        <SectionHeader>Your workspace</SectionHeader>
         <P>
-          Home is your global conversation with Hirsel. The icon rail opens Threads, creates a
-          new Thread, lists all artifacts, and opens Processes or Settings. The Thread drawer is
-          closed until you need it. Opening a Thread gives its conversation a frame and a compact
-          context strip; the Home button in the rail returns to your global conversation.
+          The icon rail opens Threads, creates a conversation, lists all artifacts, and opens
+          Processes or Settings. Choose or create a Thread before composing. Each selected
+          conversation has a frame and a named context strip. The overview returns to Thread
+          selection without addressing a message.
         </P>
 
         <SectionHeader>Threads</SectionHeader>
         <P>
           Each Thread has its own conversation, state and any generated interface needed for the
-          work. Messages go to the Thread named in the context strip. Opening a Thread marks it
+          work. A Thread can coordinate focused child conversations. Pin any Thread for quick
+          access; pinning and parentage are independent of settlement and visibility. Child
+          progress and results return to their parent with links to the source conversation. Messages go to the Thread named in the context strip. Opening a Thread marks it
           read; settling it is a separate action in its menu. Unread activity, work that needs your
-          input, and active execution are independent signals in the drawer. Every Thread has a
+          input, and active execution are independent signals in the drawer. A dot on Threads means a visible Thread needs you. Use the filter menu for settled, snoozed or archived work, and Search to find a Thread by title or reference. Every Thread has a
           short reference such as <span class="font-mono">#12</span>; type{" "}
           <span class="font-mono">#</span> in a message to cite another Thread without moving your conversation.
         </P>
@@ -91,24 +93,30 @@ export function GuideSection(): JSX.Element {
         <SectionHeader>Artifacts and execution</SectionHeader>
         <P>
           Hirsel can create interactive previews, pages and files as artifacts. Open a reference in
-          the conversation or use the document button for that Thread's artifacts. The grid button
+          the conversation or use Related for that Thread’s artifacts and saved links and threads. The grid button
           in the rail lists all artifacts while keeping your current conversation addressed. Threads
-          can reference the same artifact; each reference opens its current content.
+          can reference the same artifact; each reference opens its current content. Previewing a
+          result stages an About context in your selected Thread’s draft. Remove it to send without
+          that reference, or keep it when asking Hirsel to change the result. Closing the preview
+          keeps this context; switching Threads never transfers it.
+        </P>
+        <P>
+          Use a link’s adjacent actions to open it, copy its address or save it to Related. Saving a
+          link keeps it with that Thread without sending a message. Remove a saved link from its
+          row’s actions; artifacts keep their existing conversation references.
         </P>
         <P>
           An artifact opens beside your conversation on desktop and full-screen on phone. Close it
-          to return to your draft. Detailed tool activity stays under Inspect execution, with useful
+          to return to your draft. Expand a work summary to see its steps, with useful
           updates and results in the conversation.
         </P>
 
         <SectionHeader>The agents</SectionHeader>
         <P>
-          There is one main agent, and that is who you are always talking to. Anything that arrives
-          on its own — a sub-agent finishing, a monitor firing — is triaged first by a short-lived
-          fork agent, so the main one is only interrupted when something genuinely needs it, and
-          bigger jobs get handed off to sub-agents, which do work but never speak to you. You can
-          change the model behind each of them under Settings → Agents, and the accounts and keys
-          they run on under Settings → Providers. The defaults are fine.
+          Each Thread keeps its own conversation context. A coordinator can create focused child
+          Threads and receive their progress and results. You can open any parent or child and
+          talk there directly. Change shared model defaults and available delegation models
+          under Settings → Thread models, and configure their accounts under Settings → Providers.
         </P>
 
         <SectionHeader>Keyboard, on a desktop</SectionHeader>
@@ -117,7 +125,7 @@ export function GuideSection(): JSX.Element {
           Single-key shortcuts stand down while you are typing.
         </P>
         <div class="mt-2 divide-y divide-border">
-          <Shortcut keys={["⌘/Ctrl", "K"]}>The command palette. Start here — it holds the lot.</Shortcut>
+          <Shortcut keys={["⌘/Ctrl", "K"]}>Search commands and Threads by title or #reference.</Shortcut>
           <Shortcut keys={["⌘/Ctrl", "/"]}>The keyboard shortcut sheet.</Shortcut>
           <Shortcut keys={["g", "t"]} chord>
             Open the Thread drawer.
@@ -134,15 +142,15 @@ export function GuideSection(): JSX.Element {
           <Shortcut keys={["/"]}>Focus the composer, same as g then h.</Shortcut>
           <Shortcut keys={["G"]}>Jump down to the latest message.</Shortcut>
           <Shortcut keys={["Esc"]}>
-            Back out, one rung at a time: close whatever is open, else stop the running turn, else
-            return from the focused Thread to Home.
+            Close the active picker, menu or preview. Escape never changes the conversation
+            addressed by your draft. Use Stop to interrupt execution.
           </Shortcut>
         </div>
 
         <SectionHeader>Where to poke around</SectionHeader>
         <P>
-          The activity icon in the rail opens Processes, where you can inspect sub-agents and
-          monitors. Ask Hirsel to stop a process when you no longer need it.
+          The activity icon in the rail opens Processes, where you can inspect monitors and their
+          latest summaries.
         </P>
         <P>
           Settings → Agents is where the models, reasoning levels and system prompts live, and

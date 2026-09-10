@@ -2,138 +2,7 @@ use super::*;
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
-const PEER: &str = r#"
-import json, os, subprocess, sys, time
-mode, directory = sys.argv[1:]
-with open(directory + '/pid', 'w') as f:
-    f.write(str(os.getpid()))
-
-def send(value):
-    print(json.dumps(value), flush=True)
-
-def reply(request, result):
-    send({'id': request['id'], 'result': result})
-
-def reject(request):
-    send({'id': request['id'], 'error': {'code': -32000, 'message': 'fixture rejected ' + request['method']}})
-
-def event(method, thread='root', **params):
-    send({'method': method, 'params': {'threadId': thread, **params}})
-
-def complete(thread='root', turn='turn-a'):
-    event('turn/completed', thread, turn={'id': turn, 'status': 'completed'})
-
-initialized = False
-pending = []
-for line in sys.stdin:
-    request = json.loads(line)
-    with open(directory + '/requests', 'a') as f:
-        f.write(json.dumps(request) + '\n')
-    if 'method' not in request:
-        assert request['error']['code'] == -32601
-        assert request['id'] == 4
-        reply(pending.pop(), {'turnId': 'turn-a'})
-        continue
-    method = request['method']
-    if method == 'initialize':
-        if mode == 'malformed':
-            print('{broken-json', flush=True)
-            time.sleep(60)
-        if mode == 'hang-startup':
-            time.sleep(60)
-        if mode == 'reject-initialize':
-            reject(request)
-            continue
-        if mode == 'stderr':
-            os.write(2, b'x' * 262144)
-        reply(request, {'userAgent': 'hermetic-codex'})
-    elif method == 'initialized':
-        initialized = True
-    elif method == 'thread/start':
-        assert initialized, 'thread/start before initialized'
-        if mode == 'reject-thread':
-            reject(request)
-            continue
-        send({'method': 'thread/started', 'params': {'thread': {'id': 'child'}}})
-        reply(request, {'thread': {'id': 'root'}})
-    elif method == 'turn/start':
-        assert request['params']['threadId'] == 'root'
-        if mode == 'reject-turn':
-            reject(request)
-            continue
-        reply(request, {'turn': {'id': 'turn-a'}})
-        event('turn/started', turn={'id': 'turn-a'})
-        if mode == 'child':
-            event('turn/started', 'child', turn={'id': 'child-turn'})
-            event('item/completed', 'child', item={'type': 'agentMessage', 'text': 'CHILD RESULT'})
-            complete('child', 'child-turn')
-            complete('root', 'stale-root-turn')
-            send({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-a', 'status': 'completed'}}})
-            event('item/completed', item={'type': 'agentMessage', 'text': 'root barrier'})
-        if mode == 'closed-stdin-final':
-            os.close(0)
-            send({'id': 'closing-native-request', 'method': 'item/tool/requestUserInput', 'params': {'threadId': 'root'}})
-            time.sleep(0.05)
-            event('item/completed', item={'type': 'agentMessage', 'text': 'last root result'})
-            complete()
-            sys.exit(0)
-        if mode == 'reply-backpressure':
-            descendant = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
-            with open(directory + '/descendant', 'w') as f:
-                f.write(str(descendant.pid))
-            while not os.path.exists(directory + '/send-native-request'):
-                time.sleep(0.001)
-            send({'id': 'native-request', 'method': 'item/tool/requestUserInput', 'params': {'threadId': 'root'}})
-            while not os.path.exists(directory + '/exit-now'):
-                time.sleep(0.001)
-            sys.exit(0)
-        if mode in ['exit-zero', 'inherited-pipes']:
-            if mode == 'inherited-pipes':
-                descendant = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
-                with open(directory + '/descendant', 'w') as f:
-                    f.write(str(descendant.pid))
-            sys.exit(0)
-        if mode == 'done':
-            event('item/completed', item={'type': 'agentMessage', 'text': 'root result'})
-            complete()
-            sys.exit(0)
-    elif method == 'turn/steer':
-        assert request['params']['threadId'] == 'root'
-        assert request['params']['expectedTurnId'] == 'turn-a'
-        if mode == 'hang-control':
-            continue
-        if mode == 'close-control':
-            sys.exit(0)
-        if mode == 'control-errors':
-            reject(request)
-        elif mode == 'out-of-order':
-            pending.append(request)
-        elif mode == 'server-request':
-            pending.append(request)
-            send({'id': request['id'], 'method': 'item/tool/requestUserInput', 'params': {'threadId': 'root'}})
-        elif mode == 'wrong-steer-turn':
-            reply(request, {'turnId': 'unexpected-turn'})
-        else:
-            reply(request, {'turnId': 'turn-a'})
-    elif method == 'turn/interrupt':
-        assert request['params']['threadId'] == 'root'
-        assert request['params']['turnId'] == 'turn-a'
-        if mode == 'control-errors':
-            reject(request)
-        elif mode == 'out-of-order':
-            pending.append(request)
-        else:
-            reply(request, {})
-            event('item/completed', item={'type': 'agentMessage', 'text': 'ROOT RESULT'})
-            complete()
-    if len(pending) == 2:
-        for waiting in reversed(pending):
-            if waiting['method'] == 'turn/steer':
-                reject(waiting)
-            else:
-                reply(waiting, {})
-        pending.clear()
-"#;
+const PEER: &str = include_str!("../fixtures/codex_app_server.py");
 
 struct Peer {
     directory: TempDir,
@@ -143,7 +12,25 @@ impl Peer {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("peer.py"), PEER).unwrap();
+        let helper = directory.path().join("host.py");
+        std::fs::write(&helper, include_str!("../fixtures/codex_mcp_host.py")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(directory.path().join("capability"), "fixture-capability").unwrap();
         Self { directory }
+    }
+
+    fn launch(&self) -> crate::ScopedMcpLaunch {
+        crate::ScopedMcpLaunch {
+            host_executable: self.directory.path().join("host.py"),
+            socket_path: self.directory.path().join("bridge.sock"),
+            capability_file: self.directory.path().join("capability"),
+            expected_tools: vec![
+                "threads_context".into(),
+                "threads_delegate".into(),
+                "threads_report".into(),
+            ],
+        }
     }
 
     async fn spawn(&self, driver: &CodexDriver, mode: &str) -> DriverResult<SessionHandle> {
@@ -171,9 +58,9 @@ impl Peer {
                     prompt: "initial task".into(),
                     cwd: self.directory.path().to_path_buf(),
                     fake_fixture: None,
+                    scoped_mcp: self.launch(),
                 },
                 command,
-                Vec::new(),
                 control_timeout,
             )
             .await
@@ -247,10 +134,17 @@ async fn native_handshake_is_ordered_and_stderr_is_drained_before_initialization
             .iter()
             .map(|request| request["method"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["initialize", "initialized", "thread/start", "turn/start"]
+        [
+            "initialize",
+            "initialized",
+            "config/read",
+            "thread/start",
+            "mcpServerStatus/list",
+            "turn/start"
+        ]
     );
-    assert_eq!(requests[2]["params"]["approvalPolicy"], "never");
-    assert_eq!(requests[2]["params"]["sandbox"], "danger-full-access");
+    assert_eq!(requests[3]["params"]["approvalPolicy"], "never");
+    assert_eq!(requests[3]["params"]["sandbox"], "danger-full-access");
     driver.retire(&handle).await.unwrap();
     wait_dead(peer.wait_pid().await).await;
 }
@@ -270,7 +164,7 @@ async fn every_startup_rejection_and_malformed_output_roll_back_the_owned_proces
             error.to_string().contains(if mode == "malformed" {
                 "protocol error"
             } else {
-                "fixture rejected"
+                "rejected"
             }),
             "{mode}: {error}"
         );
@@ -338,8 +232,8 @@ async fn child_traffic_cannot_change_the_root_turn_result_or_steering_target() {
             .count(),
         1
     );
-    assert_eq!(requests[4]["method"], "turn/steer");
-    assert_eq!(requests[4]["params"]["expectedTurnId"], "turn-a");
+    assert_eq!(requests[6]["method"], "turn/steer");
+    assert_eq!(requests[6]["params"]["expectedTurnId"], "turn-a");
     assert!(matches!(
         driver.prompt(&handle, "after completion".into()).await,
         Err(DriverError::NoActiveTurn)
@@ -361,18 +255,34 @@ async fn native_control_errors_are_returned_to_the_matching_caller() {
             steer
                 .unwrap_err()
                 .to_string()
-                .contains("fixture rejected turn/steer")
+                .contains("turn/steer rejected")
         );
         if mode == "control-errors" {
             assert!(
                 interrupt
                     .unwrap_err()
                     .to_string()
-                    .contains("fixture rejected turn/interrupt")
+                    .contains("turn/interrupt rejected")
             );
         } else {
             interrupt.unwrap();
         }
+        wait_dead(peer.wait_pid().await).await;
+        assert!(
+            driver
+                .prompt(&handle, "after interrupt".into())
+                .await
+                .is_err()
+        );
+        assert!(driver.interrupt(&handle).await.is_err());
+        let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SubagentEvent::Terminal { .. }))
+                .count(),
+            1
+        );
         driver.retire(&handle).await.unwrap();
     }
 }
@@ -473,7 +383,7 @@ async fn unsupported_native_requests_are_rejected_without_stealing_a_client_resp
         .iter()
         .find(|value| value.get("error").is_some())
         .unwrap();
-    assert_eq!(response["id"], 4);
+    assert_eq!(response["id"], 6);
     assert_eq!(response["error"]["code"], -32601);
     driver.retire(&handle).await.unwrap();
 }
@@ -548,4 +458,264 @@ async fn failed_native_reply_still_drains_a_valid_final_result() {
     );
     assert!(events.next().await.is_none());
     driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_preflight_rejects_inherited_connectors_and_wrong_catalog_before_a_turn() {
+    for mode in [
+        "unsafe-config",
+        "unsafe-status",
+        "null-status",
+        "wrong-tools",
+        "missing-layers",
+        "missing-bridge",
+        "bad-cursor",
+        "unsafe-config-warning",
+    ] {
+        let peer = Peer::new();
+        let error = peer.spawn(&CodexDriver::default(), mode).await.unwrap_err();
+        assert!(!error.to_string().contains("SECRET_CANARY"));
+        assert!(
+            !peer.requests().iter().any(|r| r["method"] == "turn/start"),
+            "{mode}"
+        );
+        wait_dead(peer.wait_pid().await).await;
+    }
+}
+
+#[tokio::test]
+async fn supplied_mcp_helper_is_launched_and_recursive_tools_are_called() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "scoped-recursive").await.unwrap();
+    let mut events = driver.events(&handle).unwrap();
+    let mut output = None;
+    while let Some(event) = events.next().await {
+        match event {
+            SubagentEvent::AssistantOutput { text } => output = Some(text),
+            SubagentEvent::Terminal { outcome } => {
+                assert!(matches!(outcome, TerminalOutcome::Done { .. }))
+            }
+            _ => {}
+        }
+    }
+    assert!(output.unwrap().contains("thread_id"));
+    let calls = std::fs::read_to_string(peer.directory.path().join("tool-calls")).unwrap();
+    let names = calls
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["threads_context", "threads_delegate", "threads_report"]
+    );
+    driver.retire(&handle).await.unwrap();
+    let helper = std::fs::read_to_string(peer.directory.path().join("helper-pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_dead(helper).await;
+}
+
+#[tokio::test]
+async fn complete_output_precedes_one_terminal_and_is_never_the_bounded_summary() {
+    for mode in [
+        "long-output",
+        "failed-final",
+        "empty-done",
+        "missing-status",
+        "invalid-status",
+    ] {
+        let peer = Peer::new();
+        let driver = CodexDriver::default();
+        let handle = peer.spawn(&driver, mode).await.unwrap();
+        let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
+        let outputs = events
+            .iter()
+            .filter_map(|e| match e {
+                SubagentEvent::AssistantOutput { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let outcomes = events
+            .iter()
+            .filter_map(|e| match e {
+                SubagentEvent::Terminal { outcome } => Some(outcome),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.len(), 1, "{mode}");
+        assert!(matches!(
+            events.last(),
+            Some(SubagentEvent::Terminal { .. })
+        ));
+        if matches!(mode, "long-output" | "failed-final") {
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].len(), 30_000);
+        } else {
+            assert!(outputs.is_empty());
+        }
+        match mode {
+            "long-output" => assert!(
+                matches!(outcomes[0], TerminalOutcome::Done { summary } if summary.len() < 30_000)
+            ),
+            "empty-done" => assert!(
+                matches!(outcomes[0], TerminalOutcome::Done { summary } if summary.is_empty())
+            ),
+            _ => assert!(matches!(outcomes[0], TerminalOutcome::Failed { .. })),
+        }
+        assert!(driver.interrupt(&handle).await.is_err());
+        assert!(driver.prompt(&handle, "stale".into()).await.is_err());
+        driver.retire(&handle).await.unwrap();
+    }
+}
+
+#[test]
+fn scoped_command_preserves_selection_and_disables_native_context_sources() {
+    let fixture = tempfile::tempdir().unwrap();
+    let task = SpawnSpec {
+        agent: AgentKind::Codex,
+        model: Some("gpt-6-astra".into()),
+        variant: Some("ultra".into()),
+        prompt: "accepted context".into(),
+        cwd: "/tmp".into(),
+        fake_fixture: None,
+        scoped_mcp: crate::test_support::scoped_mcp_fixture(fixture.path(), &["threads_context"]),
+    };
+    let mut command = Command::new("codex");
+    config::configure_command(&mut command, &task);
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|s| s.to_str().unwrap())
+        .collect::<Vec<_>>();
+    for required in [
+        "app-server",
+        "--stdio",
+        "model=\"gpt-6-astra\"",
+        "model_reasoning_effort=\"ultra\"",
+        "agents.enabled=false",
+        "features.apps=false",
+        "features.plugins=false",
+        "memories.use_memories=false",
+        "memories.generate_memories=false",
+    ] {
+        assert!(args.contains(&required), "missing {required}");
+    }
+    let inherited = BTreeSet::from(["dot.name".into(), "quote\"name".into()]);
+    let request = config::thread_start_request(&task, &inherited, "unique_bridge");
+    assert_eq!(
+        request["params"]["config"]["mcp_servers"]["dot.name"]["enabled"],
+        false
+    );
+    assert_eq!(
+        request["params"]["config"]["mcp_servers"]["quote\"name"]["enabled"],
+        false
+    );
+    assert_eq!(
+        request["params"]["config"]["mcp_servers"]["unique_bridge"]["enabled"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn scoped_catalog_preflight_consumes_all_pages_before_turn_start() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "paged-status").await.unwrap();
+    let requests = peer.requests();
+    let methods = requests
+        .iter()
+        .map(|r| r["method"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &methods[4..],
+        ["mcpServerStatus/list", "mcpServerStatus/list", "turn/start"]
+    );
+    assert!(matches!(
+        next_terminal(&mut driver.events(&handle).unwrap()).await,
+        TerminalOutcome::Done { .. }
+    ));
+    driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupt_acknowledgment_without_terminal_times_out_and_retires_owned_processes() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer
+        .spawn_with_timeout(&driver, "interrupt-ack-only", Duration::from_millis(500))
+        .await
+        .unwrap();
+    let mut events = driver.events(&handle).unwrap();
+    assert!(matches!(
+        driver.interrupt(&handle).await,
+        Err(DriverError::RequestTimeout(_))
+    ));
+    assert!(matches!(
+        next_terminal(&mut events).await,
+        TerminalOutcome::Failed { .. }
+    ));
+    wait_dead(peer.wait_pid().await).await;
+    driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn intermediate_messages_and_malformed_completion_never_invent_final_output() {
+    for mode in [
+        "commentary-eof",
+        "commentary-failed",
+        "unknown-eof",
+        "unknown-failed",
+        "commentary-done",
+        "malformed-completion",
+    ] {
+        let peer = Peer::new();
+        let driver = CodexDriver::default();
+        let handle = peer.spawn(&driver, mode).await.unwrap();
+        let events = timeout(
+            Duration::from_secs(3),
+            driver.events(&handle).unwrap().collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::AssistantOutput { .. })),
+            "{mode}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SubagentEvent::Terminal { .. }))
+                .count(),
+            1,
+            "{mode}"
+        );
+        if mode == "commentary-done" {
+            assert!(
+                matches!(events.last(), Some(SubagentEvent::Terminal { outcome: TerminalOutcome::Done { summary } }) if summary.is_empty())
+            );
+        } else {
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(SubagentEvent::Terminal {
+                        outcome: TerminalOutcome::Failed { .. }
+                    })
+                ),
+                "{mode}"
+            );
+        }
+        if mode == "malformed-completion" {
+            wait_dead(peer.wait_pid().await).await;
+        }
+        driver.retire(&handle).await.unwrap();
+    }
 }

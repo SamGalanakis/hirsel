@@ -60,6 +60,7 @@ impl From<core::Blob> for Blob {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ToolCall {
+    pub id: String,
     pub name: String,
     pub ok: bool,
 }
@@ -67,9 +68,28 @@ pub struct ToolCall {
 impl From<core::ToolCallSummary> for ToolCall {
     fn from(value: core::ToolCallSummary) -> Self {
         Self {
+            id: value.id,
             name: value.name,
             ok: value.ok,
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_call_tests {
+    use super::*;
+
+    #[test]
+    fn ffi_tool_call_keeps_canonical_id() {
+        let call: ToolCall = core::ToolCallSummary {
+            id: "call-7".to_string(),
+            name: "shell_run".to_string(),
+            ok: false,
+        }
+        .into();
+        assert_eq!(call.id, "call-7");
+        assert_eq!(call.name, "shell_run");
+        assert!(!call.ok);
     }
 }
 
@@ -78,6 +98,7 @@ pub struct ChatMessage {
     pub error: Option<String>,
     pub thread_id: u64,
     pub mentions: Vec<u64>,
+    pub artifact_ids: Vec<u64>,
     pub id: Option<u64>,
     pub author: ChatAuthor,
     pub body: String,
@@ -97,6 +118,7 @@ impl From<core::ChatEntry> for ChatMessage {
                 id: Some(message.id),
                 thread_id: message.thread_id,
                 mentions: message.mentions,
+                artifact_ids: message.artifact_ids,
                 author: message.author.into(),
                 body: message.body,
                 reply_to: message.reply_to,
@@ -111,9 +133,10 @@ impl From<core::ChatEntry> for ChatMessage {
                 id: None,
                 thread_id: send.thread_id,
                 mentions: send.mentions,
+                artifact_ids: send.artifact_ids,
                 author: ChatAuthor::Owner,
                 body: send.body,
-                reply_to: send.reply_to,
+                reply_to: None,
                 timestamp: send.timestamp,
                 attachments: Vec::new(),
                 tool_calls: Vec::new(),
@@ -161,11 +184,14 @@ pub struct ClientSnapshot {
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
     pub activities: Vec<ThreadActivity>,
+    pub briefs: Vec<ThreadBrief>,
+    pub related_items: Vec<ThreadRelatedItem>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub history_has_more: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
-    pub last_seen_msg_id: Option<u64>,
+    pub history_id: Option<String>,
+    pub recovered_drafts: Vec<String>,
     /// Host build identity from the last `hello_ok`; `None` until reported.
     pub host_version: Option<String>,
 }
@@ -178,11 +204,14 @@ impl From<core::ClientSnapshot> for ClientSnapshot {
             threads: value.threads.into_iter().map(Into::into).collect(),
             turns: value.turns.into_iter().map(Into::into).collect(),
             activities: value.activities.into_iter().map(Into::into).collect(),
+            briefs: value.briefs.into_iter().map(Into::into).collect(),
+            related_items: value.related_items.into_iter().map(Into::into).collect(),
             streams: value.streams.into_iter().map(Into::into).collect(),
             opened_threads: value.opened_threads,
             history_has_more: value.history_has_more,
             created_threads: value.created_threads.into_iter().map(Into::into).collect(),
-            last_seen_msg_id: value.last_seen_msg_id,
+            history_id: value.history_id,
+            recovered_drafts: value.recovered_drafts,
             host_version: value.host_version,
         }
     }
@@ -190,10 +219,31 @@ impl From<core::ClientSnapshot> for ClientSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum LifecycleEvent {
-    Connecting { attempt: u32 },
+    Connecting {
+        attempt: u32,
+    },
     Online,
-    Offline { reason: Option<String> },
-    ProtocolError { detail: String },
+    Offline {
+        reason: Option<String>,
+    },
+    ProtocolError {
+        detail: String,
+        client_id: Option<String>,
+    },
+    ThreadActionApplied {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+    },
+    ThreadOpened {
+        client_id: String,
+        thread_id: u64,
+    },
+    ThreadRelatedChanged {
+        history_id: String,
+        thread_id: u64,
+        client_id: Option<String>,
+    },
 }
 
 impl From<core::LifecycleEvent> for LifecycleEvent {
@@ -202,7 +252,34 @@ impl From<core::LifecycleEvent> for LifecycleEvent {
             core::LifecycleEvent::Connecting { attempt } => Self::Connecting { attempt },
             core::LifecycleEvent::Online => Self::Online,
             core::LifecycleEvent::Offline { reason } => Self::Offline { reason },
-            core::LifecycleEvent::ProtocolError { detail } => Self::ProtocolError { detail },
+            core::LifecycleEvent::ProtocolError { detail, client_id } => {
+                Self::ProtocolError { detail, client_id }
+            }
+            core::LifecycleEvent::ThreadActionApplied {
+                client_id,
+                history_id,
+                thread_id,
+            } => Self::ThreadActionApplied {
+                client_id,
+                history_id,
+                thread_id,
+            },
+            core::LifecycleEvent::ThreadOpened {
+                client_id,
+                thread_id,
+            } => Self::ThreadOpened {
+                client_id,
+                thread_id,
+            },
+            core::LifecycleEvent::ThreadRelatedChanged {
+                history_id,
+                thread_id,
+                client_id,
+            } => Self::ThreadRelatedChanged {
+                history_id,
+                thread_id,
+                client_id,
+            },
         }
     }
 }
@@ -326,21 +403,21 @@ impl Client {
         Ok(())
     }
 
-    pub fn send_message(&self, body: String) -> SendReceipt {
-        let receipt = self.core.send_message(core::SendMessageRequest::new(body));
-        SendReceipt {
-            client_id: receipt.client_id,
-        }
-    }
-
     pub fn retry_send(&self, client_id: String) {
         self.core.retry_send(client_id);
     }
 
-    pub fn create_thread(&self, title: String) -> SendReceipt {
-        SendReceipt {
-            client_id: self.core.create_thread(title).client_id,
-        }
+    pub fn create_thread(
+        &self,
+        history_id: String,
+        title: String,
+        parent_thread_id: Option<u64>,
+    ) -> Option<SendReceipt> {
+        self.core
+            .create_thread(history_id, title, parent_thread_id)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
     }
 
     pub fn open_thread(&self, thread_id: u64, before_id: Option<u64>) -> SendReceipt {
@@ -351,38 +428,110 @@ impl Client {
 
     pub fn send_thread_message(
         &self,
+        history_id: String,
         thread_id: u64,
         body: String,
         attachments: Vec<String>,
         mentions: Vec<u64>,
-    ) -> SendReceipt {
-        let mut request = core::SendMessageRequest::new(body);
+        artifact_ids: Vec<u64>,
+    ) -> Option<SendReceipt> {
+        let mut request = core::SendThreadMessageRequest::new(history_id, thread_id, body);
         request.thread_id = thread_id;
         request.attachments = attachments;
         request.mentions = mentions;
-        SendReceipt {
-            client_id: self.core.send_message(request).client_id,
-        }
+        request.artifact_ids = artifact_ids;
+        self.core.send_message(request).map(|receipt| SendReceipt {
+            client_id: receipt.client_id,
+        })
     }
 
     pub fn thread_action(
         &self,
+        history_id: String,
         thread_id: u64,
         action: String,
         data_json: String,
         expected_revision: Option<u64>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<Option<SendReceipt>, ClientError> {
         let data =
             serde_json::from_str(&data_json).map_err(|error| ClientError::InvalidAction {
                 detail: error.to_string(),
             })?;
-        self.core
-            .thread_action(thread_id, action, data, expected_revision);
-        Ok(())
+        Ok(self
+            .core
+            .thread_action(history_id, thread_id, action, data, expected_revision)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            }))
     }
 
-    pub fn cancel_turn(&self, thread_id: u64) {
-        self.core.cancel_turn(thread_id);
+    pub fn open_related_thread(&self, target: ThreadRelatedTarget) -> Option<SendReceipt> {
+        self.core
+            .open_related_thread(target.into())
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
+    }
+
+    pub fn add_thread_related(
+        &self,
+        history_id: String,
+        thread_id: u64,
+        target: ThreadRelatedTarget,
+        title: Option<String>,
+    ) -> SendReceipt {
+        SendReceipt {
+            client_id: self
+                .core
+                .add_thread_related(history_id, thread_id, target.into(), title)
+                .client_id,
+        }
+    }
+
+    pub fn remove_thread_related(
+        &self,
+        history_id: String,
+        thread_id: u64,
+        item_id: u64,
+    ) -> SendReceipt {
+        SendReceipt {
+            client_id: self
+                .core
+                .remove_thread_related(history_id, thread_id, item_id)
+                .client_id,
+        }
+    }
+
+    pub fn update_thread_icon(
+        &self,
+        expected_history: String,
+        thread_id: u64,
+        icon: Option<String>,
+        expected_revision: u64,
+    ) -> Option<SendReceipt> {
+        self.core
+            .update_thread_icon(expected_history, thread_id, icon, expected_revision)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
+    }
+
+    pub fn update_thread_showcase(
+        &self,
+        expected_history: String,
+        thread_id: u64,
+        artifact_id: Option<u64>,
+        expected_revision: u64,
+    ) -> Option<SendReceipt> {
+        self.core
+            .update_thread_showcase(expected_history, thread_id, artifact_id, expected_revision)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
+    }
+
+    pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {
+        self.core.cancel_turn(history_id, thread_id)
     }
 
     pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {

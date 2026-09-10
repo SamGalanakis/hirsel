@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use hirsel_drivers::{AgentKind, TerminalOutcome};
 use hirsel_proto::{
-    AgentActivityState, Event, HostToClient, ModelSelection, ModelSnapshot, Ping, SendMode,
+    AgentActivityState, Blob, HostToClient, ModelSelection, ModelSnapshot, SendMode,
     SubagentModelCatalog, ToolCallSummary, TurnEventKind,
 };
 use lash::{
@@ -25,17 +25,15 @@ use lash::{
         PluginSessionContext, SessionPlugin,
     },
     process::{
-        ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEventAppendRequest,
-        ProcessEventType, ProcessExecutionEnvSpec, ProcessIdentity, ProcessInput,
-        ProcessStartRequest, ProcessStatus, ProcessWakeDelivery, ProcessWakeSpec, RecoveryContract,
-        SessionScope,
+        ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventType, ProcessExecutionEnvSpec,
+        ProcessIdentity, ProcessInput, ProcessStartRequest, RecoveryContract, SessionScope,
     },
     provider::{ProviderHandle, ProviderOptions, ReasoningSelection},
     remote::{
         observations::{RemoteSessionCursor, RemoteSessionObservationEventPayload},
         usage::RemoteTurnEvent,
     },
-    rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect},
+    rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect, RlmTermination, RlmTurnOptions},
     runtime::{NativeQueuedWork, QueuedWorkRunHandle, QueuedWorkRunRequest},
     tools::{
         StaticToolExecute, ToolBinding, ToolCall, ToolContract, ToolDefinition,
@@ -45,8 +43,8 @@ use lash::{
 };
 use lash_core::{
     ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
-    ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, ProcessTerminalSpec,
-    ProcessValueSelector, SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputIngress,
+    ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, ProtocolTurnOptions,
+    SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputIngress,
     plugin::ProcessEngineContributionContext,
 };
 use serde_json::{Value, json};
@@ -63,9 +61,7 @@ use crate::{
     monitors::{output_tail, run_monitor_tick},
     prompt_config::PromptConfig,
     providers::ProviderRosterState,
-    storage::{MonitorRecord, MonitorWakeOn, StoredBlob},
-    subagent_models::SubagentModelState,
-    text::short_label,
+    storage::{MonitorCondition, MonitorRecord},
     tools::ToolSuite,
 };
 
@@ -74,27 +70,8 @@ use crate::{
 /// a recorded dialect pin is durable for the session's lifetime.
 const AGENT_RLM_DIALECT: RlmDialect = RlmDialect::Typescript;
 
-/// Page size for the boot-time non-terminal process scan.
-const NON_TERMINAL_SCAN_PAGE: std::num::NonZeroUsize =
-    std::num::NonZeroUsize::new(256).expect("non-terminal scan page size is non-zero");
-
-const HIRSEL_SUBAGENT_ENGINE: &str = "hirsel_subagent";
 const HIRSEL_MONITOR_ENGINE: &str = "hirsel_monitor";
-const SUBAGENT_COMPLETED: &str = "subagent.completed";
-const SUBAGENT_FAILED: &str = "subagent.failed";
-const SUBAGENT_CANCELLED: &str = "subagent.cancelled";
-const SUBAGENT_ABANDONED: &str = "subagent.abandoned";
 const MONITOR_WAKE_EVENT: &str = "monitor.wake";
-/// The pre-ADR-0015 monitor wake: same payload, but it still carries a
-/// `ProcessWakeSpec`, so appending it turns the main Agent directly.
-///
-/// It exists for exactly one case — a monitor firing while no fork dispatcher
-/// is installed — because the triage event type deliberately carries no wake
-/// spec, and appending *that* with no fork to read it would drop the text on
-/// the floor. Two event types rather than one conditional spec: an event
-/// type's semantics are registered when the process starts and are durable
-/// from then on, so the choice has to be made per append, not per process.
-const MONITOR_WAKE_DIRECT_EVENT: &str = "monitor.wake.direct";
 /// Prefix stamped on every queued turn a triage fork escalates (ADR-0015).
 ///
 /// Escalation rides the same `enqueue_turn_input` path an Owner queued turn
@@ -119,9 +96,12 @@ mod process_engines;
 mod provider;
 mod runtime;
 mod scripted;
+mod thread_lanes;
 mod thread_queue;
+use thread_lanes::ThreadRuntimeRegistry;
+mod scoped_tools;
 mod thread_schemas;
-mod thread_tools;
+pub(crate) use scoped_tools::{ScopedThreadTools, scoped_mcp_catalog};
 mod timeline;
 mod timers;
 mod tool_defs;
@@ -139,8 +119,9 @@ mod thread_tests;
 #[cfg(test)]
 mod upgrade_tests;
 
+#[cfg(test)]
 use bridges::*;
-use condense::*;
+pub(crate) use condense::*;
 use executor::*;
 use lifecycle::*;
 use plugin::*;
@@ -156,7 +137,22 @@ use turn::*;
 
 pub use provider::RuntimeConfig;
 pub(crate) use provider::agent_host_section;
-pub use runtime::{
-    AgentRuntime, CancelQueuedResult, OwnerTurn, TaskActionContext, ThreadActionContext,
-};
-pub(crate) use turn::append_mentioned_ping_context;
+pub use runtime::{AgentRuntime, CancelQueuedResult, OwnerTurn, ThreadActionContext};
+
+#[cfg(test)]
+pub(crate) async fn test_owner_turn_input(
+    turn: &OwnerTurn,
+    storage: &crate::storage::Storage,
+) -> anyhow::Result<TurnInput> {
+    turn::owner_turn_input(turn, storage).await
+}
+
+mod runtime_tasks;
+pub(crate) use runtime_tasks::RuntimeTasks;
+
+mod cli_turn;
+use cli_turn::CliTurn;
+
+#[cfg(test)]
+#[path = "lash_runtime/resource_tests.rs"]
+mod resource_tests;

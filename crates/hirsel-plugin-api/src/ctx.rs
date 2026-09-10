@@ -55,18 +55,13 @@ pub struct NewActivity {
 }
 
 impl NewActivity {
-    /// Record informational activity in the global orchestrator conversation.
-    pub fn new(kind: impl Into<String>, data: Value) -> Self {
+    /// Record informational activity in an explicit existing Thread.
+    pub fn new(thread_id: u64, kind: impl Into<String>, data: Value) -> Self {
         Self {
-            thread_id: 0,
+            thread_id,
             kind: kind.into(),
             data,
         }
-    }
-
-    pub fn in_thread(mut self, thread_id: u64) -> Self {
-        self.thread_id = thread_id;
-        self
     }
 }
 
@@ -228,5 +223,24 @@ impl PluginLog<'_> {
 
     pub fn error(&self, message: &str) {
         tracing::error!(plugin = %self.id, "{message}");
+    }
+}
+
+impl PluginCtx {
+    /// Host-created per-invocation resource capabilities. Settings and human
+    /// plugin broadcasts stay attached to this plugin's original registration.
+    pub fn with_resource_capabilities(
+        &self,
+        threads: Arc<dyn PluginThreads>,
+        kv: Arc<dyn PluginKv>,
+    ) -> Self {
+        Self::new(
+            self.inner.id.clone(),
+            self.inner.label.clone(),
+            threads,
+            kv,
+            self.inner.settings.clone(),
+            self.inner.push.clone(),
+        )
     }
 }

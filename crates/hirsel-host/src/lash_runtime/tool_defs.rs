@@ -85,8 +85,8 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.artifacts_list",
             "artifacts_list",
-            "List global artifact summaries, optionally filtered to references in a Thread. Artifacts have no owning Thread; thread_ids are backlinks to conversations that reference them.",
-            json!({"type":"object","additionalProperties":false,"properties":{"thread_id":{"type":"integer","minimum":0}}}),
+            "List artifact summaries referenced in your own Thread or an authorized descendant. Backlinks include only visible Threads.",
+            json!({"type":"object","additionalProperties":false,"properties":{"thread":thread_ref_schema()}}),
             json!({"type":"object"}),
             ["artifacts"],
             "list",
@@ -94,11 +94,58 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.artifacts_show",
             "artifacts_show",
-            "Read an artifact's latest source and publish its card in the current conversation. Showing a global artifact adds a reference, never transfers ownership or copies content.",
+            "Read an artifact's latest source and publish its card in the current conversation. Only already-authorized artifact content is available; publication records a reference in your Thread.",
             json!({"type":"object","additionalProperties":false,"required":["artifact_id"],"properties":{"artifact_id":{"type":"integer","minimum":1}}}),
             json!({"type":"object"}),
             ["artifacts"],
             "show",
+        ),
+        tool_definition(
+            "hirsel.threads_context",
+            "threads_context",
+            "Read your identity, bounded ancestor names and this accepted turn assignment. No parent or peer transcript.",
+            empty_object_input_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "context",
+        ),
+        tool_definition(
+            "hirsel.threads_delegate",
+            "threads_delegate",
+            "Assign focused work to a new or existing direct child. Real asynchronous execution; durable results return upward. Parent completion does not abandon children.",
+            crate::subagent_models::SubagentModelState::delegation_input_schema_for(
+                subagent_models,
+            ),
+            json!({"type":"object"}),
+            ["threads"],
+            "delegate",
+        ),
+        tool_definition(
+            "hirsel.threads_send",
+            "threads_send",
+            "Send a follow-up only to a direct child, using its stored execution backend. Returns its accepted turn identity.",
+            thread_send_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "send",
+        ),
+        tool_definition(
+            "hirsel.threads_report",
+            "threads_report",
+            "Report meaningful progress to the actual requesting parent. No recipient choice; terminal results are reported automatically.",
+            thread_report_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "report",
+        ),
+        tool_definition(
+            "hirsel.threads_cancel",
+            "threads_cancel",
+            "Cancel running or queued work in your own subtree. Never cancels a peer or changes settlement.",
+            json!({"type":"object","additionalProperties":false,"properties":{"thread":thread_ref_schema()}}),
+            json!({"type":"object"}),
+            ["threads"],
+            "cancel",
         ),
         tool_definition(
             "hirsel.threads_create",
@@ -112,7 +159,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_update",
             "threads_update",
-            "Update an existing Thread title, description, generated instrument or attention from any wake. Identity and conversation are preserved. Reading or updating never settles it.",
+            "Update an existing Thread title, icon, showcased artifact, description, generated instrument or attention from any wake. Identity and conversation are preserved. Reading or updating never settles it.",
             thread_update_schema(),
             thread_result_schema(),
             ["threads"],
@@ -121,8 +168,8 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_list",
             "threads_list",
-            "List durable Threads, including settled and archived state, to inspect work across conversations.",
-            empty_object_input_schema(),
+            "List authorized descendants, direct children by default. Lifecycle is independent of hierarchy.",
+            thread_list_schema(),
             json!({"type":"object","required":["threads"],"properties":{"threads":{"type":"array","items":{"type":"object"}}}}),
             ["threads"],
             "list",
@@ -130,11 +177,29 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_read",
             "threads_read",
-            "Read a Thread's own conversation, turns and activity. Use before acting on another Thread; this read does not settle or mark attention handled.",
+            "Read bounded own/subtree history. Follow next_cursor verbatim for older messages, turns and activities; null collection boundaries are exhausted. Current brief and Related references are independent of pagination. Use reference_url for ordinary Markdown links [label](reference_url); URLs never grant access.",
             thread_read_schema(),
             json!({"type":"object"}),
             ["threads"],
             "read",
+        ),
+        tool_definition(
+            "hirsel.threads_add_related",
+            "threads_add_related",
+            "Explicitly save an HTTP(S) URL or an authorized Thread reference to this Thread or a descendant's Related list. Does not fetch the URL, create an artifact, grant access or start work. Use kind=thread for Thread targets. Read references with threads.read or threads.context.",
+            thread_add_related_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "add_related",
+        ),
+        tool_definition(
+            "hirsel.threads_remove_related",
+            "threads_remove_related",
+            "Remove a saved reference from this Thread or a descendant's Related list. Removing an absent reference is harmless.",
+            thread_remove_related_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "remove_related",
         ),
         tool_definition(
             "hirsel.threads_activity",
@@ -148,20 +213,15 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.views_show",
             "views_show",
-            "Resolve and show a validated component view in canvas, chat, or a Ping.",
+            "Resolve and show a validated component view on the Canvas.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["placement"],
                 "properties": {
                     "template_id": { "type": "string", "minLength": 1 },
                     "spec": { "type": "object" },
                     "params": { "type": "object" },
-                    "instance_id": { "type": "string", "minLength": 1 },
-                    "placement": {
-                        "type": "string",
-                        "pattern": "^(canvas|chat|ping:[1-9][0-9]*)$"
-                    }
+                    "instance_id": { "type": "string", "minLength": 1 }
                 },
                 "oneOf": [
                     { "required": ["template_id"], "not": { "required": ["spec"] } },
@@ -240,111 +300,10 @@ pub(super) fn hirsel_tool_definitions(
             "list_templates",
         ),
         tool_definition(
-            "hirsel.subagents_spawn",
-            "subagents_spawn",
-            "Start a Claude or Codex Sub-agent as a Lash Runtime Process. Call this after any required subagents.list check, then make the turn's Chat output a concise hand-off note. Do not wait or poll for completion in the same turn; the terminal event will wake you later.",
-            SubagentModelState::spawn_input_schema_for(subagent_models),
-            subagents_spawn_output_schema(),
-            ["subagents"],
-            "spawn",
-        ),
-        tool_definition(
-            "hirsel.subagents_prompt",
-            "subagents_prompt",
-            "Send steering input to a running Sub-agent. Codex targets its active turn; Claude acknowledges native input receipt, which does not guarantee incorporation before the run ends. Completed or stale runs return an error. This does not resume completed work or create a Hirsel follow-up queue.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["process_id", "text"],
-                "properties": {
-                    "process_id": { "type": "string" },
-                    "text": { "type": "string" }
-                }
-            }),
-            acknowledgement_output_schema(),
-            ["subagents"],
-            "prompt",
-        ),
-        tool_definition(
-            "hirsel.subagents_interrupt",
-            "subagents_interrupt",
-            "Request interruption of a running Sub-agent process and await the provider's control acknowledgement. The process terminal event reports when the run actually stops.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["process_id"],
-                "properties": {
-                    "process_id": { "type": "string" }
-                }
-            }),
-            acknowledgement_output_schema(),
-            ["subagents"],
-            "interrupt",
-        ),
-        tool_definition(
-            "hirsel.subagents_list",
-            "subagents_list",
-            "List known Sub-agent processes.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {}
-            }),
-            subagents_list_output_schema(),
-            ["subagents"],
-            "list",
-        ),
-        tool_definition(
-            "hirsel.subagents_progress",
-            "subagents_progress",
-            "Read recent progress events for a Sub-agent process.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["process_id"],
-                "properties": {
-                    "process_id": { "type": "string" }
-                }
-            }),
-            subagents_progress_output_schema(),
-            ["subagents"],
-            "progress",
-        ),
-        tool_definition(
-            "hirsel.subagents_wait",
-            "subagents_wait",
-            "Wait for a Sub-agent process to reach a terminal outcome — for short waits only; for anything longer, end your turn and let the terminal event wake you.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["process_id"],
-                "properties": {
-                    "process_id": { "type": "string" }
-                }
-            }),
-            subagents_wait_output_schema(),
-            ["subagents"],
-            "wait",
-        ),
-        tool_definition(
             "hirsel.monitors_create",
             "monitors_create",
             "Create a persisted host monitor that wakes the Agent when its condition fires. Monitors and timers are the way to watch for a condition instead of polling in-turn.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["cmd", "wake_on", "label"],
-                "properties": {
-                    "cmd": { "type": "string" },
-                    "every_secs": { "type": "integer", "minimum": 30 },
-                    "wake_on": {
-                        "type": "string",
-                        "enum": ["changed", "exit_zero", "exit_nonzero", "regex"]
-                    },
-                    "pattern": { "type": "string" },
-                    "label": { "type": "string" }
-                }
-            }),
+            monitors_create_input_schema(),
             monitors_create_output_schema(),
             ["monitors"],
             "create",

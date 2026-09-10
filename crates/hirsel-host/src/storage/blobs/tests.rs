@@ -1,7 +1,7 @@
 use super::super::Storage;
 
 #[tokio::test]
-async fn blobs_are_stored_as_raw_files_and_idempotent_by_client_id() {
+async fn blobs_store_only_metadata_and_are_idempotent_by_client_id() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
 
@@ -34,11 +34,140 @@ async fn blobs_are_stored_as_raw_files_and_idempotent_by_client_id() {
         Some(first.blob.id.as_str())
     );
     assert!(first.path.is_absolute());
+    let columns = storage
+        .conn
+        .lock()
+        .await
+        .prepare("SELECT name FROM pragma_table_xinfo('blobs') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(columns, ["id", "name", "mime", "size", "created_ts"]);
     let files = std::fs::read_dir(dir.path().join("blobs"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
     assert_eq!(files, vec![first.path]);
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn stopped_data_directory_relocation_keeps_blob_and_queued_image_ownership() {
+    let roots = tempfile::tempdir().unwrap();
+    let old = roots.path().join("old");
+    let new = roots.path().join("new");
+    let storage = Storage::open(&old).await.unwrap();
+    let thread = storage
+        .create_thread(
+            "relocation",
+            "Relocation",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let image = storage
+        .store_blob(
+            "relocated-image",
+            "tiny.png",
+            "image/png",
+            vec![137, 80, 78, 71],
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_owner_request(
+            &storage.history_id().await.unwrap(),
+            thread.id,
+            "queued-image",
+            "inspect image".into(),
+            std::slice::from_ref(&image.blob.id),
+            &[],
+            &[],
+            &serde_json::json!({"mode":"next_turn","thread_action":null}),
+        )
+        .await
+        .unwrap();
+    drop(storage);
+
+    copy_tree(&old, &new);
+    std::fs::remove_dir_all(&old).unwrap();
+    let storage = Storage::open(&new).await.unwrap();
+    let relocated = storage.blob(&image.blob.id).await.unwrap().unwrap();
+    assert_eq!(relocated.path, new.join("blobs").join(&image.blob.id));
+    assert_eq!(
+        tokio::fs::read(&relocated.path).await.unwrap(),
+        [137, 80, 78, 71]
+    );
+    let orphan = new.join("blobs/orphan-file");
+    tokio::fs::write(&orphan, b"orphan").await.unwrap();
+    assert_eq!(storage.orphaned_blob_paths().await.unwrap(), vec![orphan]);
+
+    let request = storage
+        .thread_request("queued-image")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        request["attachments"],
+        serde_json::json!([image.blob.clone()])
+    );
+    let turn: crate::lash_runtime::OwnerTurn = serde_json::from_value(request).unwrap();
+    let input = crate::lash_runtime::test_owner_turn_input(&turn, &storage)
+        .await
+        .unwrap();
+    let lash::InputItem::Attachment {
+        source: lash::direct::AttachmentSource::Inline { media_type, bytes },
+    } = &input.items[1]
+    else {
+        panic!("the relocated queued image should execute as inline model input");
+    };
+    assert_eq!(media_type.as_str(), "image/png");
+    assert_eq!(bytes.as_slice(), &[137, 80, 78, 71]);
+    drop(storage);
+
+    let state = crate::build_state(crate::tests::test_config(&new))
+        .await
+        .unwrap();
+    let app = crate::router_from_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/blob/{}", image.blob.id))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(response.bytes().await.unwrap().as_ref(), [137, 80, 78, 71]);
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -55,6 +184,18 @@ async fn orphan_scan_reports_files_without_metadata() {
 async fn owner_message_attachments_are_joined_and_replayed() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
+    let thread = storage
+        .create_thread(
+            "conversation",
+            "Conversation",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
     let text = storage
         .store_blob("text-upload", "note.txt", "text/plain", b"hello".to_vec())
         .await
@@ -71,10 +212,19 @@ async fn owner_message_attachments_are_joined_and_replayed() {
     let attachment_ids = vec![text.blob.id.clone(), image.blob.id.clone()];
 
     let (message, inserted) = storage
-        .append_owner_message("client-1", "see attached", None, &attachment_ids)
+        .append_thread_owner_message(
+            &storage.history_id().await.unwrap(),
+            thread.id,
+            "client-1",
+            "see attached",
+            None,
+            &attachment_ids,
+            &[],
+            &[],
+        )
         .await
         .unwrap();
-    let replay = storage.replay_messages(None).await.unwrap();
+    let replay = storage.all_chat().await.unwrap();
     let stored_blobs = storage.blobs_for_message(message.id).await.unwrap();
 
     assert!(inserted);
@@ -96,17 +246,153 @@ async fn owner_message_attachments_are_joined_and_replayed() {
 async fn owner_message_rejects_unknown_attachment_ids() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
+    let thread = storage
+        .create_thread(
+            "conversation",
+            "Conversation",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
 
     let error = storage
-        .append_owner_message(
+        .append_thread_owner_message(
+            &storage.history_id().await.unwrap(),
+            thread.id,
             "client-1",
             "missing attachment",
             None,
             &[String::from("missing-blob")],
+            &[],
+            &[],
         )
         .await
         .unwrap_err();
 
     assert!(error.to_string().contains("unknown blob id: missing-blob"));
     assert!(storage.all_chat().await.unwrap().is_empty());
+}
+
+#[derive(Clone)]
+struct Pause {
+    arrived: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+fn pauses()
+-> &'static std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, &'static str), Pause>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, &'static str), Pause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+fn install_pause(path: &std::path::Path, phase: &'static str) -> Pause {
+    let pause = Pause {
+        arrived: Default::default(),
+        release: Default::default(),
+    };
+    pauses()
+        .lock()
+        .unwrap()
+        .insert((path.to_owned(), phase), pause.clone());
+    pause
+}
+pub(crate) async fn pause(path: &std::path::Path, phase: &'static str) {
+    let pause = pauses().lock().unwrap().remove(&(path.to_owned(), phase));
+    if let Some(pause) = pause {
+        pause.arrived.notify_one();
+        pause.release.notified().await;
+    }
+}
+
+#[tokio::test]
+async fn old_upload_cannot_publish_metadata_or_receipt_after_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let old_history = storage.history_id().await.unwrap();
+    let pause = install_pause(storage.blobs_dir.as_ref(), "upload");
+    let uploading = storage.clone();
+    let upload = tokio::spawn(async move {
+        uploading
+            .store_blob("same-client", "old", "text/plain", b"old".to_vec())
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.arrived.notified())
+        .await
+        .unwrap();
+    storage.reset().await.unwrap();
+    assert_ne!(old_history, storage.history_id().await.unwrap());
+    pause.release.notify_one();
+    let error = upload.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("history"), "{error}");
+    {
+        let conn = storage.conn.lock().await;
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM client_blobs", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    let fresh = storage
+        .store_blob("same-client", "fresh", "text/plain", b"fresh".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(fresh.path).await.unwrap(), b"fresh");
+}
+
+#[tokio::test]
+async fn new_upload_waits_for_reset_filesystem_cleanup_and_keeps_valid_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let old = storage
+        .store_blob("old", "old", "text/plain", b"old".to_vec())
+        .await
+        .unwrap();
+    let pause = install_pause(storage.blobs_dir.as_ref(), "reset");
+    let resetting = storage.clone();
+    let reset = tokio::spawn(async move { resetting.reset().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.arrived.notified())
+        .await
+        .unwrap();
+    assert!(old.path.exists());
+    let uploading = storage.clone();
+    let mut upload = tokio::spawn(async move {
+        uploading
+            .store_blob("new", "new", "text/plain", b"new history bytes".to_vec())
+            .await
+    });
+    // SQL has committed, but upload cannot even capture that history until file cleanup completes.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut upload)
+            .await
+            .is_err()
+    );
+    pause.release.notify_one();
+    reset.await.unwrap().unwrap();
+    let fresh = upload.await.unwrap().unwrap();
+    assert!(!old.path.exists());
+    assert_eq!(
+        storage.blob(&fresh.blob.id).await.unwrap(),
+        Some(fresh.clone())
+    );
+    assert_eq!(
+        tokio::fs::read(&fresh.path).await.unwrap(),
+        b"new history bytes"
+    );
+    assert_eq!(
+        storage
+            .store_blob("new", "retry", "text/plain", b"ignored".to_vec())
+            .await
+            .unwrap(),
+        fresh
+    );
 }

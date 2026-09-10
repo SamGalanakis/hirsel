@@ -1,21 +1,19 @@
-import { openThreadNavigation } from "../threads/navigation";
-import { focusedThreadRunning, focusThread, threadState } from "../threads/store";
+import { openThreadNavigation, closeThreadNavigation } from "../threads/navigation";
+import { threadState } from "../threads/store";
 // The global keyboard layer — hirsel's CLI-lineage "shortcuts are features"
 // surface (Linear/Superhuman). A single window-level keydown listener routes
 // bare keys and `g`-prefixed chords to app actions, and is deliberately quiet:
 // it suppresses itself whenever the Owner is typing in a field or an overlay
 // owns input, so it never steals a keystroke from the composer or a dialog.
 //
-// Esc is the one key this layer shares: it owns only the LAST rung of the Esc
-// ladder (leave the focused Thread). The rungs above it — an open overlay's focus
-// trap, and the composer stopping a live turn — keep Esc for themselves, and
-// `escapeField` yields to both rather than fighting them.
+// Escape stays with the active control; global shortcuts never retarget messages.
 
 import { createSignal } from "solid-js";
 
 import { scrollToBottom } from "./scroll";
 import { openProcesses, openSettings } from "../store/store";
 import { getClient } from "../ws/client";
+import { historyId } from "./history";
 // True while a modal/overlay owns input — focus traps and the native dialogs
 // that register their own presence both feed it. Used to suppress the bare-key
 // layer so summoned surfaces keep the keyboard.
@@ -30,7 +28,17 @@ export type PaneTarget = "threads" | "composer" | "processes" | "settings";
 // The command palette and the shortcut cheat-sheet are summoned, never standing,
 // so their open-state lives here where the keymap, App, and command affordances
 // can all reach it without prop-drilling.
-export const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+export const [commandPaletteOpen, updateCommandPaletteOpen] = createSignal(false);
+export const [commandPaletteIntent, setCommandPaletteIntent] = createSignal<"commands" | "threads">("commands");
+export function setCommandPaletteOpen(open: boolean): void { setCommandPaletteIntent("commands"); updateCommandPaletteOpen(open); }
+export function openThreadSearch(): void {
+  closeThreadNavigation();
+  queueMicrotask(() => {
+    document.querySelector<HTMLButtonElement>('[data-slot="thread-navigation-trigger"]')?.focus();
+    setCommandPaletteIntent("threads");
+    updateCommandPaletteOpen(true);
+  });
+}
 export const [shortcutHelpOpen, setShortcutHelpOpen] = createSignal(false);
 
 // ---- Actions (shared by the keymap and the command palette, so both agree) ---
@@ -58,7 +66,7 @@ export function goPane(target: PaneTarget): void {
   }
 }
 
-/** Jump to the newest task-context material in the current field. */
+/** Jump to the newest Thread context material in the current field. */
 export function jumpToLatest(): void {
   const element = document.querySelector<HTMLElement>('[data-slot="thread-scroll"]');
   // Shares the conversation's own bottom-pinning helper, so the keyboard route
@@ -69,21 +77,8 @@ export function jumpToLatest(): void {
 
 /** Best-effort cancel of the live turn — a no-op when the agent is idle. */
 export function stopActiveTurn(): void {
-  getClient()?.cancelTurn(threadState.focusedId);
-}
-
-/** The Esc ladder, in priority order:
- *   1. an overlay/dialog is open  → its focus trap owns Esc (yield);
- *   2. an agent turn is running   → the composer's stop owns Esc (yield);
- *   3. a Thread is focused          → leave it for the ambient field.
- * Returns true when this layer consumed the key, so the caller can
- * `preventDefault` only on the rung it actually acted on. */
-export function escapeField(): boolean {
-  if (anyOverlayOpen()) return false;
-  if (focusedThreadRunning()) return false;
-  if (threadState.focusedId === 0) return false;
-  focusThread(0);
-  return true;
+  const history = historyId();
+  if (history && threadState.focusedId !== null) getClient()?.cancelTurn(history, threadState.focusedId);
 }
 
 // ---- Cheat-sheet / hint vocabulary (one source for help + palette hints) ------
@@ -97,13 +92,12 @@ export interface Shortcut {
 }
 
 export const SHORTCUTS: Shortcut[] = [
-  { keys: ["⌘", "K"], label: "Command palette", group: "General" },
+  { keys: ["⌘", "K"], label: "Search commands and threads", group: "General" },
   // Two routes to the same sheet, listed adjacently: ⌘/ reaches it mid-type,
   // `?` is the bare-key one you find by accident.
   { keys: ["⌘", "/"], label: "Keyboard shortcuts", group: "General" },
   { keys: ["?"], label: "Keyboard shortcuts", group: "General" },
-  { keys: ["Esc"], label: "Open Hirsel", group: "Threads" },
-  { keys: ["/"], label: "Focus Hirsel", group: "Hirsel" },
+  { keys: ["/"], label: "Focus conversation", group: "Hirsel" },
   { keys: ["G"], label: "Jump to latest", group: "Hirsel" },
   { keys: ["Enter"], label: "Send message", group: "Hirsel" },
   { keys: ["⇧", "Enter"], label: "New line", group: "Hirsel" },
@@ -112,10 +106,10 @@ export const SHORTCUTS: Shortcut[] = [
   // routes to a queued turn are written down — the desktop key and the touch
   // gesture, which is the only one a phone can reach.
   { keys: ["Hold Send"], label: "Queue for next turn (touch)", group: "Hirsel" },
-  { keys: ["Esc"], label: "Stop the active turn", group: "Hirsel" },
+  { keys: ["Esc"], label: "Stop active turn (composer focused)", group: "Hirsel" },
   { keys: ["#"], label: "Cite a thread", group: "Hirsel" },
   { keys: ["g", "t"], label: "Open threads", group: "Focus" },
-  { keys: ["g", "h"], label: "Focus Hirsel", group: "Focus" },
+  { keys: ["g", "h"], label: "Focus conversation", group: "Focus" },
   { keys: ["g", "p"], label: "Processes", group: "Focus" },
   { keys: ["g", "s"], label: "Settings", group: "Focus" },
 ];
@@ -128,8 +122,6 @@ export interface KeymapHandlers {
   jumpToLatest(): void;
   openPalette(): void;
   showHelp(): void;
-  /** Runs the Esc ladder; true when it consumed the key. */
-  escapeField(): boolean;
 }
 
 /** The production wiring: bare-key/chord actions run the shared action helpers;
@@ -141,7 +133,6 @@ export const defaultHandlers: KeymapHandlers = {
   jumpToLatest,
   openPalette: () => setCommandPaletteOpen(true),
   showHelp: () => setShortcutHelpOpen(true),
-  escapeField,
 };
 
 /** True when the event originated in a text-entry surface — where a bare key is
@@ -195,15 +186,6 @@ export function installGlobalKeymap(handlers: KeymapHandlers = defaultHandlers):
 
     // No other modifier combo belongs to this layer.
     if (meta || e.altKey) return;
-
-    // Esc is checked ahead of the typing suppression below: it is never typed
-    // content, so leaving a Task must work with the caret in the composer too.
-    // `escapeField` yields to an open overlay and to a live turn, so this can
-    // only ever fire on the ladder's last rung.
-    if (e.key === "Escape") {
-      if (handlers.escapeField()) e.preventDefault();
-      return;
-    }
 
     // The bare-key layer is silent while the Owner is typing or an overlay owns
     // input — this is what keeps it from ever eating a composer keystroke.

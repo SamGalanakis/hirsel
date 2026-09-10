@@ -191,7 +191,7 @@ export function createFocusTrap(
       // Run in the window capture phase and consume this Escape completely.
       // Closing typically unmounts the panel and pops this trap synchronously,
       // so the bubble-phase Esc ladder in lib/keymap.ts would see a world where
-      // no overlay is open and advance to its next rung — clearing task focus on
+      // no overlay is open and advance to its next rung — clearing Thread focus on
       // the very keystroke that only dismissed a utility. A trap that handled
       // Escape owns the entire gesture.
       e.stopImmediatePropagation();

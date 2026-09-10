@@ -54,16 +54,7 @@ const CATALOG: SubagentModelCatalog = {
 };
 
 function helloOk(extra: Record<string, unknown>) {
-  return reduce(initialState(), {
-    type: "hello_ok",
-    payload: {
-      type: "hello_ok",
-      latest_msg_id: 0,
-      messages: [],
-      pings: [],
-      ...extra,
-    },
-  });
+  return reduce(initialState(), { type: "hello_ok", payload: { type: "hello_ok", history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null, ...extra } });
 }
 
 describe("model config: hello_ok seeding", () => {
@@ -81,10 +72,7 @@ describe("model config: hello_ok seeding", () => {
 
   it("re-seeds authoritatively on a resync, dropping a field an older host omits", () => {
     const seeded = helloOk({ model: MODEL, subagent_models: CATALOG });
-    const resynced = reduce(seeded, {
-      type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [] },
-    });
+    const resynced = reduce(seeded, { type: "hello_ok", payload: { type: "hello_ok", history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null } });
     expect(resynced.model).toBeNull();
     expect(resynced.subagentModels).toBeNull();
   });

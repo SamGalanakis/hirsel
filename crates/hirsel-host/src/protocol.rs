@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
-    auth::owner_token_matches,
+    auth::{AuthPeer, owner_token_matches},
 };
 
 mod hello_dedupe;
@@ -48,41 +48,25 @@ pub(crate) trait ProtocolChannel: Send {
     async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()>;
 }
 
-pub(crate) enum Peer {
-    WebSocket { addr: Option<String> },
-    Iroh { node_id: String },
-}
-
-pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer: Peer)
+pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer: AuthPeer)
 where
     C: ProtocolChannel,
 {
-    let peer_key = match &peer {
-        Peer::WebSocket { addr } => addr.as_deref(),
-        Peer::Iroh { node_id } => Some(node_id.as_str()),
-    };
     let first_frame = tokio::time::timeout(
         AUTH_HANDSHAKE_TIMEOUT,
         channel.receive(PRE_AUTH_MAX_FRAME_BYTES),
     )
     .await;
-    let (auth, last_seen_msg_id) = match first_frame {
+    let auth = match first_frame {
         Err(_) => {
-            tracing::warn!(
-                peer = peer_key.unwrap_or("unknown"),
-                "auth handshake timed out"
-            );
+            tracing::warn!(peer = %peer, "auth handshake timed out");
             return;
         }
         Ok(frame) => match frame {
             Ok(Some(IncomingFrame::Message {
-                frame:
-                    ClientToHost::Hello {
-                        auth,
-                        last_seen_msg_id,
-                    },
+                frame: ClientToHost::Hello { auth },
                 ..
-            })) => (auth, last_seen_msg_id),
+            })) => auth,
             Ok(Some(IncomingFrame::Message { .. })) => {
                 let _ = channel
                     .send(&HostToClient::Error {
@@ -108,9 +92,7 @@ where
     let paired_token = match authenticate(&state, auth, &peer).await {
         Ok(token) => token,
         Err(detail) => {
-            if let Some(peer) = peer_key {
-                tokio::time::sleep(state.auth_throttle.record_failure(peer)).await;
-            }
+            tokio::time::sleep(state.auth_throttle.record_failure(&peer)).await;
             let _ = channel
                 .send(&HostToClient::Error {
                     detail,
@@ -120,9 +102,7 @@ where
             return;
         }
     };
-    if let Some(peer) = peer_key {
-        state.auth_throttle.record_success(peer);
-    }
+    state.auth_throttle.record_success(&peer);
     if let Some(device_token) = paired_token
         && channel
             .send(&HostToClient::Paired { device_token })
@@ -136,7 +116,7 @@ where
     #[cfg(test)]
     run_hello_test_hook(HelloTestHookPoint::Subscribed, &state).await;
 
-    let (hello, mut dedupe) = match build_snapshot(&state, last_seen_msg_id).await {
+    let (hello, mut dedupe) = match build_snapshot(&state).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let _ = channel
@@ -208,7 +188,7 @@ where
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!(skipped, "client broadcast receiver lagged; sending full resync");
-                        match build_snapshot(&state, None).await {
+                        match build_snapshot(&state).await {
                             Ok((hello, resynced)) if channel.send(&hello).await.is_ok() => {
                                 dedupe = resynced;
                             }
@@ -251,25 +231,15 @@ pub fn host_version() -> String {
     format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("HIRSEL_GIT_SHA"))
 }
 
-async fn build_snapshot(
-    state: &AppState,
-    last_seen_msg_id: Option<u64>,
-) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
-    let snapshot = state.storage.hello_snapshot(last_seen_msg_id).await?;
+async fn build_snapshot(state: &AppState) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
+    let snapshot = state.storage.hello_snapshot().await?;
     let views = state.views.snapshot().await;
-    let mut dedupe = HelloBroadcastDedupe::new(
-        snapshot.latest_msg_id,
-        snapshot.events.clone(),
-        views.clone(),
-    );
+    let mut dedupe = HelloBroadcastDedupe::new(views.clone());
     dedupe.include_threads(&snapshot.threads);
     let hello = HostToClient::HelloOk {
+        history_id: snapshot.history_id,
         threads: snapshot.threads,
-        latest_msg_id: snapshot.latest_msg_id,
-        messages: snapshot.messages,
-        events: snapshot.events,
         processes: state.process_snapshot().await?,
-        side_chats: state.side_chats.summaries().await,
         host_version: host_version(),
         model: state.model_snapshot(),
         subagent_models: Some(state.subagent_model_snapshot()),
@@ -283,7 +253,7 @@ async fn build_snapshot(
 async fn authenticate(
     state: &AppState,
     auth: HelloAuth,
-    peer: &Peer,
+    peer: &AuthPeer,
 ) -> Result<Option<String>, String> {
     match (auth, peer) {
         (HelloAuth::StaticToken(token), _) => {
@@ -293,7 +263,7 @@ async fn authenticate(
                 Err("invalid token".to_string())
             }
         }
-        (HelloAuth::DeviceToken(token), Peer::Iroh { node_id }) => {
+        (HelloAuth::DeviceToken(token), AuthPeer::Iroh(node_id)) => {
             state
                 .storage
                 .authenticate_device_token(&token, Some(node_id))
@@ -301,7 +271,7 @@ async fn authenticate(
                 .map_err(|_| "invalid device token".to_string())?;
             Ok(None)
         }
-        (HelloAuth::PairingCode { code, device_label }, Peer::Iroh { node_id }) => {
+        (HelloAuth::PairingCode { code, device_label }, AuthPeer::Iroh(node_id)) => {
             let _ = state
                 .storage
                 .redeem_pairing_code(&code)
@@ -314,10 +284,10 @@ async fn authenticate(
                 .map(Some)
                 .map_err(|_| "failed to issue device token".to_string())
         }
-        (HelloAuth::DeviceToken(_), Peer::WebSocket { .. }) => {
+        (HelloAuth::DeviceToken(_), AuthPeer::WebSocket(_)) => {
             Err("device-token auth requires iroh".to_string())
         }
-        (HelloAuth::PairingCode { .. }, Peer::WebSocket { .. }) => {
+        (HelloAuth::PairingCode { .. }, AuthPeer::WebSocket(_)) => {
             Err("pairing-code auth requires iroh".to_string())
         }
     }
@@ -364,15 +334,22 @@ where
                 })
                 .await?;
         }
-        ClientToHost::CreateThread { client_id, title } => {
+        ClientToHost::CreateThread {
+            client_id,
+            history_id,
+            title,
+            parent_thread_id,
+        } => {
             let (thread, inserted) = state
                 .storage
-                .create_thread(
+                .create_addressed_thread(
+                    &history_id,
                     &client_id,
                     &title,
                     "",
                     &serde_json::json!({}),
                     hirsel_proto::ThreadAttention::Quiet,
+                    parent_thread_id,
                 )
                 .await?;
             if inserted {
@@ -397,86 +374,107 @@ where
                 .send(&HostToClient::ThreadOpened { client_id, detail })
                 .await?;
         }
+        ClientToHost::AddThreadRelated {
+            client_id,
+            history_id,
+            thread_id,
+            target,
+            title,
+        } => {
+            let result = state
+                .storage
+                .add_thread_related(
+                    &client_id,
+                    &history_id,
+                    thread_id,
+                    &target,
+                    title.as_deref(),
+                )
+                .await?;
+            state
+                .tools
+                .publish_thread_related(Some(client_id), result)
+                .await?;
+        }
+        ClientToHost::RemoveThreadRelated {
+            client_id,
+            history_id,
+            thread_id,
+            item_id,
+        } => {
+            let result = state
+                .storage
+                .remove_thread_related(&client_id, &history_id, thread_id, item_id)
+                .await?;
+            state
+                .tools
+                .publish_thread_related(Some(client_id), result)
+                .await?;
+        }
         ClientToHost::SendThreadMessage {
             client_id,
+            history_id,
             thread_id,
             body,
             attachments,
             mentions,
             mode,
+            artifact_ids,
         } => {
             let submission = state
-                .submit_thread_message(client_id, thread_id, body, attachments, mentions, mode)
+                .submit_addressed_thread_message(
+                    &history_id,
+                    client_id,
+                    thread_id,
+                    body,
+                    attachments,
+                    mentions,
+                    mode,
+                    artifact_ids,
+                )
                 .await?;
             if !submission.inserted {
                 channel
                     .send(&HostToClient::Msg {
                         message: submission.message,
-                        sc: None,
                     })
                     .await?;
             }
         }
         ClientToHost::ThreadAction {
+            client_id,
+            history_id,
             thread_id,
             action,
             data,
             expected_revision,
         } => {
             state
-                .handle_thread_action(thread_id, action, data, expected_revision)
+                .handle_addressed_thread_action(
+                    &history_id,
+                    thread_id,
+                    action,
+                    data,
+                    expected_revision,
+                )
                 .await?;
-        }
-        ClientToHost::SendMessage {
-            client_id,
-            body,
-            r#ref,
-            attachments,
-            mode,
-            sc,
-            mentions,
-        } => {
-            if let Some(sc) = sc {
-                state.side_chats.send(&sc, body, mentions).await?;
-            } else {
-                let submission = state
-                    .submit_owner_message(client_id, body, r#ref, attachments, mentions, mode)
-                    .await?;
-                if !submission.inserted {
-                    channel
-                        .send(&HostToClient::Msg {
-                            message: submission.message,
-                            sc: None,
-                        })
-                        .await?;
-                }
-            }
-        }
-        ClientToHost::FetchMessages {
-            client_id,
-            before_id,
-            limit,
-        } => {
-            let page = state.storage.fetch_messages(before_id, limit).await?;
             channel
-                .send(&HostToClient::Messages {
+                .send(&HostToClient::ThreadActionApplied {
                     client_id,
-                    before_id,
-                    messages: page.messages,
-                    has_more: page.has_more,
+                    history_id,
+                    thread_id,
                 })
                 .await?;
         }
-        ClientToHost::CancelTurn { sc, thread_id } => {
-            if let Some(sc) = sc {
-                state.side_chats.cancel(&sc).await?;
-            } else {
-                if let Some(thread_id) = thread_id {
-                    state.agent.cancel_thread_turn(thread_id).await?;
-                } else {
-                    state.cancel_turn().await?;
-                }
-            }
+
+        ClientToHost::CancelTurn {
+            history_id,
+            thread_id,
+        } => {
+            state
+                .agent
+                .cancel_thread_turn(&history_id, thread_id)
+                .await?;
         }
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
@@ -589,74 +587,14 @@ where
                 })
                 .await?;
         }
-        ClientToHost::ResolvePing { ping_id } => {
-            if let Some(event) = state.storage.resolve_ping(ping_id).await? {
-                state.broadcast(HostToClient::EventUpsert { event });
-            }
-        }
-        ClientToHost::ReopenPing { ping_id } => {
-            if let Some(event) = state.storage.reopen_ping(ping_id).await? {
-                state.broadcast(HostToClient::EventUpsert { event });
-            }
-        }
-        ClientToHost::ReadPing { ping_id } => {
-            let event = state
-                .storage
-                .mark_ping_read(ping_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("unknown ping: {ping_id}"))?;
-            state.broadcast(HostToClient::EventUpsert { event });
-        }
-        ClientToHost::EventAction {
-            event_id,
-            action,
-            data,
-        } => {
-            state.handle_event_action(event_id, action, data).await?;
-        }
-        ClientToHost::ClearFinishedEvents {} => {
-            state.tools.events_clear().await?;
-        }
+
         ClientToHost::RegisterPushToken { platform, token } => {
             state.storage.register_push_token(platform, token).await?;
         }
         ClientToHost::UnregisterPushToken { token } => {
             state.storage.unregister_push_token(&token).await?;
         }
-        ClientToHost::OpenSideChat {
-            client_id: _,
-            event_id,
-            ping_id,
-        } => {
-            let (event_id, legacy_ping) = match (event_id, ping_id) {
-                (Some(event_id), None) => (event_id, false),
-                (None, Some(ping_id)) => (ping_id, true),
-                (Some(event_id), Some(ping_id)) if event_id == ping_id => (event_id, false),
-                (Some(_), Some(_)) => anyhow::bail!("event_id and ping_id must match"),
-                (None, None) => anyhow::bail!("event_id or ping_id is required"),
-            };
-            let opened = if legacy_ping {
-                state.side_chats.open_legacy_ping(event_id).await?
-            } else {
-                state.side_chats.open(event_id).await?
-            };
-            state.broadcast(HostToClient::SideChatOpen {
-                sc: opened.sc,
-                event_id,
-                ping_id: event_id,
-                event: opened.event,
-                messages: opened.messages,
-            });
-        }
-        ClientToHost::ConcludeSideChat { sc } => {
-            state.side_chats.conclude(&sc).await?;
-        }
-        ClientToHost::ConfirmConclusion { sc, text } => {
-            state.side_chats.confirm(&sc, text, state).await?;
-        }
-        ClientToHost::DiscardSideChat { sc } => {
-            state.side_chats.discard(&sc).await?;
-        }
+
         ClientToHost::ViewEvent {
             instance_id,
             action,
@@ -718,10 +656,29 @@ async fn run_hello_test_hook(point: HelloTestHookPoint, state: &AppState) {
     if let Some(hook) = hook {
         let message = state
             .storage
-            .append_chat(ChatAuthor::Agent, hook.body, None)
+            .append_thread_chat(
+                state
+                    .storage
+                    .create_thread(
+                        "fixture-Conversation",
+                        "Conversation",
+                        "",
+                        &serde_json::Value::Null,
+                        hirsel_proto::ThreadAttention::Quiet,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .0
+                    .id,
+                ChatAuthor::Agent,
+                hook.body,
+                None,
+                vec![],
+            )
             .await
             .expect("hello test hook appends chat");
-        state.broadcast(HostToClient::Msg { message, sc: None });
+        state.broadcast(HostToClient::Msg { message });
     }
 }
 

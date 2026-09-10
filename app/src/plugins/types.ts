@@ -7,21 +7,9 @@ import type { JSX } from "@solidjs/web";
 /** The mount points a plugin may render into. A slot is a promise about
  * placement AND about the `ctx` its components receive — adding one means
  * adding a `<PluginSlot>` in the view that owns that region. */
-export type SlotName = "settings.section" | "task.panel" | "home.section";
-
-export const SLOT_NAMES: readonly SlotName[] = [
-  "settings.section",
-  "task.panel",
-  "home.section",
-];
-
-/** What a slot component is told about where it is rendering. Deliberately
- * minimal: `settings.section` and `home.section` pass `{}`; `task.panel` passes
- * the focused Task's id. Fields are optional so one component type covers every
- * slot; a component reads only the field its slot documents. */
-export interface SlotCtx {
-  taskId?: number;
-}
+export type SlotName = "settings.section";
+export const SLOT_NAMES: readonly SlotName[] = ["settings.section"];
+export type SlotCtx = Record<string, never>;
 
 /** A plugin-supplied Solid component. It runs once (Solid semantics) inside an
  * error boundary owned by the host view. */

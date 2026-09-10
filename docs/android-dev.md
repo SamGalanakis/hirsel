@@ -31,13 +31,17 @@ fast-boot snapshots, and a non-Play-Store Google APIs image. The latter matters:
 
 ## Native product contract
 
-The Android skin must implement the same current Task Margins world as the web
-reference client: one global conversation, one flat Task inventory, one
-standing composer with removable Task scope, generated Task instruments that
-can recompose in place, and Processes/Settings/Canvas as temporary utilities.
-Legacy `chat`, `ping`, and side-session records in the Rust core are wire
-compatibility, not Android destinations. Do not scaffold an Inbox, Chat list,
-Tray, or Side Chat from those names.
+The Android skin uses the same nested Thread conversations as the web client.
+Every message has one explicit Thread destination. Humans can navigate the full
+tree, pin Threads, open parent or child conversations, and use the current brief
+and artifact references. Pinning, attention, read state, execution, settlement,
+and visibility remain independent.
+
+The shared Rust core and FFI require explicit nullable parents on creation and
+explicit artifact reference arrays on submission. Notifications and retry state
+carry the store history identity as well as the Thread ID. An empty store has no
+reserved Thread; retained ID 0 is an ordinary root. A changed history invalidates
+old recipients and runtime state while allowing plain draft text recovery.
 
 To inspect tools directly:
 

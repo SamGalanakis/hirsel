@@ -4,14 +4,15 @@ import { chromium } from '../app/node_modules/playwright/index.mjs';
 const base = process.env.HIRSEL_ARTIFACT_HOST_URL;
 if (!base || new URL(base).port === '3076') throw new Error('Set HIRSEL_ARTIFACT_HOST_URL to an isolated scripted host.');
 const token=process.env.HIRSEL_ARTIFACT_HOST_TOKEN ?? 'dev-token';
+let currentHistory;
 function request(frame, expected) { return new Promise((resolve,reject)=>{
  const ws=new WebSocket(`${base.replace(/^http/,'ws')}/ws`);const timer=setTimeout(()=>{ws.close();reject(new Error(`Missing ${expected}`))},10000);
- ws.on('error',reject);ws.on('open',()=>ws.send(JSON.stringify({type:'hello',token,last_seen_msg_id:null})));
- ws.on('message',raw=>{const value=JSON.parse(raw.toString());if(value.type==='hello_ok')ws.send(JSON.stringify(frame));else if(value.type===expected){clearTimeout(timer);ws.close();resolve(value)}});
+ ws.on('error',reject);ws.on('open',()=>ws.send(JSON.stringify({type:'hello',auth:{static_token:token}})));
+ ws.on('message',raw=>{const value=JSON.parse(raw.toString());if(value.type==='hello_ok'){currentHistory=value.history_id;ws.send(JSON.stringify(frame));}else if(value.type===expected){clearTimeout(timer);ws.close();resolve(value)}});
 }); }
 async function publish(threadId,id,draft){const response=await fetch(`${base}/debug/publish-artifact`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({operation_id:crypto.randomUUID(),thread_id:threadId,artifact_id:id,draft})});if(!response.ok)throw new Error(await response.text());return response.json()}
-const a=(await request({type:'create_thread',client_id:crypto.randomUUID(),title:`Artifact discussion A ${Date.now()}`},'thread_created')).thread;
-const b=(await request({type:'create_thread',client_id:crypto.randomUUID(),title:`Artifact discussion B ${Date.now()}`},'thread_created')).thread;
+const a=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion A ${Date.now()}`},'thread_created')).thread;
+const b=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion B ${Date.now()}`},'thread_created')).thread;
 const draft=(start,title)=>({title,kind:'solid',mime:'text/jsx',filename:'counter.jsx',content:`import {createSignal} from 'solid-js'; export default function App(){const [n,setN]=createSignal(${start});return <button onClick={()=>setN(n()+1)}>Count {n()}</button>}`});
 const artifact=await publish(a.id,undefined,draft(0,'Shared counter'));
 const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? '/home/sam/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});
@@ -20,7 +21,7 @@ try{for(const viewport of [{width:1440,height:900},{width:390,height:844}]){
  await publish(a.id,artifact.id,draft(0,'Shared counter'));
  const page=await browser.newPage({viewport,hasTouch:viewport.width<1024});const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.addInitScript(token=>{if(window===window.top)localStorage.setItem('hirsel.token',token)},token);
- await page.goto(`${base}/t/${a.id}`);await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().waitFor();
+ await page.goto(`${base}/t/${a.id}?history=${currentHistory}`);await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().waitFor();
  await page.locator('textarea').fill('Keep this conversation draft');
  await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().click();
  let preview=page.frameLocator('[data-slot="artifact-preview"] iframe');

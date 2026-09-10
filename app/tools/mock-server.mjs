@@ -18,14 +18,14 @@ const broadcast = (world, frame) => {
   const id = frame.type === "msg" ? frame.message.thread_id : frame.type === "thread_turn" ? frame.turn.thread_id : null;
   if (id !== null) broadcast(world, { type: "thread_upsert", thread: threadFor(world, id) });
 };
-function makeThread(id, title) {
-  return { id, title, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1, running_turn: null, queued_turn_count: 0, last_finished_turn: null, last_activity_at: now() };
+function makeThread(id, title, parent_thread_id = null) {
+  return { id, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
 }
 function worldFor(token) {
   if (!tenants.has(token)) {
-    const threads = [makeThread(0, "Hirsel")];
+    const threads = [];
     if (process.env.MOCK_SEED !== "none") threads.push(makeThread(1, "Buy groceries"));
-    tenants.set(token, { token, threads, messages: [], artifacts: [], artifactOperations: new Map(), nextArtifact: 1, turns: [], activities: [], clients: new Set(), requests: new Map(), blobs: new Map(), timers: new Map(), queue: [], nextThread: threads.length, nextMessage: 1, nextTurn: 1 });
+    tenants.set(token, { token, history_id: randomUUID(), threads, messages: [], relatedItems: [], nextRelatedItem: 1, relatedReceipts: new Map(), artifacts: [], artifactOperations: new Map(), nextArtifact: 1, turns: [], activities: [], clients: new Set(), requests: new Map(), blobs: new Map(), timers: new Map(), queue: [], nextThread: Math.max(0, ...threads.map(thread => thread.id)) + 1, nextMessage: 1, nextTurn: 1 });
   }
   return tenants.get(token);
 }
@@ -34,6 +34,9 @@ function summary(world, thread) {
   const terminal = turns.filter(turn => turn.finished_at).sort((a, b) => Date.parse(b.finished_at) - Date.parse(a.finished_at) || b.id - a.id);
   const times = [thread.created_at, ...world.messages.filter(row => row.thread_id === thread.id).map(row => row.ts), ...world.activities.filter(row => row.thread_id === thread.id).map(row => row.ts), ...turns.flatMap(turn => [turn.started_at, turn.finished_at]).filter(Boolean)];
   return { ...thread, running_turn: turns.find(turn => turn.state === "running") ?? null, queued_turn_count: turns.filter(turn => turn.state === "queued").length, last_finished_turn: terminal[0] ?? null, last_activity_at: new Date(Math.max(...times.map(Date.parse))).toISOString() };
+}
+function createFingerprint(title, parent_thread_id) {
+  return createHash("sha256").update(JSON.stringify({ title, parent_thread_id })).digest("hex");
 }
 function threadFor(world, id) {
   const thread = world.threads.find(row => row.id === id);
@@ -51,7 +54,7 @@ function addMessage(world, threadId, author, body, extra = {}) {
   return message;
 }
 function startTurn(world, message) {
-  const turn = { id: world.nextTurn++, thread_id: message.thread_id, owner_message_id: message.id, agent_message_id: null, state: "queued", started_at: now(), finished_at: null };
+  const turn = { id: world.nextTurn++, thread_id: message.thread_id, owner_message_id: message.id, requester_thread_id: threadFor(world, message.thread_id).parent_thread_id, requester_turn_id: null, agent_message_id: null, state: "queued", started_at: now(), finished_at: null };
   world.turns.push(turn);
   world.queue.push({ turn, message });
   broadcast(world, { type: "thread_turn", turn });
@@ -76,7 +79,7 @@ function runNext(world) {
 }
 function artifactSummary(world, artifact) {
   const { content: _content, ...summary } = artifact;
-  return { ...summary, thread_ids: [...new Set(world.messages.filter(message => message.artifact_ids?.includes(artifact.id)).map(message => message.thread_id))].sort((a,b)=>a-b) };
+  return { ...summary, thread_ids: [...new Set([...[...world.messages, ...world.activities].filter(message => message.artifact_ids?.includes(artifact.id)).map(message => message.thread_id), ...world.threads.filter(thread => thread.showcased_artifact_id === artifact.id).map(thread => thread.id)])].sort((a,b)=>a-b) };
 }
 function artifactFor(world,id) {
   const artifact=world.artifacts.find(row=>row.id===id);
@@ -123,29 +126,85 @@ function handle(world, ws, frame) {
       send(ws,{type:"artifact_opened",client_id:frame.client_id,artifact:{...artifactSummary(world,artifact),content:artifact.content}}); return;
     }
     case "create_thread": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
+      if (!("parent_thread_id" in frame) || (frame.parent_thread_id !== null && !Number.isSafeInteger(frame.parent_thread_id))) throw new Error("parent_thread_id is required and must be null or an ID");
+      if (frame.parent_thread_id !== null) threadFor(world, frame.parent_thread_id);
       if (!frame.title?.trim()) throw new Error("Thread title must not be empty");
+      const title = frame.title.trim();
+      const fingerprint = createFingerprint(title, frame.parent_thread_id);
       const prior = world.requests.get(frame.client_id);
-      if (prior) { if (prior.type !== "thread_created") throw new Error("client_id already used"); send(ws, prior); return; }
-      const thread = makeThread(world.nextThread++, frame.title.trim());
+      if (prior) {
+        if (prior.type !== "thread_created" || prior.fingerprint !== fingerprint) throw new Error("client_id already used");
+        send(ws, { type: "thread_created", client_id: frame.client_id, thread: summary(world, threadFor(world, prior.thread_id)) });
+        return;
+      }
+      const thread = makeThread(world.nextThread++, title, frame.parent_thread_id);
       world.threads.push(thread);
-      const result = { type: "thread_created", client_id: frame.client_id, thread };
-      world.requests.set(frame.client_id, result);
+      world.requests.set(frame.client_id, { type: "thread_created", fingerprint, thread_id: thread.id });
       broadcast(world, { type: "thread_upsert", thread });
-      send(ws, result);
+      send(ws, { type: "thread_created", client_id: frame.client_id, thread: summary(world, thread) });
       return;
     }
     case "open_thread": {
       const thread = threadFor(world, frame.thread_id);
       const rows = world.messages.filter(row => row.thread_id === thread.id && (frame.before_id == null || row.id < frame.before_id));
-      send(ws, { type: "thread_opened", client_id: frame.client_id, detail: { thread: summary(world, thread), messages: rows.slice(-100), turns: world.turns.filter(row => row.thread_id === thread.id), activities: world.activities.filter(row => row.thread_id === thread.id), has_more: rows.length > 100 } });
+      send(ws, { type: "thread_opened", client_id: frame.client_id, detail: { related_items: world.relatedItems.filter(item => item.thread_id === thread.id), brief: { text: "", artifact_ids: [] }, thread: summary(world, thread), messages: rows.slice(-100), turns: world.turns.filter(row => row.thread_id === thread.id), turn_timelines: [], activities: world.activities.filter(row => row.thread_id === thread.id), has_more: rows.length > 100 } });
+      return;
+    }
+    case "add_thread_related":
+    case "remove_thread_related": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
+      const thread = threadFor(world, frame.thread_id);
+      let target, title = null;
+      if (frame.type === "add_thread_related") {
+        target = frame.target;
+        if (target?.kind === "url") {
+          // eslint-disable-next-line no-control-regex
+          if (typeof target.url !== "string" || !/^https?:\/\//i.test(target.url) || /[\s\u0000-\u001f\u007f]/u.test(target.url) || Buffer.byteLength(target.url) > 4096) throw new Error("Invalid web URL");
+          const url = new URL(target.url);
+          if (!url.hostname || url.username || url.password || Buffer.byteLength(url.href) > 4096) throw new Error("Invalid web URL");
+          target = { kind: "url", url: url.href }; title = frame.title?.trim() || null;
+          // eslint-disable-next-line no-control-regex
+          if (title && ([...title].length > 200 || /[\u0000-\u001f\u007f]/u.test(title))) throw new Error("Invalid item title");
+        } else if (target?.kind === "thread") {
+          if (target.history_id !== world.history_id) throw new Error("Thread reference belongs to another history");
+          threadFor(world, target.thread_id);
+          if (frame.title != null) throw new Error("Thread references use their current title");
+          target = { kind: "thread", history_id: world.history_id, thread_id: target.thread_id };
+        } else throw new Error("Unknown Related target");
+      }
+      const payload = JSON.stringify([frame.type, frame.history_id, thread.id, target, title, frame.item_id]);
+      const receipt = world.relatedReceipts.get(frame.client_id);
+      if (receipt !== undefined && receipt !== payload) throw new Error("client_id already used for different content");
+      let changed = false;
+      if (receipt === undefined) {
+        if (frame.type === "add_thread_related") {
+          if (!world.relatedItems.some(item => item.thread_id === thread.id && JSON.stringify(item.target) === JSON.stringify(target))) {
+            if (world.relatedItems.filter(item => item.thread_id === thread.id).length >= 100) throw new Error("This Thread already has 100 saved references");
+            world.relatedItems.push({ id: world.nextRelatedItem++, thread_id: thread.id, target, title, created_at: now() }); changed = true;
+          }
+        } else {
+          const count = world.relatedItems.length;
+          world.relatedItems = world.relatedItems.filter(item => item.thread_id !== thread.id || item.id !== frame.item_id);
+          changed = count !== world.relatedItems.length;
+        }
+        world.relatedReceipts.set(frame.client_id, payload);
+      }
+      if (changed) updateThread(world, thread, {});
+      broadcast(world, { type: "thread_related_changed", client_id: frame.client_id, history_id: world.history_id, thread_id: thread.id, revision: thread.revision, items: world.relatedItems.filter(item => item.thread_id === thread.id) });
       return;
     }
     case "send_thread_message": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       threadFor(world, frame.thread_id);
+      if (!Array.isArray(frame.artifact_ids)) throw new Error("artifact_ids is required");
+      const references = [...new Set(frame.artifact_ids)].sort((a,b) => a-b);
+      if (references.length > 16 || references.some(id => !Number.isSafeInteger(id) || id < 0)) throw new Error("Invalid artifact references");
+      for (const id of references) artifactFor(world, id);
       for (const id of frame.mentions ?? []) threadFor(world, id);
       const prior = world.requests.get(frame.client_id);
       if (prior) {
-        if (prior.type !== "msg" || prior.message.thread_id !== frame.thread_id || prior.message.body !== frame.body) throw new Error("client_id already used for different content");
+        if (prior.type !== "msg" || prior.message.thread_id !== frame.thread_id || prior.message.body !== frame.body || JSON.stringify(prior.message.artifact_ids) !== JSON.stringify(references)) throw new Error("client_id already used for different content");
         send(ws, prior); return;
       }
       const attachments = (frame.attachments ?? []).map(id => {
@@ -154,21 +213,51 @@ function handle(world, ws, frame) {
         return blob.info;
       });
       if (!frame.body?.trim() && attachments.length === 0) throw new Error("Message must not be empty");
-      const message = addMessage(world, frame.thread_id, "owner", frame.body, { client_id: frame.client_id, attachments, mentions: frame.mentions ?? [] });
+      const message = addMessage(world, frame.thread_id, "owner", frame.body, { client_id: frame.client_id, attachments, mentions: frame.mentions ?? [], artifact_ids: references });
       world.requests.set(frame.client_id, { type: "msg", message });
+      for (const id of references) broadcast(world, { type: "artifact_upsert", artifact: artifactSummary(world, artifactFor(world, id)) });
       startTurn(world, message);
       return;
     }
     case "thread_action": {
+      if (typeof frame.client_id !== "string" || !frame.client_id) throw new Error("client_id is required");
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       const thread = threadFor(world, frame.thread_id);
-      if (thread.id === 0 && ["settle", "archive"].includes(frame.action)) throw new Error("The orchestrator cannot be settled or archived");
-      const patches = { settle: { settled_at: now() }, reopen: { settled_at: null }, archive: { archived_at: now() }, unarchive: { archived_at: null }, read: { read: true }, snooze: { snoozed_until: frame.data?.until }, unsnooze: { snoozed_until: null } };
-      if (patches[frame.action]) { updateThread(world, thread, patches[frame.action]); return; }
+      const acknowledge = () => send(ws, { type: "thread_action_applied", client_id: frame.client_id, history_id: frame.history_id, thread_id: frame.thread_id });
+      if (frame.action === "pin" && thread.parent_thread_id !== null) throw new Error("Only top-level threads can be pinned");
+      if (["pin", "unpin", "set_icon", "set_showcase"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
+      if (frame.action === "set_showcase") {
+        if (!Object.hasOwn(frame.data, "artifact_id") || Object.keys(frame.data).length !== 1) throw new Error("artifact_id is required and must be the only field");
+        const id = frame.data.artifact_id;
+        if (id !== null && (!Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid artifact ID");
+        if (id !== null) artifactFor(world, id);
+        const previous = thread.showcased_artifact_id;
+        if (id === previous) { acknowledge(); return; }
+        updateThread(world, thread, { showcased_artifact_id: id });
+        for (const affected of new Set([previous, id])) if (affected != null) {
+          const artifact = artifactFor(world, affected); artifact.updated_at = now();
+          broadcast(world, { type: "artifact_upsert", artifact: artifactSummary(world, artifact) });
+        }
+        acknowledge(); return;
+      }
+      if (frame.action === "set_icon") {
+        const patch = {};
+        if (!Object.hasOwn(frame.data ?? {}, "icon")) { acknowledge(); return; }
+        if (Object.hasOwn(frame.data ?? {}, "icon")) {
+          const icon = frame.data.icon;
+          if (icon !== null && (typeof icon !== "string" || !icon.trim() || /\p{Cc}|\u2028|\u2029/u.test(icon) || Array.from(icon).length > 16 || Buffer.byteLength(icon, "utf8") > 64)) throw new Error("Invalid thread icon");
+          patch.icon = icon;
+        }
+        updateThread(world, thread, patch); acknowledge(); return;
+      }
+      const patches = { pin: { pinned_at: thread.pinned_at ?? now() }, unpin: { pinned_at: null }, settle: { settled_at: now() }, reopen: { settled_at: null }, archive: { archived_at: now() }, unarchive: { archived_at: null }, read: { read: true }, snooze: { snoozed_until: frame.data?.until }, unsnooze: { snoozed_until: null } };
+      if (patches[frame.action]) { updateThread(world, thread, patches[frame.action]); acknowledge(); return; }
       if (frame.expected_revision !== thread.revision) throw new Error("This instrument has changed. Refresh before acting.");
       throw new Error("This mock thread has no generated action; use the scripted Rust host to test instruments.");
     }
     case "cancel_turn":
-      for (const turn of world.turns.filter(row => row.thread_id === (frame.thread_id ?? 0) && row.state === "running")) {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
+      for (const turn of world.turns.filter(row => row.thread_id === frame.thread_id && row.state === "running")) {
         clearTimeout(world.timers.get(turn.id)); world.timers.delete(turn.id);
         Object.assign(turn, { state: "cancelled", finished_at: now() });
         broadcast(world, { type: "thread_turn", turn });
@@ -227,9 +316,9 @@ new WebSocketServer({ server }).on("connection", ws => {
     try {
       frame = JSON.parse(raw.toString());
       if (!world) {
-        if (frame.type !== "hello" || !accepts(frame.token)) { send(ws, { type: "error", detail: "Authenticated hello required" }); ws.close(1008); return; }
-        world = worldFor(frame.token); world.clients.add(ws);
-        send(ws, { type: "hello_ok", latest_msg_id: world.nextMessage - 1, messages: world.messages.filter(row => row.thread_id === 0).slice(-100), pings: [], events: [], threads: world.threads.map(thread => summary(world, thread)), processes: [], views: [], host_version: "thread-development-mock" });
+        if (frame.type !== "hello" || !accepts(frame.auth?.static_token)) { send(ws, { type: "error", detail: "Authenticated hello required" }); ws.close(1008); return; }
+        world = worldFor(frame.auth.static_token); world.clients.add(ws);
+        send(ws, { type: "hello_ok", history_id: world.history_id, model: null, subagent_models: null, prompts: null, providers: null, threads: world.threads.map(thread => summary(world, thread)), processes: [], views: [], host_version: "thread-development-mock" });
         return;
       }
       handle(world, ws, frame);

@@ -1,6 +1,6 @@
 //! Client → host frames and the auth/mode enums they carry.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,7 +32,7 @@ pub enum PushPlatform {
     Ios,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HelloAuth {
     StaticToken(String),
@@ -40,60 +40,14 @@ pub enum HelloAuth {
     PairingCode { code: String, device_label: String },
 }
 
-impl<'de> Deserialize<'de> for HelloAuth {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum TaggedHelloAuth {
-            StaticToken(String),
-            DeviceToken(String),
-            PairingCode { code: String, device_label: String },
-        }
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum HelloAuthWire {
-            LegacyStaticToken(String),
-            Tagged(TaggedHelloAuth),
-        }
-
-        Ok(match HelloAuthWire::deserialize(deserializer)? {
-            HelloAuthWire::LegacyStaticToken(token) => Self::StaticToken(token),
-            HelloAuthWire::Tagged(TaggedHelloAuth::StaticToken(token)) => Self::StaticToken(token),
-            HelloAuthWire::Tagged(TaggedHelloAuth::DeviceToken(token)) => Self::DeviceToken(token),
-            HelloAuthWire::Tagged(TaggedHelloAuth::PairingCode { code, device_label }) => {
-                Self::PairingCode { code, device_label }
-            }
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientToHost {
     Hello {
-        #[serde(alias = "token")]
         auth: HelloAuth,
-        last_seen_msg_id: Option<u64>,
     },
-    SendMessage {
-        client_id: String,
-        body: String,
-        #[serde(rename = "ref")]
-        r#ref: Option<u64>,
-        #[serde(default)]
-        attachments: Vec<String>,
-        #[serde(default, skip_serializing_if = "SendMode::is_send")]
-        mode: SendMode,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sc: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        mentions: Vec<u64>,
-    },
+
     ListArtifacts {
         client_id: String,
         thread_id: Option<u64>,
@@ -103,6 +57,9 @@ pub enum ClientToHost {
         artifact_id: u64,
     },
     CreateThread {
+        history_id: String,
+        #[serde(deserialize_with = "required_nullable_parent")]
+        parent_thread_id: Option<u64>,
         client_id: String,
         title: String,
     },
@@ -111,8 +68,22 @@ pub enum ClientToHost {
         thread_id: u64,
         before_id: Option<u64>,
     },
+    AddThreadRelated {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        target: crate::ThreadRelatedTarget,
+        title: Option<String>,
+    },
+    RemoveThreadRelated {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        item_id: u64,
+    },
     SendThreadMessage {
         client_id: String,
+        history_id: String,
         thread_id: u64,
         body: String,
         #[serde(default)]
@@ -121,8 +92,11 @@ pub enum ClientToHost {
         mentions: Vec<u64>,
         #[serde(default)]
         mode: SendMode,
+        artifact_ids: Vec<u64>,
     },
     ThreadAction {
+        client_id: String,
+        history_id: String,
         thread_id: u64,
         action: String,
         #[serde(default)]
@@ -130,16 +104,10 @@ pub enum ClientToHost {
         #[serde(default)]
         expected_revision: Option<u64>,
     },
-    FetchMessages {
-        client_id: String,
-        before_id: u64,
-        limit: u64,
-    },
+
     CancelTurn {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sc: Option<String>,
+        history_id: String,
+        thread_id: u64,
     },
     CancelQueued {
         client_id: String,
@@ -215,22 +183,7 @@ pub enum ClientToHost {
         client_id: String,
         blob_id: String,
     },
-    ResolvePing {
-        ping_id: u64,
-    },
-    ReopenPing {
-        ping_id: u64,
-    },
-    ReadPing {
-        ping_id: u64,
-    },
-    EventAction {
-        event_id: u64,
-        action: String,
-        #[serde(default)]
-        data: serde_json::Value,
-    },
-    ClearFinishedEvents {},
+
     RegisterPushToken {
         platform: PushPlatform,
         token: String,
@@ -238,27 +191,18 @@ pub enum ClientToHost {
     UnregisterPushToken {
         token: String,
     },
-    OpenSideChat {
-        client_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        event_id: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ping_id: Option<u64>,
-    },
-    ConcludeSideChat {
-        sc: String,
-    },
-    ConfirmConclusion {
-        sc: String,
-        text: String,
-    },
-    DiscardSideChat {
-        sc: String,
-    },
+
     ViewEvent {
         instance_id: String,
         action: String,
         #[serde(default)]
         data: serde_json::Value,
     },
+}
+
+// A missing destination is distinct from an explicitly requested root.
+fn required_nullable_parent<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(d)
 }

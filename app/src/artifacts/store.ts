@@ -1,3 +1,5 @@
+import { attachShowcaseTransport, disconnectShowcase, handleShowcaseMessage, resetShowcase } from "./showcase-store";
+import { resetDraftArtifacts } from "./draft-context";
 import { createStore } from "solid-js";
 import type { ServerMessage } from "../protocol";
 import type { Artifact, ArtifactClientMessage, ArtifactSummary } from "./types";
@@ -26,9 +28,10 @@ function finish(id: string) {
   requests.delete(id);
   return request;
 }
-export function attachArtifactTransport(send: (frame: ArtifactClientMessage) => void) { transport = send; }
+export function attachArtifactTransport(send: (frame: ArtifactClientMessage) => void) { transport = send; attachShowcaseTransport(send); }
 export function disconnectArtifacts() {
-  transport = null;
+  transport = null; disconnectShowcase();
+  if (artifactState.selectedId !== null && artifactState.loading) setArtifactState({ error: "Reconnect to load this artifact." });
   for (const id of requests.keys()) finish(id);
   setArtifactState({ loading: false, listing: false, listError: "Reconnect to load artifacts." });
 }
@@ -60,18 +63,32 @@ export function closeArtifact() { setArtifactState({ selectedId: null, opened: n
 function mergeSummary(rows: ArtifactSummary[], artifact: ArtifactSummary) {
   const prior = rows.find(row => row.id === artifact.id);
   if (prior) {
-    const thread_ids = [...new Set([...prior.thread_ids, ...artifact.thread_ids])];
-    if (prior.updated_at <= artifact.updated_at) Object.assign(prior, artifact);
-    prior.thread_ids = thread_ids;
+    if (compareTimestamps(prior.updated_at, artifact.updated_at) <= 0) Object.assign(prior, artifact);
   } else rows.push(artifact);
 }
+/** Compare RFC3339 instants without losing the protocol's nanosecond precision.
+ * The lexical fallback keeps hand-built fixtures deterministic. */
+function compareTimestamps(left: string, right: string): number {
+  const instant = (value: string): bigint | null => {
+    const match = /^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+    if (!match) return null;
+    const milliseconds = Date.parse(match[1] + match[3]);
+    if (!Number.isFinite(milliseconds)) return null;
+    return BigInt(milliseconds) * 1_000_000n + BigInt((match[2] ?? "").padEnd(9, "0").slice(0, 9));
+  };
+  const leftInstant = instant(left), rightInstant = instant(right);
+  if (leftInstant !== null && rightInstant !== null) return leftInstant < rightInstant ? -1 : leftInstant > rightInstant ? 1 : 0;
+  return left.localeCompare(right);
+}
 function sortSummaries(rows: ArtifactSummary[]) {
-  rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
+  rows.sort((a, b) => compareTimestamps(b.updated_at, a.updated_at) || b.id - a.id);
 }
 function upsert(artifact: ArtifactSummary) {
   updateArtifacts(draft => { mergeSummary(draft.summaries, artifact); sortSummaries(draft.summaries); });
 }
 export function handleArtifactMessage(message: ServerMessage) {
+  handleShowcaseMessage(message);
+  updateArtifacts(() => {
   switch (message.type) {
     case "hello_ok": listArtifacts(); if (artifactState.selectedId !== null) openArtifact(artifactState.selectedId); break;
     case "artifacts_listed":
@@ -97,4 +114,11 @@ export function handleArtifactMessage(message: ServerMessage) {
       if (message.client_id) { const request = finish(message.client_id); if (request) requestFailed(request.artifactId, message.detail); }
       break;
   }
+  });
+}
+
+export function resetArtifacts(): void {
+  resetDraftArtifacts(); resetShowcase();
+  disconnectArtifacts(); latestOpenRequest = null; latestListRequest = null;
+  setArtifactState({ summaries: [], opened: null, selectedId: null, loading: false, error: null, listing: false, listed: false, listError: null });
 }

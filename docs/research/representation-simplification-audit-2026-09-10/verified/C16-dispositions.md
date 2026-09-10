@@ -1,0 +1,7 @@
+# C16 — artifact UI proposals
+
+Coordinator verdict: skip both; no material current defect established. Worker ../workers/C16-WEB-ARTIFACTS.md. Independently reopened complete ArtifactPreview, ArtifactSurface panel state/rendering, openArtifact and current rendered sandbox test. Exact policy/source queries repeated: 4 and 3 matches respectively.
+
+F1: ARTIFACT_SANDBOX is an unused exported constant exercised by a test; the actual iframe literal has its own DOM assertion for approved allow-scripts. Current policy is correct, no production writer changes either at runtime, and no behavior escape follows. A new policy module/import/test arrangement to unify two identical values is unnecessary for this audit; deleting the unused constant/test is a minor dead-code cleanup, not a security finding. Preserve the actual DOM policy test and lazy document import; no new module recommended.
+
+F2: source-mode preference survives artifact switching while the desktop panel stays open. The worker calls this identity-invalid but establishes no requirement that display mode belongs to one artifact rather than the panel. Non-Markdown content is explicitly guarded from source transformation; the next Markdown artifact shows the current Source/Preview toggle and no content is lost or wrong artifact shown. Retained view preference can be intentional. Resetting it or adding artifactId-bearing state would impose a new UX rule, not repair a verified contract violation. Do not manufacture a defect from a boolean plus a separate selected entity.

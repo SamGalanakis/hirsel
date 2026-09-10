@@ -1,18 +1,18 @@
 use super::ToolSuite;
-use crate::storage::{MonitorRecord, MonitorWakeOn, monitor_process_info};
+use crate::storage::{MonitorCondition, MonitorRecord, monitor_process_info};
 
 impl ToolSuite {
     pub async fn monitors_create(
         &self,
+        thread_id: u64,
         cmd: String,
         every_secs: u64,
-        wake_on: MonitorWakeOn,
-        pattern: Option<String>,
+        condition: MonitorCondition,
         label: String,
     ) -> anyhow::Result<MonitorRecord> {
         let record = self
             .storage
-            .create_monitor(cmd, every_secs, wake_on, pattern, label)
+            .create_monitor(thread_id, cmd, every_secs, condition, label)
             .await?;
         self.broadcast_monitor_upsert(&record);
         Ok(record)
@@ -55,6 +55,8 @@ impl ToolSuite {
     }
 
     pub fn broadcast_monitor_upsert(&self, record: &MonitorRecord) {
-        self.broadcast_process_upsert(monitor_process_info(record));
+        self.broadcast(hirsel_proto::HostToClient::ProcessUpsert {
+            process: monitor_process_info(record),
+        });
     }
 }

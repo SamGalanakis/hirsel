@@ -12,24 +12,26 @@ use crate::observer::{ClientObserver, LifecycleEvent};
 use crate::store::{ClientSnapshot, LocalStore, PendingSend};
 use crate::transport;
 
-/// Owned send arguments. Later slices will add attachments and send mode here.
+/// Explicitly addressed Thread send arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendMessageRequest {
+pub struct SendThreadMessageRequest {
+    pub history_id: String,
     pub thread_id: u64,
     pub attachments: Vec<String>,
     pub body: String,
-    pub reply_to: Option<u64>,
     pub mentions: Vec<u64>,
+    pub artifact_ids: Vec<u64>,
 }
 
-impl SendMessageRequest {
-    pub fn new(body: String) -> Self {
+impl SendThreadMessageRequest {
+    pub fn new(history_id: String, thread_id: u64, body: String) -> Self {
         Self {
-            thread_id: 0,
+            history_id,
+            thread_id,
             attachments: Vec::new(),
             body,
-            reply_to: None,
             mentions: Vec::new(),
+            artifact_ids: Vec::new(),
         }
     }
 }
@@ -189,18 +191,22 @@ impl Client {
         }
     }
 
-    pub fn send_message(&self, request: SendMessageRequest) -> SendReceipt {
+    pub fn send_message(&self, request: SendThreadMessageRequest) -> Option<SendReceipt> {
         let client_id = Uuid::new_v4().to_string();
-        self.inner
-            .write_store()
-            .add_optimistic_send(PendingSend::new(
-                request.thread_id,
-                request.attachments,
-                client_id.clone(),
-                request.body,
-                request.reply_to,
-                request.mentions,
-            ));
+        let mut store = self.inner.write_store();
+        if store.history_id.as_deref() != Some(&request.history_id) {
+            return None;
+        }
+        store.add_optimistic_send(PendingSend::new(
+            request.history_id,
+            request.thread_id,
+            request.attachments,
+            client_id.clone(),
+            request.body,
+            request.mentions,
+            request.artifact_ids,
+        ));
+        drop(store);
         self.inner.notify_snapshot();
         if let Some(sender) = self
             .inner
@@ -211,7 +217,7 @@ impl Client {
         {
             let _ = sender.send(Command::SendPending);
         }
-        SendReceipt { client_id }
+        Some(SendReceipt { client_id })
     }
 
     pub fn retry_send(&self, client_id: String) {
@@ -251,12 +257,21 @@ impl Client {
         }
     }
 
-    pub fn create_thread(&self, title: String) -> SendReceipt {
+    pub fn create_thread(
+        &self,
+        history_id: String,
+        title: String,
+        parent_thread_id: Option<u64>,
+    ) -> Option<SendReceipt> {
         let client_id = Uuid::new_v4().to_string();
-        self.inner
-            .write_store()
+        let mut store = self.inner.write_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return None;
+        }
+        store
             .pending_creates
-            .push((client_id.clone(), title));
+            .push((client_id.clone(), history_id, title, parent_thread_id));
+        drop(store);
         if let Some(sender) = self
             .inner
             .command_tx
@@ -266,7 +281,7 @@ impl Client {
         {
             let _ = sender.send(Command::SendPending);
         }
-        SendReceipt { client_id }
+        Some(SendReceipt { client_id })
     }
 
     pub fn open_thread(&self, thread_id: u64, before_id: Option<u64>) -> SendReceipt {
@@ -283,26 +298,178 @@ impl Client {
         SendReceipt { client_id }
     }
 
+    /// Validate a saved Thread target against live native state while queueing.
+    /// UI snapshots can lag a reset; history must survive the UI/FFI boundary.
+    pub fn open_related_thread(
+        &self,
+        target: hirsel_proto::ThreadRelatedTarget,
+    ) -> Option<SendReceipt> {
+        let hirsel_proto::ThreadRelatedTarget::Thread {
+            history_id,
+            thread_id,
+        } = target
+        else {
+            return None;
+        };
+        let mut store = self.inner.write_store();
+        if store.connection != crate::ConnectionState::Online
+            || store.history_id.as_deref() != Some(&history_id)
+            || !store.threads.iter().any(|thread| thread.id == thread_id)
+        {
+            return None;
+        }
+        let client_id = Uuid::new_v4().to_string();
+        store.requests.push((client_id.clone(), thread_id));
+        self.queue_frame(ClientToHost::OpenThread {
+            client_id: client_id.clone(),
+            thread_id,
+            before_id: None,
+        });
+        drop(store);
+        Some(SendReceipt { client_id })
+    }
+
     pub fn thread_action(
         &self,
+        history_id: String,
         thread_id: u64,
         action: String,
         data: serde_json::Value,
         expected_revision: Option<u64>,
-    ) {
+    ) -> Option<SendReceipt> {
+        let store = self.inner.read_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return None;
+        }
+        let client_id = Uuid::new_v4().to_string();
         self.queue_frame(ClientToHost::ThreadAction {
+            client_id: client_id.clone(),
+            history_id,
             thread_id,
             action,
             data,
             expected_revision,
         });
+        drop(store);
+        Some(SendReceipt { client_id })
     }
 
-    pub fn cancel_turn(&self, thread_id: u64) {
-        self.queue_frame(ClientToHost::CancelTurn {
-            thread_id: Some(thread_id),
-            sc: None,
+    /// Save a typed reference in the history the caller was viewing when it chose the Thread.
+    /// Never replace this explicit history with the current connection history:
+    /// delayed actions must not address reused IDs after a host reset.
+    pub fn add_thread_related(
+        &self,
+        history_id: String,
+        thread_id: u64,
+        target: hirsel_proto::ThreadRelatedTarget,
+        title: Option<String>,
+    ) -> SendReceipt {
+        let client_id = Uuid::new_v4().to_string();
+        self.queue_frame(ClientToHost::AddThreadRelated {
+            client_id: client_id.clone(),
+            history_id,
+            thread_id,
+            target,
+            title,
         });
+        SendReceipt { client_id }
+    }
+
+    /// Remove a saved reference in the caller's explicitly addressed history.
+    pub fn remove_thread_related(
+        &self,
+        history_id: String,
+        thread_id: u64,
+        item_id: u64,
+    ) -> SendReceipt {
+        let client_id = Uuid::new_v4().to_string();
+        self.queue_frame(ClientToHost::RemoveThreadRelated {
+            client_id: client_id.clone(),
+            history_id,
+            thread_id,
+            item_id,
+        });
+        SendReceipt { client_id }
+    }
+
+    /// Queue an icon edit only for the exact history and Thread the picker saw.
+    /// Holding the store guard through enqueue pairs with Hello's store→queue
+    /// lock order, so a history replacement cannot slip between check and write.
+    pub fn update_thread_icon(
+        &self,
+        expected_history: String,
+        thread_id: u64,
+        icon: Option<String>,
+        expected_revision: u64,
+    ) -> Option<SendReceipt> {
+        self.update_thread_presentation(
+            expected_history,
+            thread_id,
+            "set_icon",
+            serde_json::json!({"icon": icon}),
+            expected_revision,
+        )
+    }
+
+    pub fn update_thread_showcase(
+        &self,
+        expected_history: String,
+        thread_id: u64,
+        artifact_id: Option<u64>,
+        expected_revision: u64,
+    ) -> Option<SendReceipt> {
+        let data = serde_json::json!({"artifact_id": artifact_id});
+        self.update_thread_presentation(
+            expected_history,
+            thread_id,
+            "set_showcase",
+            data,
+            expected_revision,
+        )
+    }
+
+    fn update_thread_presentation(
+        &self,
+        expected_history: String,
+        thread_id: u64,
+        action: &str,
+        data: serde_json::Value,
+        expected_revision: u64,
+    ) -> Option<SendReceipt> {
+        let store = self.inner.read_store();
+        if store.history_id.as_deref() != Some(expected_history.as_str())
+            || store.connection != crate::ConnectionState::Online
+            || !store
+                .threads
+                .iter()
+                .any(|thread| thread.id == thread_id && thread.revision == expected_revision)
+        {
+            return None;
+        }
+        let client_id = Uuid::new_v4().to_string();
+        self.queue_frame(ClientToHost::ThreadAction {
+            client_id: client_id.clone(),
+            history_id: expected_history,
+            thread_id,
+            action: action.into(),
+            data,
+            expected_revision: Some(expected_revision),
+        });
+        drop(store);
+        Some(SendReceipt { client_id })
+    }
+
+    pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {
+        let store = self.inner.read_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return false;
+        }
+        self.queue_frame(ClientToHost::CancelTurn {
+            history_id,
+            thread_id,
+        });
+        drop(store);
+        true
     }
 
     /// Register a push token once the WebSocket is online. Registrations made
@@ -361,14 +528,28 @@ impl Client {
 pub(crate) fn pending_to_wire(send: &PendingSend) -> ClientToHost {
     ClientToHost::SendThreadMessage {
         client_id: send.client_id.clone(),
+        history_id: send.history_id.clone(),
         thread_id: send.thread_id,
         body: send.body.clone(),
         attachments: send.attachments.clone(),
         mode: hirsel_proto::SendMode::Send,
         mentions: send.mentions.clone(),
+        artifact_ids: send.artifact_ids.clone(),
     }
 }
 
 pub(crate) fn upgrade(weak: &Weak<ClientInner>) -> Option<Arc<ClientInner>> {
     weak.upgrade()
 }
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod icon_tests;
+
+#[cfg(test)]
+#[path = "showcase_tests.rs"]
+mod showcase_tests;
+
+#[cfg(test)]
+#[path = "history_mutation_tests.rs"]
+mod history_mutation_tests;

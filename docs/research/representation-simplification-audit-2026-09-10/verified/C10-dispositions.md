@@ -1,0 +1,7 @@
+# C10 — Claude peer-shape proposals
+
+Coordinator verdict: skip both; latent robustness with unproven semantics/materiality. Worker ../workers/C10-CLAUDE-DRIVER.md. Independently reopened Claude handle receipt correlation, ClaudeOutput init/assistant/user/result/rate-limit classification, check_session and preflight catalog validation. Exact consumer queries repeated: 8, 6 and 18 matches.
+
+F1: two interpreters of raw events exist, but receipt correlation checks a fresh exact request UUID plus request kind and root parent. Bootstrap user echo legitimately precedes init. The proposed foreign follow-up UUID/tool-result examples are fabricated provider output; no owned fixture or live/source producer demonstrates them. The worker also does not establish that rate-limit events carry session identity, so blanket session-bound variants could reject valid sessionless events. A phase/parser rewrite is unsupported without that contract and a real misrouting witness. No new protocol model recommended.
+
+F2: preflight rejects duplicate full tool definitions; provider init checks the set of advertised names. These are related but not identical validation responsibilities. Duplicate advertised names do not introduce a foreign tool or ambiguous bridge implementation after preflight has already verified unique actual definitions. The normal fixture cannot produce the duplicate and no concrete effect beyond repeated names was established. Treat as optional malformed-provider strictness rather than material layer-drift bug or a new ticket.

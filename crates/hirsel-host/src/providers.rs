@@ -25,7 +25,7 @@ use hirsel_proto::{
 use crate::{
     boot_provider::BootProvider,
     config::ProviderMode,
-    host_config::{ConfigStore, EnvBootstrap, StoredProvider},
+    host_config::{ConfigStore, EnvBootstrap, StoredProvider, non_empty},
     model_selection, provider_detect,
 };
 
@@ -405,14 +405,6 @@ fn built_in_or_unknown(id: &str, verb: &str) -> anyhow::Error {
     }
 }
 
-fn non_empty<'a>(value: &'a str, field: &str) -> anyhow::Result<&'a str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("provider {field} must not be empty"));
-    }
-    Ok(trimmed)
-}
-
 /// Instance ids are `[a-z0-9][a-z0-9_-]{0,31}`, and `codex`/`claude` are the
 /// host's own. A rejected id says exactly what is allowed.
 fn validate_id(id: &str) -> anyhow::Result<()> {
@@ -447,7 +439,6 @@ mod tests {
     async fn roster(dir: &tempfile::TempDir, booted: ProviderMode) -> ProviderRosterState {
         let store = ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
             &EnvBootstrap::default(),
         )
@@ -656,7 +647,7 @@ mod tests {
             main.iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.6-sol"]
+            ["gpt-5.6-sol", "gpt-6-astra"]
         );
         assert_eq!(
             fork.iter()

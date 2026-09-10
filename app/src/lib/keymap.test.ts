@@ -1,9 +1,9 @@
 import { flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { escapeField, installGlobalKeymap, isEditableTarget, type KeymapHandlers } from "./keymap";
+import { installGlobalKeymap, isEditableTarget, type KeymapHandlers } from "./keymap";
 import { setThreadState, threadState } from "../threads/store";
-const clearTaskFocus = () => flush(() => setThreadState(draft => { draft["focusedId"] = 0; }));
-const toggleTaskFocus = (id: number) => flush(() => setThreadState(draft => { draft["focusedId"] = id; }));
+
+const selectThread = (id: number) => flush(() => setThreadState(draft => { draft["focusedId"] = id; }));
 
 // Routing-level unit tests: the overlay registry is stubbed so the suppression
 // check is drivable from a flag. `src/lib/overlay-presence.test.tsx` covers the
@@ -22,7 +22,6 @@ function makeHandlers(): KeymapHandlers {
     jumpToLatest: vi.fn(),
     openPalette: vi.fn(),
     showHelp: vi.fn(),
-    escapeField: vi.fn(() => true),
   };
 }
 
@@ -105,19 +104,11 @@ describe("keymap", () => {
     expect(handlers.showHelp).not.toHaveBeenCalled();
   });
 
-  it("routes Esc to the ladder even while the caret is in a field", () => {
-    const input = document.createElement("input");
-    document.body.appendChild(input);
-    const ev = press("Escape", {}, input);
-    expect(handlers.escapeField).toHaveBeenCalledTimes(1);
-    expect(ev.defaultPrevented).toBe(true);
-    input.remove();
-  });
-
-  it("leaves Esc alone when the ladder declines it", () => {
-    (handlers.escapeField as ReturnType<typeof vi.fn>).mockReturnValue(false);
-    const ev = press("Escape");
-    expect(ev.defaultPrevented).toBe(false);
+  it("leaves Escape to the active control without changing the recipient", () => {
+    selectThread(7);
+    const input = document.createElement("input"); document.body.appendChild(input);
+    expect(press("Escape", {}, input).defaultPrevented).toBe(false);
+    expect(threadState.focusedId).toBe(7); input.remove();
   });
 
   it("prevents default on handled keys", () => {
@@ -131,42 +122,5 @@ describe("keymap", () => {
     expect(isEditableTarget(input)).toBe(true);
     expect(isEditableTarget(div)).toBe(false);
     expect(isEditableTarget(null)).toBe(false);
-  });
-});
-
-describe("Esc ladder", () => {
-  const idle = () => flush(() => setThreadState(draft => { draft["histories"] = {}; }));
-  const thinking = () => flush(() => setThreadState(draft => { draft["histories"][7] = { messages: [], activities: [], loaded: true, hasMore: false, turns: [{ id: 1, thread_id: 7, state: "running", owner_message_id: null, agent_message_id: null, started_at: "2026-09-09T10:00:00Z", finished_at: null }] }; }));
-
-  beforeEach(() => {
-    overlayRef.open = false;
-    flush(() => clearTaskFocus());
-    idle();
-  });
-
-  it("clears task focus when nothing above it owns Esc", () => {
-    flush(() => toggleTaskFocus(7));
-    const handled = escapeField();
-    flush();
-    expect(handled).toBe(true);
-    expect(threadState.focusedId).toBe(0);
-  });
-
-  it("yields to a running turn so Esc stops it instead of leaving the task", () => {
-    flush(() => toggleTaskFocus(7));
-    thinking();
-    expect(escapeField()).toBe(false);
-    expect(threadState.focusedId).toBe(7);
-  });
-
-  it("yields to an open overlay's focus trap", () => {
-    flush(() => toggleTaskFocus(7));
-    overlayRef.open = true;
-    expect(escapeField()).toBe(false);
-    expect(threadState.focusedId).toBe(7);
-  });
-
-  it("does nothing in the ambient field", () => {
-    expect(escapeField()).toBe(false);
   });
 });

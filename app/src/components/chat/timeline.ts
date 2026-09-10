@@ -1,7 +1,7 @@
 // Pure fold from the running turn's ordered `turn_event`s (v1.5) into rendered
 // timeline items. Kept free of any Solid/DOM concerns so it can be unit tested
-// directly (see timeline.test.tsx) and reused by both the live timeline under
-// the thinking marker and the committed-turn "turn details" view.
+// directly (see timeline.test.tsx) and reused by both live and committed inline
+// turn activity.
 import type { TimelineEvent } from "../../store/types";
 
 /** Where a started step (a tool call, an Agent program cell) has got to. A step
@@ -13,7 +13,9 @@ export type StepStatus =
   | {
       state: "done";
       ok: boolean;
+      summary: string | null;
       result: string | null;
+      resultTruncated: boolean;
       /** Wall time between the start and done arrivals; null when either
        * endpoint carried no client timestamp (hand-built or replayed events). */
       durationMs: number | null;
@@ -31,6 +33,8 @@ export type TimelineItem =
       toolId: string;
       name: string;
       summary: string | null;
+      input: string | null;
+      inputTruncated: boolean;
       status: StepStatus;
     }
   | {
@@ -137,14 +141,16 @@ function stepPairing(items: TimelineItem[]) {
     done(
       id: string,
       at: number | undefined,
-      outcome: { ok: boolean; result: string | null },
+      outcome: { ok: boolean; summary: string | null; result: string | null; resultTruncated: boolean },
       orphan: () => StepItem,
     ): void {
       const from = startedAt.get(id);
       const status: StepStatus = {
         state: "done",
         ok: outcome.ok,
+        summary: outcome.summary,
         result: outcome.result,
+        resultTruncated: outcome.resultTruncated,
         durationMs: at !== undefined && from !== undefined ? at - from : null,
       };
       const idx = indexById.get(id);
@@ -184,6 +190,8 @@ export function buildTimeline(events: TimelineEvent[], showCode = false): Timeli
           toolId: event.id,
           name: event.name,
           summary: event.summary,
+          input: event.input?.text ?? null,
+          inputTruncated: event.input?.truncated ?? false,
           status: { state: "running" },
         });
         break;
@@ -191,12 +199,19 @@ export function buildTimeline(events: TimelineEvent[], showCode = false): Timeli
       case "tool_done": {
         // An orphan done is labelled from its own `name` — the start carried
         // the summary, so there is none to show.
-        tools.done(event.id, at, { ok: event.ok, result: event.summary }, () => ({
+        tools.done(event.id, at, {
+          ok: event.ok,
+          summary: event.summary,
+          result: event.result?.text ?? null,
+          resultTruncated: event.result?.truncated ?? false,
+        }, () => ({
           kind: "tool",
           key: `tool-${event.id}`,
           toolId: event.id,
           name: event.name,
           summary: null,
+          input: null,
+          inputTruncated: false,
           status: { state: "running" },
         }));
         break;
@@ -218,7 +233,7 @@ export function buildTimeline(events: TimelineEvent[], showCode = false): Timeli
         if (!showCode) break;
         // An orphan done has no source to show, only the cell's outcome — which
         // still beats dropping it silently.
-        code.done(event.id, at, { ok: event.ok, result: event.summary }, () => ({
+        code.done(event.id, at, { ok: event.ok, summary: event.summary, result: event.summary, resultTruncated: false }, () => ({
           kind: "code",
           key: `code-${event.id}`,
           codeId: event.id,

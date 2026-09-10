@@ -8,7 +8,7 @@
 //! API keys live in this file's TOML and stop there. Nothing here logs a stored
 //! value: a malformed entry is reported by instance id and reason only.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use toml_edit::{DocumentMut, Item, value};
 
 use super::{ConfigStore, ensure_child_table, ensure_table};
@@ -52,6 +52,40 @@ const SEED_PROVIDER_ID: &str = "openrouter";
 const SEED_PROVIDER_LABEL: &str = "OpenRouter";
 const SEED_PROVIDER_DEFAULT_MODEL: &str = "google/gemini-3.7-flash";
 
+pub(crate) fn non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("provider {field} must not be empty"));
+    }
+    Ok(trimmed)
+}
+
+fn required_field<'a>(
+    provider: &str,
+    section: &'a toml_edit::Table,
+    field: &'static str,
+) -> Option<&'a str> {
+    let Some(value) = section.get(field).and_then(Item::as_str) else {
+        tracing::warn!(
+            provider,
+            field,
+            "provider entry has an invalid required field; ignoring it"
+        );
+        return None;
+    };
+    match non_empty(value, field) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            tracing::warn!(
+                provider,
+                field,
+                "provider entry has an invalid required field; ignoring it"
+            );
+            None
+        }
+    }
+}
+
 impl ConfigStore {
     /// Every OpenAI-compatible instance the `[providers]` table holds, in file
     /// order. A malformed entry is skipped with a warning naming the instance
@@ -82,8 +116,10 @@ impl ConfigStore {
                 );
                 continue;
             }
-            let Some(base_url) = section.get("base_url").and_then(Item::as_str) else {
-                tracing::warn!(provider = id, "provider entry has no base_url; ignoring it");
+            let Some(base_url) = required_field(id, section, "base_url") else {
+                continue;
+            };
+            let Some(default_model) = required_field(id, section, "default_model") else {
                 continue;
             };
             providers.push(StoredProvider {
@@ -99,11 +135,7 @@ impl ConfigStore {
                     .and_then(Item::as_str)
                     .filter(|key| !key.is_empty())
                     .map(str::to_string),
-                default_model: section
-                    .get("default_model")
-                    .and_then(Item::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                default_model: default_model.to_string(),
             });
         }
         providers
@@ -261,14 +293,9 @@ mod tests {
             model: None,
             openrouter_api_key: Some("sk-first-key".to_string()),
         };
-        let store = ConfigStore::load(
-            path.clone(),
-            dir.path(),
-            Path::new("/docs/config.md"),
-            &first,
-        )
-        .await
-        .unwrap();
+        let store = ConfigStore::load(path.clone(), Path::new("/docs/config.md"), &first)
+            .await
+            .unwrap();
         let seeded = store.providers();
         assert_eq!(seeded.len(), 1);
         assert_eq!(seeded[0].id, "openrouter");
@@ -288,14 +315,9 @@ mod tests {
             model: None,
             openrouter_api_key: Some("sk-second-key".to_string()),
         };
-        let reloaded = ConfigStore::load(
-            path.clone(),
-            dir.path(),
-            Path::new("/docs/config.md"),
-            &second,
-        )
-        .await
-        .unwrap();
+        let reloaded = ConfigStore::load(path.clone(), Path::new("/docs/config.md"), &second)
+            .await
+            .unwrap();
         assert_eq!(
             reloaded.providers()[0].api_key.as_deref(),
             Some("sk-first-key")
@@ -309,7 +331,6 @@ mod tests {
         let codex = tempfile::tempdir().unwrap();
         let store = ConfigStore::load(
             codex.path().join("hirsel.toml"),
-            codex.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap {
                 provider: Some("codex".to_string()),
@@ -333,7 +354,6 @@ mod tests {
         let openrouter = tempfile::tempdir().unwrap();
         let store = ConfigStore::load(
             openrouter.path().join("hirsel.toml"),
-            openrouter.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap {
                 provider: Some("openrouter".to_string()),
@@ -358,7 +378,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap::default(),
         )
@@ -382,7 +401,6 @@ mod tests {
         .unwrap();
         let store = ConfigStore::load(
             path,
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap {
                 provider: Some("codex".to_string()),
@@ -402,7 +420,6 @@ mod tests {
         let path = dir.path().join("hirsel.toml");
         let store = ConfigStore::load(
             path.clone(),
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap::default(),
         )
@@ -431,5 +448,89 @@ mod tests {
 
         store.remove_provider("router").await.unwrap();
         assert!(!store.providers().iter().any(|p| p.id == "router"));
+    }
+
+    #[tokio::test]
+    async fn raw_provider_entries_require_nonempty_base_url_and_default_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hirsel.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.missing_base_url]
+kind = "openai_compatible"
+default_model = "missing/base"
+
+[providers.empty_base_url]
+kind = "openai_compatible"
+base_url = ""
+default_model = "empty/base"
+
+[providers.whitespace_base_url]
+kind = "openai_compatible"
+base_url = " \t "
+default_model = "whitespace/base"
+
+[providers.missing_default_model]
+kind = "openai_compatible"
+base_url = "https://missing-model.invalid/v1"
+
+[providers.empty_default_model]
+kind = "openai_compatible"
+base_url = "https://empty-model.invalid/v1"
+default_model = ""
+
+[providers.whitespace_default_model]
+kind = "openai_compatible"
+base_url = "https://whitespace-model.invalid/v1"
+default_model = " \t "
+
+[providers.valid]
+kind = "openai_compatible"
+base_url = "  https://example.invalid/v1?tenant=acme  "
+api_key = ""
+default_model = "  valid/model  "
+
+[model]
+provider = "missing_base_url"
+id = "missing/base"
+variant = "default"
+"#,
+        )
+        .unwrap();
+
+        let store = ConfigStore::load(path, Path::new("/docs/config.md"), &EnvBootstrap::default())
+            .await
+            .unwrap();
+        let providers = store.providers();
+        assert_eq!(
+            providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            ["valid"]
+        );
+        let valid = &providers[0];
+        assert_eq!(valid.label, "valid");
+        assert_eq!(valid.base_url, "https://example.invalid/v1?tenant=acme");
+        assert_eq!(valid.default_model, "valid/model");
+        assert_eq!(valid.api_key, None);
+
+        let boot = crate::boot_provider::resolve(
+            &store,
+            crate::config::ProviderMode::Codex,
+            Some(dir.path()),
+        )
+        .await;
+        assert_eq!(boot.id.as_deref(), Some("codex"));
+        assert_eq!(
+            boot.plan,
+            crate::boot_provider::BootPlan::Env(crate::config::ProviderMode::Codex)
+        );
+        let notice = boot
+            .notice
+            .expect("invalid configured provider must fall back");
+        assert!(notice.contains("missing_base_url"), "{notice}");
+        assert!(notice.contains("not in the provider roster"), "{notice}");
     }
 }

@@ -16,6 +16,20 @@ pub struct TurnEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadTurnTimeline {
+    pub turn_id: u64,
+    pub events: Vec<TurnEvent>,
+}
+
+/// A bounded verbatim JSON payload for an expandable timeline row. `truncated`
+/// is explicit so a client never presents clipped content as complete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnEventPayload {
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 #[serde(rename_all = "snake_case")]
 pub enum TurnEventKind {
@@ -30,12 +44,14 @@ pub enum TurnEventKind {
         id: String,
         name: String,
         summary: Option<String>,
+        input: Option<TurnEventPayload>,
     },
     ToolDone {
         id: String,
         name: String,
         ok: bool,
         summary: Option<String>,
+        result: Option<TurnEventPayload>,
     },
     /// The Agent's own program for one cell, verbatim. Unlike tool summaries
     /// this carries the FULL source (clients render it as code, not a

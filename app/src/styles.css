@@ -56,7 +56,7 @@
   --status-idle: oklch(0.55 0 0);
   --status-success: oklch(0.52 0.17 149);
   --status-danger: var(--destructive);
-  --status-attention: oklch(0.56 0.15 73);
+  --status-attention: oklch(0.53 0.14 73);
 
   /* The one raised-control elevation (selected segment). A token rather than a
      hardcoded rgb() so the lift is honest on BOTH canvases: an ink shadow on
@@ -127,17 +127,20 @@
   color-scheme: dark;
 }
 
-/* Named layout breakpoints (desktop-shell). Two thresholds, mobile-first, so
+/* Named layout breakpoints (desktop-shell). Three thresholds, mobile-first, so
    the codebase has one breakpoint vocabulary instead of scattered `min-[Npx]:`
    literals:
      `split` — two-pane capable: a utility region may appear;
      `rail`  — desktop: the persistent 3-pane shell (task rail ∣ field ∣ utility)
-               engages.
+               engages;
+     `workspace` — the Thread inventory, readable conversation and an artifact
+                   preview all fit side by side without covering each other.
    Layout keys off width only (these); pointer/keyboard behaviour stays on the
    single `(pointer: coarse)` probe in useTextInput. */
 @theme {
   --breakpoint-split: 900px;
   --breakpoint-rail: 1100px;
+  --breakpoint-workspace: 1280px;
 
   /* The task world's one horizontal rhythm. There is exactly ONE column width —
      the reading measure — and everything that stands in the task world holds it:

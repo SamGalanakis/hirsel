@@ -11,7 +11,7 @@ import { PaneHeader } from "../ui/PaneHeader";
 import { ProcessesView } from "./ProcessesView";
 
 // The Processes surface as one of the exclusive right-region panes (v2.3).
-// Below `rail` it is a full-screen `fixed` sheet over the task world (a true modal —
+// Below `rail` it is a full-screen `fixed` sheet over the Thread workspace (a true modal —
 // Tab is trapped, `aria-modal` honest); at/above `rail` it is an in-flow
 // `<aside>` docked at the right edge of the frame, sharing the utility width
 // token and h-14 header datum, never covering the standing conversation. Only mounted while it
@@ -57,8 +57,8 @@ function ProcessesPanel() {
         motion-safe:rail:slide-in-from-bottom-0 motion-safe:rail:slide-in-from-right-2 motion-safe:rail:duration-150"
     >
       {/* ONE header at both widths: the shared PaneHeader. There is no phone
-          `‹ Tasks` back chevron — hirsel has no navigation stack, and this pane
-          is summoned over the standing task world, so the only honest exit is a
+          `‹ Threads` back chevron — hirsel has no navigation stack, and this pane
+          is summoned over the standing Thread workspace, so the only honest exit is a
           trailing × that dismisses it. */}
       <PaneHeader
         icon={<Activity class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}

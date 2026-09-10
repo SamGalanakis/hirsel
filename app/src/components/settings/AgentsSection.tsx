@@ -1,8 +1,3 @@
-// Settings → Agents: the two resident agents (ADR-0015) and the catalog the
-// main Agent may spawn Sub-agents from. Main agent first — the one
-// interlocutor — then the ephemeral fork, then the Sub-agent models. Every
-// control is host-backed: it reflects a broadcast snapshot and settles from the
-// next one, never from an optimistic local write.
 import { ChevronDown } from "@/components/ui/icons";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { type JSX } from "@solidjs/web";
@@ -292,10 +287,10 @@ function SubagentModels() {
 
   return (
     <Show when={catalog()}>
-      <SubHeading>Sub-agents</SubHeading>
+      <SubHeading>Delegation models</SubHeading>
       <p class="mb-2 text-xs leading-snug text-muted-foreground">
-        Choose which models and reasoning levels an Agent may use for Sub-agents. Claude is
-        available to Sub-agents only — it never runs the main Agent or the fork.
+        Choose models and reasoning levels for focused child Threads. Claude and Codex run
+        delegated work in the child conversation; its progress and results return to its parent.
       </p>
       <div class="flex flex-col gap-3">
         <For each={catalog()?.providers ?? []}>

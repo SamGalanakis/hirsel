@@ -1,0 +1,11 @@
+# F07 — persisted absolute blob location breaks data-directory relocation
+
+Recommend, medium priority/high confidence; owner C04, worker F2 ../workers/C04-BLOBS.md. Fixed snapshot 3ee0621. Independently reopened Storage::open, blob create/read/orphan paths and row conversion, current.sql blobs, durable request serialization, OwnerTurn attachments, runtime image reads/prompt paths and HTTP route reads.
+
+A concrete operator transition creates the mismatch without invalid writes: create a store under /old, copy the entire stopped data directory (SQLite and blobs) to /new, then open /new and remove/unmount /old. Storage::open selects /new/blobs, but valid blob rows and queued request snapshots still contain /old/blobs/<uuid>. Attachment GET/runtime reads fail despite the file existing in the new canonical directory, and orphan diagnostics misclassify the copied files. Normal upload writes remain atomic and coherent. Arbitrary externally corrupted paths are not the reason to promote this finding.
+
+Target: SQLite stores immutable Blob metadata/id, not absolute path; durable OwnerTurn stores the existing Blob metadata snapshot, not StoredBlob/PathBuf. Resolve id under current Storage.blobs_dir at the actual read boundary; keep any resolved path host-only and nonserialized. Orphan checks compare canonical current-root paths/IDs. Preserve accepted attachment metadata and agent-visible current paths. Avoid a second persistent relative-path field or generalized storage abstraction.
+
+This is a real operational representation failure with a broader clean-schema/durable-payload cutover cost. Parent must coordinate strict current.sql/catalog and request serialization changes together; no compatibility shim/migration. Validate copied-directory reopen with route read and queued-image execution, same-root reopen, missing attachment errors, orphan detection, duplicate upload cleanup and history reset. Audit ran no tests or copies of real data. Scope storage/current.sql, blobs.rs, thread_messages.rs, runtime OwnerTurn/input/text consumers and blob_route.rs plus meaningful fixtures. Fresh materiality review must weigh this bounded portability benefit against cutover risk.
+
+Exact worker production-consumer query rerun independently: 6 matches; storage row/writer/orphan queries inspected separately.

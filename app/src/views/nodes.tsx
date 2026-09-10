@@ -1,5 +1,5 @@
 // The node vocabulary shared by the two JSON-UI renderers: ViewRenderer.tsx
-// (generative-UI tier, templates/CATALOG.md) and EventCardRenderer.tsx
+// (generative-UI tier, templates/CATALOG.md) and ThreadInstrument.tsx
 // (constrained event-card tier, ADR-0013). Both draw `text`, `divider`,
 // `keyValue`, `badge` and `status` under the same safety contract — text only
 // (no HTML injection), unknown types degrade to a quiet placeholder, every tone

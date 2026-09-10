@@ -1,38 +1,11 @@
-//! The fork's context pack.
-//!
-//! A triage fork never sees the main Agent's transcript. It sees exactly four
-//! things, and this module is the single authority on what they are:
-//!
-//! 1. **The triggering message, verbatim.** Whatever woke the host — a
-//!    Sub-agent terminal line, a monitor's wake text, an external
-//!    notification — reproduced without paraphrase. Triage that reads a
-//!    summary of the thing it is triaging is triage of the summary.
-//! 2. **The live event/task inventory.** Just enough per row to recognise
-//!    "already known / already handled": id, kind, name, one-line description,
-//!    status. Never the UI payload, never archived rows.
-//! 3. **A short conversation tail.** The last few Owner/Agent messages, each
-//!    truncated to one line, so the fork can tell "the Owner already knows"
-//!    from "this is new". Not a transcript, and never enough to be one.
-//! 4. **Recorded rules.** The taste-store decisions
-//!    (`docs/product-direction.md` §11) so a ruled decision auto-resolves at
-//!    the triage layer instead of paging the main Agent again.
-//!
-//! Everything here is a pure function over owned snapshots: the builder takes
-//! data, returns a string, and touches no storage, clock, or session. That is
-//! deliberate — the pack is the product of this feature, so it has to be
-//! assertable in a unit test without a provider or a lash session.
-
+//! Restricted triage context: triggering fact, current Threads, and a bounded conversation tail.
 use hirsel_proto::{ChatAuthor, ChatMessage, Thread};
-
-use crate::storage::TasteDecision;
 
 /// How many live events the pack lists. Beyond this the inventory stops being
 /// a recognition aid and starts being a context dump.
-pub(crate) const PACK_EVENT_LIMIT: usize = 20;
+pub(crate) const PACK_THREAD_LIMIT: usize = 20;
 /// How many recent chat messages the pack carries.
 pub(crate) const PACK_CHAT_LIMIT: usize = 10;
-/// How many recorded rules the pack carries.
-pub(crate) const PACK_RULE_LIMIT: usize = 20;
 /// Per-line truncation for anything quoted out of chat or an event.
 const PACK_LINE_CHARS: usize = 240;
 /// The triggering message is the one thing that is never summarised, but it is
@@ -44,7 +17,6 @@ const TRIGGER_CHARS: usize = 8 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakeSource {
     /// A Sub-agent reached a terminal state.
-    Subagent { process_id: String },
     /// A monitor's probe fired its wake condition.
     Monitor { monitor_id: String, label: String },
     /// Anything else the host routed in (debug injection, external notifier).
@@ -54,7 +26,6 @@ pub enum WakeSource {
 impl WakeSource {
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Subagent { process_id } => format!("sub-agent {process_id}"),
             Self::Monitor { monitor_id, label } => format!("monitor {label} ({monitor_id})"),
             Self::External { origin } => format!("external {origin}"),
         }
@@ -63,7 +34,6 @@ impl WakeSource {
     /// A stable prefix for log fields and enqueue source keys.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
-            Self::Subagent { .. } => "subagent",
             Self::Monitor { .. } => "monitor",
             Self::External { .. } => "external",
         }
@@ -74,6 +44,7 @@ impl WakeSource {
 /// this type (ADR-0015 ruling 1 — no batching, no debouncing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeMessage {
+    pub thread_id: u64,
     pub source: WakeSource,
     /// The triggering text, verbatim.
     pub text: String,
@@ -83,8 +54,14 @@ pub struct WakeMessage {
 }
 
 impl WakeMessage {
-    pub fn new(source: WakeSource, text: impl Into<String>, key: impl Into<String>) -> Self {
+    pub fn new(
+        thread_id: u64,
+        source: WakeSource,
+        text: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
         Self {
+            thread_id,
             source,
             text: text.into(),
             key: key.into(),
@@ -98,7 +75,6 @@ impl WakeMessage {
 pub struct PackContext {
     pub threads: Vec<Thread>,
     pub recent_chat: Vec<ChatMessage>,
-    pub rules: Vec<TasteDecision>,
 }
 
 /// Render the fork's context pack. Pure: same inputs, same string.
@@ -115,7 +91,7 @@ pub fn build_pack(message: &WakeMessage, context: &PackContext) -> String {
     let threads = context
         .threads
         .iter()
-        .take(PACK_EVENT_LIMIT)
+        .take(PACK_THREAD_LIMIT)
         .collect::<Vec<_>>();
     if threads.is_empty() {
         pack.push_str("(none open)\n");
@@ -151,25 +127,6 @@ pub fn build_pack(message: &WakeMessage, context: &PackContext) -> String {
                 message.thread_id,
                 author_name(message.author),
                 truncate(&one_line(&message.body), PACK_LINE_CHARS),
-            ));
-        }
-    }
-
-    pack.push_str("\n## Recorded rules\n\n");
-    let rules = context
-        .rules
-        .iter()
-        .rev()
-        .take(PACK_RULE_LIMIT)
-        .collect::<Vec<_>>();
-    if rules.is_empty() {
-        pack.push_str("(none)\n");
-    } else {
-        for rule in rules.into_iter().rev() {
-            pack.push_str(&format!(
-                "- (from event #{}) {}\n",
-                rule.event_id,
-                truncate(&one_line(&rule.rule), PACK_LINE_CHARS),
             ));
         }
     }

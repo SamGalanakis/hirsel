@@ -19,6 +19,24 @@ describe("artifact references", () => {
     expect(store.artifactState.listing).toBe(false); expect(store.artifactState.listed).toBe(true);
     expect(store.artifactState.listError).toBeNull(); store.disconnectArtifacts();
   });
+  it("shows a recoverable preview error if the connection drops during an open", async () => {
+    const store = await import("./store");
+    const frames: ArtifactClientMessage[] = [];
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.openArtifact(9); flush();
+    store.disconnectArtifacts(); flush();
+    expect(store.artifactState.loading).toBe(false);
+    expect(store.artifactState.opened).toBeNull();
+    expect(store.artifactState.error).toMatch(/Reconnect/);
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[0].client_id, artifact: { ...row, content: "late" } }); flush();
+    expect(store.artifactState.opened).toBeNull();
+    store.attachArtifactTransport(frame => frames.push(frame));
+    store.openArtifact(9);
+    store.handleArtifactMessage({ type: "artifact_opened", client_id: frames.at(-1)!.client_id, artifact: { ...row, content: "retried" } }); flush();
+    expect(store.artifactState.opened?.content).toBe("retried");
+    expect(store.artifactState.error).toBeNull();
+    store.disconnectArtifacts();
+  });
   it("uses global IDs and follows latest edit while preserving selection", async () => {
     const store = await import("./store");
     const frames: ArtifactClientMessage[] = [];

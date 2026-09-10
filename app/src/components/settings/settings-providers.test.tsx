@@ -1,6 +1,7 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderRoster } from "../../protocol";
+import { PENDING_MS } from "../../lib/pending";
 
 const memStore = new Map<string, string>();
 const memLocalStorage: Storage = {
@@ -78,20 +79,14 @@ beforeEach(() => {
   }));
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 async function mount(roster: ProviderRoster | null = ROSTER) {
   const store = await import("../../store/store");
-  store.dispatch({
-    type: "hello_ok",
-    payload: {
-      type: "hello_ok",
-      latest_msg_id: 0,
-      messages: [],
-      pings: [],
-      providers: roster ?? undefined,
-    },
-  });
+  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", providers: roster, history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null } });
   store.openSettings("providers");
   const { SettingsSheet } = await import("./SettingsSheet");
   return { store, ...render(() => <SettingsSheet />) };
@@ -219,6 +214,89 @@ describe("Settings → Providers: the roster", () => {
     fireEvent.click(getByText("Save"));
     store.dispatch({ type: "providers_changed", roster: ROSTER });
     await waitFor(() => expect(queryByLabelText("API key")).toBeNull());
+  });
+
+  it("keeps a rejected edit draft through a later unrelated roster refresh", async () => {
+    const { store, getByLabelText, getByText } = await mount();
+    fireEvent.click(getByLabelText("Edit OpenRouter"));
+    fireEvent.input(getByLabelText("Label"), { target: { value: "Rejected edit" } });
+    fireEvent.click(getByText("Save"));
+
+    store.setProtocolError("provider rejected");
+    await waitFor(() => expect(getByLabelText("Label")).not.toBeDisabled());
+    fireEvent.input(getByLabelText("Label"), { target: { value: "Continued edit draft" } });
+
+    store.dispatch({ type: "providers_changed", roster: ROSTER });
+    await waitFor(() => expect(getByLabelText("Label")).toHaveValue("Continued edit draft"));
+  });
+
+  it("keeps a rejected Add draft through a later unrelated roster refresh", async () => {
+    const { store, getByLabelText, getByRole } = await mount();
+    fireEvent.click(getByRole("button", { name: "Add provider" }));
+    fireEvent.input(getByLabelText("Provider id"), { target: { value: "local-llama" } });
+    fireEvent.input(getByLabelText("Provider label"), { target: { value: "Local" } });
+    fireEvent.input(getByLabelText("Provider base URL"), {
+      target: { value: "http://localhost:8080/v1" },
+    });
+    fireEvent.input(getByLabelText("Provider default model"), {
+      target: { value: "qwen3-max" },
+    });
+    fireEvent.click(getByRole("button", { name: "Add provider" }));
+
+    store.setProtocolError("provider rejected");
+    await waitFor(() => expect(getByLabelText("Provider label")).not.toBeDisabled());
+    fireEvent.input(getByLabelText("Provider label"), { target: { value: "Continued local" } });
+
+    store.dispatch({ type: "providers_changed", roster: ROSTER });
+    await waitFor(() => expect(getByLabelText("Provider label")).toHaveValue("Continued local"));
+  });
+
+  it("keeps a timed-out edit draft through a later unrelated roster refresh", async () => {
+    vi.useFakeTimers();
+    const { store, getByLabelText, getByText } = await mount();
+    fireEvent.click(getByLabelText("Edit OpenRouter"));
+    fireEvent.input(getByLabelText("Label"), { target: { value: "Timed-out edit" } });
+    fireEvent.click(getByText("Save"));
+
+    vi.advanceTimersByTime(PENDING_MS);
+    await waitFor(() => expect(getByLabelText("Label")).not.toBeDisabled());
+    fireEvent.input(getByLabelText("Label"), { target: { value: "Continued timed-out edit" } });
+
+    store.dispatch({ type: "providers_changed", roster: ROSTER });
+    await waitFor(() =>
+      expect(getByLabelText("Label")).toHaveValue("Continued timed-out edit"),
+    );
+  });
+
+  it("keeps a timed-out Add draft through a later unrelated roster refresh", async () => {
+    vi.useFakeTimers();
+    const { store, getByLabelText, getByRole } = await mount();
+    fireEvent.click(getByRole("button", { name: "Add provider" }));
+    fireEvent.input(getByLabelText("Provider id"), { target: { value: "local-llama" } });
+    fireEvent.input(getByLabelText("Provider label"), { target: { value: "Local" } });
+    fireEvent.input(getByLabelText("Provider base URL"), {
+      target: { value: "http://localhost:8080/v1" },
+    });
+    fireEvent.input(getByLabelText("Provider default model"), {
+      target: { value: "qwen3-max" },
+    });
+    fireEvent.click(getByRole("button", { name: "Add provider" }));
+
+    vi.advanceTimersByTime(PENDING_MS);
+    await waitFor(() => expect(getByLabelText("Provider label")).not.toBeDisabled());
+    fireEvent.input(getByLabelText("Provider label"), { target: { value: "Continued local" } });
+
+    store.dispatch({ type: "providers_changed", roster: ROSTER });
+    await waitFor(() => expect(getByLabelText("Provider label")).toHaveValue("Continued local"));
+  });
+
+  it("preserves an unsent edit draft on a passive roster refresh", async () => {
+    const { store, getByLabelText } = await mount();
+    fireEvent.click(getByLabelText("Edit OpenRouter"));
+    fireEvent.input(getByLabelText("Label"), { target: { value: "Unsent local draft" } });
+
+    store.dispatch({ type: "providers_changed", roster: ROSTER });
+    await waitFor(() => expect(getByLabelText("Label")).toHaveValue("Unsent local draft"));
   });
 
   it("reads the OAuth providers' detection, and offers only a re-probe", async () => {

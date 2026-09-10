@@ -29,26 +29,19 @@ import { SettingsTabs, settingsPanelId, settingsTabId } from "./SettingsTabs";
 import {
   computeFingerprint,
   copyText,
-  DEBUG_KEY,
   DEVICE_LABEL_KEY,
   PHASE_WORD,
   readLocal,
 } from "./prefs";
 
-/** The one centred column Settings reads in: the task world's own reading
- * measure plus a gutter each side (`--container-frame`). Settings is a deep,
- * form-shaped visit — grouped rows, a device fingerprint, monospace prompt
- * editors — and the 340–440px inspector rail it used to dock in wrapped every
- * one of them. It does NOT get a bespoke width: the app has exactly one
- * horizontal rhythm and a full-viewport utility centres on it like everything
- * else. */
-const SETTINGS_COLUMN = "mx-auto w-full max-w-frame px-gutter";
+/** Settings has room for both its section navigation and a readable form.
+ * Keep this utility measure independent of the conversation's narrower column. */
+const SETTINGS_COLUMN = "mx-auto w-full max-w-5xl px-gutter";
 
 function SettingsPanel() {
   const endpoint = resolveWsUrl();
 
   const [deviceLabel, setDeviceLabel] = createSignal(readLocal(DEVICE_LABEL_KEY));
-  const [debug, setDebug] = createSignal(readLocal(DEBUG_KEY) === "1");
   const [fingerprint, setFingerprint] = createSignal("…");
   const [confirmForget, setConfirmForget] = createSignal(false);
   // The landing tab is chosen once, on open: `openSettings("providers")` lands
@@ -57,6 +50,7 @@ function SettingsPanel() {
   const [tab, setTab] = createSignal<SettingsTab>(state.settingsTab ?? "appearance");
 
   let panelRef: HTMLDivElement | undefined;
+  let scrollRef: HTMLDivElement | undefined;
 
   createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
@@ -66,10 +60,10 @@ function SettingsPanel() {
   onSettled(() => {
     void computeFingerprint(getStoredToken()).then(setFingerprint);
     // ONE focus contract at every width now that Settings is full-viewport
-    // everywhere: a true modal — Tab trapped so the task world behind it stays
+    // everywhere: a true modal — Tab trapped so the Thread workspace behind it stays
     // out of the tab order, Escape dismissing it and NOTHING else (the trap
     // consumes the key in the capture phase, so keymap's Esc ladder never
-    // advances to clearing task focus on the same keystroke), and focus
+    // advances to clearing Thread focus on the same keystroke), and focus
     // restored to the standing ⋯ that summoned it. That restoration target is
     // deliberate rather than "whatever was focused": the menu item that opened
     // Settings has unmounted by the time the panel closes, so the captured
@@ -90,15 +84,6 @@ function SettingsPanel() {
     toast("Device label saved");
   }
 
-  function toggleDebug(v: boolean) {
-    setDebug(v);
-    try {
-      localStorage.setItem(DEBUG_KEY, v ? "1" : "0");
-    } catch {
-      /* best-effort */
-    }
-  }
-
   function diagnostics(): string {
     return [
       "hirsel diagnostics",
@@ -108,7 +93,6 @@ function SettingsPanel() {
       `connection: ${PHASE_WORD[state.connection]}`,
       `theme: ${themeMode()}`,
       "notifications: not available (web)",
-      `debug: ${debug() ? "on" : "off"}`,
       `show agent code: ${showAgentCode() ? "on" : "off"}`,
       `device label: ${deviceLabel() || "(unset)"}`,
       `identity: ${fingerprint()}`,
@@ -158,71 +142,76 @@ function SettingsPanel() {
         contentClass={SETTINGS_COLUMN}
       />
 
-      {/* The rail and the panel share ONE column — the same `max-w-frame`
-          measure the header centres on — so the tabs take their width out of
-          it rather than introducing a second horizontal system. Only the panel
-          scrolls: the rail stays put while a long form is read. */}
+      {/* One native scroll surface includes the navigation and both gutters.
+          Nested editors keep their normal scrolling and chain here at the edge. */}
       <div
-        data-slot="settings-column"
-        class={`${SETTINGS_COLUMN} flex min-h-0 flex-1 flex-col pt-6 rail:flex-row`}
+        ref={(node) => { scrollRef = node; }}
+        data-slot="settings-scroll"
+        class="thin-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-y-contain"
       >
-        <SettingsTabs active={tab()} onSelect={setTab} />
         <div
-          role="tabpanel"
-          id={settingsPanelId(tab())}
-          aria-labelledby={settingsTabId(tab())}
-          tabindex={0}
-          data-slot="settings-tabpanel"
-          class="thin-scrollbar min-h-0 flex-1 overflow-y-auto pb-16 outline-none"
+          data-slot="settings-column"
+          class={`${SETTINGS_COLUMN} flex min-h-full flex-col pt-6 rail:flex-row rail:items-start rail:gap-8`}
         >
-          {/* One restrained fade on the swap — the same continuity vocabulary
-              the sheet itself arrives with. Nothing slides. */}
-          <div class="motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150">
-            <Switch>
-              <Match when={tab() === "appearance"}>
-                <AppearanceSection />
-              </Match>
-              <Match when={tab() === "agents"}>
-                <AgentsSection />
-              </Match>
-              <Match when={tab() === "providers"}>
-                <ProvidersSection />
-              </Match>
-              <Match when={tab() === "connection"}>
-                <ConnectionSection
-                  endpoint={endpoint}
-                  deviceLabel={deviceLabel()}
-                  onForget={() => setConfirmForget(true)}
-                />
-                <IdentitySection
-                  deviceLabel={deviceLabel()}
-                  fingerprint={fingerprint()}
-                  onSaveLabel={saveLabel}
-                />
-              </Match>
-              <Match when={tab() === "notifications"}>
-                <NotificationsSection />
-              </Match>
-              <Match when={tab() === "guide"}>
-                <GuideSection />
-              </Match>
-              <Match when={tab() === "about"}>
-                <AboutSection
-                  debug={debug()}
-                  onDebugChange={toggleDebug}
-                  onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
-                />
-              </Match>
-              <Match when={tab() === "plugins"}>
-                {/* The Host-backed roster (state, on/off, declared settings),
-                    then whatever settings UI the plugins themselves
-                    contribute. */}
-                <PluginsSection />
-                <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
-                  <PluginSlot name="settings.section" />
-                </div>
-              </Match>
-            </Switch>
+          <SettingsTabs active={tab()} onSelect={(next) => {
+            setTab(next);
+            if (scrollRef) scrollRef.scrollTop = 0;
+          }} />
+          <div
+            role="tabpanel"
+            id={settingsPanelId(tab())}
+            aria-labelledby={settingsTabId(tab())}
+            tabindex={0}
+            data-slot="settings-tabpanel"
+            class="min-w-0 flex-1 pb-16 outline-none"
+          >
+            {/* One restrained fade on the swap — the same continuity vocabulary
+                the sheet itself arrives with. Nothing slides. */}
+            <div class="motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150">
+              <Switch>
+                <Match when={tab() === "appearance"}>
+                  <AppearanceSection />
+                </Match>
+                <Match when={tab() === "agents"}>
+                  <AgentsSection />
+                </Match>
+                <Match when={tab() === "providers"}>
+                  <ProvidersSection />
+                </Match>
+                <Match when={tab() === "connection"}>
+                  <ConnectionSection
+                    endpoint={endpoint}
+                    deviceLabel={deviceLabel()}
+                    onForget={() => setConfirmForget(true)}
+                  />
+                  <IdentitySection
+                    deviceLabel={deviceLabel()}
+                    fingerprint={fingerprint()}
+                    onSaveLabel={saveLabel}
+                  />
+                </Match>
+                <Match when={tab() === "notifications"}>
+                  <NotificationsSection />
+                </Match>
+                <Match when={tab() === "guide"}>
+                  <GuideSection />
+                </Match>
+                <Match when={tab() === "about"}>
+                  <AboutSection
+                    onCopyDiagnostics={() => copyText(diagnostics(), "diagnostics")}
+                  />
+                </Match>
+                <Match when={tab() === "plugins"}>
+                  {/* The Host-backed roster (state, on/off, declared settings),
+                      then whatever settings UI the plugins themselves
+                      contribute. */}
+                  <PluginsSection />
+                  <div class="mt-6 flex flex-col gap-2.5 empty:hidden">
+                    <PluginSlot name="settings.section" />
+                  </div>
+                </Match>
+              </Switch>
+            </div>
           </div>
         </div>
       </div>

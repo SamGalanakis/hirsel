@@ -8,6 +8,7 @@ import { TokenGate } from "./components/TokenGate";
 import { resolveWsUrl } from "./lib/endpoint";
 import {
   commandPaletteOpen,
+  commandPaletteIntent,
   installGlobalKeymap,
   setCommandPaletteOpen,
   setShortcutHelpOpen,
@@ -74,11 +75,7 @@ function App() {
     if (connection === "connected") startPlugins();
   });
 
-  // The "needs you" count is the SINGLE truth the attention layer reads: open,
-  // undecided judgments over the resting (non-archived) queue — the same count
-  // the task header shows as its one red. The title badge, the
-  // favicon dot, and desktop notifications onto THIS (they read the
-  // superseded legacy state before — a live bug).
+  // Attention notifications follow authoritative Thread attention.
   const needsYouCount = () =>
     threadState.threads.filter(t => !t.settled_at && !t.archived_at && t.attention === "needs_owner").length;
 
@@ -124,7 +121,7 @@ function App() {
     try {
       const note = new Notification("hirsel — needs you", {
         body: newest.title,
-        tag: `hirsel-judgment-${newest.id}`,
+        tag: `hirsel-thread-${newest.id}`,
         silent: true,
       });
       // Clicking the notification brings the tab forward — the one useful action.
@@ -156,14 +153,12 @@ function App() {
         </div>
       }
     >
-      {/* Task Margins: one responsive shell. Opening a task changes the subject
-          and generated UI; the standing composer stays connected to global
-          Hirsel and scopes through a removable task chip. */}
+      {/* One responsive shell with independently owned Thread conversations. */}
       <ThreadShell />
       <Toaster />
       {/* Summoned surfaces — no standing chrome. Opened from the keymap (⌘K /
           `?`) and command-palette affordances. */}
-      <CommandPalette open={commandPaletteOpen()} onOpenChange={setCommandPaletteOpen} />
+      <CommandPalette intent={commandPaletteIntent()} open={commandPaletteOpen()} onOpenChange={setCommandPaletteOpen} />
       <ShortcutHelp open={shortcutHelpOpen()} onOpenChange={setShortcutHelpOpen} />
     </Show>
   );

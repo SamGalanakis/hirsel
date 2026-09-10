@@ -1,5 +1,5 @@
-// Settings → About & debug: the app/host versions, the two debug preferences
-// (verbose logging, "Show agent code"), and the copyable diagnostics blob.
+// Settings → About & debug: the app/host versions, the local "Show agent code"
+// preference, and the copyable diagnostics blob.
 import { Copy } from "@/components/ui/icons";
 import type { JSX } from "@solidjs/web";
 import { setShowAgentCode, showAgentCode } from "../../lib/prefs";
@@ -8,8 +8,6 @@ import { state } from "../../store/store";
 import { Group, Field, Toggle } from "./rows";
 
 export function AboutSection(props: {
-  debug: boolean;
-  onDebugChange: (v: boolean) => void;
   onCopyDiagnostics: () => void;
 }): JSX.Element {
   return (
@@ -24,10 +22,6 @@ export function AboutSection(props: {
           <span class="font-mono text-xs text-muted-foreground">
             {state.hostVersion ?? (state.connection === "connected" ? "Not reported" : "—")}
           </span>
-        </div>
-        <div class="flex items-center gap-3 py-3">
-          <Field title="Debug mode" subtitle="Verbose client logging for diagnostics." />
-          <Toggle ariaLabel="Debug mode" checked={props.debug} onChange={props.onDebugChange} />
         </div>
         <div class="flex items-center gap-3 py-3">
           <Field

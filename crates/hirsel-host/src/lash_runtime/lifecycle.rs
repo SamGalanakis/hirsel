@@ -31,12 +31,17 @@ pub(super) async fn reconcile_opened_session_provider(
 }
 
 impl LashAgentRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn start(
         config: RuntimeConfig,
         model_selection: Option<ModelSelectionState>,
         tools: ToolSuite,
         broadcaster: broadcast::Sender<HostToClient>,
         broadcast_log: BroadcastLog,
+        thread_id: u64,
+        history_id: String,
+        tasks: RuntimeTasks,
+        capacity: Arc<tokio::sync::Semaphore>,
     ) -> anyhow::Result<LashStartup> {
         let provider = match build_provider(&config).await {
             Ok(provider) => provider,
@@ -44,15 +49,16 @@ impl LashAgentRuntime {
                 tracing::warn!(%message, "Lash Agent provider unavailable; using degraded runtime");
                 return Ok(LashStartup::Unavailable(Arc::new(DegradedAgentRuntime {
                     reason: message,
-                    tools,
-                    broadcaster,
-                    broadcast_log,
                 })));
             }
         };
 
         tokio::fs::create_dir_all(&config.data_dir).await?;
-        let lash_dir = config.data_dir.join("lash");
+        let lash_dir = config
+            .data_dir
+            .join("thread-runtime")
+            .join(&history_id)
+            .join(thread_id.to_string());
         tokio::fs::create_dir_all(&lash_dir).await?;
         let store_factory = Arc::new(
             lash_sqlite_store::SqliteSessionStoreFactory::new_with_process_registry(
@@ -113,18 +119,20 @@ impl LashAgentRuntime {
         tool_definitions.extend(tools.plugin_tools().definitions());
         let tool_surface = agent_tool_surface(&tool_definitions)?;
         let session_bootstrap = tools
-            .prepare_agent_session(&tool_surface.fingerprint, &tool_surface.tool_names)
+            .prepare_agent_session(
+                thread_id,
+                &tool_surface.fingerprint,
+                &tool_surface.tool_names,
+            )
             .await
             .context("prepare main-agent session generation")?;
         let session_guidance = agent_guidance_with_handoff(
             config.prompts.agent_guidance(),
             session_bootstrap.handoff_seed.as_deref(),
         );
-        let runtime_handle = Arc::new(std::sync::OnceLock::new());
         let executor = HirselToolExecutor {
             tools: tools.clone(),
             anchors: Arc::new(Mutex::new(TurnAnchorState::default())),
-            runtime: Arc::clone(&runtime_handle),
         };
         let anchors = executor.anchors.clone();
         let tool_provider = Arc::new(HirselToolProvider { executor });
@@ -150,8 +158,9 @@ impl LashAgentRuntime {
             .trigger_store(Arc::clone(&trigger_store))
             .tools(tool_provider)
             .plugin(Arc::new(HirselProcessPluginFactory {
+                history_id: history_id.clone(),
+                thread_id,
                 tools: tools.clone(),
-                notify: Arc::clone(&notify),
                 fork_wake: fork_wake.clone(),
             }))
             .with_queued_work(Arc::new(queued_work_driver))
@@ -168,9 +177,6 @@ impl LashAgentRuntime {
                 format!("hirsel-host:agent:{}", local_host_id()),
                 Uuid::new_v4().to_string(),
             ))?;
-        let process_registry = core
-            .process_registry()
-            .ok_or_else(|| anyhow::anyhow!("Lash process registry was not configured"))?;
         let session = core
             .session(&session_bootstrap.session_id)
             // The agent is prompted and acts in the TypeScript RLM dialect. The
@@ -195,6 +201,11 @@ impl LashAgentRuntime {
         reconcile_opened_session_provider(&session, &provider, &model_spec).await?;
 
         let runtime = Arc::new(Self {
+            thread_id,
+            history_id,
+            tasks,
+            provider_id: config.boot_plan.label().into(),
+            capacity,
             core: core.clone(),
             provider,
             session,
@@ -207,6 +218,7 @@ impl LashAgentRuntime {
             request_lock: Mutex::new(()),
             anchors,
             active_turn_id: Arc::new(Mutex::new(None)),
+            timeline_commits: TimelineCommitBarrier::default(),
             drain_seq: AtomicU64::new(0),
             drain_boot_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -219,27 +231,12 @@ impl LashAgentRuntime {
             handoff_seed: session_bootstrap.handoff_seed,
             fork_wake: fork_wake.clone(),
         });
-        runtime_handle
-            .set(Arc::downgrade(&runtime))
-            .map_err(|_| anyhow::anyhow!("agent runtime handle already installed"))?;
         fork_wake.install(runtime.build_fork_wake());
         runtime.reconcile_unowned_inputs().await?;
         runtime.spawn_observation_bridge();
         runtime.spawn_turn_pump();
         runtime.notify.notify_one();
-        runtime.spawn_process_terminal_bridge(process_registry.clone(), store_factory.clone());
-        runtime.spawn_subagent_control_bridge(process_registry.clone());
         runtime.spawn_timer_trigger_source(trigger_store);
-        runtime
-            .restore_subagent_processes_after_restart(
-                process_registry.clone(),
-                store_factory.clone(),
-            )
-            .await;
-        runtime
-            .abandon_recovered_subagent_runtime_processes(process_registry, store_factory)
-            .await;
-        runtime.resume_active_monitors().await;
         runtime.notify_if_work_pending().await;
         tracing::info!(
             model = %runtime.session.policy_snapshot().model.id,
@@ -372,7 +369,11 @@ impl LashAgentRuntime {
             .storage()
             .pending_thread_requests()
             .await
-            .map(|requests| !requests.is_empty())
+            .map(|requests| {
+                requests
+                    .iter()
+                    .any(|(_, p)| p["thread_id"].as_u64() == Some(self.thread_id))
+            })
             .unwrap_or(true);
         pending_inputs || queued_work || requests
     }
@@ -395,7 +396,7 @@ impl LashAgentRuntime {
              execution lease busy); scheduling a delayed drain retry"
         );
         let runtime = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             tokio::time::sleep(delay).await;
             runtime
                 .drain_retry_scheduled
@@ -404,204 +405,14 @@ impl LashAgentRuntime {
         });
     }
 
-    pub(super) async fn restore_subagent_processes_after_restart(
-        &self,
-        process_registry: Arc<dyn lash::process::ProcessRegistry>,
-        store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
-    ) {
-        let abandoned = match self.tools.restore_subagent_processes_after_restart().await {
-            Ok(abandoned) => abandoned,
-            Err(error) => {
-                tracing::warn!(%error, "failed to restore Sub-agent process metadata at boot");
-                return;
-            }
-        };
-        for process_id in abandoned {
-            if self
-                .append_subagent_abandoned_event(
-                    process_registry.as_ref(),
-                    store_factory.as_ref(),
-                    &process_id,
-                )
-                .await
-            {
-                self.notify.notify_one();
-            }
-        }
-    }
-
-    pub(super) async fn abandon_recovered_subagent_runtime_processes(
-        &self,
-        process_registry: Arc<dyn lash::process::ProcessRegistry>,
-        store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
-    ) {
-        // The registry only exposes non-terminal rows as a cursor-paged scan;
-        // boot recovery walks every page rather than assuming one fits.
-        let mut continuation = None;
-        loop {
-            let page = match process_registry
-                .list_non_terminal_page(NON_TERMINAL_SCAN_PAGE, continuation.take())
-                .await
-            {
-                Ok(page) => page,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to list non-terminal Lash processes at boot");
-                    return;
-                }
-            };
-            let more = page.continuation.clone();
-            for record in page.records {
-                if !is_hirsel_subagent_process_record(&record) {
-                    continue;
-                }
-                if self
-                    .append_subagent_abandoned_event(
-                        process_registry.as_ref(),
-                        store_factory.as_ref(),
-                        &record.id,
-                    )
-                    .await
-                {
-                    self.notify.notify_one();
-                }
-            }
-            match more {
-                Some(cursor) => continuation = Some(cursor),
-                None => break,
-            }
-        }
-    }
-
-    pub(super) async fn append_subagent_abandoned_event(
-        &self,
-        process_registry: &dyn lash::process::ProcessRegistry,
-        store_factory: &dyn lash::persistence::SessionStoreFactory,
-        process_id: &str,
-    ) -> bool {
-        let request =
-            ProcessEventAppendRequest::new(SUBAGENT_ABANDONED, subagent_abandoned_payload())
-                .with_replay_key(format!("hirsel-subagent:{process_id}:{SUBAGENT_ABANDONED}"));
-        match process_registry.append_event(process_id, request).await {
-            Ok(result) => {
-                // Same cutover as the live terminal bridge: an abandonment is
-                // a non-owner message, so it is triaged rather than turning
-                // the main Agent at boot.
-                if self.fork_wake.dispatch(subagent_wake_message(
-                    process_id,
-                    SUBAGENT_ABANDONED,
-                    "Sub-agent was abandoned after host restart.".to_string(),
-                )) {
-                    return false;
-                }
-                match enqueue_process_wake(store_factory, result.wake_delivery).await {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            process_id = %process_id,
-                            "failed to enqueue abandoned Sub-agent process wake"
-                        );
-                        false
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    process_id = %process_id,
-                    "failed to append abandoned Sub-agent process event"
-                );
-                match process_registry
-                    .complete_process(
-                        process_id,
-                        subagent_abandoned_output(),
-                        ProcessCompletionAuthority::ReconciledAbandon,
-                    )
-                    .await
-                {
-                    Ok(_) => true,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            process_id = %process_id,
-                            "failed to complete recovered Sub-agent process as abandoned"
-                        );
-                        false
-                    }
-                }
-            }
-        }
-    }
-
-    pub(super) async fn resume_active_monitors(&self) {
-        let monitors = match self.tools.active_monitors().await {
-            Ok(monitors) => monitors,
-            Err(error) => {
-                tracing::warn!(%error, "failed to list active monitors at boot");
-                return;
-            }
-        };
-        for monitor in monitors {
-            let existing = match self.core.processes().get(&monitor.id).await {
-                Ok(existing) => existing,
-                Err(error) => {
-                    tracing::warn!(%error, monitor_id = %monitor.id, "failed to inspect monitor process at boot");
-                    continue;
-                }
-            };
-            if existing.as_ref().is_some_and(|process| !process.terminal) {
-                continue;
-            }
-            let scope = inline_trigger_scope(format!("monitor-resume:{}", monitor.id));
-            if let Err(error) = self
-                .core
-                .processes()
-                .start(
-                    monitor_start_request(
-                        &monitor,
-                        &self.session_id,
-                        host_process_env_spec(self.session.policy_snapshot()),
-                    ),
-                    scope,
-                )
-                .await
-            {
-                tracing::warn!(%error, monitor_id = %monitor.id, "failed to resume monitor process");
-            } else {
-                self.tools.broadcast_monitor_upsert(&monitor);
-            }
-        }
-        match self.core.durable_process_worker_config() {
-            Ok(config) => {
-                let worker = match lash::durability::DurableProcessWorker::new(config) {
-                    Ok(worker) => worker,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to build monitor recovery worker");
-                        return;
-                    }
-                };
-                if let Err(error) = worker.drive_pending_processes().await {
-                    tracing::warn!(%error, "failed to drive recovered monitor processes at boot");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to build monitor recovery worker");
-            }
-        }
-    }
-
     pub(super) fn spawn_turn_pump(self: &Arc<Self>) {
         let runtime = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             loop {
                 runtime.notify.notified().await;
                 let _guard = runtime.pump_lock.lock().await;
                 loop {
-                    if let Err(error) = runtime.apply_selected_model().await {
-                        tracing::warn!(%error, "failed to reconcile main-agent model before queued turn");
-                        runtime.schedule_drain_retry();
-                        break;
-                    }
+                    let Ok(_capacity) = runtime.capacity.acquire().await else { return; };
                     if let Err(error) = runtime.apply_agent_prompt().await {
                         tracing::warn!(%error, "failed to reconcile the Agent prompt before queued turn");
                         runtime.schedule_drain_retry();
@@ -633,7 +444,6 @@ impl LashAgentRuntime {
                         .clone()
                         .expect("every admitted drain has an execution identity");
                     let result = runtime.run_admitted_drain(&drain_id).await;
-                    runtime.clear_active_turn_id(&drain_id).await;
 
                     match result {
                         Ok(QueuedTurnDrain::Ran(output)) => {
@@ -651,15 +461,18 @@ impl LashAgentRuntime {
                                     if let Err(error) =
                                         runtime.finish_thread_request(id, None).await
                                     {
+                                        runtime.clear_active_turn_id(&drain_id).await;
                                         tracing::error!(%error,"cannot settle failed Thread projection; stopping pump until restart");
                                         return;
                                     }
                                 } else if let Err(error) = runtime.finish_active_thread(None).await
                                 {
+                                    runtime.clear_active_turn_id(&drain_id).await;
                                     tracing::error!(%error, "cannot settle failed background Thread projection");
                                     return;
                                 }
                             }
+                            runtime.clear_active_turn_id(&drain_id).await;
                             runtime.clear_active_anchor().await;
                             continue;
                         }
@@ -673,6 +486,7 @@ impl LashAgentRuntime {
                             if runtime.work_pending().await {
                                 runtime.schedule_drain_retry();
                             }
+                            runtime.clear_active_turn_id(&drain_id).await;
                             break;
                         }
                         Err(error) => {
@@ -680,6 +494,7 @@ impl LashAgentRuntime {
                                 && let Err(delivery_error) =
                                     runtime.finish_thread_request(id, None).await
                             {
+                                runtime.clear_active_turn_id(&drain_id).await;
                                 tracing::error!(%delivery_error, "cannot settle failed Thread turn; stopping pump until restart");
                                 return;
                             }
@@ -687,9 +502,11 @@ impl LashAgentRuntime {
                                 && let Err(delivery_error) =
                                     runtime.finish_active_thread(None).await
                             {
+                                runtime.clear_active_turn_id(&drain_id).await;
                                 tracing::error!(%delivery_error, "cannot settle failed background Thread turn");
                                 return;
                             }
+                            runtime.clear_active_turn_id(&drain_id).await;
                             runtime.handle_turn_error(error).await;
                             runtime.clear_active_anchor().await;
                             break;
@@ -721,14 +538,24 @@ impl LashAgentRuntime {
         let mut active = self.active_turn_id.lock().await;
         if active.as_deref() == Some(id) {
             *active = None;
+            self.timeline_commits.clear(id).await;
         }
     }
 
     pub(super) async fn activate_background_turn(&self) -> anyhow::Result<bool> {
         let _request_guard = self.request_lock.lock().await;
         if let Some(route) = self.anchors.lock().await.active.clone() {
-            self.set_active_turn_id(Some(self.next_drain_id(&route)))
-                .await;
+            let drain_id = self.next_drain_id(&route);
+            self.tools
+                .storage()
+                .bind_thread_execution(
+                    &self.history_id,
+                    &self.session_id,
+                    &drain_id,
+                    route.thread_turn_id.expect("owned turn"),
+                )
+                .await?;
+            self.set_active_turn_id(Some(drain_id)).await;
             return Ok(true);
         }
         if self.session.queued_work().await?.is_empty()
@@ -736,15 +563,22 @@ impl LashAgentRuntime {
         {
             return Ok(false);
         }
-        let turn = self.tools.storage().start_thread_turn(0, None).await?;
+        let turn = self
+            .tools
+            .storage()
+            .start_thread_turn(self.thread_id, None)
+            .await?;
         let route = TurnAnchors {
             request_id: None,
-            thread_id: 0,
+            thread_id: self.thread_id,
             thread_turn_id: Some(turn.id),
-            owner_message_id: 0,
         };
-        self.set_active_turn_id(Some(self.next_drain_id(&route)))
-            .await;
+        let drain_id = self.next_drain_id(&route);
+        self.tools
+            .storage()
+            .bind_thread_execution(&self.history_id, &self.session_id, &drain_id, turn.id)
+            .await?;
+        self.set_active_turn_id(Some(drain_id)).await;
         self.anchors.lock().await.active = Some(route);
         self.tools.publish_thread_turn(turn).await;
         Ok(true)
@@ -781,24 +615,6 @@ impl LashAgentRuntime {
         Ok(())
     }
 
-    pub(super) async fn cancel_monitor_process(&self, monitor_id: &str) -> anyhow::Result<()> {
-        match self
-            .core
-            .processes()
-            .cancel(
-                monitor_id,
-                inline_trigger_scope(format!("monitor-debug-cancel:{monitor_id}")),
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                tracing::debug!(%error, monitor_id = %monitor_id, "monitor process cancel returned an error");
-                Ok(())
-            }
-        }
-    }
-
     /// Build the ADR-0015 dispatcher for this runtime.
     ///
     /// The sink holds a [`std::sync::Weak`] back to the runtime: the runtime
@@ -806,6 +622,8 @@ impl LashAgentRuntime {
     /// reference here would be a cycle that never drops.
     pub(super) fn build_fork_wake(self: &Arc<Self>) -> Arc<crate::fork_wake::ForkWake> {
         crate::fork_wake::ForkWake::new(
+            self.thread_id,
+            self.history_id.clone(),
             crate::fork_wake::LashForkRunner::new(
                 self.core.clone(),
                 self.provider.clone(),
@@ -839,23 +657,29 @@ impl LashAgentRuntime {
             message.source.label()
         );
         let client_id = format!("fork-brief:{}", message.key);
+        anyhow::ensure!(
+            message.thread_id == self.thread_id,
+            "wake destination mismatch"
+        );
         let request = OwnerTurn {
-            thread_id: 0,
+            history_id: self.history_id.clone(),
+            turn_id: None,
+            thread_id: self.thread_id,
             thread_action: None,
-            message_id: 0,
+            message_id: None,
+            report_triggered: false,
             client_id: client_id.clone(),
             body: text,
             anchor: None,
             attachments: Vec::new(),
-            mentioned_pings: Vec::new(),
+
             mode: SendMode::NextTurn,
-            task_action: None,
         };
         let payload = serde_json::to_value(request)?;
         let turn = self
             .tools
             .storage()
-            .queue_background_thread_request(&client_id, 0, &payload)
+            .queue_background_thread_request(&client_id, self.thread_id, &payload)
             .await?;
         self.publish_background_acceptance(&client_id, turn).await?;
         self.notify.notify_one();
@@ -865,7 +689,7 @@ impl LashAgentRuntime {
     pub(super) async fn handle_turn_error(&self, error: lash::EmbedError) {
         tracing::warn!(%error, "Lash queued turn failed");
         let active = self.anchors.lock().await.active.clone();
-        let thread_id = active.as_ref().map_or(0, |a| a.thread_id);
+        let thread_id = self.thread_id;
         let turn_id = active.as_ref().and_then(|a| a.thread_turn_id);
         match self
             .tools
@@ -883,17 +707,18 @@ impl LashAgentRuntime {
                 tracing::warn!(%storage_error,"failed to record Thread turn error")
             }
         }
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id,
-                thread_id: Some(thread_id),
-                state: AgentActivityState::Idle,
-                text: None,
-                sc: None,
-            },
-        );
+        if let Some(turn_id) = turn_id {
+            publish(
+                &self.broadcast_log,
+                &self.broadcaster,
+                HostToClient::AgentActivity {
+                    turn_id,
+                    thread_id,
+                    state: AgentActivityState::Idle,
+                    text: None,
+                },
+            );
+        }
     }
 }
 

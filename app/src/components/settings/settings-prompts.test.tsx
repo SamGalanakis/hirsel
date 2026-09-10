@@ -76,16 +76,7 @@ const inlineEditor = (container: HTMLElement) =>
 
 async function mount(prompts?: PromptSnapshot) {
   const store = await import("../../store/store");
-  store.dispatch({
-    type: "hello_ok",
-    payload: {
-      type: "hello_ok",
-      latest_msg_id: 0,
-      messages: [],
-      pings: [],
-      prompts,
-    },
-  });
+  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", prompts: prompts ?? null, history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, providers: null } });
   store.openSettings("agents");
   const { SettingsSheet } = await import("./SettingsSheet");
   return { store, ...render(() => <SettingsSheet />) };

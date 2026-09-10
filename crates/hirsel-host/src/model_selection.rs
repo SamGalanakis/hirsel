@@ -28,17 +28,26 @@ struct RegistryEntry {
     variant_kind: VariantKind,
 }
 
-// Current ChatGPT-account model metadata confirms this ID and its effort tokens.
-// The main agent is deliberately pinned to GPT-5.6 Sol; keep this curated until
-// the host has a provider-backed catalog.
-const CODEX_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    variants: &["low", "medium", "high", "xhigh", "max"],
-    default_variant: "medium",
-    context_window_tokens: 200_000,
-    variant_kind: VariantKind::Effort,
-}];
+// Curated from ChatGPT-account model metadata until the host has a
+// provider-backed catalog. Keep Sol first to preserve the main-agent default.
+const CODEX_REGISTRY: &[RegistryEntry] = &[
+    RegistryEntry {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6 Sol",
+        variants: &["low", "medium", "high", "xhigh", "max"],
+        default_variant: "medium",
+        context_window_tokens: 200_000,
+        variant_kind: VariantKind::Effort,
+    },
+    RegistryEntry {
+        id: "gpt-6-astra",
+        label: "GPT-6 Astra",
+        variants: &["low", "medium", "high", "xhigh", "max", "ultra"],
+        default_variant: "medium",
+        context_window_tokens: 272_000,
+        variant_kind: VariantKind::Effort,
+    },
+];
 
 // Forks have their own curated surface: Luna is the economy default, while Sol
 // remains available as a deliberate escalation without becoming selectable by
@@ -575,7 +584,6 @@ mod tests {
     async fn store(dir: &tempfile::TempDir) -> ConfigStore {
         ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             std::path::Path::new("/docs/hirsel-config.md"),
             &crate::host_config::EnvBootstrap::default(),
         )
@@ -591,6 +599,49 @@ mod tests {
         assert!(validate_selection(ProviderMode::Codex, "gpt-5.6-luna", "max").is_err());
         assert!(validate_selection(ProviderMode::Codex, "gpt-5", "high").is_err());
         assert!(validate_selection(ProviderMode::Codex, "gpt-5.6-sol", "impossible").is_err());
+    }
+
+    #[tokio::test]
+    async fn astra_is_selectable_without_changing_the_default_or_fork_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir, ProviderMode::Codex, "gpt-5.6-sol").await;
+        assert_eq!(state.current().id, "gpt-5.6-sol");
+        let snapshot = state.snapshot();
+        let astra = snapshot
+            .available
+            .iter()
+            .find(|model| model.id == "gpt-6-astra")
+            .unwrap();
+        assert_eq!(
+            astra.variants,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(astra.default_variant, "medium");
+        for effort in &astra.variants {
+            let selection = state.validate(&astra.id, effort).unwrap();
+            let spec = model_spec(ProviderMode::Codex, &selection).unwrap();
+            assert_eq!(spec.variant, ReasoningSelection::Effort(effort.clone()));
+            assert_eq!(spec.limits.context_window_tokens.get(), 272_000);
+            assert_eq!(spec.capability.reasoning.unwrap().efforts, astra.variants);
+        }
+        assert!(state.validate(&astra.id, "impossible").is_err());
+        assert!(validate_fork(ProviderMode::Codex, &astra.id, "high").is_err());
+        state
+            .persist_and_select(state.validate(&astra.id, "ultra").unwrap())
+            .await
+            .unwrap();
+        let store = store(&dir).await;
+        let roster = roster(&dir, &store, ProviderMode::Codex);
+        let reloaded = ModelSelectionState::load(ProviderMode::Codex, store, roster, "gpt-5.6-sol")
+            .await
+            .unwrap();
+        assert_eq!(
+            reloaded.current(),
+            ModelSelection {
+                id: "gpt-6-astra".into(),
+                variant: "ultra".into()
+            }
+        );
     }
 
     #[test]
@@ -808,7 +859,7 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.6-sol"]
+            ["gpt-5.6-sol", "gpt-6-astra"]
         );
         assert!(state.validate("gpt-5.6-luna", "max").is_err());
         assert!(state.validate("gpt-5.6-sol", "impossible").is_err());

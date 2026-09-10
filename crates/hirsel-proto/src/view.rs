@@ -5,6 +5,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewInstance {
     pub instance_id: String,
-    pub placement: String,
+    pub thread_id: u64,
     pub spec: serde_json::Value,
 }

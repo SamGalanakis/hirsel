@@ -24,8 +24,6 @@ type SlotTable = Record<SlotName, SlotEntry[]>;
 function emptySlots(): SlotTable {
   return {
     "settings.section": [],
-    "task.panel": [],
-    "home.section": [],
   };
 }
 

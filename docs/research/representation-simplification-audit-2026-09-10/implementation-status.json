@@ -1,0 +1,130 @@
+{
+  "audit_snapshot": "3ee0621a603659ab0168f565b99012b642415419",
+  "delivery": "https://github.com/SamGalanakis/hirsel/pull/17",
+  "qualification": "Implementation commits are listed below. Exact-head validation and independent review are recorded with the delivery pull request.",
+  "findings": {
+    "F01": {
+      "issue": 16,
+      "state": "implemented",
+      "commit": "35adb88b155078bcd3d64e5169e702e4fe8f4059"
+    },
+    "F02": {
+      "issue": 19,
+      "state": "implemented",
+      "commit": "6522b158e1892eaada19e68cb3059255ce0b9cc7"
+    },
+    "F03": {
+      "issue": 20,
+      "state": "implemented",
+      "commit": "2d949f3fbf193966e39300d1b51772ef47e0c651"
+    },
+    "F04": {
+      "issue": 21,
+      "state": "implemented",
+      "commit": "2d949f3fbf193966e39300d1b51772ef47e0c651"
+    },
+    "F05": {
+      "issue": 23,
+      "state": "implemented",
+      "commit": "aecbba8be9b129adfdc072ac95ea93696386a67c",
+      "followup_commits": [
+        "7bf1587911dce6c58803cd68603cac16197c6ffa",
+        "b0724302fc9b90fa74d2fa39dcbaccee268dde24"
+      ]
+    },
+    "F06": {
+      "issue": 24,
+      "state": "implemented",
+      "commit": "bb5be34ddc7d1f2bfe0550c1cfbecde78a06c968"
+    },
+    "F07": {
+      "issue": 25,
+      "state": "implemented",
+      "commit": "bb5be34ddc7d1f2bfe0550c1cfbecde78a06c968"
+    },
+    "F08": {
+      "issue": 26,
+      "state": "implemented",
+      "commit": "9ff1d448bce98bc5265433b36b86bd6badba796c"
+    },
+    "F09": {
+      "issue": 27,
+      "state": "implemented",
+      "commit": "061c640632fb8b96de9a06d8176dc656a8e1f09d"
+    },
+    "F10": {
+      "issue": 28,
+      "state": "implemented",
+      "commit": "994f7ff567f39a3522ee76b2bf9b229bc4175fe1"
+    },
+    "F11": {
+      "issue": 29,
+      "state": "implemented",
+      "commit": "943b818b19afcd618f03bf05310dba2470283de2"
+    },
+    "F12": {
+      "issue": 30,
+      "state": "implemented",
+      "commit": "cad7c51145650a470a62b966248ffd821743dbf8"
+    },
+    "F13": {
+      "issue": 31,
+      "state": "implemented",
+      "commit": "417be45de9b05a7f3efe305ad39e5765c1567238"
+    },
+    "F14": {
+      "issue": 32,
+      "state": "implemented",
+      "commit": "417be45de9b05a7f3efe305ad39e5765c1567238"
+    },
+    "F15": {
+      "issue": 33,
+      "state": "implemented",
+      "commit": "38a5e9460b2f15f0403da94e60aec578bc746d1e"
+    },
+    "F16": {
+      "issue": 34,
+      "state": "implemented",
+      "commit": "38a5e9460b2f15f0403da94e60aec578bc746d1e"
+    },
+    "F17": {
+      "issue": 35,
+      "state": "implemented",
+      "commit": "eff12d1e565367f63be01832f35523a18df14263",
+      "followup_commits": [
+        "1982d6ea5577f6e85e69babf936430934bfa6853"
+      ]
+    },
+    "F18": {
+      "issue": 36,
+      "state": "implemented",
+      "commit": "eff12d1e565367f63be01832f35523a18df14263"
+    },
+    "F19": {
+      "issue": 37,
+      "state": "implemented",
+      "commit": "11bb44e80d3d53c4efa78812d2b4880a6b4a63fe"
+    },
+    "F20": {
+      "issue": 38,
+      "state": "implemented",
+      "commit": "f2b60b103e86b084ef1fe7d1e63e7efcea86f1f2"
+    },
+    "F21": {
+      "issue": 39,
+      "state": "implemented",
+      "commit": "0dd3b9929917e40bbcafe2a769fe7bd28a09c69b"
+    },
+    "F22": {
+      "issue": 40,
+      "state": "implemented",
+      "commit": "0dd3b9929917e40bbcafe2a769fe7bd28a09c69b",
+      "note": "The later-added blob policy gate retains its required lifecycle helpers; the zero-caller audit evidence applies to the fixed audit snapshot."
+    },
+    "F23": {
+      "issue": 41,
+      "state": "implemented",
+      "commit": "dfb3a22d4b4d4865b445a00f381aaca340ac4644"
+    }
+  }
+}

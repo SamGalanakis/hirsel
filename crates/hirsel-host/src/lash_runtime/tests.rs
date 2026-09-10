@@ -1,35 +1,15 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    processes::{ProcessRecord, ProcessStatus, ProcessStore},
     storage::Storage,
     tools::{ShellRunOutput, ToolsConfig},
 };
 use chrono::Utc;
-use hirsel_drivers::{SessionHandle, SubagentEvent};
-use hirsel_proto::{Blob, ChatAuthor, Ping, PingStatus};
+use hirsel_proto::{ChatAuthor, ThreadTurnState};
 use lash_core::{
     ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
     TriggerInputBinding, TriggerSubscriptionRecord,
 };
-
-#[test]
-fn terminal_payload_keeps_full_text_for_wake_and_wait() {
-    let full_summary = format!("{}the actual ending", "research findings ".repeat(20));
-    let (_, payload) = terminal_event_payload(&TerminalOutcome::Done {
-        summary: full_summary.clone(),
-    });
-
-    assert_eq!(
-        payload["text"],
-        format!("Sub-agent completed: {full_summary}")
-    );
-
-    let outcome: ProcessAwaitOutput =
-        serde_json::from_value(payload["await_output"].clone()).unwrap();
-    let wait_payload = subagents_wait_result("proc-1", &outcome).unwrap();
-    assert_eq!(wait_payload["outcome"]["value"]["summary"], full_summary);
-}
 
 use super::timers::*;
 use super::*;
@@ -78,50 +58,81 @@ pub(super) fn test_turn_output(
 
 #[test]
 fn timeline_flushes_prose_before_tool_events() {
-    let broadcast_log = BroadcastLog::default();
-    let (broadcaster, _) = broadcast::channel(16);
-    let mut timeline = TurnTimelineBridge::default();
+    let mut timeline = TurnTimelineBridge {
+        thread_id: Some(0),
+        turn_id: Some(1),
+        ..Default::default()
+    };
 
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::ModelRequestStarted {
+    timeline.observe(&remote_turn_activity(
+        RemoteTurnEvent::ModelRequestStarted {
             protocol_iteration: 0,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::AssistantProseDelta {
+        },
+    ));
+    timeline.observe(&remote_turn_activity(
+        RemoteTurnEvent::AssistantProseDelta {
             text: "I will ".to_string(),
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::AssistantProseDelta {
+        },
+    ));
+    timeline.observe(&remote_turn_activity(
+        RemoteTurnEvent::AssistantProseDelta {
             text: "check now.".to_string(),
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    assert!(turn_events(&broadcast_log).is_empty());
+        },
+    ));
+    assert!(timeline.take_ready().is_empty());
 
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::ToolCallStarted {
-            call_id: Some("call-1".to_string()),
-            name: "shell_run".to_string(),
-            args: serde_json::json!({ "cmd": "true" }),
-            graph_key: None,
-            parent_call_id: None,
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::ToolCallStarted {
+        call_id: Some("call-1".to_string()),
+        name: "shell_run".to_string(),
+        args: serde_json::json!({ "cmd": "true" }),
+        graph_key: None,
+        parent_call_id: None,
+    }));
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::ToolCallCompleted {
+        call_id: Some("call-1".to_string()),
+        name: "shell_run".to_string(),
+        args: serde_json::json!({ "cmd": "true" }),
+        output: serde_json::json!({
+            "outcome": {
+                "status": "success",
+                "payload": {
+                    "status": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": false
+                }
+            }
         }),
-        &broadcast_log,
-        &broadcaster,
+        duration_ms: 12,
+        graph_key: None,
+        parent_call_id: None,
+    }));
+
+    let events = timeline.take_ready();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        TurnEventKind::Prose {
+            text: "I will check now.".to_string()
+        }
     );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::ToolCallCompleted {
-            call_id: Some("call-1".to_string()),
+    assert_eq!(
+        events[1],
+        TurnEventKind::ToolStart {
+            id: "call-1".to_string(),
             name: "shell_run".to_string(),
-            args: serde_json::json!({ "cmd": "true" }),
-            output: serde_json::json!({
+            summary: Some("cmd: true".to_string()),
+            input: Some(bounded_turn_payload(&serde_json::json!({ "cmd": "true" })))
+        }
+    );
+    assert_eq!(
+        events[2],
+        TurnEventKind::ToolDone {
+            id: "call-1".to_string(),
+            name: "shell_run".to_string(),
+            ok: true,
+            summary: Some("ok status 0".to_string()),
+            result: Some(bounded_turn_payload(&serde_json::json!({
                 "outcome": {
                     "status": "success",
                     "payload": {
@@ -131,81 +142,41 @@ fn timeline_flushes_prose_before_tool_events() {
                         "timed_out": false
                     }
                 }
-            }),
-            duration_ms: 12,
-            graph_key: None,
-            parent_call_id: None,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-
-    let events = turn_events(&broadcast_log);
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0].0, 1);
-    assert_eq!(
-        events[0].1,
-        TurnEventKind::Prose {
-            text: "I will check now.".to_string()
-        }
-    );
-    assert_eq!(events[1].0, 2);
-    assert_eq!(
-        events[1].1,
-        TurnEventKind::ToolStart {
-            id: "call-1".to_string(),
-            name: "shell_run".to_string(),
-            summary: Some("cmd: true".to_string())
-        }
-    );
-    assert_eq!(events[2].0, 3);
-    assert_eq!(
-        events[2].1,
-        TurnEventKind::ToolDone {
-            id: "call-1".to_string(),
-            name: "shell_run".to_string(),
-            ok: true,
-            summary: Some("ok status 0".to_string())
+            })))
         }
     );
 }
 
 #[test]
 fn code_blocks_stream_full_source_and_pair_with_their_completion() {
-    let broadcast_log = BroadcastLog::default();
-    let (broadcaster, _) = broadcast::channel(16);
-    let mut timeline = TurnTimelineBridge::default();
+    let mut timeline = TurnTimelineBridge {
+        thread_id: Some(0),
+        turn_id: Some(1),
+        ..Default::default()
+    };
     let source = "const x = await shell.run({ cmd: \"true\" });\nfinish(x);";
 
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::CodeBlockStarted {
-            language: "typescript".to_string(),
-            code: source.to_string(),
-            graph_key: None,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
-    timeline.observe(
-        &remote_turn_activity(RemoteTurnEvent::CodeBlockCompleted {
-            language: "typescript".to_string(),
-            output: "ok".to_string(),
-            error: None,
-            success: true,
-            duration_ms: 42,
-            tool_call_ids: vec!["call-1".to_string()],
-            graph_key: None,
-        }),
-        &broadcast_log,
-        &broadcaster,
-    );
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::CodeBlockStarted {
+        language: "typescript".to_string(),
+        code: source.to_string(),
+        graph_key: None,
+    }));
+    timeline.observe(&remote_turn_activity(RemoteTurnEvent::CodeBlockCompleted {
+        language: "typescript".to_string(),
+        output: "ok".to_string(),
+        error: None,
+        success: true,
+        duration_ms: 42,
+        tool_call_ids: vec!["call-1".to_string()],
+        graph_key: None,
+    }));
 
-    let events = turn_events(&broadcast_log);
+    let events = timeline.take_ready();
     assert_eq!(events.len(), 2);
     // The full program is carried verbatim — never through the 120-char
     // summary path that tool rows use.
     assert_eq!(
-        events[0].1,
+        events[0],
         TurnEventKind::CodeStart {
             id: "code:1".to_string(),
             language: "typescript".to_string(),
@@ -214,7 +185,7 @@ fn code_blocks_stream_full_source_and_pair_with_their_completion() {
         }
     );
     assert_eq!(
-        events[1].1,
+        events[1],
         TurnEventKind::CodeDone {
             id: "code:1".to_string(),
             ok: true,
@@ -276,6 +247,7 @@ fn cancelled_turn_materializes_checkpointed_chat_and_completed_tools() {
     assert_eq!(
         tool_calls,
         vec![ToolCallSummary {
+            id: "completed".to_string(),
             name: "shell_run".to_string(),
             ok: true,
         }]
@@ -318,11 +290,7 @@ async fn finished_tool_only_turn_persists_completed_tools() {
         }],
     );
 
-    assert!(
-        materialize_turn_chat(&executor.tools, &output)
-            .await
-            .unwrap()
-    );
+    assert!(complete_fixture_turn(&executor, &output).await.unwrap());
 
     let messages = storage.all_chat().await.unwrap();
     let persisted = messages.last().expect("tool-only Agent Chat row");
@@ -331,6 +299,7 @@ async fn finished_tool_only_turn_persists_completed_tools() {
     assert_eq!(
         persisted.tool_calls,
         vec![ToolCallSummary {
+            id: "completed".to_string(),
             name: "events_judgment".to_string(),
             ok: true,
         }]
@@ -395,28 +364,36 @@ fn tool_result_summaries_include_status_and_error_hint() {
 #[tokio::test]
 async fn owner_turn_input_notes_all_attachments_and_references_images() {
     let dir = tempfile::tempdir().unwrap();
-    let text_path = dir.path().join("text-blob");
-    let image_path = dir.path().join("image-blob");
-    tokio::fs::write(&text_path, b"hello").await.unwrap();
-    tokio::fs::write(&image_path, [137, 80, 78, 71])
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let text = storage
+        .store_blob("text-upload", "note.txt", "text/plain", b"hello".to_vec())
         .await
         .unwrap();
-    let text = stored_blob("text-1", "note.txt", "text/plain", 5, text_path);
-    let image = stored_blob("image-1", "tiny.png", "image/png", 4, image_path);
+    let image = storage
+        .store_blob(
+            "image-upload",
+            "tiny.png",
+            "image/png",
+            vec![137, 80, 78, 71],
+        )
+        .await
+        .unwrap();
     let turn = OwnerTurn {
+        history_id: "fixture-history".into(),
+        turn_id: None,
         thread_id: 0,
         thread_action: None,
-        message_id: 1,
+        message_id: Some(1),
+        report_triggered: false,
         client_id: "client-1".to_string(),
         body: "see attached".to_string(),
         anchor: None,
-        attachments: vec![text.clone(), image.clone()],
-        mentioned_pings: Vec::new(),
+        attachments: vec![text.blob.clone(), image.blob.clone()],
+
         mode: SendMode::Send,
-        task_action: None,
     };
 
-    let rendered = owner_turn_text(&turn);
+    let rendered = owner_turn_text(&turn, &storage);
     assert!(rendered.contains(&format!(
         "[attachment stored at {}: note.txt (text/plain, 5 bytes)]",
         text.path.display()
@@ -426,8 +403,19 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
         image.path.display()
     )));
 
-    let input = owner_turn_input(&turn).await.unwrap();
+    let input = owner_turn_input(&turn, &storage).await.unwrap();
     assert_eq!(input.items.len(), 2);
+    let options = input
+        .protocol_turn_options
+        .as_ref()
+        .expect("resident Agent turns require an explicit finish");
+    assert_eq!(
+        options.decode::<RlmTurnOptions>().unwrap(),
+        RlmTurnOptions {
+            termination: Some(RlmTermination::FinishRequired { schema: None }),
+            final_answer_format: None,
+        }
+    );
     assert!(matches!(input.items[0], InputItem::Text { .. }));
     let InputItem::Attachment {
         source: lash::direct::AttachmentSource::Inline { media_type, bytes },
@@ -439,48 +427,119 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
     assert_eq!(bytes.as_slice(), &[137, 80, 78, 71]);
 }
 
-#[test]
-fn owner_turn_text_expands_mentioned_ping_context() {
+#[tokio::test]
+async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
+    use lash_core::{LlmOutputPart, llm::types::LlmResponse};
+
+    let responses = Arc::new(std::sync::Mutex::new(VecDeque::from([
+        "I cannot create that artifact.".to_string(),
+        "<typescript>\nfinish(\"Ordinary chat answer.\");\n</typescript>".to_string(),
+    ])));
+    let request_count = Arc::new(AtomicU64::new(0));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("hirsel-resident-finish-test")
+        .complete({
+            let responses = Arc::clone(&responses);
+            let request_count = Arc::clone(&request_count);
+            move |_request| {
+                let response = responses
+                    .lock()
+                    .expect("response queue")
+                    .pop_front()
+                    .expect("queued response");
+                request_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Ok(LlmResponse {
+                        parts: vec![LlmOutputPart::Text {
+                            text: response,
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    })
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::builder()
+            .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
+            .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
+            .memory_limit(lash_protocol_rlm::MemoryBound::mebibytes(64))
+            .build(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
+        .with_native_queued_work()
+        .provider(provider)
+        .model(provider_rebind_test_model("hirsel-resident-finish-model"))
+        .store_factory(Arc::new(
+            lash_core::facade_support::InMemorySessionStoreFactory::new(),
+        ))
+        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+        .without_queued_work()
+        .build(lash_core::testing::runtime_lease_owner())
+        .unwrap();
+    let session = core
+        .session("hirsel-resident-finish")
+        .plugin_option(
+            RLM_PROTOCOL_PLUGIN_ID,
+            RlmCreateExtras {
+                dialect: Some(AGENT_RLM_DIALECT),
+                ..RlmCreateExtras::default()
+            },
+        )
+        .unwrap()
+        .open()
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
     let turn = OwnerTurn {
+        history_id: "fixture-history".into(),
+        turn_id: None,
         thread_id: 0,
         thread_action: None,
-        message_id: 2,
-        client_id: "mention-1".to_string(),
-        body: "What changed?".to_string(),
+        message_id: Some(1),
+        report_triggered: false,
+        client_id: "resident-finish".into(),
+        body: "Say hello".into(),
         anchor: None,
         attachments: Vec::new(),
-        mentioned_pings: vec![Ping {
-            id: 7,
-            kind: hirsel_proto::EventKind::Judgment,
-            source: hirsel_proto::EventSource {
-                kind: hirsel_proto::EventSourceKind::Agent,
-                r#ref: None,
-            },
-            name: "release-choice".to_string(),
-            description: "Choose the release channel".to_string(),
-            ui: json!({
-                "type": "card",
-                "children": [{ "type": "text", "text": "Longer details" }]
-            }),
-            anchor: 3,
-            requires_response: true,
-            quick_replies: Vec::new(),
-            status: PingStatus::Done,
-            read: true,
-            archived: false,
-            snoozed_until: None,
-            archived_at: None,
-            fork_sc: None,
-            ts: Utc::now(),
-        }],
         mode: SendMode::Send,
-        task_action: None,
     };
 
+    session
+        .enqueue(owner_turn_input(&turn, &storage).await.unwrap())
+        .id("resident-finish")
+        .ingress(TurnInputIngress::next_turn())
+        .send()
+        .await
+        .unwrap();
+    let output = session
+        .queued_turn()
+        .turn_id("resident-finish-drain")
+        .run()
+        .await
+        .unwrap()
+        .expect("resident input should drain");
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
     assert_eq!(
-        owner_turn_text(&turn),
-        "[Owning Thread #0; answer only within this Thread. Use threads.read to inspect other conversations.]\nWhat changed?\n[mentioned ping @release-choice (ping_id 7, done, requires_response=true, anchor 3): Choose the release channel]"
+        output.final_value(),
+        Some(&serde_json::json!("Ordinary chat answer."))
     );
+    assert_eq!(
+        turn_chat_payload(&output).map(|payload| payload.0),
+        Some("Ordinary chat answer.".to_string())
+    );
+    assert!(responses.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -491,61 +550,6 @@ fn agent_host_section_references_runtime_config_and_docs_paths() {
     assert!(section.contains(config.config_path.to_str().unwrap()));
     assert!(section.contains(config.docs_path.to_str().unwrap()));
     assert!(section.contains("## Host configuration"));
-}
-
-#[test]
-fn tool_surface_fingerprint_uses_names_not_argument_schemas() {
-    let first = vec![tool_definition(
-        "test.events_notify",
-        "events_notify",
-        "Notify",
-        json!({
-            "type": "object",
-            "required": ["message"],
-            "properties": { "message": { "type": "string" } }
-        }),
-        json!({ "type": "object" }),
-        ["events"],
-        "notify",
-    )];
-    let argument_only_change = vec![tool_definition(
-        "test.events_notify",
-        "events_notify",
-        "Notify with an evolved schema",
-        json!({
-            "type": "object",
-            "required": ["message"],
-            "properties": {
-                "message": { "type": "string" },
-                "quiet": { "type": "boolean" }
-            }
-        }),
-        json!({ "type": "object" }),
-        ["events"],
-        "notify",
-    )];
-    let mut name_set_change = argument_only_change.clone();
-    name_set_change.push(tool_definition(
-        "test.events_archive",
-        "events_archive",
-        "Archive",
-        json!({ "type": "object" }),
-        json!({ "type": "object" }),
-        ["events"],
-        "archive",
-    ));
-
-    let first = agent_tool_surface(&first).unwrap();
-    let argument_only_change = agent_tool_surface(&argument_only_change).unwrap();
-    let name_set_change = agent_tool_surface(&name_set_change).unwrap();
-
-    assert_eq!(first.fingerprint, argument_only_change.fingerprint);
-    assert_eq!(first.tool_names, vec!["events.notify"]);
-    assert_ne!(first.fingerprint, name_set_change.fingerprint);
-    assert_eq!(
-        name_set_change.tool_names,
-        vec!["events.archive", "events.notify"]
-    );
 }
 
 fn provider_rebind_test_core(
@@ -630,68 +634,6 @@ async fn reopened_agent_session_rebinds_provider_and_model_at_open() {
 }
 
 #[tokio::test]
-async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = crate::build_state(crate::tests::test_config(dir.path()))
-        .await
-        .unwrap();
-    let first = state
-        .tools
-        .prepare_agent_session("v1", &["threads.create".into()])
-        .await
-        .unwrap();
-    assert_eq!(first.session_id, "agent");
-    let (thread, _) = state
-        .storage
-        .create_thread(
-            "release",
-            "Release",
-            "Choose stable or beta",
-            &Value::Null,
-            hirsel_proto::ThreadAttention::NeedsOwner,
-        )
-        .await
-        .unwrap();
-    state
-        .storage
-        .append_thread_chat(
-            thread.id,
-            ChatAuthor::Owner,
-            "Release request",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    let rotated = state
-        .tools
-        .prepare_agent_session("v2", &["threads.create".into(), "threads.read".into()])
-        .await
-        .unwrap();
-    assert_eq!(rotated.session_id, "agent-g1");
-    let seed = rotated.handoff_seed.unwrap();
-    assert!(seed.contains(&format!("Thread #{} owner: Release request", thread.id)));
-    assert!(seed.contains("Choose stable or beta"));
-    let detail = state.storage.thread_detail(0, None, 30).await.unwrap();
-    assert!(
-        detail
-            .activities
-            .iter()
-            .any(|a| a.kind == "session_rotated")
-    );
-    assert!(state.storage.all_pings().await.unwrap().is_empty());
-    assert!(
-        state
-            .tools
-            .prepare_agent_session("v2", &["threads.create".into(), "threads.read".into()])
-            .await
-            .unwrap()
-            .handoff_seed
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     let (executor, storage, broadcast_log, _dir) = test_event_executor().await;
     broadcast_log.clear();
@@ -709,11 +651,7 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
         }],
     );
 
-    assert!(
-        materialize_turn_chat(&executor.tools, &output)
-            .await
-            .unwrap()
-    );
+    assert!(complete_fixture_turn(&executor, &output).await.unwrap());
 
     let messages = storage.all_chat().await.unwrap();
     let persisted = messages.last().expect("persisted partial Agent message");
@@ -725,6 +663,7 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     assert_eq!(
         persisted.tool_calls,
         vec![ToolCallSummary {
+            id: "completed".to_string(),
             name: "shell_run".to_string(),
             ok: true,
         }]
@@ -739,7 +678,7 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
     );
     assert!(broadcasts.iter().any(|frame| matches!(
         frame,
-        HostToClient::Msg { message, sc: None } if message == persisted
+        HostToClient::Msg { message } if message == persisted
     )));
 }
 
@@ -748,8 +687,15 @@ pub(super) async fn test_event_executor()
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let storage = Storage::open(&path).await.unwrap();
-    let owner = storage
-        .append_chat(ChatAuthor::Owner, "owner turn", None)
+    let caller = storage.test_running_caller().await;
+    let _owner = storage
+        .append_thread_chat(
+            caller.thread_id,
+            ChatAuthor::Owner,
+            "owner turn",
+            None,
+            vec![],
+        )
         .await
         .unwrap();
     let (broadcaster, _) = broadcast::channel(16);
@@ -759,11 +705,14 @@ pub(super) async fn test_event_executor()
         crate::templates::TemplateStore::load(crate::templates::bundled_templates_dir())
             .await
             .unwrap();
-    let views =
-        crate::templates::ViewManager::new(templates, broadcaster.clone(), broadcast_log.clone());
+    let views = crate::templates::ViewManager::new(
+        storage.history_id().await.unwrap(),
+        templates,
+        broadcaster.clone(),
+        broadcast_log.clone(),
+    );
     let config_store = crate::host_config::ConfigStore::load(
         path.join("hirsel.toml"),
-        &path,
         std::path::Path::new("/docs/hirsel-config.md"),
         &crate::host_config::EnvBootstrap::default(),
     )
@@ -778,24 +727,18 @@ pub(super) async fn test_event_executor()
         storage.clone(),
         broadcaster,
         broadcast_log.clone(),
-        ProcessStore::default(),
         pushes,
         views,
     );
     let anchors = Arc::new(Mutex::new(TurnAnchorState {
         active: Some(TurnAnchors {
             request_id: None,
-            thread_id: 0,
-            thread_turn_id: None,
-            owner_message_id: owner.id,
+            thread_id: caller.thread_id,
+            thread_turn_id: Some(caller.turn_id),
         }),
     }));
     (
-        HirselToolExecutor {
-            tools,
-            anchors,
-            runtime: Arc::new(std::sync::OnceLock::new()),
-        },
+        HirselToolExecutor { tools, anchors },
         storage,
         broadcast_log,
         dir,
@@ -850,145 +793,15 @@ fn tool_prose_never_names_a_dialect() {
     }
 }
 
-#[test]
-fn subagent_spawn_schema_rejects_model_aliases() {
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
-    let spawn = definitions
-        .iter()
-        .find(|definition| definition.name() == "subagents_spawn")
-        .unwrap();
-    let validator =
-        jsonschema::JSONSchema::compile(spawn.contract.input_schema.canonical()).unwrap();
-
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "claude",
-                "model": "opus",
-                "effort": "high",
-                "prompt": "Research Linear triage."
-            }))
-            .is_err(),
-        "the model-facing contract must reject aliases the Host cannot execute"
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "claude",
-                "model": "claude-opus-5",
-                "effort": "high",
-                "prompt": "Research Linear triage."
-            }))
-            .is_ok()
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "codex",
-                "model": "gpt-5.6-luna",
-                "variant": "max",
-                "prompt": "Audit this repository."
-            }))
-            .is_ok(),
-        "Codex-only variants must be represented by the generated contract"
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "codex",
-                "model": "gpt-5.6-luna",
-                "variant": "high",
-                "prompt": "Audit this repository."
-            }))
-            .is_err(),
-        "each lane carries exactly one effort; there is no per-task tuning"
-    );
-    assert!(
-        validator
-            .validate(&json!({
-                "agent": "claude",
-                "model": "gpt-5.6-sol",
-                "variant": "high",
-                "prompt": "Audit this repository."
-            }))
-            .is_err(),
-        "the generated contract must reject models from another provider"
-    );
-}
-
 #[tokio::test]
-async fn subagent_tool_provider_resolves_the_current_settings_schema() {
-    let (executor, _storage, _broadcast_log, dir) = test_event_executor().await;
-    let provider = HirselToolProvider { executor };
-    let opus_spawn = json!({
-        "agent": "claude",
-        "model": "claude-opus-5",
-        "effort": "high",
-        "prompt": "Research Linear triage."
-    });
-    let before = provider.resolve_contract("subagents_spawn").unwrap();
-    let before = jsonschema::JSONSchema::compile(before.input_schema.canonical()).unwrap();
-    assert!(before.validate(&opus_spawn).is_ok());
-
-    let store = crate::host_config::ConfigStore::load(
-        dir.path().join("hirsel.toml"),
-        dir.path(),
-        std::path::Path::new("/docs/hirsel-config.md"),
-        &crate::host_config::EnvBootstrap::default(),
-    )
-    .await
-    .unwrap();
-    store
-        .set_subagent_model("claude", "claude-opus-5", false, &["high".to_string()])
-        .await
-        .unwrap();
-
-    let after = provider.resolve_contract("subagents_spawn").unwrap();
-    let after = jsonschema::JSONSchema::compile(after.input_schema.canonical()).unwrap();
-    assert!(
-        after.validate(&opus_spawn).is_err(),
-        "a fresh contract resolution must reflect Settings without rebuilding the provider"
-    );
-}
-
-#[test]
-fn every_executor_result_matches_its_declared_output_schema() {
+async fn every_executor_result_matches_its_declared_output_schema() {
     let now = Utc::now();
-    let events = vec![
-        SubagentEvent::Started {
-            external_id: "driver-session-1".to_string(),
-        },
-        SubagentEvent::Progress {
-            summary: "running tests".to_string(),
-        },
-        SubagentEvent::Terminal {
-            outcome: TerminalOutcome::Done {
-                summary: "tests passed".to_string(),
-            },
-        },
-    ];
-    let process = ProcessRecord::restored(
-        "proc-1".to_string(),
-        AgentKind::Codex,
-        Some("gpt-test".to_string()),
-        SessionHandle {
-            id: "driver-session-1".to_string(),
-            agent: AgentKind::Codex,
-        },
-        "Run the tests".to_string(),
-        "/tmp/repo".to_string(),
-        Some("external-1".to_string()),
-        ProcessStatus::Done,
-        events.clone(),
-        now,
-        now,
-    );
     let monitor = MonitorRecord {
+        thread_id: 1,
         id: "monitor-1".to_string(),
         cmd: "test -f done".to_string(),
         every_secs: 30,
-        wake_on: MonitorWakeOn::Regex,
-        pattern: Some("ready".to_string()),
+        condition: MonitorCondition::parse("regex", Some("ready".to_string())).unwrap(),
         label: "build ready".to_string(),
         created_ts: now,
         last_event_ts: now,
@@ -997,33 +810,9 @@ fn every_executor_result_matches_its_declared_output_schema() {
         summary: Some("matched".to_string()),
         cancelled_ts: Some(now),
     };
-    let wait_outcomes = [
-        ProcessAwaitOutput::Settled {
-            output: lash_core::ToolCallOutput::success(json!({ "summary": "done" })),
-        },
-        ProcessAwaitOutput::Settled {
-            output: lash_core::ToolCallOutput::failure(lash_core::ToolFailure {
-                class: lash_core::ToolFailureClass::Execution,
-                code: "subagent_failed".to_string(),
-                message: "failed".to_string(),
-                raw: Some(lash_core::ToolValue::untrusted_json(
-                    json!({ "reason": "failed" }),
-                )),
-                source: lash_core::ToolFailureSource::Tool,
-                retry: lash_core::ToolRetryStatus::Never,
-            }),
-        },
-        cancelled_await_output("interrupted".to_string()),
-        ProcessAwaitOutput::Abandoned {
-            evidence: Box::new(lash_core::AbandonEvidence {
-                writer: lash_core::AbandonWriter::ReconciledRequest,
-                owner: None,
-                epoch_ms: 42,
-            }),
-            control: None,
-        },
-    ];
-
+    let mut changed_monitor = monitor.clone();
+    changed_monitor.id = "monitor-2".to_string();
+    changed_monitor.condition = MonitorCondition::Changed;
     let mut results = BTreeMap::<&str, Vec<Value>>::new();
     for name in ["artifacts_create", "artifacts_edit", "artifacts_show"] {
         results.insert(name, vec![json!({"id":1,"content":"result"})]);
@@ -1045,8 +834,8 @@ fn every_executor_result_matches_its_declared_output_schema() {
     );
     results.insert("threads_activity",vec![json!({"activity":{"id":1,"thread_id":1,"turn_id":null,"kind":"progress","data":{},"ts":now}})]);
     let view = hirsel_proto::ViewInstance {
+        thread_id: 1,
         instance_id: "view-1".to_string(),
-        placement: "canvas".to_string(),
         spec: json!({ "type": "text", "text": "Ready" }),
     };
     results.insert("views_show", vec![view_instance_result(&view)]);
@@ -1059,34 +848,16 @@ fn every_executor_result_matches_its_declared_output_schema() {
         "views_list_templates",
         vec![json!([{ "id": "status", "title": "Status" }])],
     );
-    results.insert("subagents_spawn", vec![subagent_spawn_result("proc-1")]);
-    results.insert("subagents_prompt", vec![acknowledgement_result()]);
-    results.insert("subagents_interrupt", vec![acknowledgement_result()]);
     results.insert(
-        "subagents_list",
-        vec![subagents_list_result(std::slice::from_ref(&process)).unwrap()],
-    );
-    results.insert(
-        "subagents_progress",
+        "monitors_create",
         vec![
-            subagents_progress_result(Some(&process), &events).unwrap(),
-            subagents_progress_result(None, &[]).unwrap(),
+            monitors_create_result(&monitor).unwrap(),
+            monitors_create_result(&changed_monitor).unwrap(),
         ],
     );
     results.insert(
-        "subagents_wait",
-        wait_outcomes
-            .iter()
-            .map(|outcome| subagents_wait_result("proc-1", outcome).unwrap())
-            .collect(),
-    );
-    results.insert(
-        "monitors_create",
-        vec![monitors_create_result(&monitor).unwrap()],
-    );
-    results.insert(
         "monitors_list",
-        vec![monitors_list_result(std::slice::from_ref(&monitor)).unwrap()],
+        vec![monitors_list_result(&[monitor.clone(), changed_monitor]).unwrap()],
     );
     results.insert("monitors_cancel", vec![monitors_cancel_result("monitor-1")]);
     results.insert(
@@ -1109,6 +880,44 @@ fn every_executor_result_matches_its_declared_output_schema() {
         ],
     );
 
+    results.insert(
+        "threads_context",
+        vec![json!({"thread":thread,"ancestors":[],"brief":{"text":"","artifact_ids":[]}})],
+    );
+    results.insert("threads_delegate", vec![json!({"thread_id":2,"turn_id":3})]);
+    results.insert("threads_send", vec![json!({"thread_id":2,"turn_id":4})]);
+    results.insert("threads_report", vec![json!({"activity_id":5})]);
+    results.insert(
+        "threads_cancel",
+        vec![json!({"turn_id":4,"cancel_requested":true})],
+    );
+    let (executor, storage, _log, _dir) = test_event_executor().await;
+    let caller = storage.test_running_caller().await;
+    let mut tools = ScopedThreadTools {
+        tools: executor.tools.clone(),
+        caller: caller.clone(),
+        operation_id: String::new(),
+    };
+    let mut added_examples = Vec::new();
+    let mut removed_examples = Vec::new();
+    for (index, input) in [
+        json!({"target":{"kind":"url","url":"https://example.com/reference#section"},"title":"Reference"}),
+        json!({"target":{"kind":"thread","thread":"."}}),
+    ].into_iter().enumerate() {
+        tools.operation_id = format!("schema-add-{index}");
+        let added = tools.execute("threads_add_related", &input).await.unwrap();
+        assert_eq!(added["history_id"], caller.history_id);
+        assert_eq!(added["thread_id"], caller.thread_id);
+        assert_eq!(added["related_items"][0]["target"]["kind"], input["target"]["kind"]);
+        let item_id = added["related_items"][0]["id"].as_u64().unwrap();
+        tools.operation_id = format!("schema-remove-{index}");
+        let removed = tools.execute("threads_remove_related", &json!({"item_id":item_id})).await.unwrap();
+        assert_eq!(removed["related_items"], json!([]));
+        added_examples.push(added);
+        removed_examples.push(removed);
+    }
+    results.insert("threads_add_related", added_examples);
+    results.insert("threads_remove_related", removed_examples);
     let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
     assert_eq!(results.len(), definitions.len());
     for definition in definitions {
@@ -1130,6 +939,61 @@ fn every_executor_result_matches_its_declared_output_schema() {
     }
 }
 
+#[test]
+fn monitor_create_schema_and_parser_share_the_condition_contract() {
+    let definition = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+        .into_iter()
+        .find(|definition| definition.name() == "monitors_create")
+        .unwrap();
+    let schema = jsonschema::JSONSchema::compile(definition.contract.input_schema.canonical())
+        .expect("monitor input schema compiles");
+    let base = json!({"cmd":"printf ready","label":"ready","every_secs":30});
+
+    for condition in [
+        json!({"wake_on":"changed"}),
+        json!({"wake_on":"exit_zero"}),
+        json!({"wake_on":"exit_nonzero"}),
+        json!({"wake_on":"regex","pattern":"ready"}),
+        json!({"wake_on":"regex","pattern":" "}),
+        json!({"wake_on":"regex","pattern":"\u{0}"}),
+    ] {
+        let mut input = base.clone();
+        input.as_object_mut().unwrap().extend(
+            condition
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        assert!(schema.is_valid(&input), "schema rejected {input}");
+        parse_monitor_condition(&input).unwrap();
+    }
+
+    for condition in [
+        json!({"wake_on":"regex"}),
+        json!({"wake_on":"regex","pattern":""}),
+        json!({"wake_on":"changed","pattern":"ignored"}),
+        json!({"wake_on":"unknown"}),
+    ] {
+        let mut input = base.clone();
+        input.as_object_mut().unwrap().extend(
+            condition
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        assert!(!schema.is_valid(&input), "schema accepted {input}");
+        assert!(parse_monitor_condition(&input).is_err());
+    }
+
+    let mut malformed = base;
+    malformed["wake_on"] = json!("regex");
+    malformed["pattern"] = json!("[");
+    assert!(schema.is_valid(&malformed));
+    assert!(parse_monitor_condition(&malformed).is_err());
+}
+
 fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
     RemoteSessionObservationEventPayload::TurnActivity {
         activity: Box::new(lash::remote::usage::RemoteTurnActivity {
@@ -1139,17 +1003,6 @@ fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEvent
             event,
         }),
     }
-}
-
-fn turn_events(broadcast_log: &BroadcastLog) -> Vec<(u64, TurnEventKind)> {
-    broadcast_log
-        .recent()
-        .into_iter()
-        .filter_map(|event| match event {
-            HostToClient::TurnEvent { seq, event, .. } => Some((seq, event)),
-            _ => None,
-        })
-        .collect()
 }
 
 #[test]
@@ -1213,19 +1066,6 @@ fn digest_timer_labels_select_the_scheduled_event_producer() {
     );
     assert_eq!(scheduled_digest_label("digest:   "), None);
     assert_eq!(scheduled_digest_label("ordinary timer"), None);
-}
-
-fn stored_blob(id: &str, name: &str, mime: &str, size: u64, path: PathBuf) -> StoredBlob {
-    StoredBlob {
-        blob: Blob {
-            id: id.to_string(),
-            name: name.to_string(),
-            mime: mime.to_string(),
-            size,
-        },
-        path,
-        created_ts: Utc::now(),
-    }
 }
 
 fn timer_registration(value: Value, created_at_ms: u64) -> TriggerSubscriptionRecord {
@@ -1334,7 +1174,13 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
     // Dispatch runs the plugin's handler and returns its JSON verbatim.
     let result = tools
         .plugin_tools()
-        .call("plugin__catalog_test__ping", serde_json::json!({}))
+        .call(
+            "plugin__catalog_test__ping",
+            serde_json::json!({}),
+            tools.clone(),
+            tools.storage().test_running_caller().await,
+            "plugin-call".into(),
+        )
         .await
         .expect("registered plugin tool")
         .unwrap();
@@ -1363,11 +1209,11 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
 fn engine_start_requests_declare_a_captured_execution_env() {
     let now = Utc::now();
     let monitor = MonitorRecord {
+        thread_id: 1,
         id: "monitor-1".to_string(),
         cmd: "test -f done".to_string(),
         every_secs: 30,
-        wake_on: MonitorWakeOn::Regex,
-        pattern: Some("ready".to_string()),
+        condition: MonitorCondition::parse("regex", Some("ready".to_string())).unwrap(),
         label: "build ready".to_string(),
         created_ts: now,
         last_event_ts: now,
@@ -1377,15 +1223,11 @@ fn engine_start_requests_declare_a_captured_execution_env() {
         cancelled_ts: None,
     };
     let policy = SessionPolicy::new(lash::TurnBudget::Unbounded);
-    let requests = [
-        subagent_start_request(
-            "proc-1",
-            "agent",
-            json!({ "prompt": "go", "cwd": "/tmp" }),
-            host_process_env_spec(policy.clone()),
-        ),
-        monitor_start_request(&monitor, "agent", host_process_env_spec(policy)),
-    ];
+    let requests = [monitor_start_request(
+        &monitor,
+        "agent",
+        host_process_env_spec(policy),
+    )];
 
     for request in requests {
         assert!(
@@ -1399,5 +1241,184 @@ fn engine_start_requests_declare_a_captured_execution_env() {
         let env_ref = env_spec.stable_ref().expect("stable execution env ref");
         let registration = request.into_registration(Some(env_ref.clone()));
         assert_eq!(registration.env_ref, Some(env_ref));
+    }
+}
+
+#[test]
+fn tool_surface_fingerprint_uses_names_not_argument_schemas() {
+    let first = vec![tool_definition(
+        "test.events_notify",
+        "events_notify",
+        "Notify",
+        json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": { "message": { "type": "string" } }
+        }),
+        json!({ "type": "object" }),
+        ["events"],
+        "notify",
+    )];
+    let argument_only_change = vec![tool_definition(
+        "test.events_notify",
+        "events_notify",
+        "Notify with an evolved schema",
+        json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+                "message": { "type": "string" },
+                "quiet": { "type": "boolean" }
+            }
+        }),
+        json!({ "type": "object" }),
+        ["events"],
+        "notify",
+    )];
+    let mut name_set_change = argument_only_change.clone();
+    name_set_change.push(tool_definition(
+        "test.events_archive",
+        "events_archive",
+        "Archive",
+        json!({ "type": "object" }),
+        json!({ "type": "object" }),
+        ["events"],
+        "archive",
+    ));
+
+    let first = agent_tool_surface(&first).unwrap();
+    let argument_only_change = agent_tool_surface(&argument_only_change).unwrap();
+    let name_set_change = agent_tool_surface(&name_set_change).unwrap();
+
+    assert_eq!(first.fingerprint, argument_only_change.fingerprint);
+    assert_eq!(first.tool_names, vec!["events.notify"]);
+    assert_ne!(first.fingerprint, name_set_change.fingerprint);
+    assert_eq!(
+        name_set_change.tool_names,
+        vec!["events.archive", "events.notify"]
+    );
+}
+
+#[tokio::test]
+async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let (thread, _) = state
+        .storage
+        .create_thread(
+            "release",
+            "Release",
+            "Choose stable or beta",
+            &Value::Null,
+            hirsel_proto::ThreadAttention::NeedsOwner,
+            None,
+        )
+        .await
+        .unwrap();
+    let first = state
+        .tools
+        .prepare_agent_session(thread.id, "v1", &["threads.create".into()])
+        .await
+        .unwrap();
+    assert!(first.session_id.starts_with(&format!(
+        "thread-{}-{}-g",
+        state.storage.history_id().await.unwrap(),
+        thread.id
+    )));
+    state
+        .storage
+        .append_thread_chat(
+            thread.id,
+            ChatAuthor::Owner,
+            "Release request",
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let rotated = state
+        .tools
+        .prepare_agent_session(
+            thread.id,
+            "v2",
+            &["threads.create".into(), "threads.read".into()],
+        )
+        .await
+        .unwrap();
+    assert!(rotated.session_id.ends_with("-g1"));
+    let seed = rotated.handoff_seed.unwrap();
+    assert!(seed.contains(&format!("Thread #{} owner: Release request", thread.id)));
+    assert!(seed.contains("This is this Thread"));
+    let detail = state
+        .storage
+        .thread_detail(thread.id, None, 30)
+        .await
+        .unwrap();
+    assert!(
+        detail
+            .activities
+            .iter()
+            .any(|a| a.kind == "session_rotated")
+    );
+
+    assert!(
+        state
+            .tools
+            .prepare_agent_session(
+                thread.id,
+                "v2",
+                &["threads.create".into(), "threads.read".into()]
+            )
+            .await
+            .unwrap()
+            .handoff_seed
+            .is_none()
+    );
+}
+
+#[test]
+fn view_tool_contract_is_canvas_only_without_a_placement_dimension() {
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let show = definitions
+        .iter()
+        .find(|d| d.name() == "views_show")
+        .unwrap();
+    let schema = jsonschema::JSONSchema::compile(show.contract.input_schema.canonical()).unwrap();
+    assert!(schema.is_valid(&json!({"spec":{"type":"text","text":"hello"}})));
+    assert!(!schema.is_valid(&json!({"placement":"chat","spec":{"type":"text","text":"hello"}})));
+}
+
+async fn complete_fixture_turn(
+    executor: &HirselToolExecutor,
+    output: &lash::TurnOutput,
+) -> anyhow::Result<bool> {
+    let turn_id = executor
+        .anchors
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .unwrap()
+        .thread_turn_id
+        .unwrap();
+    let history = executor.tools.storage().history_id().await?;
+    let reply = turn_chat_payload(output);
+    let terminal = match &output.result.outcome {
+        lash::TurnOutcome::Finished(_) => ThreadTurnState::Completed,
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => ThreadTurnState::Cancelled,
+        _ => ThreadTurnState::Failed,
+    };
+    let (_, message) = executor
+        .tools
+        .storage()
+        .complete_thread_turn(&history, turn_id, terminal, reply)
+        .await?;
+    if let Some(message) = message {
+        executor.tools.publish_thread_message(message).await;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }

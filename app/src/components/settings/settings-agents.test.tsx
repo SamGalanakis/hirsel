@@ -198,10 +198,7 @@ async function mount(seed?: {
   providers?: ProviderRoster;
 }) {
   const store = await import("../../store/store");
-  store.dispatch({
-    type: "hello_ok",
-    payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], ...seed },
-  });
+  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null, ...seed } });
   store.openSettings("agents");
   const { SettingsSheet } = await import("./SettingsSheet");
   return render(() => <SettingsSheet />);
@@ -411,7 +408,7 @@ describe("Settings → Agents: sub-agents", () => {
 
   it("hides the sub-agent subsection when subagentModels is null", async () => {
     const { queryByText } = await mount({ model: MODEL });
-    expect(queryByText("Sub-agents")).toBeNull();
+    expect(queryByText("Delegation models")).toBeNull();
   });
 });
 
@@ -604,8 +601,8 @@ describe("Settings → Agents: providers", () => {
     expect(getByLabelText("Fork agent prompt")).toBeTruthy();
   });
 
-  it("marks the Sub-agent catalog as Claude's only lane", async () => {
+  it("describes the preserved CLI choices as child Thread execution", async () => {
     const { getByText } = await mount({ subagent_models: CATALOG, providers: ROSTER });
-    expect(getByText(/Claude is\s+available to Sub-agents only/i)).toBeTruthy();
+    expect(getByText(/Claude and Codex run\s+delegated work in the child conversation/i)).toBeTruthy();
   });
 });

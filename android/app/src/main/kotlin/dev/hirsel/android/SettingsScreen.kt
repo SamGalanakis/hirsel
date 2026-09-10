@@ -74,6 +74,8 @@ fun SettingsScreen(
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
     settings: SettingsStore,
+    pushEnabled: Boolean,
+    onPushEnabledChange: (Boolean) -> Unit,
     phase: Phase,
     deviceLabel: String,
     identitySecret: String?,
@@ -88,7 +90,6 @@ fun SettingsScreen(
     val c = LocalHirselColors.current
     val context = LocalContext.current
 
-    var pushEnabled by remember { mutableStateOf(settings.pushEnabled) }
     var notifyScope by remember { mutableStateOf(settings.notifyScope) }
     var debugMode by remember { mutableStateOf(settings.debugMode) }
 
@@ -198,9 +199,9 @@ fun SettingsScreen(
             SettingsCard(contentPadding = 0.dp) {
                 ToggleRow(
                     title = "Push notifications",
-                    subtitle = "Register this device for Ping pushes.",
+                    subtitle = "Register this device for Thread notifications.",
                     checked = pushEnabled,
-                    onCheckedChange = { pushEnabled = it; settings.pushEnabled = it },
+                    onCheckedChange = onPushEnabledChange,
                     testTag = "push-toggle",
                 )
                 RowDivider()

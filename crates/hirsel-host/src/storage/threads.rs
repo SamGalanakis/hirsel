@@ -1,10 +1,32 @@
 use super::{Storage, common::parse_ts};
 use chrono::{DateTime, Utc};
 use hirsel_proto::{Thread, ThreadAttention};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision";
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ThreadPublication {
+    history_id: String,
+    thread: Thread,
+}
+
+impl ThreadPublication {
+    pub(crate) fn history_id(&self) -> &str {
+        &self.history_id
+    }
+
+    pub(crate) fn thread(&self) -> &Thread {
+        &self.thread
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test(history_id: String, thread: Thread) -> Self {
+        Self { history_id, thread }
+    }
+}
+
+pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,showcased_artifact_id";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
+    let parent_thread_id = r.get::<_, Option<u64>>(12)?;
     let time = |i| -> rusqlite::Result<Option<DateTime<Utc>>> {
         r.get::<_, Option<String>>(i)?
             .map(|s| parse_ts(&s))
@@ -12,7 +34,11 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     };
     Ok(Thread {
         id: r.get(0)?,
+        parent_thread_id,
+        pinned_at: time(13)?,
         title: r.get(1)?,
+        icon: r.get(14)?,
+        showcased_artifact_id: r.get(15)?,
         description: r.get(2)?,
         instrument: serde_json::from_str(&r.get::<_, String>(3)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
@@ -59,7 +85,7 @@ pub(super) fn attention(value: ThreadAttention) -> &'static str {
         ThreadAttention::NeedsOwner => "needs_owner",
     }
 }
-fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
+pub(super) fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
     // An empty instrument is valid when ordinary work has no controls yet.
     if instrument.is_null()
         || instrument
@@ -68,7 +94,7 @@ fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    crate::task_ui::validate(instrument)?;
+    crate::thread_instrument::validate(instrument)?;
     let mut pending = vec![instrument];
     while let Some(node) = pending.pop() {
         if let Some(nodes) = node.as_array() {
@@ -79,13 +105,17 @@ fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
                 anyhow::ensure!(
                     !matches!(
                         action,
-                        "settle"
+                        "set_icon"
+                            | "set_showcase"
+                            | "settle"
                             | "reopen"
                             | "read"
                             | "archive"
                             | "unarchive"
                             | "snooze"
                             | "unsnooze"
+                            | "pin"
+                            | "unpin"
                     ),
                     "instrument action `{action}` is reserved for Thread lifecycle commands"
                 );
@@ -97,7 +127,70 @@ fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+fn create_in_transaction(
+    tx: &Transaction<'_>,
+    client_id: &str,
+    title: &str,
+    description: &str,
+    instrument: &serde_json::Value,
+    needs: ThreadAttention,
+    parent_thread_id: Option<u64>,
+) -> anyhow::Result<(Thread, bool)> {
+    if let Some(id) = tx
+        .query_row(
+            "SELECT id FROM threads WHERE client_id=?1",
+            [client_id],
+            |r| r.get::<_, u64>(0),
+        )
+        .optional()?
+    {
+        let thread = get(tx, id)?;
+        anyhow::ensure!(
+            thread.parent_thread_id == parent_thread_id,
+            "creation key belongs to another parent"
+        );
+        return Ok((thread, false));
+    }
+    if let Some(parent) = parent_thread_id {
+        get(tx, parent)?;
+    }
+    let now = Utc::now().to_rfc3339();
+    tx.execute("INSERT INTO threads(client_id,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,0,?6,?6,1,?7)",params![client_id,title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now,parent_thread_id])?;
+    Ok((get(tx, tx.last_insert_rowid() as u64)?, true))
+}
+
 impl Storage {
+    pub(crate) async fn current_thread_publication(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(tokio::sync::MutexGuard<'_, Connection>, ThreadPublication)> {
+        let c = self.conn.lock().await;
+        let publication = ThreadPublication {
+            history_id: super::schema::read_history_id(&c)?,
+            thread: get(&c, id)?,
+        };
+        Ok((c, publication))
+    }
+
+    pub(crate) async fn checked_thread_publication(
+        &self,
+        expected_history: &str,
+        expected: &Thread,
+    ) -> anyhow::Result<(tokio::sync::MutexGuard<'_, Connection>, ThreadPublication)> {
+        let guard = self.conn.lock().await;
+        super::thread_scope::validate_history(&guard, expected_history)?;
+        let publication = ThreadPublication {
+            history_id: expected_history.to_owned(),
+            thread: get(&guard, expected.id)?,
+        };
+        anyhow::ensure!(
+            publication.thread == *expected,
+            "Thread publication snapshot is stale"
+        );
+        Ok((guard, publication))
+    }
+
     pub async fn thread(&self, id: u64) -> anyhow::Result<Option<Thread>> {
         let c = self.conn.lock().await;
         match get(&c, id) {
@@ -117,6 +210,15 @@ impl Storage {
             snapshot(&c)
         }
     }
+    pub(crate) async fn addressed_thread(
+        &self,
+        expected_history: &str,
+        id: u64,
+    ) -> anyhow::Result<Thread> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, expected_history)?;
+        get(&c, id)
+    }
     pub async fn create_thread(
         &self,
         client_id: &str,
@@ -124,29 +226,53 @@ impl Storage {
         description: &str,
         instrument: &serde_json::Value,
         needs: ThreadAttention,
+        parent_thread_id: Option<u64>,
     ) -> anyhow::Result<(Thread, bool)> {
         validate_instrument(instrument)?;
         anyhow::ensure!(!client_id.is_empty(), "client_id must not be empty");
         anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
-        if let Some(id) = tx
-            .query_row(
-                "SELECT id FROM threads WHERE client_id=?1",
-                [client_id],
-                |r| r.get::<_, u64>(0),
-            )
-            .optional()?
-        {
-            let t = get(&tx, id)?;
-            tx.commit()?;
-            return Ok((t, false));
-        }
-        let now = Utc::now().to_rfc3339();
-        tx.execute("INSERT INTO threads(client_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES(?1,?2,?3,?4,?5,0,?6,?6,1)",params![client_id,title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now])?;
-        let thread = get(&tx, tx.last_insert_rowid() as u64)?;
+        let result = create_in_transaction(
+            &tx,
+            client_id,
+            title,
+            description,
+            instrument,
+            needs,
+            parent_thread_id,
+        )?;
         tx.commit()?;
-        Ok((thread, true))
+        Ok(result)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_addressed_thread(
+        &self,
+        expected_history: &str,
+        client_id: &str,
+        title: &str,
+        description: &str,
+        instrument: &serde_json::Value,
+        needs: ThreadAttention,
+        parent_thread_id: Option<u64>,
+    ) -> anyhow::Result<(Thread, bool)> {
+        validate_instrument(instrument)?;
+        anyhow::ensure!(!client_id.is_empty(), "client_id must not be empty");
+        anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        let result = create_in_transaction(
+            &tx,
+            client_id,
+            title,
+            description,
+            instrument,
+            needs,
+            parent_thread_id,
+        )?;
+        tx.commit()?;
+        Ok(result)
     }
     pub async fn update_thread(
         &self,
@@ -183,13 +309,71 @@ impl Storage {
         )?;
         get(&c, id)
     }
+    async fn set_addressed_thread_field(
+        &self,
+        expected_history: &str,
+        id: u64,
+        column: &str,
+        value: Option<String>,
+    ) -> anyhow::Result<Thread> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, expected_history)?;
+        get(&c, id)?;
+        c.execute(
+            &format!(
+                "UPDATE threads SET {column}=?2,updated_at=?3,revision=revision+1 WHERE id=?1"
+            ),
+            params![id, value, Utc::now().to_rfc3339()],
+        )?;
+        get(&c, id)
+    }
+    pub(crate) async fn settle_addressed_thread(
+        &self,
+        expected_history: &str,
+        id: u64,
+        settled: bool,
+    ) -> anyhow::Result<Thread> {
+        self.set_addressed_thread_field(
+            expected_history,
+            id,
+            "settled_at",
+            settled.then(|| Utc::now().to_rfc3339()),
+        )
+        .await
+    }
+    pub(crate) async fn archive_addressed_thread(
+        &self,
+        expected_history: &str,
+        id: u64,
+        archived: bool,
+    ) -> anyhow::Result<Thread> {
+        self.set_addressed_thread_field(
+            expected_history,
+            id,
+            "archived_at",
+            archived.then(|| Utc::now().to_rfc3339()),
+        )
+        .await
+    }
+    pub(crate) async fn snooze_addressed_thread(
+        &self,
+        expected_history: &str,
+        id: u64,
+        until: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Thread> {
+        self.set_addressed_thread_field(
+            expected_history,
+            id,
+            "snoozed_until",
+            until.map(|value| value.to_rfc3339()),
+        )
+        .await
+    }
     pub async fn settle_thread(&self, id: u64, settled: bool) -> anyhow::Result<Thread> {
-        anyhow::ensure!(id != 0, "Orchestrator cannot be settled");
         self.set_thread_field(id, "settled_at", settled.then(|| Utc::now().to_rfc3339()))
             .await
     }
     pub async fn archive_thread(&self, id: u64, archived: bool) -> anyhow::Result<Thread> {
-        anyhow::ensure!(id != 0, "Orchestrator cannot be archived");
         self.set_thread_field(id, "archived_at", archived.then(|| Utc::now().to_rfc3339()))
             .await
     }
@@ -201,7 +385,59 @@ impl Storage {
         self.set_thread_field(id, "snoozed_until", until.map(|v| v.to_rfc3339()))
             .await
     }
+    pub async fn pin_thread(&self, id: u64, pinned: bool) -> anyhow::Result<Thread> {
+        let c = self.conn.lock().await;
+        let thread = get(&c, id)?;
+        anyhow::ensure!(
+            thread.parent_thread_id.is_none(),
+            "only top-level Threads can be pinned or unpinned"
+        );
+        c.execute(
+            "UPDATE threads SET pinned_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                pinned.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        get(&c, id)
+    }
+    pub(crate) async fn pin_addressed_thread(
+        &self,
+        expected_history: &str,
+        id: u64,
+        pinned: bool,
+    ) -> anyhow::Result<Thread> {
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, expected_history)?;
+        let thread = get(&c, id)?;
+        anyhow::ensure!(
+            thread.parent_thread_id.is_none(),
+            "only top-level Threads can be pinned or unpinned"
+        );
+        c.execute(
+            "UPDATE threads SET pinned_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                pinned.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        get(&c, id)
+    }
     pub async fn mark_thread_read(&self, id: u64) -> anyhow::Result<Thread> {
         self.set_thread_field(id, "read", Some("1".into())).await
     }
+    pub(crate) async fn mark_addressed_thread_read(
+        &self,
+        expected_history: &str,
+        id: u64,
+    ) -> anyhow::Result<Thread> {
+        self.set_addressed_thread_field(expected_history, id, "read", Some("1".into()))
+            .await
+    }
 }
+
+#[cfg(test)]
+#[path = "thread_pins_tests.rs"]
+mod pin_tests;

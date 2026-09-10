@@ -1,0 +1,45 @@
+crates/hirsel-host/src/lash_runtime/thread_lanes.rs:164:        let requests = self.tools.storage().pending_thread_requests().await?;
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:60:    let requests = state.storage.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:90:    let requests = state.storage.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:103:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:133:    let pending = state.storage.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:233:    let pending = state.storage.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:340:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:401:    let requests = state.storage.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:490:    let pending = state.storage.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:515:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_recovery_tests.rs:632:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/scripted.rs:81:                .remove_thread_request(&turn.client_id)
+crates/hirsel-host/src/lash_runtime/scripted.rs:141:        match self.tools.storage().pending_thread_requests().await {
+crates/hirsel-host/src/lash_runtime/scripted.rs:160:                        let _ = self.tools.storage().remove_thread_request(&client_id).await;
+crates/hirsel-host/src/lash_runtime/lifecycle.rs:369:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_tests.rs:64:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_tests.rs:140:        .interrupt_unfinished_thread_turns()
+crates/hirsel-host/src/lash_runtime/thread_tests.rs:157:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_tests.rs:281:    assert!(storage.pending_thread_requests().await.unwrap().is_empty());
+crates/hirsel-host/src/lash_runtime/thread_tests.rs:338:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/runtime.rs:104:        for turn in tools.storage().interrupt_unfinished_thread_turns().await? {
+crates/hirsel-host/src/lash_runtime/thread_queue.rs:59:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_queue.rs:104:                .remove_thread_request(&client_id)
+crates/hirsel-host/src/lash_runtime/thread_queue.rs:236:            .remove_thread_request(client_id)
+crates/hirsel-host/src/lash_runtime/thread_queue.rs:311:            .pending_thread_requests()
+crates/hirsel-host/src/lash_runtime/thread_queue.rs:416:            .remove_thread_request(client_id)
+crates/hirsel-host/src/tests.rs:172:        state.storage.pending_thread_requests().await.unwrap().len(),
+crates/hirsel-host/src/storage/chat.rs:38:            "DELETE FROM thread_requests WHERE client_id IN (SELECT client_id FROM client_messages WHERE msg_id = ?1)",
+crates/hirsel-host/src/storage.rs:104:                DELETE FROM thread_requests;
+crates/hirsel-host/src/storage/thread_activity.rs:187:    pub async fn interrupt_unfinished_thread_turns(&self) -> anyhow::Result<Vec<ThreadTurn>> {
+crates/hirsel-host/src/storage/thread_scope_tests.rs:159:        !s.pending_thread_requests()
+crates/hirsel-host/src/storage/thread_scope_tests.rs:167:        s.pending_thread_requests()
+crates/hirsel-host/src/storage/thread_scope_tests.rs:192:    s.interrupt_unfinished_thread_turns().await.unwrap();
+crates/hirsel-host/src/storage/thread_scope_tests.rs:193:    s.interrupt_unfinished_thread_turns().await.unwrap();
+crates/hirsel-host/src/storage/thread_completion.rs:109:            "DELETE FROM thread_requests WHERE json_extract(payload,'$.turn_id')=?1",
+crates/hirsel-host/src/view_event_tests.rs:107:            .pending_thread_requests()
+crates/hirsel-host/src/storage/threads_tests.rs:141:    assert_eq!(s.pending_thread_requests().await.unwrap().len(), 1);
+crates/hirsel-host/src/storage/threads_tests.rs:143:        s.interrupt_unfinished_thread_turns()
+crates/hirsel-host/src/storage/threads_tests.rs:173:    assert!(s.remove_thread_request("message").await.unwrap());
+crates/hirsel-host/src/storage/threads_tests.rs:174:    assert!(s.pending_thread_requests().await.unwrap().is_empty());
+crates/hirsel-host/src/storage/threads_tests.rs:209:    let pending = s.pending_thread_requests().await.unwrap();
+crates/hirsel-host/src/ws.rs:449:            state.storage.pending_thread_requests().await.unwrap().len(),
+crates/hirsel-host/src/storage/thread_requests.rs:34:    pub async fn pending_thread_requests(
+crates/hirsel-host/src/storage/thread_requests.rs:46:    pub async fn remove_thread_request(&self, client_id: &str) -> anyhow::Result<bool> {
+crates/hirsel-host/src/storage/thread_requests.rs:48:            "DELETE FROM thread_requests WHERE client_id=?1",

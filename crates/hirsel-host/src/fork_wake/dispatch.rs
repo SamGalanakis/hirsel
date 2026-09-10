@@ -75,6 +75,9 @@ pub trait TriageRunner: Send + Sync {
 
 /// The host's fork-wake dispatcher.
 pub struct ForkWake {
+    thread_id: u64,
+    history_id: String,
+    tasks: crate::lash_runtime::RuntimeTasks,
     runner: Arc<dyn TriageRunner>,
     sink: Arc<dyn BriefSink>,
     tools: ToolSuite,
@@ -84,12 +87,17 @@ pub struct ForkWake {
 
 impl ForkWake {
     pub fn new(
+        thread_id: u64,
+        history_id: String,
         runner: Arc<dyn TriageRunner>,
         sink: Arc<dyn BriefSink>,
         tools: ToolSuite,
         storage: Storage,
     ) -> Arc<Self> {
         Arc::new(Self {
+            thread_id,
+            history_id,
+            tasks: crate::lash_runtime::RuntimeTasks::new(),
             runner,
             sink,
             tools,
@@ -103,7 +111,7 @@ impl ForkWake {
     /// loop) and must not block on a model turn.
     pub fn dispatch(self: &Arc<Self>, message: WakeMessage) {
         let fork = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             // A panic anywhere in the dispatch body would otherwise take the
             // message with it: the task dies, nobody observes the join handle,
             // and a Sub-agent completion silently never happened. Catching it
@@ -138,10 +146,25 @@ impl ForkWake {
             "spawning triage fork"
         );
 
-        let context = self.pack_context().await;
+        if message.thread_id != self.thread_id {
+            tracing::warn!("fork wake destination mismatch");
+            return;
+        }
+        let context = match self
+            .storage
+            .background_context(&self.history_id, self.thread_id)
+            .await
+        {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(%error,"fork history is unavailable");
+                return;
+            }
+        };
         let anchor = anchor(&context);
         let pack = build_pack(&message, &context);
         let tools = Arc::new(ForkTools::new(
+            self.history_id.clone(),
             self.tools.clone(),
             Arc::clone(&self.sink),
             message.clone(),
@@ -193,38 +216,6 @@ impl ForkWake {
     /// Read the slice the pack is built from. Failures degrade to an empty
     /// slice rather than aborting the fork: a fork with a thin pack still
     /// beats a lost message.
-    async fn pack_context(&self) -> PackContext {
-        let threads = self
-            .storage
-            .thread_snapshot()
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to read the Thread inventory for a fork pack");
-                Vec::new()
-            });
-        let recent_chat = self
-            .storage
-            .recent_chat(super::pack::PACK_CHAT_LIMIT as u64)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to read the conversation tail for a fork pack");
-                Vec::new()
-            });
-        let rules = self
-            .storage
-            .taste_decisions()
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to read recorded rules for a fork pack");
-                Vec::new()
-            });
-        PackContext {
-            threads,
-            recent_chat,
-            rules,
-        }
-    }
-
     /// The fail-open path (ruling 2). Injects a minimal brief that names the
     /// original message verbatim, so the main Agent has everything it needs
     /// even though no fork distilled it.
@@ -273,14 +264,19 @@ impl ForkWakeHandle {
         }
     }
 
+    pub(crate) async fn stop(&self) {
+        if let Some(fork) = self.inner.get() {
+            fork.tasks.stop().await;
+        }
+    }
+
     pub fn is_installed(&self) -> bool {
         self.inner.get().is_some()
     }
 
     /// Route one non-owner message to a triage fork.
     ///
-    /// Returns `false` when no dispatcher is installed, so the caller can fall
-    /// back to its pre-ADR-0015 behaviour rather than lose the message.
+    /// Returns `false` if initialization has not installed the required dispatcher.
     #[must_use]
     pub fn dispatch(&self, message: WakeMessage) -> bool {
         match self.inner.get() {

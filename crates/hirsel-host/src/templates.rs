@@ -73,6 +73,149 @@ mod tests {
         assert!(error.contains("unknown property `flash`"));
     }
 
+    #[test]
+    fn same_field_name_is_allowed_in_separate_forms() {
+        validate(&json!({
+            "type": "stack",
+            "children": [
+                {
+                    "type": "form",
+                    "action": "first",
+                    "fields": [{
+                        "type": "field",
+                        "name": "answer",
+                        "label": "First answer",
+                        "kind": "text"
+                    }]
+                },
+                {
+                    "type": "form",
+                    "action": "second",
+                    "fields": [{
+                        "type": "field",
+                        "name": "answer",
+                        "label": "Second answer",
+                        "kind": "text"
+                    }]
+                }
+            ]
+        }))
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inline_form_rejects_duplicate_names_before_view_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(8);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+
+        let error = views
+            .show(
+                "fixture-history",
+                1,
+                None,
+                Some(json!({
+                    "type": "form",
+                    "action": "submit",
+                    "fields": [
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "First answer",
+                            "kind": "text"
+                        },
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "Second answer",
+                            "kind": "text"
+                        }
+                    ]
+                })),
+                None,
+                Some("duplicate-inline".to_string()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate form field name `answer`"));
+        assert!(error.contains("spec.fields[1]"));
+        assert!(views.snapshot().await.is_empty());
+        assert!(matches!(
+            broadcasts.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_backed_form_rejects_duplicate_names_before_view_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("duplicate.json"),
+            serde_json::to_vec(&json!({
+                "id": "duplicate",
+                "title": "Duplicate form",
+                "spec": {
+                    "type": "form",
+                    "action": "submit",
+                    "fields": [
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "First answer",
+                            "kind": "text"
+                        },
+                        {
+                            "type": "field",
+                            "name": "answer",
+                            "label": "Second answer",
+                            "kind": "text"
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(8);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+
+        let error = views
+            .show(
+                "fixture-history",
+                1,
+                Some("duplicate".to_string()),
+                None,
+                None,
+                Some("duplicate-file".to_string()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate form field name `answer`"));
+        assert!(error.contains("spec.fields[1]"));
+        assert!(views.snapshot().await.is_empty());
+        assert!(matches!(
+            broadcasts.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
     #[tokio::test]
     async fn template_resolve_reloads_edits_without_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -213,15 +356,21 @@ mod tests {
         let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
         let (broadcaster, mut broadcasts) = broadcast::channel(8);
         let log = BroadcastLog::default();
-        let views = ViewManager::new(templates, broadcaster, log.clone());
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            log.clone(),
+        );
 
         let shown = views
             .show(
+                "fixture-history",
+                1,
                 Some("progress".to_string()),
                 None,
                 Some(json!({ "value": 0.2, "label": "Starting" })),
                 Some("view-test".to_string()),
-                "canvas".to_string(),
             )
             .await
             .unwrap();
@@ -233,6 +382,8 @@ mod tests {
 
         let updated = views
             .update(
+                "fixture-history",
+                1,
                 "view-test",
                 Some(json!({ "value": 0.8 })),
                 Some(json!([
@@ -249,7 +400,10 @@ mod tests {
             HostToClient::ViewUpsert { .. }
         ));
 
-        views.clear("view-test").await.unwrap();
+        views
+            .clear("fixture-history", 1, "view-test")
+            .await
+            .unwrap();
         assert!(views.snapshot().await.is_empty());
         assert!(matches!(
             broadcasts.recv().await.unwrap(),
@@ -259,5 +413,103 @@ mod tests {
             event,
             HostToClient::ViewRemoved { instance_id } if instance_id == "view-test"
         )));
+    }
+
+    #[tokio::test]
+    async fn view_snapshot_follows_latest_upsert_order_across_threads_and_recreation() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(8);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+        for (thread_id, instance_id) in [(1, "z"), (2, "a")] {
+            views
+                .show(
+                    "fixture-history",
+                    thread_id,
+                    None,
+                    Some(json!({ "type": "text", "text": instance_id })),
+                    None,
+                    Some(instance_id.to_string()),
+                )
+                .await
+                .unwrap();
+        }
+        let live_ids = [
+            broadcasts.recv().await.unwrap(),
+            broadcasts.recv().await.unwrap(),
+        ]
+        .map(|event| match event {
+            HostToClient::ViewUpsert { instance_id, .. } => instance_id,
+            other => panic!("unexpected view event: {other:?}"),
+        });
+        assert_eq!(live_ids, ["z", "a"]);
+        assert_eq!(
+            views
+                .snapshot()
+                .await
+                .iter()
+                .map(|view| view.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+
+        views
+            .update(
+                "fixture-history",
+                1,
+                "z",
+                None,
+                Some(json!([{ "op": "replace", "path": "/text", "value": "updated" }])),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            broadcasts.recv().await.unwrap(),
+            HostToClient::ViewUpsert { instance_id, .. } if instance_id == "z"
+        ));
+        assert_eq!(
+            views
+                .snapshot()
+                .await
+                .iter()
+                .map(|view| view.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+
+        views.clear("fixture-history", 2, "a").await.unwrap();
+        assert!(matches!(
+            broadcasts.recv().await.unwrap(),
+            HostToClient::ViewRemoved { instance_id } if instance_id == "a"
+        ));
+        views
+            .show(
+                "fixture-history",
+                2,
+                None,
+                Some(json!({ "type": "text", "text": "recreated" })),
+                None,
+                Some("a".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            broadcasts.recv().await.unwrap(),
+            HostToClient::ViewUpsert { instance_id, .. } if instance_id == "a"
+        ));
+        assert_eq!(
+            views
+                .snapshot()
+                .await
+                .iter()
+                .map(|view| view.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
     }
 }

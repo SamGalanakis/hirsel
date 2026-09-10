@@ -15,6 +15,8 @@ import dev.hirsel.core.ClientObserver
 import dev.hirsel.core.ClientSnapshot
 import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.LifecycleEvent
+import dev.hirsel.core.SendReceipt
+import dev.hirsel.core.ThreadRelatedTarget
 
 /** How a hirsel iroh connection should be established. */
 sealed interface ConnectionSpec {
@@ -40,7 +42,44 @@ sealed interface Phase {
 }
 
 /** An outbound message that never reached the host, kept so the UI can offer a retry. */
-data class FailedSend(val id: Long, val body: String, val threadId: ULong)
+data class FailedSend(val id: Long, val body: String, val threadId: ULong, val artifactIds: List<ULong>, val historyId: String)
+data class ActionFailure(val detail: String, val historyId: String? = null, val threadId: ULong? = null, val clientId: String? = null)
+internal fun ActionFailure.visibleIn(historyId: String?, threadId: ULong?): Boolean =
+    (this.historyId == null || this.historyId == historyId) && (this.threadId == null || this.threadId == threadId)
+
+internal enum class PendingRequestKind { Action, Create, Open, Related }
+private data class PendingRequest(val kind: PendingRequestKind, val historyId: String?, val threadId: ULong?)
+private const val REQUEST_TIMEOUT_MS = 20_000L
+
+internal class PendingRequests {
+    private val entries = mutableMapOf<String, PendingRequest>()
+
+    fun track(clientId: String, kind: PendingRequestKind, historyId: String?, threadId: ULong?) {
+        entries[clientId] = PendingRequest(kind, historyId, threadId)
+    }
+
+    fun clear() {
+        entries.clear()
+    }
+
+    fun accept(clientId: String, kind: PendingRequestKind, historyId: String? = null, threadId: ULong? = null): Boolean {
+        val pending = entries[clientId]
+        if (pending?.kind != kind || historyId != null && pending.historyId != historyId || threadId != null && pending.threadId != threadId) return false
+        entries.remove(clientId)
+        return true
+    }
+
+    fun fail(detail: String, clientId: String?): ActionFailure? {
+        if (clientId == null) return ActionFailure(detail)
+        val pending = entries.remove(clientId) ?: return null
+        return ActionFailure(detail, pending.historyId, pending.threadId, clientId)
+    }
+
+    fun timeout(clientId: String): ActionFailure? {
+        val pending = entries.remove(clientId) ?: return null
+        return ActionFailure("Thread request timed out", pending.historyId, pending.threadId, clientId)
+    }
+}
 
 /**
  * Live, observable state of a single native [Client]. Callbacks arrive on native
@@ -57,7 +96,7 @@ class Connection internal constructor(
 
     /**
      * Sends that threw before the host accepted them. The happy path is owned by
-     * native: `sendMessage` inserts an optimistic message (keyed by its
+     * native: `sendThreadMessage` inserts an optimistic message (keyed by its
      * `clientId`) with `pending = true`, then the host's ack flips it to sent via
      * a fresh snapshot — that reconciliation needs no bookkeeping here. Only the
      * failure case surfaces, as a retryable bubble.
@@ -67,44 +106,119 @@ class Connection internal constructor(
 
     var focusedThreadId by mutableStateOf<ULong?>(null)
     val drafts = mutableStateMapOf<ULong, String>()
+    val recoveredDrafts = mutableStateListOf<String>()
     var creatingClientId by mutableStateOf<String?>(null)
-    var actionError by mutableStateOf<String?>(null)
+    var actionError by mutableStateOf<ActionFailure?>(null)
+    private val pendingRequests = PendingRequests()
 
-    fun openThread(id: ULong) {
+    fun openThread(id: ULong, beforeId: ULong? = null) {
         focusedThreadId = id
-        client?.openThread(id, null)
+        val receipt = client?.openThread(id, beforeId) ?: return
+        trackRequest(receipt, PendingRequestKind.Open, snapshot?.historyId, id)
     }
 
-    fun createThread(title: String) {
-        creatingClientId = client?.createThread(title)?.clientId
+    fun createThread(historyId: String, title: String, parentThreadId: ULong?) {
+        val receipt = client?.createThread(historyId, title, parentThreadId)
+        creatingClientId = receipt?.clientId
+        if (receipt != null) trackRequest(receipt, PendingRequestKind.Create, historyId, parentThreadId)
     }
 
-    fun action(threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
-        runCatching { client?.threadAction(threadId, action, data, revision) }
-            .onFailure { actionError = it.message ?: "Action failed" }
+    fun action(historyId: String, threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
+        val receipt = runCatching { client?.threadAction(historyId, threadId, action, data, revision) }
+            .getOrElse {
+                actionError = ActionFailure(it.message ?: "Action failed", historyId, threadId)
+                return
+            }
+        if (receipt == null) {
+            actionError = ActionFailure("Thread or history changed. Reopen this control and try again.", historyId, threadId)
+            return
+        }
+        trackRequest(receipt, PendingRequestKind.Action, historyId, threadId)
     }
 
-    fun stop(threadId: ULong) { client?.cancelTurn(threadId) }
+    fun updateThreadIcon(historyId: String, threadId: ULong, icon: String?, revision: ULong): Boolean {
+        val receipt = client?.updateThreadIcon(historyId, threadId, icon, revision) ?: return false
+        trackRequest(receipt, PendingRequestKind.Action, historyId, threadId)
+        return true
+    }
+
+    private fun trackRequest(receipt: SendReceipt, kind: PendingRequestKind, historyId: String?, threadId: ULong?) {
+        pendingRequests.track(receipt.clientId, kind, historyId, threadId)
+        mainHandler.postDelayed({
+            pendingRequests.timeout(receipt.clientId)?.let {
+                if (creatingClientId == receipt.clientId) creatingClientId = null
+                actionError = it
+            }
+        }, REQUEST_TIMEOUT_MS)
+    }
+
+    internal fun clearPendingRequests() {
+        pendingRequests.clear()
+    }
+
+    internal fun acceptAction(clientId: String, historyId: String, threadId: ULong) {
+        if (!pendingRequests.accept(clientId, PendingRequestKind.Action, historyId, threadId)) return
+        if (actionError?.clientId == clientId) actionError = null
+    }
+
+    internal fun acceptCreated(clientId: String) {
+        if (!pendingRequests.accept(clientId, PendingRequestKind.Create)) return
+        if (actionError?.clientId == clientId) actionError = null
+    }
+
+    internal fun acceptOpened(clientId: String, threadId: ULong) {
+        if (!pendingRequests.accept(clientId, PendingRequestKind.Open, threadId = threadId)) return
+        if (actionError?.clientId == clientId) actionError = null
+    }
+
+    internal fun acceptRelated(clientId: String, historyId: String, threadId: ULong) {
+        if (!pendingRequests.accept(clientId, PendingRequestKind.Related, historyId, threadId)) return
+        if (actionError?.clientId == clientId) actionError = null
+    }
+
+    internal fun receiveProtocolError(detail: String, clientId: String?) {
+        pendingRequests.fail(detail, clientId)?.let {
+            if (creatingClientId == clientId) creatingClientId = null
+            actionError = it
+        }
+    }
+
+    // Callers capture historyId with the addressed Thread, before any delayed UI action.
+    fun addThreadRelated(historyId: String, threadId: ULong, target: ThreadRelatedTarget, title: String?): SendReceipt? =
+        client?.addThreadRelated(historyId, threadId, target, title)?.also {
+            trackRequest(it, PendingRequestKind.Related, historyId, threadId)
+        }
+
+    fun removeThreadRelated(historyId: String, threadId: ULong, itemId: ULong): SendReceipt? =
+        client?.removeThreadRelated(historyId, threadId, itemId)?.also {
+            trackRequest(it, PendingRequestKind.Related, historyId, threadId)
+        }
+
+    fun stop(historyId: String, threadId: ULong) { client?.cancelTurn(historyId, threadId) }
 
     val isOnline: Boolean get() = phase is Phase.Online
 
-    /** Fire-and-forget send off the main thread; a throw becomes a retryable [FailedSend]. */
-    fun send(body: String, threadId: ULong = focusedThreadId ?: 0uL) {
-        val c = client ?: run { recordFailure(body, threadId); return }
-        Thread {
-            runCatching { c.sendThreadMessage(threadId, body, emptyList(), emptyList()) }
-                .onFailure { mainHandler.post { recordFailure(body, threadId) } }
-        }.start()
+    /** Queue locally; a throw becomes a retryable [FailedSend]. */
+    fun send(body: String, threadId: ULong, expectedHistoryId: String?, artifactIds: List<ULong> = emptyList()) {
+        if (expectedHistoryId == null || expectedHistoryId != snapshot?.historyId) {
+            recoveredDrafts.add(body)
+            actionError = ActionFailure("History changed. Restore this text to a current Thread before sending.", expectedHistoryId, threadId)
+            return
+        }
+        val c = client ?: run { recordFailure(body, threadId, artifactIds, expectedHistoryId); return }
+        // This native method only queues locally; keep it ordered with identity callbacks.
+        runCatching { c.sendThreadMessage(expectedHistoryId, threadId, body, emptyList(), emptyList(), artifactIds.toList()) }
+            .onFailure { recordFailure(body, threadId, artifactIds, expectedHistoryId) }
     }
 
     /** Drop the failed entry and try the same body again. */
     fun retry(failed: FailedSend) {
         failedSends.remove(failed)
-        send(failed.body, failed.threadId)
+        send(failed.body, failed.threadId, failed.historyId, failed.artifactIds)
     }
 
-    private fun recordFailure(body: String, threadId: ULong) {
-        failedSends.add(FailedSend(failCounter++, body, threadId))
+    private fun recordFailure(body: String, threadId: ULong, artifactIds: List<ULong>, historyId: String) {
+        failedSends.add(FailedSend(failCounter++, body, threadId, artifactIds.toList(), historyId))
     }
 
     /** The device token the host issued during a successful pairing handshake. */
@@ -154,7 +268,21 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
         override fun onStateChanged(snapshot: ClientSnapshot) {
             mainHandler.post {
                 val conn = target.value ?: return@post
+                val old = conn.snapshot
+                if (old?.historyId != null && old.historyId != snapshot.historyId) {
+                    conn.recoveredDrafts.addAll(conn.drafts.values.filter { it.isNotBlank() })
+                    conn.recoveredDrafts.addAll(conn.failedSends.map { it.body })
+                    conn.drafts.clear()
+                    conn.failedSends.clear()
+                    conn.focusedThreadId = null
+                    conn.creatingClientId = null
+                    conn.clearPendingRequests()
+                    conn.actionError = ActionFailure("History changed. Unsent text is available in recovered drafts.")
+                }
+                val priorRecovered = old?.recoveredDrafts.orEmpty().toSet()
+                conn.recoveredDrafts.addAll(snapshot.recoveredDrafts.filter { it !in priorRecovered })
                 conn.snapshot = snapshot
+                snapshot.createdThreads.forEach { conn.acceptCreated(it.clientId) }
                 snapshot.createdThreads.firstOrNull { it.clientId == conn.creatingClientId }?.let {
                     conn.creatingClientId = null
                     conn.openThread(it.threadId)
@@ -173,7 +301,22 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                         if (event.attempt == 0u) Phase.Connecting else Phase.Reconnecting(event.attempt.toInt() + 1)
                     is LifecycleEvent.Online -> Phase.Online
                     is LifecycleEvent.Offline -> Phase.Offline(event.reason)
-                    is LifecycleEvent.ProtocolError -> { conn.actionError = event.detail; conn.phase }
+                    is LifecycleEvent.ThreadOpened -> {
+                        conn.acceptOpened(event.clientId, event.threadId)
+                        conn.phase
+                    }
+                    is LifecycleEvent.ThreadRelatedChanged -> {
+                        event.clientId?.let { conn.acceptRelated(it, event.historyId, event.threadId) }
+                        conn.phase
+                    }
+                    is LifecycleEvent.ThreadActionApplied -> {
+                        conn.acceptAction(event.clientId, event.historyId, event.threadId)
+                        conn.phase
+                    }
+                    is LifecycleEvent.ProtocolError -> {
+                        conn.receiveProtocolError(event.detail, event.clientId)
+                        conn.phase
+                    }
                 }
             }
         }

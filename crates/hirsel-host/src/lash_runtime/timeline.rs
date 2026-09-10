@@ -14,16 +14,78 @@ pub(super) const TURN_EVENT_SUMMARY_CHARS: usize = 120;
 /// Agent programs are shown verbatim, so the only cap here is a safety valve
 /// against a pathological cell blowing up the ephemeral turn stream.
 pub(super) const TURN_EVENT_CODE_BYTES: usize = 64 * 1024;
+pub(super) const TURN_EVENT_PAYLOAD_BYTES: usize = 64 * 1024;
+#[cfg(not(test))]
+const TIMELINE_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const TIMELINE_COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Rendezvous between Lash's observation stream and Hirsel's terminal turn
+/// projection. A turn cannot become successful until its `Committed`
+/// observation has flushed every preceding timeline event to SQLite.
+#[derive(Clone, Default)]
+pub(super) struct TimelineCommitBarrier {
+    state: Arc<Mutex<TimelineCommitState>>,
+    notify: Arc<Notify>,
+}
+
+#[derive(Default)]
+struct TimelineCommitState {
+    committed: Option<String>,
+    failures: HashMap<String, String>,
+}
+
+impl TimelineCommitBarrier {
+    pub(super) async fn record(&self, turn_id: String) {
+        self.state.lock().await.committed = Some(turn_id);
+        self.notify.notify_waiters();
+    }
+
+    pub(super) async fn fail(&self, turn_id: String, reason: String) {
+        self.state
+            .lock()
+            .await
+            .failures
+            .entry(turn_id)
+            .or_insert(reason);
+        self.notify.notify_waiters();
+    }
+
+    pub(super) async fn wait(&self, turn_id: &str) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + TIMELINE_COMMIT_TIMEOUT;
+        loop {
+            let notified = self.notify.notified();
+            let state = self.state.lock().await;
+            if let Some(reason) = state.failures.get(turn_id) {
+                return Err(anyhow::anyhow!(reason.clone()));
+            }
+            if state.committed.as_deref() == Some(turn_id) {
+                return Ok(());
+            }
+            drop(state);
+            tokio::time::timeout_at(deadline, notified)
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out waiting for durable timeline commit"))?;
+        }
+    }
+
+    pub(super) async fn clear(&self, turn_id: &str) {
+        let mut state = self.state.lock().await;
+        if state.committed.as_deref() == Some(turn_id) {
+            state.committed = None;
+        }
+        state.failures.remove(turn_id);
+    }
+}
 
 #[derive(Default)]
 pub(super) struct TurnTimelineBridge {
     pub(super) turn_id: Option<u64>,
     pub(super) thread_id: Option<u64>,
-    pub(super) seq: u64,
     pub(super) in_turn: bool,
     pub(super) pending: Option<PendingTimelineText>,
-    pub(super) tool_id_seq: u64,
     pub(super) code_id_seq: u64,
+    pub(super) ready: Vec<TurnEventKind>,
 }
 
 pub(super) struct PendingTimelineText {
@@ -50,12 +112,7 @@ impl TurnTimelineBridge {
             .unwrap_or(TURN_EVENT_BATCH_INTERVAL)
     }
 
-    pub(super) fn observe(
-        &mut self,
-        event: &RemoteSessionObservationEventPayload,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
+    pub(super) fn observe(&mut self, event: &RemoteSessionObservationEventPayload) {
         match event {
             RemoteSessionObservationEventPayload::TurnActivity { activity } => {
                 match &activity.event {
@@ -63,15 +120,10 @@ impl TurnTimelineBridge {
                         self.start_turn_if_needed();
                     }
                     RemoteTurnEvent::AssistantProseDelta { text } => {
-                        self.push_text(TimelineTextKind::Prose, text, broadcast_log, broadcaster);
+                        self.push_text(TimelineTextKind::Prose, text);
                     }
                     RemoteTurnEvent::ReasoningDelta { text } => {
-                        self.push_text(
-                            TimelineTextKind::Reasoning,
-                            text,
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.push_text(TimelineTextKind::Reasoning, text);
                     }
                     RemoteTurnEvent::CodeBlockStarted {
                         language,
@@ -79,19 +131,15 @@ impl TurnTimelineBridge {
                         graph_key,
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
+                        self.flush_pending();
                         let id = self.code_event_id(graph_key.as_deref());
                         let (code, truncated) = clamp_code(code);
-                        self.publish_event(
-                            TurnEventKind::CodeStart {
-                                id,
-                                language: language.clone(),
-                                code,
-                                truncated,
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.publish_event(TurnEventKind::CodeStart {
+                            id,
+                            language: language.clone(),
+                            code,
+                            truncated,
+                        });
                     }
                     RemoteTurnEvent::CodeBlockCompleted {
                         success,
@@ -101,21 +149,17 @@ impl TurnTimelineBridge {
                         ..
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
+                        self.flush_pending();
                         let id = self.code_event_id(graph_key.as_deref());
-                        self.publish_event(
-                            TurnEventKind::CodeDone {
-                                id,
-                                ok: *success,
-                                summary: code_done_summary(
-                                    *success,
-                                    error.as_ref().map(|failure| failure.message.as_str()),
-                                    *duration_ms,
-                                ),
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.publish_event(TurnEventKind::CodeDone {
+                            id,
+                            ok: *success,
+                            summary: code_done_summary(
+                                *success,
+                                error.as_ref().map(|failure| failure.message.as_str()),
+                                *duration_ms,
+                            ),
+                        });
                     }
                     RemoteTurnEvent::ToolCallStarted {
                         call_id,
@@ -124,17 +168,16 @@ impl TurnTimelineBridge {
                         ..
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
-                        let id = self.tool_event_id(call_id.as_deref(), name);
-                        self.publish_event(
-                            TurnEventKind::ToolStart {
-                                id,
-                                name: name.clone(),
-                                summary: condense_args(name, args),
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.flush_pending();
+                        let Some(id) = call_id.clone() else {
+                            return;
+                        };
+                        self.publish_event(TurnEventKind::ToolStart {
+                            id,
+                            name: name.clone(),
+                            summary: condense_args(name, args),
+                            input: Some(bounded_turn_payload(args)),
+                        });
                     }
                     RemoteTurnEvent::ToolCallCompleted {
                         call_id,
@@ -144,24 +187,23 @@ impl TurnTimelineBridge {
                         ..
                     } => {
                         self.start_turn_if_needed();
-                        self.flush_pending(broadcast_log, broadcaster);
-                        let id = self.tool_event_id(call_id.as_deref(), name);
-                        self.publish_event(
-                            TurnEventKind::ToolDone {
-                                id,
-                                name: name.clone(),
-                                ok: tool_output_ok(output),
-                                summary: condense_result(name, args, output),
-                            },
-                            broadcast_log,
-                            broadcaster,
-                        );
+                        self.flush_pending();
+                        let Some(id) = call_id.clone() else {
+                            return;
+                        };
+                        self.publish_event(TurnEventKind::ToolDone {
+                            id,
+                            name: name.clone(),
+                            ok: tool_output_ok(output),
+                            summary: condense_result(name, args, output),
+                            result: Some(bounded_turn_payload(output)),
+                        });
                     }
                     _ => {}
                 }
             }
             RemoteSessionObservationEventPayload::Committed => {
-                self.finish_turn(broadcast_log, broadcaster);
+                self.finish_turn();
             }
             _ => {}
         }
@@ -169,24 +211,9 @@ impl TurnTimelineBridge {
 
     pub(super) fn start_turn_if_needed(&mut self) {
         if !self.in_turn {
-            self.seq = 0;
             self.pending = None;
             self.in_turn = true;
-            self.tool_id_seq = 0;
             self.code_id_seq = 0;
-        }
-    }
-
-    /// lash supplies call_id on native tool events; RLM cell executions may
-    /// omit it, so fall back to a per-turn ordinal. Started/Completed arrive
-    /// serially per call in RLM mode, so name+ordinal pairs stay aligned.
-    pub(super) fn tool_event_id(&mut self, call_id: Option<&str>, name: &str) -> String {
-        match call_id {
-            Some(id) => id.to_string(),
-            None => {
-                self.tool_id_seq += 1;
-                format!("{name}:{}", self.tool_id_seq.div_ceil(2))
-            }
         }
     }
 
@@ -203,22 +230,12 @@ impl TurnTimelineBridge {
         }
     }
 
-    pub(super) fn finish_turn(
-        &mut self,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
-        self.flush_pending(broadcast_log, broadcaster);
+    pub(super) fn finish_turn(&mut self) {
+        self.flush_pending();
         self.in_turn = false;
     }
 
-    pub(super) fn push_text(
-        &mut self,
-        kind: TimelineTextKind,
-        text: &str,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
+    pub(super) fn push_text(&mut self, kind: TimelineTextKind, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -228,7 +245,7 @@ impl TurnTimelineBridge {
             .as_ref()
             .is_some_and(|pending| pending.kind != kind)
         {
-            self.flush_pending(broadcast_log, broadcaster);
+            self.flush_pending();
         }
         let pending = self.pending.get_or_insert_with(|| PendingTimelineText {
             kind,
@@ -239,15 +256,11 @@ impl TurnTimelineBridge {
         if pending.text.chars().count() >= TURN_EVENT_BATCH_CHARS
             || pending.started_at.elapsed() >= TURN_EVENT_BATCH_INTERVAL
         {
-            self.flush_pending(broadcast_log, broadcaster);
+            self.flush_pending();
         }
     }
 
-    pub(super) fn flush_pending(
-        &mut self,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
+    pub(super) fn flush_pending(&mut self) {
         let Some(pending) = self.pending.take() else {
             return;
         };
@@ -258,27 +271,17 @@ impl TurnTimelineBridge {
             TimelineTextKind::Prose => TurnEventKind::Prose { text: pending.text },
             TimelineTextKind::Reasoning => TurnEventKind::Reasoning { text: pending.text },
         };
-        self.publish_event(event, broadcast_log, broadcaster);
+        self.publish_event(event);
     }
 
-    pub(super) fn publish_event(
-        &mut self,
-        event: TurnEventKind,
-        broadcast_log: &BroadcastLog,
-        broadcaster: &broadcast::Sender<HostToClient>,
-    ) {
-        self.seq += 1;
-        publish(
-            broadcast_log,
-            broadcaster,
-            HostToClient::TurnEvent {
-                turn_id: self.turn_id,
-                thread_id: self.thread_id,
-                seq: self.seq,
-                event,
-                sc: None,
-            },
-        );
+    pub(super) fn publish_event(&mut self, event: TurnEventKind) {
+        if self.thread_id.is_some() && self.turn_id.is_some() {
+            self.ready.push(event);
+        }
+    }
+
+    pub(super) fn take_ready(&mut self) -> Vec<TurnEventKind> {
+        std::mem::take(&mut self.ready)
     }
 }
 
@@ -293,9 +296,12 @@ pub(super) fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSumm
                 lash_core::ToolCallOutcome::Cancelled(_)
             )
         })
-        .map(|call| ToolCallSummary {
-            name: call.tool.clone(),
-            ok: call.output.is_success(),
+        .filter_map(|call| {
+            call.call_id.as_ref().map(|id| ToolCallSummary {
+                id: id.clone(),
+                name: call.tool.clone(),
+                ok: call.output.is_success(),
+            })
         })
         .collect::<Vec<_>>();
     if !summaries.is_empty() {
@@ -305,10 +311,14 @@ pub(super) fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSumm
         .activities
         .iter()
         .filter_map(|activity| match &activity.event {
-            lash::TurnEvent::ToolCallCompleted { name, output, .. }
-                if !matches!(output.outcome, lash_core::ToolCallOutcome::Cancelled(_)) =>
-            {
+            lash::TurnEvent::ToolCallCompleted {
+                call_id: Some(id),
+                name,
+                output,
+                ..
+            } if !matches!(output.outcome, lash_core::ToolCallOutcome::Cancelled(_)) => {
                 Some(ToolCallSummary {
+                    id: id.clone(),
                     name: name.clone(),
                     ok: output.is_success(),
                 })
@@ -348,34 +358,6 @@ pub(super) fn turn_chat_payload(
 }
 
 #[cfg(test)]
-pub(super) async fn materialize_turn_chat(
-    tools: &ToolSuite,
-    output: &lash::TurnOutput,
-) -> anyhow::Result<bool> {
-    let Some((text, tool_calls)) = turn_chat_payload(output) else {
-        return Ok(false);
-    };
-    tools.thread_chat_send(0, text, None, tool_calls).await?;
-    Ok(true)
-}
-
-pub(super) async fn materialize_thread_turn_chat(
-    tools: &ToolSuite,
-    output: &lash::TurnOutput,
-    thread_id: u64,
-    anchor: u64,
-) -> anyhow::Result<Option<u64>> {
-    let Some((text, calls)) = turn_chat_payload(output) else {
-        return Ok(None);
-    };
-    Ok(Some(
-        tools
-            .thread_chat_send(thread_id, text, Some(anchor), calls)
-            .await?
-            .id,
-    ))
-}
-
 pub(super) async fn materialize_thread_turn_reply(
     tools: &ToolSuite,
     output: &lash::TurnOutput,

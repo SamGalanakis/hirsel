@@ -6,13 +6,16 @@ import {
   ArrowDownToLine,
   Layers,
   MessagesSquare,
-  Minimize2,
   Search,
   Settings,
 } from "@/components/ui/icons";
 import { type Component, createEffect, createMemo, createSignal, For, Show, onSettled } from "solid-js";
 import { type JSX, Portal } from "@solidjs/web";
 import { focusThread, threadState } from "../threads/store";
+import { threadPath } from "../threads/tree";
+import { threadSection } from "../threads/model";
+import { closeThreadNavigation } from "../threads/navigation";
+import { ThreadAvatar } from "../threads/ThreadAvatar";
 import { threadActions } from "../threads/actions";
 import { ThreadActionSymbol } from "../threads/ThreadActions";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS } from "../lib/keymap";
@@ -22,6 +25,7 @@ import { cn } from "@/lib/utils";
 interface Command {
   id: string;
   label: string;
+  description?: string;
   /** Optional keyboard-hint tokens, rendered as mono chips on the right. */
   hint?: string[];
   keywords?: string;
@@ -48,6 +52,7 @@ function fuzzyMatch(query: string, text: string): boolean {
 
 export const CommandPalette: Component<{
   open: boolean;
+  intent?: "commands" | "threads";
   onOpenChange: (open: boolean) => void;
 }> = (props) => {
   const [query, setQuery] = createSignal("");
@@ -62,7 +67,7 @@ export const CommandPalette: Component<{
     const out: Command[] = [
       {
         id: "focus-composer",
-        label: "Focus Hirsel",
+        label: "Focus conversation",
         hint: ["/"],
         keywords: "type write message reply",
         icon: <MessagesSquare class={iconClass} aria-hidden="true" />,
@@ -102,29 +107,24 @@ export const CommandPalette: Component<{
       },
     ];
 
-    // The exit from a focused Task, mirroring the Esc ladder's last rung. Only
-    // offered while there is a focus to leave.
-    if (threadState.focusedId !== 0) {
-      out.push({
-        id: "clear-focus",
-        label: "Open Hirsel",
-        hint: ["Esc"],
-        keywords: "ambient leave exit close unfocus back",
-        icon: <Minimize2 class={iconClass} aria-hidden="true" />,
-        run: () => focusThread(0),
-      });
-    }
-
     const thread = threadState.threads.find(t => t.id === threadState.focusedId);
     if (thread) for (const action of threadActions(thread)) out.push({ id: `${action.id}-thread`, label: action.label, icon: <ThreadActionSymbol name={action.icon} />, run: action.run });
 
+    for (const destination of threadState.threads) {
+      const section = threadSection(destination);
+      const description = [threadPath(threadState.threads, destination.id), destination.parent_thread_id === null && destination.pinned_at ? "Pinned" : null, section === "active" ? null : section, destination.attention === "needs_owner" ? "Needs you" : null, !destination.read ? "Unread" : null].filter(Boolean).join(" · ");
+      out.push({ id: `open-thread-${destination.id}`, label: destination.title, description, keywords: `thread ${threadPath(threadState.threads, destination.id)} ${section}`, icon: <ThreadAvatar thread={destination} />, run: () => { closeThreadNavigation(); focusThread(destination.id); focusComposer(); } });
+    }
     return out;
   });
 
   const filtered = createMemo<Command[]>(() => {
     const q = query().trim();
-    if (!q) return commands();
-    return commands().filter((c) => fuzzyMatch(q, `${c.label} ${c.keywords ?? ""}`));
+    const candidates = props.intent === "threads" ? commands().filter(command => command.id.startsWith("open-thread-")) : commands();
+    if (!q) return candidates;
+    const reference = /^#(\d+)$/.exec(q);
+    if (reference) return candidates.filter(command => command.id === `open-thread-${Number(reference[1])}`);
+    return candidates.filter((c) => fuzzyMatch(q, `${c.label} ${c.description ?? ""} ${c.keywords ?? ""}`));
   });
 
   // Reset the surface each time it is summoned, and keep the active row in range
@@ -181,14 +181,14 @@ export const CommandPalette: Component<{
               <input
                 type="text"
                 role="combobox"
-                aria-label="Search commands"
+                aria-label={props.intent === "threads" ? "Search threads" : "Search commands or threads"}
                 aria-expanded="true"
                 aria-controls="command-palette-list"
                 aria-activedescendant={filtered()[activeIndex()]?.id}
                 autocomplete="off"
                 autocorrect="off"
                 spellcheck={false}
-                placeholder="Type a command…"
+                placeholder={props.intent === "threads" ? "Search threads…" : "Search commands or threads…"}
                 class="h-11 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
                 value={query()}
                 onInput={(e) => {
@@ -204,7 +204,7 @@ export const CommandPalette: Component<{
               <Show
                 when={filtered().length > 0}
                 fallback={
-                  <div class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands</div>
+                  <div class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands or threads</div>
                 }
               >
                 <For each={filtered()}>
@@ -216,14 +216,14 @@ export const CommandPalette: Component<{
                       tabindex={-1}
                       aria-selected={i() === activeIndex() ? "true" : "false"}
                       class={cn(
-                        "flex w-full cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground",
+                        "flex min-h-11 w-full cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground",
                         i() === activeIndex() && "bg-muted",
                       )}
                       onMouseMove={() => setActiveIndex(i())}
                       onClick={() => runCommand(cmd)}
                     >
                       {cmd.icon}
-                      <span class="min-w-0 flex-1 truncate">{cmd.label}</span>
+                      <span class="min-w-0 flex-1"><span class="block break-words">{cmd.label}</span><Show when={cmd.description}><span class="block text-xs text-muted-foreground">{cmd.description}</span></Show></span>
                       <Show when={cmd.hint}>
                         <KeyHint keys={cmd.hint!} />
                       </Show>

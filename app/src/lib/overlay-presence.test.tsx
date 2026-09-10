@@ -1,3 +1,5 @@
+import { setHistoryId } from "./history";
+import { focusThread, threadState, setThreadState } from "../threads/store";
 import { flush } from "solid-js";
 // The overlay-presence contract, exercised against the REAL registry: the
 // palette and the cheat-sheet are Kobalte dialogs that never push a focus trap,
@@ -13,12 +15,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette, ShortcutHelp } from "../components/CommandPalette";
 import { ProcessesSheet } from "../components/processes/ProcessesSheet";
 import {
-  clearTaskFocus,
   closeRightRegion,
-  dispatch,
   openProcesses,
   state,
-  toggleTaskFocus,
 } from "../store/store";
 import { anyOverlayOpen } from "./focus";
 import { defaultHandlers, installGlobalKeymap, type KeymapHandlers } from "./keymap";
@@ -36,23 +35,21 @@ function spyHandlers(overrides: Partial<KeymapHandlers> = {}): KeymapHandlers {
     jumpToLatest: vi.fn(),
     openPalette: vi.fn(),
     showHelp: vi.fn(),
-    escapeField: vi.fn(() => true),
     ...overrides,
   };
 }
 
 describe("overlay presence (real registry)", () => {
   beforeEach(() => {
-    flush(() => clearTaskFocus());
+    flush(() => { setHistoryId("overlay-history"); setThreadState(draft => { draft.ready = true; }); focusThread(0); });
     flush(() => closeRightRegion());
-    flush(() => dispatch({ type: "agent_activity", payload: { state: "idle", text: null } }));
     // Auto-cleanup unmounted the previous test's dialog; if a token had leaked,
     // the global bare-key layer would be dead for the rest of the session.
     expect(anyOverlayOpen()).toBe(false);
   });
 
   it("does not clear task focus when Esc dismisses the open palette", async () => {
-    flush(() => toggleTaskFocus(7));
+    flush(() => focusThread(7));
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(anyOverlayOpen()).toBe(true));
 
@@ -61,12 +58,12 @@ describe("overlay presence (real registry)", () => {
     const ev = press("Escape");
     dispose();
 
-    expect(state.focusedTaskId).toBe(7);
+    expect(threadState.focusedId).toBe(7);
     expect(ev.defaultPrevented).toBe(false);
   });
 
   it("does not clear task focus when Esc dismisses a focus-trapped utility", async () => {
-    flush(() => toggleTaskFocus(3));
+    flush(() => focusThread(3));
     openProcesses();
     render(() => <ProcessesSheet />);
     await waitFor(() => expect(anyOverlayOpen()).toBe(true));
@@ -81,7 +78,7 @@ describe("overlay presence (real registry)", () => {
     dispose();
 
     expect(state.rightRegion).toBe("none");
-    expect(state.focusedTaskId).toBe(3);
+    expect(threadState.focusedId).toBe(3);
   });
 
   it("suppresses bare keys while the shortcut cheat-sheet is open", async () => {

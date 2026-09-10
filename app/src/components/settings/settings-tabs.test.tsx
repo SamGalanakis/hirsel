@@ -1,5 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
-import userEvent from "@testing-library/user-event";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelSnapshot, ProviderRoster } from "../../protocol";
 import type { SettingsTab } from "../../store/store";
@@ -46,7 +45,7 @@ const ROSTER: ProviderRoster = {
 /** The tab list, in the order the rail shows it. */
 const TAB_LABELS = [
   "Appearance",
-  "Agents",
+  "Thread models",
   "Providers",
   "Connection & devices",
   "Notifications",
@@ -70,17 +69,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 async function mount(tab?: SettingsTab) {
   const store = await import("../../store/store");
-  store.dispatch({
-    type: "hello_ok",
-    payload: {
-      type: "hello_ok",
-      latest_msg_id: 0,
-      messages: [],
-      pings: [],
-      model: MODEL,
-      providers: ROSTER,
-    },
-  });
+  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", model: MODEL, providers: ROSTER, history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", subagent_models: null, prompts: null } });
   store.openSettings(tab);
   const { SettingsSheet } = await import("./SettingsSheet");
   return render(() => <SettingsSheet />);
@@ -96,7 +85,7 @@ describe("Settings: side-tab navigation", () => {
     expect(getByLabelText("Theme")).toBeTruthy();
     expect(queryByLabelText("Main agent model")).toBeNull();
 
-    fireEvent.click(getByRole("tab", { name: "Agents" }));
+    fireEvent.click(getByRole("tab", { name: "Thread models" }));
     expect(getByLabelText("Main agent model")).toBeTruthy();
     expect(queryByLabelText("Theme")).toBeNull();
   });
@@ -120,15 +109,15 @@ describe("Settings: side-tab navigation", () => {
       getAllByRole("tab").find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent;
 
     fireEvent.keyDown(getByRole("tab", { name: "Appearance" }), { key: "ArrowDown" });
-    expect(selected()).toBe("Agents");
+    expect(selected()).toBe("Thread models");
 
-    fireEvent.keyDown(getByRole("tab", { name: "Agents" }), { key: "ArrowRight" });
+    fireEvent.keyDown(getByRole("tab", { name: "Thread models" }), { key: "ArrowRight" });
     expect(selected()).toBe("Providers");
 
     fireEvent.keyDown(getByRole("tab", { name: "Providers" }), { key: "ArrowLeft" });
-    expect(selected()).toBe("Agents");
+    expect(selected()).toBe("Thread models");
 
-    fireEvent.keyDown(getByRole("tab", { name: "Agents" }), { key: "End" });
+    fireEvent.keyDown(getByRole("tab", { name: "Thread models" }), { key: "End" });
     expect(selected()).toBe("Plugins");
 
     fireEvent.keyDown(getByRole("tab", { name: "Plugins" }), { key: "Home" });
@@ -151,7 +140,7 @@ describe("Settings: Guide", () => {
   /** The concepts the page promises, in the order it explains them. */
   const HEADINGS = [
     "What hirsel is",
-    "The home screen",
+    "Your workspace",
     "Threads",
     "Talking to it",
     "Artifacts and execution",
@@ -178,20 +167,6 @@ describe("Settings: Guide", () => {
 });
 
 describe("Settings: one entry point", () => {
-  it("gives the overflow menu exactly one Settings row", async () => {
-    const store = await import("../../store/store");
-    store.dispatch({
-      type: "hello_ok",
-      payload: { type: "hello_ok", latest_msg_id: 0, messages: [], pings: [], model: MODEL },
-    });
-    const { PhoneOverflowMenu } = await import("../PhoneOverflowMenu");
-    render(() => <PhoneOverflowMenu />);
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    await user.click(screen.getByLabelText("More actions"));
-
-    const items = await within(document.body).findAllByRole("menuitem");
-    expect(items.filter((item) => /settings/i.test(item.textContent ?? ""))).toHaveLength(1);
-  });
 
   it("gives the command palette exactly one Open Settings command", async () => {
     vi.doMock("../../lib/focus", () => ({

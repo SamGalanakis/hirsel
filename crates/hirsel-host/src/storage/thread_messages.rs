@@ -9,20 +9,24 @@ impl Storage {
     #[allow(clippy::too_many_arguments)]
     pub async fn append_thread_owner_message(
         &self,
+        expected_history: &str,
         thread_id: u64,
         client_id: &str,
         body: impl Into<String>,
         anchor: Option<u64>,
         attachments: &[String],
         mentions: &[u64],
+        artifact_ids: &[u64],
     ) -> anyhow::Result<(ChatMessage, bool)> {
         self.append_thread_owner_record(
+            expected_history,
             thread_id,
             client_id,
             body.into(),
             anchor,
             attachments,
             mentions,
+            artifact_ids,
             None,
         )
         .await
@@ -30,20 +34,24 @@ impl Storage {
     #[allow(clippy::too_many_arguments)]
     pub async fn append_thread_owner_request(
         &self,
+        expected_history: &str,
         thread_id: u64,
         client_id: &str,
         body: String,
         attachments: &[String],
         mentions: &[u64],
+        artifact_ids: &[u64],
         request: &serde_json::Value,
     ) -> anyhow::Result<(ChatMessage, bool)> {
         self.append_thread_owner_record(
+            expected_history,
             thread_id,
             client_id,
             body,
             None,
             attachments,
             mentions,
+            artifact_ids,
             Some(request),
         )
         .await
@@ -51,14 +59,26 @@ impl Storage {
     #[allow(clippy::too_many_arguments)]
     async fn append_thread_owner_record(
         &self,
+        expected_history: &str,
         thread_id: u64,
         client_id: &str,
         body: String,
         anchor: Option<u64>,
         attachments: &[String],
         mentions: &[u64],
+        artifact_ids: &[u64],
         request: Option<&serde_json::Value>,
     ) -> anyhow::Result<(ChatMessage, bool)> {
+        let artifact_ids = artifact_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            artifact_ids.len() <= 16,
+            "a message may reference at most 16 distinct artifacts"
+        );
         if let Some(request) = request {
             anyhow::ensure!(request.is_object(), "thread request must be an object");
             anyhow::ensure!(
@@ -71,6 +91,7 @@ impl Storage {
             .filter(|a| !a.is_null());
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
         threads::get(&tx, thread_id)?;
         if let Some(id) = tx
             .query_row(
@@ -81,6 +102,10 @@ impl Storage {
             .optional()?
         {
             let message = get_chat_message(&tx, id)?;
+            anyhow::ensure!(
+                message.artifact_ids == artifact_ids,
+                "client_id artifact references changed"
+            );
             anyhow::ensure!(
                 message.thread_id == thread_id,
                 "client_id belongs to another thread"
@@ -113,7 +138,8 @@ impl Storage {
             );
         }
         for mention in mentions {
-            threads::get(&tx, *mention)?;
+            threads::get(&tx, *mention)
+                .map_err(|error| anyhow::anyhow!("unknown mentioned Thread #{mention}: {error}"))?;
         }
         if let Some(action) = action {
             let expected = action
@@ -140,6 +166,14 @@ impl Storage {
                 params![thread_id, chrono::Utc::now().to_rfc3339()],
             )?;
         }
+        for artifact_id in &artifact_ids {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=?1)",
+                [artifact_id],
+                |r| r.get(0),
+            )?;
+            anyhow::ensure!(exists, "referenced artifact does not exist");
+        }
         super::blobs::validate_blob_ids(&tx, attachments)?;
         tx.execute("INSERT INTO chat_messages(author,body,ref,ts,thread_id,mentions) VALUES('owner',?1,?2,?3,?4,?5)",params![body,anchor,chrono::Utc::now().to_rfc3339(),thread_id,serde_json::to_string(mentions)?])?;
         let id = tx.last_insert_rowid() as u64;
@@ -153,10 +187,18 @@ impl Storage {
                 params![id, blob, position as u64],
             )?;
         }
+        for artifact_id in &artifact_ids {
+            tx.execute(
+                "INSERT INTO message_artifacts(message_id,artifact_id) VALUES(?1,?2)",
+                params![id, artifact_id],
+            )?;
+        }
         let message = get_chat_message(&tx, id)?;
         if let Some(request) = request {
             let mut request = request.clone();
+            request["history_id"] = serde_json::json!(expected_history);
             request["message_id"] = serde_json::json!(id);
+            request["report_triggered"] = serde_json::json!(false);
             request["thread_id"] = serde_json::json!(thread_id);
             request["client_id"] = serde_json::json!(client_id);
             // Explicit skills are captured when accepted. Persist model input
@@ -167,8 +209,11 @@ impl Storage {
             request["anchor"] = serde_json::json!(anchor);
             request["attachments"] =
                 serde_json::to_value(super::blobs::message_attachments(&tx, id)?)?;
-            request["mentioned_pings"] = serde_json::json!([]);
-            request["task_action"] = serde_json::Value::Null;
+
+            tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,requester_thread_id,state,started_at) VALUES(?1,?2,(SELECT parent_thread_id FROM threads WHERE id=?1),'queued',?3)",params![thread_id,id,chrono::Utc::now().to_rfc3339()])?;
+            let accepted_turn = tx.last_insert_rowid() as u64;
+            super::thread_execution::capture(&tx, thread_id, accepted_turn, None)?;
+            request["turn_id"] = serde_json::json!(accepted_turn);
             tx.execute(
                 "INSERT INTO thread_requests(client_id,payload) VALUES(?1,?2)",
                 params![client_id, serde_json::to_string(&request)?],
@@ -217,12 +262,60 @@ impl Storage {
             None => false,
         };
         let turns = super::thread_activity::turns(&tx, id)?;
+        let message_ids = messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<std::collections::HashSet<_>>();
+        let represented_turn_ids = turns
+            .iter()
+            .filter(|turn| {
+                turn.owner_message_id
+                    .is_some_and(|message_id| message_ids.contains(&message_id))
+                    || turn
+                        .agent_message_id
+                        .is_some_and(|message_id| message_ids.contains(&message_id))
+            })
+            .map(|turn| turn.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut supplemental_turn_ids = turns
+            .iter()
+            .filter(|turn| {
+                before_id.is_none()
+                    && !represented_turn_ids.contains(&turn.id)
+                    && (matches!(
+                        turn.state,
+                        hirsel_proto::ThreadTurnState::Queued
+                            | hirsel_proto::ThreadTurnState::Running
+                    ) || (turn.owner_message_id.is_none() && turn.agent_message_id.is_none()))
+            })
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>();
+        let supplemental_limit = limit.clamp(1, 100) as usize;
+        if supplemental_turn_ids.len() > supplemental_limit {
+            supplemental_turn_ids.drain(..supplemental_turn_ids.len() - supplemental_limit);
+        }
+        let supplemental_turn_ids = supplemental_turn_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let timeline_turn_ids = turns
+            .iter()
+            .filter(|turn| {
+                represented_turn_ids.contains(&turn.id) || supplemental_turn_ids.contains(&turn.id)
+            })
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>();
+        let turn_timelines = super::thread_events::for_turns(&tx, &timeline_turn_ids)?;
         let activities = super::thread_activity::activities(&tx, id)?;
+        let brief = super::thread_read::brief(&tx, id)?;
+        let related_items = super::thread_related::list(&tx, id)?;
         tx.commit()?;
         Ok(ThreadDetail {
+            related_items,
+            brief,
             thread,
             messages,
             turns,
+            turn_timelines,
             activities,
             has_more,
         })

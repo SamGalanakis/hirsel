@@ -21,11 +21,11 @@ async function expectLifecycle(page, label) {
   await page.getByRole("menuitem", { name: label, exact: true }).waitFor();
   await page.keyboard.press("Escape");
 }
-async function home(page) {
-  await page.getByRole("button", { name: "Home", exact: true }).click();
-  await page.locator('[data-thread-id="0"]').waitFor();
-  if (new URL(page.url()).pathname !== "/") throw new Error("Home did not address the coordinator Thread");
-  if (await page.locator('[data-thread-id="0"] h1').count()) throw new Error("Home grew a duplicate title header");
+async function overview(page) {
+  await page.getByRole("button", { name: "Thread overview", exact: true }).click();
+  await page.locator('[data-slot="thread-empty"]').waitFor();
+  if (new URL(page.url()).pathname !== "/") throw new Error("Overview did not clear the explicit selection");
+  if (await page.locator("textarea").count()) throw new Error("Overview has an implicit recipient");
 }
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}) });
 try {
@@ -44,22 +44,22 @@ try {
       await inventory(page);
       await page.locator(`[data-thread-row="${id}"]`).click();
       await page.locator(`[data-thread-id="${id}"]`).waitFor();
-      await page.getByRole("heading", { name: "buy-groceries", exact: true }).waitFor();
+      await page.locator('[data-slot="thread-context"] h1').filter({ hasText: "buy-groceries" }).waitFor();
       if (artifacts) await page.screenshot({ path: `${artifacts}/imported-groceries-${viewport.width}.png`, fullPage: true });
     }
     const title = `Thread smoke ${viewport.width} ${Date.now()}`;
     await inventory(page);
     await page.getByLabel("New thread title").fill(title);
     await page.getByRole("button", { name: "Create thread", exact: true }).click();
-    await page.getByRole("heading", { name: title, exact: true }).waitFor();
-    const path = new URL(page.url()).pathname;
+    await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
+    const path = new URL(page.url()).pathname + new URL(page.url()).search;
     const threadId = Number(path.split("/").at(-1));
     if (!/^\/t\/\d+$/.test(path)) throw new Error(`Thread create did not navigate: ${path}`);
     await page.locator("textarea").fill("This draft belongs to this thread");
-    await home(page);
-    if (await page.locator("textarea").inputValue() !== "") throw new Error("Thread draft leaked into orchestrator");
+    await overview(page);
+    if (await page.locator("textarea").count()) throw new Error("Thread draft leaked into overview");
     await page.goto(`${url}${path}`);
-    await page.getByRole("heading", { name: title, exact: true }).waitFor();
+    await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
     if (await page.locator("textarea").inputValue() !== "This draft belongs to this thread") throw new Error("Thread draft was lost");
     const body = `Owned message ${viewport.width} ${Date.now()}`;
     await page.locator("textarea").fill(body);
@@ -71,9 +71,8 @@ try {
     const ownedMessages = frames.filter(frame => frame.type === "msg" && frame.message.thread_id === threadId).map(frame => frame.message);
     if (!ownedMessages.some(message => message.author === "owner" && message.body === body) || !ownedMessages.some(message => message.author === "agent")) throw new Error("Host did not emit both messages with correct Thread ownership");
     if (artifacts) await page.screenshot({ path: `${artifacts}/thread-conversation-${viewport.width}.png`, fullPage: true });
-    await home(page);
-    await page.locator('[data-thread-id="0"]').waitFor();
-    if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into orchestrator history");
+    await overview(page);
+    if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into overview");
     await page.goto(`${url}${path}`);
     await page.getByText(body, { exact: true }).waitFor();
     await chooseLifecycle(page, "Settle thread");
@@ -97,7 +96,9 @@ try {
     const sent = [];
     page.on("websocket", ws => ws.on("framesent", event => sent.push(JSON.parse(event.payload.toString()))));
     await page.addInitScript(value => { if (window === window.top) localStorage.setItem("hirsel.token", value); }, token);
-    await page.goto(`${url}/t/${thread.id}`);
+    await page.goto(url);
+    await page.getByRole("button", {name:"Threads",exact:true}).click();
+    await page.locator(`[data-thread-row="${thread.id}"]`).click();
     await page.getByLabel("Confirmation").fill("ready");
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await page.getByRole("heading", { name: "Adaptive host proof advanced", exact: true }).waitFor();
@@ -108,7 +109,7 @@ try {
       const ws = new WebSocket(`${url.replace(/^http/, "ws")}/ws`);
       const timer = setTimeout(() => { ws.close(); reject(new Error(`Missing ${expected}`)); }, 5000);
       ws.on("error", reject);
-      ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token, last_seen_msg_id: null })));
+      ws.on("open", () => ws.send(JSON.stringify({ type: "hello", auth: { static_token: token } })));
       ws.on("message", raw => {
         const message = JSON.parse(raw.toString());
         if (message.type === "hello_ok") ws.send(JSON.stringify(frame));

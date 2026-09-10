@@ -16,35 +16,24 @@ describe("PluginSlot", () => {
     const { registerSlot } = await import("./registry");
     const { PluginSlot } = await import("./PluginSlot");
 
-    flush(() => registerSlot("a", "Plugin A", "home.section", () => <p>from A</p>));
-    flush(() => registerSlot("b", "Plugin B", "home.section", () => <p>from B</p>));
+    flush(() => registerSlot("a", "Plugin A", "settings.section", () => <p>from A</p>));
+    flush(() => registerSlot("b", "Plugin B", "settings.section", () => <p>from B</p>));
     // A different slot must not leak into this one.
-    flush(() => registerSlot("c", "Plugin C", "settings.section", () => <p>from C</p>));
 
-    const { container } = render(() => <PluginSlot name="home.section" />);
+    const { container } = render(() => <PluginSlot name="settings.section" />);
     expect(container.textContent).toBe("from Afrom B");
-  });
-
-  it("passes ctx through — task.panel gets the focused Task id", async () => {
-    const { registerSlot } = await import("./registry");
-    const { PluginSlot } = await import("./PluginSlot");
-
-    flush(() => registerSlot("a", "Plugin A", "task.panel", (props) => <p>task {props.ctx.taskId}</p>));
-
-    const { getByText } = render(() => <PluginSlot name="task.panel" ctx={{ taskId: 42 }} />);
-    expect(getByText("task 42")).toBeTruthy();
   });
 
   it("contains a throwing component: neighbours still render", async () => {
     const { registerSlot } = await import("./registry");
     const { PluginSlot } = await import("./PluginSlot");
 
-    flush(() => registerSlot("boom", "Exploding Plugin", "home.section", () => {
+    flush(() => registerSlot("boom", "Exploding Plugin", "settings.section", () => {
       throw new Error("render exploded");
     }));
-    flush(() => registerSlot("ok", "Calm Plugin", "home.section", () => <p>still here</p>));
+    flush(() => registerSlot("ok", "Calm Plugin", "settings.section", () => <p>still here</p>));
 
-    const { getByText, container } = render(() => <PluginSlot name="home.section" />);
+    const { getByText, container } = render(() => <PluginSlot name="settings.section" />);
 
     expect(getByText("still here")).toBeTruthy();
     // The failure is named and visible, not a blank hole.
@@ -58,8 +47,8 @@ describe("PluginSlot", () => {
     const { registerSlot } = await import("./registry");
     const { PluginSlot } = await import("./PluginSlot");
 
-    const off = flush(() => registerSlot("a", "Plugin A", "home.section", () => <p>from A</p>));
-    const { container } = render(() => <PluginSlot name="home.section" />);
+    const off = flush(() => registerSlot("a", "Plugin A", "settings.section", () => <p>from A</p>));
+    const { container } = render(() => <PluginSlot name="settings.section" />);
     expect(container.textContent).toBe("from A");
 
     flush(off);
@@ -126,9 +115,9 @@ describe("plugin_push routing", () => {
 
     const [count, setCount] = createSignal(0);
     subscribePush("github", "tick", (data) => setCount(Number(data)));
-    flush(() => registerSlot("github", "GitHub", "home.section", () => <p>ticks: {count()}</p>));
+    flush(() => registerSlot("github", "GitHub", "settings.section", () => <p>ticks: {count()}</p>));
 
-    const { container } = render(() => <PluginSlot name="home.section" />);
+    const { container } = render(() => <PluginSlot name="settings.section" />);
     expect(container.textContent).toBe("ticks: 0");
 
     flush(() => deliverPluginPush({ type: "plugin_push", plugin: "github", topic: "tick", data: 3 }));

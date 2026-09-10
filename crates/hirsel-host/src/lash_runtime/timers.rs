@@ -6,7 +6,7 @@ impl LashAgentRuntime {
         trigger_store: Arc<dyn TriggerStore>,
     ) {
         let runtime = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let mut interval = tokio::time::interval(SNOOZE_TICK_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -97,6 +97,8 @@ impl LashAgentRuntime {
             if let Some(label) = digest_label {
                 self.tools
                     .emit_scheduled_digest(
+                        &self.history_id,
+                        self.thread_id,
                         record.source_key.clone(),
                         format!(
                             "Scheduled digest `{label}` fired at {}.",

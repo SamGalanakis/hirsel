@@ -24,7 +24,6 @@ pub struct ChatMessage {
     pub artifact_ids: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    #[serde(default)]
     pub thread_id: u64,
     #[serde(default)]
     pub mentions: Vec<u64>,
@@ -42,6 +41,7 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallSummary {
+    pub id: String,
     pub name: String,
     pub ok: bool,
 }

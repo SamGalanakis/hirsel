@@ -6,17 +6,15 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 use uuid::Uuid;
 
 mod provider_store;
 
+pub(crate) use provider_store::non_empty;
 use provider_store::seed_bootstrap;
 pub use provider_store::{EnvBootstrap, OPENAI_COMPATIBLE_KIND, StoredProvider};
-
-const LEGACY_MODEL_SELECTION_FILE: &str = "model-selection.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentModelOverride {
@@ -37,16 +35,9 @@ struct StoreInner {
     source: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct LegacyModelSelection {
-    model_id: String,
-    variant: String,
-}
-
 impl ConfigStore {
     pub async fn load(
         path: PathBuf,
-        data_dir: &Path,
         docs_path: &Path,
         bootstrap: &EnvBootstrap,
     ) -> anyhow::Result<Self> {
@@ -69,8 +60,7 @@ impl ConfigStore {
                 }
             },
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                let mut document = defaults.clone();
-                migrate_legacy_model(data_dir, &mut document).await;
+                let document = defaults.clone();
                 let source = document.to_string();
                 persist_atomic(&path, source.as_bytes()).await?;
                 (document, source)
@@ -442,9 +432,9 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 
 # Main Agent provider and model. `provider` names an instance above; leave it
 # out to stay on whatever HIRSEL_PROVIDER booted. An OpenAI-compatible provider
-# takes any model id its endpoint offers; codex offers gpt-5.6-sol (variants:
-# low, medium, high, xhigh, max). A model change applies from the Agent's next
-# turn; a provider change applies at the next host start.
+# takes any model id its endpoint offers; codex offers gpt-5.6-sol (low, medium,
+# high, xhigh, max) and gpt-6-astra (the same plus ultra). A model change applies
+# from the Agent's next turn; a provider change applies at the next host start.
 [model]
 id = "google/gemini-3.7-flash"
 variant = "default"
@@ -471,9 +461,9 @@ variant = "default"
 # You are a wake-triage fork ...
 # """
 
-# Sub-agent delegation lanes. The catalog is exactly these three rows, one
-# effort each — there is no per-task effort tuning. Set `enabled = false` to
-# take a lane out of service; entries for anything else are ignored.
+# CLI Thread models. Set `enabled = false` to take a model out of service;
+# enabled_variants limits the reasoning efforts offered for delegation.
+# Entries outside the curated catalog are ignored.
 
 # Workhorse lane: judgment-heavy implementation and review-expensive
 # verification.
@@ -491,32 +481,19 @@ enabled_variants = ["max"]
 [subagent_models.claude.claude-opus-5]
 enabled = true
 enabled_variants = ["high"]
+
+[subagent_models.codex."gpt-6-astra"]
+enabled = true
+enabled_variants = ["low", "medium", "high", "xhigh", "max", "ultra"]
+
+[subagent_models.claude.claude-fable-5-1]
+enabled = true
+enabled_variants = ["low", "medium", "high", "xhigh", "max"]
 "#,
         docs_path.display()
     )
     .parse::<DocumentMut>()
     .context("parse built-in Hirsel host config")
-}
-
-async fn migrate_legacy_model(data_dir: &Path, document: &mut DocumentMut) {
-    let path = data_dir.join(LEGACY_MODEL_SELECTION_FILE);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => return,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "failed to read legacy model selection");
-            return;
-        }
-    };
-    match serde_json::from_slice::<LegacyModelSelection>(&bytes) {
-        Ok(selection) => {
-            document["model"]["id"] = value(selection.model_id);
-            document["model"]["variant"] = value(selection.variant);
-        }
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "legacy model selection is malformed; using defaults");
-        }
-    }
 }
 
 async fn persist_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -556,48 +533,11 @@ mod tests {
     use std::fs::FileTimes;
 
     #[tokio::test]
-    async fn seeds_comments_migrates_legacy_and_preserves_comments_on_write() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join(LEGACY_MODEL_SELECTION_FILE),
-            br#"{"model_id":"gpt-5.6-sol","variant":"high"}"#,
-        )
-        .await
-        .unwrap();
-        let path = dir.path().join("hirsel.toml");
-        let store = ConfigStore::load(
-            path.clone(),
-            dir.path(),
-            Path::new("/docs/config.md"),
-            &EnvBootstrap::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            store.model_selection(),
-            Some(("gpt-5.6-sol".to_string(), "high".to_string()))
-        );
-        let seeded = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(seeded.contains("safe to hand-edit"));
-        assert!(seeded.contains("/docs/config.md"));
-
-        store
-            .set_subagent_model("codex", "gpt-5.6-luna", false, &["max".to_string()])
-            .await
-            .unwrap();
-        let edited = tokio::fs::read_to_string(path).await.unwrap();
-        assert!(edited.contains("# Economy lane: mechanically verifiable work"));
-        assert!(edited.contains("enabled = false"));
-        assert!(edited.contains("enabled_variants = [\"max\"]"));
-    }
-
-    #[tokio::test]
     async fn reloads_a_direct_edit_with_an_unchanged_modified_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hirsel.toml");
         let store = ConfigStore::load(
             path.clone(),
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap::default(),
         )
@@ -623,7 +563,6 @@ mod tests {
         let path = dir.path().join("hirsel.toml");
         let store = ConfigStore::load(
             path.clone(),
-            dir.path(),
             Path::new("/docs/config.md"),
             &EnvBootstrap::default(),
         )

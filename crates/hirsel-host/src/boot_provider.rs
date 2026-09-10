@@ -210,7 +210,6 @@ mod tests {
     async fn store(dir: &tempfile::TempDir) -> ConfigStore {
         ConfigStore::load(
             dir.path().join("hirsel.toml"),
-            dir.path(),
             Path::new("/docs/hirsel-config.md"),
             &EnvBootstrap::default(),
         )

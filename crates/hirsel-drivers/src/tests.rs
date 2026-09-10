@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{io::Write, process::Stdio};
 
 use futures_util::StreamExt;
 use serde_json::json;
@@ -12,6 +12,7 @@ use crate::{
     codex::{CodexDriver, codex_agent_message, codex_terminal_outcome},
     fake::FakeDriver,
     shared::drain_stderr,
+    test_support::scoped_launch,
     types::{
         AgentKind, DriverError, SessionHandle, SpawnSpec, SubagentDriver, SubagentEvent,
         TerminalOutcome,
@@ -110,6 +111,7 @@ async fn fake_driver_emits_started_progress_and_done() {
             prompt: "fix it".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -125,6 +127,7 @@ async fn fake_driver_emits_started_progress_and_done() {
             .unwrap();
         match event {
             SubagentEvent::Progress { .. } => saw_progress = true,
+            SubagentEvent::AssistantOutput { text } => assert_eq!(text, "fake driver completed"),
             SubagentEvent::Terminal {
                 outcome: TerminalOutcome::Done { .. },
             } => break,
@@ -145,6 +148,7 @@ async fn fake_driver_records_requested_model() {
             prompt: "fix it".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -178,6 +182,7 @@ async fn fake_driver_interrupt_is_terminal() {
             prompt: "wait".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: Some(fixture.path().to_path_buf()),
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -242,6 +247,7 @@ async fn fake_driver_retire_ends_an_interrupted_session() {
             prompt: "wait".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: Some(fixture.path().to_path_buf()),
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -291,6 +297,7 @@ async fn fake_driver_replays_instant_terminal_to_late_subscriber() {
             prompt: "instant".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: Some(fixture.path().to_path_buf()),
+            scoped_mcp: scoped_launch(),
         })
         .await
         .unwrap();
@@ -323,23 +330,82 @@ async fn fake_driver_replays_instant_terminal_to_late_subscriber() {
 
 #[tokio::test]
 async fn drains_spawned_cli_stderr_without_deadlock() {
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg("for _ in $(seq 1 20000); do printf 1234567890 >&2; done")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut blocked_child = stderr_writer_fixture();
+    let blocked_stderr = blocked_child.stderr.take().unwrap();
+
+    match timeout(Duration::from_millis(100), blocked_child.wait()).await {
+        Err(_) => kill_and_reap(&mut blocked_child).await,
+        Ok(Ok(status)) => panic!(
+            "the fixture must exceed pipe capacity and block without a stderr reader, but exited with {status}"
+        ),
+        Ok(Err(error)) => {
+            kill_and_reap(&mut blocked_child).await;
+            panic!("failed to wait for undrained stderr fixture: {error}");
+        }
+    }
+    drop(blocked_stderr);
+
+    let mut child = stderr_writer_fixture();
     let stderr = child.stderr.take().unwrap();
     let drain = tokio::spawn(drain_stderr(stderr));
 
-    let status = timeout(Duration::from_secs(2), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
+    let status = match timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            kill_and_reap(&mut child).await;
+            drain.await.unwrap();
+            panic!("failed to wait for stderr fixture: {error}");
+        }
+        Err(_) => {
+            kill_and_reap(&mut child).await;
+            drain.await.unwrap();
+            panic!("stderr drain did not let the fixture exit within two seconds");
+        }
+    };
 
-    assert!(status.success());
     drain.await.unwrap();
+    assert!(status.success());
+}
+
+fn stderr_writer_fixture() -> tokio::process::Child {
+    Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "tests::write_stderr_fixture",
+            "--nocapture",
+        ])
+        .env("HIRSEL_STDERR_FIXTURE_BYTES", (2 * 1024 * 1024).to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+}
+
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    timeout(Duration::from_secs(1), child.wait())
+        .await
+        .expect("owned stderr fixture did not reap after kill")
+        .expect("failed to reap owned stderr fixture");
+}
+
+#[test]
+#[ignore = "spawned as a hermetic stderr writer fixture"]
+fn write_stderr_fixture() {
+    let byte_count = std::env::var("HIRSEL_STDERR_FIXTURE_BYTES")
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let chunk = [b'x'; 64 * 1024];
+    let mut stderr = std::io::stderr().lock();
+    for _ in 0..byte_count / chunk.len() {
+        stderr.write_all(&chunk).unwrap();
+    }
+    stderr
+        .write_all(&chunk[..byte_count % chunk.len()])
+        .unwrap();
 }
 
 #[tokio::test]
@@ -354,6 +420,7 @@ async fn claude_code_driver_real_cli_smoke() {
             prompt: "Reply with exactly: driver-smoke".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: real_scoped_launch(),
         })
         .await
         .unwrap();
@@ -378,6 +445,7 @@ async fn codex_driver_real_cli_smoke() {
             prompt: "Reply with exactly: driver-smoke".to_string(),
             cwd: std::env::current_dir().unwrap(),
             fake_fixture: None,
+            scoped_mcp: real_scoped_launch(),
         })
         .await
         .unwrap();
@@ -388,4 +456,13 @@ async fn codex_driver_real_cli_smoke() {
         }
     }
     panic!("codex CLI exited without a terminal event");
+}
+
+fn real_scoped_launch() -> crate::ScopedMcpLaunch {
+    let value = std::env::var("HIRSEL_DRIVER_TEST_SCOPED_MCP")
+        .expect("real driver smoke requires explicit host-issued scoped MCP launch JSON");
+    let launch: crate::ScopedMcpLaunch =
+        serde_json::from_str(&value).expect("invalid scoped MCP launch JSON");
+    launch.validate().expect("invalid scoped MCP launch");
+    launch
 }

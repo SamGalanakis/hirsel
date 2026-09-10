@@ -12,7 +12,7 @@ import type { SettingsTab } from "../../store/store";
 
 export const SETTINGS_TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "Appearance" },
-  { id: "agents", label: "Agents" },
+  { id: "agents", label: "Thread models" },
   { id: "providers", label: "Providers" },
   { id: "connection", label: "Connection & devices" },
   { id: "notifications", label: "Notifications" },
@@ -80,7 +80,7 @@ export function SettingsTabs(props: {
       tabindex={-1}
       data-slot="settings-tabs"
       onKeyDown={onKeyDown}
-      class="thin-scrollbar flex shrink-0 gap-1 overflow-x-auto pb-2 rail:w-48 rail:flex-col rail:gap-0.5 rail:overflow-x-visible rail:pb-0 rail:pr-6"
+      class="thin-scrollbar sticky top-0 z-10 flex shrink-0 gap-1 overflow-x-auto bg-background pb-2 rail:top-6 rail:max-h-[calc(100dvh-6rem)] rail:w-48 rail:flex-col rail:gap-0.5 rail:overflow-x-hidden rail:overflow-y-auto rail:pb-0"
     >
       <For each={SETTINGS_TABS}>
         {(tab) => {

@@ -6,6 +6,7 @@ use serde_json::Value;
 /// Persisted requests retain the accepted instrument and lifecycle facts.
 /// Inventory execution projections are derived live and do not belong here.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadActionSnapshot {
     pub id: u64,
     pub title: String,
@@ -43,7 +44,6 @@ impl From<Thread> for ThreadActionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lash_runtime::OwnerTurn;
     use serde_json::json;
 
     fn historical_thread() -> Value {
@@ -58,27 +58,6 @@ mod tests {
     }
 
     #[test]
-    fn queued_owner_action_before_summary_fields_preserves_captured_context() {
-        let snapshot = historical_thread();
-        // The public inventory contract still requires real derived summary fields.
-        assert!(serde_json::from_value::<Thread>(snapshot.clone()).is_err());
-        let queued = json!({
-            "thread_id": 5, "message_id": 42, "client_id": "thread-action-5-7-advance",
-            "body": "Advance", "anchor": null, "attachments": [], "mentioned_pings": [],
-            "mode": "send", "task_action": null,
-            "thread_action": {"thread": snapshot, "action": "advance", "data": {"choice": "A"}}
-        });
-        let restored: OwnerTurn = serde_json::from_value(queued.clone()).unwrap();
-        let action = restored.thread_action.as_ref().unwrap();
-        assert_eq!(action.thread.revision, 7);
-        assert_eq!(action.thread.attention, ThreadAttention::NeedsOwner);
-        assert!(action.thread.read && action.thread.settled_at.is_none());
-        assert!(action.thread.archived_at.is_none());
-        assert_eq!(action.thread.instrument, snapshot["instrument"]);
-        assert_eq!(serde_json::to_value(restored).unwrap(), queued);
-    }
-
-    #[test]
     fn action_capture_keeps_original_fields_without_live_summary_projections() {
         let original = historical_thread();
         let mut current = original.clone();
@@ -89,10 +68,6 @@ mod tests {
         let thread: Thread = serde_json::from_value(current.clone()).unwrap();
         let captured = ThreadActionSnapshot::from(thread);
         assert_eq!(serde_json::to_value(&captured).unwrap(), original);
-        // Also accept requests captured by a build that included derived fields.
-        assert_eq!(
-            serde_json::from_value::<ThreadActionSnapshot>(current).unwrap(),
-            captured
-        );
+        assert!(serde_json::from_value::<ThreadActionSnapshot>(current).is_err());
     }
 }

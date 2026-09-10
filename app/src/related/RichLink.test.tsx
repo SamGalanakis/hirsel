@@ -18,6 +18,12 @@ describe("rich Markdown links",()=>{
   expect(container.querySelectorAll('a')).toHaveLength(3);expect(screen.getByRole('link',{name:'Review #123'}).querySelector('strong')?.textContent).toBe('Review');expect(screen.getByRole('link',{name:'Review definition'}).getAttribute('href')).toBe(url);
   expect(container.querySelectorAll('code a, a button')).toHaveLength(0);expect(container.querySelectorAll('[data-thread-ref]')).toHaveLength(0);expect(frames).toEqual([]);
  });
+ it("renders Linear ticket identity for bare links and preserves authored labels",()=>{
+  const linear="https://linear.app/acme/issue/ENG-123/fix-the-parser?pane=activity#comment-42";
+  const {container}=mount(`${linear}\n\n[Parser follow-up](${linear})`);const links=screen.getAllByRole('link');
+  expect(links[0]).toHaveTextContent('ENG-123');expect(links[0].getAttribute('href')).toBe(linear);expect(links[0].closest('[data-link-kind]')?.getAttribute('data-link-kind')).toBe('issue');
+  expect(links[1]).toHaveTextContent('Parser follow-up');expect(links[1].getAttribute('href')).toBe(linear);expect(container.querySelectorAll('a svg')).toHaveLength(2);
+ });
  it("leaves unsafe URLs inert and gives lookalikes only a neutral identity",()=>{
   const {container}=mount(`[bad](javascript:alert%281%29) [fake](https://user:pass@github.com/a/b) [generic](https://github.com.evil.test/a/b/pull/1)`);
   expect(container.querySelectorAll('a')).toHaveLength(1);expect(container.querySelector('[data-link-kind]')?.getAttribute('data-link-kind')).toBe('web');

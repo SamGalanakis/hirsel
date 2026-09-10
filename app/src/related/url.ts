@@ -23,6 +23,9 @@ export function webLink(input: string): WebLink | null {
     }
     if (path.length === 2) return { ...result, label: repository, kind: "repository", site: "GitHub" };
   }
+  if (parsed.hostname === "linear.app" && (path.length === 3 || path.length === 4) && /^[\w-]+$/.test(path[0]) && path[1] === "issue" && /^[A-Z][A-Z0-9]*-\d+$/i.test(path[2])) {
+    return { ...result, label: path[2].toUpperCase(), kind: "issue", site: "Linear" };
+  }
   return result;
 }
 export function isBareLinkLabel(label: string, href: string): boolean {

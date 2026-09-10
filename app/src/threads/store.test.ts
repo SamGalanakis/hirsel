@@ -30,6 +30,19 @@ describe("thread transport projection", () => {
     expect(threadState.histories[1].loaded).toBe(true);
     expect(threadState.histories[2].loaded).toBe(true);
   });
+  it("does not let a stale older page regress a newer live terminal turn", async () => {
+    const page = openThread(1, 100);
+    const frame = sent.at(-1);
+    if (frame?.type !== "open_thread") throw new Error("expected open command");
+    const completed = { requester_thread_id: null, requester_turn_id: null, id: 10, thread_id: 1, owner_message_id: 9, agent_message_id: 11, state: "completed" as const, started_at: "2026-09-10T10:00:00Z", finished_at: "2026-09-10T10:00:05Z" };
+    flush(() => handleThreadMessage({ type: "thread_turn", turn: completed }));
+    const staleRunning = { ...completed, state: "running" as const, agent_message_id: null, finished_at: null };
+    const older = { id: 8, thread_id: 1, author: "owner" as const, body: "Earlier context", ref: null, ts: "2026-09-10T09:59:00Z" };
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: { ...detail(1), messages: [older], turns: [staleRunning], has_more: true } }));
+    await page;
+    expect(threadState.histories[1].turns).toEqual([completed]);
+    expect(threadState.histories[1].messages).toEqual([older]);
+  });
   it("correlates identical outgoing text by client id and preserves ownership across replay", () => {
     flush(() => sendThreadMessage(1, "same", "send", [], [2], []));
     flush(() => sendThreadMessage(2, "same", "send", [], [1], []));

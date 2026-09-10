@@ -334,16 +334,47 @@ describe("current history boundary", () => {
     expect(same.sentTypes()).not.toContain("send_thread_message"); same.serverSend(HELLO_OK);
     expect(same.sent.map(row=>JSON.parse(row))).toContainEqual(sent); c.close();
   });
+  it("reconciles a turn that finishes while a same-history connection is offline", async () => {
+    vi.useFakeTimers();
+    const { client } = await load();
+    const threads = await import("../threads/store");
+    const { conversationEntries } = await import("../threads/conversation");
+    const { makeThread } = await import("../threads/fixtures");
+    const owner = { id: 10, thread_id: 1, author: "owner" as const, body: "Finish this", ref: null, ts: "2026-09-10T10:00:00Z" };
+    const running = { requester_thread_id: null, requester_turn_id: null, id: 1, thread_id: 1, state: "running" as const, owner_message_id: owner.id, agent_message_id: null, started_at: owner.ts, finished_at: null };
+    const thread = makeThread(1, { running_turn: running });
+    const c = client.startClient("wss://host/ws", "good");
+    const first = FakeWebSocket.instances[0];
+    first.serverOpen(); first.serverSend({ ...HELLO_OK, threads: [thread] });
+    flush(() => threads.focusThread(1, false));
+    const firstOpen = first.sent.map(row => JSON.parse(row)).find(frame => frame.type === "open_thread");
+    first.serverSend({ type: "thread_opened", client_id: firstOpen.client_id, detail: { thread, brief: { text: "", artifact_ids: [] }, messages: [owner], turns: [running], activities: [], related_items: [], has_more: false } });
+    expect(threads.threadState.histories[1].turns[0].state).toBe("running");
+
+    first.serverClose(1006);
+    vi.advanceTimersByTime(2_000);
+    const reconnected = FakeWebSocket.instances[1];
+    reconnected.serverOpen(); reconnected.serverSend({ ...HELLO_OK, threads: [makeThread(1)] });
+    const reconnectOpen = reconnected.sent.map(row => JSON.parse(row)).find(frame => frame.type === "open_thread");
+    const final = { id: 11, thread_id: 1, author: "agent" as const, body: "Done", ref: owner.id, ts: "2026-09-10T10:00:05Z" };
+    const completed = { ...running, state: "completed" as const, agent_message_id: final.id, finished_at: final.ts };
+    reconnected.serverSend({ type: "thread_opened", client_id: reconnectOpen.client_id, detail: { thread: makeThread(1, { last_finished_turn: completed }), brief: { text: "", artifact_ids: [] }, messages: [owner, final], turns: [completed], activities: [], related_items: [], has_more: false } });
+
+    expect(threads.threadState.histories[1].turns).toEqual([completed]);
+    expect(conversationEntries(threads.threadState.histories[1])).toContainEqual({ key: "turn-1", kind: "message", message: final, turn: completed });
+    c.close();
+  });
   it("clears stale cache, uploads and queued operations on reset while retaining unsent text for recovery", async () => {
     vi.useFakeTimers(); const { client } = await load();
     const threads = await import("../threads/store"); const artifacts = await import("../artifacts/store");
     const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
-    flush(() => { threads.sendThreadMessage(4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; }); artifacts.setArtifactState({ selectedId: 2 }); });
+    flush(() => { threads.sendThreadMessage(4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; draft.histories[4] = { brief: { text: "Old", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: true }; }); artifacts.setArtifactState({ selectedId: 2 }); });
     const upload = c.uploadBlob("upload-old","old.txt","text/plain","eA==").catch(error=>error.message);
     first.serverClose(1006); c.setAgentPrompt("Stale queued operation"); vi.advanceTimersByTime(2000);
     const next = FakeWebSocket.instances[1]; next.serverOpen(); next.serverSend({ ...HELLO_OK, history_id: "fresh-history" }); await Promise.resolve(); flush();
     expect(next.sentTypes()).not.toContain("send_thread_message"); expect(next.sentTypes()).not.toContain("set_agent_prompt");
     expect(threads.threadState.pending).toEqual([]); expect(threads.threadState.focusedId).toBeNull(); expect(threads.threadState.error).toBeNull();
+    expect(threads.threadState.histories).toEqual({});
     expect(artifacts.artifactState.selectedId).toBeNull(); expect(await upload).toContain("History was reset");
     const { recoveredDrafts } = await import("../lib/history"); expect(recoveredDrafts().map(row=>row.text)).toContain("Saved unsent text"); c.close();
   });

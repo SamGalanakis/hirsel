@@ -4,7 +4,7 @@ import { createStore, reconcile } from "solid-js";
 
 import type { Blob, ChatMessage, SendMode, ServerMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
-import { emptyHistory, mergeById, mergeDetail, upsertThread, type ThreadHistory } from "./model";
+import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
 import type { Thread, ThreadClientMessage, ThreadDetail } from "./types";
 
 interface PendingMessage {
@@ -227,7 +227,7 @@ export function handleThreadMessage(message: ServerMessage): void {
         setThreadState(draft => { draft["streams"][id] = []; });
         setThreadState(draft => { draft["streamTurnIds"][id] = message.turn.id; });
       }
-      setThreadState(draft => { draft["histories"][id] = { ...prior, turns: mergeById(prior.turns, [message.turn]) }; });
+      setThreadState(draft => { draft["histories"][id] = { ...prior, turns: mergeTurns(prior.turns, [message.turn]) }; });
       if (!["queued", "running"].includes(message.turn.state) && currentTurnId === message.turn.id) {
         if ((threadState.streams[id]?.length ?? 0) > 0) setThreadState(draft => { draft.turnDetails[message.turn.id] = [...threadState.streams[id]]; });
         setThreadState(draft => { draft.streams[id] = []; });

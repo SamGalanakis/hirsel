@@ -20,10 +20,20 @@ export function mergeById<T extends { id: number }>(prior: T[], incoming: T[]): 
   for (const row of incoming) entries.set(row.id, row);
   return [...entries.values()].sort((a, b) => a.id - b.id);
 }
+const turnProgress = (turn: ThreadTurn): number => turn.state === "queued" ? 0 : turn.state === "running" ? 1 : 2;
+/** Turn state is monotonic even when reconnect snapshots and live frames race. */
+export function mergeTurns(prior: ThreadTurn[], incoming: ThreadTurn[]): ThreadTurn[] {
+  const entries = new Map(prior.map(turn => [turn.id, turn]));
+  for (const turn of incoming) {
+    const current = entries.get(turn.id);
+    if (!current || turnProgress(turn) > turnProgress(current)) entries.set(turn.id, turn);
+  }
+  return [...entries.values()].sort((a, b) => a.id - b.id);
+}
 /** A fetched page may race live updates: only replace older rows, never delete live arrivals. */
 export function mergeDetail(prior: ThreadHistory, detail: ThreadDetail, earlier: boolean): ThreadHistory {
   const id = detail.thread.id;
-  const turns = mergeById(detail.turns.filter(t => t.thread_id === id), prior.turns);
+  const turns = mergeTurns(prior.turns, detail.turns.filter(t => t.thread_id === id));
   const latestAssignment = (activities: ThreadActivity[]) => Math.max(-1, ...activities.filter(activity => activity.kind === "delegation_received").map(activity => activity.id));
   return {
     brief: latestAssignment(prior.activities) > latestAssignment(detail.activities) ? prior.brief : detail.brief,

@@ -22,7 +22,9 @@ describe("readable work outcomes", () => {
     const failure = view.container.querySelector('[data-slot="work-failure"]')!;
     expect(failure).toHaveTextContent("Browser checks failed: the page did not load.");
     expect(failure.closest("details")).toBeNull();
-    expect(view.getByText("Send a message to continue.")).toBeTruthy();
+    const recovery = view.container.querySelector('[data-slot="work-recovery"]')!;
+    expect(recovery).toHaveTextContent("Send a message to continue.");
+    expect(failure.nextElementSibling).toBe(recovery);
     expect(view.container.querySelector("details")!.open).toBe(false);
   });
   it("keeps plain replies free of an empty work disclosure", () => {

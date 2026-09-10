@@ -68,7 +68,10 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
         </div>
       </details>
     </Show>
-    <Show when={failed()}><p class="max-w-prose break-words pb-2 text-sm text-destructive" data-slot="work-failure">{failureReason(props.activities) ?? "This run ended before it could finish."} <span class="text-muted-foreground">Send a message to continue.</span></p></Show>
+    <Show when={failed()}><div class="max-w-prose space-y-1 pb-2 text-sm">
+      <p class="break-words text-destructive" data-slot="work-failure">{failureReason(props.activities) ?? "This run ended before it could finish."}</p>
+      <p class="text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>
+    </div></Show>
     <Show when={stopped()}><p class="pb-2">Your conversation is kept. Send a message to continue.</p></Show>
   </section></Show>;
 }

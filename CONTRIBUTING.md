@@ -67,6 +67,10 @@ just product-runbook all
 The deterministic Rust, frontend, and `e2e/*.mjs` gates remain necessary but
 do not replace these product checks.
 
+Changes to Owner-visible behavior must add or update the matching runbook and
+run it before delivery. Include the judged outcome and evidence in the pull
+request; an unrun or failing scenario is not accepted work.
+
 ## Releases
 
 Android releases are manual. Run the release workflow from `main` with a

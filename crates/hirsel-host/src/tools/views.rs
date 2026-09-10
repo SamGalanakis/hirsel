@@ -10,7 +10,6 @@ impl ToolSuite {
         spec: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
         instance_id: Option<String>,
-        placement: String,
     ) -> anyhow::Result<hirsel_proto::ViewInstance> {
         self.views
             .show(
@@ -20,7 +19,6 @@ impl ToolSuite {
                 spec,
                 params,
                 instance_id,
-                placement,
             )
             .await
     }

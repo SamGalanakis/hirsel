@@ -195,7 +195,6 @@ async fn full_resync_snapshot_replays_all_chat() {
             Some(json!({ "type": "text", "text": "Still active" })),
             None,
             Some("view-reconnect".to_string()),
-            "chat".to_string(),
         )
         .await
         .unwrap();

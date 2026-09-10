@@ -63,7 +63,7 @@ async fn scoped_views_monitors_and_shell_reject_foreign_or_cancelled_execution()
         caller: b.clone(),
         operation_id: "peer".into(),
     };
-    let view = json!({"instance_id":"same-name","spec":{"type":"text","text":"A private view"},"placement":"canvas"});
+    let view = json!({"instance_id":"same-name","spec":{"type":"text","text":"A private view"}});
     own.execute("views_show", &view).await.unwrap();
     assert!(peer.execute("views_show", &view).await.is_err());
     assert!(

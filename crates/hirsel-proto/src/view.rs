@@ -6,6 +6,5 @@ use serde::{Deserialize, Serialize};
 pub struct ViewInstance {
     pub instance_id: String,
     pub thread_id: u64,
-    pub placement: String,
     pub spec: serde_json::Value,
 }

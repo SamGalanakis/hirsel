@@ -18,7 +18,7 @@ import { Check } from "@/components/ui/icons";
 import { createContext, createMemo, createSignal, Errored, For, Show, useContext } from "solid-js";
 
 import type { JSX } from "@solidjs/web";
-import type { ViewPlacement, ViewSpec } from "../protocol";
+import type { ViewSpec } from "../protocol";
 import { cn } from "@/lib/utils";
 import { createSubmitting } from "../lib/pending";
 import { getClient } from "../ws/client";
@@ -680,9 +680,6 @@ export interface ViewRendererProps {
   spec: ViewSpec;
   /** The owning instance — every emitted `view_event` carries it. */
   instanceId: string;
-  /** Where this view is surfaced. Historical inline/Thread strings are carried for
-   * context/telemetry; the visual output is placement-independent. */
-  placement: ViewPlacement;
   /** Test/host seam for owner-initiated events. Defaults to the ws client's
    * `sendViewEvent`. */
   onEvent?: (event: { instanceId: string; action: string; data: unknown }) => void;
@@ -720,7 +717,7 @@ export function ViewRenderer(props: ViewRendererProps): JSX.Element {
       fallback={<Notice>This view couldn't be displayed.</Notice>}
     >
       <ViewEmitContext value={{ instanceId: props.instanceId, emit }}>
-        <div data-slot="view" data-placement={props.placement}>
+        <div data-slot="view">
           <Show when={specKey()} keyed>
             {(_key: string) => <ViewNode node={props.spec} />}
           </Show>

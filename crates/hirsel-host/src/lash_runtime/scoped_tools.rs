@@ -325,7 +325,6 @@ impl ScopedThreadTools {
         let spec = args.get("spec").cloned().filter(|value| !value.is_null());
         let params = args.get("params").cloned().filter(|value| !value.is_null());
         let instance_id = optional_string(args, "instance_id")?;
-        let placement = required_string(args, "placement")?;
         let storage = self.tools.storage();
         let _execution = storage
             .execution_guard(&self.caller)
@@ -340,7 +339,6 @@ impl ScopedThreadTools {
                 spec,
                 params,
                 instance_id,
-                placement,
             )
             .await
             .map_err(|error| error.to_string())?;

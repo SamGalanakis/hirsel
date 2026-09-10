@@ -1705,6 +1705,7 @@ dependencies = [
  "hirsel-proto",
  "hmac",
  "image",
+ "indexmap",
  "iroh",
  "iroh-tickets",
  "jsonschema",

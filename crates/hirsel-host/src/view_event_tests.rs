@@ -49,7 +49,6 @@ async fn delayed_view_callback_cannot_accept_into_reused_thread_after_runtime_re
             Some(spec.clone()),
             None,
             Some(instance.clone()),
-            "canvas".into(),
         )
         .await
         .unwrap();
@@ -120,7 +119,6 @@ async fn delayed_view_callback_cannot_accept_into_reused_thread_after_runtime_re
                 Some(spec.clone()),
                 None,
                 Some(instance.clone()),
-                "canvas".into()
             )
             .await
             .is_err()
@@ -134,7 +132,6 @@ async fn delayed_view_callback_cannot_accept_into_reused_thread_after_runtime_re
             Some(spec),
             None,
             Some(instance.clone()),
-            "canvas".into(),
         )
         .await
         .unwrap();

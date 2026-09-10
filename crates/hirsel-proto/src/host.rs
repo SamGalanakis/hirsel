@@ -131,7 +131,6 @@ pub enum HostToClient {
     ViewUpsert {
         thread_id: u64,
         instance_id: String,
-        placement: String,
         spec: serde_json::Value,
     },
     ViewRemoved {

@@ -727,7 +727,6 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     let view = hirsel_proto::ViewInstance {
         thread_id: 1,
         instance_id: "view-1".to_string(),
-        placement: "canvas".to_string(),
         spec: json!({ "type": "text", "text": "Ready" }),
     };
     results.insert("views_show", vec![view_instance_result(&view)]);
@@ -1282,19 +1281,15 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
 }
 
 #[test]
-fn view_tool_contract_accepts_current_placements_only() {
+fn view_tool_contract_is_canvas_only_without_a_placement_dimension() {
     let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
     let show = definitions
         .iter()
         .find(|d| d.name() == "views_show")
         .unwrap();
     let schema = jsonschema::JSONSchema::compile(show.contract.input_schema.canonical()).unwrap();
-    for placement in ["canvas", "chat"] {
-        assert!(
-            schema.is_valid(&json!({"placement":placement,"spec":{"type":"text","text":"hello"}}))
-        );
-    }
-    assert!(!schema.is_valid(&json!({"placement":"ping:7","spec":{"type":"text","text":"hello"}})));
+    assert!(schema.is_valid(&json!({"spec":{"type":"text","text":"hello"}})));
+    assert!(!schema.is_valid(&json!({"placement":"chat","spec":{"type":"text","text":"hello"}})));
 }
 
 async fn complete_fixture_turn(

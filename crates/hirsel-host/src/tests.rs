@@ -341,7 +341,6 @@ async fn canvas_view_event_enters_its_origin_thread_as_owner_message() {
             Some(json!({ "type": "action", "label": "Retry", "action": "retry" })),
             None,
             Some("view-canvas".to_string()),
-            "canvas".to_string(),
         )
         .await
         .unwrap();

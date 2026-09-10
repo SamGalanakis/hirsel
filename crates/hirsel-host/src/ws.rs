@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_view_surface_shows_lists_and_posts_events() {
+    async fn debug_canvas_view_surface_rejects_legacy_placement_and_posts_events() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_state(test_config(dir.path())).await.unwrap();
         let thread = state
@@ -196,6 +196,18 @@ mod tests {
         let addr = spawn_app(app).await;
         let client = owner_http_client();
 
+        let legacy = client
+            .post(format!("http://{addr}/debug/show-view"))
+            .json(&serde_json::json!({
+                "thread_id":thread.id,
+                "spec": { "type": "text", "text": "invisible" },
+                "placement": "chat"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+
         let shown: serde_json::Value = client
             .post(format!("http://{addr}/debug/show-view"))
             .json(&serde_json::json!({
@@ -204,8 +216,7 @@ mod tests {
                     "type": "action",
                     "label": "Continue",
                     "action": "continue"
-                },
-                "placement": "chat"
+                }
             }))
             .send()
             .await
@@ -216,7 +227,7 @@ mod tests {
             .await
             .unwrap();
         let instance_id = shown["instance_id"].as_str().unwrap();
-        assert_eq!(shown["placement"], "chat");
+        assert!(shown.get("placement").is_none());
 
         let active: serde_json::Value = client
             .get(format!("http://{addr}/debug/views"))

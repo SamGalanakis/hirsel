@@ -22,6 +22,7 @@ hirsel-proto.workspace = true
 hmac = "0.12.1"
 iroh.workspace = true
 iroh-tickets.workspace = true
+indexmap.workspace = true
 lash-core.workspace = true
 lash.workspace = true
 lash-provider-anthropic.workspace = true

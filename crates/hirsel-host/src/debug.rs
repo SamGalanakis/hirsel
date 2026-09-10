@@ -191,6 +191,7 @@ struct SetSubagentModelRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShowViewRequest {
     thread_id: u64,
     #[serde(default)]
@@ -199,7 +200,6 @@ struct ShowViewRequest {
     spec: Option<serde_json::Value>,
     #[serde(default)]
     params: Option<serde_json::Value>,
-    placement: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,7 +352,6 @@ async fn show_view(
                 request.spec,
                 request.params,
                 None,
-                request.placement,
             )
             .await?,
     ))

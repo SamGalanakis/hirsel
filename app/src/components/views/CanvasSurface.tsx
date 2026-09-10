@@ -12,8 +12,8 @@ import { closeRightRegion, showCanvas, state } from "../../store/store";
 import { ViewRenderer } from "../../views/ViewRenderer";
 import { PaneHeader } from "../ui/PaneHeader";
 
-// Canvas: the shared right-context surface for `canvas`-placed generative
-// views. On desktop (`rail`) it is an in-flow right column that takes the slot
+// Canvas: the shared right-context surface for generative views. On desktop
+// (`rail`) it is an in-flow right column that takes the slot
 // otherwise occupied by the conversation; on phone
 // it is a full-screen `fixed` sheet over the Thread workspace. The newest canvas view leads
 // when explicitly summoned; older
@@ -39,7 +39,7 @@ function CanvasBody() {
     <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
       <For each={orderedCanvasViews()}>
         {(v) => (
-          <ViewRenderer spec={v.spec} instanceId={v.instance_id} placement={v.placement} />
+          <ViewRenderer spec={v.spec} instanceId={v.instance_id} />
         )}
       </For>
     </div>

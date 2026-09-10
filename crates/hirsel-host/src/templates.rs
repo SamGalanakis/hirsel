@@ -228,7 +228,6 @@ mod tests {
                 None,
                 Some(json!({ "value": 0.2, "label": "Starting" })),
                 Some("view-test".to_string()),
-                "canvas".to_string(),
             )
             .await
             .unwrap();
@@ -271,5 +270,103 @@ mod tests {
             event,
             HostToClient::ViewRemoved { instance_id } if instance_id == "view-test"
         )));
+    }
+
+    #[tokio::test]
+    async fn view_snapshot_follows_latest_upsert_order_across_threads_and_recreation() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = TemplateStore::load(dir.path().to_path_buf()).await.unwrap();
+        let (broadcaster, mut broadcasts) = broadcast::channel(8);
+        let views = ViewManager::new(
+            "fixture-history".to_string(),
+            templates,
+            broadcaster,
+            BroadcastLog::default(),
+        );
+        for (thread_id, instance_id) in [(1, "z"), (2, "a")] {
+            views
+                .show(
+                    "fixture-history",
+                    thread_id,
+                    None,
+                    Some(json!({ "type": "text", "text": instance_id })),
+                    None,
+                    Some(instance_id.to_string()),
+                )
+                .await
+                .unwrap();
+        }
+        let live_ids = [
+            broadcasts.recv().await.unwrap(),
+            broadcasts.recv().await.unwrap(),
+        ]
+        .map(|event| match event {
+            HostToClient::ViewUpsert { instance_id, .. } => instance_id,
+            other => panic!("unexpected view event: {other:?}"),
+        });
+        assert_eq!(live_ids, ["z", "a"]);
+        assert_eq!(
+            views
+                .snapshot()
+                .await
+                .iter()
+                .map(|view| view.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+
+        views
+            .update(
+                "fixture-history",
+                1,
+                "z",
+                None,
+                Some(json!([{ "op": "replace", "path": "/text", "value": "updated" }])),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            broadcasts.recv().await.unwrap(),
+            HostToClient::ViewUpsert { instance_id, .. } if instance_id == "z"
+        ));
+        assert_eq!(
+            views
+                .snapshot()
+                .await
+                .iter()
+                .map(|view| view.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+
+        views.clear("fixture-history", 2, "a").await.unwrap();
+        assert!(matches!(
+            broadcasts.recv().await.unwrap(),
+            HostToClient::ViewRemoved { instance_id } if instance_id == "a"
+        ));
+        views
+            .show(
+                "fixture-history",
+                2,
+                None,
+                Some(json!({ "type": "text", "text": "recreated" })),
+                None,
+                Some("a".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            broadcasts.recv().await.unwrap(),
+            HostToClient::ViewUpsert { instance_id, .. } if instance_id == "a"
+        ));
+        assert_eq!(
+            views
+                .snapshot()
+                .await
+                .iter()
+                .map(|view| view.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
     }
 }

@@ -49,13 +49,11 @@ impl HelloBroadcastDedupe {
             HostToClient::ViewUpsert {
                 thread_id,
                 instance_id,
-                placement,
                 spec,
-            } => self.views.remove(instance_id).is_none_or(|snapshot| {
-                snapshot.thread_id != *thread_id
-                    || snapshot.placement != *placement
-                    || snapshot.spec != *spec
-            }),
+            } => self
+                .views
+                .remove(instance_id)
+                .is_none_or(|snapshot| snapshot.thread_id != *thread_id || snapshot.spec != *spec),
             HostToClient::ViewRemoved { instance_id } => {
                 self.views.remove(instance_id);
                 true
@@ -81,7 +79,6 @@ mod tests {
         ViewInstance {
             thread_id: 7,
             instance_id: "status".to_string(),
-            placement: "canvas".to_string(),
             spec,
         }
     }
@@ -90,7 +87,6 @@ mod tests {
         HostToClient::ViewUpsert {
             thread_id: view.thread_id,
             instance_id: view.instance_id.clone(),
-            placement: view.placement.clone(),
             spec: view.spec.clone(),
         }
     }
@@ -115,7 +111,6 @@ mod tests {
                 Some(spec.clone()),
                 None,
                 Some("status".to_string()),
-                "canvas".to_string(),
             )
             .await
             .unwrap();
@@ -137,7 +132,6 @@ mod tests {
                 Some(spec),
                 None,
                 Some("status".to_string()),
-                "canvas".to_string(),
             )
             .await
             .unwrap();

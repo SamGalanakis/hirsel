@@ -73,15 +73,11 @@ export interface ViewSpec {
   [prop: string]: unknown;
 }
 
-/** Current host-authored utility placement. */
-export type ViewPlacement = "canvas";
-
 /** One active view instance. Keyed by `instance_id`; an update in place is just
  * a re-`view_upsert` of the same id. */
 export interface ViewInstance {
   thread_id: number;
   instance_id: string;
-  placement: ViewPlacement;
   spec: ViewSpec;
 }
 
@@ -486,7 +482,6 @@ export interface ViewUpsertMsg {
   thread_id: number;
   type: "view_upsert";
   instance_id: string;
-  placement: ViewPlacement;
   spec: ViewSpec;
 }
 

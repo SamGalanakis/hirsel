@@ -145,12 +145,12 @@ fn view_frames_round_trip_with_resolved_specs_and_event_data() {
     let upsert = HostToClient::ViewUpsert {
         thread_id: 1,
         instance_id: "view-1".to_string(),
-        placement: "chat".to_string(),
         spec: spec.clone(),
     };
     let encoded = serde_json::to_value(&upsert).unwrap();
     assert_eq!(encoded["type"], "view_upsert");
     assert_eq!(encoded["spec"], spec);
+    assert!(encoded.get("placement").is_none());
     assert_eq!(
         serde_json::from_value::<HostToClient>(encoded).unwrap(),
         upsert

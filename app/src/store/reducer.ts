@@ -8,8 +8,8 @@ export function reduce(state: AppState, action: Action): AppState {
     case "connection_status": return { ...state, connection: action.status };
     case "process_upsert": return { ...state, processes: [...state.processes.filter(row => row.id !== action.payload.process.id), action.payload.process] };
     case "view_upsert": {
-      const { instance_id, thread_id, placement, spec } = action.payload;
-      return { ...state, views: [...state.views.filter(row => row.instance_id !== instance_id), { instance_id, thread_id, placement, spec }] };
+      const { instance_id, thread_id, spec } = action.payload;
+      return { ...state, views: [...state.views.filter(row => row.instance_id !== instance_id), { instance_id, thread_id, spec }] };
     }
     case "view_removed": return { ...state, views: state.views.filter(row => row.instance_id !== action.payload.instance_id) };
     case "model_changed": return { ...state, model: action.model };

@@ -11,10 +11,10 @@ export function runningProcessCount(processes: ProcessInfo[]): number {
 
 // ---- Generative-UI tier (view templates) ----
 
-/** Views placed on the shared Canvas surface, oldest-first (insertion order).
+/** Views on the shared Canvas surface, oldest-first (latest-upsert order).
  * The Canvas auto-surfaces the newest, i.e. the LAST of this list. */
 export function canvasViews(views: ViewInstance[], threadId: number | null): ViewInstance[] {
-  return views.filter((v) => v.placement === "canvas" && v.thread_id === threadId);
+  return views.filter((v) => v.thread_id === threadId);
 }
 
 /** Group processes into Running / Finished, each newest-activity-first

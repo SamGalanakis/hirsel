@@ -213,20 +213,15 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.views_show",
             "views_show",
-            "Resolve and show a validated component view in canvas or chat.",
+            "Resolve and show a validated component view on the Canvas.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["placement"],
                 "properties": {
                     "template_id": { "type": "string", "minLength": 1 },
                     "spec": { "type": "object" },
                     "params": { "type": "object" },
-                    "instance_id": { "type": "string", "minLength": 1 },
-                    "placement": {
-                        "type": "string",
-                        "enum": ["canvas", "chat"]
-                    }
+                    "instance_id": { "type": "string", "minLength": 1 }
                 },
                 "oneOf": [
                     { "required": ["template_id"], "not": { "required": ["spec"] } },

@@ -1,6 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use hirsel_proto::{HostToClient, ViewInstance};
+use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::{RwLock, broadcast};
@@ -39,7 +40,7 @@ struct ActiveView {
 pub struct ViewManager {
     templates: TemplateStore,
     history_id: Arc<std::sync::RwLock<String>>,
-    active: Arc<RwLock<BTreeMap<String, ActiveView>>>,
+    active: Arc<RwLock<IndexMap<String, ActiveView>>>,
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
 }
@@ -54,7 +55,7 @@ impl ViewManager {
         Self {
             templates,
             history_id: Arc::new(std::sync::RwLock::new(history_id)),
-            active: Arc::new(RwLock::new(BTreeMap::new())),
+            active: Arc::new(RwLock::new(IndexMap::new())),
             broadcaster,
             broadcast_log,
         }
@@ -73,9 +74,7 @@ impl ViewManager {
         spec: Option<Value>,
         params: Option<Value>,
         instance_id: Option<String>,
-        placement: String,
     ) -> anyhow::Result<ViewInstance> {
-        validate_placement(&placement)?;
         let params = params.unwrap_or_else(|| Value::Object(Map::new()));
         if !params.is_object() {
             anyhow::bail!("view params must be an object");
@@ -99,7 +98,6 @@ impl ViewManager {
         let view = ViewInstance {
             thread_id,
             instance_id: instance_id.clone(),
-            placement,
             spec: resolved,
         };
         let mut active = self.active.write().await;
@@ -110,6 +108,7 @@ impl ViewManager {
                 .is_none_or(|v| v.view.thread_id == thread_id),
             "view belongs to another Thread"
         );
+        active.shift_remove(&instance_id);
         active.insert(
             instance_id,
             ActiveView {
@@ -174,6 +173,7 @@ impl ViewManager {
             active.contains_key(instance_id),
             "view was removed during update"
         );
+        active.shift_remove(instance_id);
         active.insert(instance_id.to_string(), record);
         self.publish_upsert(&view);
         drop(active);
@@ -194,7 +194,7 @@ impl ViewManager {
                 .is_none_or(|v| v.view.thread_id == thread_id),
             "view belongs to another Thread"
         );
-        if active.remove(instance_id).is_none() {
+        if active.shift_remove(instance_id).is_none() {
             anyhow::bail!("unknown view instance `{instance_id}`");
         }
         let event = HostToClient::ViewRemoved {
@@ -246,19 +246,11 @@ impl ViewManager {
         let event = HostToClient::ViewUpsert {
             thread_id: view.thread_id,
             instance_id: view.instance_id.clone(),
-            placement: view.placement.clone(),
             spec: view.spec.clone(),
         };
         self.broadcast_log.record(event.clone());
         let _ = self.broadcaster.send(event);
     }
-}
-
-fn validate_placement(placement: &str) -> anyhow::Result<()> {
-    if matches!(placement, "canvas" | "chat") {
-        return Ok(());
-    }
-    anyhow::bail!("placement must be `canvas` or `chat`")
 }
 
 fn merge_params(existing: &mut Value, update: Value) -> anyhow::Result<()> {

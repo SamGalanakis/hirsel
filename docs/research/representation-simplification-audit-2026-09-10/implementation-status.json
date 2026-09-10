@@ -26,7 +26,10 @@
     "F05": {
       "issue": 23,
       "state": "implemented",
-      "commit": "aecbba8be9b129adfdc072ac95ea93696386a67c"
+      "commit": "aecbba8be9b129adfdc072ac95ea93696386a67c",
+      "followup_commits": [
+        "7bf1587911dce6c58803cd68603cac16197c6ffa"
+      ]
     },
     "F06": {
       "issue": 24,
@@ -86,7 +89,10 @@
     "F17": {
       "issue": 35,
       "state": "implemented",
-      "commit": "eff12d1e565367f63be01832f35523a18df14263"
+      "commit": "eff12d1e565367f63be01832f35523a18df14263",
+      "followup_commits": [
+        "1982d6ea5577f6e85e69babf936430934bfa6853"
+      ]
     },
     "F18": {
       "issue": 36,

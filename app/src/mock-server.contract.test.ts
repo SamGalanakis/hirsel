@@ -103,7 +103,7 @@ describe("dev mock Thread contract", () => {
     const port = await freePort();
     child = spawn(process.execPath, ["tools/mock-server.mjs"], {
       cwd: process.cwd(),
-      env: { ...process.env, MOCK_PORT: String(port), MOCK_REPLY_MS: "10" },
+      env: { ...process.env, MOCK_PORT: String(port), MOCK_REPLY_MS: "100" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     await new Promise<void>((resolve, reject) => {
@@ -127,14 +127,25 @@ describe("dev mock Thread contract", () => {
       connection.ws.send(JSON.stringify(frame));
       return response;
     };
-    const created = (await request({ parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread as Thread;
+    const createCommand = { parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" };
+    const created = (await request(createCommand, "thread_created")).thread as Thread;
     expect(created.attention).toBe("quiet");
-    expect((await request({ parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread).toEqual(created);
+    expect((await request(createCommand, "thread_created")).thread).toEqual(created);
+    await expectActionError(connection.ws, addressed({ ...createCommand, title: "Different subject" }), "client_id already used");
+    const running = waitForFrame(connection.ws, frame => frame.type === "thread_turn" && (frame.turn as { state?: string }).state === "running");
     const completed = waitForFrame(connection.ws, frame => frame.type === "thread_turn" && (frame.turn as { state?: string }).state === "completed");
     const command = { type: "send_thread_message", artifact_ids: [], thread_id: created.id, client_id: "message", body: "keep investigating", mentions: [1], attachments: [] };
     const owner = (await request(command, "msg")).message as ChatMessage;
     expect(owner).toMatchObject({ thread_id: created.id, mentions: [1], client_id: "message" });
-    await completed;
+    const runningFrame = await running;
+    const runningReplay = (await request(createCommand, "thread_created")).thread as Thread;
+    expect(runningReplay.running_turn).toEqual(runningFrame.turn);
+    expect(runningReplay.queued_turn_count).toBe(0);
+    expect(runningReplay.last_finished_turn).toBeNull();
+    const completedFrame = await completed;
+    const completedReplay = (await request(createCommand, "thread_created")).thread as Thread;
+    expect(completedReplay.running_turn).toBeNull();
+    expect(completedReplay.last_finished_turn).toEqual(completedFrame.turn);
     expect((await request(command, "msg")).message).toEqual(owner);
     await expectActionError(connection.ws, addressed({ ...command, body: "conflicting retry" }), "different content");
     const detail = (await request({ type: "open_thread", client_id: "open", thread_id: created.id }, "thread_opened")).detail as ThreadDetail;
@@ -162,7 +173,9 @@ describe("dev mock Thread contract", () => {
     expect(isolated.frame).not.toHaveProperty("messages");
     await close(isolated.ws);
     connection = await hello(port);
-    expect((connection.frame.threads as Thread[]).find(thread => thread.id === created.id)).toEqual(reset);
+    const reconnectedSummary = (connection.frame.threads as Thread[]).find(thread => thread.id === created.id);
+    expect(reconnectedSummary).toEqual(reset);
+    expect((await request(createCommand, "thread_created")).thread).toEqual(reconnectedSummary);
     expect(connection.frame).not.toHaveProperty("messages");
     const replay = (await request({ type: "open_thread", client_id: "replay", thread_id: created.id }, "thread_opened")).detail as ThreadDetail;
     expect(replay.messages).toEqual(detail.messages);

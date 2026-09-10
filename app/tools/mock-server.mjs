@@ -19,7 +19,7 @@ const broadcast = (world, frame) => {
   if (id !== null) broadcast(world, { type: "thread_upsert", thread: threadFor(world, id) });
 };
 function makeThread(id, title, parent_thread_id = null) {
-  return { id, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1, running_turn: null, queued_turn_count: 0, last_finished_turn: null, last_activity_at: now() };
+  return { id, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
 }
 function worldFor(token) {
   if (!tenants.has(token)) {
@@ -34,6 +34,9 @@ function summary(world, thread) {
   const terminal = turns.filter(turn => turn.finished_at).sort((a, b) => Date.parse(b.finished_at) - Date.parse(a.finished_at) || b.id - a.id);
   const times = [thread.created_at, ...world.messages.filter(row => row.thread_id === thread.id).map(row => row.ts), ...world.activities.filter(row => row.thread_id === thread.id).map(row => row.ts), ...turns.flatMap(turn => [turn.started_at, turn.finished_at]).filter(Boolean)];
   return { ...thread, running_turn: turns.find(turn => turn.state === "running") ?? null, queued_turn_count: turns.filter(turn => turn.state === "queued").length, last_finished_turn: terminal[0] ?? null, last_activity_at: new Date(Math.max(...times.map(Date.parse))).toISOString() };
+}
+function createFingerprint(title, parent_thread_id) {
+  return createHash("sha256").update(JSON.stringify({ title, parent_thread_id })).digest("hex");
 }
 function threadFor(world, id) {
   const thread = world.threads.find(row => row.id === id);
@@ -127,14 +130,19 @@ function handle(world, ws, frame) {
       if (!("parent_thread_id" in frame) || (frame.parent_thread_id !== null && !Number.isSafeInteger(frame.parent_thread_id))) throw new Error("parent_thread_id is required and must be null or an ID");
       if (frame.parent_thread_id !== null) threadFor(world, frame.parent_thread_id);
       if (!frame.title?.trim()) throw new Error("Thread title must not be empty");
+      const title = frame.title.trim();
+      const fingerprint = createFingerprint(title, frame.parent_thread_id);
       const prior = world.requests.get(frame.client_id);
-      if (prior) { if (prior.type !== "thread_created" || prior.thread.title !== frame.title.trim() || prior.thread.parent_thread_id !== frame.parent_thread_id) throw new Error("client_id already used"); send(ws, prior); return; }
-      const thread = makeThread(world.nextThread++, frame.title.trim(), frame.parent_thread_id);
+      if (prior) {
+        if (prior.type !== "thread_created" || prior.fingerprint !== fingerprint) throw new Error("client_id already used");
+        send(ws, { type: "thread_created", client_id: frame.client_id, thread: summary(world, threadFor(world, prior.thread_id)) });
+        return;
+      }
+      const thread = makeThread(world.nextThread++, title, frame.parent_thread_id);
       world.threads.push(thread);
-      const result = { type: "thread_created", client_id: frame.client_id, thread };
-      world.requests.set(frame.client_id, result);
+      world.requests.set(frame.client_id, { type: "thread_created", fingerprint, thread_id: thread.id });
       broadcast(world, { type: "thread_upsert", thread });
-      send(ws, result);
+      send(ws, { type: "thread_created", client_id: frame.client_id, thread: summary(world, thread) });
       return;
     }
     case "open_thread": {

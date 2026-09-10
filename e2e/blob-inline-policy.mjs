@@ -1,15 +1,101 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
 import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
-import { pollReady, startHost, teardown } from "./lib/harness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const children = [];
 const logs = [];
 const token = "isolated-blob-policy-token";
 const marker = "HIRSEL_INERT_SVG_MARKER";
+
+function startProcess(children, command, args, options = {}, logs = []) {
+  const child = spawn(command, args, {
+    ...options,
+    detached: process.platform !== "win32",
+    stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
+  });
+  children.push(child);
+  for (const stream of [child.stdout, child.stderr]) stream?.on("data", chunk => logs.push(chunk.toString().trim()));
+  return child;
+}
+
+async function startBlobHost({ root, children, logs, port, token, env = {} }) {
+  const dataDir = await mkdtemp(join(tmpdir(), "hirsel-blob-policy-"));
+  const build = spawnSync("cargo", ["build", "-p", "hirsel-host", "--bin", "hirsel-host"], { cwd: root, encoding: "utf8" });
+  if (build.status !== 0) throw new Error(`Host build failed: ${build.stderr || build.stdout}`);
+  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], { cwd: root, encoding: "utf8" });
+  if (metadata.status !== 0) throw new Error(`Cargo metadata failed: ${metadata.stderr || metadata.stdout}`);
+  const binary = join(JSON.parse(metadata.stdout).target_directory, "debug", "hirsel-host");
+  const environment = Object.fromEntries(Object.entries({
+    ...process.env,
+    HIRSEL_TOKEN: token,
+    HIRSEL_AGENT: "scripted",
+    HIRSEL_DRIVER: "fake",
+    HIRSEL_PROVIDER: "anthropic",
+    HIRSEL_DEBUG: "1",
+    HIRSEL_IROH: "0",
+    HIRSEL_DATA_DIR: dataDir,
+    HIRSEL_TEMPLATES_DIR: `${root}/templates`,
+    HIRSEL_LISTEN: `127.0.0.1:${port}`,
+    ...env,
+  }).filter(([, value]) => value !== undefined));
+  startProcess(children, binary, [], { cwd: dataDir, env: environment }, logs);
+  return { dataDir, binary };
+}
+
+async function pollReady(label, probe, timeoutMs = 30_000, intervalMs = 75) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const result = await probe();
+      if (result) return result;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`${label} did not settle${lastError ? `: ${lastError.message}` : ""}`);
+}
+
+function signalProcess(child, signal) {
+  try {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {
+    // The owned process group already exited.
+  }
+}
+
+function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("exit", finish);
+  });
+}
+
+async function teardownBlobHost(children, { timeoutMs = 1_000, dataDirs = [] } = {}) {
+  for (const child of children) signalProcess(child, "SIGTERM");
+  await Promise.all(children.map(child => waitForExit(child, timeoutMs)));
+  for (const child of children) signalProcess(child, "SIGKILL");
+  await Promise.all(children.map(child => waitForExit(child, timeoutMs)));
+  await Promise.all(dataDirs.filter(Boolean).map(dataDir => rm(dataDir, { recursive: true, force: true })));
+}
 
 async function unusedPort() {
   const server = createServer();
@@ -54,7 +140,7 @@ const host = `http://127.0.0.1:${port}`;
 let dataDir;
 let browser;
 try {
-  ({ dataDir } = await startHost({
+  ({ dataDir } = await startBlobHost({
     root,
     children,
     logs,
@@ -109,5 +195,5 @@ try {
   console.log(JSON.stringify({ unsafeSvgExecuted: unsafe, disposition: response.headers.get("content-disposition") }));
 } finally {
   await browser?.close();
-  await teardown(children, { dataDirs: [dataDir] });
+  await teardownBlobHost(children, { dataDirs: [dataDir] });
 }

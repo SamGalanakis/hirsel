@@ -194,5 +194,25 @@ mod tests {
             &record(condition, None),
             &probe(Some(0), "still building", false)
         ));
+
+        let whitespace = MonitorCondition::parse("regex", Some(" ".to_string())).unwrap();
+        assert!(monitor_should_wake(
+            &record(whitespace.clone(), None),
+            &probe(Some(0), "one two", false)
+        ));
+        assert!(!monitor_should_wake(
+            &record(whitespace, None),
+            &probe(Some(0), "onetwo", false)
+        ));
+
+        let nul = MonitorCondition::parse("regex", Some("\0".to_string())).unwrap();
+        assert!(monitor_should_wake(
+            &record(nul.clone(), None),
+            &probe(Some(0), "before\0after", false)
+        ));
+        assert!(!monitor_should_wake(
+            &record(nul, None),
+            &probe(Some(0), "before after", false)
+        ));
     }
 }

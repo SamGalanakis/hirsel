@@ -86,6 +86,46 @@ async fn current_schema_enforces_condition_shape_and_reads_validate_regex_syntax
         )
         .await
         .unwrap();
+    let whitespace = storage
+        .create_monitor(
+            thread_id,
+            "printf ' '",
+            30,
+            MonitorCondition::parse("regex", Some(" ".to_string())).unwrap(),
+            "literal whitespace",
+        )
+        .await
+        .unwrap();
+    let nul = storage
+        .create_monitor(
+            thread_id,
+            "printf '\\0'",
+            30,
+            MonitorCondition::parse("regex", Some("\0".to_string())).unwrap(),
+            "literal nul",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .monitor(&whitespace.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .condition
+            .pattern(),
+        Some(" ")
+    );
+    assert_eq!(
+        storage
+            .monitor(&nul.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .condition
+            .pattern(),
+        Some("\0")
+    );
     let changed = storage
         .create_monitor(
             thread_id,
@@ -100,7 +140,7 @@ async fn current_schema_enforces_condition_shape_and_reads_validate_regex_syntax
     let conn = storage.conn.lock().await;
     for sql in [
         "UPDATE monitors SET pattern = NULL WHERE id = ?1",
-        "UPDATE monitors SET pattern = '   ' WHERE id = ?1",
+        "UPDATE monitors SET pattern = '' WHERE id = ?1",
         "UPDATE monitors SET wake_on = 'unknown' WHERE id = ?1",
     ] {
         assert!(conn.execute(sql, [&regex.id]).is_err(), "accepted {sql}");

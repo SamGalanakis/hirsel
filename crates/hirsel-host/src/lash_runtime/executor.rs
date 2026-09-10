@@ -160,6 +160,6 @@ pub(super) fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
 
 pub(super) fn parse_monitor_condition(args: &Value) -> Result<MonitorCondition, String> {
     let wake_on = required_string(args, "wake_on")?;
-    let pattern = optional_string(args, "pattern")?;
+    let pattern = optional_string_any_allow_empty(args, &["pattern"])?;
     MonitorCondition::parse(&wake_on, pattern).map_err(|error| error.to_string())
 }

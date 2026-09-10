@@ -284,7 +284,7 @@ pub struct MonitorRegex(Regex);
 
 impl MonitorRegex {
     fn new(pattern: String) -> Result<Self, MonitorConditionError> {
-        if pattern.trim().is_empty() {
+        if pattern.is_empty() {
             return Err(MonitorConditionError::MissingRegexPattern);
         }
         Ok(Self(Regex::new(&pattern)?))

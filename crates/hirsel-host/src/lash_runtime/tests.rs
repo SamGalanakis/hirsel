@@ -846,6 +846,8 @@ fn monitor_create_schema_and_parser_share_the_condition_contract() {
         json!({"wake_on":"exit_zero"}),
         json!({"wake_on":"exit_nonzero"}),
         json!({"wake_on":"regex","pattern":"ready"}),
+        json!({"wake_on":"regex","pattern":" "}),
+        json!({"wake_on":"regex","pattern":"\u{0}"}),
     ] {
         let mut input = base.clone();
         input.as_object_mut().unwrap().extend(

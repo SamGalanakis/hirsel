@@ -76,7 +76,7 @@ CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='r
                 summary TEXT NULL,
                 cancelled_ts TEXT NULL,
                 CHECK (
-                    (wake_on = 'regex' AND pattern IS NOT NULL AND length(trim(pattern)) > 0)
+                    (wake_on = 'regex' AND pattern IS NOT NULL AND length(CAST(pattern AS BLOB)) > 0)
                     OR
                     (wake_on IN ('changed', 'exit_zero', 'exit_nonzero') AND pattern IS NULL)
                 )

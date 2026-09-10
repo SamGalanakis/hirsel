@@ -35,6 +35,8 @@ async fn monitor_create_accepts_only_valid_condition_variants() {
         ("exit-zero", json!({"wake_on": "exit_zero"})),
         ("exit-nonzero", json!({"wake_on": "exit_nonzero"})),
         ("regex", json!({"wake_on": "regex", "pattern": "ready"})),
+        ("space-regex", json!({"wake_on": "regex", "pattern": " "})),
+        ("nul-regex", json!({"wake_on": "regex", "pattern": "\u{0}"})),
     ] {
         tools.operation_id = format!("valid-{name}");
         let mut args = condition;
@@ -43,7 +45,7 @@ async fn monitor_create_accepts_only_valid_condition_variants() {
         args["every_secs"] = json!(30);
         tools.execute("monitors_create", &args).await.unwrap();
     }
-    assert_eq!(storage.active_monitors().await.unwrap().len(), 4);
+    assert_eq!(storage.active_monitors().await.unwrap().len(), 6);
 }
 
 #[tokio::test]

@@ -35,10 +35,9 @@ function formatDuration(ms: number): string {
  *
  * `flex-col-reverse` is what keeps the TAIL in view as the run grows: the child
  * is laid out from the bottom edge, so overflow spills off the TOP, which is the
- * text already read. The gradient mask softens that cut so the block fades into
- * the rail instead of being guillotined mid-line. */
+ * text already read. */
 const LIVE_REASONING_BLOCK =
-  "flex max-h-[9.75em] flex-col-reverse overflow-hidden [mask-image:linear-gradient(to_bottom,transparent,#000_1.25rem)]";
+  "flex max-h-[9.75em] flex-col-reverse overflow-hidden";
 
 /** The reasoning run the Agent is writing right now: bare dim-italic text in the
  * timeline, with none of the settled row's chrome — no disclosure chevron, no
@@ -56,7 +55,7 @@ function StreamingReasoning(props: { text: string }) {
       data-slot="timeline-reasoning-stream"
       aria-busy="true"
     >
-      <p class="whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground/60">
+      <p class="whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground">
         {renderInline(props.text)}
       </p>
     </li>
@@ -69,7 +68,7 @@ function StreamingReasoning(props: { text: string }) {
 function ReasoningRow(props: { text: string }) {
   return (
     <li class="min-w-0" data-slot="timeline-reasoning">
-      <p class="max-w-prose whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground/75">
+      <p class="max-w-prose whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground">
         {renderInline(props.text)}
       </p>
     </li>

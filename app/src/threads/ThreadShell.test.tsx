@@ -255,7 +255,7 @@ describe("thread workspace", () => {
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Settle thread" }));
-    expect(sent).toContainEqual({ type: "thread_action", thread_id: 1, action: "settle", data: {}, expected_revision: undefined });
+    expect(sent).toContainEqual({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "settle", data: {}, expected_revision: undefined });
     expect(threadState.threads.find(t => t.id === 1)?.settled_at).toBeNull();
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { settled_at: "2026-09-09T10:00:00Z", revision: 2 }) }));
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
@@ -320,7 +320,7 @@ describe("nested Thread workspace", () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Pin thread" }));
-    expect(sent).toContainEqual({ type: "thread_action", thread_id: 1, action: "pin", data: {}, expected_revision: 1 });
+    expect(sent).toContainEqual({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "pin", data: {}, expected_revision: 1 });
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { read: true, pinned_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
     fireEvent.click(view.getByRole("button", { name: "Threads" }));
     expect(view.container.querySelectorAll('[data-thread-row="1"]')).toHaveLength(1);
@@ -417,7 +417,7 @@ it("keeps current brief reachable beyond the visible history page without moving
 describe("contextual Thread errors", () => {
   it("keeps send recovery in its addressed conversation while the drawer is open", () => {
     const view = render(() => <ThreadShell />);
-    flush(() => sendThreadMessage(1, "Keep this failed draft", "send", [], [], [44]));
+    flush(() => sendThreadMessage("test-history", 1, "Keep this failed draft", "send", [], [], [44]));
     const outgoing = sent.findLast(frame => frame.type === "send_thread_message")!;
     if (outgoing.type !== "send_thread_message") throw new Error("Missing send");
     flush(() => handleThreadMessage({type:"error",client_id:outgoing.client_id,detail:"Send unavailable"}));
@@ -433,7 +433,7 @@ describe("contextual Thread errors", () => {
     expect(sent.at(-1)).toEqual(outgoing);
     flush(() => handleThreadMessage({type:"msg",message:{id:40,thread_id:1,author:"owner",body:outgoing.body,client_id:outgoing.client_id,artifact_ids:[44],ref:null,ts:"2026-09-10T10:00:00Z"}}));
     expect(within(main).queryByRole("alert")).toBeNull();
-    flush(() => sendThreadMessage(2, "Other Thread failure", "send", [], [], []));
+    flush(() => sendThreadMessage("test-history", 2, "Other Thread failure", "send", [], [], []));
     const other = sent.findLast(frame => frame.type === "send_thread_message")!;
     if (other.type !== "send_thread_message") throw new Error("Missing other send");
     flush(() => handleThreadMessage({type:"error",client_id:other.client_id,detail:"Other Thread unavailable"}));
@@ -460,7 +460,7 @@ describe("contextual Thread errors", () => {
 describe("retry keyboard focus", () => {
   async function retryFixture() {
     const view = render(() => <ThreadShell />);
-    flush(() => sendThreadMessage(1, "Keyboard recovery", "send", [], [], [44]));
+    flush(() => sendThreadMessage("test-history", 1, "Keyboard recovery", "send", [], [], [44]));
     const frame = sent.findLast(frame => frame.type === "send_thread_message")!;
     if (frame.type !== "send_thread_message") throw new Error("Missing send");
     flush(() => handleThreadMessage({type:"error",client_id:frame.client_id,detail:"Temporary failure"}));

@@ -27,8 +27,9 @@ impl AppState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn submit_thread_message(
+    pub async fn submit_addressed_thread_message(
         &self,
+        expected_history: &str,
         client_id: String,
         thread_id: u64,
         body: String,
@@ -37,9 +38,8 @@ impl AppState {
         mode: SendMode,
         artifact_ids: Vec<u64>,
     ) -> anyhow::Result<OwnerSubmission> {
-        let expected_history = self.storage.history_id().await?;
         self.submit_addressed_turn(
-            &expected_history,
+            expected_history,
             client_id,
             thread_id,
             body,
@@ -112,19 +112,15 @@ impl AppState {
             inserted,
         })
     }
-    pub async fn handle_thread_action(
+    pub async fn handle_addressed_thread_action(
         &self,
+        expected_history: &str,
         id: u64,
         action: String,
         data: serde_json::Value,
         expected_revision: Option<u64>,
     ) -> anyhow::Result<Thread> {
-        let expected_history = self.storage.history_id().await?;
-        let current = self
-            .storage
-            .thread(id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("unknown thread: {id}"))?;
+        let current = self.storage.addressed_thread(expected_history, id).await?;
         let thread = match action.as_str() {
             "set_icon" => {
                 let object = data
@@ -138,7 +134,12 @@ impl AppState {
                 let revision = expected_revision
                     .ok_or_else(|| anyhow::anyhow!("expected_revision is required for set_icon"))?;
                 self.storage
-                    .update_thread_icon(id, icon.as_ref().map(|value| value.as_deref()), revision)
+                    .update_thread_icon(
+                        expected_history,
+                        id,
+                        icon.as_ref().map(|value| value.as_deref()),
+                        revision,
+                    )
                     .await?
             }
 
@@ -147,55 +148,66 @@ impl AppState {
                     .as_object()
                     .ok_or_else(|| anyhow::anyhow!("set_showcase data must be an object"))?;
                 anyhow::ensure!(
-                    object.len() == 2
-                        && object.contains_key("artifact_id")
-                        && object.contains_key("history_id"),
-                    "set_showcase requires artifact_id and history_id"
+                    object.len() == 1 && object.contains_key("artifact_id"),
+                    "set_showcase requires only artifact_id"
                 );
-                let history = data["history_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("history_id must be a string"))?;
                 let artifact_id =
                     crate::storage::parse_showcase(&data, "artifact_id")?.expect("required field");
                 let revision = expected_revision.ok_or_else(|| {
                     anyhow::anyhow!("expected_revision is required for set_showcase")
                 })?;
                 self.storage
-                    .update_thread_showcase(history, id, artifact_id, revision)
+                    .update_thread_showcase(expected_history, id, artifact_id, revision)
                     .await?
             }
 
             "pin" | "unpin" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.pin_thread(id, action == "pin").await?
+                self.storage
+                    .pin_addressed_thread(expected_history, id, action == "pin")
+                    .await?
             }
             "settle" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.settle_thread(id, true).await?
+                self.storage
+                    .settle_addressed_thread(expected_history, id, true)
+                    .await?
             }
             "reopen" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.settle_thread(id, false).await?
+                self.storage
+                    .settle_addressed_thread(expected_history, id, false)
+                    .await?
             }
             "read" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.mark_thread_read(id).await?
+                self.storage
+                    .mark_addressed_thread_read(expected_history, id)
+                    .await?
             }
             "archive" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.archive_thread(id, true).await?
+                self.storage
+                    .archive_addressed_thread(expected_history, id, true)
+                    .await?
             }
             "unarchive" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.archive_thread(id, false).await?
+                self.storage
+                    .archive_addressed_thread(expected_history, id, false)
+                    .await?
             }
             "snooze" => {
                 let until = validate_snooze_lifecycle_data(&data)?;
-                self.storage.snooze_thread(id, Some(until)).await?
+                self.storage
+                    .snooze_addressed_thread(expected_history, id, Some(until))
+                    .await?
             }
             "unsnooze" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage.snooze_thread(id, None).await?
+                self.storage
+                    .snooze_addressed_thread(expected_history, id, None)
+                    .await?
             }
             generated => {
                 anyhow::ensure!(
@@ -222,7 +234,7 @@ impl AppState {
                     .unwrap_or(generated)
                     .to_string();
                 self.submit_addressed_turn(
-                    &expected_history,
+                    expected_history,
                     format!("thread-action-{id}-{}-{generated}", current.revision),
                     id,
                     body,
@@ -238,12 +250,11 @@ impl AppState {
                 )
                 .await?;
                 if validated.settles {
-                    self.storage.settle_thread(id, true).await?
-                } else {
                     self.storage
-                        .thread(id)
+                        .settle_addressed_thread(expected_history, id, true)
                         .await?
-                        .ok_or_else(|| anyhow::anyhow!("unknown thread: {id}"))?
+                } else {
+                    self.storage.addressed_thread(expected_history, id).await?
                 }
             }
         };
@@ -254,7 +265,7 @@ impl AppState {
                 .chain(thread.showcased_artifact_id)
                 .collect::<Vec<_>>();
             self.tools
-                .publish_showcase_artifacts(&expected_history, &ids)
+                .publish_showcase_artifacts(expected_history, &ids)
                 .await?;
         }
         self.tools.publish_thread(thread.clone()).await;
@@ -287,7 +298,13 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .handle_thread_action(thread.id, "advance".into(), json!({}), None)
+                .handle_addressed_thread_action(
+                    &state.storage.history_id().await.unwrap(),
+                    thread.id,
+                    "advance".into(),
+                    json!({}),
+                    None
+                )
                 .await
                 .is_err()
         );
@@ -298,7 +315,8 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .handle_thread_action(
+                .handle_addressed_thread_action(
+                    &state.storage.history_id().await.unwrap(),
                     thread.id,
                     "advance".into(),
                     json!({}),
@@ -317,7 +335,8 @@ mod tests {
                 .is_empty()
         );
         let continued = state
-            .handle_thread_action(
+            .handle_addressed_thread_action(
+                &state.storage.history_id().await.unwrap(),
                 thread.id,
                 "advance".into(),
                 json!({}),

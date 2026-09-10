@@ -348,8 +348,10 @@ async fn owner_message(
     let client_id = request
         .client_id
         .unwrap_or_else(|| format!("debug-{}", Uuid::new_v4()));
+    let history_id = state.storage.history_id().await?;
     let submission = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &history_id,
             client_id,
             request.thread_id,
             request.body,

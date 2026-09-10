@@ -382,10 +382,17 @@ impl Client {
         self.core.retry_send(client_id);
     }
 
-    pub fn create_thread(&self, title: String, parent_thread_id: Option<u64>) -> SendReceipt {
-        SendReceipt {
-            client_id: self.core.create_thread(title, parent_thread_id).client_id,
-        }
+    pub fn create_thread(
+        &self,
+        history_id: String,
+        title: String,
+        parent_thread_id: Option<u64>,
+    ) -> Option<SendReceipt> {
+        self.core
+            .create_thread(history_id, title, parent_thread_id)
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
     }
 
     pub fn open_thread(&self, thread_id: u64, before_id: Option<u64>) -> SendReceipt {
@@ -396,36 +403,38 @@ impl Client {
 
     pub fn send_thread_message(
         &self,
+        history_id: String,
         thread_id: u64,
         body: String,
         attachments: Vec<String>,
         mentions: Vec<u64>,
         artifact_ids: Vec<u64>,
-    ) -> SendReceipt {
-        let mut request = core::SendThreadMessageRequest::new(thread_id, body);
+    ) -> Option<SendReceipt> {
+        let mut request = core::SendThreadMessageRequest::new(history_id, thread_id, body);
         request.thread_id = thread_id;
         request.attachments = attachments;
         request.mentions = mentions;
         request.artifact_ids = artifact_ids;
-        SendReceipt {
-            client_id: self.core.send_message(request).client_id,
-        }
+        self.core.send_message(request).map(|receipt| SendReceipt {
+            client_id: receipt.client_id,
+        })
     }
 
     pub fn thread_action(
         &self,
+        history_id: String,
         thread_id: u64,
         action: String,
         data_json: String,
         expected_revision: Option<u64>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<bool, ClientError> {
         let data =
             serde_json::from_str(&data_json).map_err(|error| ClientError::InvalidAction {
                 detail: error.to_string(),
             })?;
-        self.core
-            .thread_action(thread_id, action, data, expected_revision);
-        Ok(())
+        Ok(self
+            .core
+            .thread_action(history_id, thread_id, action, data, expected_revision))
     }
 
     pub fn open_related_thread(&self, target: ThreadRelatedTarget) -> Option<SendReceipt> {
@@ -491,8 +500,8 @@ impl Client {
         )
     }
 
-    pub fn cancel_turn(&self, thread_id: u64) {
-        self.core.cancel_turn(thread_id);
+    pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {
+        self.core.cancel_turn(history_id, thread_id)
     }
 
     pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {

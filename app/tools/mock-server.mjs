@@ -123,6 +123,7 @@ function handle(world, ws, frame) {
       send(ws,{type:"artifact_opened",client_id:frame.client_id,artifact:{...artifactSummary(world,artifact),content:artifact.content}}); return;
     }
     case "create_thread": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       if (!("parent_thread_id" in frame) || (frame.parent_thread_id !== null && !Number.isSafeInteger(frame.parent_thread_id))) throw new Error("parent_thread_id is required and must be null or an ID");
       if (frame.parent_thread_id !== null) threadFor(world, frame.parent_thread_id);
       if (!frame.title?.trim()) throw new Error("Thread title must not be empty");
@@ -186,6 +187,7 @@ function handle(world, ws, frame) {
       return;
     }
     case "send_thread_message": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       threadFor(world, frame.thread_id);
       if (!Array.isArray(frame.artifact_ids)) throw new Error("artifact_ids is required");
       const references = [...new Set(frame.artifact_ids)].sort((a,b) => a-b);
@@ -210,12 +212,12 @@ function handle(world, ws, frame) {
       return;
     }
     case "thread_action": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       const thread = threadFor(world, frame.thread_id);
       if (frame.action === "pin" && thread.parent_thread_id !== null) throw new Error("Only top-level threads can be pinned");
       if (["pin", "unpin", "set_icon", "set_showcase"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
       if (frame.action === "set_showcase") {
-        if (frame.data?.history_id !== world.history_id) throw new Error("History changed; reopen this control");
-        if (!Object.hasOwn(frame.data, "artifact_id")) throw new Error("artifact_id is required");
+        if (!Object.hasOwn(frame.data, "artifact_id") || Object.keys(frame.data).length !== 1) throw new Error("artifact_id is required and must be the only field");
         const id = frame.data.artifact_id;
         if (id !== null && (!Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid artifact ID");
         if (id !== null) artifactFor(world, id);
@@ -244,6 +246,7 @@ function handle(world, ws, frame) {
       throw new Error("This mock thread has no generated action; use the scripted Rust host to test instruments.");
     }
     case "cancel_turn":
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       for (const turn of world.turns.filter(row => row.thread_id === frame.thread_id && row.state === "running")) {
         clearTimeout(world.timers.get(turn.id)); world.timers.delete(turn.id);
         Object.assign(turn, { state: "cancelled", finished_at: now() });

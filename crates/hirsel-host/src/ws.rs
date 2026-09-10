@@ -301,6 +301,7 @@ mod tests {
             .await
             .unwrap()
             .0;
+        let history_id = state.storage.history_id().await.unwrap();
         let app = router_from_state(state);
         let addr = spawn_app(app).await;
 
@@ -377,6 +378,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "send_thread_message",
+                "history_id": history_id,
                 "artifact_ids": [],
                 "thread_id": thread.id,
                 "client_id": "message-1",
@@ -415,6 +417,7 @@ mod tests {
             .await
             .unwrap()
             .0;
+        let history_id = state.storage.history_id().await.unwrap();
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
 
@@ -425,6 +428,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "send_thread_message",
+                "history_id": history_id,
                 "artifact_ids": [],
                 "thread_id": thread.id,
                 "client_id": "enqueue-fails",
@@ -468,6 +472,7 @@ mod tests {
             .await
             .unwrap()
             .0;
+        let history_id = state.storage.history_id().await.unwrap();
         let app = router_from_state(state.clone());
         let addr = spawn_app(app).await;
 
@@ -477,6 +482,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "send_thread_message",
+                "history_id": history_id,
                 "artifact_ids": [],
                 "thread_id": thread.id,
                 "client_id": "bad-mention",

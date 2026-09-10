@@ -323,12 +323,16 @@ impl ThreadRuntimeRegistry {
         // provider kinds and is also the recovery/wakeup path for child reports.
         Ok(())
     }
-    pub(super) async fn cancel(&self, id: u64) -> anyhow::Result<()> {
+    pub(super) async fn cancel(&self, expected_history: &str, id: u64) -> anyhow::Result<()> {
         let _admission = self.admission.lock().await;
         let history = self.epoch.read().expect("runtime epoch poisoned").0.clone();
+        anyhow::ensure!(
+            history == expected_history,
+            "cancellation belongs to an old history"
+        );
         self.tools
             .storage()
-            .request_thread_cancellation(&history, id)
+            .request_thread_cancellation(expected_history, id)
             .await?;
         if let Some(work) = self.cli.lock().await.get(&id) {
             work.cancel.cancel();

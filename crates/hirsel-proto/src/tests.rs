@@ -49,9 +49,15 @@ fn pairing_auth_and_paired_response_round_trip() {
 
 #[test]
 fn cancel_frames_round_trip() {
-    let cancel_turn = ClientToHost::CancelTurn { thread_id: 1 };
+    let cancel_turn = ClientToHost::CancelTurn {
+        history_id: "history-a".into(),
+        thread_id: 1,
+    };
     let encoded = serde_json::to_string(&cancel_turn).unwrap();
-    assert_eq!(encoded, r#"{"type":"cancel_turn","thread_id":1}"#);
+    assert_eq!(
+        encoded,
+        r#"{"type":"cancel_turn","history_id":"history-a","thread_id":1}"#
+    );
     let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, cancel_turn);
 
@@ -61,6 +67,25 @@ fn cancel_frames_round_trip() {
     let encoded = serde_json::to_string(&cancel_queued).unwrap();
     let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, cancel_queued);
+}
+
+#[test]
+fn thread_mutations_require_captured_history_on_the_wire() {
+    for value in [
+        json!({"type":"create_thread","client_id":"create","history_id":"history-a","title":"Child","parent_thread_id":1}),
+        json!({"type":"send_thread_message","client_id":"send","history_id":"history-a","thread_id":1,"body":"Hello","attachments":[],"mentions":[],"mode":"send","artifact_ids":[]}),
+        json!({"type":"thread_action","history_id":"history-a","thread_id":1,"action":"archive","data":{},"expected_revision":null}),
+        json!({"type":"cancel_turn","history_id":"history-a","thread_id":1}),
+    ] {
+        let command: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), value);
+        let mut missing_history = value;
+        missing_history
+            .as_object_mut()
+            .unwrap()
+            .remove("history_id");
+        assert!(serde_json::from_value::<ClientToHost>(missing_history).is_err());
+    }
 }
 
 #[test]

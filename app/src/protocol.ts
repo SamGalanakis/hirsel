@@ -259,6 +259,7 @@ export interface GetBlobUrlMsg {
 
 /** v1.2: cooperatively interrupt the active agent turn (Esc). No-op if idle. */
 export interface CancelTurnMsg {
+  history_id: string;
   thread_id: number;
   type: "cancel_turn";
 }

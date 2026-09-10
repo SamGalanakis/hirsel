@@ -15,6 +15,7 @@ use crate::transport;
 /// Explicitly addressed Thread send arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendThreadMessageRequest {
+    pub history_id: String,
     pub thread_id: u64,
     pub attachments: Vec<String>,
     pub body: String,
@@ -23,8 +24,9 @@ pub struct SendThreadMessageRequest {
 }
 
 impl SendThreadMessageRequest {
-    pub fn new(thread_id: u64, body: String) -> Self {
+    pub fn new(history_id: String, thread_id: u64, body: String) -> Self {
         Self {
+            history_id,
             thread_id,
             attachments: Vec::new(),
             body,
@@ -189,18 +191,22 @@ impl Client {
         }
     }
 
-    pub fn send_message(&self, request: SendThreadMessageRequest) -> SendReceipt {
+    pub fn send_message(&self, request: SendThreadMessageRequest) -> Option<SendReceipt> {
         let client_id = Uuid::new_v4().to_string();
-        self.inner
-            .write_store()
-            .add_optimistic_send(PendingSend::new(
-                request.thread_id,
-                request.attachments,
-                client_id.clone(),
-                request.body,
-                request.mentions,
-                request.artifact_ids,
-            ));
+        let mut store = self.inner.write_store();
+        if store.history_id.as_deref() != Some(&request.history_id) {
+            return None;
+        }
+        store.add_optimistic_send(PendingSend::new(
+            request.history_id,
+            request.thread_id,
+            request.attachments,
+            client_id.clone(),
+            request.body,
+            request.mentions,
+            request.artifact_ids,
+        ));
+        drop(store);
         self.inner.notify_snapshot();
         if let Some(sender) = self
             .inner
@@ -211,7 +217,7 @@ impl Client {
         {
             let _ = sender.send(Command::SendPending);
         }
-        SendReceipt { client_id }
+        Some(SendReceipt { client_id })
     }
 
     pub fn retry_send(&self, client_id: String) {
@@ -251,12 +257,21 @@ impl Client {
         }
     }
 
-    pub fn create_thread(&self, title: String, parent_thread_id: Option<u64>) -> SendReceipt {
+    pub fn create_thread(
+        &self,
+        history_id: String,
+        title: String,
+        parent_thread_id: Option<u64>,
+    ) -> Option<SendReceipt> {
         let client_id = Uuid::new_v4().to_string();
-        self.inner
-            .write_store()
+        let mut store = self.inner.write_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return None;
+        }
+        store
             .pending_creates
-            .push((client_id.clone(), title, parent_thread_id));
+            .push((client_id.clone(), history_id, title, parent_thread_id));
+        drop(store);
         if let Some(sender) = self
             .inner
             .command_tx
@@ -266,7 +281,7 @@ impl Client {
         {
             let _ = sender.send(Command::SendPending);
         }
-        SendReceipt { client_id }
+        Some(SendReceipt { client_id })
     }
 
     pub fn open_thread(&self, thread_id: u64, before_id: Option<u64>) -> SendReceipt {
@@ -316,17 +331,25 @@ impl Client {
 
     pub fn thread_action(
         &self,
+        history_id: String,
         thread_id: u64,
         action: String,
         data: serde_json::Value,
         expected_revision: Option<u64>,
-    ) {
+    ) -> bool {
+        let store = self.inner.read_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return false;
+        }
         self.queue_frame(ClientToHost::ThreadAction {
+            history_id,
             thread_id,
             action,
             data,
             expected_revision,
         });
+        drop(store);
+        true
     }
 
     /// Save a typed reference in the history the caller was viewing when it chose the Thread.
@@ -393,7 +416,7 @@ impl Client {
         artifact_id: Option<u64>,
         expected_revision: u64,
     ) -> bool {
-        let data = serde_json::json!({"artifact_id": artifact_id, "history_id": expected_history});
+        let data = serde_json::json!({"artifact_id": artifact_id});
         self.update_thread_presentation(
             expected_history,
             thread_id,
@@ -422,6 +445,7 @@ impl Client {
             return false;
         }
         self.queue_frame(ClientToHost::ThreadAction {
+            history_id: expected_history,
             thread_id,
             action: action.into(),
             data,
@@ -431,8 +455,17 @@ impl Client {
         true
     }
 
-    pub fn cancel_turn(&self, thread_id: u64) {
-        self.queue_frame(ClientToHost::CancelTurn { thread_id });
+    pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {
+        let store = self.inner.read_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return false;
+        }
+        self.queue_frame(ClientToHost::CancelTurn {
+            history_id,
+            thread_id,
+        });
+        drop(store);
+        true
     }
 
     /// Register a push token once the WebSocket is online. Registrations made
@@ -491,6 +524,7 @@ impl Client {
 pub(crate) fn pending_to_wire(send: &PendingSend) -> ClientToHost {
     ClientToHost::SendThreadMessage {
         client_id: send.client_id.clone(),
+        history_id: send.history_id.clone(),
         thread_id: send.thread_id,
         body: send.body.clone(),
         attachments: send.attachments.clone(),
@@ -511,3 +545,7 @@ mod icon_tests;
 #[cfg(test)]
 #[path = "showcase_tests.rs"]
 mod showcase_tests;
+
+#[cfg(test)]
+#[path = "history_mutation_tests.rs"]
+mod history_mutation_tests;

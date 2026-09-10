@@ -34,7 +34,13 @@ async fn root_pin_actions_advance_revision_without_changing_history() {
         .unwrap()
         .0;
     let pinned = state
-        .handle_thread_action(root.id, "pin".into(), json!({}), None)
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
+            root.id,
+            "pin".into(),
+            json!({}),
+            None,
+        )
         .await
         .unwrap();
     assert!(pinned.pinned_at.is_some());
@@ -45,7 +51,7 @@ async fn root_pin_actions_advance_revision_without_changing_history() {
     for action in ["pin", "unpin"] {
         assert!(
             state
-                .handle_thread_action(child.id, action.into(), json!({}), None)
+                .handle_addressed_thread_action(&history, child.id, action.into(), json!({}), None)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -55,7 +61,7 @@ async fn root_pin_actions_advance_revision_without_changing_history() {
         assert_eq!(storage.history_id().await.unwrap(), history);
     }
     let unpinned = state
-        .handle_thread_action(root.id, "unpin".into(), json!({}), None)
+        .handle_addressed_thread_action(&history, root.id, "unpin".into(), json!({}), None)
         .await
         .unwrap();
     assert!(unpinned.pinned_at.is_none());

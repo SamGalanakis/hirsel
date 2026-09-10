@@ -264,20 +264,13 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
     let revision = s.thread(id).await.unwrap().unwrap().revision;
     for (data, expected) in [
         (json!({}), Some(revision)),
-        (json!({"artifact_id":null}), Some(revision)),
         (
             json!({"artifact_id":42,"history_id":"old-history"}),
             Some(revision),
         ),
-        (
-            json!({"artifact_id":999,"history_id":history}),
-            Some(revision),
-        ),
-        (json!({"artifact_id":42,"history_id":history}), None),
-        (
-            json!({"artifact_id":42,"history_id":history}),
-            Some(revision + 1),
-        ),
+        (json!({"artifact_id":999}), Some(revision)),
+        (json!({"artifact_id":42}), None),
+        (json!({"artifact_id":42}), Some(revision + 1)),
         (
             json!({"artifact_id":42,"history_id":history,"extra":true}),
             Some(revision),
@@ -285,7 +278,13 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
     ] {
         assert!(
             state
-                .handle_thread_action(id, "set_showcase".into(), data, expected)
+                .handle_addressed_thread_action(
+                    &state.storage.history_id().await.unwrap(),
+                    id,
+                    "set_showcase".into(),
+                    data,
+                    expected
+                )
                 .await
                 .is_err()
         );
@@ -294,10 +293,11 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
     s.conn.lock().await.execute_batch("CREATE TRIGGER block_showcase_metadata BEFORE UPDATE ON artifacts BEGIN SELECT RAISE(FAIL,'metadata unavailable'); END;").unwrap();
     assert!(
         state
-            .handle_thread_action(
+            .handle_addressed_thread_action(
+                &state.storage.history_id().await.unwrap(),
                 id,
                 "set_showcase".into(),
-                json!({"artifact_id":42,"history_id":history}),
+                json!({"artifact_id":42}),
                 Some(revision)
             )
             .await
@@ -314,10 +314,11 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
         .execute_batch("DROP TRIGGER block_showcase_metadata")
         .unwrap();
     let set = state
-        .handle_thread_action(
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
             id,
             "set_showcase".into(),
-            json!({"artifact_id":42,"history_id":history}),
+            json!({"artifact_id":42}),
             Some(revision),
         )
         .await
@@ -337,10 +338,11 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
     );
     s.conn.lock().await.execute("INSERT INTO artifacts(id,title,kind,mime,content,created_at,updated_at) SELECT 43,'Replacement',kind,mime,content,created_at,updated_at FROM artifacts WHERE id=42", []).unwrap();
     let replacement = state
-        .handle_thread_action(
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
             id,
             "set_showcase".into(),
-            json!({"artifact_id":43,"history_id":history}),
+            json!({"artifact_id":43}),
             Some(set.revision),
         )
         .await
@@ -348,10 +350,11 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
     assert_eq!(replacement.showcased_artifact_id, Some(43));
     assert!(s.artifact(42).await.unwrap().summary.thread_ids.is_empty());
     let cleared = state
-        .handle_thread_action(
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
             id,
             "set_showcase".into(),
-            json!({"artifact_id":null,"history_id":history}),
+            json!({"artifact_id":null}),
             Some(replacement.revision),
         )
         .await

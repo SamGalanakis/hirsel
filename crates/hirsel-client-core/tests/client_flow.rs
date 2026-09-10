@@ -330,7 +330,13 @@ async fn optimistic_send_reconciles_with_owner_echo() {
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |state| state.connection == ConnectionState::Online).await;
-    let receipt = client.send_message(SendThreadMessageRequest::new(0, "queued thought".into()));
+    let receipt = client
+        .send_message(SendThreadMessageRequest::new(
+            "test-store-a".into(),
+            0,
+            "queued thought".into(),
+        ))
+        .unwrap();
     let optimistic = client.snapshot();
     assert_eq!(optimistic.messages.len(), 1);
     assert!(optimistic.messages[0].is_pending());
@@ -400,10 +406,20 @@ async fn offline_queue_flushes_in_order_on_same_store_reconnect() {
         state.connection == ConnectionState::Offline
     })
     .await;
-    let first_receipt =
-        client.send_message(SendThreadMessageRequest::new(0, "first offline".into()));
-    let second_receipt =
-        client.send_message(SendThreadMessageRequest::new(0, "second offline".into()));
+    let first_receipt = client
+        .send_message(SendThreadMessageRequest::new(
+            "test-store-a".into(),
+            0,
+            "first offline".into(),
+        ))
+        .unwrap();
+    let second_receipt = client
+        .send_message(SendThreadMessageRequest::new(
+            "test-store-a".into(),
+            0,
+            "second offline".into(),
+        ))
+        .unwrap();
     assert_ne!(first_receipt.client_id, second_receipt.client_id);
     assert!(
         client
@@ -506,6 +522,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
         send_hello(&mut socket, vec![], vec![], vec![]).await;
         let ClientToHost::CreateThread {
             client_id,
+            history_id,
             title,
             parent_thread_id,
         } = receive_client(&mut socket).await
@@ -513,6 +530,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
             panic!("create");
         };
         assert_eq!(title, "Groceries");
+        assert_eq!(history_id, "test-store-a");
         assert_eq!(parent_thread_id, None);
         send_server(
             &mut socket,
@@ -559,6 +577,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
         assert_eq!(
             action,
             ClientToHost::ThreadAction {
+                history_id: "test-store-a".into(),
                 thread_id: 5,
                 action: "choose".into(),
                 data: serde_json::json!({"choice":"milk","label":"Milk"}),
@@ -568,6 +587,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
         assert_eq!(
             receive_client(&mut socket).await,
             ClientToHost::ThreadAction {
+                history_id: "test-store-a".into(),
                 thread_id: 5,
                 action: "read".into(),
                 data: serde_json::json!({}),
@@ -576,7 +596,10 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
         );
         assert_eq!(
             receive_client(&mut socket).await,
-            ClientToHost::CancelTurn { thread_id: 5 }
+            ClientToHost::CancelTurn {
+                history_id: "test-store-a".into(),
+                thread_id: 5,
+            }
         );
         ready_tx.send(()).unwrap();
         let _ = release_rx.await;
@@ -584,7 +607,9 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
-    let created = client.create_thread("Groceries".into(), None);
+    let created = client
+        .create_thread("test-store-a".into(), "Groceries".into(), None)
+        .unwrap();
     let snapshot = wait_for_snapshot(&client, |s| {
         s.created_threads
             .iter()
@@ -595,13 +620,20 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     client.open_thread(5, None);
     wait_for_snapshot(&client, |s| s.opened_threads.contains(&5)).await;
     client.thread_action(
+        "test-store-a".into(),
         5,
         "choose".into(),
         serde_json::json!({"choice":"milk","label":"Milk"}),
         Some(1),
     );
-    client.thread_action(5, "read".into(), serde_json::json!({}), None);
-    client.cancel_turn(5);
+    client.thread_action(
+        "test-store-a".into(),
+        5,
+        "read".into(),
+        serde_json::json!({}),
+        None,
+    );
+    client.cancel_turn("test-store-a".into(), 5);
     timeout(Duration::from_secs(3), ready_rx)
         .await
         .unwrap()
@@ -650,7 +682,9 @@ async fn lost_create_ack_retries_same_identity_after_reconnect() {
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
-    let receipt = client.create_thread("Groceries".into(), None);
+    let receipt = client
+        .create_thread("test-store-a".into(), "Groceries".into(), None)
+        .unwrap();
     let snapshot = wait_for_snapshot(&client, |s| {
         s.created_threads
             .iter()
@@ -707,13 +741,20 @@ async fn new_history_discards_pending_transport_actions_and_recovers_unsent_text
     wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     client.disconnect().await;
     client.send_message(SendThreadMessageRequest::new(
+        "test-store-a".into(),
         5,
         "recover this draft".into(),
     ));
-    client.create_thread("old create".into(), None);
+    client.create_thread("test-store-a".into(), "old create".into(), None);
     client.open_thread(5, None);
-    client.thread_action(5, "archive".into(), serde_json::json!({}), Some(1));
-    client.cancel_turn(5);
+    client.thread_action(
+        "test-store-a".into(),
+        5,
+        "archive".into(),
+        serde_json::json!({}),
+        Some(1),
+    );
+    client.cancel_turn("test-store-a".into(), 5);
     client.add_thread_related(
         "test-store-a".into(),
         5,

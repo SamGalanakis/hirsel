@@ -352,12 +352,14 @@ where
         }
         ClientToHost::CreateThread {
             client_id,
+            history_id,
             title,
             parent_thread_id,
         } => {
             let (thread, inserted) = state
                 .storage
-                .create_thread(
+                .create_addressed_thread(
+                    &history_id,
                     &client_id,
                     &title,
                     "",
@@ -427,6 +429,7 @@ where
         }
         ClientToHost::SendThreadMessage {
             client_id,
+            history_id,
             thread_id,
             body,
             attachments,
@@ -435,7 +438,8 @@ where
             artifact_ids,
         } => {
             let submission = state
-                .submit_thread_message(
+                .submit_addressed_thread_message(
+                    &history_id,
                     client_id,
                     thread_id,
                     body,
@@ -454,18 +458,31 @@ where
             }
         }
         ClientToHost::ThreadAction {
+            history_id,
             thread_id,
             action,
             data,
             expected_revision,
         } => {
             state
-                .handle_thread_action(thread_id, action, data, expected_revision)
+                .handle_addressed_thread_action(
+                    &history_id,
+                    thread_id,
+                    action,
+                    data,
+                    expected_revision,
+                )
                 .await?;
         }
 
-        ClientToHost::CancelTurn { thread_id } => {
-            state.agent.cancel_thread_turn(thread_id).await?;
+        ClientToHost::CancelTurn {
+            history_id,
+            thread_id,
+        } => {
+            state
+                .agent
+                .cancel_thread_turn(&history_id, thread_id)
+                .await?;
         }
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;

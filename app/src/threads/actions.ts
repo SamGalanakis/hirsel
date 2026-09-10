@@ -13,15 +13,15 @@ export function threadActions(thread: Thread, now = Date.now()): ThreadActionIte
   const referenceHistory = historyId();
   const actions: ThreadActionItem[] = [
     { id: "icon", label: "Change thread icon", icon: "icon", run: () => openThreadIconPicker(thread) },
-    { id: "child", label: "New child thread", icon: "child", run: () => openThreadNavigation({ kind: "create", parentId: thread.id }) },
+    { id: "child", label: "New child thread", icon: "child", run: () => { if (referenceHistory) openThreadNavigation({ kind: "create", historyId: referenceHistory, parentId: thread.id }); } },
   ];
-  if (thread.parent_thread_id === null) actions.splice(1, 0, { id: "pin", label: thread.pinned_at ? "Unpin thread" : "Pin thread", icon: "pin", run: () => threadAction(thread.id, thread.pinned_at ? "unpin" : "pin", {}, thread.revision) });
-  actions.push({ id: "settle", label: thread.settled_at ? "Reopen thread" : "Settle thread", icon: thread.settled_at ? "reopen" : "settle", run: () => threadAction(thread.id, thread.settled_at ? "reopen" : "settle") });
-  if (!thread.read) actions.push({ id: "read", label: "Mark read", icon: "read", run: () => threadAction(thread.id, "read") });
+  if (thread.parent_thread_id === null) actions.splice(1, 0, { id: "pin", label: thread.pinned_at ? "Unpin thread" : "Pin thread", icon: "pin", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.pinned_at ? "unpin" : "pin", {}, thread.revision); } });
+  actions.push({ id: "settle", label: thread.settled_at ? "Reopen thread" : "Settle thread", icon: thread.settled_at ? "reopen" : "settle", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.settled_at ? "reopen" : "settle"); } });
+  if (!thread.read) actions.push({ id: "read", label: "Mark read", icon: "read", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, "read"); } });
   {
     const snoozed = Boolean(thread.snoozed_until && Date.parse(thread.snoozed_until) > now);
-    actions.push({ id: "snooze", label: snoozed ? "Unsnooze" : "Snooze for a day", icon: "snooze", run: () => threadAction(thread.id, snoozed ? "unsnooze" : "snooze", snoozed ? {} : { until: new Date(Date.now() + 86_400_000).toISOString() }) });
-    actions.push({ id: "archive", label: thread.archived_at ? "Unarchive thread" : "Archive thread", icon: "archive", run: () => threadAction(thread.id, thread.archived_at ? "unarchive" : "archive") });
+    actions.push({ id: "snooze", label: snoozed ? "Unsnooze" : "Snooze for a day", icon: "snooze", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, snoozed ? "unsnooze" : "snooze", snoozed ? {} : { until: new Date(Date.now() + 86_400_000).toISOString() }); } });
+    actions.push({ id: "archive", label: thread.archived_at ? "Unarchive thread" : "Archive thread", icon: "archive", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.archived_at ? "unarchive" : "archive"); } });
   }
   actions.push({ id: "copy", label: "Copy thread link", icon: "copy", run: () => { void (async () => {
     try { await navigator.clipboard.writeText(threadUrl({kind:"thread",history_id:referenceHistory!,thread_id:thread.id})); toast("Thread link copied"); }
@@ -31,6 +31,6 @@ export function threadActions(thread: Thread, now = Date.now()): ThreadActionIte
     try { await navigator.clipboard.writeText(threadReference({kind:"thread",history_id:referenceHistory!,thread_id:thread.id})); toast("Thread reference copied"); }
     catch { toast("Couldn’t copy the reference.", {variant:"error"}); }
   })(); } });
-  if (thread.running_turn) actions.push({ id: "stop", label: "Stop current turn", icon: "stop", run: () => getClient()?.cancelTurn(thread.id) });
+  if (thread.running_turn) actions.push({ id: "stop", label: "Stop current turn", icon: "stop", run: () => { if (referenceHistory) getClient()?.cancelTurn(referenceHistory, thread.id); } });
   return actions;
 }

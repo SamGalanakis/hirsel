@@ -32,7 +32,7 @@ export function ThreadIconPicker() {
     event.preventDefault();
     const target = threadIconTarget();
     if (!target || target.history !== historyId() || error() || state.connection !== "connected") return;
-    threadAction(target.thread.id, "set_icon", { icon: value() }, target.thread.revision);
+    threadAction(target.history, target.thread.id, "set_icon", { icon: value() }, target.thread.revision);
     close();
   };
   return <dialog ref={node => { dialog = node; }} aria-label="Change thread icon"

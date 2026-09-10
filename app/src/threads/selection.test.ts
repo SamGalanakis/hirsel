@@ -63,7 +63,7 @@ describe("explicit Thread selection", () => {
     attachThreadTransport(frame=>frames.push(frame)); history.replaceState(null,"","/t/2?history=ab123456-1234-5678-9abc-123456789abc");
     flush(followThreadLocation); flush(()=>focusThread(2));
     expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
-    expect(()=>sendThreadMessage(2,"not yet","send",[],[],[])).toThrow("Reconnect");
+    expect(()=>sendThreadMessage("test-history",2,"not yet","send",[],[],[])).toThrow("Reconnect");
     hello([1,2]); expect(threadState.focusedId).toBe(2); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:2}));
   });
 

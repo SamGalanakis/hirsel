@@ -4,13 +4,26 @@ import type { ChatMessage } from "../protocol";
 import type { ThreadClientMessage, ThreadDetail } from "./types";
 import { makeThread } from "./fixtures";
 import { attachThreadTransport, createThread, disconnectThreads, handleThreadMessage, openThread, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
+import { setHistoryId } from "../lib/history";
 const sent: ThreadClientMessage[] = [];
-beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
+beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, streams: {}, streamTurnIds: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
 afterEach(() => { disconnectThreads(); vi.useRealTimers();vi.unstubAllGlobals(); });
 const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], activities: [], related_items: [], has_more: false });
 describe("thread transport projection", () => {
+  it("rejects delayed mutations captured from the history before an ID was reused", async () => {
+    const capturedHistory = "test-history";
+    flush(() => setHistoryId("replacement-history"));
+
+    expect(() => sendThreadMessage(capturedHistory, 1, "stale", "send", [], [], [])).toThrow("History changed");
+    await expect(createThread(capturedHistory, "Stale child", 1)).rejects.toThrow("History changed");
+    flush(() => threadAction(capturedHistory, 1, "archive"));
+
+    expect(sent).toEqual([]);
+    expect(threadState.pending).toEqual([]);
+    expect(threadState.error?.detail).toContain("History changed");
+  });
   it("creates a visible thread before any message and accepts its duplicate broadcast once", async () => {
-    const promise = createThread("Buy groceries", null);
+    const promise = createThread("test-history", "Buy groceries", null);
     const frame = sent[0];
     if (frame.type !== "create_thread") throw new Error("wrong command");
     flush(() => handleThreadMessage({ type: "thread_created", client_id: frame.client_id, thread: makeThread() }));
@@ -44,8 +57,8 @@ describe("thread transport projection", () => {
     expect(threadState.histories[1].messages).toEqual([older]);
   });
   it("correlates identical outgoing text by client id and preserves ownership across replay", () => {
-    flush(() => sendThreadMessage(1, "same", "send", [], [2], []));
-    flush(() => sendThreadMessage(2, "same", "send", [], [1], []));
+    flush(() => sendThreadMessage("test-history", 1, "same", "send", [], [2], []));
+    flush(() => sendThreadMessage("test-history", 2, "same", "send", [], [1], []));
     const second = threadState.pending[1].clientId;
     flush(() => handleThreadMessage({ type: "msg", message: { id: 5, thread_id: 2, client_id: second, author: "owner", body: "same", ref: null, ts: "2026-09-09T10:00:00Z", mentions: [1] } }));
     expect(threadState.pending.map(p => p.threadId)).toEqual([1]);
@@ -54,7 +67,7 @@ describe("thread transport projection", () => {
   });
   it("fails a missing acknowledgement and retries the same identity without duplicating content", () => {
     vi.useFakeTimers();
-    flush(() => sendThreadMessage(1, "Buy groceries", "send", [], [2], []));
+    flush(() => sendThreadMessage("test-history", 1, "Buy groceries", "send", [], [2], []));
     const clientId = threadState.pending[0].clientId;
     flush(() => vi.advanceTimersByTime(20_000));
     expect(threadState.pending[0].failed).toBe(true);
@@ -81,8 +94,8 @@ describe("thread transport projection", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 2, turn_id: 1, seq: 1, event: { kind: "prose", text: "working" } }));
     expect(threadState.streams[1]).toBeUndefined();
     expect(threadState.streams[2]).toHaveLength(1);
-    flush(() => threadAction(2, "choose", { choice: "a" }, 7));
-    expect(sent[0]).toEqual({ type: "thread_action", thread_id: 2, action: "choose", data: { choice: "a" }, expected_revision: 7 });
+    flush(() => threadAction("test-history", 2, "choose", { choice: "a" }, 7));
+    expect(sent[0]).toEqual({ type: "thread_action", history_id: "test-history", thread_id: 2, action: "choose", data: { choice: "a" }, expected_revision: 7 });
   });
   it("resets sequence on a new turn and rejects late events or completion from the previous turn", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 1, event: { kind: "prose", text: "old" } }));
@@ -123,7 +136,7 @@ describe("thread transport projection", () => {
     expect(threadState.histories[2].messages).toEqual([retained]);
   });
   it("remembers a tombstone received before a message and acknowledges its delayed owner echo", () => {
-    flush(() => sendThreadMessage(1, "Cancelled before echo", "next_turn", [], [], []));
+    flush(() => sendThreadMessage("test-history", 1, "Cancelled before echo", "next_turn", [], [], []));
     const clientId = threadState.pending[0].clientId;
     flush(() => handleThreadMessage({ type: "msg_removed", id: 12 }));
     flush(() => handleThreadMessage({ type: "msg", message: { id: 12, thread_id: 1, client_id: clientId, author: "owner", body: "Cancelled before echo", ref: null, ts: "2026-09-09T10:00:00Z" } }));
@@ -134,7 +147,7 @@ describe("thread transport projection", () => {
     const promise = openThread(1);
     disconnectThreads();
     await expect(promise).rejects.toThrow("Connection interrupted");
-    flush(() => threadAction(1, "settle"));
+    flush(() => threadAction("test-history", 1, "settle"));
     expect(threadState.error?.detail).toMatch(/Reconnect/);
   });
 });
@@ -174,7 +187,7 @@ describe("running turn with a newer queued request", () => {
 
 it("snapshots canonical artifact references through failure, retry and reconnect", () => {
   const references = [55,44,55];
-  flush(() => sendThreadMessage(1, "Make this simpler", "send", [], [], references));
+  flush(() => sendThreadMessage("test-history", 1, "Make this simpler", "send", [], [], references));
   references.splice(0,references.length,99);
   const frame = sent.find(frame => frame.type === "send_thread_message");
   if (frame?.type !== "send_thread_message") throw new Error("Missing send");
@@ -189,8 +202,8 @@ it("snapshots canonical artifact references through failure, retry and reconnect
 });
 
 it("clears a send failure only when that exact message is accepted", () => {
-  flush(() => sendThreadMessage(1, "first", "send", [], [], [44]));
-  flush(() => sendThreadMessage(1, "second", "send", [], [], [55]));
+  flush(() => sendThreadMessage("test-history", 1, "first", "send", [], [], [44]));
+  flush(() => sendThreadMessage("test-history", 1, "second", "send", [], [], [55]));
   const [first, second] = sent.filter(row => row.type === "send_thread_message").map(row => row.client_id);
   expect(first).not.toBe(second);
   expect(threadState.pending).toHaveLength(2);
@@ -208,11 +221,11 @@ it("clears a send failure only when that exact message is accepted", () => {
 
 it("preserves other pending messages when one times out and retries", () => {
   vi.useFakeTimers();
-  flush(() => sendThreadMessage(1, "first", "send", [], [], [44]));
+  flush(() => sendThreadMessage("test-history", 1, "first", "send", [], [], [44]));
   const first = sent[0];
   if (first.type !== "send_thread_message") throw new Error("Missing send");
   flush(() => vi.advanceTimersByTime(10_000));
-  flush(() => sendThreadMessage(1, "second", "send", [], [], [55]));
+  flush(() => sendThreadMessage("test-history", 1, "second", "send", [], [], [55]));
   flush(() => vi.advanceTimersByTime(10_000));
   expect(threadState.pending.map(row => [row.body,row.failed,row.artifactIds])).toEqual([["first",true,[44]],["second",false,[55]]]);
   flush(() => retryThreadMessage(first.client_id));

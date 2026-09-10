@@ -85,6 +85,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
     val snapshot = connection.snapshot
+    val displayedHistory = snapshot?.historyId
     val c = LocalHirselColors.current
     val focused = connection.focusedThreadId
     BackHandler(enabled = focused != null) { connection.focusedThreadId = null }
@@ -137,7 +138,7 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
         if (focused == null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New thread", testTag = "new-thread-title", singleLine = true) }
-                Button(onClick = { connection.createThread(title.trim(), null); title = "" }, enabled = title.isNotBlank() && connection.isOnline) { Text("Create") }
+                Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), null) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null) { Text("Create") }
             }
             FlowRow {
                 listOf("Active", "Settled", "Snoozed", "Archived").forEach { filter ->
@@ -172,19 +173,19 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 FlowRow {
                     ReplyChip("Change thread icon") { snapshot.historyId?.let { iconTarget = it to thread.copy() } }
                     thread.parentThreadId?.let { parent -> ReplyChip("Parent: ${snapshot.threads.find { it.id == parent }?.title ?: "#$parent"}") { connection.openThread(parent) } }
-                    if (thread.parentThreadId == null) ReplyChip(if (thread.pinnedAt == null) "Pin" else "Unpin") { connection.action(focused, if (thread.pinnedAt == null) "pin" else "unpin", revision = thread.revision) }
-                    ReplyChip(if (thread.settledAt == null) "Settle" else "Reopen") { connection.action(focused, if (thread.settledAt == null) "settle" else "reopen") }
-                    if (!thread.read) ReplyChip("Mark read") { connection.action(focused, "read") }
-                    ReplyChip(if (thread.archivedAt == null) "Archive" else "Unarchive") { connection.action(focused, if (thread.archivedAt == null) "archive" else "unarchive") }
+                    if (thread.parentThreadId == null) ReplyChip(if (thread.pinnedAt == null) "Pin" else "Unpin") { displayedHistory?.let { connection.action(it, focused, if (thread.pinnedAt == null) "pin" else "unpin", revision = thread.revision) } }
+                    ReplyChip(if (thread.settledAt == null) "Settle" else "Reopen") { displayedHistory?.let { connection.action(it, focused, if (thread.settledAt == null) "settle" else "reopen") } }
+                    if (!thread.read) ReplyChip("Mark read") { displayedHistory?.let { connection.action(it, focused, "read") } }
+                    ReplyChip(if (thread.archivedAt == null) "Archive" else "Unarchive") { displayedHistory?.let { connection.action(it, focused, if (thread.archivedAt == null) "archive" else "unarchive") } }
                     ReplyChip(if (isSnoozed(thread.snoozedUntil)) "Unsnooze" else "Snooze 1h") {
-                        if (isSnoozed(thread.snoozedUntil)) connection.action(focused, "unsnooze")
-                        else connection.action(focused, "snooze", org.json.JSONObject().put("until", java.time.Instant.now().plusSeconds(3600).toString()).toString())
+                        if (isSnoozed(thread.snoozedUntil)) displayedHistory?.let { connection.action(it, focused, "unsnooze") }
+                        else displayedHistory?.let { connection.action(it, focused, "snooze", org.json.JSONObject().put("until", java.time.Instant.now().plusSeconds(3600).toString()).toString()) }
                     }
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { HirselField(value = title, onValueChange = { title = it }, placeholder = "New child thread", testTag = "new-child-title", singleLine = true) }
-                Button(onClick = { connection.createThread(title.trim(), focused); title = "" }, enabled = title.isNotBlank() && connection.isOnline) { Text("Create child") }
+                Button(onClick = { displayedHistory?.let { connection.createThread(it, title.trim(), focused) }; title = "" }, enabled = title.isNotBlank() && connection.isOnline && displayedHistory != null) { Text("Create child") }
             }
             FlowRow { snapshot?.threads.orEmpty().filter { it.parentThreadId == focused }.forEach { child -> ReplyChip("${threadIconText(child)} ${child.title}") { connection.openThread(child.id) } } }
             LazyColumn(Modifier.weight(1f).testTag("chat-list")) {
@@ -192,7 +193,7 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                     if (brief.text.isNotBlank()) item { Text("Current brief", color = c.MutedForeground); Text(brief.text, color = c.Foreground); if (brief.artifactIds.isNotEmpty()) Text("Artifacts: ${brief.artifactIds.joinToString { "#$it" }}", color = c.MutedForeground) }
                 }
                 if (thread != null) item {
-                    ThreadInstrument(thread, connection)
+                    displayedHistory?.let { ThreadInstrument(thread, it, connection) }
                 }
                 if (snapshot?.openedThreads?.contains(focused) != true) item { Text("Loading conversation…", color = c.MutedForeground) }
                 if (snapshot?.historyHasMore?.contains(focused) == true) item {
@@ -212,7 +213,7 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                     StreamTimeline(stream.eventsJson)
                     if (thinking) WorkingRow(stream.activity.text)
                 }
-                if (stream != null || executing) item { Button(onClick = { connection.stop(focused) }) { Text("Stop") } }
+                if ((stream != null || executing) && displayedHistory != null) item { Button(onClick = { connection.stop(displayedHistory, focused) }) { Text("Stop") } }
                 items(snapshot?.activities.orEmpty().filter { it.threadId == focused }, key = { "activity-${it.id}" }) { activity ->
                     if (activity.kind == "child_report") {
                         val report = runCatching { org.json.JSONObject(activity.dataJson) }.getOrNull()

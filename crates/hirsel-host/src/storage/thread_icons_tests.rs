@@ -123,19 +123,37 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     ] {
         assert!(
             state
-                .handle_thread_action(id, "set_icon".into(), data, expected)
+                .handle_addressed_thread_action(
+                    &state.storage.history_id().await.unwrap(),
+                    id,
+                    "set_icon".into(),
+                    data,
+                    expected
+                )
                 .await
                 .is_err()
         );
         assert_eq!(state.storage.thread(id).await.unwrap().unwrap(), before);
     }
     let omitted = state
-        .handle_thread_action(id, "set_icon".into(), json!({}), Some(revision))
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
+            id,
+            "set_icon".into(),
+            json!({}),
+            Some(revision),
+        )
         .await
         .unwrap();
     assert_eq!(omitted, before);
     let manual = state
-        .handle_thread_action(id, "set_icon".into(), json!({"icon":"🐙"}), Some(revision))
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
+            id,
+            "set_icon".into(),
+            json!({"icon":"🐙"}),
+            Some(revision),
+        )
         .await
         .unwrap();
     assert_eq!(manual.icon.as_deref(), Some("🐙"));
@@ -143,7 +161,8 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     assert_eq!(manual.last_activity_at, before.last_activity_at);
     assert!(state.broadcast_log.recent().iter().any(|frame| matches!(frame, HostToClient::ThreadUpsert { thread } if thread.id == id && thread.icon.as_deref() == Some("🐙"))));
     let clear = state
-        .handle_thread_action(
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
             id,
             "set_icon".into(),
             json!({"icon":null}),

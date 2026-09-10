@@ -29,7 +29,7 @@ describe("persistent Thread showcase", () => {
     fireEvent.click(view.getByRole("button", { name: "Artifact actions" }));
     flush(() => setThreadState(draft => { draft.focusedId = 2; }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Showcase in this thread" }));
-    expect(actions).toContainEqual({ type: "thread_action", thread_id: 1, action: "set_showcase", expected_revision: 1, data: { artifact_id: 4, history_id: "history-a" } });
+    expect(actions).toContainEqual({ type: "thread_action", history_id: "history-a", thread_id: 1, action: "set_showcase", expected_revision: 1, data: { artifact_id: 4 } });
     expect(artifactState.selectedId).toBeNull();
   });
   it("rejects stale menu revisions and reused IDs in a new history", async () => {
@@ -62,10 +62,10 @@ describe("persistent Thread showcase", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Replace showcase" }));
     const picker = view.getByRole("dialog", { name: "Choose showcase" });
     fireEvent.click(within(picker).getByRole("button", { name: "Choose Checklist as showcase" }));
-    expect(actions.at(-1)).toMatchObject({ thread_id: 1, action: "set_showcase", expected_revision: 1, data: { artifact_id: 5, history_id: "history-a" } });
+    expect(actions.at(-1)).toMatchObject({ history_id: "history-a", thread_id: 1, action: "set_showcase", expected_revision: 1, data: { artifact_id: 5 } });
     fireEvent.click(view.getByRole("button", { name: "Showcase actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Remove showcase" }));
-    expect(actions.at(-1)).toMatchObject({ data: { artifact_id: null, history_id: "history-a" } });
+    expect(actions.at(-1)).toMatchObject({ history_id: "history-a", data: { artifact_id: null } });
   });
   it("ignores stale reads after thread/history changes and unrelated host errors", () => {
     flush(() => selectShowcase("history-a", 1, 4)); const old = frames.at(-1)!;

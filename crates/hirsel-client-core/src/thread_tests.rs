@@ -46,6 +46,7 @@ fn message(id: u64, thread_id: u64, client_id: Option<&str>) -> ChatMessage {
 }
 fn pending(thread_id: u64, client_id: &str) -> PendingSend {
     PendingSend::new(
+        "history-a".into(),
         thread_id,
         vec!["blob-1".into()],
         client_id.into(),
@@ -261,7 +262,7 @@ fn changed_history_clears_owned_state_but_preserves_plain_unsent_text() {
     let text = store.pending_sends().next().unwrap().body.clone();
     store
         .pending_creates
-        .push(("old-create".into(), "Title".into(), None));
+        .push(("old-create".into(), "A".into(), "Title".into(), None));
     store.requests.push(("old-open".into(), 5));
     store.opened_threads.push(5);
     store.apply_delta(

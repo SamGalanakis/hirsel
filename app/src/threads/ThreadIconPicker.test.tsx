@@ -41,7 +41,7 @@ describe("Thread icons", () => {
     const picker = view.getByRole("dialog", { name: "Change thread icon" });
     fireEvent.click(within(picker).getByRole("button", { name: "Seedling" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
-    expect(sent).toContainEqual({ type: "thread_action", thread_id: 1, action: "set_icon", data: { icon: "🌱" }, expected_revision: 1 });
+    expect(sent).toContainEqual({ type: "thread_action", history_id: "icon-history", thread_id: 1, action: "set_icon", data: { icon: "🌱" }, expected_revision: 1 });
     expect(threadState.threads[1].icon).toBeNull();
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Garden", icon: "🌱", revision: 2 }) }));
     expect(view.container.querySelector('header [data-thread-avatar="1"]')).toHaveTextContent("🌱");

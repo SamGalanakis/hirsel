@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-export type ThreadNavigationIntent = { kind: "browse" } | { kind: "create"; parentId: number | null };
+export type ThreadNavigationIntent = { kind: "browse" } | { kind: "create"; historyId: string; parentId: number | null };
 /** The drawer alone consumes the opening intent and owns initial focus. */
 export const [threadNavigationIntent, setThreadNavigationIntent] = createSignal<ThreadNavigationIntent | null>(null);
 export const threadNavigationOpen = () => threadNavigationIntent() !== null;

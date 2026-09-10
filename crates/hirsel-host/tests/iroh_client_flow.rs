@@ -160,7 +160,11 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     }));
     assert!(reconnected.threads.iter().any(|item| item.id == thread.id));
 
-    let mut request = SendThreadMessageRequest::new(0, ROUND_TRIP_BODY.to_owned());
+    let mut request = SendThreadMessageRequest::new(
+        reconnected.history_id.clone().unwrap(),
+        0,
+        ROUND_TRIP_BODY.to_owned(),
+    );
     request.thread_id = thread.id;
     reconnected_client.send_message(request);
     tokio::time::timeout(Duration::from_secs(10), async {

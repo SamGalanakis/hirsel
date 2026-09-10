@@ -14,7 +14,7 @@ export function setThreadShowcase(origin: ShowcaseOrigin, artifactId: number | n
   if (origin.historyId !== historyId() || !threadState.ready || state.connection !== "connected") throw new Error("The history or connection changed. Reopen this control and try again.");
   const thread = threadState.threads.find(thread => thread.id === origin.threadId);
   if (!thread || thread.revision !== origin.revision) throw new Error("This thread changed. Reopen this control and try again.");
-  threadAction(origin.threadId, "set_showcase", { artifact_id: artifactId, history_id: origin.historyId }, origin.revision);
+  threadAction(origin.historyId, origin.threadId, "set_showcase", { artifact_id: artifactId }, origin.revision);
 }
 export const [showcasePicker, setShowcasePicker] = createSignal<ShowcaseOrigin | null>(null);
 export const [phoneShowcase, setPhoneShowcase] = createSignal<RelatedOrigin | null>(null);

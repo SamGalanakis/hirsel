@@ -217,9 +217,13 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn cancel_thread_turn(&self, thread_id: u64) -> anyhow::Result<()> {
+    pub async fn cancel_thread_turn(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+    ) -> anyhow::Result<()> {
         match self.backend.as_ref() {
-            AgentBackend::Threaded(runtime) => runtime.cancel(thread_id).await?,
+            AgentBackend::Threaded(runtime) => runtime.cancel(expected_history, thread_id).await?,
             AgentBackend::Scripted(runtime) => {
                 let state = runtime.state.lock().await;
                 let active = state

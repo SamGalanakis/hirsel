@@ -120,7 +120,7 @@ describe("HirselWsClient lifecycle", () => {
     expect(artifacts.artifactState.error).toBeNull();
     expect(artifacts.artifactState.opened?.content).toBe("Working");
     expect(threads.threadState.error).toBeNull();
-    threads.sendThreadMessage(0, "Follow up", "send", [], [], []); flush();
+    threads.sendThreadMessage("test-history", 0, "Follow up", "send", [], [], []); flush();
     const send = JSON.parse(ws.sent.at(-1)!);
     ws.serverSend({ type: "error", client_id: send.client_id, detail: "Thread send failed" });
     expect(threads.threadState.error).toMatchObject({ operation: "send", detail: "Thread send failed" });
@@ -328,7 +328,7 @@ describe("current history boundary", () => {
     vi.useFakeTimers(); const { client } = await load();
     const threads = await import("../threads/store");
     const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
-    flush(() => threads.sendThreadMessage(4,"Retain me","send",[],[], []));
+    flush(() => threads.sendThreadMessage("test-history",4,"Retain me","send",[],[], []));
     const sent = JSON.parse(first.sent.find(row=>JSON.parse(row).type==="send_thread_message")!);
     first.serverClose(1006); vi.advanceTimersByTime(2000); const same = FakeWebSocket.instances[1]; same.serverOpen();
     expect(same.sentTypes()).not.toContain("send_thread_message"); same.serverSend(HELLO_OK);
@@ -368,7 +368,7 @@ describe("current history boundary", () => {
     vi.useFakeTimers(); const { client } = await load();
     const threads = await import("../threads/store"); const artifacts = await import("../artifacts/store");
     const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
-    flush(() => { threads.sendThreadMessage(4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; draft.histories[4] = { brief: { text: "Old", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: true }; }); artifacts.setArtifactState({ selectedId: 2 }); });
+    flush(() => { threads.sendThreadMessage("test-history",4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; draft.histories[4] = { brief: { text: "Old", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: true }; }); artifacts.setArtifactState({ selectedId: 2 }); });
     const upload = c.uploadBlob("upload-old","old.txt","text/plain","eA==").catch(error=>error.message);
     first.serverClose(1006); c.setAgentPrompt("Stale queued operation"); vi.advanceTimersByTime(2000);
     const next = FakeWebSocket.instances[1]; next.serverOpen(); next.serverSend({ ...HELLO_OK, history_id: "fresh-history" }); await Promise.resolve(); flush();

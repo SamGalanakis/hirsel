@@ -12,6 +12,7 @@ import { ThreadActions } from "./ThreadActions";
 import { threadAncestors, threadPath, threadTree } from "./tree";
 import { openThreadNavigation } from "./navigation";
 import { state } from "../store/store";
+import { historyId } from "../lib/history";
 import { createThread, threadState } from "./store";
 
 const control = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
@@ -21,6 +22,7 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
   const [section, setSection] = createSignal<ThreadSection>("active");
   const [expanded, setExpanded] = createSignal<ReadonlySet<number>>(new Set());
   const [parentId, setParentId] = createSignal<number | null>(null);
+  const [createHistoryId, setCreateHistoryId] = createSignal<string | null>(null);
   const [title, setTitle] = createSignal("");
   const [creating, setCreating] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -37,6 +39,7 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
     if (!dialog) return;
     if (intent) {
       setParentId(intent.kind === "create" ? intent.parentId : null);
+      setCreateHistoryId(intent.kind === "create" ? intent.historyId : null);
       setExpanded(previous => new Set([...previous, ...threadAncestors(threadState.threads, threadState.focusedId ?? -1).map(thread => thread.id)]));
       if (!dialog.open) restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (!dialog.open) dialog.showModal();
@@ -85,7 +88,9 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
     const value = title().trim();
     if (!value || creating()) return;
     setCreating(true); setError(null);
-    try { const thread = await createThread(value, parentId()); setTitle(""); setSection("active"); props.onSelect(thread.id); }
+    const expectedHistory = createHistoryId() ?? historyId();
+    if (!expectedHistory) { setCreating(false); setError("History is unavailable. Reconnect and try again."); return; }
+    try { const thread = await createThread(expectedHistory, value, parentId()); setTitle(""); setSection("active"); props.onSelect(thread.id); }
     catch (cause) { setError(String(cause)); }
     finally { setCreating(false); }
   };
@@ -95,7 +100,7 @@ export function ThreadNavigation(props: { intent: ThreadNavigationIntent | null;
     onPointerDown={event => { if (event.target === dialog && dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) props.onClose(); } }}
     class="fixed inset-y-0 left-14 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-3.5rem))] max-w-none flex-col border-0 border-r border-border bg-background p-4 text-foreground backdrop:bg-transparent open:flex">
     <div class="mb-4 flex items-center justify-between"><div class="min-w-0 flex-1"><h2 class="text-base font-semibold">Threads</h2><p data-slot="thread-filter-caption" class="text-xs capitalize text-muted-foreground">{section()}</p></div><DropdownMenu><DropdownMenuTrigger data-thread-filter class={`${control} ${section() !== "active" ? "bg-muted text-foreground" : ""}`} aria-label={`Filter threads: ${section()}`} title={`Filter threads: ${section()}`}><Funnel class="size-4" /></DropdownMenuTrigger><DropdownMenuContent><For each={["active", "settled", "snoozed", "archived"] as const}>{name => <DropdownMenuItem role="menuitemradio" aria-checked={section() === name ? "true" : "false"} class="min-h-11 capitalize" onSelect={() => setSection(name)}><Check class={section() === name ? "size-4" : "size-4 invisible"} />{name}</DropdownMenuItem>}</For></DropdownMenuContent></DropdownMenu><button class={control} aria-label="Search threads" title="Search threads" onClick={openThreadSearch}><Search class="size-4" /></button><button class={control} aria-label="Close threads" title="Close threads" onClick={props.onClose}><X class="size-5" /></button></div>
-    <Show when={parentId() !== null}><p class="mb-2 break-words text-xs text-muted-foreground">New child in {threadPath(threadState.threads, parentId()!)} <button class="min-h-11 rounded px-2 underline" onClick={() => openThreadNavigation({ kind: "create", parentId: null })}>Create at top level</button></p></Show>
+    <Show when={parentId() !== null}><p class="mb-2 break-words text-xs text-muted-foreground">New child in {threadPath(threadState.threads, parentId()!)} <button class="min-h-11 rounded px-2 underline" onClick={() => { const history = historyId(); if (history) openThreadNavigation({ kind: "create", historyId: history, parentId: null }); }}>Create at top level</button></p></Show>
     <form onSubmit={event => void add(event)} class="mb-3 flex gap-2"><input aria-label="New thread title" placeholder={parentId() === null ? "New thread…" : "New child thread…"} value={title()} onInput={event => setTitle(event.currentTarget.value)} class="min-w-0 flex-1 rounded-lg border border-border bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /><button type="submit" class={`${control} bg-muted text-foreground`} aria-label="Create thread" title="Create thread" disabled={!title().trim() || creating() || state.connection !== "connected"}><Plus class="size-5" /></button></form>
     <Show when={error()}><div role="alert" class="mt-3 space-y-2 text-sm"><p>Couldn’t confirm the new thread. Your title is kept. Check the list before creating it again.</p><details><summary class="cursor-pointer py-2 text-muted-foreground">Technical details</summary><p class="break-words">{error()}</p></details></div></Show>
 

@@ -776,11 +776,11 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_hirsel_client_ffi_fn_method_client_add_thread_related(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`target`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(`ptr`: Long,`threadId`: Long,uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
+    external fun uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
     external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`title`: RustBuffer.ByValue,`parentThreadId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`historyId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`parentThreadId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
@@ -796,12 +796,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_retry_send(`ptr`: Long,`clientId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(`ptr`: Long,`threadId`: Long,`body`: RustBuffer.ByValue,`attachments`: RustBuffer.ByValue,`mentions`: RustBuffer.ByValue,`artifactIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`body`: RustBuffer.ByValue,`attachments`: RustBuffer.ByValue,`mentions`: RustBuffer.ByValue,`artifactIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_thread_action(`ptr`: Long,`threadId`: Long,`action`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,`expectedRevision`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
+    external fun uniffi_hirsel_client_ffi_fn_method_client_thread_action(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`action`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,`expectedRevision`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
     external fun uniffi_hirsel_client_ffi_fn_method_client_update_thread_icon(`ptr`: Long,`expectedHistory`: RustBuffer.ByValue,`threadId`: Long,`icon`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
     external fun uniffi_hirsel_client_ffi_fn_method_client_update_thread_showcase(`ptr`: Long,`expectedHistory`: RustBuffer.ByValue,`threadId`: Long,`artifactId`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -935,13 +935,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_add_thread_related() != 21628) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_cancel_turn() != 42345) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_cancel_turn() != 57751) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_connect() != 45376) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_create_thread() != 5359) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_create_thread() != 48200) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_disconnect() != 57486) {
@@ -965,13 +965,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_retry_send() != 25402) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_send_thread_message() != 45956) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_send_thread_message() != 29905) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_snapshot() != 20352) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_thread_action() != 54436) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_thread_action() != 12444) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_update_thread_icon() != 12038) {
@@ -1409,11 +1409,11 @@ public interface ClientInterface {
 
     fun `addThreadRelated`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `target`: ThreadRelatedTarget, `title`: kotlin.String?): SendReceipt
 
-    fun `cancelTurn`(`threadId`: kotlin.ULong)
+    fun `cancelTurn`(`historyId`: kotlin.String, `threadId`: kotlin.ULong): kotlin.Boolean
 
     fun `connect`()
 
-    fun `createThread`(`title`: kotlin.String, `parentThreadId`: kotlin.ULong?): SendReceipt
+    fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `parentThreadId`: kotlin.ULong?): SendReceipt?
 
     fun `disconnect`()
 
@@ -1435,11 +1435,11 @@ public interface ClientInterface {
 
     fun `retrySend`(`clientId`: kotlin.String)
 
-    fun `sendThreadMessage`(`threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>, `artifactIds`: List<kotlin.ULong>): SendReceipt
+    fun `sendThreadMessage`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>, `artifactIds`: List<kotlin.ULong>): SendReceipt?
 
     fun `snapshot`(): ClientSnapshot
 
-    fun `threadAction`(`threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?)
+    fun `threadAction`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?): kotlin.Boolean
 
     fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: kotlin.String?, `expectedRevision`: kotlin.ULong): kotlin.Boolean
 
@@ -1577,17 +1577,19 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
 
 
-    override fun `cancelTurn`(`threadId`: kotlin.ULong)
-        =
+    override fun `cancelTurn`(`historyId`: kotlin.String, `threadId`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(
         it,
 
+        FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),_status)
 }
     }
-
+    )
+    }
 
 
 
@@ -1603,13 +1605,14 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
 
 
-    override fun `createThread`(`title`: kotlin.String, `parentThreadId`: kotlin.ULong?): SendReceipt {
-            return FfiConverterTypeSendReceipt.lift(
+    override fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `parentThreadId`: kotlin.ULong?): SendReceipt? {
+            return FfiConverterOptionalTypeSendReceipt.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_create_thread(
         it,
 
+        FfiConverterString.lower(`historyId`),
         FfiConverterString.lower(`title`),
         FfiConverterOptionalULong.lower(`parentThreadId`),_status)
 }
@@ -1723,13 +1726,14 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
 
 
-    override fun `sendThreadMessage`(`threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>, `artifactIds`: List<kotlin.ULong>): SendReceipt {
-            return FfiConverterTypeSendReceipt.lift(
+    override fun `sendThreadMessage`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>, `artifactIds`: List<kotlin.ULong>): SendReceipt? {
+            return FfiConverterOptionalTypeSendReceipt.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(
         it,
 
+        FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterString.lower(`body`),
         FfiConverterSequenceString.lower(`attachments`),
@@ -1755,20 +1759,22 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
 
 
-    @Throws(ClientException::class)override fun `threadAction`(`threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?)
-        =
+    @Throws(ClientException::class)override fun `threadAction`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_thread_action(
         it,
 
+        FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterString.lower(`action`),
         FfiConverterString.lower(`dataJson`),
         FfiConverterOptionalULong.lower(`expectedRevision`),_status)
 }
     }
-
+    )
+    }
 
 
     override fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: kotlin.String?, `expectedRevision`: kotlin.ULong): kotlin.Boolean {

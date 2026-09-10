@@ -119,9 +119,12 @@ describe("dev mock Thread contract", () => {
     expect(connection.frame.threads).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 1, title: "Buy groceries", attention: "quiet", settled_at: null }),
     ]));
+    const historyId = connection.frame.history_id as string;
+    const addressed = (command: Record<string, unknown>) => ({ history_id: historyId, ...command });
     const request = async (command: Record<string, unknown>, type: string) => {
       const response = waitForFrame(connection.ws, frame => frame.type === type);
-      connection.ws.send(JSON.stringify(command));
+      const frame = ["create_thread", "send_thread_message", "thread_action", "cancel_turn"].includes(String(command.type)) ? addressed(command) : command;
+      connection.ws.send(JSON.stringify(frame));
       return response;
     };
     const created = (await request({ parent_thread_id: null, type: "create_thread", client_id: "create", title: "New subject" }, "thread_created")).thread as Thread;
@@ -133,7 +136,7 @@ describe("dev mock Thread contract", () => {
     expect(owner).toMatchObject({ thread_id: created.id, mentions: [1], client_id: "message" });
     await completed;
     expect((await request(command, "msg")).message).toEqual(owner);
-    await expectActionError(connection.ws, { ...command, body: "conflicting retry" }, "different content");
+    await expectActionError(connection.ws, addressed({ ...command, body: "conflicting retry" }), "different content");
     const detail = (await request({ type: "open_thread", client_id: "open", thread_id: created.id }, "thread_opened")).detail as ThreadDetail;
     expect(detail.messages).toHaveLength(2);
     expect(detail.messages.every(message => message.thread_id === created.id)).toBe(true);
@@ -141,16 +144,16 @@ describe("dev mock Thread contract", () => {
     const earlier = (await request({ type: "open_thread", client_id: "earlier", thread_id: created.id, before_id: detail.messages[1].id }, "thread_opened")).detail as ThreadDetail;
     expect(earlier.messages).toEqual([owner]);
     expect(earlier.has_more).toBe(false);
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "invented", expected_revision: 0 }, "changed");
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "invented", expected_revision: created.revision }, "no generated action");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "invented", expected_revision: 0 }), "changed");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "invented", expected_revision: created.revision }), "no generated action");
     expect((await request({ type: "thread_action", thread_id: created.id, action: "read" }, "thread_upsert")).thread).toMatchObject({ id: created.id, read: true, settled_at: null });
     const settled = (await request({ type: "thread_action", thread_id: created.id, action: "settle" }, "thread_upsert")).thread as Thread;
     expect(settled.settled_at).not.toBeNull();
     expect(settled.icon).toBeNull();
     const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "👩🏽‍💻" }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
     expect(withIcon.icon).toBe("👩🏽‍💻");
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "🌱" }, expected_revision: settled.revision }, "changed");
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "x\n" }, expected_revision: withIcon.revision }, "Invalid thread icon");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "🌱" }, expected_revision: settled.revision }), "changed");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "x\n" }, expected_revision: withIcon.revision }), "Invalid thread icon");
     const reset = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: null }, expected_revision: withIcon.revision }, "thread_upsert")).thread as Thread;
     expect(reset.icon).toBeNull();
     await close(connection.ws);
@@ -165,11 +168,11 @@ describe("dev mock Thread contract", () => {
     expect(replay.messages).toEqual(detail.messages);
     const reopened = (await request({ type: "thread_action", thread_id: created.id, action: "reopen" }, "thread_upsert")).thread as Thread;
     expect(reopened).toMatchObject({ id: created.id, settled_at: null, read: true });
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: 0, action: "settle" }, "does not exist");
-    await expectActionError(connection.ws, { type: "create_thread", client_id: "missing-parent", title: "Missing parent" }, "parent_thread_id");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: 0, action: "settle" }), "does not exist");
+    await expectActionError(connection.ws, addressed({ type: "create_thread", client_id: "missing-parent", title: "Missing parent" }), "parent_thread_id");
     const childThread = (await request({ type: "create_thread", client_id: "child", title: "Focused review", parent_thread_id: created.id }, "thread_created")).thread as Thread;
     expect(childThread.parent_thread_id).toBe(created.id);
-    await expectActionError(connection.ws, { type: "thread_action", thread_id: childThread.id, action: "pin", expected_revision: childThread.revision }, "Only top-level threads");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", thread_id: childThread.id, action: "pin", expected_revision: childThread.revision }), "Only top-level threads");
     const pinned = (await request({ type: "thread_action", thread_id: created.id, action: "pin", expected_revision: reopened.revision }, "thread_upsert")).thread as Thread;
     expect(pinned.pinned_at).not.toBeNull();
     expect(pinned.last_activity_at).toBe(reopened.last_activity_at);
@@ -210,8 +213,8 @@ describe("dev mock Thread contract", () => {
     const shared=(await request(contextMessage,"msg")).message as ChatMessage;
     expect(shared.artifact_ids).toEqual([artifact.id]);
     expect((await request({...contextMessage,artifact_ids:[artifact.id]},"msg")).message).toEqual(shared);
-    await expectActionError(connection.ws,{...contextMessage,artifact_ids:[]},"different content");
-    await expectActionError(connection.ws,{...contextMessage,client_id:"invalid-artifact",artifact_ids:[999999]},"does not exist");
+    await expectActionError(connection.ws,addressed({...contextMessage,artifact_ids:[]}),"different content");
+    await expectActionError(connection.ws,addressed({...contextMessage,client_id:"invalid-artifact",artifact_ids:[999999]}),"does not exist");
     const afterShare=(await request({type:"open_thread",client_id:"shared-history",thread_id:recipient.id},"thread_opened")).detail as ThreadDetail;
     expect(afterShare.messages.filter(message=>message.author==="owner")).toHaveLength(2);
     expect(afterShare.messages.filter(message=>message.artifact_ids?.includes(artifact.id))).toHaveLength(1);

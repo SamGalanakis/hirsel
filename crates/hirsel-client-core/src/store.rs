@@ -83,6 +83,7 @@ impl From<ChatMessage> for ChatEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSend {
     pub error: Option<String>,
+    pub history_id: String,
     pub thread_id: u64,
     pub attachments: Vec<String>,
     pub client_id: String,
@@ -94,6 +95,7 @@ pub struct PendingSend {
 
 impl PendingSend {
     pub(crate) fn new(
+        history_id: String,
         thread_id: u64,
         attachments: Vec<String>,
         client_id: String,
@@ -103,6 +105,7 @@ impl PendingSend {
     ) -> Self {
         Self {
             error: None,
+            history_id,
             thread_id,
             attachments,
             client_id,
@@ -167,7 +170,7 @@ pub(crate) struct LocalStore {
     pub created_threads: Vec<CreatedThread>,
     pub requests: Vec<(String, u64)>,
     pub history_has_more: Vec<u64>,
-    pub pending_creates: Vec<(String, String, Option<u64>)>,
+    pub pending_creates: Vec<(String, String, String, Option<u64>)>,
     pub processes: Vec<ProcessInfo>,
     pub history_id: Option<String>,
     pub recovered_drafts: Vec<String>,

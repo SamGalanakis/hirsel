@@ -45,7 +45,8 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
     );
     assert!(!dir.path().join("lash/sessions/durable-core.db").exists());
     state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "before-reset".into(),
             thread.id,
             "private old history".into(),
@@ -92,7 +93,8 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
             .is_empty()
     );
     state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "after-reset".into(),
             fresh.id,
             "new history input".into(),

@@ -26,7 +26,8 @@ async fn scripted_next_turn_waits_and_cancel_queued_removes_message() {
     let mut broadcasts = state.broadcaster.subscribe();
 
     state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "active".to_string(),
             thread.id,
             "slow:0.4".to_string(),
@@ -40,7 +41,8 @@ async fn scripted_next_turn_waits_and_cancel_queued_removes_message() {
     read_until_agent_activity(&mut broadcasts, AgentActivityState::Thinking).await;
 
     let queued = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "queued".to_string(),
             thread.id,
             "pong".to_string(),
@@ -108,7 +110,8 @@ async fn scripted_cancel_turn_interrupts_slow_turn_without_reply() {
     let mut broadcasts = state.broadcaster.subscribe();
 
     state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "active".to_string(),
             thread.id,
             "slow:5".to_string(),
@@ -121,7 +124,11 @@ async fn scripted_cancel_turn_interrupts_slow_turn_without_reply() {
         .unwrap();
     read_until_agent_activity(&mut broadcasts, AgentActivityState::Thinking).await;
 
-    state.agent.cancel_thread_turn(thread.id).await.unwrap();
+    state
+        .agent
+        .cancel_thread_turn(&state.storage.history_id().await.unwrap(), thread.id)
+        .await
+        .unwrap();
     read_until_agent_activity(&mut broadcasts, AgentActivityState::Idle).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -155,7 +162,8 @@ async fn enqueue_failure_retains_accepted_thread_message_and_request() {
         .unwrap()
         .0;
     let error = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "enqueue-fails".into(),
             thread.id,
             "__hirsel_test_enqueue_error__".into(),

@@ -9,6 +9,7 @@ import type { Thread, ThreadClientMessage, ThreadDetail } from "./types";
 
 interface PendingMessage {
   clientId: string;
+  historyId: string;
   threadId: number;
   body: string;
   attachments: Blob[];
@@ -91,8 +92,10 @@ function request(frame: Extract<ThreadClientMessage, { client_id: string }>, thr
     sendFrame(frame);
   });
 }
-export async function createThread(title: string, parentId: number | null): Promise<Thread> {
-  return await request({ type: "create_thread", client_id: crypto.randomUUID(), title, parent_thread_id: parentId }) as Thread;
+export async function createThread(expectedHistory: string, title: string, parentId: number | null): Promise<Thread> {
+  if (!threadState.ready) throw new Error("Reconnect before creating a Thread.");
+  if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this control and try again.");
+  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, parent_thread_id: parentId }) as Thread;
 }
 export async function openThread(id: number, beforeId: number | null = null): Promise<void> {
   const generation = historyGeneration;
@@ -115,12 +118,13 @@ export function focusThread(id: number | null, updateUrl = true, currentHistory 
     if (sendFrame) void openThread(id).catch(() => {});
   }
 }
-export function threadAction(id: number, action: string, data: unknown = {}, expectedRevision?: number): void {
+export function threadAction(expectedHistory: string, id: number, action: string, data: unknown = {}, expectedRevision?: number): void {
   if (!sendFrame) { setThreadState(draft => { draft["error"] = { operation: "request", detail: "Reconnect before changing this thread.", threadId: id }; }); return; }
-  sendFrame({ type: "thread_action", thread_id: id, action, data, expected_revision: expectedRevision });
+  if (!threadState.ready || historyId() !== expectedHistory) { setThreadState(draft => { draft["error"] = { operation: "request", detail: "History changed. Reopen this control and try again.", threadId: id }; }); return; }
+  sendFrame({ type: "thread_action", history_id: expectedHistory, thread_id: id, action, data, expected_revision: expectedRevision });
 }
 function pendingFrame(pending: PendingMessage): ThreadClientMessage {
-  return { type: "send_thread_message", client_id: pending.clientId, thread_id: pending.threadId,
+  return { type: "send_thread_message", client_id: pending.clientId, history_id: pending.historyId, thread_id: pending.threadId,
     body: pending.body, attachments: pending.attachments.map(b => b.id), mentions: pending.mentions, artifact_ids: [...pending.artifactIds], mode: pending.mode };
 }
 function clearMessageTimer(clientId: string): void {
@@ -141,11 +145,12 @@ function transmitMessage(pending: PendingMessage): void {
   }, MESSAGE_ACK_TIMEOUT_MS));
   sendFrame(pendingFrame(pending));
 }
-export function sendThreadMessage(threadId: number, body: string, mode: SendMode, attachments: Blob[], mentions: number[], artifactIds: number[]): void {
+export function sendThreadMessage(expectedHistory: string, threadId: number, body: string, mode: SendMode, attachments: Blob[], mentions: number[], artifactIds: number[]): void {
   if (!threadState.ready) throw new Error("Reconnect before sending to a Thread.");
+  if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this Thread before sending.");
   const references = [...new Set(artifactIds)].sort((a,b) => a-b);
   if (references.length > 16 || references.some(id => !Number.isSafeInteger(id) || id < 0)) throw new Error("A message supports at most 16 valid artifact references.");
-  const pending: PendingMessage = { clientId: crypto.randomUUID(), threadId, body, attachments, mentions, artifactIds: references, mode, failed: false };
+  const pending: PendingMessage = { clientId: crypto.randomUUID(), historyId: expectedHistory, threadId, body, attachments, mentions, artifactIds: references, mode, failed: false };
   setThreadState(draft => { draft["pending"] = (rows => [...rows, pending])(draft["pending"]); });
   transmitMessage(pending);
 }

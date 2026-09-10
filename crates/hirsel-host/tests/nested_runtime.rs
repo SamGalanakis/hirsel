@@ -219,10 +219,11 @@ variant = "default"
     .await;
     let hello = next_frame(&mut ws, "hello_ok").await;
     assert_eq!(hello["threads"].as_array().unwrap().len(), 1);
-    send(&mut ws,json!({"type":"create_thread","client_id":"parent","title":"Real Lash parent","parent_thread_id":null})).await;
+    let history_id = hello["history_id"].as_str().unwrap();
+    send(&mut ws,json!({"type":"create_thread","history_id":history_id,"client_id":"parent","title":"Real Lash parent","parent_thread_id":null})).await;
     let created = next_frame(&mut ws, "thread_created").await;
     let parent = created["thread"]["id"].as_u64().unwrap();
-    send(&mut ws,json!({"type":"send_thread_message","client_id":"owner-proof","thread_id":parent,"body":"Edit the explicitly attached notes and delegate the focused child.","attachments":[],"mentions":[],"artifact_ids":[44],"mode":"send"})).await;
+    send(&mut ws,json!({"type":"send_thread_message","history_id":history_id,"client_id":"owner-proof","thread_id":parent,"body":"Edit the explicitly attached notes and delegate the focused child.","attachments":[],"mentions":[],"artifact_ids":[44],"mode":"send"})).await;
     let db = rusqlite::Connection::open_with_flags(
         data.join("hirsel.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -333,7 +334,7 @@ variant = "default"
 
     // Retain an actual running CLI callback across debug reset, then recreate IDs.
     std::fs::write(dir.path().join("hold"), b"hold this owned fixture").unwrap();
-    send(&mut ws,json!({"type":"send_thread_message","client_id":"child-held","thread_id":child,"body":"Hold this callback for reset proof.","attachments":[],"mentions":[],"artifact_ids":[],"mode":"send"})).await;
+    send(&mut ws,json!({"type":"send_thread_message","history_id":history_id,"client_id":"child-held","thread_id":child,"body":"Hold this callback for reset proof.","attachments":[],"mentions":[],"artifact_ids":[],"mode":"send"})).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while !dir.path().join("held").exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -389,13 +390,13 @@ variant = "default"
     );
     std::fs::remove_file(dir.path().join("hold")).unwrap();
     for (client, title) in [("new-peer", "New peer"), ("new-parent", "Fresh parent")] {
-        send(&mut ws,json!({"type":"create_thread","client_id":client,"title":title,"parent_thread_id":null})).await;
+        send(&mut ws,json!({"type":"create_thread","history_id":new_history,"client_id":client,"title":title,"parent_thread_id":null})).await;
         let fresh = next_frame(&mut ws, "thread_created").await;
         if client == "new-parent" {
             assert_eq!(fresh["thread"]["id"], parent);
         }
     }
-    send(&mut ws,json!({"type":"send_thread_message","client_id":"fresh-input","thread_id":parent,"body":"NEW_HISTORY_ONLY","attachments":[],"mentions":[],"artifact_ids":[],"mode":"send"})).await;
+    send(&mut ws,json!({"type":"send_thread_message","history_id":new_history,"client_id":"fresh-input","thread_id":parent,"body":"NEW_HISTORY_ONLY","attachments":[],"mentions":[],"artifact_ids":[],"mode":"send"})).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if db

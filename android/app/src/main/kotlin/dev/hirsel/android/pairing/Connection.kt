@@ -78,12 +78,12 @@ class Connection internal constructor(
         client?.openThread(id, null)
     }
 
-    fun createThread(title: String, parentThreadId: ULong?) {
-        creatingClientId = client?.createThread(title, parentThreadId)?.clientId
+    fun createThread(historyId: String, title: String, parentThreadId: ULong?) {
+        creatingClientId = client?.createThread(historyId, title, parentThreadId)?.clientId
     }
 
-    fun action(threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
-        runCatching { client?.threadAction(threadId, action, data, revision) }
+    fun action(historyId: String, threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
+        runCatching { client?.threadAction(historyId, threadId, action, data, revision) }
             .onFailure { actionError = it.message ?: "Action failed" }
     }
 
@@ -105,7 +105,7 @@ class Connection internal constructor(
         return true
     }
 
-    fun stop(threadId: ULong) { client?.cancelTurn(threadId) }
+    fun stop(historyId: String, threadId: ULong) { client?.cancelTurn(historyId, threadId) }
 
     val isOnline: Boolean get() = phase is Phase.Online
 
@@ -118,7 +118,7 @@ class Connection internal constructor(
         }
         val c = client ?: run { recordFailure(body, threadId, artifactIds, expectedHistoryId); return }
         // This native method only queues locally; keep it ordered with identity callbacks.
-        runCatching { c.sendThreadMessage(threadId, body, emptyList(), emptyList(), artifactIds.toList()) }
+        runCatching { c.sendThreadMessage(expectedHistoryId, threadId, body, emptyList(), emptyList(), artifactIds.toList()) }
             .onFailure { recordFailure(body, threadId, artifactIds, expectedHistoryId) }
     }
 

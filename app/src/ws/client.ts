@@ -165,8 +165,8 @@ class HirselWsClient {
     });
   }
 
-  cancelTurn(threadId: number): void {
-    this.sendFrame({ type: "cancel_turn", thread_id: threadId });
+  cancelTurn(historyId: string, threadId: number): void {
+    this.sendFrame({ type: "cancel_turn", history_id: historyId, thread_id: threadId });
   }
 
   cancelQueued(clientId: string): void {

@@ -250,7 +250,7 @@ async fn accepted_stop_immediately_revokes_reads_writes_and_cached_replies() {
     );
     state
         .agent
-        .cancel_thread_turn(active.caller.thread_id)
+        .cancel_thread_turn(&active.caller.history_id, active.caller.thread_id)
         .await
         .unwrap();
     assert!(rpc(&active, "provider", "context", request).await.is_err());
@@ -382,7 +382,7 @@ async fn interrupted_inflight_call_finishes_once_and_keeps_authority_revoked() {
     let frames = start_held_call(&active, &state).await;
     state
         .agent
-        .cancel_thread_turn(active.caller.thread_id)
+        .cancel_thread_turn(&active.caller.history_id, active.caller.thread_id)
         .await
         .unwrap();
     // Provider bridge closes before a result; terminal owner reconciliation

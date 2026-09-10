@@ -57,6 +57,7 @@ pub enum ClientToHost {
         artifact_id: u64,
     },
     CreateThread {
+        history_id: String,
         #[serde(deserialize_with = "required_nullable_parent")]
         parent_thread_id: Option<u64>,
         client_id: String,
@@ -82,6 +83,7 @@ pub enum ClientToHost {
     },
     SendThreadMessage {
         client_id: String,
+        history_id: String,
         thread_id: u64,
         body: String,
         #[serde(default)]
@@ -93,6 +95,7 @@ pub enum ClientToHost {
         artifact_ids: Vec<u64>,
     },
     ThreadAction {
+        history_id: String,
         thread_id: u64,
         action: String,
         #[serde(default)]
@@ -102,6 +105,7 @@ pub enum ClientToHost {
     },
 
     CancelTurn {
+        history_id: String,
         thread_id: u64,
     },
     CancelQueued {

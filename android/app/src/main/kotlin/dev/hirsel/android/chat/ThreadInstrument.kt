@@ -20,11 +20,11 @@ import org.json.JSONTokener
 
 /** Constrained native rendering; the host remains the action-contract authority. */
 @Composable
-internal fun ThreadInstrument(thread: WorkThread, connection: Connection) {
+internal fun ThreadInstrument(thread: WorkThread, historyId: String, connection: Connection) {
     val root = remember(thread.instrumentJson) { runCatching { JSONTokener(thread.instrumentJson).nextValue() }.getOrNull() }
     val fields = remember(thread.id, thread.revision) { mutableStateMapOf<String, String>().apply { putAll(initialFields(root)) } }
     val enabled = thread.settledAt == null && thread.archivedAt == null && !snoozed(thread.snoozedUntil)
-    val submit: (String, JSONObject) -> Unit = { action, data -> connection.action(thread.id, action, data.toString(), thread.revision) }
+    val submit: (String, JSONObject) -> Unit = { action, data -> connection.action(historyId, thread.id, action, data.toString(), thread.revision) }
     Column(Modifier.fillMaxWidth()) { InstrumentNode(root, fields, enabled, submit) }
 }
 

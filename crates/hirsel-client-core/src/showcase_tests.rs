@@ -37,6 +37,6 @@ fn showcase_edits_reject_reused_thread_identity_after_history_change() {
     let frames = client.inner.pending_frames.lock().unwrap();
     assert_eq!(frames.len(), 1);
     assert!(
-        matches!(&frames[0], ClientToHost::ThreadAction { thread_id:5, action, data, expected_revision:Some(7) } if action == "set_showcase" && data == &json!({"artifact_id":null,"history_id":"history-b"}))
+        matches!(&frames[0], ClientToHost::ThreadAction { history_id, thread_id:5, action, data, expected_revision:Some(7) } if history_id == "history-b" && action == "set_showcase" && data == &json!({"artifact_id":null}))
     );
 }

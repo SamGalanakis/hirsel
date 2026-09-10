@@ -50,7 +50,8 @@ async fn restart_interrupts_native_input_without_blocking_later_thread_work() {
         .await
         .unwrap();
     let later = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "later-after-restart".into(),
             interrupted.0,
             "Run the later request".into(),
@@ -134,7 +135,8 @@ async fn queued_scripted_replies_and_telemetry_keep_their_owning_threads() {
             .unwrap();
         ids.push(thread.id);
         state
-            .submit_thread_message(
+            .submit_addressed_thread_message(
+                &state.storage.history_id().await.unwrap(),
                 format!("message-{key}"),
                 thread.id,
                 "pong".into(),
@@ -208,7 +210,8 @@ async fn durable_admission_is_fifo_with_independent_thread_sessions() {
         let runtime = super::thread_recovery_tests::runtime_lane(&state, Some(thread.id)).await;
         for n in 1..=2 {
             state
-                .submit_thread_message(
+                .submit_addressed_thread_message(
+                    &state.storage.history_id().await.unwrap(),
                     format!("{key}-{n}"),
                     thread.id,
                     format!("{key} secret {n}"),

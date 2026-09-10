@@ -13,6 +13,7 @@ import { createSignal } from "solid-js";
 import { scrollToBottom } from "./scroll";
 import { openProcesses, openSettings } from "../store/store";
 import { getClient } from "../ws/client";
+import { historyId } from "./history";
 // True while a modal/overlay owns input — focus traps and the native dialogs
 // that register their own presence both feed it. Used to suppress the bare-key
 // layer so summoned surfaces keep the keyboard.
@@ -76,7 +77,8 @@ export function jumpToLatest(): void {
 
 /** Best-effort cancel of the live turn — a no-op when the agent is idle. */
 export function stopActiveTurn(): void {
-  if (threadState.focusedId !== null) getClient()?.cancelTurn(threadState.focusedId);
+  const history = historyId();
+  if (history && threadState.focusedId !== null) getClient()?.cancelTurn(history, threadState.focusedId);
 }
 
 // ---- Cheat-sheet / hint vocabulary (one source for help + palette hints) ------

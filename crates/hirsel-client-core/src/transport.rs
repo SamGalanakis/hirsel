@@ -280,11 +280,12 @@ async fn flush_pending(
             return Err(error);
         }
     }
-    for (client_id, title, parent_thread_id) in creates {
+    for (client_id, history_id, title, parent_thread_id) in creates {
         if sent_this_connection.insert(client_id.clone()) {
             channel
                 .send(&hirsel_proto::ClientToHost::CreateThread {
                     client_id,
+                    history_id,
                     title,
                     parent_thread_id,
                 })
@@ -398,7 +399,9 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 changed
             }
             HostToClient::ThreadCreated { client_id, thread } => {
-                store.pending_creates.retain(|(id, _, _)| *id != client_id);
+                store
+                    .pending_creates
+                    .retain(|(id, _, _, _)| *id != client_id);
                 store
                     .created_threads
                     .retain(|created| created.client_id != client_id);
@@ -436,7 +439,9 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
             }
             HostToClient::Error { detail, client_id } => {
                 if let Some(client_id) = &client_id {
-                    store.pending_creates.retain(|(id, _, _)| id != client_id);
+                    store
+                        .pending_creates
+                        .retain(|(id, _, _, _)| id != client_id);
                     store.requests.retain(|(id, _)| id != client_id);
                     for entry in &mut store.messages {
                         if let crate::ChatEntry::Pending(send) = entry

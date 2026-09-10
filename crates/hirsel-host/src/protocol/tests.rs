@@ -246,7 +246,9 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
         incoming: VecDeque::new(),
         sent: Vec::new(),
     };
+    let history_id = state.storage.history_id().await.unwrap();
     let frame = ClientToHost::CreateThread {
+        history_id,
         parent_thread_id: None,
         client_id: "groceries-create".into(),
         title: "Buy groceries".into(),
@@ -297,6 +299,174 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
     .unwrap();
     assert!(
         matches!(channel.sent.last(),Some(HostToClient::ThreadOpened{client_id,detail}) if client_id=="open" && detail.thread.id==thread.id && detail.messages.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let old_history = state.storage.history_id().await.unwrap();
+    let old = state
+        .storage
+        .create_thread(
+            "old-thread",
+            "Old",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    state.agent.reset_history().await.unwrap();
+    let new_history = state.storage.history_id().await.unwrap();
+    let fresh = state
+        .storage
+        .create_thread(
+            "fresh-thread",
+            "Fresh",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(old.id, fresh.id, "reset must exercise numeric ID reuse");
+
+    let mut channel = TestChannel {
+        incoming: VecDeque::new(),
+        sent: Vec::new(),
+    };
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::SendThreadMessage {
+            history_id: new_history.clone(),
+            client_id: "current-send".into(),
+            thread_id: fresh.id,
+            body: "slow:5".into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            mode: hirsel_proto::SendMode::Send,
+            artifact_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if state
+                .storage
+                .thread(fresh.id)
+                .await
+                .unwrap()
+                .is_some_and(|thread| thread.running_turn.is_some())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for stale in [
+        ClientToHost::CreateThread {
+            history_id: old_history.clone(),
+            parent_thread_id: Some(fresh.id),
+            client_id: "stale-child".into(),
+            title: "Wrong child".into(),
+        },
+        ClientToHost::ThreadAction {
+            history_id: old_history.clone(),
+            thread_id: fresh.id,
+            action: "archive".into(),
+            data: json!({}),
+            expected_revision: None,
+        },
+        ClientToHost::SendThreadMessage {
+            history_id: old_history.clone(),
+            client_id: "stale-send".into(),
+            thread_id: fresh.id,
+            body: "Wrong history".into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            mode: hirsel_proto::SendMode::Send,
+            artifact_ids: Vec::new(),
+        },
+        ClientToHost::CancelTurn {
+            history_id: old_history,
+            thread_id: fresh.id,
+        },
+    ] {
+        let error = handle_client_frame(&state, &mut channel, stale)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("history"),
+            "stale frame failed for the wrong reason: {error}"
+        );
+    }
+    let unchanged = state.storage.thread(fresh.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.title, "Fresh");
+    assert!(unchanged.archived_at.is_none());
+    assert!(unchanged.running_turn.is_some());
+    assert_eq!(state.storage.thread_snapshot().await.unwrap().len(), 1);
+    assert_eq!(state.storage.all_chat().await.unwrap().len(), 1);
+
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::CreateThread {
+            history_id: new_history.clone(),
+            parent_thread_id: Some(fresh.id),
+            client_id: "current-child".into(),
+            title: "Current child".into(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::ThreadAction {
+            history_id: new_history.clone(),
+            thread_id: fresh.id,
+            action: "archive".into(),
+            data: json!({}),
+            expected_revision: None,
+        },
+    )
+    .await
+    .unwrap();
+    handle_client_frame(
+        &state,
+        &mut channel,
+        ClientToHost::CancelTurn {
+            history_id: new_history,
+            thread_id: fresh.id,
+        },
+    )
+    .await
+    .unwrap();
+
+    let threads = state.storage.thread_snapshot().await.unwrap();
+    assert_eq!(threads.len(), 2);
+    assert_eq!(threads[1].parent_thread_id, Some(fresh.id));
+    assert!(threads[0].archived_at.is_some());
+    assert!(
+        state
+            .storage
+            .all_chat()
+            .await
+            .unwrap()
+            .iter()
+            .any(|message| message.client_id.as_deref() == Some("current-send"))
     );
 }
 
@@ -576,6 +746,7 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
             before_id: None,
         },
         ClientToHost::CreateThread {
+            history_id: state.storage.history_id().await.unwrap(),
             parent_thread_id: None,
             client_id: "direct-summary".into(),
             title: "Retry".into(),

@@ -37,7 +37,7 @@ import { createThread, focusThread, followThreadLocation, openThread, retryThrea
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground";
-function ThreadConversation(props: { id: number; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void; onBrowse: () => void }) {
+function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void; onBrowse: () => void }) {
   const [now, setNow] = createSignal(Date.now());
   const statusTimer = setInterval(() => setNow(Date.now()), 30_000);
   onCleanup(() => clearInterval(statusTimer));
@@ -74,7 +74,7 @@ function ThreadConversation(props: { id: number; attachments: AttachmentsControl
     } catch { /* openThread owns contextual recovery. */ }
     finally { setLoading(false); }
   };
-  const origin = { historyId: historyId()!, threadId: props.id };
+  const origin = { historyId: props.historyId, threadId: props.id };
   const artifactCount = () => artifactState.summaries.filter(artifact => artifact.thread_ids.includes(props.id)).length;
   const relatedCount = () => artifactCount() + (relatedState.lists[props.id]?.items.length ?? 0);
   return <RelatedContext value={origin}><main class="thread-focus-frame flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border border-border bg-background" data-thread-id={props.id} aria-label={current()?.title ?? "Thread conversation"}>
@@ -100,7 +100,7 @@ function ThreadConversation(props: { id: number; attachments: AttachmentsControl
         <Show when={history()?.brief.text || history()?.brief.artifact_ids.length}><details data-slot="thread-brief" class="text-sm"><summary class="min-h-11 w-fit cursor-pointer rounded py-3 text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Current brief</summary><div class="space-y-2 pb-2"><Markdown>{history()?.brief.text ?? ""}</Markdown><For each={history()?.brief.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For></div></details></Show>
         <Show when={current()?.description}><p class="text-sm text-muted-foreground">{current()?.description}</p></Show>
         <Show when={current()?.instrument && Object.keys(current()!.instrument!).length > 0}>
-          <Show when={current()?.revision} keyed>{revision => <ThreadInstrument ui={current()?.instrument ?? undefined} onAction={(action, data) => threadAction(props.id, action, data, revision)} />}</Show>
+          <Show when={current()?.revision} keyed>{revision => <ThreadInstrument ui={current()?.instrument ?? undefined} onAction={(action, data) => threadAction(props.historyId, props.id, action, data, revision)} />}</Show>
         </Show>
         <Show when={history()?.hasMore}><button class={button} disabled={loading()} onClick={() => void earlier()}>{loading() ? "Loading…" : "Load earlier messages"}</button></Show>
         <Show when={!history()?.loaded && !(threadState.error?.operation === "load" && threadState.error.threadId === props.id)}><p role="status" class="text-sm text-muted-foreground">Loading conversation…</p></Show>
@@ -114,9 +114,9 @@ function ThreadConversation(props: { id: number; attachments: AttachmentsControl
     <ThreadError threadId={props.id} />
     <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
-        sendThreadMessage(props.id, body, mode, blobs, mentions, artifactIds);
+        sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds);
       }}
-      onStop={() => getClient()?.cancelTurn(props.id)} getLastOwnerBody={() => messages().findLast(m => m.author === "owner")?.body ?? null} />
+      onStop={() => getClient()?.cancelTurn(props.historyId, props.id)} getLastOwnerBody={() => messages().findLast(m => m.author === "owner")?.body ?? null} />
   </main></RelatedContext>;
 }
 
@@ -147,7 +147,9 @@ function ThreadStart(props: { globalArtifacts: boolean; onSelect: (id: number) =
   const create = async (event: SubmitEvent) => {
     event.preventDefault(); if (!title().trim() || creating()) return;
     setCreating(true); setError("");
-    try { const thread = await createThread(title().trim(), null); setTitle(""); props.onSelect(thread.id); }
+    const expectedHistory = historyId();
+    if (!expectedHistory) { setError("History is unavailable. Reconnect and try again."); setCreating(false); return; }
+    try { const thread = await createThread(expectedHistory, title().trim(), null); setTitle(""); props.onSelect(thread.id); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setCreating(false); }
   };
@@ -188,13 +190,13 @@ export function ThreadShell() {
   const onPop = () => followThreadLocation();
   window.addEventListener("popstate", onPop);
   onCleanup(() => window.removeEventListener("popstate", onPop));
-  createEffect(() => { const thread = threadState.threads.find(t => t.id === threadState.focusedId); return thread && !thread.read && state.connection === "connected" ? thread.id : null; }, (id) => { if (id !== null) threadAction(id, "read"); });
+  createEffect(() => { const thread = threadState.threads.find(t => t.id === threadState.focusedId); const history = historyId(); return thread && history && !thread.read && state.connection === "connected" ? { id: thread.id, history } : null; }, (target) => { if (target) threadAction(target.history, target.id, "read"); });
   return <div class="flex h-dvh min-h-0 bg-background text-foreground">
     <nav aria-label="Hirsel" data-slot="icon-rail" class="relative z-10 flex w-14 shrink-0 flex-col items-center gap-2 py-2">
       <button class={iconButton} aria-label="Thread overview" title="Thread overview" aria-pressed={threadState.focusedId === null && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); focusThread(null); }}><BrandMark size={23} /></button>
       <button class={`${iconButton} relative`} aria-label="Threads" aria-describedby={attentionCount() > 0 ? "thread-attention-summary" : undefined} title={attentionCount() > 0 ? `Threads · ${attentionCount()} need you` : "Threads"} data-slot="thread-navigation-trigger" aria-controls="thread-navigation" aria-expanded={navigationOpen() ? "true" : "false"} aria-pressed={threadState.focusedId !== null && !globalArtifacts() ? "true" : "false"} onClick={() => navigationOpen() ? closeThreadNavigation() : openThreadNavigation()}><GitBranch class="size-5" /><Show when={attentionCount() > 0}><span aria-hidden="true" class="absolute right-2 top-2 size-1.5 rounded-full bg-status-attention" /><span id="thread-attention-summary" class="sr-only">{attentionCount()} {attentionCount() === 1 ? "thread needs" : "threads need"} your attention</span></Show></button>
       <Show when={threadState.focusedId !== null && !globalArtifacts()}><svg class="pointer-events-none absolute top-[58px] left-12 h-8 w-4 text-border" viewBox="0 0 16 32" fill="none" aria-hidden="true" data-slot="thread-connector"><path d="M0 24h4c8 0 12-4 12-12V0" stroke="currentColor" /></svg></Show>
-      <button class={iconButton} aria-label="New thread" title="New thread" onClick={() => openThreadNavigation({ kind: "create", parentId: null })}><Plus class="size-5" /></button>
+      <button class={iconButton} aria-label="New thread" title="New thread" onClick={() => { const history = historyId(); if (history) openThreadNavigation({ kind: "create", historyId: history, parentId: null }); }}><Plus class="size-5" /></button>
       <button class={iconButton} aria-label="All artifacts" title="All artifacts" aria-pressed={globalArtifacts() ? "true" : "false"} onClick={() => setGlobalArtifacts(value => !value)}><LayoutGrid class="size-5" /></button>
       <button class={iconButton} aria-label="Processes" title="Processes" onClick={openProcesses}><Activity class="size-5" /></button>
       <div class="flex-1" />
@@ -206,7 +208,7 @@ export function ThreadShell() {
       <Show when={recoveredDrafts().length > 0}><details class="px-3 py-2 text-sm"><summary class="cursor-pointer text-muted-foreground">Saved drafts from another history</summary><p class="py-2">Copy any text you want to keep into a new conversation.</p><For each={recoveredDrafts()}>{draft => <pre class="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border p-2 text-xs">{draft.text}</pre>}</For></details></Show>
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>
       <div class="flex min-h-0 flex-1 gap-2 py-2 pr-2 pl-2 sm:gap-3 sm:pr-3">
-        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId() } : null} keyed fallback={<ThreadStart globalArtifacts={globalArtifacts()} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} attachments={attachmentsFor(focused.id)} globalArtifacts={globalArtifacts()} onConversation={() => setGlobalArtifacts(false)} onBrowse={() => openThreadNavigation()} />}</Show>
+        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart globalArtifacts={globalArtifacts()} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} globalArtifacts={globalArtifacts()} onConversation={() => setGlobalArtifacts(false)} onBrowse={() => openThreadNavigation()} />}</Show>
         <ArtifactSurface />
         <ShowcaseSurface />
         <CanvasRail /><CanvasSheet /><ProcessesSheet /><SettingsSheet />

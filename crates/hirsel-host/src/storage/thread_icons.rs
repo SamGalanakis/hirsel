@@ -42,6 +42,7 @@ impl Storage {
     /// Check the revision and write under the same lock as agent mutations.
     pub(crate) async fn update_thread_icon(
         &self,
+        expected_history: &str,
         id: u64,
         icon: Option<Option<&str>>,
         expected_revision: u64,
@@ -50,6 +51,7 @@ impl Storage {
             validate_icon(icon)?;
         }
         let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, expected_history)?;
         let current = threads::get(&c, id)?;
         anyhow::ensure!(
             current.revision == expected_revision,

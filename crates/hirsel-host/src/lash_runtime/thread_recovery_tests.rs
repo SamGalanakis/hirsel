@@ -45,7 +45,8 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
         .await
         .unwrap();
     let accepted = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "skill-request".into(),
             thread.id,
             "/skill:check inspect this diff".into(),
@@ -74,7 +75,8 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
     assert_eq!(turn.mode, SendMode::NextTurn);
     std::fs::remove_file(path).unwrap();
     let retried = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "skill-request".into(),
             thread.id,
             "/skill:check inspect this diff".into(),
@@ -118,7 +120,8 @@ async fn skill_commands_cover_addressed_input_and_reject_unknown_before_acceptan
     let _pump = runtime.pump_lock.lock().await;
     let path = install_test_skill(dir.path());
     let accepted = state
-        .submit_thread_message(
+        .submit_addressed_thread_message(
+            &state.storage.history_id().await.unwrap(),
             "owner-skill".into(),
             runtime.thread_id,
             "/skill:check check current input".into(),
@@ -144,7 +147,8 @@ async fn skill_commands_cover_addressed_input_and_reject_unknown_before_acceptan
     std::fs::remove_file(path).unwrap();
     assert!(
         !state
-            .submit_thread_message(
+            .submit_addressed_thread_message(
+                &state.storage.history_id().await.unwrap(),
                 "owner-skill".into(),
                 runtime.thread_id,
                 "/skill:check check current input".into(),
@@ -159,7 +163,8 @@ async fn skill_commands_cover_addressed_input_and_reject_unknown_before_acceptan
     );
     assert!(
         state
-            .submit_thread_message(
+            .submit_addressed_thread_message(
+                &state.storage.history_id().await.unwrap(),
                 "unknown-skill".into(),
                 runtime.thread_id,
                 "/skill:absent".into(),
@@ -181,7 +186,8 @@ async fn skill_commands_cover_addressed_input_and_reject_unknown_before_acceptan
     );
     assert!(
         state
-            .submit_thread_message(
+            .submit_addressed_thread_message(
+                &state.storage.history_id().await.unwrap(),
                 "unknown-owner-skill".into(),
                 runtime.thread_id,
                 "/skill:absent".into(),
@@ -222,7 +228,8 @@ async fn generated_action_labels_are_not_skill_commands() {
         .await
         .unwrap();
     state
-        .handle_thread_action(
+        .handle_addressed_thread_action(
+            &state.storage.history_id().await.unwrap(),
             thread.id,
             "advance".into(),
             json!({"choice":"go"}),
@@ -367,13 +374,13 @@ async fn stop_after_admission_before_dispatch_cancels_exact_thread_without_provi
     assert!(
         state
             .agent
-            .cancel_thread_turn(next.thread_id)
+            .cancel_thread_turn(&next.history_id, next.thread_id)
             .await
             .is_err()
     );
     state
         .agent
-        .cancel_thread_turn(turn.thread_id)
+        .cancel_thread_turn(&turn.history_id, turn.thread_id)
         .await
         .unwrap();
     let id = runtime.active_turn_id.lock().await.clone().unwrap();

@@ -1,0 +1,71 @@
+crates/hirsel-host/src/push.rs:33:    pub history_id: String,
+crates/hirsel-host/src/push.rs:34:    pub thread_id: u64,
+crates/hirsel-host/src/push.rs:75:            thread_id = payload.data.thread_id,
+crates/hirsel-host/src/push.rs:180:                        "thread_id": payload.data.thread_id.to_string(),
+crates/hirsel-host/src/push.rs:244:    history_id: String,
+crates/hirsel-host/src/push.rs:309:        let Ok(history_id) = self.storage.history_id().await else {
+crates/hirsel-host/src/push.rs:316:        let Some(delivery) = self.claim_delivery(&history_id, thread.id, eligible) else {
+crates/hirsel-host/src/push.rs:326:                tracing::warn!(thread_id = thread.id, %error, "failed to load push tokens");
+crates/hirsel-host/src/push.rs:344:                history_id: history_id.clone(),
+crates/hirsel-host/src/push.rs:345:                thread_id: thread.id,
+crates/hirsel-host/src/push.rs:351:        let thread_id = thread.id;
+crates/hirsel-host/src/push.rs:357:            if state.history_id != history_id {
+crates/hirsel-host/src/push.rs:362:                if state.episodes.get(&thread_id) == Some(&(true, delivery.1)) {
+crates/hirsel-host/src/push.rs:366:                tracing::warn!(thread_id, %error, "push delivery failed after retries");
+crates/hirsel-host/src/push.rs:373:        history_id: &str,
+crates/hirsel-host/src/push.rs:374:        thread_id: u64,
+crates/hirsel-host/src/push.rs:381:        if state.history_id != history_id {
+crates/hirsel-host/src/push.rs:383:                history_id: history_id.to_owned(),
+crates/hirsel-host/src/push.rs:387:        let episode = state.episodes.entry(thread_id).or_insert((false, 0));
+crates/hirsel-host/src/push.rs:392:        let key = (thread_id, episode.1);
+crates/hirsel-host/src/push.rs:395:            .retain(|old| old.0 != thread_id || *old == key);
+android/app/src/main/kotlin/dev/hirsel/android/NotificationDestination.kt:4:internal fun notificationDestination(
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:95:        notificationThreadId = intent.getStringExtra("thread_id")?.toULongOrNull()
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:96:        notificationHistoryId = intent.getStringExtra("history_id")
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:101:        notificationThreadId = intent.getStringExtra("thread_id")?.toULongOrNull()
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:102:        notificationHistoryId = intent.getStringExtra("history_id")
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:191:    LaunchedEffect(notificationThreadId, notificationHistoryId, connection.snapshot?.historyId, connection.phase) {
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:193:        if (id != null && connection.isOnline && connection.snapshot?.historyId != null) {
+android/app/src/main/kotlin/dev/hirsel/android/MainActivity.kt:194:            val destination = notificationDestination(notificationHistoryId, id, connection.snapshot?.historyId, connection.snapshot?.threads.orEmpty().map { it.id })
+android/app/src/main/kotlin/dev/hirsel/android/pairing/RelatedNavigation.kt:3:import dev.hirsel.android.notificationDestination
+android/app/src/main/kotlin/dev/hirsel/android/pairing/RelatedNavigation.kt:15:    return notificationDestination(target.historyId, target.threadId, currentHistoryId, availableThreadIds)
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:45:data class FailedSend(val id: Long, val body: String, val threadId: ULong, val artifactIds: List<ULong>, val historyId: String)
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:85:    fun action(threadId: ULong, action: String, data: String = "{}", revision: ULong? = null) {
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:86:        runCatching { client?.threadAction(threadId, action, data, revision) }
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:90:    // Callers capture historyId with the addressed Thread, before any delayed UI action.
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:91:    fun addThreadRelated(historyId: String, threadId: ULong, target: ThreadRelatedTarget, title: String?): SendReceipt? =
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:92:        client?.addThreadRelated(historyId, threadId, target, title)
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:94:    fun removeThreadRelated(historyId: String, threadId: ULong, itemId: ULong): SendReceipt? =
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:95:        client?.removeThreadRelated(historyId, threadId, itemId)
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:100:            target, current.connection, current.historyId, current.threads.map { it.id },
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:108:    fun stop(threadId: ULong) { client?.cancelTurn(threadId) }
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:113:    fun send(body: String, threadId: ULong, expectedHistoryId: String?, artifactIds: List<ULong> = emptyList()) {
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:114:        if (expectedHistoryId == null || expectedHistoryId != snapshot?.historyId) {
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:119:        val c = client ?: run { recordFailure(body, threadId, artifactIds, expectedHistoryId); return }
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:121:        runCatching { c.sendThreadMessage(threadId, body, emptyList(), emptyList(), artifactIds.toList()) }
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:122:            .onFailure { recordFailure(body, threadId, artifactIds, expectedHistoryId) }
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:128:        send(failed.body, failed.threadId, failed.historyId, failed.artifactIds)
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:131:    private fun recordFailure(body: String, threadId: ULong, artifactIds: List<ULong>, historyId: String) {
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:132:        failedSends.add(FailedSend(failCounter++, body, threadId, artifactIds.toList(), historyId))
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:183:                if (old?.historyId != null && old.historyId != snapshot.historyId) {
+android/app/src/main/kotlin/dev/hirsel/android/pairing/Connection.kt:197:                    conn.openThread(it.threadId)
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:26:        val threadId = message.data["thread_id"]?.takeIf { it.toULongOrNull() != null } ?: return
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:27:        val historyId = message.data["history_id"]?.takeIf { it.isNotBlank() } ?: return
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:31:            Log.i(FCM_LOG_TAG, "push disabled in settings; suppressing notification for Thread $threadId")
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:34:        postThreadNotification(title, body, name, threadId, historyId)
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:37:    private fun postThreadNotification(title: String, body: String, name: String, threadId: String, historyId: String) {
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:51:            putExtra("thread_id", threadId)
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:52:            putExtra("history_id", historyId)
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:56:            (historyId + ":" + threadId).hashCode(),
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:64:            .setSubText("@$name · Thread #$threadId")
+android/app/src/main/kotlin/dev/hirsel/android/HirselFirebaseMessagingService.kt:68:        manager.notify(threadId.toIntOrNull() ?: (historyId + ":" + threadId).hashCode(), notification)
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:92:    val messages = snapshot?.messages.orEmpty().filter { it.threadId == focused }
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:93:    val stream = snapshot?.streams?.find { it.threadId == focused && !it.finished }
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:95:    val executing = snapshot?.turns.orEmpty().any { it.threadId == focused && it.state in listOf("queued", "running") }
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:97:    LaunchedEffect(snapshot?.historyId) { iconTarget = null }
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:104:            connection.send(draft.trim(), focused, snapshot?.historyId)
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:173:                    ReplyChip("Change thread icon") { snapshot.historyId?.let { iconTarget = it to thread.copy() } }
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:191:                snapshot?.briefs?.find { it.threadId == focused }?.let { brief ->
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:210:                items(connection.failedSends.filter { it.threadId == focused }, key = { "failed-${it.id}" }) { failed -> FailedMessageRow(failed) { connection.retry(failed) } }
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:216:                items(snapshot?.activities.orEmpty().filter { it.threadId == focused }, key = { "activity-${it.id}" }) { activity ->
+android/app/src/main/kotlin/dev/hirsel/android/chat/ChatScreen.kt:219:                        val childId = report?.optString("child_thread_id")?.toULongOrNull()

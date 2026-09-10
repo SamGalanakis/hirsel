@@ -1,0 +1,5 @@
+# C08-01 — proposed Subagent ProcessInfo restoration
+
+Coordinator verdict: reject proposed producer/union expansion. Worker evidence ../workers/C08-PROCESS-WAKE.md. Reopened current Rust ProcessKind/ProcessInfo, only production monitor constructor, web type/ProcessRow/ProcessesView, and PRODUCT.md30–36. Rust deliberately describes current monitor resources only; PRODUCT places CLI processes inside Thread execution rather than a second work inventory. The stale web subagent branch and fixture do not establish a requirement to restore a new process inventory/producer.
+
+A narrower clean cutover may delete stale web subagent branches, ask-to-stop callback, obsolete metadata fields and inaccurate empty-state promise, aligning the TypeScript contract with actual monitor-only producers. That is preferable to the worker's expansion, but no missing process projection is promoted as a defect. Coordinator will let root decide whether this bounded legacy removal belongs to its existing wholehog work. Preserve this rejected direction for fresh materiality review.

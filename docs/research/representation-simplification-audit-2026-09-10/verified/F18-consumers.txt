@@ -1,0 +1,16 @@
+crates/hirsel-host/src/storage/current.sql:79:            CREATE TABLE push_tokens (
+crates/hirsel-host/src/storage/push_tokens.rs:14:    pub async fn register_push_token(
+crates/hirsel-host/src/storage/push_tokens.rs:27:            INSERT INTO push_tokens (token, platform, created_ts, last_seen_ts)
+crates/hirsel-host/src/storage/push_tokens.rs:38:    pub async fn unregister_push_token(&self, token: &str) -> anyhow::Result<bool> {
+crates/hirsel-host/src/storage/push_tokens.rs:40:        Ok(conn.execute("DELETE FROM push_tokens WHERE token = ?1", params![token])? > 0)
+crates/hirsel-host/src/storage/push_tokens.rs:43:    pub async fn push_tokens(&self) -> anyhow::Result<Vec<PushToken>> {
+crates/hirsel-host/src/storage/push_tokens.rs:48:            FROM push_tokens
+crates/hirsel-host/src/storage/push_tokens.rs:69:        FROM push_tokens
+crates/hirsel-host/src/storage.rs:14:mod push_tokens;
+crates/hirsel-host/src/storage.rs:54:pub use push_tokens::PushToken;
+crates/hirsel-host/src/storage.rs:120:                DELETE FROM push_tokens;
+crates/hirsel-client-core/src/client.rs:440:    pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {
+crates/hirsel-client-core/src/client.rs:455:            .push_back(ClientToHost::RegisterPushToken { platform, token });
+crates/hirsel-host/src/protocol.rs:582:        ClientToHost::RegisterPushToken { platform, token } => {
+crates/hirsel-host/src/protocol.rs:583:            state.storage.register_push_token(platform, token).await?;
+crates/hirsel-host/src/protocol.rs:586:            state.storage.unregister_push_token(&token).await?;

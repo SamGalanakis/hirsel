@@ -1,0 +1,5 @@
+# C13-02 — provider roster union redesign
+
+Coordinator verdict: skip, coherent derived snapshots and insufficient material benefit for a wire cutover. Worker ../workers/C13-CONFIG.md. Reopened ProviderInstance/DetectionStatus/MaskedSecret, three host constructors, add/update/remove/selection guards and settings consuming branches. Exact query repeated: 14 matches.
+
+The flat outbound snapshot admits fabricated kind/option/boolean combinations, but all current constructors produce coherent values and replace the roster wholesale. No writer independently changes capabilities or secret/detection flags. The worker proposes several public enum replacements and coordinated Rust/TS fixture churn without a production mismatch or material branch reduction beyond rearrangement. Do not treat a stale comment mentioning older hosts as proof that a runtime compatibility path must be retained; root may delete actual obsolete fallbacks during wholehog cleanup, separately from this broad redesign. F11 is distinct: the supported editable TOML producer actually violates documented validation, so it survives without changing this wire shape.

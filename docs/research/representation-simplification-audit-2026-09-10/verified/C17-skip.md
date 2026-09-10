@@ -1,0 +1,3 @@
+# C17 — Related UI coverage
+
+Coordinator accepts explicit skip. Worker ../workers/C17-WEB-RELATED.md supplies all12 owned-file coverage and five rejected candidates. Independently spot-reopened source-keyed cache reset, captured-history requests/read tracking, revision receive, canonical URL validation and typed link producers. History reset clears maps/pending work; capture guards delayed detail responses; retained items during loading/error are intentional. No observed contradictory producer or material simplification. C07 malformed envelope/item proposal remains rejected; no new witness emerged.

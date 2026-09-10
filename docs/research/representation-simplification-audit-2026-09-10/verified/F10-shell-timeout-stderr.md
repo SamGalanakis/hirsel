@@ -1,0 +1,7 @@
+# F10 — timeout projection discards real stderr
+
+Recommend; high confidence, medium priority. Owner C11. Worker ../workers/C11-DRIVER-SHARED.md. Independently reopened tools/shell.rs in full, process_run timeout result, scoped_tools call, ShellRunOutput schema and condense summary. Repeated shell_output consumer query: 3 matches (definition and two calls), including one cross-module consumer.
+
+A normal command writes diagnostic stderr then times out. Process runner already retains those bytes and timed_out=true (existing process_run fixture explicitly asserts partial-error survives), but shell_output replaces stderr with "command timed out". This loses the diagnostic the agent needs despite a separate canonical timeout bit. The normal summary already reads timed_out, so the sentinel duplicates information without any consumer benefit.
+
+Target: retain the same raw/tool/wire shapes, always decode/truncate actual stderr using the existing helper, and use timed_out exclusively for timeout status. Scope one tools/shell.rs projection plus meaningful raw stderr+timeout unit regression/serialization checks. Preserve 16KiB cap and timeout/process-group behavior. No schema/wire/newtype/refactor. Audit ran no tests. This is distinct from root #18 CI stderr fixture timing; that concerns test execution duration, while F10 is a deterministic tool-output loss after successful timeout cleanup.

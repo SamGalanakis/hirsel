@@ -60,6 +60,20 @@ async function stopProcess(child) {
 const [thread] = sqliteJson("SELECT id,title FROM threads ORDER BY id LIMIT 1");
 const [artifact] = sqliteJson("SELECT id,title,mime,length(content) AS bytes FROM artifacts WHERE mime='image/svg+xml' ORDER BY id LIMIT 1");
 assert(thread && artifact, "Fixture must contain a Thread and a saved SVG artifact.");
+const [{ base: nestingBase }] = sqliteJson("SELECT COALESCE(MAX(id), 0) + 100 AS base FROM threads");
+const ancestorIds = [0, 1, 2, 3].map(offset => nestingBase + offset);
+execFileSync("sqlite3", [join(dataDir, "hirsel.sqlite"), `
+  PRAGMA foreign_keys=ON;
+  BEGIN;
+  INSERT INTO threads(id,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision)
+  VALUES
+    (${ancestorIds[0]},NULL,'Responsive parent A','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
+    (${ancestorIds[1]},${ancestorIds[0]},'Responsive parent B','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
+    (${ancestorIds[2]},${ancestorIds[1]},'Responsive parent C','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
+    (${ancestorIds[3]},${ancestorIds[2]},'Responsive parent D','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1);
+  UPDATE threads SET parent_thread_id=${ancestorIds[3]} WHERE id=${thread.id};
+  COMMIT;
+`]);
 const token = `responsive-${crypto.randomUUID()}`;
 const port = await unusedPort();
 const url = `http://127.0.0.1:${port}`;
@@ -101,7 +115,23 @@ async function layoutMetrics(page) {
     const status = [...document.querySelectorAll('[data-slot="thread-status-primary"]')].filter(node => node.checkVisibility()).map(node => {
       const style = getComputedStyle(node);
       const box = node.getBoundingClientRect();
-      return { text: node.textContent?.trim(), whiteSpace: style.whiteSpace, height: box.height, lineHeight: Number.parseFloat(style.lineHeight), clipped: node.scrollWidth > node.clientWidth };
+      const entry = node.closest('[data-thread-entry]');
+      const inventory = node.closest('nav');
+      const actions = entry?.querySelector('[data-thread-actions]')?.parentElement;
+      const entryBox = entry?.getBoundingClientRect();
+      const inventoryBox = inventory?.getBoundingClientRect();
+      const actionsBox = actions?.getBoundingClientRect();
+      const overlapsActions = !!actionsBox && box.left < actionsBox.right && box.right > actionsBox.left && box.top < actionsBox.bottom && box.bottom > actionsBox.top;
+      return {
+        text: node.textContent?.trim(), whiteSpace: style.whiteSpace, height: box.height,
+        lineHeight: Number.parseFloat(style.lineHeight), clipped: node.scrollWidth > node.clientWidth,
+        bounds: { left: box.left, right: box.right, width: box.width },
+        entryBounds: entryBox ? { left: entryBox.left, right: entryBox.right, width: entryBox.width } : null,
+        inventoryBounds: inventoryBox ? { left: inventoryBox.left, right: inventoryBox.right, width: inventoryBox.width } : null,
+        clippedByEntry: !entryBox || box.left < entryBox.left - 0.5 || box.right > entryBox.right + 0.5,
+        clippedByInventory: !inventoryBox || box.left < inventoryBox.left - 0.5 || box.right > inventoryBox.right + 0.5,
+        overlapsActions,
+      };
     });
     return {
       viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio },
@@ -148,6 +178,9 @@ function assertContained(metrics, width, selected) {
   for (const row of metrics.status) {
     assert.equal(row.whiteSpace, "nowrap", `${width}: status ${row.text} can wrap`);
     assert.equal(row.clipped, false, `${width}: status ${row.text} is clipped`);
+    assert.equal(row.clippedByEntry, false, `${width}: status ${row.text} escapes its Thread row`);
+    assert.equal(row.clippedByInventory, false, `${width}: status ${row.text} escapes the Thread inventory`);
+    assert.equal(row.overlapsActions, false, `${width}: status ${row.text} overlaps Thread actions`);
     assert(row.height <= row.lineHeight * 1.5, `${width}: status ${row.text} spans multiple lines`);
   }
 }
@@ -164,6 +197,14 @@ async function capture(page, width, label, selected) {
   return metrics;
 }
 
+async function expandNestedThread(page) {
+  for (const name of ["Responsive parent A", "Responsive parent B", "Responsive parent C", "Responsive parent D"]) {
+    const toggle = page.getByRole("button", { name: new RegExp(`^(Expand|Collapse) ${name}$`) });
+    await toggle.waitFor({ state: "visible" });
+    if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  }
+}
+
 try {
   await poll("isolated Host readiness", async () => {
     if (host.exitCode !== null || host.signalCode !== null) throw new Error(`Host exited (${host.exitCode ?? host.signalCode})`);
@@ -171,6 +212,8 @@ try {
   });
   browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "/home/sam/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell" });
   const page = await browser.newPage({ viewport: { width: 2048, height: 900 } });
+  const sockets = [];
+  await page.routeWebSocket("**/ws", socket => { socket.connectToServer(); sockets.push(socket); });
   page.on("pageerror", error => browserErrors.push({ type: "pageerror", message: error.message }));
   page.on("console", message => { if (message.type() === "error") browserErrors.push({ type: "console", message: message.text() }); });
   await page.addInitScript(({ ownerToken }) => {
@@ -187,6 +230,7 @@ try {
   await drawer.waitFor({ state: "visible" });
   const initialFocus = await drawer.evaluate(node => ({ inside: node.contains(document.activeElement), tag: document.activeElement?.tagName, label: document.activeElement?.getAttribute("aria-label") }));
   assert.equal(initialFocus.inside, false, `default dock stole initial focus: ${JSON.stringify(initialFocus)}`);
+  await expandNestedThread(page);
   await page.locator(`[data-thread-row="${thread.id}"]`).click();
   await page.locator(`[data-thread-id="${thread.id}"]`).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "All artifacts", exact: true }).click();
@@ -230,6 +274,23 @@ try {
   assert.equal(await drawer.isVisible(), false, "mobile dismissal overwrote the explicit desktop-closed preference");
   await page.reload({ waitUntil: "domcontentloaded" });
   assert.equal(await drawer.isVisible(), false, "desktop-closed preference did not survive reload");
+
+  await trigger.click();
+  await drawer.waitFor({ state: "visible" });
+  await expandNestedThread(page);
+  await page.locator(`[data-thread-row="${thread.id}"]`).click();
+  await page.getByRole("button", { name: "All artifacts", exact: true }).click();
+  await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().click();
+  await page.locator('[data-slot="artifact-preview"]').waitFor({ state: "visible" });
+  await page.getByRole("button", { name: "Conversation", exact: true }).click();
+  await page.context().setOffline(true);
+  for (const socket of sockets) await socket.close({ code: 1001, reason: "responsive offline check" });
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-slot="thread-status-primary"]')].some(node => node.textContent?.includes("Last known:")));
+  await page.locator(`[data-thread-entry="tree:${thread.id}"] [data-slot="thread-status-primary"] span`).first().evaluate(node => {
+    node.textContent = "Last known: Working · 1 queued";
+  });
+  const nestedOffline = await capture(page, 1440, "nested-offline", false);
+  assert(nestedOffline.status.some(row => row.text?.includes("Last known: Working · 1 queued")), "longest offline nested Thread status was not exercised");
 
   assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
   await writeFile(join(evidenceDir, "result.json"), `${JSON.stringify({

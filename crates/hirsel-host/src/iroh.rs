@@ -16,7 +16,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use crate::{
     AppState,
     attachments::MAX_BLOB_BASE64_BYTES,
-    protocol::{IncomingFrame, Peer, ProtocolChannel, decode_json, run_protocol},
+    auth::AuthPeer,
+    protocol::{IncomingFrame, ProtocolChannel, decode_json, run_protocol},
 };
 
 pub const SECRET_KEY_FILE: &str = "iroh-secret-key";
@@ -136,14 +137,7 @@ async fn handle_connection(
     tracing::debug!(%remote_id, "iroh owner connection established");
 
     let mut channel = IrohChannel::new(send, recv);
-    run_protocol(
-        &mut channel,
-        state,
-        Peer::Iroh {
-            node_id: remote_id.to_string(),
-        },
-    )
-    .await;
+    run_protocol(&mut channel, state, AuthPeer::Iroh(remote_id.to_string())).await;
     let _ = channel.close().await;
     connection.close(0u32.into(), b"owner protocol complete");
     Ok(())

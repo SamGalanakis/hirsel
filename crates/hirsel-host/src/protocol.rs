@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 use crate::{
     AppState,
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
-    auth::owner_token_matches,
+    auth::{AuthPeer, owner_token_matches},
 };
 
 mod hello_dedupe;
@@ -48,19 +48,10 @@ pub(crate) trait ProtocolChannel: Send {
     async fn send(&mut self, frame: &HostToClient) -> anyhow::Result<()>;
 }
 
-pub(crate) enum Peer {
-    WebSocket { addr: Option<String> },
-    Iroh { node_id: String },
-}
-
-pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer: Peer)
+pub(crate) async fn run_protocol<C>(channel: &mut C, state: AppState, peer: AuthPeer)
 where
     C: ProtocolChannel,
 {
-    let peer_key = match &peer {
-        Peer::WebSocket { addr } => addr.as_deref(),
-        Peer::Iroh { node_id } => Some(node_id.as_str()),
-    };
     let first_frame = tokio::time::timeout(
         AUTH_HANDSHAKE_TIMEOUT,
         channel.receive(PRE_AUTH_MAX_FRAME_BYTES),
@@ -68,10 +59,7 @@ where
     .await;
     let auth = match first_frame {
         Err(_) => {
-            tracing::warn!(
-                peer = peer_key.unwrap_or("unknown"),
-                "auth handshake timed out"
-            );
+            tracing::warn!(peer = %peer, "auth handshake timed out");
             return;
         }
         Ok(frame) => match frame {
@@ -104,9 +92,7 @@ where
     let paired_token = match authenticate(&state, auth, &peer).await {
         Ok(token) => token,
         Err(detail) => {
-            if let Some(peer) = peer_key {
-                tokio::time::sleep(state.auth_throttle.record_failure(peer)).await;
-            }
+            tokio::time::sleep(state.auth_throttle.record_failure(&peer)).await;
             let _ = channel
                 .send(&HostToClient::Error {
                     detail,
@@ -116,9 +102,7 @@ where
             return;
         }
     };
-    if let Some(peer) = peer_key {
-        state.auth_throttle.record_success(peer);
-    }
+    state.auth_throttle.record_success(&peer);
     if let Some(device_token) = paired_token
         && channel
             .send(&HostToClient::Paired { device_token })
@@ -269,7 +253,7 @@ async fn build_snapshot(state: &AppState) -> anyhow::Result<(HostToClient, Hello
 async fn authenticate(
     state: &AppState,
     auth: HelloAuth,
-    peer: &Peer,
+    peer: &AuthPeer,
 ) -> Result<Option<String>, String> {
     match (auth, peer) {
         (HelloAuth::StaticToken(token), _) => {
@@ -279,7 +263,7 @@ async fn authenticate(
                 Err("invalid token".to_string())
             }
         }
-        (HelloAuth::DeviceToken(token), Peer::Iroh { node_id }) => {
+        (HelloAuth::DeviceToken(token), AuthPeer::Iroh(node_id)) => {
             state
                 .storage
                 .authenticate_device_token(&token, Some(node_id))
@@ -287,7 +271,7 @@ async fn authenticate(
                 .map_err(|_| "invalid device token".to_string())?;
             Ok(None)
         }
-        (HelloAuth::PairingCode { code, device_label }, Peer::Iroh { node_id }) => {
+        (HelloAuth::PairingCode { code, device_label }, AuthPeer::Iroh(node_id)) => {
             let _ = state
                 .storage
                 .redeem_pairing_code(&code)
@@ -300,10 +284,10 @@ async fn authenticate(
                 .map(Some)
                 .map_err(|_| "failed to issue device token".to_string())
         }
-        (HelloAuth::DeviceToken(_), Peer::WebSocket { .. }) => {
+        (HelloAuth::DeviceToken(_), AuthPeer::WebSocket(_)) => {
             Err("device-token auth requires iroh".to_string())
         }
-        (HelloAuth::PairingCode { .. }, Peer::WebSocket { .. }) => {
+        (HelloAuth::PairingCode { .. }, AuthPeer::WebSocket(_)) => {
             Err("pairing-code auth requires iroh".to_string())
         }
     }

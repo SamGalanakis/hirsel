@@ -55,9 +55,13 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     let http_addr = listener.local_addr().unwrap();
     let http_state = state.clone();
     let http_task = tokio::spawn(async move {
-        axum::serve(listener, router_from_state(http_state))
-            .await
-            .unwrap();
+        axum::serve(
+            listener,
+            router_from_state(http_state)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(

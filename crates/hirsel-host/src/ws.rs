@@ -12,7 +12,8 @@ use std::net::SocketAddr;
 use crate::{
     AppState,
     attachments::MAX_BLOB_BASE64_BYTES,
-    protocol::{IncomingFrame, Peer, ProtocolChannel, decode_json, run_protocol},
+    auth::AuthPeer,
+    protocol::{IncomingFrame, ProtocolChannel, decode_json, run_protocol},
 };
 
 const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -20,18 +21,18 @@ const WS_UPLOAD_ENVELOPE_BYTES: usize = 64 * 1024;
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     ws.max_message_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
         .max_frame_size(MAX_BLOB_BASE64_BYTES + WS_UPLOAD_ENVELOPE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, peer.map(|peer| peer.0.to_string())))
+        .on_upgrade(move |socket| handle_socket(socket, state, peer.ip()))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState, peer: Option<String>) {
+async fn handle_socket(mut socket: WebSocket, state: AppState, peer_ip: std::net::IpAddr) {
     run_protocol(
         &mut WebSocketChannel(&mut socket),
         state,
-        Peer::WebSocket { addr: peer },
+        AuthPeer::WebSocket(peer_ip),
     )
     .await;
 }
@@ -67,8 +68,8 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use hirsel_proto::{ChatAuthor, HostToClient};
     use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-    use tokio::net::TcpListener;
-    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tokio::net::{TcpListener, TcpSocket, TcpStream};
+    use tokio_tungstenite::{WebSocketStream, client_async, connect_async, tungstenite::Message};
 
     use crate::{
         build_state,
@@ -173,6 +174,43 @@ mod tests {
             }
             other => panic!("unexpected hello response: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_auth_throttle_uses_stable_peer_ip_across_source_ports() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.debug = false;
+        let state = build_state(config).await.unwrap();
+        let app = router_from_state(state.clone());
+        let addr = spawn_app(app).await;
+
+        let (mut first, first_addr) = connect_from_new_source(addr).await;
+        send_local_hello(&mut first, "wrong-token").await;
+        assert!(matches!(
+            read_local_frame(&mut first).await,
+            HostToClient::Error { detail, .. } if detail == "invalid token"
+        ));
+
+        let (mut second, second_addr) = connect_from_new_source(addr).await;
+        send_local_hello(&mut second, "still-wrong").await;
+        assert!(matches!(
+            read_local_frame(&mut second).await,
+            HostToClient::Error { detail, .. } if detail == "invalid token"
+        ));
+
+        assert_ne!(first_addr.port(), second_addr.port());
+        assert_eq!(first_addr.ip(), second_addr.ip());
+        let peer = crate::auth::AuthPeer::WebSocket(first_addr.ip());
+        assert_eq!(state.auth_throttle.failure_attempts(&peer), Some(2));
+
+        let (mut valid, _) = connect_from_new_source(addr).await;
+        send_local_hello(&mut valid, "test-token").await;
+        assert!(matches!(
+            read_local_frame(&mut valid).await,
+            HostToClient::HelloOk { .. }
+        ));
+        assert_eq!(state.auth_throttle.failure_attempts(&peer), None);
     }
 
     #[tokio::test]
@@ -688,9 +726,43 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         addr
+    }
+
+    async fn connect_from_new_source(addr: SocketAddr) -> (WebSocketStream<TcpStream>, SocketAddr) {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let stream = socket.connect(addr).await.unwrap();
+        let source = stream.local_addr().unwrap();
+        let (websocket, _) = client_async(format!("ws://{addr}/ws"), stream)
+            .await
+            .unwrap();
+        (websocket, source)
+    }
+
+    async fn send_local_hello(websocket: &mut WebSocketStream<TcpStream>, token: &str) {
+        websocket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "hello",
+                    "auth": {"static_token": token}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn read_local_frame(websocket: &mut WebSocketStream<TcpStream>) -> HostToClient {
+        let message = websocket.next().await.unwrap().unwrap();
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
     }
 
     fn test_config(data_dir: &std::path::Path) -> Config {

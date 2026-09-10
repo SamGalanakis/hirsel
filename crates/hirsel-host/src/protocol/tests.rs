@@ -1,14 +1,15 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{collections::VecDeque, net::Ipv4Addr, time::Duration};
 
 use async_trait::async_trait;
 use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
 use serde_json::json;
 
 use super::{
-    IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, Peer, ProtocolChannel,
+    IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
     authenticate, build_snapshot, handle_client_frame, run_protocol,
 };
 use crate::{
+    auth::AuthPeer,
     build_state,
     config::{AgentMode, Config, DriverMode, ProviderMode},
 };
@@ -46,9 +47,7 @@ async fn pairing_uses_the_apps_device_label() {
             code,
             device_label: "App-chosen label".to_string(),
         },
-        &Peer::Iroh {
-            node_id: "node-a".to_string(),
-        },
+        &AuthPeer::Iroh("node-a".to_string()),
     )
     .await
     .unwrap()
@@ -90,7 +89,7 @@ async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
         authenticate(
             &state,
             HelloAuth::StaticToken(String::new()),
-            &Peer::WebSocket { addr: None }
+            &AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into())
         )
         .await
         .is_err()
@@ -99,7 +98,7 @@ async fn static_owner_auth_rejects_empty_and_accepts_real_token() {
         authenticate(
             &state,
             HelloAuth::StaticToken("real-token".to_string()),
-            &Peer::WebSocket { addr: None }
+            &AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into())
         )
         .await
         .is_ok()
@@ -112,9 +111,7 @@ async fn websocket_rejects_iroh_only_auth() {
     let state = build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
-    let peer = Peer::WebSocket {
-        addr: Some("127.0.0.1:1234".to_string()),
-    };
+    let peer = AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into());
 
     assert_eq!(
         authenticate(
@@ -501,7 +498,12 @@ async fn snapshot_failure_sends_error_instead_of_empty_hello() {
         sent: Vec::new(),
     };
 
-    run_protocol(&mut channel, state, Peer::WebSocket { addr: None }).await;
+    run_protocol(
+        &mut channel,
+        state,
+        AuthPeer::WebSocket(Ipv4Addr::LOCALHOST.into()),
+    )
+    .await;
 
     assert_eq!(channel.sent.len(), 1);
     assert!(matches!(

@@ -149,7 +149,14 @@ async fn stopped_data_directory_relocation_keeps_blob_and_queued_image_ownership
     let app = crate::router_from_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
     let response = reqwest::Client::new()
         .get(format!("http://{address}/blob/{}", image.blob.id))
         .bearer_auth("test-token")

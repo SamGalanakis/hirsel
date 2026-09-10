@@ -7,6 +7,12 @@ across WebSocket and authenticated HTTP routes. Debug mode forces the Host to
 loopback even if `HIRSEL_LISTEN` names another interface. Production mode
 remains strict and requires the exact `HIRSEL_TOKEN`.
 
+Failed WebSocket authentication is throttled by the connection's source IP
+address, regardless of its ephemeral source port. Hirsel does not trust
+`Forwarded` or `X-Forwarded-For` headers for this identity. Deployments behind
+a shared proxy therefore share one WebSocket authentication-throttle history
+unless a future trusted-proxy contract explicitly provides client identity.
+
 The Host runs addressed Thread conversations plus current subagent, monitor and fork-triage resources. There are no side-session compatibility flags or Event/Ping APIs.
 
 History lives in `hirsel.sqlite`. New stores use the complete current schema 4

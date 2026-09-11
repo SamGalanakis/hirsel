@@ -65,6 +65,7 @@ const ancestorIds = [0, 1, 2, 3].map(offset => nestingBase + offset);
 execFileSync("sqlite3", [join(dataDir, "hirsel.sqlite"), `
   PRAGMA foreign_keys=ON;
   BEGIN;
+  DROP TRIGGER IF EXISTS threads_parent_immutable;
   INSERT INTO threads(id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision)
   VALUES
     (${ancestorIds[0]},'space',NULL,'Responsive parent A','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
@@ -72,6 +73,12 @@ execFileSync("sqlite3", [join(dataDir, "hirsel.sqlite"), `
     (${ancestorIds[2]},'space',${ancestorIds[1]},'Responsive parent C','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
     (${ancestorIds[3]},'space',${ancestorIds[2]},'Responsive parent D','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1);
   UPDATE threads SET parent_thread_id=${ancestorIds[3]} WHERE id=${thread.id};
+CREATE TRIGGER threads_parent_immutable
+BEFORE UPDATE OF parent_thread_id ON threads
+WHEN NEW.parent_thread_id IS NOT OLD.parent_thread_id
+BEGIN
+    SELECT RAISE(ABORT, 'Thread parent is immutable');
+END;
   COMMIT;
 `]);
 const token = `responsive-${crypto.randomUUID()}`;

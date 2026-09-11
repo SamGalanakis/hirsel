@@ -23,6 +23,20 @@ pub(super) struct NativeWorkerTurn {
     active_tools: Mutex<Option<Arc<NativeCodingTools>>>,
 }
 
+pub(super) struct NativeWorkerRunContext<'a> {
+    pub(super) config: &'a RuntimeConfig,
+    pub(super) tools: &'a ToolSuite,
+    pub(super) capacity: Arc<tokio::sync::Semaphore>,
+    pub(super) broadcaster: broadcast::Sender<HostToClient>,
+    pub(super) broadcast_log: BroadcastLog,
+}
+
+struct NativeTerminalProjection {
+    state: ThreadTurnState,
+    output: Option<(String, Vec<hirsel_proto::ToolCallSummary>)>,
+    reason: Option<String>,
+}
+
 impl NativeWorkerTurn {
     pub(super) fn new(turn_id: u64) -> Arc<Self> {
         Arc::new(Self {
@@ -48,40 +62,33 @@ impl NativeWorkerTurn {
 
     pub(super) async fn run(
         &self,
-        config: &RuntimeConfig,
-        tools: &ToolSuite,
+        context: NativeWorkerRunContext<'_>,
         request: OwnerTurn,
         execution: crate::storage::ThreadExecution,
-        capacity: Arc<tokio::sync::Semaphore>,
-        broadcaster: broadcast::Sender<HostToClient>,
-        broadcast_log: BroadcastLog,
     ) -> anyhow::Result<()> {
-        let result = self
-            .execute(
-                config,
-                tools,
-                &request,
-                execution,
-                capacity,
-                broadcaster,
-                broadcast_log,
-            )
-            .await;
+        let tools = context.tools;
+        let result = self.execute(&context, &request, execution).await;
         self.stop().await;
         let abandon_session = result.is_err();
 
         let integrity_failure = tools.turn_timeline_integrity_failure(self.turn_id);
-        let (state, output, reason) = match (integrity_failure.as_ref(), result) {
-            (Some(reason), _) => (ThreadTurnState::Failed, None, Some(reason.clone())),
+        let projection = match (integrity_failure.as_ref(), result) {
+            (Some(reason), _) => NativeTerminalProjection {
+                state: ThreadTurnState::Failed,
+                output: None,
+                reason: Some(reason.clone()),
+            },
             (None, Ok(output)) => native_terminal_projection(&output),
-            (None, Err(_error)) if self.cancel.is_cancelled() => {
-                (ThreadTurnState::Cancelled, None, None)
-            }
-            (None, Err(error)) => (
-                ThreadTurnState::Failed,
-                None,
-                Some(bounded_error(&error.to_string())),
-            ),
+            (None, Err(_error)) if self.cancel.is_cancelled() => NativeTerminalProjection {
+                state: ThreadTurnState::Cancelled,
+                output: None,
+                reason: None,
+            },
+            (None, Err(error)) => NativeTerminalProjection {
+                state: ThreadTurnState::Failed,
+                output: None,
+                reason: Some(bounded_error(&error.to_string())),
+            },
         };
 
         // Terminal delivery is an outbox operation. Once provider execution
@@ -118,9 +125,9 @@ impl NativeWorkerTurn {
                 .complete_thread_turn_with_failure(
                     &request.history_id,
                     self.turn_id,
-                    state,
-                    output.clone(),
-                    reason.as_deref(),
+                    projection.state,
+                    projection.output.clone(),
+                    projection.reason.as_deref(),
                 )
                 .await
             {
@@ -162,17 +169,14 @@ impl NativeWorkerTurn {
 
     async fn execute(
         &self,
-        config: &RuntimeConfig,
-        tools: &ToolSuite,
+        context: &NativeWorkerRunContext<'_>,
         request: &OwnerTurn,
         execution: crate::storage::ThreadExecution,
-        capacity: Arc<tokio::sync::Semaphore>,
-        broadcaster: broadcast::Sender<HostToClient>,
-        broadcast_log: BroadcastLog,
     ) -> anyhow::Result<lash::TurnOutput> {
+        let tools = context.tools;
         let _permit = tokio::select! {
             () = self.cancel.cancelled() => anyhow::bail!("native worker turn cancelled before admission"),
-            permit = capacity.acquire() => permit?,
+            permit = context.capacity.acquire() => permit?,
         };
         let accepted = request.stored_turn(&tools.storage()).await?;
         anyhow::ensure!(
@@ -239,7 +243,8 @@ impl NativeWorkerTurn {
             )
             .await?;
 
-        let lash_dir = config
+        let lash_dir = context
+            .config
             .data_dir
             .join("thread-runtime")
             .join(&request.history_id)
@@ -319,8 +324,8 @@ impl NativeWorkerTurn {
             request.thread_id,
             self.turn_id,
             tools.clone(),
-            broadcaster,
-            broadcast_log,
+            context.broadcaster.clone(),
+            context.broadcast_log.clone(),
         );
         let report = session
             .turn(input)
@@ -341,32 +346,32 @@ impl NativeWorkerTurn {
     }
 }
 
-fn native_terminal_projection(
-    output: &lash::TurnOutput,
-) -> (
-    ThreadTurnState,
-    Option<(String, Vec<hirsel_proto::ToolCallSummary>)>,
-    Option<String>,
-) {
+fn native_terminal_projection(output: &lash::TurnOutput) -> NativeTerminalProjection {
     match &output.result.outcome {
-        lash::TurnOutcome::Finished(_) => {
-            (ThreadTurnState::Completed, turn_chat_payload(output), None)
-        }
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => {
-            (ThreadTurnState::Cancelled, turn_chat_payload(output), None)
-        }
-        lash::TurnOutcome::Stopped(stop) => (
-            ThreadTurnState::Failed,
-            None,
-            Some(bounded_error(&format!(
+        lash::TurnOutcome::Finished(_) => NativeTerminalProjection {
+            state: ThreadTurnState::Completed,
+            output: turn_chat_payload(output),
+            reason: None,
+        },
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => NativeTerminalProjection {
+            state: ThreadTurnState::Cancelled,
+            output: turn_chat_payload(output),
+            reason: None,
+        },
+        lash::TurnOutcome::Stopped(stop) => NativeTerminalProjection {
+            state: ThreadTurnState::Failed,
+            output: None,
+            reason: Some(bounded_error(&format!(
                 "native Lash worker stopped: {stop:?}"
             ))),
-        ),
-        lash::TurnOutcome::AgentFrameSwitch { .. } => (
-            ThreadTurnState::Failed,
-            None,
-            Some("native Lash standard worker attempted an unsupported agent-frame switch".into()),
-        ),
+        },
+        lash::TurnOutcome::AgentFrameSwitch { .. } => NativeTerminalProjection {
+            state: ThreadTurnState::Failed,
+            output: None,
+            reason: Some(
+                "native Lash standard worker attempted an unsupported agent-frame switch".into(),
+            ),
+        },
     }
 }
 

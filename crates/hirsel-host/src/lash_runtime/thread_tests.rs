@@ -48,7 +48,24 @@ fn native_execution(cwd: std::path::PathBuf) -> crate::storage::ThreadExecution 
 
 #[tokio::test]
 async fn native_worker_rejects_artifact_references_before_acceptance() {
-    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
+    let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
+    let store = crate::host_config::ConfigStore::load(
+        dir.path().join("hirsel.toml"),
+        std::path::Path::new("/docs/hirsel-config.md"),
+        &crate::host_config::EnvBootstrap::default(),
+    )
+    .await
+    .unwrap();
+    store
+        .upsert_provider(&crate::host_config::StoredProvider {
+            id: "openrouter".into(),
+            label: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: Some("test-key-no-inference".into()),
+            default_model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.into(),
+        })
+        .await
+        .unwrap();
     let caller = storage.test_running_caller().await;
     let before = storage.thread_snapshot().await.unwrap().len();
     let tools = ScopedThreadTools {

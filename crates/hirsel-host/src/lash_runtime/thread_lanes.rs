@@ -1,5 +1,5 @@
 //! Lazy independent Thread sessions. A durable FIFO feeds each lane; capacity is shared.
-use super::native_worker::NativeWorkerTurn;
+use super::native_worker::{NativeWorkerRunContext, NativeWorkerTurn};
 use super::*;
 use tokio::sync::{OnceCell, Semaphore};
 
@@ -224,13 +224,15 @@ impl ThreadRuntimeRegistry {
                     .spawn(async move {
                         if let Err(error) = work
                             .run(
-                                &config,
-                                &tools,
+                                NativeWorkerRunContext {
+                                    config: &config,
+                                    tools: &tools,
+                                    capacity,
+                                    broadcaster,
+                                    broadcast_log,
+                                },
                                 request,
                                 execution,
-                                capacity,
-                                broadcaster,
-                                broadcast_log,
                             )
                             .await
                         {

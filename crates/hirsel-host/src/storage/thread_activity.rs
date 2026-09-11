@@ -216,6 +216,13 @@ impl Storage {
                     "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     params![key, value],
                 )?;
+                // The provider or a coding tool may already have observed this
+                // accepted input. Retire the durable request with the turn so
+                // startup cannot later dispatch it as fresh work.
+                tx.execute(
+                    "DELETE FROM thread_requests WHERE json_extract(payload,'$.turn_id')=?1",
+                    [id],
+                )?;
             }
             turns.push(finish(&tx, id, ThreadTurnState::Interrupted, None)?);
         }

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
 import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
+import { renderedInlineCodeText } from "./product-runbook-oracles.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const requested = process.argv[2] ?? "all";
@@ -344,7 +345,7 @@ function timelineProjection(dom) {
 }
 
 function renderedMarkdownText(text) {
-  return text.trim().replace(/^(\*{1,3}|_{1,3})([\s\S]*)\1$/, "$2");
+  return renderedInlineCodeText(text.trim().replace(/^(\*{1,3}|_{1,3})([\s\S]*)\1$/, "$2"));
 }
 
 async function expandInlineTools(page, callIds) {
@@ -1053,7 +1054,12 @@ async function runNativeLashWorker(context, fixture) {
   assert.equal(await parentComposer.inputValue(), draftMarker);
   assert.equal(await parentComposer.isEnabled(), true);
   const responsive = await captureNativeWorker("10-parent-responsive", context, parentThreadId, parentThreadId, childThreadId);
-  assert.equal(responsive.dom.entries.some(entry => entry.text.includes(parentPrompt)), true);
+  const parentDom = responsive.dom.entries.find(entry => entry.messageId === String(parent.owner.id));
+  assert.equal(parentDom?.text, renderedInlineCodeText(parentPrompt), "rendered parent prompt content differs from its raw Markdown");
+  const parentDetail = responsive.detail.messages.find(message => message.id === parent.owner.id);
+  assert.equal(parentDetail?.body, parentPrompt, "authenticated parent prompt differs from the accepted raw Markdown");
+  const parentStore = responsive.store.messages.find(message => message.id === parent.owner.id);
+  assert.equal(parentStore?.body, parentPrompt, "stored parent prompt differs from the accepted raw Markdown");
   assert.equal(latestFrame(frames, frame => frame.type === "thread_turn" && frame.turn.id === firstTurn.id)?.frame.turn.state, "running");
   assert.equal(toolEvents(frames, firstTurn.id).some(event => event.kind === "tool_done" && event.id === secondCommand.id), false, "passing command ended before responsiveness evidence");
   await parentComposer.fill("");

@@ -159,6 +159,12 @@ function threadRecord(snapshot, id) {
 async function domSnapshot(page) {
   return page.evaluate(() => {
     const visible = element => Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+    const textLineCount = element => {
+      if (!element) return null;
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return new Set([...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top))).size;
+    };
     const current = document.querySelector("main[data-thread-id]");
     return {
       url: location.href,
@@ -168,11 +174,16 @@ async function domSnapshot(page) {
         kind: current.querySelector('[data-slot="thread-context"] [data-thread-kind]')?.getAttribute("data-thread-kind") ?? null,
         text: current.textContent?.trim() ?? "",
       } : null,
-      rows: [...document.querySelectorAll("[data-thread-row]")].filter(visible).map(row => ({
-        id: Number(row.getAttribute("data-thread-row")),
-        text: row.textContent?.trim() ?? "",
-        current: row.getAttribute("aria-current"),
-      })),
+      rows: [...document.querySelectorAll("[data-thread-row]")].filter(visible).map(row => {
+        const title = row.querySelector('[data-slot="thread-row-title"]');
+        return {
+          id: Number(row.getAttribute("data-thread-row")),
+          text: row.textContent?.trim() ?? "",
+          title: title?.textContent?.trim() ?? null,
+          titleLines: textLineCount(title),
+          current: row.getAttribute("aria-current"),
+        };
+      }),
       alerts: [...document.querySelectorAll('[role="alert"]')].filter(visible).map(row => row.textContent?.trim() ?? ""),
       buttons: [...document.querySelectorAll("button")].filter(visible).map(button => button.textContent?.trim() || button.getAttribute("aria-label") || ""),
       pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
@@ -294,6 +305,13 @@ function assertKindPresentation(dom, kind) {
   const radius = Number.parseFloat(avatar.radius);
   if (kind === "space") assert(radius < 20, `Space avatar is not visibly squared (${avatar.radius})`);
   else assert(radius > 100, `Task avatar is not visibly round (${avatar.radius})`);
+}
+
+function assertReadableRowTitles(dom, label) {
+  for (const row of dom.rows) {
+    assert(row.title, `${label}: Thread ${row.id} has no visible title`);
+    assert(row.titleLines <= 2, `${label}: ${row.title} fragmented across ${row.titleLines} lines`);
+  }
 }
 
 const token = `spaces-runbook-${crypto.randomUUID()}`;
@@ -426,12 +444,14 @@ try {
   await page.getByText(/Child threads · 1/).waitFor();
   checkpoints.taskDesktop = await capture(page, url, token, "40-task-desktop", rootTask.id);
   assertKindPresentation(checkpoints.taskDesktop.dom, "task");
+  assertReadableRowTitles(checkpoints.taskDesktop.dom, "desktop Task inventory");
 
   await page.setViewportSize({ width: 390, height: 844 });
   const taskNarrowDrawer = await ensureDrawer(page);
   await taskNarrowDrawer.getByRole("button", { name: `Expand ${rootTask.title}`, exact: true }).click();
   checkpoints.taskNarrow = await capture(page, url, token, "41-task-narrow", rootTask.id);
   assertKindPresentation(checkpoints.taskNarrow.dom, "task");
+  assertReadableRowTitles(checkpoints.taskNarrow.dom, "narrow Task hierarchy");
 
   // Fixture-only layer: add visible operational state and two generated actions
   // directly to this disposable store. Core create/action/conversion claims above
@@ -484,11 +504,13 @@ try {
   await ensureDrawer(page);
   checkpoints.spaceDesktop = await capture(page, url, token, "50-space-fixture-desktop", rootSpace.id);
   assertKindPresentation(checkpoints.spaceDesktop.dom, "space");
+  assertReadableRowTitles(checkpoints.spaceDesktop.dom, "desktop Space inventory");
   await page.setViewportSize({ width: 390, height: 844 });
   const spaceNarrowDrawer = await ensureDrawer(page);
   await spaceNarrowDrawer.getByRole("button", { name: `Expand ${rootSpace.title}`, exact: true }).click();
   checkpoints.spaceNarrow = await capture(page, url, token, "51-space-fixture-narrow", rootSpace.id);
   assertKindPresentation(checkpoints.spaceNarrow.dom, "space");
+  assertReadableRowTitles(checkpoints.spaceNarrow.dom, "narrow Space hierarchy");
 
   assert.equal(storeSnapshot().schemaVersion, 6, "runbook did not use durable schema 6");
   assert.deepEqual(

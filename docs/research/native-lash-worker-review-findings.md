@@ -13,7 +13,9 @@ kept here so later runtime changes can search for the same failure shapes.
   a lookalike route that was never verified.
 - Partial-line continuation can advance beyond bytes that were never returned.
 - Completed shell calls can lose ownership of still-running descendants before
-  worker shutdown.
-- A transient tool-result consumer cannot own command lifetime. The provider
-  must retain the owned shell future, cancel it through its token, and join it
-  during shutdown even when the consumer disappears.
+  worker shutdown. Hirsel's Linux executor therefore retains the unreaped
+  direct leader as trustworthy process-group identity, terminates the group,
+  and only then reaps and drains it.
+- A transient tool-result consumer cannot own command lifetime. The Hirsel tool
+  provider retains its host-owned command task, cancels it through its token,
+  and joins it during shutdown even when the consumer disappears.

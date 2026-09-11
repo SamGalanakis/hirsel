@@ -22,7 +22,7 @@ async fn history_reset_reaps_an_owned_native_shell_command() {
         "hirsel:native-coding:exec-command:v1",
         "exec_command",
         serde_json::json!({
-            "cmd": "printf '%s' \"$$\" > history-reset.pid; exec sleep 30",
+            "cmd": "sh -c 'echo $$ > history-reset.pid; sleep 0.5; : > history-reset-late; exec sleep 30' >/dev/null 2>&1 & wait",
             "timeout_ms": 30000
         }),
         None,
@@ -74,11 +74,31 @@ async fn history_reset_reaps_an_owned_native_shell_command() {
         output.outcome,
         lash_core::ToolCallOutcome::Cancelled(_)
     ));
-    assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        -1,
-        "native shell survived reset"
+    assert!(
+        native_test_process_is_terminated(pid),
+        "native shell descendant survived reset"
     );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !dir.path().join("history-reset-late").exists(),
+        "native shell descendant wrote after reset returned"
+    );
+}
+
+#[cfg(unix)]
+fn native_test_process_is_terminated(pid: i32) -> bool {
+    // SAFETY: signal zero only probes the test-owned PID read from the fixture.
+    if unsafe { libc::kill(pid, 0) } == -1 {
+        return true;
+    }
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return true;
+    };
+    matches!(
+        stat.rsplit_once(") ")
+            .and_then(|(_, fields)| fields.split_whitespace().next()),
+        Some("Z" | "X")
+    )
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 //! shell and process-control tools.
 
 mod file_tools;
+mod shell;
 
 use std::{
     future::Future,
@@ -18,24 +19,22 @@ use lash::tools::{
     ToolBinding, ToolCall, ToolContract, ToolDefinition, ToolDefinitionBindingExt, ToolManifest,
     ToolOutcome, ToolProvider,
 };
-use lash_core::{ToolCallOutcome, ToolValue};
 use serde_json::{Value, json};
-use tempfile::TempPath;
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use self::file_tools::execute_file_tool;
+use self::shell::{ShellArgs, ShellExecutor};
 
 const READ: &str = "read";
 const EDIT: &str = "edit";
 const WRITE: &str = "write";
 const EXEC_COMMAND: &str = "exec_command";
-const PROFILE_SHELL: &str = "/bin/sh";
 
 /// The complete, four-tool profile for a native coding worker.
 pub(crate) struct NativeCodingTools {
     cwd: Arc<PathBuf>,
-    shell: lash_tools::shell::StandardShell,
+    shell: ShellExecutor,
     mutations: Arc<Mutex<()>>,
     lifecycle: Arc<Lifecycle>,
 }
@@ -54,7 +53,7 @@ impl NativeCodingTools {
             cwd.display()
         );
 
-        let shell = lash_tools::shell::StandardShell::new().with_cwd(cwd.clone());
+        let shell = ShellExecutor::new(cwd.clone());
         Ok(Self {
             cwd: Arc::new(cwd),
             shell,
@@ -67,6 +66,17 @@ impl NativeCodingTools {
     /// admitted tool body to finish. Repeated calls are safe.
     pub(crate) async fn shutdown(&self) {
         self.lifecycle.shutdown().await;
+    }
+
+    #[cfg(test)]
+    fn with_reader_failure_barrier(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
+        self.shell = self.shell.with_reader_failure_barrier(barrier);
+        self
+    }
+
+    #[cfg(test)]
+    async fn wait_for_owned_work_to_finish(&self) {
+        self.lifecycle.wait_for_idle_for_test().await;
     }
 
     async fn execute_file(&self, name: &str, args: &Value) -> ToolOutcome {
@@ -83,45 +93,21 @@ impl NativeCodingTools {
         args: &Value,
         attempt_cancellation: CancellationToken,
     ) -> ToolOutcome {
-        let Some(command) = args.get("cmd").and_then(Value::as_str) else {
-            return ToolOutcome::err_fmt("missing required string field `cmd`");
+        let owned_args = match ShellArgs::parse(args) {
+            Ok(args) => args,
+            Err(outcome) => return outcome,
         };
-        let status_owner = match tempfile::NamedTempFile::new() {
-            Ok(file) => file.into_temp_path(),
-            Err(error) => {
-                return ToolOutcome::err_fmt(format!(
-                    "failed to create shell exit status control file: {error}"
-                ));
-            }
-        };
-        let status_path = status_owner.to_path_buf();
-        let mut owned_args = args.clone();
-        let Some(arguments) = owned_args.as_object_mut() else {
-            return ToolOutcome::err_fmt("exec_command arguments must be an object");
-        };
-        arguments.insert(
-            "cmd".to_string(),
-            Value::String(wrap_one_shot_command(command, &status_path)),
-        );
-        arguments.insert(
-            "shell".to_string(),
-            Value::String(PROFILE_SHELL.to_string()),
-        );
-        arguments.insert("login".to_string(), Value::Bool(false));
+        if attempt_cancellation.is_cancelled() {
+            return ToolOutcome::cancelled("tool call cancelled before command start");
+        }
 
         let shutdown_cancellation = CancellationToken::new();
         let retained_cancellation = shutdown_cancellation.clone();
         let shell = self.shell.clone();
         let work = async move {
-            execute_owned_shell(
-                shell,
-                owned_args,
-                attempt_cancellation,
-                shutdown_cancellation,
-                status_path,
-                status_owner,
-            )
-            .await
+            shell
+                .execute(owned_args, attempt_cancellation, shutdown_cancellation)
+                .await
         };
         self.lifecycle
             .run_owned(Some(retained_cancellation), work)
@@ -190,6 +176,23 @@ impl Lifecycle {
             }
         }
     }
+
+    #[cfg(test)]
+    async fn wait_for_idle_for_test(&self) {
+        loop {
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .tasks
+                .iter()
+                .all(tokio::task::JoinHandle::is_finished)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 struct LifecycleState {
@@ -230,62 +233,6 @@ impl ToolProvider for NativeCodingTools {
             name => ToolOutcome::err_fmt(format!("unknown native coding tool `{name}`")),
         }
     }
-}
-
-async fn execute_owned_shell(
-    shell: lash_tools::shell::StandardShell,
-    args: Value,
-    attempt_cancellation: CancellationToken,
-    shutdown_cancellation: CancellationToken,
-    status_path: PathBuf,
-    _status_owner: TempPath,
-) -> ToolOutcome {
-    let shell_call = shell.exec_command_owned(args, shutdown_cancellation.clone());
-    tokio::pin!(shell_call);
-    let outcome = tokio::select! {
-        outcome = &mut shell_call => outcome,
-        () = attempt_cancellation.cancelled() => {
-            shutdown_cancellation.cancel();
-            shell_call.await
-        }
-        () = shutdown_cancellation.cancelled() => shell_call.await,
-    };
-    restore_shell_exit_code(outcome, read_shell_exit_code(&status_path))
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn wrap_one_shot_command(command: &str, status_path: &std::path::Path) -> String {
-    format!(
-        "__hirsel_native_command={command}; \
-         ( eval \"$__hirsel_native_command\" ); \
-         __hirsel_native_status=$?; \
-         printf '%s' \"$__hirsel_native_status\" > {status}; \
-         kill -KILL -$$",
-        command = shell_quote(command),
-        status = shell_quote(&status_path.to_string_lossy()),
-    )
-}
-
-fn read_shell_exit_code(status_path: &std::path::Path) -> Option<i32> {
-    std::fs::read_to_string(status_path)
-        .ok()
-        .and_then(|value| value.trim().parse::<i32>().ok())
-}
-
-fn restore_shell_exit_code(mut outcome: ToolOutcome, status: Option<i32>) -> ToolOutcome {
-    let Some(status) = status else {
-        return outcome;
-    };
-    if let ToolOutcome::Done(output) = &mut outcome
-        && let ToolCallOutcome::Success(ToolValue::UntrustedJson(Value::Object(record))) =
-            &mut output.outcome
-    {
-        record.insert("exit_code".to_string(), json!(status));
-    }
-    outcome
 }
 
 fn definitions() -> Vec<ToolDefinition> {
@@ -358,7 +305,7 @@ fn exec_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "hirsel:native-coding:exec-command:v1",
         EXEC_COMMAND,
-        "Run one noninteractive POSIX /bin/sh command in the accepted worker cwd and wait for completion. Nonzero exits are ordinary result data. Timeout and cancellation kill owned children. Large output is truncated with a readable full-output path.",
+        "Run one noninteractive /bin/sh command in the accepted worker cwd and wait for completion. Nonzero exits are ordinary result data. On Linux, every terminal path kills same-group descendants before reaping the direct shell. Timeout and cancellation kill owned children. Large output is truncated with a readable full-output path.",
         json!({
             "type": "object",
             "properties": {

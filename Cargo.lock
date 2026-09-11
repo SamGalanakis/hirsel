@@ -456,12 +456,6 @@ checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bitflags"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
-
-[[package]]
-name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
@@ -591,12 +585,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "cfg_aliases"
@@ -1027,7 +1015,7 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "block2",
  "libc",
  "objc2",
@@ -1054,12 +1042,6 @@ dependencies = [
  "once_cell",
  "winapi",
 ]
-
-[[package]]
-name = "downcast-rs"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "dunce"
@@ -1188,17 +1170,6 @@ name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
-
-[[package]]
-name = "filedescriptor"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e40758ed24c9b2eeb76c35fb0aebc66c626084edd827e07e1552279814c6682d"
-dependencies = [
- "libc",
- "thiserror 1.0.69",
- "winapi",
-]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1743,7 +1714,6 @@ dependencies = [
  "lash-internal-provider-anthropic",
  "lash-internal-provider-openai",
  "lash-internal-sqlite-store",
- "lash-internal-tools",
  "lash-runtime",
  "libc",
  "qrcode",
@@ -2162,7 +2132,7 @@ dependencies = [
  "backon",
  "blake3",
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "ctutils",
  "data-encoding",
  "derive_more",
@@ -2230,7 +2200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46f6a9b39d18e6345f5c151afd299f2488e2cb5c520fe41b107b6bd3dc4c3349"
 dependencies = [
  "arc-swap",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "hickory-resolver",
  "iroh-base",
@@ -2282,7 +2252,7 @@ checksum = "24bd586cf927f7b700f56ec3639b53cb5fa901ce284784051ff71092bfbf8193"
 dependencies = [
  "blake3",
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "data-encoding",
  "derive_more",
  "getrandom 0.4.3",
@@ -2494,7 +2464,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-core"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2520,7 +2490,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-http-transport"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2534,7 +2504,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-lashlang"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "compact_str 0.9.1",
@@ -2558,7 +2528,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-lashlang-runtime"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2579,7 +2549,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-llm-transport"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2593,7 +2563,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-plugin-tool-output-budget"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "lash-internal-core",
  "lash-internal-protocol-standard",
@@ -2605,7 +2575,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-protocol-rlm"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2629,7 +2599,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-protocol-standard"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "lash-internal-core",
@@ -2641,7 +2611,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-provider-anthropic"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "base64",
@@ -2657,7 +2627,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-provider-auth"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "base64",
@@ -2675,7 +2645,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-provider-openai"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "base64",
@@ -2697,7 +2667,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-remote-protocol"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "base64",
  "lash-internal-core",
@@ -2711,7 +2681,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-rlm-types"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "lash-internal-sansio",
  "serde",
@@ -2721,7 +2691,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-sansio"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "blake3",
  "jsonschema",
@@ -2733,7 +2703,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-sqlite-store"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2756,7 +2726,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-tool-support"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "lash-internal-core",
@@ -2767,28 +2737,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-internal-tools"
-version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
-dependencies = [
- "async-trait",
- "lash-internal-core",
- "lash-internal-sansio",
- "lash-internal-tool-support",
- "libc",
- "portable-pty",
- "reqwest 0.13.4",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "lash-internal-trace"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "chrono",
  "lash-internal-sansio",
@@ -2802,7 +2753,7 @@ dependencies = [
 [[package]]
 name = "lash-internal-typescript"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "lash-internal-lashlang",
  "ryu-js",
@@ -2815,7 +2766,7 @@ dependencies = [
 [[package]]
 name = "lash-regress"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "hashbrown 0.16.1",
  "memchr",
@@ -2824,7 +2775,7 @@ dependencies = [
 [[package]]
 name = "lash-runtime"
 version = "0.0.0-dev"
-source = "git+https://github.com/Ascending-AI/lash?rev=8ee7a97353a075155f02fd4c00254c17e106b3b7#8ee7a97353a075155f02fd4c00254c17e106b3b7"
+source = "git+https://github.com/Ascending-AI/lash?rev=81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c#81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3050,7 +3001,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2ab99dfb861450e68853d34ae665243a88b8c493d01ba957321a1e9b2312bbe"
 dependencies = [
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "futures-buffered",
  "futures-lite",
@@ -3124,7 +3075,7 @@ version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2288fcb784eb3defd5fb16f4c4160d5f477de192eac730f43e1d11c24d9a007"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "libc",
  "log",
  "netlink-packet-core",
@@ -3166,7 +3117,7 @@ checksum = "4d9cbe01741347ef750d743d6690603f5eed8341e679fb51c8e629337aa11976"
 dependencies = [
  "atomic-waker",
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "ipnet",
  "js-sys",
@@ -3202,18 +3153,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
-name = "nix"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
-dependencies = [
- "bitflags 2.13.1",
- "cfg-if",
- "cfg_aliases 0.1.1",
- "libc",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3239,7 +3178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e4bb6601fa543c110d8957813267d5a8d775a0f8fbaccf1f615d06ba9b10da"
 dependencies = [
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "noq-proto",
  "noq-udp",
@@ -3287,7 +3226,7 @@ version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02bba20e097a5a16cd0ad14ec882fae1e80a092a124e9422fc4dddd92e96a647"
 dependencies = [
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "libc",
  "socket2",
  "tracing",
@@ -3425,7 +3364,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "block2",
  "dispatch2",
  "libc",
@@ -3438,7 +3377,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c71e34919aba0d701380d911702455038a8a3587467fe0141d6a71501e7ffe48"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -3458,7 +3397,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "block2",
  "libc",
  "objc2",
@@ -3471,7 +3410,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "objc2",
  "objc2-core-foundation",
 ]
@@ -3492,7 +3431,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7216bd11cbda54ccabcab84d523dc93b858ec75ecfb3a7d89513fa22464da396"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "dispatch2",
  "libc",
  "objc2",
@@ -3707,7 +3646,7 @@ version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "crc32fast",
  "fdeflate",
  "flate2",
@@ -3733,27 +3672,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "portable-pty"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4a596a2b3d2752d94f51fac2d4a96737b8705dddd311a32b9af47211f08671e"
-dependencies = [
- "anyhow",
- "bitflags 1.3.2",
- "downcast-rs",
- "filedescriptor",
- "lazy_static",
- "libc",
- "log",
- "nix",
- "serial2",
- "shared_library",
- "shell-words",
- "winapi",
- "winreg",
 ]
 
 [[package]]
@@ -3894,7 +3812,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
 dependencies = [
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
@@ -3936,7 +3854,7 @@ version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
 dependencies = [
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
@@ -4056,7 +3974,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
 ]
 
 [[package]]
@@ -4215,7 +4133,7 @@ version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",
@@ -4244,7 +4162,7 @@ version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -4426,7 +4344,7 @@ version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
@@ -4591,17 +4509,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serial2"
-version = "0.2.38"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b16809bc35793b19ce4e0c53924bc0dce3937f15487997cfdaed936004180730"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4648,22 +4555,6 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
-
-[[package]]
-name = "shared_library"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a9e7e0f2bfae24d8a5b5a66c5b257a83c7412304311512a0c054cd5e619da11"
-dependencies = [
- "lazy_static",
- "libc",
-]
-
-[[package]]
-name = "shell-words"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
@@ -4715,7 +4606,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a75cbde1bf934313596a004973e462f9a82caa814dcf1a5f507bdf51597eeb4"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
 ]
 
 [[package]]
@@ -4898,7 +4789,7 @@ version = "28.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08b25e2e91491e0e82f932c7a5a07f5c90bd227dbde0c34aeb231d5b3a5e5107"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "is-macro",
  "num-bigint",
  "once_cell",
@@ -4917,7 +4808,7 @@ version = "44.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c83ff3be8652d2caf9f074853f8c33a4a05b17079c1586f195eec17d3ec553"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "compact_str 0.7.1",
  "either",
  "num-bigint",
@@ -5011,7 +4902,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "core-foundation 0.9.4",
  "system-configuration-sys",
 ]
@@ -5360,7 +5251,7 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "bytes",
  "futures-core",
  "futures-util",
@@ -6222,15 +6113,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winreg"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
-dependencies = [
- "winapi",
 ]
 
 [[package]]

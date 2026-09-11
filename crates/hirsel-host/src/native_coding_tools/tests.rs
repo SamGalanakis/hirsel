@@ -260,14 +260,22 @@ async fn shell_uses_explicit_posix_profile_cwd_and_nonzero_result_data() {
     let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
     let result = coordinated_shell_call(
         tools,
-        json!({ "cmd": "printf '%s|%s' \"$PWD\" \"$0\"; exit 7", "timeout_ms": 5000 }),
+        json!({
+            "cmd": "printf 'stdout:%s|%s' \"$PWD\" \"$0\"; printf 'stderr:visible' >&2; exit 7",
+            "timeout_ms": 5000
+        }),
     )
     .await
     .value_for_projection();
     assert_eq!(result["exit_code"], 7);
-    assert_eq!(
-        result["output"],
-        format!("{}|/bin/sh", directory.path().display())
+    let output = result["output"].as_str().expect("combined command output");
+    assert!(
+        output.contains(&format!("stdout:{}|/bin/sh", directory.path().display())),
+        "stdout and shell profile missing from {output:?}"
+    );
+    assert!(
+        output.contains("stderr:visible"),
+        "stderr missing from {output:?}"
     );
 }
 
@@ -278,11 +286,12 @@ async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tools =
             Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+        let late_path = directory.path().join("late-marker");
         let result = coordinated_shell_call(
             tools.clone(),
             json!({
                 "cmd": format!(
-                    "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid; exit {status}"
+                    "sh -c 'echo $$ > descendant.pid; sleep 0.5; : > late-marker; exec sleep 30' >/dev/null 2>&1 & while [ ! -e descendant.pid ]; do sleep 0.01; done; exit {status}"
                 ),
                 "timeout_ms": 5000
             }),
@@ -291,7 +300,6 @@ async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
         .value_for_projection();
         assert_eq!(result["exit_code"], status);
 
-        tools.shutdown().await;
         let pid = std::fs::read_to_string(directory.path().join("descendant.pid"))
             .expect("pid")
             .trim()
@@ -301,6 +309,12 @@ async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
             wait_for_process_exit(pid).await,
             "background descendant {pid} survived status {status}"
         );
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !late_path.exists(),
+            "status {status} descendant wrote late marker"
+        );
+        tools.shutdown().await;
     }
 }
 
@@ -311,7 +325,7 @@ async fn shell_timeout_is_a_bounded_failure() {
     let output = coordinated_shell_call(
         tools.clone(),
         json!({
-            "cmd": "printf '%s' \"$$\" > timeout.pid; exec sleep 30",
+            "cmd": "sh -c 'echo $$ > timeout.pid; sleep 0.5; : > timeout-late; exec sleep 30' >/dev/null 2>&1 & printf before-timeout; wait",
             "timeout_ms": 200
         }),
     )
@@ -319,6 +333,13 @@ async fn shell_timeout_is_a_bounded_failure() {
     assert!(matches!(output.outcome, ToolCallOutcome::Failure(_)));
     let result = output.value_for_projection();
     assert_eq!(result["code"], "shell_timeout");
+    assert!(
+        result["raw"]["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("before-timeout"),
+        "timeout projection: {result}"
+    );
     let pid = std::fs::read_to_string(directory.path().join("timeout.pid"))
         .expect("pid")
         .trim()
@@ -328,6 +349,8 @@ async fn shell_timeout_is_a_bounded_failure() {
         wait_for_process_exit(pid).await,
         "timed-out shell {pid} survived return"
     );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(!directory.path().join("timeout-late").exists());
     tools.shutdown().await;
 }
 
@@ -340,7 +363,10 @@ async fn shutdown_cancels_and_reaps_an_owned_shell_process() {
         "call-1",
         "hirsel:native-coding:exec-command:v1",
         "exec_command",
-        json!({ "cmd": "echo $$ > child.pid; exec sleep 30", "timeout_ms": 30000 }),
+        json!({
+            "cmd": "sh -c 'echo $$ > child.pid; sleep 0.5; : > shutdown-late; exec sleep 30' >/dev/null 2>&1 & wait",
+            "timeout_ms": 30000
+        }),
         None,
         Value::Null,
     );
@@ -388,6 +414,8 @@ async fn shutdown_cancels_and_reaps_an_owned_shell_process() {
         wait_for_process_exit(pid).await,
         "owned child {pid} survived shutdown"
     );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(!directory.path().join("shutdown-late").exists());
 
     let rejected = outcome_output(call(&tools, "read", &json!({ "path": "child.pid" })).await);
     assert!(matches!(rejected.outcome, ToolCallOutcome::Cancelled(_)));
@@ -398,26 +426,39 @@ async fn shutdown_cancels_and_reaps_an_owned_shell_process() {
 async fn abandoned_result_consumer_does_not_abandon_early_shell_termination() {
     let directory = tempfile::tempdir().expect("tempdir");
     let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
-    let running = tokio::spawn(coordinated_shell_call(
-        tools.clone(),
-        json!({
-            "cmd": "printf '%s' \"$$\" > early.pid; sleep 1; kill -KILL $$",
-            "timeout_ms": 30000
-        }),
-    ));
-    let pid_path = directory.path().join("early.pid");
-    for _ in 0..200 {
-        if pid_path.exists() {
+    let call_tools = tools.clone();
+    let running = tokio::spawn(async move {
+        call_tools
+            .execute_shell(
+                &json!({
+                    "cmd": "echo $$ > leader.pid; sh -c 'echo $$ > descendant.pid; sleep 0.6; : > descendant-late; exec sleep 3' >/dev/null 2>&1 & while [ ! -e descendant.pid ]; do sleep 0.01; done; : > ready; while :; do sleep 1; done; : > leader-epilogue",
+                    "timeout_ms": 30000
+                }),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+    });
+    let ready_path = directory.path().join("ready");
+    for _ in 0..500 {
+        if ready_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(pid_path.exists(), "command did not publish its pid");
-    let pid = std::fs::read_to_string(&pid_path)
+    assert!(
+        ready_path.exists(),
+        "command did not publish descendant readiness"
+    );
+    let leader = std::fs::read_to_string(directory.path().join("leader.pid"))
         .expect("pid")
         .trim()
         .parse::<i32>()
         .expect("numeric pid");
+    let descendant = std::fs::read_to_string(directory.path().join("descendant.pid"))
+        .expect("descendant pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric descendant pid");
 
     running.abort();
     assert!(
@@ -426,19 +467,26 @@ async fn abandoned_result_consumer_does_not_abandon_early_shell_termination() {
             .expect_err("result consumer should abort")
             .is_cancelled()
     );
-    for _ in 0..300 {
-        if !process_exists(pid) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     assert!(
-        !process_exists(pid),
-        "shell did not terminate before its wrapper status publication"
+        !process_is_terminated(leader),
+        "abandoning the result consumer terminated provider-owned work"
     );
+    // SAFETY: `leader` came from this test's still-running direct child. The
+    // provider retains its child and pidfd ownership until group cleanup.
+    assert_eq!(unsafe { libc::kill(leader, libc::SIGKILL) }, 0);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tools.wait_for_owned_work_to_finish(),
+    )
+    .await
+    .expect("retained provider work did not reach its terminal outcome");
     tokio::time::timeout(Duration::from_secs(5), tools.shutdown())
         .await
         .expect("shutdown must join the retained terminal shell task");
+    assert_process_terminated(descendant, "redirected same-group descendant");
+    assert!(!directory.path().join("leader-epilogue").exists());
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!directory.path().join("descendant-late").exists());
 }
 
 #[cfg(unix)]
@@ -453,7 +501,7 @@ async fn attempt_cancellation_reaps_owned_shell_before_returning() {
         call_tools
             .execute_shell(
                 &json!({
-                    "cmd": "printf '%s' \"$$\" > cancelled.pid; exec sleep 30",
+                    "cmd": "sh -c 'echo $$ > cancelled.pid; sleep 0.5; : > cancelled-late; exec sleep 30' >/dev/null 2>&1 & wait",
                     "timeout_ms": 30000
                 }),
                 call_cancellation,
@@ -486,6 +534,61 @@ async fn attempt_cancellation_reaps_owned_shell_before_returning() {
         wait_for_process_exit(pid).await,
         "cancelled shell {pid} survived return"
     );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(!directory.path().join("cancelled-late").exists());
+    tools.shutdown().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn output_reader_failure_kills_and_drains_the_owned_process_group() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let tools = Arc::new(
+        NativeCodingTools::new(directory.path().to_path_buf())
+            .expect("tools")
+            .with_reader_failure_barrier(barrier.clone()),
+    );
+    let call_tools = tools.clone();
+    let running = tokio::spawn(async move {
+        call_tools
+            .execute_shell(
+                &json!({
+                    "cmd": "sh -c 'echo $$ > reader-child.pid; sleep 0.5; : > reader-late; exec sleep 30' >/dev/null 2>&1 & wait",
+                    "timeout_ms": 30000
+                }),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+    });
+    let pid_path = directory.path().join("reader-child.pid");
+    for _ in 0..500 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(pid_path.exists(), "reader-failure child did not start");
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric pid");
+
+    barrier.wait().await;
+    let output = outcome_output(
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("reader failure must finish")
+            .expect("reader failure caller"),
+    );
+    let ToolCallOutcome::Failure(failure) = output.outcome else {
+        panic!("reader failure must be an ordinary failure")
+    };
+    assert_eq!(failure.code, "shell_reader_died");
+    assert_process_terminated(pid, "reader-failure descendant");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(!directory.path().join("reader-late").exists());
     tools.shutdown().await;
 }
 
@@ -572,7 +675,7 @@ async fn shell_large_output_has_a_readable_full_output_path() {
     let result = coordinated_shell_call(
         tools,
         json!({
-            "cmd": "yes output | head -c 60000",
+            "cmd": "printf 'λ-start\\n'; yes output | head -c 60000",
             "timeout_ms": 5000,
             "max_output_tokens": 64
         }),
@@ -587,7 +690,30 @@ async fn shell_large_output_has_a_readable_full_output_path() {
         std::fs::metadata(spill).expect("readable spill").len() >= 60_000,
         "spill must retain complete raw output"
     );
+    assert!(
+        std::fs::read_to_string(spill)
+            .expect("UTF-8 spill")
+            .starts_with("λ-start\n")
+    );
     std::fs::remove_file(spill).expect("remove owned test spill");
+}
+
+#[tokio::test]
+async fn shell_rejects_invalid_arguments_without_starting_a_command() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let tools = NativeCodingTools::new(directory.path().to_path_buf()).expect("tools");
+    for args in [
+        json!([]),
+        json!({}),
+        json!({ "cmd": "" }),
+        json!({ "cmd": "touch must-not-exist", "timeout_ms": 0 }),
+        json!({ "cmd": "touch must-not-exist", "timeout_ms": 600001 }),
+        json!({ "cmd": "touch must-not-exist", "max_output_tokens": 0 }),
+    ] {
+        let output = outcome_output(call(&tools, "exec_command", &args).await);
+        assert!(matches!(output.outcome, ToolCallOutcome::Failure(_)));
+    }
+    assert!(!directory.path().join("must-not-exist").exists());
 }
 
 #[test]
@@ -606,10 +732,33 @@ fn process_exists(pid: i32) -> bool {
 #[cfg(unix)]
 async fn wait_for_process_exit(pid: i32) -> bool {
     for _ in 0..500 {
-        if !process_exists(pid) {
+        if process_is_terminated(pid) {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     false
+}
+
+#[cfg(unix)]
+fn assert_process_terminated(pid: i32, label: &str) {
+    assert!(
+        process_is_terminated(pid),
+        "{label} PID {pid} remains runnable"
+    );
+}
+
+#[cfg(unix)]
+fn process_is_terminated(pid: i32) -> bool {
+    if !process_exists(pid) {
+        return true;
+    }
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return true;
+    };
+    matches!(
+        stat.rsplit_once(") ")
+            .and_then(|(_, fields)| fields.split_whitespace().next()),
+        Some("Z" | "X")
+    )
 }

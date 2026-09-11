@@ -17,6 +17,7 @@ import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.LifecycleEvent
 import dev.hirsel.core.SendReceipt
 import dev.hirsel.core.ThreadRelatedTarget
+import dev.hirsel.core.ThreadKind
 
 /** How a hirsel iroh connection should be established. */
 sealed interface ConnectionSpec {
@@ -117,8 +118,8 @@ class Connection internal constructor(
         trackRequest(receipt, PendingRequestKind.Open, snapshot?.historyId, id)
     }
 
-    fun createThread(historyId: String, title: String, parentThreadId: ULong?) {
-        val receipt = client?.createThread(historyId, title, parentThreadId)
+    fun createThread(historyId: String, title: String, kind: ThreadKind, parentThreadId: ULong?) {
+        val receipt = client?.createThread(historyId, title, kind, parentThreadId)
         creatingClientId = receipt?.clientId
         if (receipt != null) trackRequest(receipt, PendingRequestKind.Create, historyId, parentThreadId)
     }

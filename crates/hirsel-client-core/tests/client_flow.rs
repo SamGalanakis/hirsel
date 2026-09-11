@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use hirsel_client_core::{
     AgentActivityState, ChatAuthor, ChatMessage, Client, ClientConfig, ClientObserver,
     ClientSnapshot, ConnectionState, LifecycleEvent, ProcessInfo, ProcessKind, ProcessState,
-    ReconnectPolicy, SendThreadMessageRequest, Thread, ThreadAttention,
+    ReconnectPolicy, SendThreadMessageRequest, Thread, ThreadAttention, ThreadKind,
 };
 use hirsel_proto::{ClientToHost, HelloAuth, HostToClient};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,6 +34,7 @@ fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
 
 fn thread(id: u64, read: bool, settled: bool) -> Thread {
     Thread {
+        kind: ThreadKind::Task,
         icon: None,
         showcased_artifact_id: None,
         parent_thread_id: None,
@@ -524,6 +525,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
             client_id,
             history_id,
             title,
+            kind,
             parent_thread_id,
         } = receive_client(&mut socket).await
         else {
@@ -531,6 +533,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
         };
         assert_eq!(title, "Groceries");
         assert_eq!(history_id, "test-store-a");
+        assert_eq!(kind, ThreadKind::Task);
         assert_eq!(parent_thread_id, None);
         send_server(
             &mut socket,
@@ -640,7 +643,12 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
     let created = client
-        .create_thread("test-store-a".into(), "Groceries".into(), None)
+        .create_thread(
+            "test-store-a".into(),
+            "Groceries".into(),
+            ThreadKind::Task,
+            None,
+        )
         .unwrap();
     let snapshot = wait_for_snapshot(&client, |s| {
         s.created_threads
@@ -750,7 +758,12 @@ async fn lost_create_ack_retries_same_identity_after_reconnect() {
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
     let receipt = client
-        .create_thread("test-store-a".into(), "Groceries".into(), None)
+        .create_thread(
+            "test-store-a".into(),
+            "Groceries".into(),
+            ThreadKind::Task,
+            None,
+        )
         .unwrap();
     let snapshot = wait_for_snapshot(&client, |s| {
         s.created_threads
@@ -988,7 +1001,12 @@ async fn new_history_discards_pending_transport_actions_and_recovers_unsent_text
         5,
         "recover this draft".into(),
     ));
-    client.create_thread("test-store-a".into(), "old create".into(), None);
+    client.create_thread(
+        "test-store-a".into(),
+        "old create".into(),
+        ThreadKind::Space,
+        None,
+    );
     client.open_thread(5, None);
     client.thread_action(
         "test-store-a".into(),

@@ -120,6 +120,18 @@ describe("ThreadInstrument — constrained vocabulary", () => {
     );
   });
 
+  it("hides completion controls for Spaces while retaining non-settling continuation", () => {
+    const screen = render(() => <ThreadInstrument allowSettlement={false} ui={[
+      { type: "optionList", action: "complete_choice", options: [{ key: "A", label: "Accept and finish" }] },
+      { type: "submit", action: "complete_form", label: "Complete" },
+      { type: "submit", action: "continue", label: "Continue", settles: false },
+    ]} />);
+
+    expect(screen.queryByRole("button", { name: "Accept and finish" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Complete" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
+  });
+
   it("collects the card's field values and posts them on submit", () => {
     const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
     const screen = renderCard(

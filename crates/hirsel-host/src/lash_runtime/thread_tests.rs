@@ -130,7 +130,15 @@ async fn queued_scripted_replies_and_telemetry_keep_their_owning_threads() {
     for (key, title) in [("a", "Alpha"), ("b", "Beta")] {
         let (thread, _) = state
             .storage
-            .create_thread(key, title, "", &Value::Null, ThreadAttention::Quiet, None)
+            .create_thread(
+                key,
+                title,
+                "",
+                &Value::Null,
+                ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
+                None,
+            )
             .await
             .unwrap();
         ids.push(thread.id);
@@ -203,7 +211,15 @@ async fn durable_admission_is_fifo_with_independent_thread_sessions() {
     for key in ["alpha", "beta"] {
         let thread = state
             .storage
-            .create_thread(key, key, "", &Value::Null, ThreadAttention::Quiet, None)
+            .create_thread(
+                key,
+                key,
+                "",
+                &Value::Null,
+                ThreadAttention::Quiet,
+                hirsel_proto::ThreadKind::Task,
+                None,
+            )
             .await
             .unwrap()
             .0;
@@ -292,6 +308,7 @@ async fn projection_retry_uses_one_thread_reply() {
             "",
             &Value::Null,
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -338,9 +355,10 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         caller,
         operation_id: "create".into(),
     };
-    let args = json!({"client_id":"groceries","title":"Buy groceries"});
+    let args = json!({"client_id":"groceries","kind":"task","title":"Buy groceries"});
     let created = executor.execute("threads_create", &args).await.unwrap();
     let id = created["thread_id"].as_u64().unwrap();
+    assert_eq!(created["thread"]["kind"], "task");
     assert_eq!(
         executor.execute("threads_create", &args).await.unwrap()["thread_id"],
         id
@@ -357,6 +375,63 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         log.recent()
             .iter()
             .any(|f| matches!(f,HostToClient::ThreadUpsert{thread} if thread.id==id))
+    );
+
+    executor.operation_id = "create-space".into();
+    let space = executor
+        .execute(
+            "threads_create",
+            &json!({"client_id":"projects","kind":"space","title":"Projects"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(space["thread"]["kind"], "space");
+    for (operation_id, args) in [
+        (
+            "missing-kind",
+            json!({"client_id":"missing","title":"Missing"}),
+        ),
+        (
+            "bad-kind",
+            json!({"client_id":"bad","kind":"project","title":"Bad"}),
+        ),
+    ] {
+        executor.operation_id = operation_id.into();
+        assert!(executor.execute("threads_create", &args).await.is_err());
+    }
+    let task_turn = storage.start_thread_turn(id, None).await.unwrap();
+    let task_caller = storage
+        .bind_thread_execution(
+            &storage.history_id().await.unwrap(),
+            "task-session",
+            "task-execution",
+            task_turn.id,
+        )
+        .await
+        .unwrap();
+    let task_executor = ScopedThreadTools {
+        tools: executor.tools.clone(),
+        caller: task_caller,
+        operation_id: "invalid-nested-space".into(),
+    };
+    assert!(
+        task_executor
+            .execute(
+                "threads_create",
+                &json!({"client_id":"invalid-space","kind":"space","title":"Invalid"}),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage
+            .thread_snapshot()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|thread| thread.parent_thread_id == Some(id))
+            .count(),
+        0
     );
 
     executor.operation_id = "update-1".into();
@@ -376,7 +451,33 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         .unwrap();
     assert!(result["thread"]["settled_at"].is_null());
     assert_eq!(result["thread"]["attention"], "quiet");
-    let names = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let create_schema = definitions
+        .iter()
+        .find(|definition| definition.name() == "threads_create")
+        .unwrap()
+        .contract
+        .input_schema
+        .canonical();
+    assert!(
+        create_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("kind"))
+    );
+    assert_eq!(
+        create_schema["properties"]["kind"]["enum"],
+        json!(["space", "task"])
+    );
+    let update_schema = definitions
+        .iter()
+        .find(|definition| definition.name() == "threads_update")
+        .unwrap()
+        .contract
+        .input_schema
+        .canonical();
+    assert!(update_schema["properties"].get("kind").is_none());
+    let names = definitions
         .into_iter()
         .map(|d| d.name().to_owned())
         .collect::<Vec<_>>();
@@ -411,6 +512,7 @@ async fn retained_current_store_opens_without_synthesizing_sessions_or_work() {
                 &thread.description,
                 &thread.instrument,
                 thread.attention,
+                thread.kind,
                 None,
             )
             .await

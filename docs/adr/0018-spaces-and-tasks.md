@@ -1,0 +1,9 @@
+# Spaces and Tasks share one conversation identity
+
+Accepted 2026-09-10 for [#51](https://github.com/SamGalanakis/hirsel/issues/51), following the Owner’s refinement of [#50](https://github.com/SamGalanakis/hirsel/issues/50). Spaces are ongoing conversational places; Tasks are finishable conversational outcomes. Both retain one durable Thread identity and the same messages, execution, tools, icons, artifacts and related references. This distinguishes ongoing context from commitments without a second work-record or conversation system.
+
+Both kinds may be roots. A Space may contain Spaces or Tasks; a Task may contain Tasks only. Parentage remains immutable. The Host enforces these rules for Owner and agent creation. Owner kind conversion validates the current history, revision, parent and immediate children atomically, preserves identity and conversation, and never converts or moves descendants. A done Task must first be reopened to become a Space, so conversion never silently discards its completion state.
+
+Only Tasks offer Mark done / Reopen, with the existing Owner authority. Agents cannot complete Tasks themselves. Turn completion and child completion never cascade into Task completion. Spaces have no completion controls or persistent successful-turn completion cues; live execution, queued work and needs-input remain visible. Generated instrument completion is subject to the same Task-only Owner authority.
+
+This supersedes ADR 0016’s universal Thread settlement and ADR 0004’s prohibition on a Task product abstraction. ADR 0004’s rejection of mechanical workflow/retry policy remains. The research report for #50 remains historical: unrestricted optional tracking at any depth was not adopted. Required kind is one current durable and wire contract; there is no dual protocol or runtime migration framework. A separately backed-up, offline local cutover may preserve existing history in the new schema.

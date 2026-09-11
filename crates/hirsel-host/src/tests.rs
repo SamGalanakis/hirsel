@@ -18,6 +18,7 @@ async fn timeline_persistence_failure_fails_the_turn_without_broadcasting_the_ev
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -79,6 +80,7 @@ async fn scripted_next_turn_waits_and_cancel_queued_removes_message() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -177,6 +179,7 @@ async fn scripted_cancel_turn_interrupts_slow_turn_without_reply() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -231,6 +234,7 @@ async fn enqueue_failure_retains_accepted_thread_message_and_request() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -402,6 +406,7 @@ async fn canvas_view_event_enters_its_origin_thread_as_owner_message() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

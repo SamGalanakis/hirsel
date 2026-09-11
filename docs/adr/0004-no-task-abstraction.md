@@ -1,5 +1,7 @@
 # No task abstraction; recovery is Agent judgment, not machinery
 
+> **Refined 2026-09-10:** [ADR 0018](0018-spaces-and-tasks.md) adopts Task as a finishable kind of durable conversation. The prohibition on a Task product abstraction is superseded; mechanical workflow/retry policy remains excluded.
+
 > **Current product clarification (2026-07-23):** This decision still rejects a Host workflow/task-spec abstraction. The visible client now calls typed Events **Tasks**. That stable product object does not mechanically retry or recover delegated processes; recovery remains Agent judgment. `CONTEXT.md` and `docs/product-direction.md` own the visible terminology.
 
 Hirsel has no Task entity — no task table, no task spec object, no status machine. What persists about delegated work is the Agent's own durable session transcript ("I spawned a Sub-agent to do X") plus the supervisor Runtime Process's event log that lash keeps anyway. Consequently there is no mechanical recovery: Sub-agent supervisor processes are not Rerunnable; on VM restart or owner loss they go Abandoned, abandonment wakes the Agent as a terminal event, and the Agent re-spawns only if it still wants the work done. Every alternative (durable task specs, Rerunnable dispositions, status machines) is policy code, which hirsel refuses by design — tracking and retrying work is Agent cognition. This also prevents zombie resurrection: work the Owner cancelled conversationally while the VM was down is never mechanically re-spawned.

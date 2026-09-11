@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elapsedTime, threadStatus } from "./status";
+import { elapsedTime, showThreadTurnStatus, threadStatus } from "./status";
 import { makeThread } from "./fixtures";
 import type { ThreadTurn } from "./types";
 const now = Date.parse("2026-09-09T12:12:00Z");
@@ -29,5 +29,10 @@ describe("authoritative Thread row status", () => {
     expect(elapsedTime("invalid", now)).toBeNull();
     expect(elapsedTime("2026-09-09T12:15:00Z", now)).toBeNull();
     expect(elapsedTime("2026-09-09T12:12:20Z", now)).toBe("<1m");
+  });
+  it("suppresses successful completion cues for Spaces only", () => {
+    expect(showThreadTurnStatus(makeThread(1, { kind: "space" }), "completed")).toBe(false);
+    expect(showThreadTurnStatus(makeThread(1, { kind: "task" }), "completed")).toBe(true);
+    expect(showThreadTurnStatus(makeThread(1, { kind: "space" }), "failed")).toBe(true);
   });
 });

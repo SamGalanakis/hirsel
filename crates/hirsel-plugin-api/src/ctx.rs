@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use hirsel_proto::ThreadKind;
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 
@@ -18,6 +19,8 @@ pub type SettingsSnapshot = Arc<Map<String, Value>>;
 /// A durable thread a plugin wants to create, independently of attention.
 #[derive(Debug, Clone)]
 pub struct NewThread {
+    /// Spaces are ongoing containers; Tasks are explicitly finishable work.
+    pub kind: ThreadKind,
     pub title: String,
     pub description: String,
     /// Constrained semantic UI, validated by the same host catalog as Agent instruments.
@@ -26,8 +29,9 @@ pub struct NewThread {
 }
 
 impl NewThread {
-    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(kind: ThreadKind, title: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
+            kind,
             title: title.into(),
             description: description.into(),
             instrument: Value::Null,
@@ -79,8 +83,6 @@ pub trait PluginThreads: Send + Sync {
     async fn create(&self, thread: NewThread) -> Result<u64, String>;
     /// Append informational activity with host-stamped plugin provenance.
     async fn append_activity(&self, activity: NewActivity) -> Result<ActivityReceipt, String>;
-    /// Explicitly settle or reopen a Thread. Reading activity never settles it.
-    async fn settle(&self, thread_id: u64, settled: bool) -> Result<(), String>;
 }
 
 /// Durable per-plugin key/value storage. Keys live in a namespace private to

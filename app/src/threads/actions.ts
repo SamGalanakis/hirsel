@@ -6,17 +6,19 @@ import { threadAction } from "./store";
 import { getClient } from "../ws/client";
 import { toast } from "../lib/toast";
 import type { Thread } from "./types";
-export type ThreadActionIcon = "settle" | "reopen" | "read" | "snooze" | "archive" | "copy" | "stop" | "pin" | "child" | "icon";
+export type ThreadActionIcon = "settle" | "reopen" | "read" | "snooze" | "archive" | "copy" | "stop" | "pin" | "child" | "icon" | "kind";
 export interface ThreadActionItem { id: string; label: string; icon: ThreadActionIcon; run: () => void }
 /** The same supported actions power the row, context strip and command palette. */
 export function threadActions(thread: Thread, now = Date.now()): ThreadActionItem[] {
   const referenceHistory = historyId();
   const actions: ThreadActionItem[] = [
-    { id: "icon", label: "Change thread icon", icon: "icon", run: () => openThreadIconPicker(thread) },
-    { id: "child", label: "New child thread", icon: "child", run: () => { if (referenceHistory) openThreadNavigation({ kind: "create", historyId: referenceHistory, parentId: thread.id }); } },
+    { id: "icon", label: `Change ${thread.kind} icon`, icon: "icon", run: () => openThreadIconPicker(thread) },
+    { id: "child", label: thread.kind === "task" ? "New child task" : "New child", icon: "child", run: () => { if (referenceHistory) openThreadNavigation({ kind: "create", historyId: referenceHistory, parentId: thread.id }); } },
   ];
   if (thread.parent_thread_id === null) actions.splice(1, 0, { id: "pin", label: thread.pinned_at ? "Unpin thread" : "Pin thread", icon: "pin", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.pinned_at ? "unpin" : "pin", {}, thread.revision); } });
-  actions.push({ id: "settle", label: thread.settled_at ? "Reopen thread" : "Settle thread", icon: thread.settled_at ? "reopen" : "settle", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.settled_at ? "reopen" : "settle"); } });
+  if (thread.kind === "task") actions.push({ id: "settle", label: thread.settled_at ? "Reopen task" : "Mark task done", icon: thread.settled_at ? "reopen" : "settle", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.settled_at ? "reopen" : "settle"); } });
+  if (thread.kind === "space") actions.push({ id: "set-kind", label: "Change to Task", icon: "kind", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, "set_kind", { kind: "task" }, thread.revision); } });
+  else if (!thread.settled_at) actions.push({ id: "set-kind", label: "Change to Space", icon: "kind", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, "set_kind", { kind: "space" }, thread.revision); } });
   if (!thread.read) actions.push({ id: "read", label: "Mark read", icon: "read", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, "read"); } });
   {
     const snoozed = Boolean(thread.snoozed_until && Date.parse(thread.snoozed_until) > now);

@@ -411,10 +411,11 @@ impl Client {
         &self,
         history_id: String,
         title: String,
+        kind: threads::ThreadKind,
         parent_thread_id: Option<u64>,
     ) -> Option<SendReceipt> {
         self.core
-            .create_thread(history_id, title, parent_thread_id)
+            .create_thread(history_id, title, kind.into(), parent_thread_id)
             .map(|receipt| SendReceipt {
                 client_id: receipt.client_id,
             })

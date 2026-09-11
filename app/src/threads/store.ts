@@ -5,7 +5,7 @@ import { createStore, reconcile } from "solid-js";
 import type { Blob, ChatMessage, SendMode, ServerMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
-import type { Thread, ThreadClientMessage } from "./types";
+import type { Thread, ThreadClientMessage, ThreadKind } from "./types";
 
 interface PendingMessage {
   clientId: string;
@@ -50,25 +50,34 @@ export function followThreadLocation(authoritativeHistory: string | null = histo
   }
   if (link.kind === "thread") focusThread(link.target.thread_id, false, authoritativeHistory);
 }
-function selectionKey(): string | null { return historyId() ? `hirsel.last-thread.${historyId()}` : null; }
 function rememberSelection(id: number, currentHistory = historyId()): void {
   const key = currentHistory ? `hirsel.last-thread.${currentHistory}` : null; if (key) localStorage.setItem(key, String(id));
+}
+function forgetSelection(currentHistory = historyId()): void {
+  const key = currentHistory ? `hirsel.last-thread.${currentHistory}` : null;
+  if (key) localStorage.removeItem(key);
 }
 function restoredSelection(threads: Thread[], currentHistory = historyId()): number | null {
   const key = currentHistory ? `hirsel.last-thread.${currentHistory}` : null; const saved = key ? localStorage.getItem(key) : null;
   if (saved === null || !/^\d+$/.test(saved)) return null;
-  const id = Number(saved); return threads.some(thread => thread.id === id) ? id : null;
+  const id = Number(saved);
+  const thread = threads.find(candidate => candidate.id === id);
+  if (thread?.archived_at) { forgetSelection(currentHistory); return null; }
+  return thread ? id : null;
 }
 export const [threadState, setThreadState] = createStore<ThreadState>({
   threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false,
 });
 let historyGeneration = 0;
+let selectionGeneration = 0;
 let sendFrame: ((frame: ThreadClientMessage) => void) | null = null;
 const messageTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const MESSAGE_ACK_TIMEOUT_MS = 20_000;
 type RequestKind = "create" | "open" | "action";
 interface PendingRequest {
   kind: RequestKind;
+  action?: string;
+  selectionGeneration?: number;
   historyId?: string;
   threadId?: number;
   beforeId: number | null;
@@ -94,18 +103,18 @@ export function disconnectThreads(): void {
   for (const timer of messageTimers.values()) clearTimeout(timer);
   messageTimers.clear();
 }
-function request(frame: Extract<ThreadClientMessage, { client_id: string }>, kind: RequestKind, threadId?: number, beforeId: number | null = null, history?: string, onFailure?: (detail: string) => void): Promise<unknown> {
+function request(frame: Extract<ThreadClientMessage, { client_id: string }>, kind: RequestKind, threadId?: number, beforeId: number | null = null, history?: string, onFailure?: (detail: string) => void, action?: string, selection?: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!sendFrame) { reject(new Error("Not connected")); return; }
     const timer = setTimeout(() => failRequest(frame.client_id, "Thread request timed out"), 20_000);
-    requests.set(frame.client_id, { kind, historyId: history, threadId, beforeId, onFailure, resolve, reject, timer });
+    requests.set(frame.client_id, { kind, action, selectionGeneration: selection, historyId: history, threadId, beforeId, onFailure, resolve, reject, timer });
     sendFrame(frame);
   });
 }
-export async function createThread(expectedHistory: string, title: string, parentId: number | null): Promise<Thread> {
+export async function createThread(expectedHistory: string, title: string, kind: ThreadKind, parentId: number | null): Promise<Thread> {
   if (!threadState.ready) throw new Error("Reconnect before creating a Thread.");
   if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this control and try again.");
-  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, parent_thread_id: parentId }, "create", undefined, null, expectedHistory) as Thread;
+  return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, kind, parent_thread_id: parentId }, "create", undefined, null, expectedHistory) as Thread;
 }
 export async function openThread(id: number, beforeId: number | null = null): Promise<void> {
   const generation = historyGeneration;
@@ -119,14 +128,22 @@ export async function openThread(id: number, beforeId: number | null = null): Pr
 }
 export function focusThread(id: number | null, updateUrl = true, currentHistory = historyId()): void {
   if (id !== null && (!threadState.ready || !currentHistory)) return;
+  selectionGeneration++;
   setThreadState(draft => { draft["focusedId"] = id; });
   setThreadState(draft => { draft["error"] = null; draft.linkError = null; });
   if (updateUrl) history.pushState(null, "", id === null ? "/" : threadPath({kind:"thread", history_id:currentHistory!, thread_id:id}));
-  if (id === null) { const key = selectionKey(); if (key) localStorage.removeItem(key); }
+  if (id === null) forgetSelection();
   if (id !== null) {
     if (threadState.threads.some(thread => thread.id === id)) rememberSelection(id, currentHistory);
     if (sendFrame) void openThread(id).catch(() => {});
   }
+}
+function clearArchivedFocus(id: number, currentHistory = historyId()): void {
+  if (!currentHistory || historyId() !== currentHistory || threadState.focusedId !== id) return;
+  selectionGeneration++;
+  setThreadState(draft => { draft.focusedId = null; draft.error = null; draft.linkError = null; });
+  forgetSelection(currentHistory);
+  history.replaceState(null, "", "/");
 }
 export function threadAction(expectedHistory: string, id: number, action: string, data: unknown = {}, expectedRevision?: number): void {
   if (!sendFrame) { setThreadState(draft => { draft["error"] = { operation: "request", detail: "Reconnect before changing this thread.", threadId: id }; }); return; }
@@ -138,7 +155,8 @@ export function threadAction(expectedHistory: string, id: number, action: string
       draft.error = { operation: "request", detail, threadId: id, clientId };
     });
   };
-  void request({ type: "thread_action", client_id: clientId, history_id: expectedHistory, thread_id: id, action, data, expected_revision: expectedRevision }, "action", id, null, expectedHistory, onFailure).catch(() => {});
+  const selection = action === "archive" && threadState.focusedId === id ? selectionGeneration : undefined;
+  void request({ type: "thread_action", client_id: clientId, history_id: expectedHistory, thread_id: id, action, data, expected_revision: expectedRevision }, "action", id, null, expectedHistory, onFailure, action, selection).catch(() => {});
 }
 function pendingFrame(pending: PendingMessage): ThreadClientMessage {
   return { type: "send_thread_message", client_id: pending.clientId, history_id: pending.historyId, thread_id: pending.threadId,
@@ -229,7 +247,8 @@ export function handleThreadMessage(message: ServerMessage): void {
       const route = parseThreadLink(location.pathname + location.search);
       if (route) { followThreadLocation(message.history_id); break; }
       const prior = threadState.focusedId;
-      const selected = prior !== null && message.threads.some(thread => thread.id === prior) ? prior : restoredSelection(message.threads, message.history_id);
+      const selected = prior !== null && message.threads.some(thread => thread.id === prior && !thread.archived_at) ? prior : restoredSelection(message.threads, message.history_id);
+      if (selected !== prior) selectionGeneration++;
       setThreadState(draft => { draft.focusedId = selected; draft.linkError = null; });
       if (selected !== null) {
         rememberSelection(selected, message.history_id);
@@ -239,13 +258,22 @@ export function handleThreadMessage(message: ServerMessage): void {
       break;
     }
     case "thread_upsert":
-    case "thread_created":
+    case "thread_created": {
+      const priorThread = threadState.threads.find(thread => thread.id === message.thread.id);
+      const archivedFocusedThread = message.type === "thread_upsert"
+        && message.thread.id === threadState.focusedId
+        && priorThread !== undefined
+        && priorThread.revision <= message.thread.revision
+        && !priorThread.archived_at
+        && Boolean(message.thread.archived_at);
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.thread), "id")(draft["threads"]); });
       if (message.type === "thread_created") {
         const pending = requests.get(message.client_id);
         if (pending?.kind === "create") { clearTimeout(pending.timer); requests.delete(message.client_id); pending.resolve(message.thread); }
       }
+      if (archivedFocusedThread) clearArchivedFocus(message.thread.id);
       break;
+    }
     case "thread_action_applied": {
       const pending = requests.get(message.client_id);
       if (pending?.kind !== "action" || pending.historyId !== message.history_id || pending.threadId !== message.thread_id) break;
@@ -253,6 +281,7 @@ export function handleThreadMessage(message: ServerMessage): void {
       setThreadState(draft => {
         if (draft.error?.operation === "request" && draft.error.clientId === message.client_id) draft.error = null;
       });
+      if (pending.action === "archive" && pending.selectionGeneration === selectionGeneration) clearArchivedFocus(message.thread_id, message.history_id);
       pending.resolve(undefined);
       break;
     }
@@ -320,6 +349,7 @@ export function focusedThreadRunning(): boolean {
 
 export function resetThreads(): void {
   historyGeneration++;
+  selectionGeneration++;
   preservePendingDrafts(threadState.pending);
   disconnectThreads();
   setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });

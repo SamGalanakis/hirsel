@@ -1,12 +1,13 @@
 use crate::store::{LocalStore, PendingSend};
 use chrono::Utc;
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, ClientToHost, Thread, ThreadAttention, ThreadDetail, ThreadTurn,
-    ThreadTurnState, TurnEventKind,
+    ChatAuthor, ChatMessage, ClientToHost, Thread, ThreadAttention, ThreadDetail, ThreadKind,
+    ThreadTurn, ThreadTurnState, TurnEventKind,
 };
 
 fn thread(revision: u64) -> Thread {
     Thread {
+        kind: ThreadKind::Space,
         icon: None,
         showcased_artifact_id: None,
         parent_thread_id: None,
@@ -262,9 +263,13 @@ fn changed_history_clears_owned_state_but_preserves_plain_unsent_text() {
     store.apply_hello_ok("A".into(), vec![thread(1)], vec![], "test".into());
     store.add_optimistic_send(pending(5, "old-send"));
     let text = store.pending_sends().next().unwrap().body.clone();
-    store
-        .pending_creates
-        .push(("old-create".into(), "A".into(), "Title".into(), None));
+    store.pending_creates.push((
+        "old-create".into(),
+        "A".into(),
+        "Title".into(),
+        ThreadKind::Space,
+        None,
+    ));
     store.requests.push(("old-open".into(), 5));
     store.opened_threads.push(5);
     store.apply_delta(

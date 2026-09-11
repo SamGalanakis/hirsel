@@ -57,26 +57,26 @@ export function GuideSection(): JSX.Element {
 
         <SectionHeader>Your workspace</SectionHeader>
         <P>
-          The icon rail opens Threads, creates a conversation, lists all artifacts, and opens
-          Processes or Settings. Choose or create a Thread before composing. Each selected
+          The icon rail opens Spaces and Tasks, creates either kind, lists all artifacts, and opens
+          Processes or Settings. Choose or create a Space or Task before composing. Each selected
           conversation has a frame and a named context strip. The overview returns to Thread
           selection without addressing a message.
         </P>
 
-        <SectionHeader>Threads</SectionHeader>
+        <SectionHeader>Spaces and Tasks</SectionHeader>
         <P>
-          Each Thread has its own conversation, state and any generated interface needed for the
-          work. A Thread can coordinate focused child conversations. Pin any Thread for quick
-          access; pinning and parentage are independent of settlement and visibility. Child
+          Each Space or Task has its own conversation, state and any generated interface needed for the
+          work. Spaces hold ongoing context and can contain Spaces or Tasks. Tasks hold finishable work and can contain Tasks. Pin either kind for quick
+          access; pinning and parentage are independent of completion and visibility. Child
           progress and results return to their parent with links to the source conversation. Messages go to the Thread named in the context strip. Opening a Thread marks it
-          read; settling it is a separate action in its menu. Unread activity, work that needs your
-          input, and active execution are independent signals in the drawer. A dot on Threads means a visible Thread needs you. Use the filter menu for settled, snoozed or archived work, and Search to find a Thread by title or reference. Every Thread has a
+          read; marking a Task done is a separate action in its menu. Unread activity, work that needs your
+          input, and active execution are independent signals in the drawer. A dot on Spaces and Tasks means a visible item needs you. Use the filter menu for done, snoozed or archived work, and Search to find a conversation by title or reference. Every conversation has a
           short reference such as <span class="font-mono">#12</span>; type{" "}
           <span class="font-mono">#</span> in a message to cite another Thread without moving your conversation.
         </P>
 
         <P>
-          Thread rows show working time, queued work and the latest turn outcome. Turn finished does not settle a Thread. Use its check button or action menu to settle explicitly; the menu also offers snooze, archive and a Thread link.
+          Rows show working time, queued work and failures. Tasks also show their latest successful turn outcome and completion state. Use a Task’s check button or action menu to mark it done explicitly; the menu also offers snooze, archive and a Thread link.
         </P>
         <SectionHeader>Talking to it</SectionHeader>
         <P>
@@ -125,10 +125,10 @@ export function GuideSection(): JSX.Element {
           Single-key shortcuts stand down while you are typing.
         </P>
         <div class="mt-2 divide-y divide-border">
-          <Shortcut keys={["⌘/Ctrl", "K"]}>Search commands and Threads by title or #reference.</Shortcut>
+          <Shortcut keys={["⌘/Ctrl", "K"]}>Search commands, Spaces and Tasks by title or #reference.</Shortcut>
           <Shortcut keys={["⌘/Ctrl", "/"]}>The keyboard shortcut sheet.</Shortcut>
           <Shortcut keys={["g", "t"]} chord>
-            Open the Thread drawer.
+            Open Spaces and Tasks.
           </Shortcut>
           <Shortcut keys={["g", "h"]} chord>
             Jump back to the composer.

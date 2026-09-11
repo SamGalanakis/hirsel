@@ -103,7 +103,7 @@ function CanvasPhonePanel() {
           aria-label="Close Canvas"
         >
           <ChevronLeft class="size-5" aria-hidden="true" />
-          <span>Threads</span>
+          <span>Spaces &amp; Tasks</span>
         </button>
         <h1
           id="canvas-sheet-heading"

@@ -10,7 +10,7 @@ import {
   splitThreadRefs,
 } from "./thread-ref";
 
-function thread(overrides: Partial<RefTarget> = {}): RefTarget { return { id: 1, title: "deploy-4821", ...overrides }; }
+function thread(overrides: Partial<RefTarget> = {}): RefTarget { return { id: 1, kind: "space", title: "deploy-4821", ...overrides }; }
 
 const field = [
   thread({ id: 1, title: "deploy-4821" }),

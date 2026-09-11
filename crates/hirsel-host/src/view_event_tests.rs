@@ -32,6 +32,7 @@ async fn delayed_view_callback_cannot_accept_into_reused_thread_after_runtime_re
             "",
             &serde_json::json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -83,6 +84,7 @@ async fn delayed_view_callback_cannot_accept_into_reused_thread_after_runtime_re
             "",
             &serde_json::json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

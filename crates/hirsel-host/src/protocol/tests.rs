@@ -170,6 +170,7 @@ async fn full_resync_snapshot_replays_all_chat() {
                     "",
                     &serde_json::Value::Null,
                     hirsel_proto::ThreadAttention::Quiet,
+                    hirsel_proto::ThreadKind::Task,
                     None,
                 )
                 .await
@@ -245,6 +246,7 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
     let history_id = state.storage.history_id().await.unwrap();
     let frame = ClientToHost::CreateThread {
         history_id,
+        kind: hirsel_proto::ThreadKind::Task,
         parent_thread_id: None,
         client_id: "groceries-create".into(),
         title: "Buy groceries".into(),
@@ -256,6 +258,7 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
         panic!("missing creation acknowledgement")
     };
     let thread = thread.clone();
+    assert_eq!(thread.kind, hirsel_proto::ThreadKind::Task);
     assert_eq!(thread.attention, hirsel_proto::ThreadAttention::Quiet);
     assert!(
         state
@@ -313,6 +316,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -328,6 +332,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -374,6 +379,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     for stale in [
         ClientToHost::CreateThread {
             history_id: old_history.clone(),
+            kind: hirsel_proto::ThreadKind::Task,
             parent_thread_id: Some(fresh.id),
             client_id: "stale-child".into(),
             title: "Wrong child".into(),
@@ -421,6 +427,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
         &mut channel,
         ClientToHost::CreateThread {
             history_id: new_history.clone(),
+            kind: hirsel_proto::ThreadKind::Task,
             parent_thread_id: Some(fresh.id),
             client_id: "current-child".into(),
             title: "Current child".into(),
@@ -528,6 +535,7 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -610,6 +618,7 @@ async fn thread_summary_updates_survive_same_revision_and_reconnect_without_stal
             "",
             &json!({}),
             ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -680,6 +689,7 @@ async fn same_revision_message_removal_refresh_can_reduce_activity_after_hello()
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -696,6 +706,7 @@ async fn same_revision_message_removal_refresh_can_reduce_activity_after_hello()
                     "",
                     &serde_json::Value::Null,
                     hirsel_proto::ThreadAttention::Quiet,
+                    hirsel_proto::ThreadKind::Task,
                     None,
                 )
                 .await
@@ -738,6 +749,7 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
             "",
             &json!({}),
             ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -750,6 +762,7 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
         },
         ClientToHost::CreateThread {
             history_id: state.storage.history_id().await.unwrap(),
+            kind: hirsel_proto::ThreadKind::Task,
             parent_thread_id: None,
             client_id: "direct-summary".into(),
             title: "Retry".into(),

@@ -58,6 +58,7 @@ pub enum ClientToHost {
     },
     CreateThread {
         history_id: String,
+        kind: crate::ThreadKind,
         #[serde(deserialize_with = "required_nullable_parent")]
         parent_thread_id: Option<u64>,
         client_id: String,

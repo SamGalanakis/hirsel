@@ -14,6 +14,7 @@ async fn owner_messages_are_idempotent_by_client_id() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -64,6 +65,7 @@ async fn chat_tool_summaries_are_persisted_with_chat_messages() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -109,6 +111,7 @@ async fn delete_chat_message_removes_client_id_and_attachment_joins() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

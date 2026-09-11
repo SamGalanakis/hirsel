@@ -16,6 +16,7 @@ async fn device_tokens_are_pinned_revocable_and_persistent() {
                         "",
                         &serde_json::Value::Null,
                         hirsel_proto::ThreadAttention::Quiet,
+                        hirsel_proto::ThreadKind::Task,
                         None,
                     )
                     .await

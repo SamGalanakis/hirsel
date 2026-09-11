@@ -80,6 +80,14 @@ product-runbook scenario="all":
     cargo build --workspace --all-targets
     cd app && npm run e2e:product-runbook -- "{{ scenario }}"
 
+# Isolated no-model acceptance for the Space/Task hierarchy and lifecycle.
+spaces-tasks-runbook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd app && npm run build )
+    cargo build --workspace --all-targets
+    node e2e/spaces-tasks-runbook.mjs
+
 # Regenerate the plugin aggregator from the folders under plugins/. Run after
 # adding or removing a plugin folder; `just dev` runs it for you.
 sync-plugins:

@@ -1,12 +1,13 @@
 package dev.hirsel.android.chat
 
 import dev.hirsel.core.Thread
+import dev.hirsel.core.ThreadKind
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ThreadNavigationTest {
     private fun thread(id: ULong, parent: ULong? = null, pin: String? = null) = Thread(
-        parentThreadId = parent, pinnedAt = pin, id = id, icon = null,
+        kind = ThreadKind.SPACE, parentThreadId = parent, pinnedAt = pin, id = id, icon = null,
         showcasedArtifactId = null, title = "Thread $id",
         description = "", instrumentJson = "null", needsOwner = false,
         settledAt = null, archivedAt = null, snoozedUntil = null, read = true,
@@ -23,6 +24,12 @@ class ThreadNavigationTest {
         listOf("", " ", "x\n", "x\u0085", "x\u2028", "x\u2029", "x".repeat(17)).forEach {
             org.junit.Assert.assertNotNull(threadIconError(it))
         }
+    }
+
+    @Test fun spacesHideCompletingInstrumentActionsButKeepContinueActions() {
+        assertEquals(false, instrumentActionVisible(true, ThreadKind.SPACE))
+        assertEquals(true, instrumentActionVisible(false, ThreadKind.SPACE))
+        assertEquals(true, instrumentActionVisible(true, ThreadKind.TASK))
     }
 
     @Test fun showsOrdinaryZeroAndNestedChildrenWithoutDuplicates() {

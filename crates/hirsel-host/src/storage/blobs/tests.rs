@@ -78,6 +78,7 @@ async fn stopped_data_directory_relocation_keeps_blob_and_queued_image_ownership
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -191,6 +192,7 @@ async fn owner_message_attachments_are_joined_and_replayed() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -253,6 +255,7 @@ async fn owner_message_rejects_unknown_attachment_ids() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

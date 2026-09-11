@@ -65,13 +65,20 @@ const ancestorIds = [0, 1, 2, 3].map(offset => nestingBase + offset);
 execFileSync("sqlite3", [join(dataDir, "hirsel.sqlite"), `
   PRAGMA foreign_keys=ON;
   BEGIN;
-  INSERT INTO threads(id,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision)
+  DROP TRIGGER IF EXISTS threads_parent_immutable;
+  INSERT INTO threads(id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision)
   VALUES
-    (${ancestorIds[0]},NULL,'Responsive parent A','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
-    (${ancestorIds[1]},${ancestorIds[0]},'Responsive parent B','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
-    (${ancestorIds[2]},${ancestorIds[1]},'Responsive parent C','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
-    (${ancestorIds[3]},${ancestorIds[2]},'Responsive parent D','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1);
+    (${ancestorIds[0]},'space',NULL,'Responsive parent A','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
+    (${ancestorIds[1]},'space',${ancestorIds[0]},'Responsive parent B','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
+    (${ancestorIds[2]},'space',${ancestorIds[1]},'Responsive parent C','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1),
+    (${ancestorIds[3]},'space',${ancestorIds[2]},'Responsive parent D','','{}','quiet',1,'2026-09-10T20:00:00Z','2026-09-10T20:00:00Z',1);
   UPDATE threads SET parent_thread_id=${ancestorIds[3]} WHERE id=${thread.id};
+CREATE TRIGGER threads_parent_immutable
+BEFORE UPDATE OF parent_thread_id ON threads
+WHEN NEW.parent_thread_id IS NOT OLD.parent_thread_id
+BEGIN
+    SELECT RAISE(ABORT, 'Thread parent is immutable');
+END;
   COMMIT;
 `]);
 const token = `responsive-${crypto.randomUUID()}`;
@@ -288,9 +295,9 @@ try {
 
   await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
   await page.setViewportSize({ width: 768, height: 844 });
-  const trigger = page.getByRole("button", { name: "Threads", exact: true });
+  const trigger = page.getByRole("button", { name: "Spaces and Tasks", exact: true });
   await trigger.click();
-  const modalDrawer = page.getByRole("dialog", { name: "Threads" });
+  const modalDrawer = page.getByRole("dialog", { name: "Spaces and Tasks" });
   await modalDrawer.waitFor({ state: "visible" });
   await poll("modal Thread focus", () => modalDrawer.evaluate(node => node.contains(document.activeElement)));
   await page.keyboard.press("Escape");
@@ -299,7 +306,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await drawer.waitFor({ state: "visible" });
 
-  await page.getByRole("button", { name: "Close threads", exact: true }).click();
+  await page.getByRole("button", { name: "Close Spaces and Tasks", exact: true }).click();
   await drawer.waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 768, height: 844 });
   await trigger.click();
@@ -327,6 +334,7 @@ try {
   await page.setViewportSize({ width: 320, height: 844 });
   if (!await drawer.isVisible()) await trigger.click();
   await drawer.waitFor({ state: "visible" });
+  await expandNestedThread(page);
   const nestedStatus = page.locator(`[data-thread-entry="tree:${thread.id}"] [data-slot="thread-status-primary"]`);
   await nestedStatus.scrollIntoViewIfNeeded();
   const narrowNestedOffline = await layoutMetrics(page);

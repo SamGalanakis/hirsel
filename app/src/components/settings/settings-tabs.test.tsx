@@ -141,7 +141,7 @@ describe("Settings: Guide", () => {
   const HEADINGS = [
     "What hirsel is",
     "Your workspace",
-    "Threads",
+    "Spaces and Tasks",
     "Talking to it",
     "Artifacts and execution",
     "The agents",

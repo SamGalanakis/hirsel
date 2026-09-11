@@ -28,16 +28,16 @@ describe("Thread icons", () => {
   it("shows defaults and custom icons for ordinary zero, rows and the active header", () => {
     const view = render(() => <ThreadShell />);
     expect(view.container.querySelector('header [data-thread-avatar="1"]')).toHaveTextContent("G");
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     for (const [id, icon] of [[0, "G"], [1, "G"], [2, "🛠️"]]) {
       expect(view.container.querySelector(`[data-thread-row="${id}"] [data-thread-avatar]`)).toHaveTextContent(String(icon));
     }
   });
   it("opens from row actions, saves a preset with its revision and applies the server update everywhere", async () => {
     const view = render(() => <ThreadShell />);
-    fireEvent.click(view.getByRole("button", { name: "Threads" }));
+    fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(view.getByRole("button", { name: "Actions for Garden" }));
-    fireEvent.click(await view.findByRole("menuitem", { name: "Change thread icon" }));
+    fireEvent.click(await view.findByRole("menuitem", { name: "Change space icon" }));
     const picker = view.getByRole("dialog", { name: "Change thread icon" });
     fireEvent.click(within(picker).getByRole("button", { name: "Seedling" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));

@@ -2,7 +2,7 @@
 // Portable references use ordinary Markdown and /t/{id}?history={uuid}.
 // The composed text remains the source for local mention IDs.
 
-export interface RefTarget { id: number; title: string; icon?: string | null; attention?: "quiet" | "needs_owner"; settled_at?: string | null; }
+export interface RefTarget { id: number; kind: "space" | "task"; title: string; icon?: string | null; attention?: "quiet" | "needs_owner"; settled_at?: string | null; }
 
 /** The character that opens the picker. */
 export const THREAD_REF_TRIGGER = "#";

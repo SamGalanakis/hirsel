@@ -51,6 +51,7 @@ const SHARED_NODES = createSharedNodes({
 interface InstrumentEmit {
   emit: (action: string, data: unknown, settles: boolean) => void;
   disabled: boolean;
+  allowSettlement: boolean;
   /** Read the card's live field values (keyed by field `name`). */
   fields: () => Record<string, unknown>;
   /** Write one field value. */
@@ -60,6 +61,7 @@ interface InstrumentEmit {
 const InstrumentEmitContext = createContext<InstrumentEmit>({
   emit: () => {},
   disabled: false,
+  allowSettlement: true,
   fields: () => ({}),
   setField: () => {},
 });
@@ -120,6 +122,7 @@ function OptionListNode(node: Node): JSX.Element {
   const emit = useInstrumentEmit();
   const action = str(node.action, "choose");
   const options = () => (Array.isArray(node.options) ? (node.options as Record<string, unknown>[]) : []);
+  if (node.settles !== false && !emit.allowSettlement) return null;
   return (
     <div class="flex flex-col border-y border-border/70">
       <For each={options()}>
@@ -206,6 +209,7 @@ function SubmitNode(node: Node): JSX.Element {
   const emit = useInstrumentEmit();
   const action = str(node.action, "submit");
   const ghost = node.variant === "ghost";
+  if (node.settles !== false && !emit.allowSettlement) return null;
   return (
     <button
       type="button"
@@ -363,6 +367,8 @@ export interface ThreadInstrumentProps {
   onAction?: (action: string, data: unknown, settles: boolean) => void;
   /** Disable interactive controls (e.g. the event is already decided). */
   disabled?: boolean;
+  /** Spaces cannot expose generated actions that would complete their Thread. */
+  allowSettlement?: boolean;
   /** Wave-3 time axis: the relative age appended to a blocking judgment's
    * boundary eyebrow ("Deciding unblocks 2 agents · 6h"). Omitted → no age. */
   eyebrowAge?: string;
@@ -377,6 +383,9 @@ export function ThreadInstrument(props: ThreadInstrumentProps): JSX.Element {
     emit: (action, data, settles) => props.onAction?.(action, data, settles),
     get disabled() {
       return props.disabled === true;
+    },
+    get allowSettlement() {
+      return props.allowSettlement !== false;
     },
     fields: values,
     setField: (name, value) => setValues((prev) => ({ ...prev, [name]: value })),

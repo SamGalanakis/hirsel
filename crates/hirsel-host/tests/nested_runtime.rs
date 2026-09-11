@@ -84,6 +84,7 @@ async fn lash_parent_delegates_real_cli_and_receives_durable_report_with_human_r
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -220,7 +221,7 @@ variant = "default"
     let hello = next_frame(&mut ws, "hello_ok").await;
     assert_eq!(hello["threads"].as_array().unwrap().len(), 1);
     let history_id = hello["history_id"].as_str().unwrap();
-    send(&mut ws,json!({"type":"create_thread","history_id":history_id,"client_id":"parent","title":"Real Lash parent","parent_thread_id":null})).await;
+    send(&mut ws,json!({"type":"create_thread","kind":"task","history_id":history_id,"client_id":"parent","title":"Real Lash parent","parent_thread_id":null})).await;
     let created = next_frame(&mut ws, "thread_created").await;
     let parent = created["thread"]["id"].as_u64().unwrap();
     send(&mut ws,json!({"type":"send_thread_message","history_id":history_id,"client_id":"owner-proof","thread_id":parent,"body":"Edit the explicitly attached notes and delegate the focused child.","attachments":[],"mentions":[],"artifact_ids":[44],"mode":"send"})).await;
@@ -390,7 +391,7 @@ variant = "default"
     );
     std::fs::remove_file(dir.path().join("hold")).unwrap();
     for (client, title) in [("new-peer", "New peer"), ("new-parent", "Fresh parent")] {
-        send(&mut ws,json!({"type":"create_thread","history_id":new_history,"client_id":client,"title":title,"parent_thread_id":null})).await;
+        send(&mut ws,json!({"type":"create_thread","kind":"task","history_id":new_history,"client_id":client,"title":title,"parent_thread_id":null})).await;
         let fresh = next_frame(&mut ws, "thread_created").await;
         if client == "new-parent" {
             assert_eq!(fresh["thread"]["id"], parent);

@@ -20,6 +20,7 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
             "",
             &serde_json::Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -72,6 +73,7 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
             "",
             &Value::Null,
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await

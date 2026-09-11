@@ -261,6 +261,7 @@ impl Client {
         &self,
         history_id: String,
         title: String,
+        kind: hirsel_proto::ThreadKind,
         parent_thread_id: Option<u64>,
     ) -> Option<SendReceipt> {
         let client_id = Uuid::new_v4().to_string();
@@ -270,7 +271,7 @@ impl Client {
         }
         store
             .pending_creates
-            .push((client_id.clone(), history_id, title, parent_thread_id));
+            .push((client_id.clone(), history_id, title, kind, parent_thread_id));
         drop(store);
         if let Some(sender) = self
             .inner

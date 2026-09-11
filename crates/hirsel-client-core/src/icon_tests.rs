@@ -6,7 +6,7 @@ use serde_json::json;
 fn icon_edits_reject_reused_thread_identity_after_history_change() {
     let client = Client::new(ClientConfig::new("localhost:3000".into(), "test".into())).unwrap();
     let thread: hirsel_proto::Thread = serde_json::from_value(json!({
-        "id":5,"parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":"🐙",
+        "id":5,"kind":"space","parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":"🐙",
         "description":"","instrument":null,"attention":"quiet","settled_at":null,
         "archived_at":null,"snoozed_until":null,"read":false,
         "created_at":"2026-09-10T10:00:00Z","updated_at":"2026-09-10T10:00:00Z","revision":7,

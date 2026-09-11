@@ -33,6 +33,7 @@ async fn bridge(state: &crate::AppState) -> ThreadToolBridge {
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -76,7 +77,7 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
     // Each rpc closes the discovery IPC normally, as Claude's preflight does.
     let request = call(
         "threads_create",
-        json!({"client_id":"child","title":"Child"}),
+        json!({"client_id":"child","kind":"task","title":"Child"}),
     );
     let first = rpc(&bridge, "actual", "create", request.clone())
         .await
@@ -94,7 +95,7 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
             "create",
             call(
                 "threads_create",
-                json!({"client_id":"child","title":"Changed"})
+                json!({"client_id":"child","kind":"task","title":"Changed"})
             )
         )
         .await
@@ -109,6 +110,7 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
             "",
             &json!({}),
             hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
             None,
         )
         .await
@@ -220,7 +222,7 @@ async fn runtime_reset_rejects_old_bridge_and_replay_with_reused_ids() {
             "write",
             call(
                 "threads_create",
-                json!({"client_id":"old","title":"Forbidden"})
+                json!({"client_id":"old","kind":"task","title":"Forbidden"})
             )
         )
         .await
@@ -259,7 +261,10 @@ async fn accepted_stop_immediately_revokes_reads_writes_and_cached_replies() {
             &active,
             "provider",
             "late",
-            call("threads_create", json!({"client_id":"late","title":"Late"}))
+            call(
+                "threads_create",
+                json!({"client_id":"late","kind":"task","title":"Late"})
+            )
         )
         .await
         .is_err()
@@ -315,7 +320,10 @@ async fn self_cancel_pairs_completion_without_restoring_capability_or_replaying_
             &active,
             "provider",
             "write",
-            call("threads_create", json!({"client_id":"late","title":"Late"}))
+            call(
+                "threads_create",
+                json!({"client_id":"late","kind":"task","title":"Late"})
+            )
         )
         .await
         .is_err()

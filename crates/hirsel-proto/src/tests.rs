@@ -72,7 +72,7 @@ fn cancel_frames_round_trip() {
 #[test]
 fn thread_mutations_require_captured_history_on_the_wire() {
     for value in [
-        json!({"type":"create_thread","client_id":"create","history_id":"history-a","title":"Child","parent_thread_id":1}),
+        json!({"type":"create_thread","client_id":"create","history_id":"history-a","kind":"task","title":"Child","parent_thread_id":1}),
         json!({"type":"send_thread_message","client_id":"send","history_id":"history-a","thread_id":1,"body":"Hello","attachments":[],"mentions":[],"mode":"send","artifact_ids":[]}),
         json!({"type":"thread_action","client_id":"action","history_id":"history-a","thread_id":1,"action":"archive","data":{},"expected_revision":null}),
         json!({"type":"cancel_turn","history_id":"history-a","thread_id":1}),
@@ -105,6 +105,35 @@ fn thread_mutations_require_captured_history_on_the_wire() {
         serde_json::from_value::<HostToClient>(value).unwrap(),
         applied
     );
+
+    for invalid in [
+        json!({"type":"create_thread","client_id":"missing-kind","history_id":"history-a","title":"Child","parent_thread_id":null}),
+        json!({"type":"create_thread","client_id":"bad-kind","history_id":"history-a","kind":"project","title":"Child","parent_thread_id":null}),
+    ] {
+        assert!(serde_json::from_value::<ClientToHost>(invalid).is_err());
+    }
+    for kind in [ThreadKind::Space, ThreadKind::Task] {
+        let frame = ClientToHost::CreateThread {
+            history_id: "history-a".into(),
+            kind,
+            parent_thread_id: None,
+            client_id: format!("{kind:?}"),
+            title: "Root".into(),
+        };
+        let encoded = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            encoded["kind"],
+            if kind == ThreadKind::Space {
+                "space"
+            } else {
+                "task"
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientToHost>(encoded).unwrap(),
+            frame
+        );
+    }
 }
 
 #[test]

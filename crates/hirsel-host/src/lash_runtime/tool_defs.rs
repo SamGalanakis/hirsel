@@ -141,7 +141,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_cancel",
             "threads_cancel",
-            "Cancel running or queued work in your own subtree. Never cancels a peer or changes settlement.",
+            "Cancel running or queued work in your own subtree. Never cancels a peer or changes Task completion.",
             json!({"type":"object","additionalProperties":false,"properties":{"thread":thread_ref_schema()}}),
             json!({"type":"object"}),
             ["threads"],
@@ -150,7 +150,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_create",
             "threads_create",
-            "Create durable work with its own conversation. Ordinary work needs no choices or notification kind. Reuse client_id on retries; every created Thread is visible immediately.",
+            "Create a durable Space or Task with its own conversation. Spaces may contain Spaces or Tasks; Tasks may contain only Tasks. Reuse client_id on retries; every created Thread is visible immediately.",
             thread_create_schema(),
             thread_result_schema(),
             ["threads"],
@@ -159,7 +159,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_update",
             "threads_update",
-            "Update an existing Thread title, icon, showcased artifact, description, generated instrument or attention from any wake. Identity and conversation are preserved. Reading or updating never settles it.",
+            "Update an existing Thread title, icon, showcased artifact, description, generated instrument or attention from any wake. Identity and conversation are preserved. Reading or updating never completes a Task.",
             thread_update_schema(),
             thread_result_schema(),
             ["threads"],
@@ -204,7 +204,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_activity",
             "threads_activity",
-            "Append a factual update to an existing Thread. Activity does not create work, request attention, or settle it. Use threads.update when attention or the instrument changes.",
+            "Append a factual update to an existing Thread. Activity does not create work, request attention, or complete a Task. Use threads.update when attention or the instrument changes.",
             thread_activity_schema(),
             json!({"type":"object","required":["activity"],"properties":{"activity":{"type":"object"}}}),
             ["threads"],

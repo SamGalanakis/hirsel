@@ -18,13 +18,13 @@ const broadcast = (world, frame) => {
   const id = frame.type === "msg" ? frame.message.thread_id : frame.type === "thread_turn" ? frame.turn.thread_id : null;
   if (id !== null) broadcast(world, { type: "thread_upsert", thread: threadFor(world, id) });
 };
-function makeThread(id, title, parent_thread_id = null) {
-  return { id, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
+function makeThread(id, title, kind, parent_thread_id = null) {
+  return { id, kind, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
 }
 function worldFor(token) {
   if (!tenants.has(token)) {
     const threads = [];
-    if (process.env.MOCK_SEED !== "none") threads.push(makeThread(1, "Buy groceries"));
+    if (process.env.MOCK_SEED !== "none") threads.push(makeThread(1, "Home", "space"));
     tenants.set(token, { token, history_id: randomUUID(), threads, messages: [], relatedItems: [], nextRelatedItem: 1, relatedReceipts: new Map(), artifacts: [], artifactOperations: new Map(), nextArtifact: 1, turns: [], activities: [], clients: new Set(), requests: new Map(), blobs: new Map(), timers: new Map(), queue: [], nextThread: Math.max(0, ...threads.map(thread => thread.id)) + 1, nextMessage: 1, nextTurn: 1 });
   }
   return tenants.get(token);
@@ -35,8 +35,8 @@ function summary(world, thread) {
   const times = [thread.created_at, ...world.messages.filter(row => row.thread_id === thread.id).map(row => row.ts), ...world.activities.filter(row => row.thread_id === thread.id).map(row => row.ts), ...turns.flatMap(turn => [turn.started_at, turn.finished_at]).filter(Boolean)];
   return { ...thread, running_turn: turns.find(turn => turn.state === "running") ?? null, queued_turn_count: turns.filter(turn => turn.state === "queued").length, last_finished_turn: terminal[0] ?? null, last_activity_at: new Date(Math.max(...times.map(Date.parse))).toISOString() };
 }
-function createFingerprint(title, parent_thread_id) {
-  return createHash("sha256").update(JSON.stringify({ title, parent_thread_id })).digest("hex");
+function createFingerprint(title, kind, parent_thread_id) {
+  return createHash("sha256").update(JSON.stringify({ title, kind, parent_thread_id })).digest("hex");
 }
 function threadFor(world, id) {
   const thread = world.threads.find(row => row.id === id);
@@ -128,17 +128,19 @@ function handle(world, ws, frame) {
     case "create_thread": {
       if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
       if (!("parent_thread_id" in frame) || (frame.parent_thread_id !== null && !Number.isSafeInteger(frame.parent_thread_id))) throw new Error("parent_thread_id is required and must be null or an ID");
-      if (frame.parent_thread_id !== null) threadFor(world, frame.parent_thread_id);
+      if (!["space", "task"].includes(frame.kind)) throw new Error("kind is required and must be space or task");
+      const parent = frame.parent_thread_id === null ? null : threadFor(world, frame.parent_thread_id);
+      if (parent?.kind === "task" && frame.kind !== "task") throw new Error("Tasks can contain child Tasks only");
       if (!frame.title?.trim()) throw new Error("Thread title must not be empty");
       const title = frame.title.trim();
-      const fingerprint = createFingerprint(title, frame.parent_thread_id);
+      const fingerprint = createFingerprint(title, frame.kind, frame.parent_thread_id);
       const prior = world.requests.get(frame.client_id);
       if (prior) {
         if (prior.type !== "thread_created" || prior.fingerprint !== fingerprint) throw new Error("client_id already used");
         send(ws, { type: "thread_created", client_id: frame.client_id, thread: summary(world, threadFor(world, prior.thread_id)) });
         return;
       }
-      const thread = makeThread(world.nextThread++, title, frame.parent_thread_id);
+      const thread = makeThread(world.nextThread++, title, frame.kind, frame.parent_thread_id);
       world.threads.push(thread);
       world.requests.set(frame.client_id, { type: "thread_created", fingerprint, thread_id: thread.id });
       broadcast(world, { type: "thread_upsert", thread });
@@ -225,7 +227,18 @@ function handle(world, ws, frame) {
       const thread = threadFor(world, frame.thread_id);
       const acknowledge = () => send(ws, { type: "thread_action_applied", client_id: frame.client_id, history_id: frame.history_id, thread_id: frame.thread_id });
       if (frame.action === "pin" && thread.parent_thread_id !== null) throw new Error("Only top-level threads can be pinned");
-      if (["pin", "unpin", "set_icon", "set_showcase"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
+      if (["pin", "unpin", "set_icon", "set_showcase", "set_kind"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
+      if (frame.action === "set_kind") {
+        const kind = frame.data?.kind;
+        if (!["space", "task"].includes(kind) || Object.keys(frame.data ?? {}).length !== 1) throw new Error("kind is required and must be space or task");
+        if (kind === thread.kind) { acknowledge(); return; }
+        if (kind === "space") {
+          if (thread.settled_at) throw new Error("Reopen this Task before changing it to a Space");
+          const parent = thread.parent_thread_id === null ? null : threadFor(world, thread.parent_thread_id);
+          if (parent?.kind === "task") throw new Error("A Task cannot contain a Space");
+        } else if (world.threads.some(child => child.parent_thread_id === thread.id && child.kind === "space")) throw new Error("Move or convert child Spaces before changing this Space to a Task");
+        updateThread(world, thread, { kind }); acknowledge(); return;
+      }
       if (frame.action === "set_showcase") {
         if (!Object.hasOwn(frame.data, "artifact_id") || Object.keys(frame.data).length !== 1) throw new Error("artifact_id is required and must be the only field");
         const id = frame.data.artifact_id;
@@ -250,6 +263,7 @@ function handle(world, ws, frame) {
         }
         updateThread(world, thread, patch); acknowledge(); return;
       }
+      if (["settle", "reopen"].includes(frame.action) && thread.kind !== "task") throw new Error("Spaces cannot be marked done or reopened");
       const patches = { pin: { pinned_at: thread.pinned_at ?? now() }, unpin: { pinned_at: null }, settle: { settled_at: now() }, reopen: { settled_at: null }, archive: { archived_at: now() }, unarchive: { archived_at: null }, read: { read: true }, snooze: { snoozed_until: frame.data?.until }, unsnooze: { snoozed_until: null } };
       if (patches[frame.action]) { updateThread(world, thread, patches[frame.action]); acknowledge(); return; }
       if (frame.expected_revision !== thread.revision) throw new Error("This instrument has changed. Refresh before acting.");

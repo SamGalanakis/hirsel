@@ -25,7 +25,7 @@ describe("CommandPalette", () => {
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
     expect(screen.getAllByText("Focus conversation").length).toBeGreaterThan(0);
-    expect(screen.getByText("Open threads")).toBeInTheDocument();
+    expect(screen.getByText("Open Spaces and Tasks")).toBeInTheDocument();
     expect(screen.getByText("Open Processes")).toBeInTheDocument();
   });
 
@@ -33,7 +33,7 @@ describe("CommandPalette", () => {
     flush(() => closeThreadNavigation());
     const onOpenChange = vi.fn();
     render(() => <CommandPalette open onOpenChange={onOpenChange} />);
-    await userEvent.setup().click(await screen.findByText("Open threads"));
+    await userEvent.setup().click(await screen.findByText("Open Spaces and Tasks"));
     await waitFor(() => expect(threadNavigationOpen()).toBe(true));
     expect(onOpenChange).toHaveBeenCalledWith(false);
     flush(() => closeThreadNavigation());
@@ -89,15 +89,15 @@ describe("CommandPalette", () => {
     render(() => <CommandPalette open onOpenChange={() => {}} />);
     const input = await screen.findByRole("combobox");
     await user.type(input, "zzzznope");
-    await waitFor(() => expect(screen.getByText("No matching commands or threads")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("No matching commands, Spaces or Tasks")).toBeInTheDocument());
   });
 });
 
 describe("Thread lifecycle commands", () => {
   it("offers explicit settlement without deriving completion from read", async () => {
-    flush(() => setThreadState(draft => { setHistoryId("palette-history"); draft.ready = true; Object.assign(draft, { threads: [makeThread(11, { read: true })], focusedId: 11 }); }));
+    flush(() => setThreadState(draft => { setHistoryId("palette-history"); draft.ready = true; Object.assign(draft, { threads: [makeThread(11, { kind: "task", read: true })], focusedId: 11 }); }));
     render(() => <CommandPalette open onOpenChange={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Settle thread")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Mark task done")).toBeInTheDocument());
     expect(screen.queryByText(/Clear finished/)).toBeNull();
     flush(() => setThreadState(draft => { setHistoryId("palette-history"); draft.ready = true; Object.assign(draft, { threads: [], focusedId: 0 }); }));
   });
@@ -109,7 +109,7 @@ describe("ShortcutHelp", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "Keyboard shortcuts" })).toBeInTheDocument(),
     );
-    expect(screen.getByText("Search commands and threads")).toBeInTheDocument();
+    expect(screen.getByText("Search commands, Spaces and Tasks")).toBeInTheDocument();
     expect(screen.getAllByText("Focus conversation").length).toBeGreaterThan(0);
     expect(screen.getByText("Jump to latest")).toBeInTheDocument();
   });
@@ -120,7 +120,7 @@ it("opens Thread search with only Thread destinations while the command palette 
   const { makeThread }=await import("../threads/fixtures");
   flush(()=>store.setThreadState(draft=>{ draft.threads=[makeThread(7,{title:"Find groceries"})]; }));
   render(()=> <CommandPalette open intent="threads" onOpenChange={()=>{}} />);
-  expect(await screen.findByRole("combobox",{name:"Search threads"})).toBeTruthy();
+  expect(await screen.findByRole("combobox",{name:"Search Spaces and Tasks"})).toBeTruthy();
   expect(screen.getAllByRole("option").map(option=>option.textContent)).toHaveLength(1);
   expect(screen.getByRole("option")).toHaveTextContent("Find groceries");
   expect(screen.queryByRole("option",{name:/Open Settings/})).toBeNull();

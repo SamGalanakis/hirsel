@@ -57,6 +57,7 @@ pub struct ToolSuite {
 pub(crate) struct AgentSessionBootstrap {
     pub session_id: String,
     pub handoff_seed: Option<String>,
+    pub unowned_message_watermark: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -34,6 +34,11 @@ struct NativeTerminalProjection {
     reason: Option<String>,
 }
 
+struct NativeWorkerExecution {
+    output: lash::TurnOutput,
+    unowned_message_watermark: Option<u64>,
+}
+
 impl NativeWorkerTurn {
     pub(super) fn new(turn_id: u64) -> Arc<Self> {
         Arc::new(Self {
@@ -77,6 +82,10 @@ impl NativeWorkerTurn {
     ) -> anyhow::Result<()> {
         let tools = context.tools;
         let result = self.execute(&context, &request, execution).await;
+        let unowned_message_watermark = result
+            .as_ref()
+            .ok()
+            .and_then(|execution| execution.unowned_message_watermark);
         let cancelled = self.cancel.is_cancelled();
         self.cleanup().await;
         let abandon_session = result.is_err();
@@ -89,7 +98,7 @@ impl NativeWorkerTurn {
                 output: None,
                 reason: Some(reason.clone()),
             },
-            (None, Ok(output)) => native_terminal_projection(&output),
+            (None, Ok(execution)) => native_terminal_projection(&execution.output),
             (None, Err(_error)) if cancelled => NativeTerminalProjection {
                 state: ThreadTurnState::Cancelled,
                 output: None,
@@ -153,7 +162,11 @@ impl NativeWorkerTurn {
                     if session_reusable
                         && let Err(error) = tools
                             .storage()
-                            .mark_native_worker_conversation_seen(request.thread_id)
+                            .mark_native_worker_conversation_seen(
+                                request.thread_id,
+                                self.turn_id,
+                                unowned_message_watermark,
+                            )
                             .await
                     {
                         tracing::warn!(
@@ -198,7 +211,7 @@ impl NativeWorkerTurn {
         context: &NativeWorkerRunContext<'_>,
         request: &OwnerTurn,
         execution: crate::storage::ThreadExecution,
-    ) -> anyhow::Result<lash::TurnOutput> {
+    ) -> anyhow::Result<NativeWorkerExecution> {
         let tools = context.tools;
         let _permit = tokio::select! {
             () = self.cancel.cancelled() => anyhow::bail!("native worker turn cancelled before admission"),
@@ -263,7 +276,7 @@ impl NativeWorkerTurn {
         let bootstrap = tools
             .prepare_native_worker_session(
                 request.thread_id,
-                request.message_id,
+                self.turn_id,
                 &fingerprint,
                 &tool_names,
             )
@@ -365,9 +378,12 @@ impl NativeWorkerTurn {
             .await;
         sink.finish().await;
         let output = report?;
-        Ok(lash::TurnOutput {
-            result: output,
-            activities: sink.activities().await,
+        Ok(NativeWorkerExecution {
+            output: lash::TurnOutput {
+                result: output,
+                activities: sink.activities().await,
+            },
+            unowned_message_watermark: bootstrap.unowned_message_watermark,
         })
     }
 }

@@ -34,6 +34,14 @@ pub(super) fn capture(
     explicit: Option<&ThreadExecution>,
 ) -> anyhow::Result<()> {
     let selected = select(c, thread_id, explicit)?;
+    capture_selected(c, turn_id, selected.as_ref())
+}
+
+pub(super) fn capture_selected(
+    c: &Connection,
+    turn_id: u64,
+    selected: Option<&ThreadExecution>,
+) -> anyhow::Result<()> {
     if let Some(execution) = selected {
         c.execute(
             "INSERT INTO thread_turn_execution(turn_id,config) VALUES(?1,?2)",
@@ -43,7 +51,7 @@ pub(super) fn capture(
     Ok(())
 }
 
-fn select(
+pub(super) fn select(
     c: &Connection,
     thread_id: u64,
     explicit: Option<&ThreadExecution>,

@@ -6,7 +6,7 @@ impl ToolSuite {
     pub(crate) async fn prepare_native_worker_session(
         &self,
         thread_id: u64,
-        before_message_id: Option<u64>,
+        current_turn_id: u64,
         profile_fingerprint: &str,
         tool_names: &[String],
     ) -> anyhow::Result<AgentSessionBootstrap> {
@@ -14,31 +14,41 @@ impl ToolSuite {
             .storage
             .reconcile_native_worker_profile(thread_id, profile_fingerprint, tool_names)
             .await?;
-        let watermark = self
+        let turn_watermark = self
             .storage
-            .native_worker_conversation_watermark(thread_id)
+            .native_worker_conversation_turn_watermark(thread_id)
             .await?;
-        let mut messages = self
+        let unowned_message_watermark = self
             .storage
-            .thread_detail(thread_id, before_message_id, 30)
-            .await?
-            .messages;
-        if !state.rotated
-            && let Some(watermark) = watermark
-        {
-            messages.retain(|message| message.id > watermark);
-        }
+            .native_worker_unowned_message_watermark(thread_id)
+            .await?;
+        let conversation = self
+            .storage
+            .native_worker_conversation(
+                thread_id,
+                current_turn_id,
+                if state.rotated { None } else { turn_watermark },
+                if state.rotated {
+                    None
+                } else {
+                    unowned_message_watermark
+                },
+                30,
+            )
+            .await?;
+        let messages = conversation.messages;
         if !state.rotated && messages.is_empty() {
             return Ok(AgentSessionBootstrap {
                 session_id: state.session_id,
                 handoff_seed: None,
+                unowned_message_watermark: None,
             });
         }
         let mut handoff = if state.rotated {
             String::from(
                 "The host rotated this native worker session because its accepted execution profile changed. Continue from this Task's visible conversation; do not assume unfinished side effects from the previous session were applied.\n\n## Recent chat\n",
             )
-        } else if watermark.is_none() {
+        } else if turn_watermark.is_none() && unowned_message_watermark.is_none() {
             String::from(
                 "This native worker is joining an existing Task. Continue from this Task's visible recent conversation.\n\n## Recent chat\n",
             )
@@ -75,6 +85,7 @@ impl ToolSuite {
         Ok(AgentSessionBootstrap {
             session_id: state.session_id,
             handoff_seed: Some(handoff),
+            unowned_message_watermark: conversation.unowned_message_watermark,
         })
     }
 
@@ -92,6 +103,7 @@ impl ToolSuite {
             return Ok(AgentSessionBootstrap {
                 session_id: state.session_id,
                 handoff_seed: None,
+                unowned_message_watermark: None,
             });
         }
 
@@ -103,6 +115,7 @@ impl ToolSuite {
         Ok(AgentSessionBootstrap {
             session_id: state.session_id,
             handoff_seed: Some(handoff_seed),
+            unowned_message_watermark: None,
         })
     }
 

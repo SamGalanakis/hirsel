@@ -157,10 +157,10 @@ impl Storage {
         })
     }
 
-    /// The newest Task message already represented in the reusable native
-    /// session. Keeping this cursor separate from the profile generation lets
-    /// the same session receive only conversation written by another backend.
-    pub(crate) async fn native_worker_conversation_watermark(
+    /// The newest Task turn already represented in the reusable native session.
+    /// Turn order remains stable when a predecessor reply is written after a
+    /// later Owner request was accepted.
+    pub(crate) async fn native_worker_conversation_turn_watermark(
         &self,
         thread_id: u64,
     ) -> anyhow::Result<Option<u64>> {
@@ -168,33 +168,69 @@ impl Storage {
         super::threads::get(&c, thread_id)?;
         meta_value_from_conn(
             &c,
-            &format!("thread:{thread_id}:native_worker_conversation_watermark"),
+            &format!("thread:{thread_id}:native_worker_conversation_turn_watermark"),
         )?
         .map(|value| value.parse::<u64>())
         .transpose()
-        .context("decode native worker conversation watermark")
+        .context("decode native worker conversation turn watermark")
     }
 
-    /// Advance the native session cursor only after its terminal projection is
-    /// durable. Failed direct drives abandon their session and deliberately do
-    /// not call this, so their accepted input is available to the next handoff.
+    pub(crate) async fn native_worker_unowned_message_watermark(
+        &self,
+        thread_id: u64,
+    ) -> anyhow::Result<Option<u64>> {
+        let c = self.conn.lock().await;
+        super::threads::get(&c, thread_id)?;
+        meta_value_from_conn(
+            &c,
+            &format!("thread:{thread_id}:native_worker_unowned_message_watermark"),
+        )?
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .context("decode native worker unowned message watermark")
+    }
+
+    /// Advance only over the completed native turn and loose chat actually
+    /// represented in its session. Future queued turns remain eligible for a
+    /// later handoff even when their Owner message has a lower global chat id.
     pub(crate) async fn mark_native_worker_conversation_seen(
         &self,
         thread_id: u64,
+        turn_id: u64,
+        unowned_message_watermark: Option<u64>,
     ) -> anyhow::Result<()> {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         super::threads::get(&tx, thread_id)?;
-        let latest = tx.query_row(
-            "SELECT MAX(id) FROM chat_messages WHERE thread_id=?1",
-            [thread_id],
-            |row| row.get::<_, Option<u64>>(0),
+        let turn = super::thread_activity::get(&tx, turn_id)?;
+        anyhow::ensure!(
+            turn.thread_id == thread_id && turn.finished_at.is_some(),
+            "native worker watermark requires its terminal Task turn"
+        );
+        let turn_key = format!("thread:{thread_id}:native_worker_conversation_turn_watermark");
+        let previous_turn = meta_value_from_conn(&tx, &turn_key)?
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .context("decode native worker conversation turn watermark")?;
+        set_meta_value(
+            &tx,
+            &turn_key,
+            &previous_turn
+                .map_or(turn_id, |previous| previous.max(turn_id))
+                .to_string(),
         )?;
-        if let Some(latest) = latest {
+        if let Some(represented) = unowned_message_watermark {
+            let message_key = format!("thread:{thread_id}:native_worker_unowned_message_watermark");
+            let previous_message = meta_value_from_conn(&tx, &message_key)?
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .context("decode native worker unowned message watermark")?;
             set_meta_value(
                 &tx,
-                &format!("thread:{thread_id}:native_worker_conversation_watermark"),
-                &latest.to_string(),
+                &message_key,
+                &previous_message
+                    .map_or(represented, |previous| previous.max(represented))
+                    .to_string(),
             )?;
         }
         tx.commit()?;

@@ -816,3 +816,166 @@ async fn human_artifact_reference_is_atomic_explicit_and_scoped_without_peer_acc
     assert!(text_only.artifact_ids.is_empty());
     assert!(s.scoped_artifact(&plain, 44).await.is_err());
 }
+
+#[tokio::test]
+async fn direct_owner_native_input_policy_is_atomic_and_preserves_text_followups() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let task = thread(&storage, "native-owner-policy", None).await;
+    let execution = ThreadExecution::LashWorker {
+        provider: crate::providers::NativeWorkerProviderSnapshot {
+            id: "openrouter".into(),
+            base_url: lash_provider_openai::OPENROUTER_BASE_URL.into(),
+            revision: "owner-policy-route".into(),
+        },
+        model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.into(),
+        variant: "default".into(),
+        cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
+        tool_profile: NATIVE_CODING_TOOL_PROFILE.into(),
+    };
+    storage
+        .conn
+        .lock()
+        .await
+        .execute(
+            "INSERT INTO thread_execution_preferences(thread_id,config) VALUES(?1,?2)",
+            rusqlite::params![task, serde_json::to_string(&execution).unwrap()],
+        )
+        .unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    storage
+        .conn
+        .lock()
+        .await
+        .execute(
+            "INSERT INTO artifacts(id,title,kind,mime,filename,content,created_at,updated_at) VALUES(44,'Native input','\"file\"','text/plain',NULL,'content',?1,?1)",
+            [&now],
+        )
+        .unwrap();
+    let attachment = storage
+        .store_blob(
+            "native-owner-blob",
+            "input.txt",
+            "text/plain",
+            b"content".to_vec(),
+        )
+        .await
+        .unwrap();
+    let history = storage.history_id().await.unwrap();
+    let request = json!({"mode":"send","thread_action":null,"body":"unsupported input"});
+    let before = storage
+        .conn
+        .lock()
+        .await
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM chat_messages),
+                (SELECT COUNT(*) FROM thread_turns),
+                (SELECT COUNT(*) FROM thread_requests),
+                (SELECT COUNT(*) FROM message_artifacts),
+                (SELECT COUNT(*) FROM message_attachments)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    for (client_id, attachments, artifact_ids, expected) in [
+        (
+            "native-owner-artifact",
+            Vec::new(),
+            vec![44],
+            "artifact references are not supported",
+        ),
+        (
+            "native-owner-attachment",
+            vec![attachment.blob.id],
+            Vec::new(),
+            "attachments are not supported",
+        ),
+    ] {
+        let error = storage
+            .append_thread_owner_request(
+                &history,
+                task,
+                client_id,
+                "unsupported input".into(),
+                &attachments,
+                &[],
+                &artifact_ids,
+                &request,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        let after = storage
+            .conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM chat_messages),
+                    (SELECT COUNT(*) FROM thread_turns),
+                    (SELECT COUNT(*) FROM thread_requests),
+                    (SELECT COUNT(*) FROM message_artifacts),
+                    (SELECT COUNT(*) FROM message_attachments)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, u64>(3)?,
+                        row.get::<_, u64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, before, "native input refusal wrote accepted state");
+    }
+
+    let supported = json!({
+        "mode":"send",
+        "thread_action":null,
+        "body":"<skill name=\"review\">Inspect the focused diff.</skill>\nApply it"
+    });
+    let (message, inserted) = storage
+        .append_thread_owner_request(
+            &history,
+            task,
+            "native-owner-text",
+            "/skill:review Apply it".into(),
+            &[],
+            &[],
+            &[],
+            &supported,
+        )
+        .await
+        .unwrap();
+    assert!(inserted);
+    assert_eq!(message.body, "/skill:review Apply it");
+    let accepted = storage
+        .thread_request("native-owner-text")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        accepted["body"]
+            .as_str()
+            .unwrap()
+            .contains("Inspect the focused diff.")
+    );
+    assert!(matches!(
+        storage
+            .turn_execution(accepted["turn_id"].as_u64().unwrap())
+            .await
+            .unwrap(),
+        ThreadExecution::LashWorker { .. }
+    ));
+}

@@ -70,6 +70,12 @@ pub(crate) struct AgentSessionState {
     pub added_tools: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeWorkerConversation {
+    pub messages: Vec<hirsel_proto::ChatMessage>,
+    pub unowned_message_watermark: Option<u64>,
+}
+
 impl Storage {
     pub async fn open(data_dir: &Path) -> anyhow::Result<Self> {
         let data_dir = absolute_path(data_dir)?;

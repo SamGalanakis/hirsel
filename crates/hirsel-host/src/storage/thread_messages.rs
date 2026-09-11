@@ -131,6 +131,24 @@ impl Storage {
             tx.commit()?;
             return Ok((message, false));
         }
+        let accepted_execution = if request.is_some() {
+            super::thread_execution::select(&tx, thread_id, None)?
+        } else {
+            None
+        };
+        if matches!(
+            &accepted_execution,
+            Some(super::ThreadExecution::LashWorker { .. })
+        ) {
+            anyhow::ensure!(
+                artifact_ids.is_empty(),
+                "native Lash worker artifact references are not supported yet; remove artifact_ids or select another backend"
+            );
+            anyhow::ensure!(
+                attachments.is_empty(),
+                "native Lash worker attachments are not supported yet; remove attachments or select another backend"
+            );
+        }
         if let Some(anchor) = anchor {
             anyhow::ensure!(
                 get_chat_message(&tx, anchor)?.thread_id == thread_id,
@@ -234,7 +252,11 @@ impl Storage {
 
             tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,requester_thread_id,state,started_at) VALUES(?1,?2,(SELECT parent_thread_id FROM threads WHERE id=?1),'queued',?3)",params![thread_id,id,chrono::Utc::now().to_rfc3339()])?;
             let accepted_turn = tx.last_insert_rowid() as u64;
-            super::thread_execution::capture(&tx, thread_id, accepted_turn, None)?;
+            super::thread_execution::capture_selected(
+                &tx,
+                accepted_turn,
+                accepted_execution.as_ref(),
+            )?;
             request["turn_id"] = serde_json::json!(accepted_turn);
             tx.execute(
                 "INSERT INTO thread_requests(client_id,payload) VALUES(?1,?2)",
@@ -243,6 +265,76 @@ impl Storage {
         }
         tx.commit()?;
         Ok((message, true))
+    }
+
+    pub(crate) async fn native_worker_conversation(
+        &self,
+        thread_id: u64,
+        current_turn_id: u64,
+        after_turn_id: Option<u64>,
+        after_unowned_message_id: Option<u64>,
+        limit: u64,
+    ) -> anyhow::Result<super::NativeWorkerConversation> {
+        let c = self.conn.lock().await;
+        threads::get(&c, thread_id)?;
+        let current = super::thread_activity::get(&c, current_turn_id)?;
+        anyhow::ensure!(
+            current.thread_id == thread_id,
+            "native worker turn belongs to another Thread"
+        );
+        let mut candidates = c.prepare(
+            "SELECT m.id,
+                    NOT EXISTS(
+                        SELECT 1 FROM thread_turns linked
+                        WHERE linked.owner_message_id=m.id OR linked.agent_message_id=m.id
+                    ) AS unowned
+             FROM chat_messages m
+             WHERE m.thread_id=?1 AND (
+                 EXISTS(
+                     SELECT 1 FROM thread_turns predecessor
+                     WHERE predecessor.thread_id=?1
+                       AND predecessor.id<?2
+                       AND predecessor.finished_at IS NOT NULL
+                       AND (predecessor.owner_message_id=m.id OR predecessor.agent_message_id=m.id)
+                       AND (?3 IS NULL OR predecessor.id>?3)
+                 ) OR (
+                     NOT EXISTS(
+                         SELECT 1 FROM thread_turns linked
+                         WHERE linked.owner_message_id=m.id OR linked.agent_message_id=m.id
+                     )
+                     AND (?4 IS NULL OR m.id<?4)
+                     AND (?5 IS NULL OR m.id>?5)
+                 )
+             )
+             ORDER BY m.id DESC
+             LIMIT ?6",
+        )?;
+        let rows = candidates
+            .query_map(
+                params![
+                    thread_id,
+                    current_turn_id,
+                    after_turn_id,
+                    current.owner_message_id,
+                    after_unowned_message_id,
+                    limit.clamp(1, 100),
+                ],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, bool>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let unowned_message_watermark = rows
+            .iter()
+            .filter_map(|(id, unowned)| unowned.then_some(*id))
+            .max();
+        let mut messages = rows
+            .into_iter()
+            .map(|(id, _)| get_chat_message(&c, id))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        messages.reverse();
+        Ok(super::NativeWorkerConversation {
+            messages,
+            unowned_message_watermark,
+        })
     }
     pub async fn append_thread_chat(
         &self,

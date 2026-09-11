@@ -307,6 +307,79 @@ async fn shell_pidfd_preflight_refuses_before_command_effects() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shell_preflight_accepts_an_unrelated_non_utf8_process_name() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let mut fixture = spawn_non_utf8_process_group(directory.path(), "fixture");
+    let fixture_pid = fixture.id().expect("fixture pid");
+    let ready = directory.path().join("fixture.ready");
+    for _ in 0..500 {
+        if ready.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let fixture_started = ready.exists();
+    let fixture_name = std::fs::read(directory.path().join("fixture.comm")).unwrap_or_default();
+    let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+    let result = coordinated_shell_call(tools.clone(), json!({ "cmd": "exit 7" }))
+        .await
+        .value_for_projection();
+
+    terminate_test_process_group(fixture_pid);
+    fixture.wait().await.expect("reap unrelated fixture");
+    assert!(fixture_started, "unrelated fixture did not become ready");
+    assert!(
+        fixture_name.contains(&0xff),
+        "fixture did not publish a non-UTF-8 process name: {fixture_name:?}"
+    );
+    assert_eq!(
+        result["exit_code"], 7,
+        "unrelated process poisoned preflight"
+    );
+    tools.shutdown().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shell_barriers_an_owned_non_utf8_process_name() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let mut fixture = spawn_non_utf8_process_group(directory.path(), "owned");
+    let pid = fixture.id().expect("owned fixture pid");
+    let ready = directory.path().join("owned.ready");
+    for _ in 0..500 {
+        if ready.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let fixture_name = std::fs::read(directory.path().join("owned.comm")).unwrap_or_default();
+    let observed = super::shell::process_group_member_state_for_test(
+        i32::try_from(pid).expect("owned fixture PID fits pid_t"),
+        pid,
+    );
+    let termination = super::shell::terminate_process_group_for_test(pid).await;
+    fixture.wait().await.expect("reap owned fixture");
+
+    assert!(ready.exists(), "owned fixture did not become ready");
+    assert!(
+        fixture_name.contains(&0xff),
+        "owned fixture did not publish a non-UTF-8 process name: {fixture_name:?}"
+    );
+    assert!(
+        matches!(observed, Ok(Some(state)) if !matches!(state, 'Z' | 'X' | 'x')),
+        "owned non-UTF-8 member was not observed as live: {observed:?}"
+    );
+    termination.expect("barrier owned non-UTF-8 process group");
+    assert_process_terminated(
+        i32::try_from(pid).expect("owned fixture PID fits pid_t"),
+        "owned non-UTF-8 process after barrier",
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
@@ -816,4 +889,38 @@ fn process_is_terminated(pid: i32) -> bool {
             .and_then(|(_, fields)| fields.split_whitespace().next()),
         Some("Z" | "X")
     )
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_test_process_group(pid: u32) {
+    let pid = i32::try_from(pid).expect("test PID fits pid_t");
+    let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    assert!(
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+        "failed to terminate test process group {pid}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_non_utf8_process_group(cwd: &std::path::Path, label: &str) -> tokio::process::Child {
+    let mut fixture = tokio::process::Command::new("/bin/sh");
+    fixture
+        .arg("-c")
+        .arg(format!(
+            "printf '\\377{label}\\n' > /proc/self/comm; cat /proc/$$/comm > {label}.comm; : > {label}.ready; while :; do sleep 1; done"
+        ))
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    unsafe {
+        fixture.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    fixture.spawn().expect("non-UTF-8 process fixture")
 }

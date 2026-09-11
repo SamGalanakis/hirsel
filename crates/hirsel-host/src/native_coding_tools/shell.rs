@@ -20,6 +20,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "linux")]
+mod procfs;
+
+#[cfg(target_os = "linux")]
+use self::procfs::process_group_members;
+
 const SHELL_PATH: &str = "/bin/sh";
 const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 const MAX_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
@@ -555,58 +561,6 @@ fn wait_for_process_group_termination(pgid: libc::pid_t) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug)]
-struct ProcessGroupMember {
-    pid: u32,
-    state: char,
-}
-
-#[cfg(target_os = "linux")]
-fn process_group_members(pgid: libc::pid_t) -> io::Result<Vec<ProcessGroupMember>> {
-    let mut members = Vec::new();
-    for entry in fs::read_dir("/proc")? {
-        let entry = entry?;
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let stat = match fs::read_to_string(entry.path().join("stat")) {
-            Ok(stat) => stat,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let Some((_, fields)) = stat.rsplit_once(") ") else {
-            continue;
-        };
-        let mut fields = fields.split_whitespace();
-        let Some(state) = fields.next().and_then(|field| field.chars().next()) else {
-            continue;
-        };
-        let _parent_pid = fields.next();
-        let Some(member_pgid) = fields
-            .next()
-            .and_then(|field| field.parse::<libc::pid_t>().ok())
-        else {
-            continue;
-        };
-        if member_pgid == pgid {
-            members.push(ProcessGroupMember { pid, state });
-        }
-    }
-    Ok(members)
-}
-
-#[cfg(target_os = "linux")]
 fn wait_for_pidfd_exit(pidfd: OwnedFd) -> io::Result<()> {
     let mut pollfd = libc::pollfd {
         fd: pidfd.as_raw_fd(),
@@ -639,6 +593,27 @@ fn terminate_group(pid: u32) {
             libc::kill(-pid, libc::SIGKILL);
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn process_group_member_state_for_test(
+    pgid: libc::pid_t,
+    pid: u32,
+) -> io::Result<Option<char>> {
+    Ok(process_group_members(pgid)?
+        .into_iter()
+        .find(|member| member.pid == pid)
+        .map(|member| member.state))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) async fn terminate_process_group_for_test(pid: u32) -> Result<(), String> {
+    let pgid = libc::pid_t::try_from(pid).map_err(|_| "test PID exceeds pid_t".to_string())?;
+    terminate_group(pid);
+    tokio::task::spawn_blocking(move || wait_for_process_group_termination(pgid))
+        .await
+        .map_err(|error| format!("test process-group wait task failed: {error}"))?
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]

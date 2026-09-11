@@ -36,6 +36,7 @@ lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash",
 lash-provider-anthropic = { package = "lash-internal-provider-anthropic", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
 lash-provider-openai = { package = "lash-internal-provider-openai", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
 lash-protocol-rlm = { package = "lash-internal-protocol-rlm", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
+lash-protocol-standard = { package = "lash-internal-protocol-standard", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
 lash-sqlite-store = { package = "lash-internal-sqlite-store", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
 libc = "0.2.177"
 rusqlite = { version = "0.37.0", features = ["bundled", "functions"] }

@@ -20,3 +20,6 @@ kept here so later runtime changes can search for the same failure shapes.
 - A transient tool-result consumer cannot own command lifetime. The Hirsel tool
   provider retains its host-owned command task, cancels it through its token,
   and joins it during shutdown even when the consumer disappears.
+- A tool provider's manifests are not the final model-facing catalog. Protocol
+  plugins may register orchestrating tools while a session opens, so fixed
+  profiles must inspect and test the effective opened-session catalog.

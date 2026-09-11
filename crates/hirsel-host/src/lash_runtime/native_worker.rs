@@ -1,4 +1,4 @@
-//! Dedicated in-process Lash standard-tool worker for one accepted Thread turn.
+//! Dedicated in-process Lash standard-protocol worker for one accepted Thread turn.
 use super::bridges::{activity_from_observation, publish_ready_timeline};
 use super::*;
 use crate::{
@@ -8,7 +8,6 @@ use crate::{
 use hirsel_proto::ThreadTurnState;
 use lash::{TurnActivity, TurnActivitySink};
 
-const NATIVE_WORKER_TURN_BUDGET: usize = 32;
 const NATIVE_WORKER_INSTRUCTION_BYTES: usize = 256 * 1024;
 const NATIVE_WORKER_ERROR_BYTES: usize = 4 * 1024;
 const NATIVE_WORKER_TOOL_NAMES: [&str; 4] = ["read", "edit", "write", "exec_command"];
@@ -289,30 +288,17 @@ impl NativeWorkerTurn {
             .join(&request.history_id)
             .join(request.thread_id.to_string())
             .join("native-worker");
-        tokio::fs::create_dir_all(&lash_dir).await?;
-        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-            lash_dir.join("sessions"),
-        ));
-        let process_env_store =
-            Arc::new(lash_sqlite_store::Store::open(&lash_dir.join("process-env.db")).await?);
-        let core =
-            lash::LashCore::standard_builder(lash::TurnBudget::bounded(NATIVE_WORKER_TURN_BUDGET))
-                .provider(provider_handle.clone())
-                .model(model_spec.clone())
-                .store_factory(store_factory)
-                .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
-                    lash_dir.join("attachments"),
-                )))
-                .process_env_store(process_env_store)
-                .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
-                .tools(coding_tools.clone() as Arc<dyn ToolProvider>)
-                .without_queued_work()
-                .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
-                .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
-                .build(lash_core::LeaseOwnerIdentity::opaque(
-                    format!("hirsel-host:native-worker:{}", local_host_id()),
-                    Uuid::new_v4().to_string(),
-                ))?;
+        let core = super::native_worker_protocol::build_native_worker_core(
+            &lash_dir,
+            provider_handle.clone(),
+            model_spec.clone(),
+            coding_tools.clone(),
+            lash_core::LeaseOwnerIdentity::opaque(
+                format!("hirsel-host:native-worker:{}", local_host_id()),
+                Uuid::new_v4().to_string(),
+            ),
+        )
+        .await?;
         let guidance = native_worker_guidance(&cwd, bootstrap.handoff_seed.as_deref());
         let session = core
             .session(&bootstrap.session_id)
@@ -431,7 +417,7 @@ fn bounded_error(message: &str) -> String {
     bounded
 }
 
-fn ensure_native_tool_surface(names: &[String]) -> anyhow::Result<()> {
+pub(super) fn ensure_native_tool_surface(names: &[String]) -> anyhow::Result<()> {
     let actual = names.iter().map(String::as_str).collect::<HashSet<_>>();
     let expected = NATIVE_WORKER_TOOL_NAMES.into_iter().collect::<HashSet<_>>();
     anyhow::ensure!(

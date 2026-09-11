@@ -1711,6 +1711,7 @@ dependencies = [
  "jsonschema",
  "lash-internal-core",
  "lash-internal-protocol-rlm",
+ "lash-internal-protocol-standard",
  "lash-internal-provider-anthropic",
  "lash-internal-provider-openai",
  "lash-internal-sqlite-store",

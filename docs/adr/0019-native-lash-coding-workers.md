@@ -2,7 +2,7 @@
 
 Accepted 2026-09-11 for [#56](https://github.com/SamGalanakis/hirsel/issues/56).
 
-`threads.delegate` may select `agent: "lash"` for a focused coding worker. This is an in-process Lash standard tool-calling session, separate from the coordinator's RLM session. `agent: "host"` remains the full coordinator; `claude` and `codex` remain external CLI workers.
+`threads.delegate` may select `agent: "lash"` for a focused coding worker. This is an in-process Lash standard tool-calling session, separate from the coordinator's RLM session. Hirsel installs a dedicated protocol plugin that reuses Lash's public `StandardDriver` without the standard factory's `batch` tool or batch-specific prompt. `agent: "host"` remains the full coordinator; `claude` and `codex` remain external CLI workers.
 
 The worker exposes exactly four Hirsel-owned model-callable operations: `read`, `edit`, `write`, and `exec_command`. `exec_command` is the model-facing name bound to Lash's semantic `shell.exec` operation, but Lash supplies only the standard agent runtime and provider integration; Hirsel owns the tool implementations and does not depend on Lash's coding-tool crate. The coordinated Lash runtime/provider family remains pinned to `81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c`; the later tool-only pin is removed. There are no background-process, browser, web, planning, delegation, Thread-management, artifact-publication, or plugin tools in this profile. The runtime verifies the opened session's effective catalog, not only the provider's declared manifests. The accepted cwd is a default base, not a filesystem sandbox. Truncated text reads return both a line and UTF-8 byte cursor so one long line can be reconstructed without skipped bytes.
 

@@ -923,6 +923,19 @@ async function selectThreadInBrowser(page, threadId, parentThreadId = null) {
     if (await expand.count()) await expand.first().click();
   }
   row = page.locator(`[data-thread-row="${threadId}"]`).first();
+  if ((!(await row.count()) || !(await row.isVisible())) && parentThreadId !== null) {
+    const children = page.locator(`main[data-thread-id="${parentThreadId}"] [data-slot="child-threads"]`).first();
+    await children.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {});
+    if (await children.count() && await children.isVisible()) {
+      if (await children.getAttribute("open") === null) await children.locator("summary").click();
+      const childLink = children.locator(`a[href*="/t/${threadId}?history="]`).first();
+      await childLink.waitFor({ state: "visible", timeout: 10_000 });
+      await childLink.click();
+      await page.locator(`main[data-thread-id="${threadId}"]`).waitFor({ state: "visible" });
+      assert.equal(new URL(page.url()).pathname, `/t/${threadId}`);
+      return;
+    }
+  }
   await row.waitFor({ state: "visible", timeout: 10_000 });
   await row.click();
   await page.locator(`main[data-thread-id="${threadId}"]`).waitFor({ state: "visible" });

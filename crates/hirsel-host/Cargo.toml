@@ -29,6 +29,7 @@ lash-provider-anthropic.workspace = true
 lash-provider-openai.workspace = true
 lash-protocol-rlm.workspace = true
 lash-sqlite-store.workspace = true
+lash-tools.workspace = true
 libc.workspace = true
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }

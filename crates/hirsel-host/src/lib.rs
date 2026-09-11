@@ -12,6 +12,10 @@ mod json_spec;
 pub mod lash_runtime;
 pub mod model_selection;
 pub mod monitors;
+// This slice lands before the worker runtime that consumes it. Keep the
+// crate-private integration surface lint-clean in isolation.
+#[allow(dead_code)]
+pub(crate) mod native_coding_tools;
 pub mod plugins;
 pub mod process_run;
 

@@ -15,6 +15,13 @@ Their live queued, needs-input, and request-error states remain visible. Space
 and Task identity, nesting, root pinning, and the selected conversation remain
 legible at desktop and phone widths.
 
+Archiving the selected Thread returns to the unaddressed overview only after the
+Host accepts the action. Its conversation and unsent draft remain intact; the
+Thread is discoverable under Archived and can be explicitly reopened. Browsing
+Archived and unarchiving do not silently choose a different recipient. The
+drawer header and New Space/New Task controls remain distinct, unclipped, and
+at least 44px tall at 320px, 390px, and desktop widths.
+
 ## Isolated no-model check
 
 This scenario creates and changes the core hierarchy through the production web
@@ -23,6 +30,15 @@ reconciles each checkpoint with authenticated WebSocket snapshots and SQLite,
 including IDs, kinds, parentage, revisions, completion, and pinning. It reloads
 after Task completion, conversion, and pinning. The scripted/fake service makes
 no provider call.
+
+Before the fixture-only layer, the runner also sends a unique conversation
+marker through the real composer, leaves a second unique draft unsent, archives
+that selected Thread through its action menu, and reconciles the overview route,
+remembered selection, browser draft, authenticated history, Archived inventory,
+explicit archived selection, unarchive behavior, and SQLite row. Empty and
+populated drawer states are measured and captured together at 320px, 390px, and
+desktop widths; the measurements cover header overlap, utility and creation
+target size, label clipping, and icon-label gap.
 
 After those UI claims pass, the runner clearly enters a disposable fixture-only
 layer. It first writes a completed turn, `needs_owner`, and an instrument with
@@ -49,12 +65,16 @@ tears down only the isolated Host process group it started.
 
 ## Agent judgment
 
-Inspect the desktop and 390 CSS-pixel screenshots in one bounded pass. Confirm
+Inspect the desktop, 390, and 320 CSS-pixel screenshots in one bounded pass. Confirm
 that Space avatars read as softly square and Task avatars as round; the kind
 labels and selected context are easy to scan; hierarchy remains readable; the
 pinned Task appears once; Task completion and conversion controls use clear
 language; both invalid conversions show an understandable error without losing
-the selected conversation; and queued plus needs-input state remains visible on
-the Space while completion controls are absent. Record the exact screenshot or
-DOM/store row for every decision and replace `NOT_JUDGED` with a separate judged
-verdict in the handoff.
+the selected conversation; the archive returns to the overview while preserving
+history and draft and remains explicitly reopenable; and queued plus needs-input
+state remains visible on the Space while completion controls are absent. Confirm
+from the empty and populated layout JSON that the header groups do not overlap,
+all measured controls are at least 44px, both creation labels remain visible and
+unclipped, and each icon-label gap is at least 8px. Record the exact screenshot
+or DOM/store row for every decision and replace `NOT_JUDGED` with a separate
+judged verdict in the handoff.

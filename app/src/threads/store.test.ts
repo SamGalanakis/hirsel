@@ -3,13 +3,77 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../protocol";
 import type { ThreadClientMessage, ThreadDetail } from "./types";
 import { makeThread } from "./fixtures";
-import { attachThreadTransport, createThread, disconnectThreads, handleThreadMessage, openThread, resetThreads, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
+import { attachThreadTransport, createThread, disconnectThreads, focusThread, handleThreadMessage, openThread, resetThreads, retryThreadMessage, sendThreadMessage, setThreadState, threadAction, threadState } from "./store";
 import { setHistoryId } from "../lib/history";
 const sent: ThreadClientMessage[] = [];
-beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
+beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; history.replaceState(null, "", "/"); setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
 afterEach(() => { disconnectThreads(); vi.useRealTimers();vi.unstubAllGlobals(); });
 const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], turn_timelines: [], activities: [], related_items: [], has_more: false });
 describe("thread transport projection", () => {
+  it("clears an archived focused Thread only after its correlated action is accepted, preserving history and draft", async () => {
+    const retained = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 1, thread_id: 1, author: "owner" as const, body: "Keep this conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false };
+    flush(() => setThreadState(draft => { draft.threads = [makeThread(1), makeThread(2)]; draft.histories[1] = retained; }));
+    localStorage.setItem("hirsel.draft.test-history:thread-1", "Keep this draft");
+    flush(() => focusThread(1));
+    flush(() => threadAction("test-history", 1, "archive"));
+    const archive = sent.findLast(frame => frame.type === "thread_action");
+    if (archive?.type !== "thread_action") throw new Error("Missing archive action");
+
+    expect(threadState.focusedId).toBe(1);
+    flush(() => handleThreadMessage({ type: "thread_action_applied", client_id: archive.client_id, history_id: archive.history_id, thread_id: archive.thread_id }));
+    await Promise.resolve();
+
+    expect(threadState.focusedId).toBeNull();
+    expect(location.pathname).toBe("/");
+    expect(localStorage.getItem("hirsel.last-thread.test-history")).toBeNull();
+    expect(threadState.histories[1]).toEqual(retained);
+    expect(localStorage.getItem("hirsel.draft.test-history:thread-1")).toBe("Keep this draft");
+  });
+
+  it("does not let a delayed archive acceptance clear a selection that moved away and back", async () => {
+    flush(() => setThreadState(draft => { draft.threads = [makeThread(1), makeThread(2)]; }));
+    flush(() => focusThread(1));
+    flush(() => threadAction("test-history", 1, "archive"));
+    const archive = sent.findLast(frame => frame.type === "thread_action");
+    if (archive?.type !== "thread_action") throw new Error("Missing archive action");
+    flush(() => focusThread(2));
+    flush(() => focusThread(1));
+
+    flush(() => handleThreadMessage({ type: "thread_action_applied", client_id: archive.client_id, history_id: archive.history_id, thread_id: archive.thread_id }));
+    await Promise.resolve();
+
+    expect(threadState.focusedId).toBe(1);
+    expect(location.pathname).toBe("/t/1");
+  });
+
+  it("clears only a focused Thread archived by an authoritative upsert", () => {
+    flush(() => setThreadState(draft => { draft.threads = [makeThread(1), makeThread(2)]; }));
+    flush(() => focusThread(1));
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(2, { archived_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
+    expect(threadState.focusedId).toBe(1);
+
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { archived_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
+    expect(threadState.focusedId).toBeNull();
+    expect(location.pathname).toBe("/");
+  });
+
+  it("keeps an explicitly selected archived Thread focused across later archived upserts", () => {
+    flush(() => setThreadState(draft => { draft.threads = [makeThread(1, { archived_at: "2026-09-10T10:00:00Z" })]; }));
+    flush(() => focusThread(1));
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { archived_at: "2026-09-10T10:00:00Z", read: true, revision: 2 }) }));
+    expect(threadState.focusedId).toBe(1);
+    expect(location.pathname).toBe("/t/1");
+  });
+
+  it("ignores an older archived upsert when the focused Thread has a newer active revision", () => {
+    flush(() => setThreadState(draft => { draft.threads = [makeThread(1, { revision: 3 })]; }));
+    flush(() => focusThread(1));
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { archived_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
+    expect(threadState.focusedId).toBe(1);
+    expect(threadState.threads[0].archived_at).toBeNull();
+    expect(location.pathname).toBe("/t/1");
+  });
+
   it("rejects delayed mutations captured from the history before an ID was reused", async () => {
     const capturedHistory = "test-history";
     flush(() => setHistoryId("replacement-history"));

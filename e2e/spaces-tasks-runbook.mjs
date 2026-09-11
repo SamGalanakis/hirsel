@@ -144,7 +144,7 @@ async function openThread(url, token, threadId) {
 function storeSnapshot() {
   return {
     schemaVersion: sqliteJson("SELECT user_version AS version FROM pragma_user_version")[0]?.version,
-    threads: sqliteJson("SELECT id,kind,parent_thread_id,pinned_at,title,instrument,attention,settled_at,read,revision FROM threads ORDER BY id"),
+    threads: sqliteJson("SELECT id,kind,parent_thread_id,pinned_at,title,instrument,attention,settled_at,archived_at,read,revision FROM threads ORDER BY id"),
     turns: sqliteJson("SELECT id,thread_id,requester_thread_id,owner_message_id,agent_message_id,state,started_at,finished_at FROM thread_turns ORDER BY id"),
     messages: sqliteJson("SELECT id,thread_id,author,body,ts FROM chat_messages ORDER BY id"),
   };
@@ -217,13 +217,82 @@ async function capture(page, url, token, label, focusId) {
   for (const field of ["id", "kind", "parent_thread_id", "title", "attention", "settled_at", "revision"]) {
     assert.deepEqual(detail.detail.thread[field], stored[field], `${label}: ${field} differs between wire and SQLite`);
   }
+  assert.equal(detail.detail.thread.archived_at === null, stored.archived_at === null, `${label}: archived state differs between wire and SQLite`);
+  if (detail.detail.thread.archived_at !== null) assert.equal(Date.parse(detail.detail.thread.archived_at), Date.parse(stored.archived_at), `${label}: archived_at instant differs between wire and SQLite`);
   return { dom, inventory, detail: detail.detail, store };
+}
+
+async function captureDrawerLayout(page, label, expectedState) {
+  const drawer = await ensureDrawer(page);
+  const metrics = await drawer.evaluate((element, state) => {
+    const rect = node => {
+      const bounds = node.getBoundingClientRect();
+      return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom, width: bounds.width, height: bounds.height };
+    };
+    const visible = node => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const overlaps = (first, second) => first.left < second.right && first.right > second.left && first.top < second.bottom && first.bottom > second.top;
+    const identity = element.querySelector('[data-slot="thread-drawer-identity"]');
+    const actions = element.querySelector('[data-slot="thread-drawer-actions"]');
+    const creation = element.querySelector('[data-slot="thread-create-actions"]');
+    const actionButtons = [...actions.querySelectorAll("button")].filter(visible);
+    const createButtons = [...creation.querySelectorAll("button")].filter(visible);
+    const createMetrics = createButtons.map(button => {
+      const buttonRect = rect(button);
+      const iconRect = rect(button.querySelector("svg"));
+      const labelRect = rect(button.querySelector("span"));
+      return {
+        label: button.textContent.trim(),
+        ...buttonRect,
+        clipped: button.scrollWidth > button.clientWidth || button.scrollHeight > button.clientHeight || labelRect.left < buttonRect.left || labelRect.right > buttonRect.right,
+        iconLabelGap: labelRect.left - iconRect.right,
+        labelVisible: labelRect.width > 0 && labelRect.height > 0,
+      };
+    });
+    return {
+      state,
+      viewport: { width: innerWidth, height: innerHeight },
+      pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      drawer: rect(element),
+      identity: rect(identity),
+      actions: rect(actions),
+      identityActionsOverlap: overlaps(rect(identity), rect(actions)),
+      actionTargets: actionButtons.map(button => ({ label: button.getAttribute("aria-label"), ...rect(button) })),
+      createButtons: createMetrics,
+      emptyMessage: [...element.querySelectorAll("p")].filter(visible).find(node => node.textContent?.startsWith("No "))?.textContent?.trim() ?? null,
+      rowCount: [...element.querySelectorAll("[data-thread-row]")].filter(visible).length,
+    };
+  }, expectedState);
+  assert.equal(metrics.pageOverflow, false, `${label}: page overflows horizontally`);
+  assert.equal(metrics.identityActionsOverlap, false, `${label}: drawer identity overlaps utility actions`);
+  assert(metrics.actionTargets.every(target => target.width >= 44 && target.height >= 44), `${label}: utility action target smaller than 44px`);
+  assert.deepEqual(metrics.createButtons.map(button => button.label), ["New Space", "New Task"], `${label}: creation labels are not fully visible`);
+  assert(metrics.createButtons.every(button => button.width >= 44 && button.height >= 44), `${label}: creation target smaller than 44px`);
+  assert(metrics.createButtons.every(button => !button.clipped && button.labelVisible), `${label}: creation label is clipped or hidden`);
+  assert(metrics.createButtons.every(button => button.iconLabelGap >= 8), `${label}: creation icon-label gap is below 8px`);
+  if (expectedState === "empty") {
+    assert.equal(metrics.rowCount, 0, `${label}: expected empty inventory`);
+    assert.equal(metrics.emptyMessage, "No active Spaces or Tasks", `${label}: empty inventory message missing`);
+  } else {
+    assert(metrics.rowCount > 0, `${label}: expected populated inventory`);
+  }
+  await Promise.all([
+    page.screenshot({ path: join(evidenceDir, `${label}.png`), fullPage: true }),
+    writeFile(join(evidenceDir, `${label}-layout.json`), `${JSON.stringify(metrics, null, 2)}\n`),
+  ]);
+  return metrics;
 }
 
 async function ensureDrawer(page) {
   const drawer = page.locator('[data-slot="thread-drawer"]');
-  if (!await drawer.isVisible()) await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
-  await drawer.waitFor({ state: "visible" });
+  const trigger = page.getByRole("button", { name: "Spaces and Tasks", exact: true });
+  const expectedRole = (await page.viewportSize()).width >= 1280 ? "complementary" : "dialog";
+  await poll("Spaces and Tasks drawer visible", async () => {
+    const role = await drawer.getAttribute("role");
+    if (await drawer.isVisible() && role === expectedRole) return true;
+    if (role !== expectedRole) return false;
+    if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click();
+    return await drawer.isVisible() && await drawer.getAttribute("role") === expectedRole;
+  }, 30_000);
   return drawer;
 }
 
@@ -386,6 +455,13 @@ try {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.getByText("Start with a Space or Task", { exact: true }).waitFor();
 
+  checkpoints.emptyLayout = {};
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: width === 1440 ? 900 : 844 });
+    checkpoints.emptyLayout[width] = await captureDrawerLayout(page, `10-empty-layout-${width}`, "empty");
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   const rootSpace = await createItem(page, frames, "Product planning", "space", null);
   const childSpace = await createItem(page, frames, "User research", "space", rootSpace);
   await selectThread(page, rootSpace.id);
@@ -402,6 +478,75 @@ try {
       [nestedTask.title, "task", rootTask.id],
     ],
   );
+
+  await selectThread(page, childTask.id);
+  const archiveHistory = (await helloSnapshot(url, token)).history_id;
+  const historyMarker = `Archive history ${crypto.randomUUID()}`;
+  const archivedComposer = page.getByRole("textbox", { name: `Message ${childTask.title}`, exact: true });
+  await archivedComposer.fill(historyMarker);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const historyBeforeArchive = await poll("archive conversation persisted", async () => {
+    const detail = (await openThread(url, token, childTask.id)).detail;
+    const ownerPersisted = detail.messages.some(message => message.author === "owner" && message.body === historyMarker);
+    const agentReplied = detail.messages.some(message => message.author === "agent");
+    const terminal = detail.turns.some(turn => ["completed", "failed", "cancelled", "interrupted"].includes(turn.state));
+    return ownerPersisted && agentReplied && terminal && detail.thread.running_turn === null ? detail : null;
+  }, 30_000);
+  const preservedDraft = `Draft retained ${crypto.randomUUID()}`;
+  await archivedComposer.fill(preservedDraft);
+  const draftKey = `hirsel.draft.${archiveHistory}:thread-${childTask.id}`;
+  await poll("archive draft persisted", () => page.evaluate(({ key, value }) => localStorage.getItem(key) === value, { key: draftKey, value: preservedDraft }));
+
+  const archiveOffset = frames.length;
+  const archiveSentOffset = sentFrames.length;
+  await chooseAction(page, "Archive thread");
+  const archivedUpsert = await waitForFrame(frames, archiveOffset, "selected archive", frame => frame.type === "thread_upsert" && frame.thread?.id === childTask.id && frame.thread.archived_at !== null);
+  const archiveRequest = sentFrames.slice(archiveSentOffset).find(frame => frame.type === "thread_action" && frame.thread_id === childTask.id && frame.action === "archive");
+  assert(archiveRequest, "Archive did not use the selected Thread action");
+  await page.getByRole("heading", { name: "Choose a Space or Task", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).pathname, "/", "Selected archive did not route to the overview");
+  assert.equal(await page.locator("main[data-thread-id]").count(), 0, "Selected archive retained an addressed conversation");
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-thread.${archiveHistory}`), null, "Selected archive retained its remembered selection");
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), draftKey), preservedDraft, "Selected archive deleted the composer draft");
+  const historyAfterArchive = (await openThread(url, token, childTask.id)).detail;
+  assert.deepEqual(historyAfterArchive.messages, historyBeforeArchive.messages, "Selected archive changed conversation history");
+  assert.equal(historyAfterArchive.thread.archived_at, archivedUpsert.thread.archived_at, "Archived inventory and open_thread disagree");
+  assert.equal(Date.parse(threadRecord(storeSnapshot(), childTask.id).archived_at), Date.parse(archivedUpsert.thread.archived_at), "Archive was not durable in SQLite");
+  await Promise.all([
+    page.screenshot({ path: join(evidenceDir, "15-archive-overview.png"), fullPage: true }),
+    writeFile(join(evidenceDir, "15-archive-overview-dom.json"), `${JSON.stringify(await domSnapshot(page), null, 2)}\n`),
+    writeFile(join(evidenceDir, "15-archive-overview-thread.json"), `${JSON.stringify(historyAfterArchive, null, 2)}\n`),
+    writeFile(join(evidenceDir, "15-archive-overview-store.json"), `${JSON.stringify(storeSnapshot(), null, 2)}\n`),
+  ]);
+
+  const archivedDrawer = await ensureDrawer(page);
+  await archivedDrawer.getByRole("button", { name: /Filter work:/ }).click();
+  await page.getByRole("menuitemradio", { name: "archived", exact: true }).click();
+  const archivedRow = archivedDrawer.locator(`[data-thread-row="${childTask.id}"]`);
+  await archivedRow.waitFor({ state: "visible" });
+  assert.equal(await page.locator("main[data-thread-id]").count(), 0, "Browsing Archived changed the recipient");
+  await archivedRow.click();
+  await page.locator(`main[data-thread-id="${childTask.id}"]`).waitFor();
+  assert.equal(new URL(page.url()).pathname, `/t/${childTask.id}`, "Explicit archived selection did not update the route");
+  assert.equal(await page.getByRole("textbox", { name: `Message ${childTask.title}`, exact: true }).inputValue(), preservedDraft, "Explicit archived selection did not restore its draft");
+  assert.deepEqual((await openThread(url, token, childTask.id)).detail.messages, historyBeforeArchive.messages, "Explicit archived selection did not retain history");
+  checkpoints.archivedSelected = await capture(page, url, token, "16-archived-selected", childTask.id);
+  const unarchiveOffset = frames.length;
+  await chooseAction(page, "Unarchive thread");
+  await waitForFrame(frames, unarchiveOffset, "selected unarchive", frame => frame.type === "thread_upsert" && frame.thread?.id === childTask.id && frame.thread.archived_at === null);
+  assert.equal(await page.locator(`main[data-thread-id="${childTask.id}"]`).count(), 1, "Unarchive changed the selected recipient");
+  assert.equal(new URL(page.url()).pathname, `/t/${childTask.id}`, "Unarchive changed the explicit Thread route");
+  const activeDrawer = await ensureDrawer(page);
+  await activeDrawer.getByRole("button", { name: /Filter work:/ }).click();
+  await page.getByRole("menuitemradio", { name: "active", exact: true }).click();
+  assert.equal(await page.locator(`main[data-thread-id="${childTask.id}"]`).count(), 1, "Changing the lifecycle filter changed the selected recipient");
+  checkpoints.archive = {
+    id: childTask.id,
+    historyMarker,
+    preservedDraft,
+    messageIds: historyBeforeArchive.messages.map(message => message.id),
+    archivedAt: archivedUpsert.thread.archived_at,
+  };
 
   await selectThread(page, rootTask.id);
   await mutate(page, frames, rootTask.id, "Mark task done", thread => thread.kind === "task" && thread.settled_at !== null);
@@ -442,6 +587,8 @@ try {
   assert.equal(await rootTaskDrawer.locator(`[data-thread-row="${rootTask.id}"]`).count(), 1, "Pinned root is duplicated");
   await rootTaskDrawer.locator(`[data-thread-row="${rootTask.id}"]`).getByText("Pinned", { exact: true }).waitFor();
   await page.getByText(/Child threads · 1/).waitFor();
+  checkpoints.populatedLayout = {};
+  checkpoints.populatedLayout[1440] = await captureDrawerLayout(page, "40-populated-layout-1440", "populated");
   checkpoints.taskDesktop = await capture(page, url, token, "40-task-desktop", rootTask.id);
   assertKindPresentation(checkpoints.taskDesktop.dom, "task");
   assertReadableRowTitles(checkpoints.taskDesktop.dom, "desktop Task inventory");
@@ -449,9 +596,13 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   const taskNarrowDrawer = await ensureDrawer(page);
   await taskNarrowDrawer.getByRole("button", { name: `Expand ${rootTask.title}`, exact: true }).click();
+  checkpoints.populatedLayout[390] = await captureDrawerLayout(page, "41-populated-layout-390", "populated");
   checkpoints.taskNarrow = await capture(page, url, token, "41-task-narrow", rootTask.id);
   assertKindPresentation(checkpoints.taskNarrow.dom, "task");
   assertReadableRowTitles(checkpoints.taskNarrow.dom, "narrow Task hierarchy");
+  await page.setViewportSize({ width: 320, height: 844 });
+  checkpoints.populatedLayout[320] = await captureDrawerLayout(page, "42-populated-layout-320", "populated");
+  await page.setViewportSize({ width: 390, height: 844 });
 
   // Fixture-only layer: add visible operational state and two generated actions
   // directly to this disposable store. Core create/action/conversion claims above
@@ -530,9 +681,11 @@ try {
     },
     port,
     ids: { rootSpace: rootSpace.id, childSpace: childSpace.id, childTask: childTask.id, rootTask: rootTask.id, nestedTask: nestedTask.id },
+    archive: checkpoints.archive,
+    layout: { empty: checkpoints.emptyLayout, populated: checkpoints.populatedLayout },
     rejected: failures.map(frame => frame.detail),
     expectedProtocolErrors,
-    screenshots: ["20-valid-task-to-space.png", "21-valid-space-to-task.png", "30-invalid-space-to-task.png", "31-invalid-task-to-space.png", "40-task-desktop.png", "41-task-narrow.png", "49-space-completed-suppressed.png", "50-space-fixture-desktop.png", "51-space-fixture-narrow.png"],
+    screenshots: ["10-empty-layout-1440.png", "10-empty-layout-390.png", "10-empty-layout-320.png", "15-archive-overview.png", "16-archived-selected.png", "20-valid-task-to-space.png", "21-valid-space-to-task.png", "30-invalid-space-to-task.png", "31-invalid-task-to-space.png", "40-populated-layout-1440.png", "40-task-desktop.png", "41-populated-layout-390.png", "41-task-narrow.png", "42-populated-layout-320.png", "49-space-completed-suppressed.png", "50-space-fixture-desktop.png", "51-space-fixture-narrow.png"],
     browserErrors,
     scorecardStatus: "NOT_JUDGED",
     objectiveStatus: "OBJECTIVE_PASS",

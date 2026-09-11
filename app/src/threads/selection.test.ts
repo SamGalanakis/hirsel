@@ -5,7 +5,8 @@ import type { ThreadClientMessage } from "./types";
 import { makeThread } from "./fixtures";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, resetThreads, routeThreadId, setThreadState, threadState, followThreadLocation, sendThreadMessage } from "./store";
 const frames: ThreadClientMessage[] = [];
-const hello = (ids: number[]) => flush(() => handleThreadMessage({ type: "hello_ok", history_id: "ab123456-1234-5678-9abc-123456789abc", threads: ids.map(id => makeThread(id)), processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null }));
+const helloThreads = (threads: ReturnType<typeof makeThread>[]) => flush(() => handleThreadMessage({ type: "hello_ok", history_id: "ab123456-1234-5678-9abc-123456789abc", threads, processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null }));
+const hello = (ids: number[]) => helloThreads(ids.map(id => makeThread(id)));
 beforeEach(() => {
   frames.length = 0;
   const storage = new Map<string, string>();
@@ -76,6 +77,32 @@ describe("explicit Thread selection", () => {
     flush();
     expect(threadState.linkError).toBeNull();expect(threadState.focusedId).toBe(2);
     expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:2}));
+  });
+
+  it("does not restore an archived selection from an authoritative snapshot", () => {
+    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc", "2");
+    helloThreads([makeThread(1), makeThread(2, { archived_at: "2026-09-10T10:00:00Z" })]);
+    expect(threadState.focusedId).toBeNull();
+    expect(localStorage.getItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
+    expect(location.pathname).toBe("/");
+  });
+
+  it("clears a previously focused Thread when a route-free snapshot archives it", () => {
+    hello([2]);
+    flush(() => focusThread(2));
+    history.replaceState(null, "", "/");
+    helloThreads([makeThread(2, { archived_at: "2026-09-10T10:00:00Z", revision: 2 })]);
+    expect(threadState.focusedId).toBeNull();
+    expect(localStorage.getItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
+    expect(location.pathname).toBe("/");
+  });
+
+  it("keeps an explicit archived Thread route selectable", () => {
+    history.replaceState(null, "", "/t/2?history=ab123456-1234-5678-9abc-123456789abc");
+    helloThreads([makeThread(2, { archived_at: "2026-09-10T10:00:00Z" })]);
+    expect(threadState.focusedId).toBe(2);
+    expect(location.pathname).toBe("/t/2");
+    expect(frames).toContainEqual(expect.objectContaining({ type: "open_thread", thread_id: 2 }));
   });
 
 });

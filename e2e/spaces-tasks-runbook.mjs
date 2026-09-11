@@ -275,7 +275,7 @@ async function invalidMutation(page, frames, url, token, id, label, detailPatter
   const offset = frames.length;
   await chooseAction(page, label);
   const failure = await waitForFrame(frames, offset, `${label} rejection`, frame => frame.type === "error" && detailPattern.test(frame.detail ?? ""));
-  const alert = page.getByRole("alert");
+  const alert = page.locator(`main[data-thread-id="${id}"]`).getByRole("alert");
   await alert.waitFor({ state: "visible" });
   await alert.locator("summary").click();
   await alert.getByText(detailPattern).waitFor();
@@ -325,6 +325,7 @@ host.stderr.pipe(log, { end: false });
 
 let browser;
 const browserErrors = [];
+const expectedProtocolErrors = [];
 const frames = [];
 const sentFrames = [];
 const checkpoints = {};
@@ -343,7 +344,11 @@ try {
   });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on("pageerror", error => browserErrors.push({ type: "pageerror", message: error.message }));
-  page.on("console", message => { if (message.type() === "error") browserErrors.push({ type: "console", message: message.text() }); });
+  page.on("console", message => {
+    if (message.type() !== "error") return;
+    if (message.text().startsWith("hirsel protocol error:")) expectedProtocolErrors.push(message.text());
+    else browserErrors.push({ type: "console", message: message.text() });
+  });
   page.on("websocket", socket => {
     socket.on("framereceived", event => {
       const frame = parseFrame(event.payload);
@@ -363,12 +368,12 @@ try {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.getByText("Start with a Space or Task", { exact: true }).waitFor();
 
-  const rootSpace = await createItem(page, frames, `Planning Space ${runId}`, "space", null);
-  const childSpace = await createItem(page, frames, `Research Space ${runId}`, "space", rootSpace);
+  const rootSpace = await createItem(page, frames, "Product planning", "space", null);
+  const childSpace = await createItem(page, frames, "User research", "space", rootSpace);
   await selectThread(page, rootSpace.id);
-  const childTask = await createItem(page, frames, `Draft Task ${runId}`, "task", rootSpace);
-  const rootTask = await createItem(page, frames, `Ship Task ${runId}`, "task", null);
-  const nestedTask = await createItem(page, frames, `Review Task ${runId}`, "task", rootTask);
+  const childTask = await createItem(page, frames, "Draft brief", "task", rootSpace);
+  const rootTask = await createItem(page, frames, "Ship release", "task", null);
+  const nestedTask = await createItem(page, frames, "Review release", "task", rootTask);
   assert.deepEqual(
     storeSnapshot().threads.map(thread => [thread.title, thread.kind, thread.parent_thread_id]),
     [
@@ -402,12 +407,14 @@ try {
   await selectThread(page, rootSpace.id);
   failures.push(await invalidMutation(page, frames, url, token, rootSpace.id, "Change to Task", /cannot contain Spaces|Space child|contains.*Space/i, storeSnapshot()));
   checkpoints.invalidSpace = await capture(page, url, token, "30-invalid-space-to-task", rootSpace.id);
-  await page.getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
+  await page.locator(`main[data-thread-id="${rootSpace.id}"]`).getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
 
+  const invalidTaskDrawer = await ensureDrawer(page);
+  await invalidTaskDrawer.getByRole("button", { name: `Expand ${rootTask.title}`, exact: true }).click();
   await selectThread(page, nestedTask.id);
   failures.push(await invalidMutation(page, frames, url, token, nestedTask.id, "Change to Space", /Task parent|under a Task|parent.*Task/i, storeSnapshot()));
   checkpoints.invalidTask = await capture(page, url, token, "31-invalid-task-to-space", nestedTask.id);
-  await page.getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
+  await page.locator(`main[data-thread-id="${nestedTask.id}"]`).getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
 
   await selectThread(page, rootTask.id);
   await mutate(page, frames, rootTask.id, "Pin thread", thread => thread.pinned_at !== null);
@@ -421,7 +428,8 @@ try {
   assertKindPresentation(checkpoints.taskDesktop.dom, "task");
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await ensureDrawer(page);
+  const taskNarrowDrawer = await ensureDrawer(page);
+  await taskNarrowDrawer.getByRole("button", { name: `Expand ${rootTask.title}`, exact: true }).click();
   checkpoints.taskNarrow = await capture(page, url, token, "41-task-narrow", rootTask.id);
   assertKindPresentation(checkpoints.taskNarrow.dom, "task");
 
@@ -449,7 +457,7 @@ try {
       WHERE id=last_insert_rowid();
     COMMIT;
   `);
-  await page.goto(`${url}/t/${rootSpace.id}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${url}/t/${rootSpace.id}${new URL(page.url()).search}`, { waitUntil: "domcontentloaded" });
   await page.locator(`main[data-thread-id="${rootSpace.id}"]`).waitFor();
   await page.getByRole("button", { name: "Continue fixture", exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Complete fixture", exact: true }).count(), 0, "Space exposed a generated completion action");
@@ -477,11 +485,17 @@ try {
   checkpoints.spaceDesktop = await capture(page, url, token, "50-space-fixture-desktop", rootSpace.id);
   assertKindPresentation(checkpoints.spaceDesktop.dom, "space");
   await page.setViewportSize({ width: 390, height: 844 });
-  await ensureDrawer(page);
+  const spaceNarrowDrawer = await ensureDrawer(page);
+  await spaceNarrowDrawer.getByRole("button", { name: `Expand ${rootSpace.title}`, exact: true }).click();
   checkpoints.spaceNarrow = await capture(page, url, token, "51-space-fixture-narrow", rootSpace.id);
   assertKindPresentation(checkpoints.spaceNarrow.dom, "space");
 
   assert.equal(storeSnapshot().schemaVersion, 6, "runbook did not use durable schema 6");
+  assert.deepEqual(
+    expectedProtocolErrors,
+    failures.map(frame => `hirsel protocol error: ${frame.detail}`),
+    "browser protocol errors differed from the two asserted conversion rejections",
+  );
   assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
   await writeFile(join(evidenceDir, "frames.json"), `${JSON.stringify({ received: frames, sent: sentFrames }, null, 2)}\n`);
   const result = {
@@ -495,6 +509,7 @@ try {
     port,
     ids: { rootSpace: rootSpace.id, childSpace: childSpace.id, childTask: childTask.id, rootTask: rootTask.id, nestedTask: nestedTask.id },
     rejected: failures.map(frame => frame.detail),
+    expectedProtocolErrors,
     screenshots: ["20-valid-task-to-space.png", "21-valid-space-to-task.png", "30-invalid-space-to-task.png", "31-invalid-task-to-space.png", "40-task-desktop.png", "41-task-narrow.png", "49-space-completed-suppressed.png", "50-space-fixture-desktop.png", "51-space-fixture-narrow.png"],
     browserErrors,
     scorecardStatus: "NOT_JUDGED",

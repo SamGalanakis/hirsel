@@ -493,7 +493,20 @@ impl ScopedThreadTools {
             && input.cwd.is_none()
             && input.child_thread_id.is_some()
         {
-            None
+            let child_thread_id = input
+                .child_thread_id
+                .ok_or("selector-free dispatch requires an existing child Thread")?;
+            let effective = self
+                .tools
+                .storage()
+                .effective_child_execution(&self.caller, child_thread_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            matches!(
+                effective,
+                crate::storage::ThreadExecution::LashWorker { .. }
+            )
+            .then_some(effective)
         } else if input.agent.as_deref() == Some("host") {
             if input.provider_id.is_some()
                 || input.model.is_some()
@@ -513,12 +526,6 @@ impl ScopedThreadTools {
                     .map_err(|e| e.to_string())?,
             )
         } else if input.agent.as_deref() == Some("lash") {
-            if !input.artifact_ids.is_empty() {
-                return Err(
-                    "native Lash worker artifact references are not supported yet; remove artifact_ids or delegate to another backend"
-                        .into(),
-                );
-            }
             let provider = self
                 .tools
                 .capture_native_worker_provider(input.provider_id.as_deref())
@@ -584,10 +591,17 @@ impl ScopedThreadTools {
                 cwd,
             })
         };
-        let brief = if matches!(
+        let native_worker = matches!(
             &execution,
             Some(crate::storage::ThreadExecution::LashWorker { .. })
-        ) {
+        );
+        if native_worker && !input.artifact_ids.is_empty() {
+            return Err(
+                "native Lash worker artifact references are not supported yet; remove artifact_ids or delegate to another backend"
+                    .into(),
+            );
+        }
+        let brief = if native_worker {
             self.tools
                 .expand_skill(&input.brief)
                 .map_err(|e| e.to_string())?

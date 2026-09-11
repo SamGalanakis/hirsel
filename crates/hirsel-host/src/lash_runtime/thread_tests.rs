@@ -93,6 +93,163 @@ async fn native_worker_rejects_artifact_references_before_acceptance() {
 }
 
 #[tokio::test]
+async fn inherited_native_worker_rejects_artifacts_without_accepting_a_turn() {
+    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
+    let caller = storage.test_running_caller().await;
+    let initial = crate::storage::Delegation {
+        title: "Native child".into(),
+        brief: "Initial native work".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(native_execution(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+    };
+    let child = storage
+        .delegate_thread(
+            &caller,
+            "native-inherited-initial",
+            &initial,
+            &serde_json::to_value(&initial).unwrap(),
+        )
+        .await
+        .unwrap();
+    let before = storage
+        .thread_detail(child.thread_id, None, 100)
+        .await
+        .unwrap()
+        .turns
+        .len();
+    let tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "native-inherited-artifact".into(),
+    };
+    let error = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Native follow-up",
+                "brief":"Use the referenced artifact",
+                "artifact_ids":[1],
+                "child_thread_id":child.thread_id
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("artifact references are not supported"),
+        "{error}"
+    );
+    assert_eq!(
+        storage
+            .thread_detail(child.thread_id, None, 100)
+            .await
+            .unwrap()
+            .turns
+            .len(),
+        before,
+        "policy refusal must precede durable turn acceptance"
+    );
+}
+
+#[tokio::test]
+async fn inherited_native_worker_expands_selected_skills_before_acceptance() {
+    let skill_root = tempfile::tempdir().unwrap();
+    let skill_dir = skill_root.path().join("review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: Review carefully\n---\nInspect the focused diff.\n",
+    )
+    .unwrap();
+    let (executor, storage, _log, _dir) =
+        super::tests::test_event_executor_with_skills(crate::skills::Skills::new(vec![
+            skill_root.path().to_owned(),
+        ]))
+        .await;
+    let caller = storage.test_running_caller().await;
+    let initial = crate::storage::Delegation {
+        title: "Native child".into(),
+        brief: "Initial native work".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(native_execution(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+    };
+    let child = storage
+        .delegate_thread(
+            &caller,
+            "native-skill-initial",
+            &initial,
+            &serde_json::to_value(&initial).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "native-skill-follow-up".into(),
+    };
+    let accepted = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Review follow-up",
+                "brief":"/skill:review check the repair",
+                "artifact_ids":[],
+                "child_thread_id":child.thread_id
+            }),
+        )
+        .await
+        .unwrap();
+    let accepted_turn = accepted["turn_id"].as_u64().unwrap();
+    let (_, request) = storage
+        .pending_thread_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(_, request)| request["turn_id"].as_u64() == Some(accepted_turn))
+        .unwrap();
+    let body = request["body"].as_str().unwrap();
+    assert!(body.contains("<skill name=\"review\""), "{body}");
+    assert!(body.contains("Inspect the focused diff."), "{body}");
+    assert!(body.ends_with("check the repair"), "{body}");
+
+    let before = storage
+        .thread_detail(child.thread_id, None, 100)
+        .await
+        .unwrap()
+        .turns
+        .len();
+    tools.operation_id = "native-missing-skill".into();
+    let error = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Broken follow-up",
+                "brief":"/skill:missing check the repair",
+                "artifact_ids":[],
+                "child_thread_id":child.thread_id
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("Unknown skill 'missing'"), "{error}");
+    assert_eq!(
+        storage
+            .thread_detail(child.thread_id, None, 100)
+            .await
+            .unwrap()
+            .turns
+            .len(),
+        before,
+        "skill expansion failure must precede durable turn acceptance"
+    );
+}
+
+#[tokio::test]
 async fn native_worker_preference_is_captured_for_follow_up_turns() {
     let dir = tempfile::tempdir().unwrap();
     let storage = crate::Storage::open(dir.path()).await.unwrap();

@@ -157,6 +157,50 @@ impl Storage {
         })
     }
 
+    /// The newest Task message already represented in the reusable native
+    /// session. Keeping this cursor separate from the profile generation lets
+    /// the same session receive only conversation written by another backend.
+    pub(crate) async fn native_worker_conversation_watermark(
+        &self,
+        thread_id: u64,
+    ) -> anyhow::Result<Option<u64>> {
+        let c = self.conn.lock().await;
+        super::threads::get(&c, thread_id)?;
+        meta_value_from_conn(
+            &c,
+            &format!("thread:{thread_id}:native_worker_conversation_watermark"),
+        )?
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .context("decode native worker conversation watermark")
+    }
+
+    /// Advance the native session cursor only after its terminal projection is
+    /// durable. Failed direct drives abandon their session and deliberately do
+    /// not call this, so their accepted input is available to the next handoff.
+    pub(crate) async fn mark_native_worker_conversation_seen(
+        &self,
+        thread_id: u64,
+    ) -> anyhow::Result<()> {
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::threads::get(&tx, thread_id)?;
+        let latest = tx.query_row(
+            "SELECT MAX(id) FROM chat_messages WHERE thread_id=?1",
+            [thread_id],
+            |row| row.get::<_, Option<u64>>(0),
+        )?;
+        if let Some(latest) = latest {
+            set_meta_value(
+                &tx,
+                &format!("thread:{thread_id}:native_worker_conversation_watermark"),
+                &latest.to_string(),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Abandon the current native-worker generation after a direct turn drive
     /// returned without a settled report. Lash may already have durably
     /// accepted that input, so a future Hirsel turn must not reopen and drive

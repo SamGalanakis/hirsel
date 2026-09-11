@@ -3,10 +3,7 @@ use super::bridges::{activity_from_observation, publish_ready_timeline};
 use super::*;
 use crate::{
     native_coding_tools::NativeCodingTools,
-    providers::{
-        NATIVE_WORKER_DEFAULT_MODEL, NATIVE_WORKER_DEFAULT_PROVIDER_ID,
-        NativeWorkerProviderSnapshot,
-    },
+    providers::{NATIVE_WORKER_DEFAULT_MODEL, NativeWorkerProviderSnapshot},
 };
 use hirsel_proto::ThreadTurnState;
 use lash::{TurnActivity, TurnActivitySink};
@@ -51,6 +48,13 @@ impl NativeWorkerTurn {
     /// runtime task or its durable session is released.
     pub(super) async fn stop(&self) {
         self.cancel.cancel();
+        self.cleanup().await;
+    }
+
+    /// Release per-turn tool resources without inventing cancellation intent.
+    /// Normal completion and execution failure both need cleanup, while only
+    /// an external stop request is allowed to classify the turn as cancelled.
+    async fn cleanup(&self) {
         // `NativeCodingTools::shutdown` is idempotent across time, but one
         // final tool completion wakes one waiter. Serialize concurrent Host
         // cancellation and normal turn teardown so both observe full cleanup.
@@ -68,8 +72,10 @@ impl NativeWorkerTurn {
     ) -> anyhow::Result<()> {
         let tools = context.tools;
         let result = self.execute(&context, &request, execution).await;
-        self.stop().await;
+        let cancelled = self.cancel.is_cancelled();
+        self.cleanup().await;
         let abandon_session = result.is_err();
+        let session_reusable = result.is_ok();
 
         let integrity_failure = tools.turn_timeline_integrity_failure(self.turn_id);
         let projection = match (integrity_failure.as_ref(), result) {
@@ -79,7 +85,7 @@ impl NativeWorkerTurn {
                 reason: Some(reason.clone()),
             },
             (None, Ok(output)) => native_terminal_projection(&output),
-            (None, Err(_error)) if self.cancel.is_cancelled() => NativeTerminalProjection {
+            (None, Err(_error)) if cancelled => NativeTerminalProjection {
                 state: ThreadTurnState::Cancelled,
                 output: None,
                 reason: None,
@@ -138,6 +144,21 @@ impl NativeWorkerTurn {
                             "timeline integrity failure lost to an earlier terminal projection"
                         );
                         tools.clear_turn_timeline_integrity_failure(self.turn_id);
+                    }
+                    if session_reusable
+                        && let Err(error) = tools
+                            .storage()
+                            .mark_native_worker_conversation_seen(request.thread_id)
+                            .await
+                    {
+                        tracing::warn!(
+                            turn_id = self.turn_id,
+                            %error,
+                            "Retrying native worker conversation watermark"
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(2));
+                        continue;
                     }
                     if let Some(activity) = completion.failure_activity {
                         tools.publish_thread_activity(activity).await;
@@ -212,7 +233,7 @@ impl NativeWorkerTurn {
         let resolved = tools.resolve_native_worker_provider(&provider)?;
         let provider_handle =
             openai_compatible_handle(resolved.api_key, resolved.snapshot.base_url.clone());
-        let model_spec = native_worker_model_spec(&provider.id, &model)?;
+        let model_spec = native_worker_model_spec(&provider, &model)?;
         let coding_tools = Arc::new(NativeCodingTools::new(cwd.clone())?);
         let manifests = coding_tools.tool_manifests();
         let tool_names = manifests
@@ -400,9 +421,15 @@ fn ensure_native_tool_surface(names: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn native_worker_model_spec(provider_id: &str, model: &str) -> anyhow::Result<lash::ModelSpec> {
-    let verified_openrouter_default =
-        provider_id == NATIVE_WORKER_DEFAULT_PROVIDER_ID && model == NATIVE_WORKER_DEFAULT_MODEL;
+fn native_worker_model_spec(
+    provider: &NativeWorkerProviderSnapshot,
+    model: &str,
+) -> anyhow::Result<lash::ModelSpec> {
+    // This metadata was verified for one public route/model pair. Provider ids
+    // are Owner-chosen labels, so an `openrouter` lookalike must not inherit it.
+    let verified_openrouter_default = provider.base_url
+        == lash_provider_openai::OPENROUTER_BASE_URL
+        && model == NATIVE_WORKER_DEFAULT_MODEL;
     let (context, output) = if verified_openrouter_default {
         (1_048_576, Some(384_000))
     } else {
@@ -639,6 +666,147 @@ impl TurnActivitySink for NativeTimelineSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID;
+
+    #[tokio::test]
+    async fn queued_provider_route_refusal_fails_and_reports_to_parent() {
+        let (executor, storage, _log, dir) = super::super::tests::test_event_executor().await;
+        let config_store = crate::host_config::ConfigStore::load(
+            dir.path().join("hirsel.toml"),
+            std::path::Path::new("/docs/hirsel-config.md"),
+            &crate::host_config::EnvBootstrap::default(),
+        )
+        .await
+        .unwrap();
+        config_store
+            .upsert_provider(&crate::host_config::StoredProvider {
+                id: NATIVE_WORKER_DEFAULT_PROVIDER_ID.into(),
+                label: "OpenRouter".into(),
+                base_url: lash_provider_openai::OPENROUTER_BASE_URL.into(),
+                api_key: Some("test-key-no-provider-call".into()),
+                default_model: NATIVE_WORKER_DEFAULT_MODEL.into(),
+            })
+            .await
+            .unwrap();
+        let caller = storage.test_running_caller().await;
+        let assignment = crate::storage::Delegation {
+            title: "Native route refusal".into(),
+            brief: "Do not reach a provider".into(),
+            artifact_ids: Vec::new(),
+            child_thread_id: None,
+            execution: Some(crate::storage::ThreadExecution::LashWorker {
+                provider: executor.tools.capture_native_worker_provider(None).unwrap(),
+                model: NATIVE_WORKER_DEFAULT_MODEL.into(),
+                variant: "default".into(),
+                cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
+                tool_profile: crate::storage::NATIVE_CODING_TOOL_PROFILE.into(),
+            }),
+        };
+        let delegated = storage
+            .delegate_thread(
+                &caller,
+                "native-route-refusal",
+                &assignment,
+                &serde_json::to_value(&assignment).unwrap(),
+            )
+            .await
+            .unwrap();
+        let (_, request) = storage
+            .pending_thread_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|(_, request)| request["turn_id"].as_u64() == Some(delegated.turn_id))
+            .unwrap();
+        let request: OwnerTurn = serde_json::from_value(request).unwrap();
+        let execution = storage.turn_execution(delegated.turn_id).await.unwrap();
+
+        config_store
+            .remove_provider(NATIVE_WORKER_DEFAULT_PROVIDER_ID)
+            .await
+            .unwrap();
+        let boot = crate::boot_provider::BootProvider::env_default(ProviderMode::Codex);
+        let providers = crate::providers::ProviderRosterState::new(
+            config_store.clone(),
+            &boot,
+            Some(dir.path().to_owned()),
+        );
+        let prompts = crate::prompt_config::PromptConfig::new(
+            ProviderMode::Codex,
+            config_store.clone(),
+            providers.clone(),
+            String::new(),
+        );
+        let runtime_config = RuntimeConfig {
+            agent_mode: AgentMode::Scripted,
+            provider_mode: ProviderMode::Codex,
+            boot_plan: boot.plan,
+            anthropic_api_key: None,
+            openrouter_api_key: None,
+            model: "test-model".into(),
+            data_dir: dir.path().to_owned(),
+            driver_mode: DriverMode::Fake,
+            config_store,
+            providers,
+            prompts,
+        };
+        let (broadcaster, _) = broadcast::channel(16);
+        let turn = NativeWorkerTurn::new(delegated.turn_id);
+        turn.run(
+            NativeWorkerRunContext {
+                config: &runtime_config,
+                tools: &executor.tools,
+                capacity: Arc::new(tokio::sync::Semaphore::new(1)),
+                broadcaster,
+                broadcast_log: BroadcastLog::default(),
+            },
+            request,
+            execution,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !turn.cancel.is_cancelled(),
+            "cleanup invented cancellation intent"
+        );
+        let child = storage
+            .thread_detail(delegated.thread_id, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(child.turns[0].state, ThreadTurnState::Failed);
+        let failure = child
+            .activities
+            .iter()
+            .find(|activity| activity.kind == "execution_failed")
+            .expect("child failure activity");
+        assert!(
+            failure.data["reason"]
+                .as_str()
+                .unwrap()
+                .contains("is no longer configured"),
+            "{}",
+            failure.data
+        );
+        let parent = storage
+            .thread_detail(caller.thread_id, None, 100)
+            .await
+            .unwrap();
+        let report = parent
+            .activities
+            .iter()
+            .find(|activity| activity.kind == "child_report")
+            .expect("terminal report to parent");
+        assert_eq!(report.data["status"], "failed");
+        assert!(
+            report.data["summary"]
+                .as_str()
+                .unwrap()
+                .contains("is no longer configured"),
+            "{}",
+            report.data
+        );
+    }
 
     #[test]
     fn native_worker_surface_is_exact() {
@@ -649,11 +817,12 @@ mod tests {
 
     #[test]
     fn deepseek_default_uses_verified_limits() {
-        let spec = native_worker_model_spec(
-            NATIVE_WORKER_DEFAULT_PROVIDER_ID,
-            NATIVE_WORKER_DEFAULT_MODEL,
-        )
-        .unwrap();
+        let official = NativeWorkerProviderSnapshot {
+            id: NATIVE_WORKER_DEFAULT_PROVIDER_ID.into(),
+            base_url: lash_provider_openai::OPENROUTER_BASE_URL.into(),
+            revision: "official-route".into(),
+        };
+        let spec = native_worker_model_spec(&official, NATIVE_WORKER_DEFAULT_MODEL).unwrap();
         assert_eq!(spec.context_window_tokens(), 1_048_576);
         assert_eq!(
             spec.limits.output_token_capacity.map(|value| value.get()),
@@ -664,10 +833,32 @@ mod tests {
             "OpenAI Chat Completions"
         );
 
-        let unknown = native_worker_model_spec("local", NATIVE_WORKER_DEFAULT_MODEL).unwrap();
+        let lookalike = NativeWorkerProviderSnapshot {
+            id: NATIVE_WORKER_DEFAULT_PROVIDER_ID.into(),
+            base_url: "https://openrouter.example.invalid/api/v1".into(),
+            revision: "lookalike-route".into(),
+        };
+        let unknown = native_worker_model_spec(&lookalike, NATIVE_WORKER_DEFAULT_MODEL).unwrap();
         assert_eq!(unknown.context_window_tokens(), 200_000);
         assert!(unknown.limits.output_token_capacity.is_none());
         assert!(unknown.capability.attachment_acceptance.is_empty());
+
+        let renamed_official = NativeWorkerProviderSnapshot {
+            id: "my-router".into(),
+            ..official.clone()
+        };
+        assert_eq!(
+            native_worker_model_spec(&renamed_official, NATIVE_WORKER_DEFAULT_MODEL)
+                .unwrap()
+                .context_window_tokens(),
+            1_048_576
+        );
+        assert_eq!(
+            native_worker_model_spec(&official, "deepseek/another-model")
+                .unwrap()
+                .context_window_tokens(),
+            200_000
+        );
     }
 
     #[test]

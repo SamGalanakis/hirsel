@@ -330,6 +330,16 @@ pub(super) fn finish(
     state: ThreadTurnState,
     agent_message_id: Option<u64>,
 ) -> anyhow::Result<ThreadTurn> {
+    finish_with_failure(c, id, state, agent_message_id, None)
+}
+
+pub(super) fn finish_with_failure(
+    c: &Connection,
+    id: u64,
+    state: ThreadTurnState,
+    agent_message_id: Option<u64>,
+    failure: Option<&str>,
+) -> anyhow::Result<ThreadTurn> {
     let previous = get(c, id)?;
     if previous.finished_at.is_some() {
         return Ok(previous);
@@ -353,6 +363,18 @@ pub(super) fn finish(
             .map(|m| m.body.trim())
             .filter(|s| !s.is_empty())
             .map(|s| s.chars().take(8000).collect::<String>())
+            .or_else(|| {
+                failure.map(|reason| {
+                    format!(
+                        "Child execution {}: {}",
+                        status.as_str().unwrap_or("ended"),
+                        reason
+                    )
+                    .chars()
+                    .take(8000)
+                    .collect::<String>()
+                })
+            })
             .unwrap_or_else(|| {
                 format!(
                     "Child execution {} without a final assistant message.",

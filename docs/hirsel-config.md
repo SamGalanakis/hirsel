@@ -157,6 +157,8 @@ Acceptance stores provider route identity, model, variant, canonical cwd, and to
 
 The worker's complete callable surface is `read`, `edit`, `write`, and `exec_command`; the last name is Lash's model binding for semantic `shell.exec`. It has no delegation, Thread management, artifact publication, browser/web, background-process, or plugin tools. Its cwd is a default path base, not a filesystem sandbox. A child Task retains this executor preference and conversation on follow-up; changing its accepted profile opens a distinct worker-session generation with a bounded Task-only handoff.
 
+Hirsel's verified `1,048,576`-token context, `384,000`-token output limit, and image-input metadata applies only when the captured base URL is exactly `https://openrouter.ai/api/v1` and the model is exactly `deepseek/deepseek-v4.1-flash`. Provider instance names are local labels and do not establish capabilities. Every other free-text model uses conservative metadata; Hirsel validates the identifier's shape, while the configured endpoint remains the authority on whether that model exists and what it supports.
+
 ## CLI Thread models
 
 The Thread model catalog is separate from the roster above and grouped by CLI

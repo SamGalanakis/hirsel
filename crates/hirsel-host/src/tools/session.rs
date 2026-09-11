@@ -14,20 +14,42 @@ impl ToolSuite {
             .storage
             .reconcile_native_worker_profile(thread_id, profile_fingerprint, tool_names)
             .await?;
-        if !state.rotated {
+        let watermark = self
+            .storage
+            .native_worker_conversation_watermark(thread_id)
+            .await?;
+        let mut messages = self
+            .storage
+            .thread_detail(thread_id, before_message_id, 30)
+            .await?
+            .messages;
+        if !state.rotated
+            && let Some(watermark) = watermark
+        {
+            messages.retain(|message| message.id > watermark);
+        }
+        if !state.rotated && messages.is_empty() {
             return Ok(AgentSessionBootstrap {
                 session_id: state.session_id,
                 handoff_seed: None,
             });
         }
-        let messages = self
-            .storage
-            .thread_detail(thread_id, before_message_id, 30)
-            .await?
-            .messages;
-        let mut handoff = String::from(
-            "The host rotated this native worker session because its accepted execution profile changed. Continue from this Task's visible conversation; do not assume unfinished side effects from the previous session were applied.\n\n## Recent chat\n",
-        );
+        let mut handoff = if state.rotated {
+            String::from(
+                "The host rotated this native worker session because its accepted execution profile changed. Continue from this Task's visible conversation; do not assume unfinished side effects from the previous session were applied.\n\n## Recent chat\n",
+            )
+        } else if watermark.is_none() {
+            String::from(
+                "This native worker is joining an existing Task. Continue from this Task's visible recent conversation.\n\n## Recent chat\n",
+            )
+        } else {
+            String::from(
+                "This Task's conversation advanced outside this native worker session. Continue from the unseen recent messages below.\n\n## Recent chat\n",
+            )
+        };
+        if messages.is_empty() {
+            handoff.push_str("(none)\n");
+        }
         for message in messages {
             let author = match message.author {
                 hirsel_proto::ChatAuthor::Owner => "owner",
@@ -38,16 +60,18 @@ impl ToolSuite {
                 indent_continuation_lines(&message.body)
             ));
         }
-        let activity = self
-            .storage
-            .append_thread_activity(
-                thread_id,
-                None,
-                "worker_session_rotated",
-                &serde_json::json!({"session_id":state.session_id}),
-            )
-            .await?;
-        self.publish_thread_activity(activity).await;
+        if state.rotated {
+            let activity = self
+                .storage
+                .append_thread_activity(
+                    thread_id,
+                    None,
+                    "worker_session_rotated",
+                    &serde_json::json!({"session_id":state.session_id}),
+                )
+                .await?;
+            self.publish_thread_activity(activity).await;
+        }
         Ok(AgentSessionBootstrap {
             session_id: state.session_id,
             handoff_seed: Some(handoff),

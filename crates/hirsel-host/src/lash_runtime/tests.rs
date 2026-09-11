@@ -684,6 +684,12 @@ async fn cancelled_turn_persists_and_broadcasts_the_normal_chat_shape() {
 
 pub(super) async fn test_event_executor()
 -> (HirselToolExecutor, Storage, BroadcastLog, tempfile::TempDir) {
+    test_event_executor_with_skills(crate::skills::Skills::default()).await
+}
+
+pub(super) async fn test_event_executor_with_skills(
+    skills: crate::skills::Skills,
+) -> (HirselToolExecutor, Storage, BroadcastLog, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let storage = Storage::open(&path).await.unwrap();
@@ -729,7 +735,7 @@ pub(super) async fn test_event_executor()
             fake_fixture: None,
             subagent_models: crate::subagent_models::SubagentModelState::load(config_store),
             providers,
-            skills: crate::skills::Skills::default(),
+            skills,
         },
         storage.clone(),
         broadcaster,
@@ -1384,6 +1390,112 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
             .handoff_seed
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn native_session_seeds_first_and_intervening_same_task_conversation_only() {
+    let (executor, storage, _log, _dir) = test_event_executor().await;
+    let thread = storage.test_running_caller().await.thread_id;
+    let (other, _) = storage
+        .create_thread(
+            "other-history",
+            "Other",
+            "",
+            &Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_chat(
+            other.id,
+            ChatAuthor::Agent,
+            "UNRELATED TASK MESSAGE",
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_chat(
+            thread,
+            ChatAuthor::Owner,
+            "host owner message",
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_chat(thread, ChatAuthor::Agent, "host answer", None, Vec::new())
+        .await
+        .unwrap();
+
+    let first = executor
+        .tools
+        .prepare_native_worker_session(thread, None, "profile", &["read".into()])
+        .await
+        .unwrap();
+    let seed = first.handoff_seed.expect("first native use needs history");
+    assert!(seed.contains("host owner message"), "{seed}");
+    assert!(seed.contains("host answer"), "{seed}");
+    assert!(!seed.contains("UNRELATED TASK MESSAGE"), "{seed}");
+
+    storage
+        .append_thread_chat(
+            thread,
+            ChatAuthor::Agent,
+            "native answer already in its session",
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    storage
+        .mark_native_worker_conversation_seen(thread)
+        .await
+        .unwrap();
+    assert!(
+        executor
+            .tools
+            .prepare_native_worker_session(thread, None, "profile", &["read".into()])
+            .await
+            .unwrap()
+            .handoff_seed
+            .is_none(),
+        "an unchanged reusable native session must not receive duplicate history"
+    );
+
+    storage
+        .append_thread_chat(
+            thread,
+            ChatAuthor::Owner,
+            "cli owner message",
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_chat(thread, ChatAuthor::Agent, "cli answer", None, Vec::new())
+        .await
+        .unwrap();
+    let resumed = executor
+        .tools
+        .prepare_native_worker_session(thread, None, "profile", &["read".into()])
+        .await
+        .unwrap();
+    assert_eq!(resumed.session_id, first.session_id);
+    let seed = resumed
+        .handoff_seed
+        .expect("intervening backend conversation needs a handoff");
+    assert!(seed.contains("cli owner message"), "{seed}");
+    assert!(seed.contains("cli answer"), "{seed}");
+    assert!(!seed.contains("host owner message"), "{seed}");
+    assert!(!seed.contains("native answer already"), "{seed}");
+    assert!(!seed.contains("UNRELATED TASK MESSAGE"), "{seed}");
 }
 
 #[test]

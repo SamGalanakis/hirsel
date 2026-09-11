@@ -22,6 +22,7 @@ if (scenarios.includes("native-lash-worker")) {
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
 const evidenceRoot = process.env.HIRSEL_RUNBOOK_ARTIFACTS
   ?? join("/tmp", `hirsel-product-runbooks-${runId}`);
+const privateEvidenceValues = [process.env.OPENROUTER_API_KEY].filter(value => value);
 await mkdir(evidenceRoot, { recursive: true });
 console.log(`Product runbook evidence: ${evidenceRoot}`);
 
@@ -76,6 +77,12 @@ function parseFrame(payload) {
 
 function sanitizeEvidence(value) {
   if (Array.isArray(value)) return value.map(sanitizeEvidence);
+  if (typeof value === "string") {
+    return privateEvidenceValues.reduce(
+      (sanitized, secret) => sanitized.replaceAll(secret, "<redacted>"),
+      value,
+    );
+  }
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, nested]) => [
     key,
@@ -83,6 +90,18 @@ function sanitizeEvidence(value) {
       ? "<redacted>"
       : sanitizeEvidence(nested),
   ]));
+}
+
+async function sanitizeEvidenceFile(path) {
+  let contents;
+  try {
+    contents = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  const sanitized = sanitizeEvidence(contents);
+  if (sanitized !== contents) await writeFile(path, sanitized);
 }
 
 function latestFrame(frames, predicate) {
@@ -226,12 +245,20 @@ async function captureNativeWorker(label, context, threadId, parentThreadId, chi
 }
 
 async function createThread(page, nonce) {
-  await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
-  const drawer = page.locator('[data-slot="thread-drawer"]');
-  await drawer.getByLabel("New space or task title", { exact: true }).waitFor();
+  const emptyState = page.locator('[data-slot="thread-empty"]');
+  const emptyStateTitle = emptyState.getByLabel("First space or task title", { exact: true });
+  let creationSurface = emptyState;
+  let titleInput = emptyStateTitle;
+  if (!(await emptyStateTitle.isVisible())) {
+    await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
+    creationSurface = page.locator('[data-slot="thread-drawer"]');
+    await creationSurface.waitFor({ state: "visible" });
+    titleInput = creationSurface.getByLabel("New space or task title", { exact: true });
+  }
+  await titleInput.waitFor({ state: "visible" });
   const title = `Runbook ${nonce}`;
-  await drawer.getByLabel("New space or task title", { exact: true }).fill(title);
-  await drawer.getByRole("button", { name: "New Space", exact: true }).click();
+  await titleInput.fill(title);
+  await creationSurface.getByRole("button", { name: "New Space", exact: true }).click();
   await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
   const match = new URL(page.url()).pathname.match(/^\/t\/(\d+)$/);
   assert(match, `Thread creation did not navigate: ${page.url()}`);
@@ -1288,10 +1315,14 @@ async function runScenario(scenario) {
       join(scenarioDir, "frames.ndjson"),
       frames.map(row => JSON.stringify(sanitizeEvidence(row))).join("\n") + (frames.length ? "\n" : ""),
     );
-    await writeFile(join(scenarioDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
+    await writeFile(join(scenarioDir, "result.json"), `${JSON.stringify(sanitizeEvidence(result), null, 2)}\n`);
     await browser?.close();
     await stopProcess(host);
-    logStream.end();
+    await new Promise(resolve => logStream.end(resolve));
+    await Promise.all([
+      sanitizeEvidenceFile(join(dataDir, "hirsel.toml")),
+      sanitizeEvidenceFile(join(scenarioDir, "host.log")),
+    ]);
   }
   console.log(`${scenario}: ${result.objectiveStatus}${result.error ? ` — ${result.error}` : ""}`);
   return result;
@@ -1299,5 +1330,5 @@ async function runScenario(scenario) {
 
 const results = [];
 for (const scenario of scenarios) results.push(await runScenario(scenario));
-await writeFile(join(evidenceRoot, "summary.json"), `${JSON.stringify(results, null, 2)}\n`);
+await writeFile(join(evidenceRoot, "summary.json"), `${JSON.stringify(sanitizeEvidence(results), null, 2)}\n`);
 if (results.some(result => result.objectiveStatus !== "OBJECTIVE_PASS")) process.exitCode = 1;

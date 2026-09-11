@@ -780,7 +780,7 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`historyId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`parentThreadId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`historyId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`parentThreadId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
@@ -941,7 +941,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_connect() != 45376) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_create_thread() != 48200) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_create_thread() != 6608) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_disconnect() != 57486) {
@@ -1413,7 +1413,7 @@ public interface ClientInterface {
 
     fun `connect`()
 
-    fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `parentThreadId`: kotlin.ULong?): SendReceipt?
+    fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `kind`: ThreadKind, `parentThreadId`: kotlin.ULong?): SendReceipt?
 
     fun `disconnect`()
 
@@ -1605,7 +1605,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
 
 
-    override fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `parentThreadId`: kotlin.ULong?): SendReceipt? {
+    override fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `kind`: ThreadKind, `parentThreadId`: kotlin.ULong?): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -1614,6 +1614,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
         FfiConverterString.lower(`historyId`),
         FfiConverterString.lower(`title`),
+        FfiConverterTypeThreadKind.lower(`kind`),
         FfiConverterOptionalULong.lower(`parentThreadId`),_status)
 }
     }
@@ -2240,6 +2241,8 @@ public object FfiConverterTypeSendReceipt: FfiConverterRustBuffer<SendReceipt> {
 
 
 data class Thread (
+    var `kind`: ThreadKind
+    ,
     var `parentThreadId`: kotlin.ULong?
     ,
     var `pinnedAt`: kotlin.String?
@@ -2295,6 +2298,7 @@ data class Thread (
 public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
     override fun read(buf: ByteBuffer): Thread {
         return Thread(
+            FfiConverterTypeThreadKind.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterULong.read(buf),
@@ -2319,6 +2323,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
     }
 
     override fun allocationSize(value: Thread) = (
+            FfiConverterTypeThreadKind.allocationSize(value.`kind`) +
             FfiConverterOptionalULong.allocationSize(value.`parentThreadId`) +
             FfiConverterOptionalString.allocationSize(value.`pinnedAt`) +
             FfiConverterULong.allocationSize(value.`id`) +
@@ -2342,6 +2347,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
     )
 
     override fun write(value: Thread, buf: ByteBuffer) {
+            FfiConverterTypeThreadKind.write(value.`kind`, buf)
             FfiConverterOptionalULong.write(value.`parentThreadId`, buf)
             FfiConverterOptionalString.write(value.`pinnedAt`, buf)
             FfiConverterULong.write(value.`id`, buf)
@@ -3163,6 +3169,40 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class ThreadKind {
+
+    SPACE,
+    TASK;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadKind: FfiConverterRustBuffer<ThreadKind> {
+    override fun read(buf: ByteBuffer) = try {
+        ThreadKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ThreadKind) = 4UL
+
+    override fun write(value: ThreadKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 

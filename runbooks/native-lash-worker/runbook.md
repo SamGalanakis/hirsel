@@ -10,6 +10,19 @@ Follow [`../RULES.md`](../RULES.md). This runbook is a bounded real-provider pro
 - Confirm `hello_ok` reports the intended Host configuration. The accepted worker execution must record provider `openrouter`, model `deepseek/deepseek-v4.1-flash`, variant `default`, and the isolated test checkout cwd.
 - Prepare a tiny repository with one focused failing test and no valuable state.
 
+Run the dedicated scenario from the repository root after building the reviewed
+tree. Supply the OpenRouter key through the process environment without writing
+it into the checkout or evidence:
+
+```bash
+just product-runbook native-lash-worker
+```
+
+The runner refuses to start the scenario when `OPENROUTER_API_KEY` is absent.
+It creates the disposable fixture inside the evidence directory, uses a fresh
+Host config and store, and asks the coordinator to omit the child provider,
+model, and variant so their accepted defaults are observable.
+
 ## Bounded scenario
 
 Spend at most two worker model turns: one initial delegation and one follow-up. Do not automatically retry a failed or timed-out model call.
@@ -20,6 +33,15 @@ Spend at most two worker model turns: one initial delegation and one follow-up. 
 4. Verify chronological reasoning, tool start, tool result, and assistant output rows. The first test must visibly fail and the later focused test must pass. Reconcile DOM, `open_thread`, captured frames, and SQLite IDs.
 5. Send one follow-up to the same child asking it to identify the earlier changed file and test result without rereading the whole repository. Verify the same Task retains context and produces exactly one new terminal report to the parent.
 6. Confirm neither successful turn marks the Task done.
+
+The fixture is intentionally wrong in one numeric operation. The worker must
+use all four callable tools: read the source and test, observe the focused test
+fail through `exec_command`, repair the unique expression through `edit`, write
+the requested summary file through `write`, and observe the same test pass
+through `exec_command`. The passing test pauses after its assertion so the
+runner can navigate back to the parent, type and clear a draft, and capture the
+responsive parent while the child's command remains active. It sends no parent
+message during this check.
 
 ## Deterministic failure probes
 
@@ -33,3 +55,17 @@ Run these without extra model calls where possible:
 ## Evidence and teardown
 
 Retain sanitized screenshots, DOM extracts, frames, `open_thread` snapshots, relevant SQLite rows, exact commit/model/provider identifiers, command exit statuses, and the isolated Host log. Record `OBJECTIVE_PASS` only when deterministic predicates pass; the reviewing Agent separately judges the product scorecard. Stop only the process group started for this run.
+
+The reusable runner writes these named checkpoints:
+
+- `10-parent-responsive`: the parent DOM, authenticated snapshot, read-only
+  SQLite extract, and screenshot while the second child command is still open;
+- `20-initial-complete`: the child's failing/edit/write/passing tool chronology;
+- `30-followup-complete`: the same Task's follow-up and its second parent report;
+- `frames.ndjson`, `fixture-final.json`, `result.json`, and `host.log`.
+
+`result.json` keeps `scorecardStatus: "NOT_JUDGED"` even after every objective
+predicate passes. The reviewing Agent must inspect all three screenshots and
+their DOM, wire, `open_thread`, and SQLite companions, then record a separate
+judged verdict. A mismatch, missing tool row, unreadable result, duplicate
+report, provider substitution, browser error, or timeout is a failed scenario.

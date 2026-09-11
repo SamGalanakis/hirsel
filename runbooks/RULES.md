@@ -79,8 +79,10 @@ just product-runbook chat-chronology
 just product-runbook tool-execution
 just product-runbook artifact-creation
 just product-runbook artifact-presentation
+just product-runbook native-lash-worker
 ```
 
 `all` uses four separate empty stores and no more than seven model turns. Set
 `HIRSEL_RUNBOOK_ARTIFACTS` to choose the evidence root. The runner prints that
-path even when a scenario aborts.
+path even when a scenario aborts. The native worker scenario is a separate,
+explicitly selected two-worker-turn check and is not included in `all`.

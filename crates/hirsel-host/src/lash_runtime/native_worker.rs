@@ -1,0 +1,676 @@
+//! Dedicated in-process Lash standard-tool worker for one accepted Thread turn.
+use super::bridges::{activity_from_observation, publish_ready_timeline};
+use super::*;
+use crate::{
+    native_coding_tools::NativeCodingTools,
+    providers::{
+        NATIVE_WORKER_DEFAULT_MODEL, NATIVE_WORKER_DEFAULT_PROVIDER_ID,
+        NativeWorkerProviderSnapshot,
+    },
+};
+use hirsel_proto::ThreadTurnState;
+use lash::{TurnActivity, TurnActivitySink};
+
+const NATIVE_WORKER_TURN_BUDGET: usize = 32;
+const NATIVE_WORKER_INSTRUCTION_BYTES: usize = 256 * 1024;
+const NATIVE_WORKER_ERROR_BYTES: usize = 4 * 1024;
+const NATIVE_WORKER_TOOL_NAMES: [&str; 4] = ["read", "edit", "write", "exec_command"];
+
+pub(super) struct NativeWorkerTurn {
+    pub(super) turn_id: u64,
+    pub(super) cancel: lash::CancellationToken,
+    shutdown: Mutex<()>,
+    active_tools: Mutex<Option<Arc<NativeCodingTools>>>,
+}
+
+impl NativeWorkerTurn {
+    pub(super) fn new(turn_id: u64) -> Arc<Self> {
+        Arc::new(Self {
+            turn_id,
+            cancel: lash::CancellationToken::new(),
+            shutdown: Mutex::new(()),
+            active_tools: Mutex::new(None),
+        })
+    }
+
+    /// Freeze tool admission and reap every owned one-shot command before the
+    /// runtime task or its durable session is released.
+    pub(super) async fn stop(&self) {
+        self.cancel.cancel();
+        // `NativeCodingTools::shutdown` is idempotent across time, but one
+        // final tool completion wakes one waiter. Serialize concurrent Host
+        // cancellation and normal turn teardown so both observe full cleanup.
+        let _shutdown = self.shutdown.lock().await;
+        if let Some(tools) = self.active_tools.lock().await.take() {
+            tools.shutdown().await;
+        }
+    }
+
+    pub(super) async fn run(
+        &self,
+        config: &RuntimeConfig,
+        tools: &ToolSuite,
+        request: OwnerTurn,
+        execution: crate::storage::ThreadExecution,
+        capacity: Arc<tokio::sync::Semaphore>,
+        broadcaster: broadcast::Sender<HostToClient>,
+        broadcast_log: BroadcastLog,
+    ) -> anyhow::Result<()> {
+        let result = self
+            .execute(
+                config,
+                tools,
+                &request,
+                execution,
+                capacity,
+                broadcaster,
+                broadcast_log,
+            )
+            .await;
+        self.stop().await;
+        let abandon_session = result.is_err();
+
+        let integrity_failure = tools.turn_timeline_integrity_failure(self.turn_id);
+        let (state, output, reason) = match (integrity_failure.as_ref(), result) {
+            (Some(reason), _) => (ThreadTurnState::Failed, None, Some(reason.clone())),
+            (None, Ok(output)) => native_terminal_projection(&output),
+            (None, Err(_error)) if self.cancel.is_cancelled() => {
+                (ThreadTurnState::Cancelled, None, None)
+            }
+            (None, Err(error)) => (
+                ThreadTurnState::Failed,
+                None,
+                Some(bounded_error(&error.to_string())),
+            ),
+        };
+
+        // Terminal delivery is an outbox operation. Once provider execution
+        // stops, retry only storage projection; never rerun a model or tool.
+        let mut delay = Duration::from_millis(50);
+        loop {
+            if abandon_session
+                && let Err(error) = tools
+                    .storage()
+                    .abandon_native_worker_session(
+                        &request.history_id,
+                        request.thread_id,
+                        self.turn_id,
+                    )
+                    .await
+            {
+                if let Ok(history) = tools.storage().history_id().await {
+                    anyhow::ensure!(
+                        history == request.history_id,
+                        "native worker session abandonment belongs to a previous history"
+                    );
+                }
+                tracing::warn!(
+                    turn_id = self.turn_id,
+                    %error,
+                    "Retrying durable native worker session abandonment"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+                continue;
+            }
+            match tools
+                .storage()
+                .complete_thread_turn_with_failure(
+                    &request.history_id,
+                    self.turn_id,
+                    state,
+                    output.clone(),
+                    reason.as_deref(),
+                )
+                .await
+            {
+                Ok(completion) => {
+                    if integrity_failure.is_some() {
+                        anyhow::ensure!(
+                            completion.turn.state == ThreadTurnState::Failed,
+                            "timeline integrity failure lost to an earlier terminal projection"
+                        );
+                        tools.clear_turn_timeline_integrity_failure(self.turn_id);
+                    }
+                    if let Some(activity) = completion.failure_activity {
+                        tools.publish_thread_activity(activity).await;
+                    }
+                    if let Some(message) = completion.message {
+                        tools.publish_thread_message(message).await;
+                    }
+                    tools.publish_thread_turn(completion.turn).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    if let Ok(history) = tools.storage().history_id().await {
+                        anyhow::ensure!(
+                            history == request.history_id,
+                            "native worker completion belongs to a previous history"
+                        );
+                    }
+                    tracing::warn!(
+                        turn_id = self.turn_id,
+                        %error,
+                        "Retrying durable native worker terminal delivery"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(2));
+                }
+            }
+        }
+    }
+
+    async fn execute(
+        &self,
+        config: &RuntimeConfig,
+        tools: &ToolSuite,
+        request: &OwnerTurn,
+        execution: crate::storage::ThreadExecution,
+        capacity: Arc<tokio::sync::Semaphore>,
+        broadcaster: broadcast::Sender<HostToClient>,
+        broadcast_log: BroadcastLog,
+    ) -> anyhow::Result<lash::TurnOutput> {
+        let _permit = tokio::select! {
+            () = self.cancel.cancelled() => anyhow::bail!("native worker turn cancelled before admission"),
+            permit = capacity.acquire() => permit?,
+        };
+        let accepted = request.stored_turn(&tools.storage()).await?;
+        anyhow::ensure!(
+            accepted.state == ThreadTurnState::Queued,
+            "native worker input is no longer queued"
+        );
+
+        let crate::storage::ThreadExecution::LashWorker {
+            provider,
+            model,
+            variant,
+            cwd,
+            tool_profile,
+        } = execution
+        else {
+            anyhow::bail!("native Lash worker execution settings required")
+        };
+        anyhow::ensure!(
+            tool_profile == crate::storage::NATIVE_CODING_TOOL_PROFILE,
+            "unsupported native worker tool profile `{tool_profile}`"
+        );
+        anyhow::ensure!(
+            variant == "default",
+            "unsupported native worker variant `{variant}`"
+        );
+
+        let stored = tools.storage().run_thread_turn(self.turn_id).await?;
+        tools.publish_thread_turn(stored).await;
+
+        // Resolution happens after capacity admission and immediately before
+        // construction. A changed or removed private provider entry refuses
+        // this immutable accepted turn instead of silently retargeting it.
+        let resolved = tools.resolve_native_worker_provider(&provider)?;
+        let provider_handle =
+            openai_compatible_handle(resolved.api_key, resolved.snapshot.base_url.clone());
+        let model_spec = native_worker_model_spec(&provider.id, &model)?;
+        let coding_tools = Arc::new(NativeCodingTools::new(cwd.clone())?);
+        let manifests = coding_tools.tool_manifests();
+        let tool_names = manifests
+            .iter()
+            .map(|manifest| manifest.name.clone())
+            .collect::<Vec<_>>();
+        ensure_native_tool_surface(&tool_names)?;
+        *self.active_tools.lock().await = Some(Arc::clone(&coding_tools));
+        if self.cancel.is_cancelled() {
+            self.stop().await;
+            anyhow::bail!("native worker turn cancelled during construction");
+        }
+
+        let fingerprint = native_worker_profile_fingerprint(
+            &provider,
+            &model,
+            &variant,
+            &cwd,
+            &tool_profile,
+            &tool_names,
+        )?;
+        let bootstrap = tools
+            .prepare_native_worker_session(
+                request.thread_id,
+                request.message_id,
+                &fingerprint,
+                &tool_names,
+            )
+            .await?;
+
+        let lash_dir = config
+            .data_dir
+            .join("thread-runtime")
+            .join(&request.history_id)
+            .join(request.thread_id.to_string())
+            .join("native-worker");
+        tokio::fs::create_dir_all(&lash_dir).await?;
+        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            lash_dir.join("sessions"),
+        ));
+        let process_env_store =
+            Arc::new(lash_sqlite_store::Store::open(&lash_dir.join("process-env.db")).await?);
+        let core =
+            lash::LashCore::standard_builder(lash::TurnBudget::bounded(NATIVE_WORKER_TURN_BUDGET))
+                .provider(provider_handle.clone())
+                .model(model_spec.clone())
+                .store_factory(store_factory)
+                .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+                    lash_dir.join("attachments"),
+                )))
+                .process_env_store(process_env_store)
+                .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+                .tools(coding_tools.clone() as Arc<dyn ToolProvider>)
+                .without_queued_work()
+                .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+                .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+                .build(lash_core::LeaseOwnerIdentity::opaque(
+                    format!("hirsel-host:native-worker:{}", local_host_id()),
+                    Uuid::new_v4().to_string(),
+                ))?;
+        let guidance = native_worker_guidance(&cwd, bootstrap.handoff_seed.as_deref());
+        let session = core
+            .session(&bootstrap.session_id)
+            .prompt_contribution(lash::prompt::PromptContribution::guidance(
+                "Hirsel native coding worker",
+                guidance,
+            ))
+            .open()
+            .await?;
+        reconcile_opened_session_provider(&session, &provider_handle, &model_spec).await?;
+        let active_tool_names = session
+            .observe()
+            .active_tool_manifests()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<Vec<_>>();
+        ensure_native_tool_surface(&active_tool_names)?;
+
+        let turn_id = native_physical_turn_id(request.thread_id, self.turn_id);
+        tools
+            .storage()
+            .bind_thread_execution(
+                &request.history_id,
+                &bootstrap.session_id,
+                &turn_id,
+                self.turn_id,
+            )
+            .await?;
+        let activity = tools
+            .storage()
+            .append_thread_activity(
+                request.thread_id,
+                Some(self.turn_id),
+                "execution_started",
+                &json!({
+                    "agent":"lash",
+                    "provider_id":provider.id,
+                    "model":model,
+                    "session_id":bootstrap.session_id,
+                }),
+            )
+            .await?;
+        tools.publish_thread_activity(activity).await;
+
+        let instructions = applicable_repo_instructions(&cwd).await?;
+        let input = native_worker_input(request, &cwd, &instructions);
+        let sink = NativeTimelineSink::new(
+            request.thread_id,
+            self.turn_id,
+            tools.clone(),
+            broadcaster,
+            broadcast_log,
+        );
+        let report = session
+            .turn(input)
+            .provider(provider_handle)
+            .cancel_with_origin(
+                self.cancel.clone(),
+                Some(format!("hirsel-thread-turn:{}", self.turn_id)),
+            )
+            .turn_id(turn_id)
+            .stream_to(&sink)
+            .await;
+        sink.finish().await;
+        let output = report?;
+        Ok(lash::TurnOutput {
+            result: output,
+            activities: sink.activities().await,
+        })
+    }
+}
+
+fn native_terminal_projection(
+    output: &lash::TurnOutput,
+) -> (
+    ThreadTurnState,
+    Option<(String, Vec<hirsel_proto::ToolCallSummary>)>,
+    Option<String>,
+) {
+    match &output.result.outcome {
+        lash::TurnOutcome::Finished(_) => {
+            (ThreadTurnState::Completed, turn_chat_payload(output), None)
+        }
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => {
+            (ThreadTurnState::Cancelled, turn_chat_payload(output), None)
+        }
+        lash::TurnOutcome::Stopped(stop) => (
+            ThreadTurnState::Failed,
+            None,
+            Some(bounded_error(&format!(
+                "native Lash worker stopped: {stop:?}"
+            ))),
+        ),
+        lash::TurnOutcome::AgentFrameSwitch { .. } => (
+            ThreadTurnState::Failed,
+            None,
+            Some("native Lash standard worker attempted an unsupported agent-frame switch".into()),
+        ),
+    }
+}
+
+fn bounded_error(message: &str) -> String {
+    if message.len() <= NATIVE_WORKER_ERROR_BYTES {
+        return message.to_string();
+    }
+    const ELLIPSIS: &str = "…";
+    let mut end = NATIVE_WORKER_ERROR_BYTES - ELLIPSIS.len();
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = message[..end].to_string();
+    bounded.push_str(ELLIPSIS);
+    bounded
+}
+
+fn ensure_native_tool_surface(names: &[String]) -> anyhow::Result<()> {
+    let actual = names.iter().map(String::as_str).collect::<HashSet<_>>();
+    let expected = NATIVE_WORKER_TOOL_NAMES.into_iter().collect::<HashSet<_>>();
+    anyhow::ensure!(
+        actual == expected && names.len() == expected.len(),
+        "native worker tool provider exposed an unexpected tool surface: {}",
+        names.join(", ")
+    );
+    Ok(())
+}
+
+fn native_worker_model_spec(provider_id: &str, model: &str) -> anyhow::Result<lash::ModelSpec> {
+    let verified_openrouter_default =
+        provider_id == NATIVE_WORKER_DEFAULT_PROVIDER_ID && model == NATIVE_WORKER_DEFAULT_MODEL;
+    let (context, output) = if verified_openrouter_default {
+        (1_048_576, Some(384_000))
+    } else {
+        (200_000, None)
+    };
+    let mut capability = lash_core::provider::ModelCapability::default();
+    if verified_openrouter_default {
+        capability.attachment_acceptance =
+            Arc::new(lash_core::provider::AttachmentCapabilitySnapshot {
+                revision: "hirsel-native-worker-images-v1".into(),
+                acceptors: vec![lash_core::provider::AttachmentAcceptor {
+                    // `OpenAiCompatibleProvider` drives Chat Completions, whose
+                    // adapter validates against this transport-dialect label.
+                    provider: "OpenAI Chat Completions".into(),
+                    rules: vec![lash_core::provider::AttachmentAcceptanceRule::Mime {
+                        source: lash_core::provider::AttachmentMimeSource::Inline,
+                        media_types: [
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "image/bmp",
+                        ]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                        media_families: Vec::new(),
+                    }],
+                }],
+            });
+    }
+    let mut builder = lash::ModelSpec::builder(model)
+        .variant(ReasoningSelection::ProviderDefault)
+        .context_window_tokens(context)
+        .capability(capability);
+    if let Some(output) = output {
+        builder = builder.output_token_capacity(output);
+    }
+    builder
+        .build()
+        .map_err(|error| anyhow::anyhow!("invalid native worker model metadata: {error}"))
+}
+
+fn native_worker_profile_fingerprint(
+    provider: &NativeWorkerProviderSnapshot,
+    model: &str,
+    variant: &str,
+    cwd: &std::path::Path,
+    tool_profile: &str,
+    tool_names: &[String],
+) -> anyhow::Result<String> {
+    let value = serde_json::to_vec(&json!({
+        "provider":provider,
+        "model":model,
+        "variant":variant,
+        "cwd":cwd,
+        "tool_profile":tool_profile,
+        "tool_names":tool_names,
+    }))?;
+    Ok(format!("{:x}", Sha256::digest(value)))
+}
+
+fn native_physical_turn_id(thread_id: u64, turn_id: u64) -> String {
+    let boot_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    format!("host-queue-drain:{boot_ms}:{turn_id}:thread:{thread_id}:turn:{turn_id}")
+}
+
+fn native_worker_guidance(cwd: &std::path::Path, handoff: Option<&str>) -> String {
+    let mut guidance = format!(
+        "You are a focused coding worker inside one Hirsel Task. Work only on the accepted assignment and return a concise summary of changed files and verification. Your accepted working directory is `{}`; it is a default base, not a filesystem sandbox. You have exactly four tools: `read`, `edit`, `write`, and `exec_command` (the model-facing binding for semantic `shell.exec`). You cannot delegate, manage Hirsel Threads, browse the web, publish artifacts, edit coordinator settings, or mark the Task Done. Use bounded reads and command output ranges when results are truncated. Do not assume a timed-out or interrupted command completed.",
+        cwd.display()
+    );
+    if let Some(handoff) = handoff {
+        guidance.push_str("\n\n## Session handoff\n\n");
+        guidance.push_str(handoff);
+    }
+    guidance
+}
+
+fn native_worker_input(
+    request: &OwnerTurn,
+    cwd: &std::path::Path,
+    instructions: &str,
+) -> TurnInput {
+    TurnInput::text(format!(
+        "Accepted assignment for Hirsel Task #{}\nWorking directory: {}\n\n## Applicable repository instructions\n\n{}\n\n## Assignment\n\n{}",
+        request.thread_id,
+        cwd.display(),
+        if instructions.is_empty() {
+            "(none found)"
+        } else {
+            instructions
+        },
+        request.body,
+    ))
+}
+
+async fn applicable_repo_instructions(cwd: &std::path::Path) -> anyhow::Result<String> {
+    let mut dirs = cwd
+        .ancestors()
+        .map(std::path::Path::to_path_buf)
+        .collect::<Vec<_>>();
+    dirs.reverse();
+    let mut output = String::new();
+    for dir in dirs {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            let path = dir.join(name);
+            let contents = match tokio::fs::read_to_string(&path).await {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("read {}", path.display()));
+                }
+            };
+            let section = format!("### {}\n\n{}\n\n", path.display(), contents);
+            let remaining = NATIVE_WORKER_INSTRUCTION_BYTES.saturating_sub(output.len());
+            anyhow::ensure!(
+                remaining > 0,
+                "applicable repository instructions exceed 256 KiB"
+            );
+            anyhow::ensure!(
+                section.len() <= remaining,
+                "applicable repository instructions exceed 256 KiB"
+            );
+            output.push_str(&section);
+        }
+    }
+    Ok(output)
+}
+
+struct NativeTimelineSink {
+    thread_id: u64,
+    turn_id: u64,
+    tools: ToolSuite,
+    broadcaster: broadcast::Sender<HostToClient>,
+    broadcast_log: BroadcastLog,
+    timeline: Mutex<TurnTimelineBridge>,
+    activities: Mutex<Vec<TurnActivity>>,
+    sequence: AtomicU64,
+}
+
+impl NativeTimelineSink {
+    fn new(
+        thread_id: u64,
+        turn_id: u64,
+        tools: ToolSuite,
+        broadcaster: broadcast::Sender<HostToClient>,
+        broadcast_log: BroadcastLog,
+    ) -> Self {
+        Self {
+            thread_id,
+            turn_id,
+            tools,
+            broadcaster,
+            broadcast_log,
+            timeline: Mutex::new(TurnTimelineBridge {
+                thread_id: Some(thread_id),
+                turn_id: Some(turn_id),
+                ..TurnTimelineBridge::default()
+            }),
+            activities: Mutex::new(Vec::new()),
+            sequence: AtomicU64::new(0),
+        }
+    }
+
+    async fn activities(&self) -> Vec<TurnActivity> {
+        self.activities.lock().await.clone()
+    }
+
+    async fn finish(&self) {
+        let mut timeline = self.timeline.lock().await;
+        timeline.finish_turn();
+        publish_ready_timeline(&self.tools, &mut timeline).await;
+        publish(
+            &self.broadcast_log,
+            &self.broadcaster,
+            HostToClient::AgentActivity {
+                thread_id: self.thread_id,
+                turn_id: self.turn_id,
+                state: AgentActivityState::Idle,
+                text: None,
+            },
+        );
+    }
+
+    async fn route(&self, activity: TurnActivity) {
+        self.activities.lock().await.push(activity.clone());
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let remote = match lash::remote::usage::RemoteTurnActivity::from_core(sequence, activity) {
+            Ok(remote) => remote,
+            Err(error) => {
+                let reason = format!("native worker timeline conversion failed: {error}");
+                self.tools
+                    .fail_turn_timeline_integrity(self.turn_id, &reason)
+                    .await;
+                return;
+            }
+        };
+        let payload = RemoteSessionObservationEventPayload::TurnActivity {
+            activity: Box::new(remote),
+        };
+        if let Some((state, text)) = activity_from_observation(&payload) {
+            publish(
+                &self.broadcast_log,
+                &self.broadcaster,
+                HostToClient::AgentActivity {
+                    thread_id: self.thread_id,
+                    turn_id: self.turn_id,
+                    state,
+                    text,
+                },
+            );
+        }
+        let mut timeline = self.timeline.lock().await;
+        timeline.observe(&payload);
+        publish_ready_timeline(&self.tools, &mut timeline).await;
+    }
+}
+
+#[async_trait]
+impl TurnActivitySink for NativeTimelineSink {
+    async fn emit(&self, activity: TurnActivity) {
+        self.route(activity).await;
+    }
+
+    async fn emit_for_turn(&self, _turn_id: &str, activity: TurnActivity) {
+        self.route(activity).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_worker_surface_is_exact() {
+        let names = NATIVE_WORKER_TOOL_NAMES.map(str::to_string);
+        ensure_native_tool_surface(&names).unwrap();
+        assert!(ensure_native_tool_surface(&["read".into(), "delegate".into()]).is_err());
+    }
+
+    #[test]
+    fn deepseek_default_uses_verified_limits() {
+        let spec = native_worker_model_spec(
+            NATIVE_WORKER_DEFAULT_PROVIDER_ID,
+            NATIVE_WORKER_DEFAULT_MODEL,
+        )
+        .unwrap();
+        assert_eq!(spec.context_window_tokens(), 1_048_576);
+        assert_eq!(
+            spec.limits.output_token_capacity.map(|value| value.get()),
+            Some(384_000)
+        );
+        assert_eq!(
+            spec.capability.attachment_acceptance.acceptors[0].provider,
+            "OpenAI Chat Completions"
+        );
+
+        let unknown = native_worker_model_spec("local", NATIVE_WORKER_DEFAULT_MODEL).unwrap();
+        assert_eq!(unknown.context_window_tokens(), 200_000);
+        assert!(unknown.limits.output_token_capacity.is_none());
+        assert!(unknown.capability.attachment_acceptance.is_empty());
+    }
+
+    #[test]
+    fn bounded_error_preserves_utf8() {
+        let message = "x".repeat(NATIVE_WORKER_ERROR_BYTES - 1) + "💚";
+        let bounded = bounded_error(&message);
+        assert!(bounded.ends_with('…'));
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert!(bounded.len() <= NATIVE_WORKER_ERROR_BYTES);
+    }
+}

@@ -91,6 +91,7 @@ mod bridges;
 mod condense;
 mod executor;
 mod lifecycle;
+mod native_worker;
 mod plugin;
 mod process_engines;
 mod provider;

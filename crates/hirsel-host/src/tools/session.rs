@@ -3,6 +3,57 @@ use hirsel_proto::ChatAuthor;
 use super::{AgentSessionBootstrap, ToolSuite};
 
 impl ToolSuite {
+    pub(crate) async fn prepare_native_worker_session(
+        &self,
+        thread_id: u64,
+        before_message_id: Option<u64>,
+        profile_fingerprint: &str,
+        tool_names: &[String],
+    ) -> anyhow::Result<AgentSessionBootstrap> {
+        let state = self
+            .storage
+            .reconcile_native_worker_profile(thread_id, profile_fingerprint, tool_names)
+            .await?;
+        if !state.rotated {
+            return Ok(AgentSessionBootstrap {
+                session_id: state.session_id,
+                handoff_seed: None,
+            });
+        }
+        let messages = self
+            .storage
+            .thread_detail(thread_id, before_message_id, 30)
+            .await?
+            .messages;
+        let mut handoff = String::from(
+            "The host rotated this native worker session because its accepted execution profile changed. Continue from this Task's visible conversation; do not assume unfinished side effects from the previous session were applied.\n\n## Recent chat\n",
+        );
+        for message in messages {
+            let author = match message.author {
+                hirsel_proto::ChatAuthor::Owner => "owner",
+                hirsel_proto::ChatAuthor::Agent => "worker",
+            };
+            handoff.push_str(&format!(
+                "- {author}: {}\n",
+                indent_continuation_lines(&message.body)
+            ));
+        }
+        let activity = self
+            .storage
+            .append_thread_activity(
+                thread_id,
+                None,
+                "worker_session_rotated",
+                &serde_json::json!({"session_id":state.session_id}),
+            )
+            .await?;
+        self.publish_thread_activity(activity).await;
+        Ok(AgentSessionBootstrap {
+            session_id: state.session_id,
+            handoff_seed: Some(handoff),
+        })
+    }
+
     pub(crate) async fn prepare_agent_session(
         &self,
         thread_id: u64,

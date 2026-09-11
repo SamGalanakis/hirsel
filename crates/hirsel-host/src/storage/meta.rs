@@ -80,6 +80,112 @@ impl Storage {
             added_tools,
         })
     }
+
+    /// Reconcile the immutable execution profile of a native coding worker.
+    /// This namespace is intentionally distinct from the coordinator's tool
+    /// surface: switching a Task between host and worker sessions can never
+    /// reopen the other role's durable conversation.
+    pub(crate) async fn reconcile_native_worker_profile(
+        &self,
+        thread_id: u64,
+        fingerprint: &str,
+        tool_names: &[String],
+    ) -> anyhow::Result<AgentSessionState> {
+        let mut normalized_names = tool_names.to_vec();
+        normalized_names.sort();
+        normalized_names.dedup();
+        let encoded_names = serde_json::to_string(&normalized_names)?;
+
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        super::threads::get(&tx, thread_id)?;
+        let fingerprint_key = format!("thread:{thread_id}:native_worker_fingerprint");
+        let names_key = format!("thread:{thread_id}:native_worker_tool_names");
+        let generation_key = format!("thread:{thread_id}:native_worker_generation");
+        let history_id: String =
+            tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |r| {
+                r.get(0)
+            })?;
+        let previous_fingerprint = meta_value_from_conn(&tx, &fingerprint_key)?;
+        let previous_names = meta_value_from_conn(&tx, &names_key)?
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .context("decode stored native worker tool names")?
+            .unwrap_or_default();
+        let generation = meta_value_from_conn(&tx, &generation_key)?
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .context("decode stored native worker session generation")?;
+        let rotated = previous_fingerprint
+            .as_deref()
+            .is_some_and(|previous| previous != fingerprint);
+        let next_generation = if rotated {
+            Some(
+                generation
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .context("native worker session generation overflow")?,
+            )
+        } else {
+            generation
+        };
+        let previous_names = previous_names.into_iter().collect::<HashSet<_>>();
+        let added_tools = if rotated {
+            normalized_names
+                .iter()
+                .filter(|name| !previous_names.contains(*name))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        set_meta_value(&tx, &fingerprint_key, fingerprint)?;
+        set_meta_value(&tx, &names_key, &encoded_names)?;
+        if let Some(generation) = next_generation {
+            set_meta_value(&tx, &generation_key, &generation.to_string())?;
+        }
+        tx.commit()?;
+
+        Ok(AgentSessionState {
+            session_id: format!(
+                "native-thread-{history_id}-{thread_id}-g{}",
+                next_generation.unwrap_or(0)
+            ),
+            rotated,
+            added_tools,
+        })
+    }
+
+    /// Abandon the current native-worker generation after a direct turn drive
+    /// returned without a settled report. Lash may already have durably
+    /// accepted that input, so a future Hirsel turn must not reopen and drive
+    /// the same physical session.
+    pub(crate) async fn abandon_native_worker_session(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+        turn_id: u64,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let history_id: String =
+            tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |row| {
+                row.get(0)
+            })?;
+        anyhow::ensure!(
+            history_id == expected_history,
+            "native worker session abandonment belongs to a previous history"
+        );
+        super::threads::get(&tx, thread_id)?;
+        set_meta_value(
+            &tx,
+            &format!("thread:{thread_id}:native_worker_fingerprint"),
+            &format!("abandoned-turn:{turn_id}"),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 fn meta_value_from_conn(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

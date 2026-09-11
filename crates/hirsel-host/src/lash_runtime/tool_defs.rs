@@ -62,6 +62,7 @@ pub(super) fn agent_tool_surface_for_dialect(
 
 pub(super) fn hirsel_tool_definitions(
     subagent_models: &SubagentModelCatalog,
+    native_worker_providers: &[String],
 ) -> Vec<ToolDefinition> {
     vec![
         tool_definition(
@@ -115,6 +116,7 @@ pub(super) fn hirsel_tool_definitions(
             "Assign focused work to a new or existing direct child. Real asynchronous execution; durable results return upward. Parent completion does not abandon children.",
             crate::subagent_models::SubagentModelState::delegation_input_schema_for(
                 subagent_models,
+                native_worker_providers,
             ),
             json!({"type":"object"}),
             ["threads"],

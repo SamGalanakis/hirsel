@@ -27,7 +27,7 @@ mod thread_requests;
 mod thread_scope;
 mod thread_summary;
 mod threads;
-pub(crate) use thread_execution::ThreadExecution;
+pub(crate) use thread_execution::{NATIVE_CODING_TOOL_PROFILE, ThreadExecution};
 pub(crate) use thread_icons::parse_icon;
 pub(crate) use threads::ThreadPublication;
 mod thread_mutations;

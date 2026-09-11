@@ -310,9 +310,15 @@ impl AppState {
         default_model: &str,
     ) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
+        let previous_worker_providers = self.providers_roster.native_worker_provider_ids();
         self.providers_roster
             .add(id, label, base_url, api_key, default_model)
             .await?;
+        if self.providers_roster.native_worker_provider_ids() != previous_worker_providers {
+            self.agent
+                .refresh_subagent_model_tools(&self.subagent_model_snapshot())
+                .await?;
+        }
         self.broadcast_providers().await
     }
 
@@ -330,9 +336,15 @@ impl AppState {
     ) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
         let surfaces = self.agent_surfaces();
+        let previous_worker_providers = self.providers_roster.native_worker_provider_ids();
         self.providers_roster
             .update(id, label, base_url, api_key, default_model)
             .await?;
+        if self.providers_roster.native_worker_provider_ids() != previous_worker_providers {
+            self.agent
+                .refresh_subagent_model_tools(&self.subagent_model_snapshot())
+                .await?;
+        }
         self.broadcast_agent_surfaces(surfaces);
         self.broadcast_providers().await
     }
@@ -350,7 +362,13 @@ impl AppState {
     pub async fn remove_provider(&self, id: &str) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
         let surfaces = self.agent_surfaces();
+        let previous_worker_providers = self.providers_roster.native_worker_provider_ids();
         self.providers_roster.remove(id).await?;
+        if self.providers_roster.native_worker_provider_ids() != previous_worker_providers {
+            self.agent
+                .refresh_subagent_model_tools(&self.subagent_model_snapshot())
+                .await?;
+        }
         self.broadcast_agent_surfaces(surfaces);
         self.broadcast_providers().await
     }
@@ -626,6 +644,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let boot = boot_provider::resolve(&config_store, config.provider, home.as_deref()).await;
     let providers_roster = providers::ProviderRosterState::new(config_store.clone(), &boot, home);
     let subagent_models = subagent_models::SubagentModelState::load(config_store.clone());
+    let skills = skills::Skills::for_host(&config.data_dir)?;
     let storage = Storage::open(&config.data_dir)
         .await
         .with_context(|| format!("open storage under {}", config.data_dir.display()))?;
@@ -651,6 +670,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             driver_mode: config.driver,
             fake_fixture: config.fake_fixture.clone(),
             subagent_models: subagent_models.clone(),
+            providers: providers_roster.clone(),
+            skills: skills.clone(),
         },
         storage.clone(),
         broadcaster.clone(),
@@ -688,7 +709,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             plugin_host.skills_prompt()
         ),
     )
-    .with_skills(skills::Skills::for_host(&config.data_dir)?);
+    .with_skills(skills);
     let agent = AgentRuntime::start(
         lash_runtime::RuntimeConfig {
             agent_mode: config.agent,

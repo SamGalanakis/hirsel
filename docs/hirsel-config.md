@@ -149,6 +149,14 @@ warning and falls back to that provider's default model.
   the same reason. The stored values are what the Host builds the handle from.
 - **Fork provider and model** — stored only. No fork runtime consumes them yet.
 
+## Native Lash coding workers
+
+`threads.delegate` exposes `agent: "lash"` when at least one stored OpenAI-compatible provider has a non-empty API key. This runs a dedicated in-process Lash standard session; it does not change the coordinator's provider or RLM mode. With no explicit worker provider, Hirsel selects the configured `openrouter` instance and defaults its model to `deepseek/deepseek-v4.1-flash`. A non-OpenRouter provider requires an explicit free-text model. The worker variant is `default`.
+
+Acceptance stores provider route identity, model, variant, canonical cwd, and tool-profile version, never an API key. A later base-URL change or provider removal cannot retarget queued work and produces a clear failure. API-key rotation remains private credential indirection for the same accepted route.
+
+The worker's complete callable surface is `read`, `edit`, `write`, and `exec_command`; the last name is Lash's model binding for semantic `shell.exec`. It has no delegation, Thread management, artifact publication, browser/web, background-process, or plugin tools. Its cwd is a default path base, not a filesystem sandbox. A child Task retains this executor preference and conversation on follow-up; changing its accepted profile opens a distinct worker-session generation with a bounded Task-only handoff.
+
 ## CLI Thread models
 
 The Thread model catalog is separate from the roster above and grouped by CLI

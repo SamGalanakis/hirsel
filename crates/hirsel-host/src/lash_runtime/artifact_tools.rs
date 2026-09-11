@@ -175,7 +175,7 @@ mod tests {
             "artifacts_show",
         ] {
             assert!(
-                hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+                hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[])
                     .iter()
                     .any(|t| t.name() == name)
             );

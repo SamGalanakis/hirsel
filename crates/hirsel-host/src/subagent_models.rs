@@ -98,11 +98,14 @@ impl SubagentModelState {
     /// The model-facing `threads.delegate` input contract. This is derived from
     /// the same refreshed catalog used by Settings and execution validation.
     pub fn delegation_input_schema(&self) -> Value {
-        Self::delegation_input_schema_for(&self.snapshot())
+        Self::delegation_input_schema_for(&self.snapshot(), &[])
     }
 
-    pub(crate) fn delegation_input_schema_for(catalog: &SubagentModelCatalog) -> Value {
-        delegation_input_schema(catalog)
+    pub(crate) fn delegation_input_schema_for(
+        catalog: &SubagentModelCatalog,
+        native_worker_providers: &[String],
+    ) -> Value {
+        delegation_input_schema(catalog, native_worker_providers)
     }
 
     pub fn resolve(
@@ -347,12 +350,16 @@ pub(crate) fn registry_catalog() -> SubagentModelCatalog {
     }
 }
 
-fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
+fn delegation_input_schema(
+    catalog: &SubagentModelCatalog,
+    native_worker_providers: &[String],
+) -> Value {
+    let mut agents = vec!["host", "claude", "codex"];
     let mut branches = vec![
-        json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}),
+        json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["provider_id"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}),
     ];
     // An existing child with no new selectors keeps its accepted backend.
-    branches.push(json!({"required":["child_thread_id"],"not":{"anyOf":[{"required":["agent"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}));
+    branches.push(json!({"required":["child_thread_id"],"not":{"anyOf":[{"required":["agent"]},{"required":["provider_id"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}));
     for provider in &catalog.providers {
         let enabled = provider
             .models
@@ -368,13 +375,42 @@ fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
         for model in enabled {
             models.push(json!({"required":["model"],"properties":{"model":{"const":model.id},"variant":{"enum":model.enabled_variants}}}));
         }
-        let explicit = json!({"required":["agent"],"properties":{"agent":{"const":provider.provider}},"oneOf":models});
+        let explicit = json!({"required":["agent"],"properties":{"agent":{"const":provider.provider}},"not":{"required":["provider_id"]},"oneOf":models});
         branches.push(explicit);
         if provider.provider == "claude" {
-            branches.push(json!({"not":{"required":["agent"]},"anyOf":[{"not":{"required":["child_thread_id"]}},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}],"oneOf":models}));
+            branches.push(json!({"not":{"anyOf":[{"required":["agent"]},{"required":["provider_id"]}]},"anyOf":[{"not":{"required":["child_thread_id"]}},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}],"oneOf":models}));
         }
     }
-    json!({"type":"object","additionalProperties":false,"required":["title","brief","artifact_ids"],"properties":{"title":{"type":"string","minLength":1},"brief":{"type":"string","minLength":1},"artifact_ids":{"type":"array","maxItems":100,"items":{"type":"integer","minimum":1}},"child_thread_id":{"type":"integer","minimum":0},"agent":{"type":"string","enum":["host","claude","codex"]},"model":{"type":"string"},"variant":{"type":"string"},"cwd":{"type":"string"}},"oneOf":branches})
+    if !native_worker_providers.is_empty() {
+        agents.push("lash");
+        let mut provider_branches = native_worker_providers
+            .iter()
+            .map(|provider| {
+                let requires_model =
+                    provider != crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID;
+                let mut branch = json!({
+                    "required":["provider_id"],
+                    "properties":{"provider_id":{"const":provider}}
+                });
+                if requires_model {
+                    branch["required"] = json!(["provider_id", "model"]);
+                }
+                branch
+            })
+            .collect::<Vec<_>>();
+        if native_worker_providers
+            .iter()
+            .any(|provider| provider == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID)
+        {
+            provider_branches.push(json!({"not":{"required":["provider_id"]}}));
+        }
+        branches.push(json!({
+            "required":["agent"],
+            "properties":{"agent":{"const":"lash"},"variant":{"const":"default"}},
+            "oneOf":provider_branches
+        }));
+    }
+    json!({"type":"object","additionalProperties":false,"required":["title","brief","artifact_ids"],"properties":{"title":{"type":"string","minLength":1},"brief":{"type":"string","minLength":1},"artifact_ids":{"type":"array","maxItems":100,"items":{"type":"integer","minimum":1}},"child_thread_id":{"type":"integer","minimum":0},"agent":{"type":"string","enum":agents},"provider_id":{"type":"string"},"model":{"type":"string","minLength":1},"variant":{"type":"string"},"cwd":{"type":"string"}},"oneOf":branches})
 }
 
 fn registry_provider(provider: &str) -> Option<&'static RegistryProvider> {
@@ -724,5 +760,52 @@ mod tests {
                 .to_string()
                 .contains("unknown variants")
         );
+    }
+
+    #[test]
+    fn native_lash_schema_exists_only_for_usable_providers() {
+        let catalog = registry_catalog();
+        let base = json!({
+            "agent":"lash",
+            "title":"Fix it",
+            "brief":"Repair and verify the bug.",
+            "artifact_ids":[]
+        });
+        let absent = SubagentModelState::delegation_input_schema_for(&catalog, &[]);
+        assert_eq!(
+            absent["properties"]["agent"]["enum"],
+            json!(["host", "claude", "codex"])
+        );
+        assert!(
+            !jsonschema::JSONSchema::compile(&absent)
+                .unwrap()
+                .is_valid(&base)
+        );
+
+        let schema = SubagentModelState::delegation_input_schema_for(
+            &catalog,
+            &["openrouter".into(), "local".into()],
+        );
+        let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
+        assert!(
+            validator.is_valid(&base),
+            "OpenRouter has the curated default"
+        );
+        assert!(validator.is_valid(&json!({
+            "agent":"lash", "provider_id":"openrouter", "model":"other/model",
+            "variant":"default", "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
+        })));
+        assert!(validator.is_valid(&json!({
+            "agent":"lash", "provider_id":"local", "model":"local-model",
+            "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
+        })));
+        assert!(!validator.is_valid(&json!({
+            "agent":"lash", "provider_id":"local",
+            "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
+        })));
+        assert!(!validator.is_valid(&json!({
+            "agent":"lash", "provider_id":"missing", "model":"m",
+            "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
+        })));
     }
 }

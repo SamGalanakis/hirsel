@@ -129,7 +129,7 @@ pub(super) async fn build_provider(
 /// One OpenAI-compatible handle for both the env OpenRouter mode and a stored
 /// instance. OpenRouter's compat quirks are applied by base URL, never by
 /// assumption: an instance pointing elsewhere must not claim them.
-fn openai_compatible_handle(api_key: String, base_url: String) -> ProviderHandle {
+pub(super) fn openai_compatible_handle(api_key: String, base_url: String) -> ProviderHandle {
     let openrouter = base_url == lash_provider_openai::OPENROUTER_BASE_URL;
     let mut provider = lash_provider_openai::OpenAiCompatibleProvider::new(api_key, base_url);
     if openrouter {

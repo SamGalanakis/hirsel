@@ -4,6 +4,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub(crate) const NATIVE_CODING_TOOL_PROFILE: &str = "hirsel.native-coding.v1";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ThreadExecution {
@@ -16,6 +18,13 @@ pub(crate) enum ThreadExecution {
         model: String,
         variant: String,
         cwd: PathBuf,
+    },
+    LashWorker {
+        provider: crate::providers::NativeWorkerProviderSnapshot,
+        model: String,
+        variant: String,
+        cwd: PathBuf,
+        tool_profile: String,
     },
 }
 pub(super) fn capture(
@@ -38,7 +47,9 @@ pub(super) fn capture(
             .map(|s| serde_json::from_str::<ThreadExecution>(&s))
             .transpose()?;
         match preferred {
-            Some(cli @ ThreadExecution::Cli { .. }) => Some(cli),
+            Some(
+                preferred @ (ThreadExecution::Cli { .. } | ThreadExecution::LashWorker { .. }),
+            ) => Some(preferred),
             _ => c
                 .query_row(
                     "SELECT value FROM meta WHERE key='host_execution_default'",

@@ -718,11 +718,18 @@ pub(super) async fn test_event_executor()
     )
     .await
     .unwrap();
+    let providers = crate::providers::ProviderRosterState::new(
+        config_store.clone(),
+        &crate::boot_provider::BootProvider::env_default(crate::config::ProviderMode::Codex),
+        None,
+    );
     let tools = ToolSuite::new(
         ToolsConfig {
             driver_mode: DriverMode::Fake,
             fake_fixture: None,
             subagent_models: crate::subagent_models::SubagentModelState::load(config_store),
+            providers,
+            skills: crate::skills::Skills::default(),
         },
         storage.clone(),
         broadcaster,
@@ -776,7 +783,7 @@ fn tool_prose_never_names_a_dialect() {
         })
         .collect::<Vec<_>>();
 
-    for definition in hirsel_tool_definitions(&crate::subagent_models::registry_catalog()) {
+    for definition in hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[]) {
         let mut prose = vec![definition.description().to_string()];
         collect_prose(definition.contract.input_schema.canonical(), &mut prose);
         collect_prose(definition.contract.output_schema.canonical(), &mut prose);
@@ -918,7 +925,7 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     }
     results.insert("threads_add_related", added_examples);
     results.insert("threads_remove_related", removed_examples);
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[]);
     assert_eq!(results.len(), definitions.len());
     for definition in definitions {
         let examples = results
@@ -941,7 +948,7 @@ async fn every_executor_result_matches_its_declared_output_schema() {
 
 #[test]
 fn monitor_create_schema_and_parser_share_the_condition_contract() {
-    let definition = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+    let definition = hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[])
         .into_iter()
         .find(|definition| definition.name() == "monitors_create")
         .unwrap();
@@ -1381,7 +1388,7 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
 
 #[test]
 fn view_tool_contract_is_canvas_only_without_a_placement_dimension() {
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[]);
     let show = definitions
         .iter()
         .find(|d| d.name() == "views_show")

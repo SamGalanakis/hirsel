@@ -285,7 +285,7 @@ async fn route_observation<E>(
     }
 }
 
-async fn publish_ready_timeline(tools: &ToolSuite, timeline: &mut TurnTimelineBridge) {
+pub(super) async fn publish_ready_timeline(tools: &ToolSuite, timeline: &mut TurnTimelineBridge) {
     let (Some(thread_id), Some(turn_id)) = (timeline.thread_id, timeline.turn_id) else {
         timeline.take_ready();
         return;

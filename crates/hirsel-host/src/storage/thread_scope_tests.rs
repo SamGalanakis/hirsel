@@ -569,6 +569,108 @@ async fn history_reset_reused_ids_reject_old_callers_receipts_and_revocation() {
 }
 
 #[tokio::test]
+async fn native_worker_sessions_are_distinct_and_rotate_on_profile_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let id = thread(&storage, "worker", None).await;
+    let coordinator = storage
+        .reconcile_agent_tool_surface(id, "coordinator-v1", &["threads_context".into()])
+        .await
+        .unwrap();
+    let worker = storage
+        .reconcile_native_worker_profile(
+            id,
+            "worker-profile-v1",
+            &[
+                "read".into(),
+                "edit".into(),
+                "write".into(),
+                "exec_command".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_ne!(coordinator.session_id, worker.session_id);
+    assert!(worker.session_id.contains("native-thread-"));
+    assert!(!worker.rotated);
+
+    let unchanged = storage
+        .reconcile_native_worker_profile(
+            id,
+            "worker-profile-v1",
+            &[
+                "read".into(),
+                "edit".into(),
+                "write".into(),
+                "exec_command".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged.session_id, worker.session_id);
+    assert!(!unchanged.rotated);
+
+    let rotated = storage
+        .reconcile_native_worker_profile(
+            id,
+            "worker-profile-v2",
+            &[
+                "read".into(),
+                "edit".into(),
+                "write".into(),
+                "exec_command".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_ne!(rotated.session_id, worker.session_id);
+    assert!(rotated.rotated);
+}
+
+#[tokio::test]
+async fn abandoned_native_worker_session_rotates_without_crossing_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let old_history = storage.history_id().await.unwrap();
+    let id = thread(&storage, "worker", None).await;
+    let names = vec![
+        "read".into(),
+        "edit".into(),
+        "write".into(),
+        "exec_command".into(),
+    ];
+    let original = storage
+        .reconcile_native_worker_profile(id, "worker-profile", &names)
+        .await
+        .unwrap();
+    storage
+        .abandon_native_worker_session(&old_history, id, 42)
+        .await
+        .unwrap();
+    let replacement = storage
+        .reconcile_native_worker_profile(id, "worker-profile", &names)
+        .await
+        .unwrap();
+    assert!(replacement.rotated);
+    assert_ne!(replacement.session_id, original.session_id);
+
+    storage.reset().await.unwrap();
+    let reused_id = thread(&storage, "fresh worker", None).await;
+    assert_eq!(reused_id, id);
+    assert!(
+        storage
+            .abandon_native_worker_session(&old_history, reused_id, 43)
+            .await
+            .is_err()
+    );
+    let fresh = storage
+        .reconcile_native_worker_profile(reused_id, "worker-profile", &names)
+        .await
+        .unwrap();
+    assert!(!fresh.rotated);
+}
+
+#[tokio::test]
 async fn human_artifact_reference_is_atomic_explicit_and_scoped_without_peer_access() {
     let dir = tempfile::tempdir().unwrap();
     let s = Storage::open(dir.path()).await.unwrap();

@@ -112,7 +112,10 @@ impl LashAgentRuntime {
             );
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
-        let mut tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
+        let mut tool_definitions = hirsel_tool_definitions(
+            &tools.subagent_model_snapshot(),
+            &tools.native_worker_provider_ids(),
+        );
         // Plugins are booted before the agent runtime, so the tools of every
         // enabled plugin are part of the first tool-surface fingerprint rather
         // than rotating the session immediately after startup.
@@ -303,18 +306,18 @@ impl LashAgentRuntime {
         &self,
         catalog: &SubagentModelCatalog,
     ) -> anyhow::Result<()> {
-        let encoded =
-            serde_json::to_vec(catalog).context("serialize Sub-agent model tool contract")?;
+        let encoded = serde_json::to_vec(&(catalog, self.tools.native_worker_provider_ids()))
+            .context("serialize delegation tool contract")?;
         let fingerprint = format!("{:x}", Sha256::digest(encoded));
         self.session
             .admin()
             .commands()
             .refresh_tool_catalog(
-                "Sub-agent model settings changed",
-                format!("subagent-model-settings:{fingerprint}"),
+                "Delegation executor settings changed",
+                format!("delegation-settings:{fingerprint}"),
             )
             .await
-            .context("enqueue Sub-agent model tool-catalog refresh")?;
+            .context("enqueue delegation tool-catalog refresh")?;
         self.notify.notify_one();
         Ok(())
     }

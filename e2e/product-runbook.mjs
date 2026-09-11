@@ -318,7 +318,7 @@ function storeTimeline(store, turnId) {
 }
 
 function assertTimelineSurfaces(snapshot, frames, turnIds) {
-  assert.equal(snapshot.store.schemaVersion, 5, "runbook store is not durable schema 5");
+  assert.equal(snapshot.store.schemaVersion, 6, "runbook store is not durable schema 6");
   for (const turnId of turnIds) {
     const live = liveTimeline(frames, turnId);
     assert(live.length > 0, `turn ${turnId} streamed no timeline events`);
@@ -1281,7 +1281,7 @@ async function runScenario(scenario) {
     assert.equal(empty.detail.turns.length, 0);
     assert.equal(empty.store.messages.length, 0);
     assert.equal(empty.store.turns.length, 0);
-    assert.equal(empty.store.schemaVersion, 5);
+    assert.equal(empty.store.schemaVersion, 6);
     assert.deepEqual(empty.store.timelineEvents, []);
     assert.deepEqual(empty.detail.turn_timelines, []);
     if (scenario === "artifact-creation" || scenario === "artifact-presentation") assert.equal(empty.store.artifacts.length, 0);

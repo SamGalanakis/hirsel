@@ -15,7 +15,8 @@ kept here so later runtime changes can search for the same failure shapes.
 - Completed shell calls can lose ownership of still-running descendants before
   worker shutdown. Hirsel's Linux executor therefore retains the unreaped
   direct leader as trustworthy process-group identity, terminates the group,
-  and only then reaps and drains it.
+  waits for ordinary same-group members to become non-runnable, and only then
+  reaps and drains it.
 - A transient tool-result consumer cannot own command lifetime. The Hirsel tool
   provider retains its host-owned command task, cancels it through its token,
   and joins it during shutdown even when the consumer disappears.

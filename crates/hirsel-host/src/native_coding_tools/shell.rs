@@ -26,12 +26,18 @@ const MAX_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 const MAX_OUTPUT_BYTES: usize = 512_000;
 const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1_024;
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const GROUP_TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const GROUP_TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Clone)]
 pub(super) struct ShellExecutor {
     cwd: PathBuf,
     #[cfg(test)]
     reader_failure_barrier: Option<Arc<tokio::sync::Barrier>>,
+    #[cfg(test)]
+    fail_pidfd_preflight: bool,
 }
 
 impl ShellExecutor {
@@ -40,6 +46,8 @@ impl ShellExecutor {
             cwd,
             #[cfg(test)]
             reader_failure_barrier: None,
+            #[cfg(test)]
+            fail_pidfd_preflight: false,
         }
     }
 
@@ -49,6 +57,12 @@ impl ShellExecutor {
         barrier: Arc<tokio::sync::Barrier>,
     ) -> Self {
         self.reader_failure_barrier = Some(barrier);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_pidfd_preflight_failure(mut self) -> Self {
+        self.fail_pidfd_preflight = true;
         self
     }
 
@@ -67,6 +81,8 @@ impl ShellExecutor {
                 shutdown_cancellation,
                 #[cfg(test)]
                 self.reader_failure_barrier.clone(),
+                #[cfg(test)]
+                self.fail_pidfd_preflight,
             )
             .await
         }
@@ -165,7 +181,21 @@ async fn execute_linux(
     attempt_cancellation: CancellationToken,
     shutdown_cancellation: CancellationToken,
     #[cfg(test)] reader_failure_barrier: Option<Arc<tokio::sync::Barrier>>,
+    #[cfg(test)] fail_pidfd_preflight: bool,
 ) -> ToolOutcome {
+    if attempt_cancellation.is_cancelled() || shutdown_cancellation.is_cancelled() {
+        return ToolOutcome::cancelled("tool call cancelled before command start");
+    }
+
+    #[cfg(test)]
+    if fail_pidfd_preflight {
+        return unsupported_linux_host("injected pidfd preflight failure");
+    }
+    if let Err(error) = preflight_linux_process_control() {
+        return unsupported_linux_host(format!(
+            "native worker command execution requires pidfd and readable procfs process-group support: {error}"
+        ));
+    }
     if attempt_cancellation.is_cancelled() || shutdown_cancellation.is_cancelled() {
         return ToolOutcome::cancelled("tool call cancelled before command start");
     }
@@ -215,29 +245,29 @@ async fn execute_linux(
     let pidfd = match open_pidfd(pid) {
         Ok(pidfd) => pidfd,
         Err(error) => {
-            terminate_group(pid);
-            let _ = child.wait().await;
+            let cleanup_error = terminate_and_reap_spawn_failure(&mut child, pid).await;
+            let cleanup_suffix = cleanup_error
+                .map(|cleanup| format!("; cleanup also failed: {cleanup}"))
+                .unwrap_or_default();
             return io_failure(
                 "native_shell_pidfd_open_failed",
-                format!("failed to open pidfd for native shell process: {error}"),
+                format!("failed to open pidfd for native shell process: {error}{cleanup_suffix}"),
             );
         }
     };
 
     let Some(stdout) = child.stdout.take() else {
-        terminate_group(pid);
-        let _ = child.wait().await;
+        let cleanup_error = terminate_and_reap_spawn_failure(&mut child, pid).await;
         return io_failure(
             "native_shell_stdout_missing",
-            "spawned native shell did not expose stdout",
+            append_cleanup_error("spawned native shell did not expose stdout", cleanup_error),
         );
     };
     let Some(stderr) = child.stderr.take() else {
-        terminate_group(pid);
-        let _ = child.wait().await;
+        let cleanup_error = terminate_and_reap_spawn_failure(&mut child, pid).await;
         return io_failure(
             "native_shell_stderr_missing",
-            "spawned native shell did not expose stderr",
+            append_cleanup_error("spawned native shell did not expose stderr", cleanup_error),
         );
     };
 
@@ -285,6 +315,11 @@ async fn execute_linux(
     };
 
     let termination_error = process.terminate_group();
+    let group_termination_error = if termination_error.is_none() {
+        process.wait_for_group_termination().await.err()
+    } else {
+        None
+    };
     let exit_observation = match &finish {
         Finish::Exited(_) => None,
         _ => Some(exit_ready.await),
@@ -294,6 +329,9 @@ async fn execute_linux(
 
     if let Some(error) = termination_error {
         return io_failure("native_shell_group_termination_failed", error);
+    }
+    if let Some(error) = group_termination_error {
+        return io_failure("native_shell_group_termination_unconfirmed", error);
     }
     if let Err(error) = status.as_ref() {
         return io_failure(
@@ -406,6 +444,16 @@ impl OwnedShellProcess {
         }
     }
 
+    async fn wait_for_group_termination(&self) -> Result<(), String> {
+        let pgid = self.pgid;
+        tokio::task::spawn_blocking(move || wait_for_process_group_termination(pgid))
+            .await
+            .map_err(|error| format!("native shell process-group wait task failed: {error}"))?
+            .map_err(|error| {
+                format!("native shell process group {pgid} did not become terminal: {error}")
+            })
+    }
+
     async fn reap(&mut self) -> io::Result<ExitStatus> {
         let result = self
             .child
@@ -453,6 +501,112 @@ fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
 }
 
 #[cfg(target_os = "linux")]
+fn preflight_linux_process_control() -> io::Result<()> {
+    let pid = std::process::id();
+    let _pidfd = open_pidfd(pid)?;
+    let pgid = unsafe { libc::getpgrp() };
+    let members = process_group_members(pgid)?;
+    if members.iter().any(|member| member.pid == pid) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "procfs did not report the current process in its process group",
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_process_group_termination(pgid: libc::pid_t) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + GROUP_TERMINATION_TIMEOUT;
+    loop {
+        let live = process_group_members(pgid)?
+            .into_iter()
+            .filter(|member| !matches!(member.state, 'Z' | 'X' | 'x'))
+            .collect::<Vec<_>>();
+        if live.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let states = live
+                .iter()
+                .map(|member| format!("{}:{}", member.pid, member.state))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("live members remained after SIGKILL: {states}"),
+            ));
+        }
+
+        // The direct leader remains unreaped for this entire loop, so its PID
+        // still anchors this numeric PGID. Reasserting SIGKILL here is safe and
+        // closes the scheduling window for members that had not reached their
+        // terminal state after the initial group signal.
+        let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        std::thread::sleep(GROUP_TERMINATION_POLL_INTERVAL);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct ProcessGroupMember {
+    pid: u32,
+    state: char,
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_members(pgid: libc::pid_t) -> io::Result<Vec<ProcessGroupMember>> {
+    let mut members = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let Some(state) = fields.next().and_then(|field| field.chars().next()) else {
+            continue;
+        };
+        let _parent_pid = fields.next();
+        let Some(member_pgid) = fields
+            .next()
+            .and_then(|field| field.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if member_pgid == pgid {
+            members.push(ProcessGroupMember { pid, state });
+        }
+    }
+    Ok(members)
+}
+
+#[cfg(target_os = "linux")]
 fn wait_for_pidfd_exit(pidfd: OwnedFd) -> io::Result<()> {
     let mut pollfd = libc::pollfd {
         fd: pidfd.as_raw_fd(),
@@ -485,6 +639,42 @@ fn terminate_group(pid: u32) {
             libc::kill(-pid, libc::SIGKILL);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn terminate_and_reap_spawn_failure(child: &mut Child, pid: u32) -> Option<String> {
+    let pgid = match libc::pid_t::try_from(pid) {
+        Ok(pgid) => pgid,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Some("native shell process id exceeds pid_t".to_string());
+        }
+    };
+    terminate_group(pid);
+    let group_error = tokio::task::spawn_blocking(move || wait_for_process_group_termination(pgid))
+        .await
+        .map_err(|error| format!("process-group wait task failed: {error}"))
+        .and_then(|result| result.map_err(|error| error.to_string()))
+        .err();
+    let reap_error = child.wait().await.err().map(|error| error.to_string());
+    match (group_error, reap_error) {
+        (None, None) => None,
+        (Some(group), None) => Some(group),
+        (None, Some(reap)) => Some(format!("failed to reap shell: {reap}")),
+        (Some(group), Some(reap)) => Some(format!("{group}; failed to reap shell: {reap}")),
+    }
+}
+
+fn append_cleanup_error(message: &str, cleanup_error: Option<String>) -> String {
+    cleanup_error
+        .map(|cleanup| format!("{message}; cleanup also failed: {cleanup}"))
+        .unwrap_or_else(|| message.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn unsupported_linux_host(message: impl Into<String>) -> ToolOutcome {
+    execution_failure("native_shell_unsupported", message)
 }
 
 async fn read_output<R>(

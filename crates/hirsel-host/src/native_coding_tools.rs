@@ -75,6 +75,12 @@ impl NativeCodingTools {
     }
 
     #[cfg(test)]
+    fn with_pidfd_preflight_failure(mut self) -> Self {
+        self.shell = self.shell.with_pidfd_preflight_failure();
+        self
+    }
+
+    #[cfg(test)]
     async fn wait_for_owned_work_to_finish(&self) {
         self.lifecycle.wait_for_idle_for_test().await;
     }

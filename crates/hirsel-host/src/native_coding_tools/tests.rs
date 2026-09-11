@@ -279,6 +279,34 @@ async fn shell_uses_explicit_posix_profile_cwd_and_nonzero_result_data() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shell_pidfd_preflight_refuses_before_command_effects() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let tools = NativeCodingTools::new(directory.path().to_path_buf())
+        .expect("tools")
+        .with_pidfd_preflight_failure();
+    let output = outcome_output(
+        tools
+            .execute_shell(
+                &json!({ "cmd": ": > must-not-exist", "timeout_ms": 5000 }),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await,
+    );
+    let ToolCallOutcome::Failure(failure) = output.outcome else {
+        panic!("unsupported pidfd host must return a typed failure")
+    };
+    assert_eq!(
+        failure.code, "native_shell_unsupported",
+        "unexpected refusal: {failure:?}"
+    );
+    assert!(
+        !directory.path().join("must-not-exist").exists(),
+        "command effect occurred before pidfd capability refusal"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
@@ -305,10 +333,7 @@ async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
             .trim()
             .parse::<i32>()
             .expect("numeric pid");
-        assert!(
-            wait_for_process_exit(pid).await,
-            "background descendant {pid} survived status {status}"
-        );
+        assert_process_terminated(pid, "background descendant at result return");
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert!(
             !late_path.exists(),
@@ -316,6 +341,36 @@ async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
         );
         tools.shutdown().await;
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shell_return_boundary_has_no_runnable_same_group_descendants() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+    for iteration in 0..32 {
+        let pid_file = format!("return-boundary-{iteration}.pids");
+        let result = coordinated_shell_call(
+            tools.clone(),
+            json!({
+                "cmd": format!(
+                    "i=0; : > {pid_file}; while [ $i -lt 32 ]; do sleep 30 >/dev/null 2>&1 & echo $! >> {pid_file}; i=$((i+1)); done; exit 7"
+                ),
+                "timeout_ms": 5000
+            }),
+        )
+        .await
+        .value_for_projection();
+        assert_eq!(result["exit_code"], 7);
+        for pid in std::fs::read_to_string(directory.path().join(&pid_file))
+            .expect("descendant pid list")
+            .lines()
+        {
+            let pid = pid.parse::<i32>().expect("numeric descendant pid");
+            assert_process_terminated(pid, "same-group descendant at result return");
+        }
+    }
+    tools.shutdown().await;
 }
 
 #[tokio::test]

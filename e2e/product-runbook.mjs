@@ -965,9 +965,12 @@ async function runNativeLashWorker(context, fixture) {
   const parentMarker = `PARENT_DELEGATED_${nonce}`;
   const finalMarker = `WORKER_FIXED_${nonce}`;
   const followupMarker = `FOLLOWUP_CONTEXT_CONFIRMED_${nonce}`;
+  const contextMarker = `PRIVATE_ASSIGNMENT_FACT_${nonce}`;
   const summaryText = `${fixture.summaryMarker}: changed calculator.mjs; focused test passed (${fixture.passMarker}).`;
   const brief = [
     `Work only in ${fixture.fixtureDir}.`,
+    `Retain this private assignment fact for a later follow-up: ${contextMarker}.`,
+    "Do not write that private assignment fact or marker into any file, and do not include it in this turn's final response.",
     "Use read to inspect calculator.mjs and test-calculator.mjs.",
     "Run exec_command with exactly `node test-calculator.mjs` and observe the focused test fail without changing the test.",
     "Use edit to replace the unique incorrect expression `left - right` with `left + right` in calculator.mjs.",
@@ -1036,6 +1039,8 @@ async function runNativeLashWorker(context, fixture) {
   assert.match(payloadText(completedTool(frames, firstTurn.id, secondCommand), "result"), new RegExp(fixture.passMarker));
   assert.match(payloadText(edit, "input"), /left - right/);
   assert.match(payloadText(write, "input"), new RegExp(fixture.summaryMarker));
+  assert.equal(payloadText(edit, "input").includes(contextMarker), false, "edit persisted the private context marker");
+  assert.equal(payloadText(write, "input").includes(contextMarker), false, "write persisted the private context marker");
   const firstToolIds = firstStarts.map(event => event.id);
   await expandInlineTools(page, firstToolIds);
   const firstCapture = await captureNativeWorker("20-initial-complete", context, childThreadId, parentThreadId, childThreadId);
@@ -1044,7 +1049,9 @@ async function runNativeLashWorker(context, fixture) {
   assertReasoningIntegrity(firstCapture.dom, firstTerminal, durableTimeline(firstCapture.detail, firstTurn.id));
   assert(durableTimeline(firstCapture.detail, firstTurn.id).some(record => record.event.kind === "reasoning"));
   assert(durableTimeline(firstCapture.detail, firstTurn.id).some(record => record.event.kind === "prose"));
-  assert.match(agentReply(firstCapture.detail, firstTerminal).body, new RegExp(finalMarker));
+  const initialReply = agentReply(firstCapture.detail, firstTerminal).body;
+  assert.match(initialReply, new RegExp(finalMarker));
+  assert.equal(initialReply.includes(contextMarker), false, "initial reply echoed the private context marker");
   assertNativeToolCatalog(firstCapture.nativeStore, childThreadId);
   assertNativeWorkerExecution(firstCapture.nativeStore, firstTurn.id, fixture.fixtureDir);
   assertChildTaskOpen(firstCapture.nativeStore, parentThreadId, childThreadId);
@@ -1056,7 +1063,8 @@ async function runNativeLashWorker(context, fixture) {
   const reportsBeforeFollowup = firstCapture.nativeStore.reports.length;
   assert.equal(reportsBeforeFollowup, 1, "initial child turn did not create exactly one terminal parent report");
 
-  const followupPrompt = `Continue this same Task. Without rerunning tests or rereading calculator.mjs or test-calculator.mjs, use read exactly once on worker-summary.txt. Then identify the source file changed in the prior turn and whether its focused test passed. End with exactly ${followupMarker}.`;
+  const followupPrompt = `Continue this same Task. Without rerunning tests or rereading calculator.mjs or test-calculator.mjs, use read exactly once on worker-summary.txt. Then identify the source file changed in the prior turn and whether its focused test passed. Also recall the private assignment fact from the initial brief and include its exact marker in your reply; its value is intentionally not repeated here. End with exactly ${followupMarker}.`;
+  assert.equal(followupPrompt.includes(contextMarker), false, "follow-up prompt repeated the context answer");
   const followup = await sendMessage(page, frames, childThreadId, followupPrompt);
   const followupTerminal = await waitForTurn(frames, followup.turnId, turn => terminal(turn.state), "native child follow-up terminal");
   assert.equal(followupTerminal.state, "completed");
@@ -1064,6 +1072,8 @@ async function runNativeLashWorker(context, fixture) {
   const followupStarts = startedTools(frames, followup.turnId);
   assert.deepEqual(followupStarts.map(event => event.name), ["read"]);
   assert.match(payloadText(followupStarts[0], "input"), /worker-summary\.txt/);
+  assert.equal(payloadText(followupStarts[0], "input").includes(contextMarker), false, "follow-up read input contained the context answer");
+  assert.equal(payloadText(completedTool(frames, followup.turnId, followupStarts[0]), "result").includes(contextMarker), false, "worker summary leaked the context answer");
   await expandInlineTools(page, followupStarts.map(event => event.id));
   const followupCapture = await captureNativeWorker("30-followup-complete", context, childThreadId, parentThreadId, childThreadId);
   assertTimelineSurfaces(followupCapture, frames, [firstTurn.id, followup.turnId]);
@@ -1071,6 +1081,7 @@ async function runNativeLashWorker(context, fixture) {
   const followupReply = agentReply(followupCapture.detail, followupTerminal).body;
   assert.match(followupReply, /calculator\.mjs/);
   assert.match(followupReply, /pass/i);
+  assert.match(followupReply, new RegExp(contextMarker));
   assert.match(followupReply, new RegExp(followupMarker));
   assertNativeWorkerExecution(followupCapture.nativeStore, followup.turnId, fixture.fixtureDir);
   assertNativeToolCatalog(followupCapture.nativeStore, childThreadId);
@@ -1085,13 +1096,17 @@ async function runNativeLashWorker(context, fixture) {
   const childReports = followupCapture.nativeStore.activities.filter(activity => activity.thread_id === parentThreadId && activity.kind === "child_report");
   assert.equal(childReports.length, 2, "parent has missing or duplicate child report activities");
 
-  const [source, summary] = await Promise.all([
+  const [source, test, summary] = await Promise.all([
     readFile(join(fixture.fixtureDir, "calculator.mjs"), "utf8"),
+    readFile(join(fixture.fixtureDir, "test-calculator.mjs"), "utf8"),
     readFile(join(fixture.fixtureDir, "worker-summary.txt"), "utf8"),
   ]);
   assert.match(source, /return left \+ right;/);
   assert.equal(summary.trimEnd(), summaryText);
-  await writeFile(join(scenarioDir, "fixture-final.json"), `${JSON.stringify({ source, summary }, null, 2)}\n`);
+  for (const [name, content] of [["calculator.mjs", source], ["test-calculator.mjs", test], ["worker-summary.txt", summary]]) {
+    assert.equal(content.includes(contextMarker), false, `${name} persisted the private context marker`);
+  }
+  await writeFile(join(scenarioDir, "fixture-final.json"), `${JSON.stringify({ source, test, summary }, null, 2)}\n`);
 
   return {
     parentThreadId,

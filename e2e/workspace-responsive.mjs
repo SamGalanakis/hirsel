@@ -334,6 +334,7 @@ try {
   await page.setViewportSize({ width: 320, height: 844 });
   if (!await drawer.isVisible()) await trigger.click();
   await drawer.waitFor({ state: "visible" });
+  await expandNestedThread(page);
   const nestedStatus = page.locator(`[data-thread-entry="tree:${thread.id}"] [data-slot="thread-status-primary"]`);
   await nestedStatus.scrollIntoViewIfNeeded();
   const narrowNestedOffline = await layoutMetrics(page);

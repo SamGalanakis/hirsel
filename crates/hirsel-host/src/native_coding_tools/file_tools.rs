@@ -47,12 +47,19 @@ pub(super) async fn execute_file_tool(
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolValue, String> {
     let path = resolve_path(cwd, required_string(args, "path")?);
     let offset = optional_usize(args, "offset", 1, MAX_FILE_BYTES)?;
+    let byte_offset = optional_zero_based_usize(args, "byte_offset", 0, MAX_FILE_BYTES)?;
     let limit = optional_usize(args, "limit", MAX_READ_LINES, MAX_READ_LINES)?;
 
     let bytes = bounded_read(&path)?;
     if let Some(media_type) = image_media_type(&path) {
-        if args.get("offset").is_some() || args.get("limit").is_some() {
-            return Err("`offset` and `limit` are not supported for image reads".to_string());
+        if args.get("offset").is_some()
+            || args.get("byte_offset").is_some()
+            || args.get("limit").is_some()
+        {
+            return Err(
+                "`offset`, `byte_offset`, and `limit` are not supported for image reads"
+                    .to_string(),
+            );
         }
         let media_type = MediaType::parse(media_type)
             .map_err(|error| format!("unsupported image media type: {error}"))?;
@@ -69,8 +76,12 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolValue, String> {
     let text = String::from_utf8(bytes)
         .map_err(|_| format!("file is not valid UTF-8: `{}`", path.display()))?;
     Ok(ToolValue::untrusted_json(text_window(
-        &path, &text, offset, limit,
-    )))
+        &path,
+        &text,
+        offset,
+        byte_offset,
+        limit,
+    )?))
 }
 
 fn edit_file(cwd: &Path, args: &Value) -> Result<ToolValue, String> {
@@ -142,45 +153,75 @@ fn bounded_read(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn text_window(path: &Path, text: &str, offset: usize, limit: usize) -> Value {
+fn text_window(
+    path: &Path,
+    text: &str,
+    offset: usize,
+    byte_offset: usize,
+    limit: usize,
+) -> Result<Value, String> {
     let lines = text.split_inclusive('\n').collect::<Vec<_>>();
     let start = offset.saturating_sub(1).min(lines.len());
+    if byte_offset > 0 && start == lines.len() {
+        return Err(format!(
+            "byte_offset {byte_offset} has no line at offset {offset}"
+        ));
+    }
+    if let Some(line) = lines.get(start)
+        && (byte_offset > line.len() || !line.is_char_boundary(byte_offset))
+    {
+        return Err(format!(
+            "byte_offset {byte_offset} is not a UTF-8 boundary in line {offset}"
+        ));
+    }
     let requested_end = start.saturating_add(limit).min(lines.len());
     let mut content = String::new();
-    let mut consumed = 0_usize;
+    let mut cursor_line = start;
+    let mut cursor_byte = byte_offset;
     let mut line_truncated = false;
 
-    for line in &lines[start..requested_end] {
+    for (index, line) in lines[start..requested_end].iter().enumerate() {
+        let line_index = start + index;
+        let line_byte_offset = if line_index == start { byte_offset } else { 0 };
+        let suffix = &line[line_byte_offset..];
         let remaining = MAX_READ_BYTES.saturating_sub(content.len());
-        if line.len() <= remaining {
-            content.push_str(line);
-            consumed += 1;
+        if suffix.len() <= remaining {
+            content.push_str(suffix);
+            cursor_line = line_index + 1;
+            cursor_byte = 0;
             continue;
         }
-        if content.is_empty() && remaining > 0 {
-            let mut end = remaining.min(line.len());
-            while end > 0 && !line.is_char_boundary(end) {
+        if remaining > 0 {
+            let mut end = remaining.min(suffix.len());
+            while end > 0 && !line.is_char_boundary(line_byte_offset + end) {
                 end -= 1;
             }
-            content.push_str(&line[..end]);
-            consumed = 1;
+            content.push_str(&suffix[..end]);
+            cursor_line = line_index;
+            cursor_byte = line_byte_offset + end;
             line_truncated = true;
         }
         break;
     }
 
-    let end_index = start.saturating_add(consumed);
-    let truncated = line_truncated || end_index < lines.len();
-    json!({
+    let truncated = cursor_line < lines.len();
+    let end_line = if line_truncated {
+        cursor_line + 1
+    } else {
+        cursor_line
+    };
+    Ok(json!({
         "path": path,
         "content": content,
         "start_line": if lines.is_empty() { 0 } else { start + 1 },
-        "end_line": end_index,
+        "start_byte_offset": byte_offset,
+        "end_line": end_line,
         "total_lines": lines.len(),
         "truncated": truncated,
         "line_truncated": line_truncated,
-        "next_offset": truncated.then_some(end_index + 1)
-    })
+        "next_offset": truncated.then_some(cursor_line + 1),
+        "next_byte_offset": truncated.then_some(cursor_byte)
+    }))
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
@@ -259,6 +300,22 @@ fn optional_usize(
         .filter(|value| *value >= 1 && *value <= maximum)
         .ok_or_else(|| format!("field `{key}` must be an integer from 1 through {maximum}"))?;
     Ok(value)
+}
+
+fn optional_zero_based_usize(
+    args: &Value,
+    key: &str,
+    default: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    let Some(value) = args.get(key) else {
+        return Ok(default);
+    };
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value <= maximum)
+        .ok_or_else(|| format!("field `{key}` must be an integer from 0 through {maximum}"))
 }
 
 fn image_media_type(path: &Path) -> Option<&'static str> {

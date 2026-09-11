@@ -31,13 +31,13 @@ hirsel-proto = { path = "crates/hirsel-proto" }
 iroh = "=1.0.2"
 iroh-tickets = "=1.0.0"
 indexmap = "2.14.0"
-lash-core = { package = "lash-internal-core", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
-lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c", features = ["rlm"] }
-lash-provider-anthropic = { package = "lash-internal-provider-anthropic", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
-lash-provider-openai = { package = "lash-internal-provider-openai", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
-lash-protocol-rlm = { package = "lash-internal-protocol-rlm", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
-lash-sqlite-store = { package = "lash-internal-sqlite-store", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
-lash-tools = { package = "lash-internal-tools", git = "https://github.com/Ascending-AI/lash", rev = "81ac79c7ccb3191dd5107f9366edbdd8dcc24c9c" }
+lash-core = { package = "lash-internal-core", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7" }
+lash = { package = "lash-runtime", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7", features = ["rlm"] }
+lash-provider-anthropic = { package = "lash-internal-provider-anthropic", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7" }
+lash-provider-openai = { package = "lash-internal-provider-openai", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7" }
+lash-protocol-rlm = { package = "lash-internal-protocol-rlm", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7" }
+lash-sqlite-store = { package = "lash-internal-sqlite-store", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7" }
+lash-tools = { package = "lash-internal-tools", git = "https://github.com/Ascending-AI/lash", rev = "8ee7a97353a075155f02fd4c00254c17e106b3b7" }
 libc = "0.2.177"
 rusqlite = { version = "0.37.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.228", features = ["derive"] }

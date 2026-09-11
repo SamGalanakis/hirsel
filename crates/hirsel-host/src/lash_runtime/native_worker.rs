@@ -64,6 +64,11 @@ impl NativeWorkerTurn {
         }
     }
 
+    #[cfg(test)]
+    pub(super) async fn install_active_tools_for_test(&self, tools: Arc<NativeCodingTools>) {
+        *self.active_tools.lock().await = Some(tools);
+    }
+
     pub(super) async fn run(
         &self,
         context: NativeWorkerRunContext<'_>,

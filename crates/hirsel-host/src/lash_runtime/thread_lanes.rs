@@ -59,6 +59,15 @@ impl ThreadRuntimeRegistry {
             }
         });
     }
+
+    #[cfg(test)]
+    pub(super) async fn install_native_turn_for_test(
+        &self,
+        thread_id: u64,
+        work: Arc<NativeWorkerTurn>,
+    ) {
+        self.native.lock().await.insert(thread_id, work);
+    }
     pub(super) async fn refresh_execution_default(&self) -> anyhow::Result<()> {
         let model = match &self.model_selection {
             Some(selection) => selection.model_spec()?,

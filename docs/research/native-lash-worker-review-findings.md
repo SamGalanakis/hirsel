@@ -14,3 +14,6 @@ kept here so later runtime changes can search for the same failure shapes.
 - Partial-line continuation can advance beyond bytes that were never returned.
 - Completed shell calls can lose ownership of still-running descendants before
   worker shutdown.
+- A transient tool-result consumer cannot own command lifetime. The provider
+  must retain the owned shell future, cancel it through its token, and join it
+  during shutdown even when the consumer disappears.

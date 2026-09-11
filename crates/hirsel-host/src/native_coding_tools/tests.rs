@@ -102,16 +102,42 @@ async fn read_returns_unicode_safe_bounded_line_windows() {
 #[tokio::test]
 async fn read_truncates_a_large_unicode_line_at_a_character_boundary() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let source = "🦀".repeat(20_000);
-    std::fs::write(directory.path().join("large.txt"), source).expect("fixture");
+    let source = format!("{}\nsecond line\n", "🦀".repeat(20_000));
+    std::fs::write(directory.path().join("large.txt"), &source).expect("fixture");
     let tools = NativeCodingTools::new(directory.path().to_path_buf()).expect("tools");
 
-    let result = outcome_value(call(&tools, "read", &json!({ "path": "large.txt" })).await);
-    let content = result["content"].as_str().expect("text content");
-    assert!(content.len() <= 50 * 1024);
-    assert!(std::str::from_utf8(content.as_bytes()).is_ok());
-    assert_eq!(result["line_truncated"], true);
-    assert_eq!(result["truncated"], true);
+    let mut reconstructed = String::new();
+    let mut offset = 1_u64;
+    let mut byte_offset = 0_u64;
+    for call_index in 0..10 {
+        let result = outcome_value(
+            call(
+                &tools,
+                "read",
+                &json!({
+                    "path": "large.txt",
+                    "offset": offset,
+                    "byte_offset": byte_offset
+                }),
+            )
+            .await,
+        );
+        let content = result["content"].as_str().expect("text content");
+        assert!(content.len() <= 50 * 1024);
+        assert!(std::str::from_utf8(content.as_bytes()).is_ok());
+        reconstructed.push_str(content);
+        if call_index == 0 {
+            assert_eq!(result["line_truncated"], true);
+            assert_eq!(result["next_offset"], 1);
+            assert!(result["next_byte_offset"].as_u64().unwrap() > 0);
+        }
+        if result["truncated"] == false {
+            break;
+        }
+        offset = result["next_offset"].as_u64().expect("next line");
+        byte_offset = result["next_byte_offset"].as_u64().expect("next byte");
+    }
+    assert_eq!(reconstructed, source);
 }
 
 #[tokio::test]
@@ -229,28 +255,80 @@ async fn write_creates_parents_and_atomically_replaces_complete_utf8() {
 }
 
 #[tokio::test]
-async fn shell_uses_accepted_cwd_and_reports_nonzero_exit_as_data() {
+async fn shell_uses_explicit_posix_profile_cwd_and_nonzero_result_data() {
     let directory = tempfile::tempdir().expect("tempdir");
     let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
     let result = coordinated_shell_call(
         tools,
-        json!({ "cmd": "printf '%s' \"$PWD\"; exit 7", "timeout_ms": 5000 }),
+        json!({ "cmd": "printf '%s|%s' \"$PWD\" \"$0\"; exit 7", "timeout_ms": 5000 }),
     )
     .await
     .value_for_projection();
     assert_eq!(result["exit_code"], 7);
-    assert_eq!(result["output"], directory.path().display().to_string());
+    assert_eq!(
+        result["output"],
+        format!("{}|/bin/sh", directory.path().display())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_normal_and_nonzero_exits_reap_background_descendants() {
+    for status in [0, 7] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tools =
+            Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+        let result = coordinated_shell_call(
+            tools.clone(),
+            json!({
+                "cmd": format!(
+                    "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid; exit {status}"
+                ),
+                "timeout_ms": 5000
+            }),
+        )
+        .await
+        .value_for_projection();
+        assert_eq!(result["exit_code"], status);
+
+        tools.shutdown().await;
+        let pid = std::fs::read_to_string(directory.path().join("descendant.pid"))
+            .expect("pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric pid");
+        assert!(
+            wait_for_process_exit(pid).await,
+            "background descendant {pid} survived status {status}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn shell_timeout_is_a_bounded_failure() {
     let directory = tempfile::tempdir().expect("tempdir");
     let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
-    let output =
-        coordinated_shell_call(tools, json!({ "cmd": "sleep 30", "timeout_ms": 20 })).await;
+    let output = coordinated_shell_call(
+        tools.clone(),
+        json!({
+            "cmd": "printf '%s' \"$$\" > timeout.pid; exec sleep 30",
+            "timeout_ms": 200
+        }),
+    )
+    .await;
     assert!(matches!(output.outcome, ToolCallOutcome::Failure(_)));
     let result = output.value_for_projection();
     assert_eq!(result["code"], "shell_timeout");
+    let pid = std::fs::read_to_string(directory.path().join("timeout.pid"))
+        .expect("pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric pid");
+    assert!(
+        wait_for_process_exit(pid).await,
+        "timed-out shell {pid} survived return"
+    );
+    tools.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -306,11 +384,185 @@ async fn shutdown_cancels_and_reaps_an_owned_shell_process() {
         .trim()
         .parse::<i32>()
         .expect("numeric pid");
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
-    assert!(!alive, "owned child {pid} survived shutdown");
+    assert!(
+        wait_for_process_exit(pid).await,
+        "owned child {pid} survived shutdown"
+    );
 
     let rejected = outcome_output(call(&tools, "read", &json!({ "path": "child.pid" })).await);
     assert!(matches!(rejected.outcome, ToolCallOutcome::Cancelled(_)));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn abandoned_result_consumer_does_not_abandon_early_shell_termination() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+    let running = tokio::spawn(coordinated_shell_call(
+        tools.clone(),
+        json!({
+            "cmd": "printf '%s' \"$$\" > early.pid; sleep 1; kill -KILL $$",
+            "timeout_ms": 30000
+        }),
+    ));
+    let pid_path = directory.path().join("early.pid");
+    for _ in 0..200 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(pid_path.exists(), "command did not publish its pid");
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric pid");
+
+    running.abort();
+    assert!(
+        running
+            .await
+            .expect_err("result consumer should abort")
+            .is_cancelled()
+    );
+    for _ in 0..300 {
+        if !process_exists(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !process_exists(pid),
+        "shell did not terminate before its wrapper status publication"
+    );
+    tokio::time::timeout(Duration::from_secs(5), tools.shutdown())
+        .await
+        .expect("shutdown must join the retained terminal shell task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn attempt_cancellation_reaps_owned_shell_before_returning() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let call_tools = tools.clone();
+    let call_cancellation = cancellation.clone();
+    let running = tokio::spawn(async move {
+        call_tools
+            .execute_shell(
+                &json!({
+                    "cmd": "printf '%s' \"$$\" > cancelled.pid; exec sleep 30",
+                    "timeout_ms": 30000
+                }),
+                call_cancellation,
+            )
+            .await
+    });
+    let pid_path = directory.path().join("cancelled.pid");
+    for _ in 0..200 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(pid_path.exists(), "command did not publish its pid");
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric pid");
+
+    cancellation.cancel();
+    let output = outcome_output(
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("attempt cancellation must complete")
+            .expect("caller task"),
+    );
+    assert!(matches!(output.outcome, ToolCallOutcome::Cancelled(_)));
+    assert!(
+        wait_for_process_exit(pid).await,
+        "cancelled shell {pid} survived return"
+    );
+    tools.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn abandoned_file_mutation_is_drained_before_shutdown_returns() {
+    use std::{ffi::CString, io::Write, os::unix::ffi::OsStrExt};
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fifo = directory.path().join("blocked-edit");
+    let fifo_name = CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+    let tools = Arc::new(NativeCodingTools::new(directory.path().to_path_buf()).expect("tools"));
+
+    let edit_tools = tools.clone();
+    let edit = tokio::spawn(async move {
+        call(
+            &edit_tools,
+            "edit",
+            &json!({ "path": "blocked-edit", "old_text": "x", "new_text": "y" }),
+        )
+        .await
+    });
+    let writer_path = fifo.clone();
+    let mut writer = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(writer_path)
+                .expect("open fifo writer")
+        }),
+    )
+    .await
+    .expect("edit must open fifo reader")
+    .expect("writer task");
+
+    edit.abort();
+    assert!(
+        edit.await
+            .expect_err("result consumer should abort")
+            .is_cancelled()
+    );
+    let shutdown_tools = tools.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_tools.shutdown().await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown returned while the owned edit was blocked"
+    );
+    let rejected = outcome_output(
+        call(
+            &tools,
+            "write",
+            &json!({
+                "path": "late.txt",
+                "content": "must not publish"
+            }),
+        )
+        .await,
+    );
+    assert!(matches!(rejected.outcome, ToolCallOutcome::Cancelled(_)));
+    writer.write_all(b"x").expect("write fifo");
+    drop(writer);
+    shutdown.await.expect("shutdown task");
+    assert_eq!(std::fs::read_to_string(&fifo).expect("edited"), "y");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        std::fs::read_to_string(&fifo).expect("stable after shutdown"),
+        "y",
+        "file mutation changed after shutdown returned"
+    );
+    assert!(
+        !directory.path().join("late.txt").exists(),
+        "shutdown admitted a late file write"
+    );
 }
 
 #[tokio::test]
@@ -344,4 +596,20 @@ fn constructor_rejects_a_non_directory_cwd() {
     let path = directory.path().join("file");
     std::fs::write(&path, "x").expect("fixture");
     assert!(NativeCodingTools::new(path).is_err());
+}
+
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    (unsafe { libc::kill(pid, 0) }) == 0
+}
+
+#[cfg(unix)]
+async fn wait_for_process_exit(pid: i32) -> bool {
+    for _ in 0..500 {
+        if !process_exists(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
 }

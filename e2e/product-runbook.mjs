@@ -7,7 +7,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
 import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
-import { renderedInlineCodeText } from "./product-runbook-oracles.mjs";
+import {
+  contiguousTextBlocks,
+  hasExactAdjacentDuplicate,
+  renderedInlineCodeText,
+  renderedMarkdownText,
+  renderedTimelineExpectation,
+} from "./product-runbook-oracles.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const requested = process.argv[2] ?? "all";
@@ -193,6 +199,7 @@ async function domSnapshot(page) {
         activityId: element.getAttribute("data-activity-id"),
         role: element.getAttribute("aria-label"),
         text: element.textContent?.trim() ?? "",
+        messageText: element.querySelector(':scope > div > [data-testid="markdown"]')?.textContent?.trim() ?? null,
         visible: visible(element),
         workDetails: [...element.querySelectorAll('[data-slot="work-details"]')].map(details => ({
           open: details.open,
@@ -344,10 +351,6 @@ function timelineProjection(dom) {
   }));
 }
 
-function renderedMarkdownText(text) {
-  return renderedInlineCodeText(text.trim().replace(/^(\*{1,3}|_{1,3})([\s\S]*)\1$/, "$2"));
-}
-
 async function expandInlineTools(page, callIds) {
   for (const callId of callIds) {
     const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
@@ -360,13 +363,8 @@ async function expandInlineTools(page, callIds) {
 function assertTimelineRendered(dom, turn, events) {
   const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
   assert(entry, `turn ${turn.id} has no rendered completed entry`);
-  const expectedToolIds = [];
+  const expected = renderedTimelineExpectation(events);
   for (const { event } of events) {
-    if (event.kind === "tool_start" && !expectedToolIds.includes(event.id)) expectedToolIds.push(event.id);
-    if (event.kind === "tool_done" && !expectedToolIds.includes(event.id)) expectedToolIds.push(event.id);
-    if ((event.kind === "reasoning" || event.kind === "prose") && event.text.trim()) {
-      assert(entry.text.includes(renderedMarkdownText(event.text)), `turn ${turn.id} omits ${event.kind} content from the DOM`);
-    }
     if (event.kind === "tool_start" && event.input?.text) {
       const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
       assert(row?.result?.includes(event.input.text), `tool ${event.id} input payload is absent from the expanded DOM row`);
@@ -376,17 +374,25 @@ function assertTimelineRendered(dom, turn, events) {
       assert(row?.result?.includes(event.result.text), `tool ${event.id} result payload is absent from the expanded DOM row`);
     }
   }
-  assert.deepEqual(entry.timeline.filter(row => row.slot === "timeline-tool").map(row => row.toolCallId), expectedToolIds, `turn ${turn.id} rendered tool row order differs from its canonical events`);
+  assert.deepEqual(
+    entry.timeline.map(row => ({ slot: row.slot, toolCallId: row.toolCallId, ...(row.slot === "timeline-tool" ? {} : { text: row.text }) })),
+    expected.rows.map(({ slot, toolCallId, text }) => ({ slot, toolCallId, ...(slot === "timeline-tool" ? {} : { text }) })),
+    `turn ${turn.id} rendered timeline order or content differs from its canonical events`,
+  );
+  if (expected.rawReply) {
+    assert.equal(entry.messageText, expected.reply, `turn ${turn.id} rendered reply differs from its fully assembled canonical prose`);
+  }
 }
 
 function assertReasoningIntegrity(dom, turn, events) {
   const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
   assert(entry, `turn ${turn.id} has no rendered completed entry`);
-  const reasoning = events
-    .filter(({ event }) => event.kind === "reasoning" && event.text.trim())
-    .map(({ event }) => {
-      assert.equal(event.text.includes("****"), false, `turn ${turn.id} reasoning contains joined duplicate emphasis`);
-      return renderedMarkdownText(event.text);
+  const reasoning = contiguousTextBlocks(events)
+    .filter(block => block.kind === "reasoning" && block.text.trim())
+    .map(block => {
+      assert.equal(block.text.includes("****"), false, `turn ${turn.id} reasoning contains joined duplicate emphasis`);
+      assert.equal(hasExactAdjacentDuplicate(block.text), false, `turn ${turn.id} reasoning contains an exact adjacent duplicate block`);
+      return renderedMarkdownText(block.text);
     });
   const rendered = entry.timeline
     .filter(row => row.slot === "timeline-reasoning")

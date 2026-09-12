@@ -38,6 +38,7 @@ __pycache__/
 
 # OS
 .DS_Store
+._*
 Thumbs.db
 
 # Editors

@@ -104,7 +104,7 @@ impl Storage {
         } else {
             before.agent_message_id
         };
-        let turn = thread_activity::finish(&tx, id, state, message_id)?;
+        let turn = thread_activity::finish_with_failure(&tx, id, state, message_id, failure)?;
         tx.execute(
             "DELETE FROM thread_requests WHERE json_extract(payload,'$.turn_id')=?1",
             [id],

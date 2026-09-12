@@ -149,6 +149,18 @@ warning and falls back to that provider's default model.
   the same reason. The stored values are what the Host builds the handle from.
 - **Fork provider and model** — stored only. No fork runtime consumes them yet.
 
+## Native Lash coding workers
+
+`threads.delegate` exposes `agent: "lash"` when at least one stored OpenAI-compatible provider has a non-empty API key. This runs a dedicated in-process Lash standard session; it does not change the coordinator's provider or RLM mode. With no explicit worker provider, Hirsel selects the configured `openrouter` instance and defaults its model to `deepseek/deepseek-v4.1-flash`. A non-OpenRouter provider requires an explicit free-text model. The worker variant is `default`.
+
+Acceptance stores provider route identity, model, variant, canonical cwd, and tool-profile version, never an API key. A later base-URL change or provider removal cannot retarget queued work and produces a clear failure. API-key rotation remains private credential indirection for the same accepted route.
+
+The worker's complete callable surface is the four Hirsel-owned tools `read`, `edit`, `write`, and `exec_command`; the last name is bound to Lash's semantic `shell.exec` operation, but does not use Lash's coding-tool implementation. The coordinated Lash runtime/provider dependencies stay at revision `47e6e23764939c790961fbe2905ee08ff5373a95`. It has no delegation, Thread management, artifact publication, browser/web, background-process, or plugin tools. Its cwd is a default path base, not a filesystem sandbox. Truncated text reads return `next_offset` and `next_byte_offset`; pass both back to continue a long Unicode line without skipping content. A child Task retains this executor preference and conversation on follow-up; changing its accepted profile opens a distinct worker-session generation with a bounded Task-only handoff.
+
+`exec_command` uses non-login `/bin/sh` and is currently available only on Linux hosts with `pidfd_open` and readable procfs process metadata. Hirsel preflights both capabilities before spawning and owns each one-shot process group through terminal group termination, a no-runnable-member barrier, direct-child reap, and output drain; cancellation, timeout, history reset, output-reader failure, and ordinary completion all wait for that cleanup. Same-group descendants cannot outlive the result, while a command that deliberately escapes its process group is outside this guarantee. Unsupported hosts reject the call before spawning a process.
+
+Hirsel's verified `1,048,576`-token context, `384,000`-token output limit, and image-input metadata applies only when the captured base URL is exactly `https://openrouter.ai/api/v1` and the model is exactly `deepseek/deepseek-v4.1-flash`. Provider instance names are local labels and do not establish capabilities. Every other free-text model uses conservative metadata; Hirsel validates the identifier's shape, while the configured endpoint remains the authority on whether that model exists and what it supports.
+
 ## CLI Thread models
 
 The Thread model catalog is separate from the roster above and grouped by CLI

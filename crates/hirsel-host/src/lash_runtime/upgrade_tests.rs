@@ -1,4 +1,106 @@
 use super::*;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn history_reset_reaps_an_owned_native_shell_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
+        panic!("Thread registry")
+    };
+    let tools = Arc::new(
+        crate::native_coding_tools::NativeCodingTools::new(dir.path().to_path_buf()).unwrap(),
+    );
+    let work = super::native_worker::NativeWorkerTurn::new(1);
+    work.install_active_tools_for_test(tools.clone()).await;
+    registry.install_native_turn_for_test(1, work).await;
+
+    let prepared = lash_core::PreparedToolCall::from_parts(
+        "history-reset-call",
+        "hirsel:native-coding:exec-command:v1",
+        "exec_command",
+        serde_json::json!({
+            "cmd": "sh -c 'echo $$ > history-reset.pid; sleep 0.5; : > history-reset-late; exec sleep 30' >/dev/null 2>&1 & wait",
+            "timeout_ms": 30000
+        }),
+        None,
+        Value::Null,
+    );
+    let effect_controller = lash_core::ScopedEffectController::shared(
+        Arc::new(
+            lash::runtime::NativeRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
+        ),
+        lash_core::ExecutionScope::runtime_operation("native-tools-history-reset-test"),
+    )
+    .unwrap();
+    let provider: Arc<dyn lash::tools::ToolProvider> = tools;
+    let running = tokio::spawn(async move {
+        lash_core::testing::coordinate_tool_provider_with_services(
+            effect_controller,
+            Arc::new(lash_core::testing::MockSessionManager::default()),
+            "native-tools-history-reset-session",
+            crate::native_coding_tools::exec_definition_for_test(),
+            provider,
+            prepared,
+        )
+        .await
+        .unwrap()
+        .output
+    });
+
+    let pid_path = dir.path().join("history-reset.pid");
+    for _ in 0..200 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(pid_path.exists(), "native command did not publish its pid");
+    let pid = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+
+    state.agent.reset_history().await.unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("history reset must join the native shell")
+        .expect("tool caller");
+    assert!(matches!(
+        output.outcome,
+        lash_core::ToolCallOutcome::Cancelled(_)
+    ));
+    assert!(
+        native_test_process_is_terminated(pid),
+        "native shell descendant survived reset"
+    );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !dir.path().join("history-reset-late").exists(),
+        "native shell descendant wrote after reset returned"
+    );
+}
+
+#[cfg(unix)]
+fn native_test_process_is_terminated(pid: i32) -> bool {
+    // SAFETY: signal zero only probes the test-owned PID read from the fixture.
+    if unsafe { libc::kill(pid, 0) } == -1 {
+        return true;
+    }
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return true;
+    };
+    matches!(
+        stat.rsplit_once(") ")
+            .and_then(|(_, fields)| fields.split_whitespace().next()),
+        Some("Z" | "X")
+    )
+}
+
 #[tokio::test]
 async fn lash_sessions_are_lazy_thread_local_and_current_only() {
     let dir = tempfile::tempdir().unwrap();

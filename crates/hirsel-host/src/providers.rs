@@ -33,6 +33,12 @@ use crate::{
 pub const CODEX_ID: &str = "codex";
 /// The built-in Claude instance's id, under the same rules.
 pub const CLAUDE_ID: &str = "claude";
+/// The provider instance the native Lash coding worker uses when delegation
+/// does not name one explicitly.
+pub const NATIVE_WORKER_DEFAULT_PROVIDER_ID: &str = "openrouter";
+/// The Owner-selected default native worker model. This is deliberately
+/// independent from the resident Agent and wake-fork defaults.
+pub const NATIVE_WORKER_DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 /// The curated model the Codex instance seeds an agent with.
 const CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
 /// The longest instance id the roster accepts.
@@ -40,6 +46,24 @@ const MAX_ID_LEN: usize = 32;
 /// Below this length a key has no tail that can be shown without effectively
 /// showing the key.
 const MIN_KEY_LEN_FOR_TAIL: usize = 8;
+
+/// Immutable, credential-free provider metadata captured with accepted work.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeWorkerProviderSnapshot {
+    pub id: String,
+    pub base_url: String,
+    /// Hash of the route identity. Credentials remain private indirection and
+    /// may rotate without changing where accepted work runs.
+    pub revision: String,
+}
+
+/// Private provider material resolved only while constructing a live worker.
+/// It is never serialized or returned on the wire.
+pub(crate) struct NativeWorkerProvider {
+    pub snapshot: NativeWorkerProviderSnapshot,
+    pub api_key: String,
+}
 
 /// Why `claude` cannot be a resident agent's provider. Quoted to the Owner
 /// verbatim when a command tries.
@@ -278,6 +302,74 @@ impl ProviderRosterState {
             .find(|provider| provider.id == id)
     }
 
+    /// Provider ids currently usable by an in-process native Lash worker.
+    /// Built-in CLI logins are intentionally absent: they are execution
+    /// backends, not OpenAI-compatible API credentials.
+    pub(crate) fn native_worker_provider_ids(&self) -> Vec<String> {
+        self.config_store
+            .providers()
+            .into_iter()
+            .filter(|provider| {
+                provider
+                    .api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.is_empty())
+            })
+            .map(|provider| provider.id)
+            .collect()
+    }
+
+    /// Capture public identity plus a private-config revision at acceptance.
+    pub(crate) fn capture_native_worker_provider(
+        &self,
+        requested: Option<&str>,
+    ) -> anyhow::Result<NativeWorkerProviderSnapshot> {
+        let id = requested.unwrap_or(NATIVE_WORKER_DEFAULT_PROVIDER_ID);
+        let provider = self.stored(id).ok_or_else(|| {
+            anyhow!(
+                "native Lash worker provider `{id}` is unavailable; configure an OpenAI-compatible provider with an API key"
+            )
+        })?;
+        anyhow::ensure!(
+            provider
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.is_empty()),
+            "native Lash worker provider `{id}` has no API key"
+        );
+        Ok(native_worker_snapshot(&provider))
+    }
+
+    /// Resolve private provider material for an accepted snapshot. A settings
+    /// edit after acceptance is a clear refusal, never an implicit reroute.
+    pub(crate) fn resolve_native_worker_provider(
+        &self,
+        accepted: &NativeWorkerProviderSnapshot,
+    ) -> anyhow::Result<NativeWorkerProvider> {
+        let provider = self.stored(&accepted.id).ok_or_else(|| {
+            anyhow!(
+                "accepted native Lash worker provider `{}` is no longer configured",
+                accepted.id
+            )
+        })?;
+        let current = native_worker_snapshot(&provider);
+        anyhow::ensure!(
+            current == *accepted,
+            "accepted native Lash worker provider `{}` changed after the turn was queued",
+            accepted.id
+        );
+        let api_key = provider.api_key.ok_or_else(|| {
+            anyhow!(
+                "accepted native Lash worker provider `{}` no longer has an API key",
+                accepted.id
+            )
+        })?;
+        Ok(NativeWorkerProvider {
+            snapshot: current,
+            api_key,
+        })
+    }
+
     async fn codex_instance(&self) -> ProviderInstance {
         ProviderInstance {
             id: CODEX_ID.to_string(),
@@ -320,6 +412,21 @@ impl ProviderRosterState {
             ProviderKind::Claude => provider_detect::detect_claude(home).await,
             _ => provider_detect::detect_codex(home).await,
         }
+    }
+}
+
+fn native_worker_snapshot(provider: &StoredProvider) -> NativeWorkerProviderSnapshot {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for value in [provider.id.as_bytes(), provider.base_url.as_bytes()] {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+    NativeWorkerProviderSnapshot {
+        id: provider.id.clone(),
+        base_url: provider.base_url.clone(),
+        revision: format!("sha256:{:x}", hasher.finalize()),
     }
 }
 
@@ -764,5 +871,66 @@ mod tests {
             .unwrap();
         assert!(!detection.detected);
         assert!(detection.detail.unwrap().contains("HOME"));
+    }
+
+    #[tokio::test]
+    async fn native_worker_capture_is_route_immutable_and_credential_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = roster(&dir, ProviderMode::Codex).await;
+        state
+            .add(
+                "openrouter",
+                "OpenRouter",
+                "https://openrouter.ai/api/v1",
+                "secret-first-key",
+                NATIVE_WORKER_DEFAULT_MODEL,
+            )
+            .await
+            .unwrap();
+
+        let accepted = state.capture_native_worker_provider(None).unwrap();
+        let encoded = serde_json::to_string(&accepted).unwrap();
+        assert_eq!(accepted.id, "openrouter");
+        assert!(!encoded.contains("secret-first-key"));
+
+        // Credential indirection may rotate without changing the accepted
+        // route. The live secret is resolved only at execution time.
+        state
+            .update(
+                "openrouter",
+                None,
+                None,
+                Some("secret-replacement-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .resolve_native_worker_provider(&accepted)
+                .unwrap()
+                .api_key,
+            "secret-replacement-key"
+        );
+
+        state
+            .update(
+                "openrouter",
+                None,
+                Some("https://changed.invalid/v1"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let error = state
+            .resolve_native_worker_provider(&accepted)
+            .err()
+            .expect("changed route must fail")
+            .to_string();
+        assert!(
+            error.contains("changed after the turn was queued"),
+            "{error}"
+        );
     }
 }

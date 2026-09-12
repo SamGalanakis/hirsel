@@ -10,7 +10,8 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::{
-    BroadcastLog, config::DriverMode, storage::Storage, subagent_models::SubagentModelState,
+    BroadcastLog, config::DriverMode, providers::ProviderRosterState, skills::Skills,
+    storage::Storage, subagent_models::SubagentModelState,
 };
 
 mod digest;
@@ -26,6 +27,8 @@ pub struct ToolsConfig {
     pub driver_mode: DriverMode,
     pub fake_fixture: Option<PathBuf>,
     pub subagent_models: SubagentModelState,
+    pub providers: ProviderRosterState,
+    pub skills: Skills,
 }
 
 #[derive(Clone)]
@@ -37,6 +40,8 @@ pub struct ToolSuite {
     pushes: crate::push::PushGateway,
     views: crate::templates::ViewManager,
     subagent_models: SubagentModelState,
+    providers: ProviderRosterState,
+    skills: Skills,
     fake: Arc<FakeDriver>,
     claude: Arc<ClaudeCodeDriver>,
     codex: Arc<CodexDriver>,
@@ -52,6 +57,7 @@ pub struct ToolSuite {
 pub(crate) struct AgentSessionBootstrap {
     pub session_id: String,
     pub handoff_seed: Option<String>,
+    pub unowned_message_watermark: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +85,8 @@ impl ToolSuite {
         views: crate::templates::ViewManager,
     ) -> Self {
         let subagent_models = config.subagent_models.clone();
+        let providers = config.providers.clone();
+        let skills = config.skills.clone();
         Self {
             config,
             storage,
@@ -87,6 +95,8 @@ impl ToolSuite {
             pushes,
             views,
             subagent_models,
+            providers,
+            skills,
             fake: Arc::new(FakeDriver::default()),
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
@@ -104,6 +114,28 @@ impl ToolSuite {
 
     pub(crate) fn subagent_model_snapshot(&self) -> SubagentModelCatalog {
         self.subagent_models.snapshot()
+    }
+
+    pub(crate) fn native_worker_provider_ids(&self) -> Vec<String> {
+        self.providers.native_worker_provider_ids()
+    }
+
+    pub(crate) fn capture_native_worker_provider(
+        &self,
+        provider_id: Option<&str>,
+    ) -> anyhow::Result<crate::providers::NativeWorkerProviderSnapshot> {
+        self.providers.capture_native_worker_provider(provider_id)
+    }
+
+    pub(crate) fn resolve_native_worker_provider(
+        &self,
+        accepted: &crate::providers::NativeWorkerProviderSnapshot,
+    ) -> anyhow::Result<crate::providers::NativeWorkerProvider> {
+        self.providers.resolve_native_worker_provider(accepted)
+    }
+
+    pub(crate) fn expand_skill(&self, brief: &str) -> anyhow::Result<String> {
+        self.skills.expand(brief)
     }
 
     pub(crate) fn broadcast(&self, event: HostToClient) {

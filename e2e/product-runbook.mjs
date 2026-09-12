@@ -7,18 +7,29 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../app/node_modules/playwright/index.mjs";
 import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
+import {
+  contiguousTextBlocks,
+  hasExactAdjacentDuplicate,
+  renderedInlineCodeText,
+  renderedMarkdownText,
+  renderedTimelineExpectation,
+} from "./product-runbook-oracles.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const requested = process.argv[2] ?? "all";
 const scenarios = requested === "all"
   ? ["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]
   : [requested];
-const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]);
+const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-lash-worker"]);
 for (const scenario of scenarios) assert(knownScenarios.has(scenario), `Unknown product runbook: ${scenario}`);
+if (scenarios.includes("native-lash-worker")) {
+  assert(process.env.OPENROUTER_API_KEY?.trim(), "native-lash-worker requires OPENROUTER_API_KEY; no model call was started");
+}
 
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
 const evidenceRoot = process.env.HIRSEL_RUNBOOK_ARTIFACTS
   ?? join("/tmp", `hirsel-product-runbooks-${runId}`);
+const privateEvidenceValues = [process.env.OPENROUTER_API_KEY].filter(value => value);
 await mkdir(evidenceRoot, { recursive: true });
 console.log(`Product runbook evidence: ${evidenceRoot}`);
 
@@ -71,6 +82,35 @@ function parseFrame(payload) {
   }
 }
 
+function sanitizeEvidence(value) {
+  if (Array.isArray(value)) return value.map(sanitizeEvidence);
+  if (typeof value === "string") {
+    return privateEvidenceValues.reduce(
+      (sanitized, secret) => sanitized.replaceAll(secret, "<redacted>"),
+      value,
+    );
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [
+    key,
+    /(^|_)(auth|authorization|token|api_key|secret|key_tail)$/i.test(key)
+      ? "<redacted>"
+      : sanitizeEvidence(nested),
+  ]));
+}
+
+async function sanitizeEvidenceFile(path) {
+  let contents;
+  try {
+    contents = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  const sanitized = sanitizeEvidence(contents);
+  if (sanitized !== contents) await writeFile(path, sanitized);
+}
+
 function latestFrame(frames, predicate) {
   return frames.findLast(row => row.direction === "received" && predicate(row.frame));
 }
@@ -114,7 +154,7 @@ async function openThread(url, token, threadId) {
 }
 
 function sqliteJson(database, sql) {
-  const output = execFileSync("sqlite3", ["-json", database, sql], { encoding: "utf8" }).trim();
+  const output = execFileSync("sqlite3", ["-readonly", "-json", database, sql], { encoding: "utf8" }).trim();
   return output ? JSON.parse(output) : [];
 }
 
@@ -133,6 +173,20 @@ function storeSnapshot(dataDir, threadId) {
   };
 }
 
+function nativeWorkerStoreSnapshot(dataDir, parentThreadId, childThreadId) {
+  const database = join(dataDir, "hirsel.sqlite");
+  return {
+    threads: sqliteJson(database, `SELECT id,kind,parent_thread_id,title,settled_at,archived_at,revision FROM threads WHERE id IN (${parentThreadId},${childThreadId}) ORDER BY id`),
+    turns: sqliteJson(database, `SELECT t.id,t.thread_id,t.requester_thread_id,t.requester_turn_id,t.owner_message_id,t.agent_message_id,t.state,t.started_at,t.finished_at,e.config AS accepted_execution FROM thread_turns t LEFT JOIN thread_turn_execution e ON e.turn_id=t.id WHERE t.thread_id IN (${parentThreadId},${childThreadId}) ORDER BY t.id`),
+    activities: sqliteJson(database, `SELECT id,thread_id,turn_id,kind,data,ts FROM thread_activities WHERE thread_id IN (${parentThreadId},${childThreadId}) ORDER BY id`),
+    delegations: sqliteJson(database, `SELECT requester_turn_id,operation_id,payload,child_thread_id,child_turn_id FROM thread_delegations WHERE child_thread_id=${childThreadId} ORDER BY requester_turn_id,operation_id`),
+    reports: sqliteJson(database, `SELECT child_turn_id,operation_id,report_seq,payload,activity_id FROM thread_reports WHERE child_turn_id IN (SELECT id FROM thread_turns WHERE thread_id=${childThreadId}) ORDER BY child_turn_id,report_seq`),
+    pendingReportOutbox: sqliteJson(database, `SELECT id,client_id,thread_id,report_triggered FROM thread_requests WHERE thread_id=${parentThreadId} AND report_triggered=1 ORDER BY id`),
+    executionPreference: sqliteJson(database, `SELECT thread_id,config FROM thread_execution_preferences WHERE thread_id=${childThreadId}`),
+    nativeWorkerMeta: sqliteJson(database, `SELECT key,value FROM meta WHERE key LIKE 'thread:${childThreadId}:native_worker_%' ORDER BY key`),
+  };
+}
+
 async function domSnapshot(page) {
   return page.locator('main[data-thread-id]').evaluate(main => {
     const visible = element => Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
@@ -145,6 +199,7 @@ async function domSnapshot(page) {
         activityId: element.getAttribute("data-activity-id"),
         role: element.getAttribute("aria-label"),
         text: element.textContent?.trim() ?? "",
+        messageText: element.querySelector(':scope > div > [data-testid="markdown"]')?.textContent?.trim() ?? null,
         visible: visible(element),
         workDetails: [...element.querySelectorAll('[data-slot="work-details"]')].map(details => ({
           open: details.open,
@@ -190,13 +245,28 @@ async function capture(label, context) {
   return { dom, detail, store };
 }
 
+async function captureNativeWorker(label, context, threadId, parentThreadId, childThreadId) {
+  const snapshot = await capture(label, { ...context, threadId });
+  const nativeStore = nativeWorkerStoreSnapshot(context.dataDir, parentThreadId, childThreadId);
+  await writeFile(join(context.scenarioDir, `${label}-native-store.json`), `${JSON.stringify(nativeStore, null, 2)}\n`);
+  return { ...snapshot, nativeStore };
+}
+
 async function createThread(page, nonce) {
-  await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
-  const drawer = page.locator('[data-slot="thread-drawer"]');
-  await drawer.getByLabel("New space or task title", { exact: true }).waitFor();
+  const emptyState = page.locator('[data-slot="thread-empty"]');
+  const emptyStateTitle = emptyState.getByLabel("First space or task title", { exact: true });
+  let creationSurface = emptyState;
+  let titleInput = emptyStateTitle;
+  if (!(await emptyStateTitle.isVisible())) {
+    await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
+    creationSurface = page.locator('[data-slot="thread-drawer"]');
+    await creationSurface.waitFor({ state: "visible" });
+    titleInput = creationSurface.getByLabel("New space or task title", { exact: true });
+  }
+  await titleInput.waitFor({ state: "visible" });
   const title = `Runbook ${nonce}`;
-  await drawer.getByLabel("New space or task title", { exact: true }).fill(title);
-  await drawer.getByRole("button", { name: "New Space", exact: true }).click();
+  await titleInput.fill(title);
+  await creationSurface.getByRole("button", { name: "New Space", exact: true }).click();
   await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
   const match = new URL(page.url()).pathname.match(/^\/t\/(\d+)$/);
   assert(match, `Thread creation did not navigate: ${page.url()}`);
@@ -256,7 +326,7 @@ function storeTimeline(store, turnId) {
 }
 
 function assertTimelineSurfaces(snapshot, frames, turnIds) {
-  assert.equal(snapshot.store.schemaVersion, 5, "runbook store is not durable schema 5");
+  assert.equal(snapshot.store.schemaVersion, 6, "runbook store is not durable schema 6");
   for (const turnId of turnIds) {
     const live = liveTimeline(frames, turnId);
     assert(live.length > 0, `turn ${turnId} streamed no timeline events`);
@@ -281,10 +351,6 @@ function timelineProjection(dom) {
   }));
 }
 
-function renderedMarkdownText(text) {
-  return text.trim().replace(/^(\*{1,3}|_{1,3})([\s\S]*)\1$/, "$2");
-}
-
 async function expandInlineTools(page, callIds) {
   for (const callId of callIds) {
     const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
@@ -297,13 +363,8 @@ async function expandInlineTools(page, callIds) {
 function assertTimelineRendered(dom, turn, events) {
   const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
   assert(entry, `turn ${turn.id} has no rendered completed entry`);
-  const expectedToolIds = [];
+  const expected = renderedTimelineExpectation(events);
   for (const { event } of events) {
-    if (event.kind === "tool_start" && !expectedToolIds.includes(event.id)) expectedToolIds.push(event.id);
-    if (event.kind === "tool_done" && !expectedToolIds.includes(event.id)) expectedToolIds.push(event.id);
-    if ((event.kind === "reasoning" || event.kind === "prose") && event.text.trim()) {
-      assert(entry.text.includes(renderedMarkdownText(event.text)), `turn ${turn.id} omits ${event.kind} content from the DOM`);
-    }
     if (event.kind === "tool_start" && event.input?.text) {
       const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
       assert(row?.result?.includes(event.input.text), `tool ${event.id} input payload is absent from the expanded DOM row`);
@@ -313,17 +374,25 @@ function assertTimelineRendered(dom, turn, events) {
       assert(row?.result?.includes(event.result.text), `tool ${event.id} result payload is absent from the expanded DOM row`);
     }
   }
-  assert.deepEqual(entry.timeline.filter(row => row.slot === "timeline-tool").map(row => row.toolCallId), expectedToolIds, `turn ${turn.id} rendered tool row order differs from its canonical events`);
+  assert.deepEqual(
+    entry.timeline.map(row => ({ slot: row.slot, toolCallId: row.toolCallId, ...(row.slot === "timeline-tool" ? {} : { text: row.text }) })),
+    expected.rows.map(({ slot, toolCallId, text }) => ({ slot, toolCallId, ...(slot === "timeline-tool" ? {} : { text }) })),
+    `turn ${turn.id} rendered timeline order or content differs from its canonical events`,
+  );
+  if (expected.rawReply) {
+    assert.equal(entry.messageText, expected.reply, `turn ${turn.id} rendered reply differs from its fully assembled canonical prose`);
+  }
 }
 
 function assertReasoningIntegrity(dom, turn, events) {
   const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
   assert(entry, `turn ${turn.id} has no rendered completed entry`);
-  const reasoning = events
-    .filter(({ event }) => event.kind === "reasoning" && event.text.trim())
-    .map(({ event }) => {
-      assert.equal(event.text.includes("****"), false, `turn ${turn.id} reasoning contains joined duplicate emphasis`);
-      return renderedMarkdownText(event.text);
+  const reasoning = contiguousTextBlocks(events)
+    .filter(block => block.kind === "reasoning" && block.text.trim())
+    .map(block => {
+      assert.equal(block.text.includes("****"), false, `turn ${turn.id} reasoning contains joined duplicate emphasis`);
+      assert.equal(hasExactAdjacentDuplicate(block.text), false, `turn ${turn.id} reasoning contains an exact adjacent duplicate block`);
+      return renderedMarkdownText(block.text);
     });
   const rendered = entry.timeline
     .filter(row => row.slot === "timeline-reasoning")
@@ -836,6 +905,293 @@ async function runArtifactPresentation(context) {
   return { turnId: request.turnId, toolCallIds: starts.map(frame => frame.event.id), artifacts: stored, results, sideEffects, workerRequests };
 }
 
+async function prepareNativeWorkerFixture(scenarioDir, nonce) {
+  const fixtureDir = join(scenarioDir, "fixture");
+  const passMarker = `FOCUSED_TEST_PASS_${nonce}`;
+  const summaryMarker = `WORKER_SUMMARY_${nonce}`;
+  await mkdir(fixtureDir, { recursive: true });
+  await Promise.all([
+    writeFile(join(fixtureDir, "calculator.mjs"), "export function add(left, right) {\n  return left - right;\n}\n"),
+    writeFile(join(fixtureDir, "test-calculator.mjs"), `import assert from "node:assert/strict";\nimport { add } from "./calculator.mjs";\n\nassert.equal(add(2, 3), 5, "add must sum both operands");\nawait new Promise(resolve => setTimeout(resolve, 20_000));\nconsole.log("${passMarker}");\n`),
+  ]);
+  return { fixtureDir, passMarker, summaryMarker };
+}
+
+async function selectThreadInBrowser(page, threadId, parentThreadId = null) {
+  let row = page.locator(`[data-thread-row="${threadId}"]`);
+  if (!(await row.count()) || !(await row.first().isVisible())) {
+    const opener = page.getByRole("button", { name: /^(Spaces and Tasks|Browse Spaces and Tasks)$/ }).first();
+    if (await opener.count()) await opener.click();
+  }
+  row = page.locator(`[data-thread-row="${threadId}"]`);
+  if ((!(await row.count()) || !(await row.first().isVisible())) && parentThreadId !== null) {
+    const parentRow = page.locator(`[data-thread-row="${parentThreadId}"]`).first();
+    const expand = parentRow.locator("xpath=..").getByRole("button", { name: /^Expand / });
+    if (await expand.count()) await expand.first().click();
+  }
+  row = page.locator(`[data-thread-row="${threadId}"]`).first();
+  if ((!(await row.count()) || !(await row.isVisible())) && parentThreadId !== null) {
+    const children = page.locator(`main[data-thread-id="${parentThreadId}"] [data-slot="child-threads"]`).first();
+    await children.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {});
+    if (await children.count() && await children.isVisible()) {
+      if (await children.getAttribute("open") === null) await children.locator("summary").click();
+      const childLink = children.locator(`a[href*="/t/${threadId}?history="]`).first();
+      await childLink.waitFor({ state: "visible", timeout: 10_000 });
+      await childLink.click();
+      await page.locator(`main[data-thread-id="${threadId}"]`).waitFor({ state: "visible" });
+      assert.equal(new URL(page.url()).pathname, `/t/${threadId}`);
+      return;
+    }
+  }
+  await row.waitFor({ state: "visible", timeout: 10_000 });
+  await row.click();
+  await page.locator(`main[data-thread-id="${threadId}"]`).waitFor({ state: "visible" });
+  assert.equal(new URL(page.url()).pathname, `/t/${threadId}`);
+}
+
+function toolEvents(frames, turnId) {
+  return turnEvents(frames, turnId)
+    .map(frame => frame.event)
+    .filter(event => event.kind === "tool_start" || event.kind === "tool_done");
+}
+
+function startedTools(frames, turnId) {
+  return toolEvents(frames, turnId).filter(event => event.kind === "tool_start");
+}
+
+function completedTool(frames, turnId, toolStart) {
+  const done = toolEvents(frames, turnId).find(event => event.kind === "tool_done" && event.id === toolStart.id);
+  assert(done, `tool ${toolStart.id} has no matching result`);
+  return done;
+}
+
+function parseStoredJson(row, field) {
+  assert(row?.[field], `missing stored ${field}`);
+  return JSON.parse(row[field]);
+}
+
+function executionStarted(store, turnId) {
+  const row = store.activities.find(activity => activity.turn_id === turnId && activity.kind === "execution_started");
+  assert(row, `turn ${turnId} has no execution_started activity`);
+  return parseStoredJson(row, "data");
+}
+
+function assertNativeWorkerExecution(store, turnId, fixtureDir) {
+  const row = store.turns.find(turn => turn.id === turnId);
+  const execution = parseStoredJson(row, "accepted_execution");
+  assert.equal(execution.backend, "lash_worker");
+  assert.equal(execution.provider.id, "openrouter");
+  assert.equal(execution.provider.base_url, "https://openrouter.ai/api/v1");
+  assert.match(execution.provider.revision, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(execution.model, "deepseek/deepseek-v4.1-flash");
+  assert.equal(execution.variant, "default");
+  assert.equal(execution.cwd, fixtureDir);
+  assert.equal(execution.tool_profile, "hirsel.native-coding.v1");
+  return execution;
+}
+
+function assertNativeToolCatalog(store, childThreadId) {
+  const names = store.nativeWorkerMeta.find(row => row.key === `thread:${childThreadId}:native_worker_tool_names`);
+  assert.deepEqual(JSON.parse(names?.value ?? "null"), ["edit", "exec_command", "read", "write"]);
+  const preference = parseStoredJson(store.executionPreference[0], "config");
+  assert.equal(preference.backend, "lash_worker");
+}
+
+function assertChildTaskOpen(store, parentThreadId, childThreadId) {
+  assert.equal(store.threads.length, 2, "isolated run contains unrelated Threads");
+  const child = store.threads.find(thread => thread.id === childThreadId);
+  assert.deepEqual(
+    { kind: child?.kind, parent: child?.parent_thread_id, settled: child?.settled_at, archived: child?.archived_at },
+    { kind: "task", parent: parentThreadId, settled: null, archived: null },
+  );
+}
+
+async function runNativeLashWorker(context, fixture) {
+  const { page, frames, nonce, threadId: parentThreadId, scenarioDir } = context;
+  const childTitle = `Native worker ${nonce}`;
+  const parentMarker = `PARENT_DELEGATED_${nonce}`;
+  const finalMarker = `WORKER_FIXED_${nonce}`;
+  const followupMarker = `FOLLOWUP_CONTEXT_CONFIRMED_${nonce}`;
+  const contextMarker = `PRIVATE_ASSIGNMENT_FACT_${nonce}`;
+  const summaryText = `${fixture.summaryMarker}: changed calculator.mjs; focused test passed (${fixture.passMarker}).`;
+  const brief = [
+    `Work only in ${fixture.fixtureDir}.`,
+    `Retain this private assignment fact for a later follow-up: ${contextMarker}.`,
+    "Do not write that private assignment fact or marker into any file, and do not include it in this turn's final response.",
+    "Use read to inspect calculator.mjs and test-calculator.mjs.",
+    "Run exec_command with exactly `node test-calculator.mjs` and observe the focused test fail without changing the test.",
+    "Use edit to replace the unique incorrect expression `left - right` with `left + right` in calculator.mjs.",
+    `Use write to create worker-summary.txt with exactly: ${summaryText}`,
+    "Run exec_command again with exactly `node test-calculator.mjs` and observe it pass.",
+    `Return a concise changed-files and checks summary ending with exactly ${finalMarker}.`,
+  ].join(" ");
+  const parentPrompt = [
+    "Delegate exactly one new child Task using threads_delegate.",
+    `Use title ${JSON.stringify(childTitle)}, agent "lash", cwd ${JSON.stringify(fixture.fixtureDir)}, and artifact_ids [].`,
+    "Omit provider_id, model, and variant so the native worker defaults are exercised.",
+    `Use this exact assignment brief: ${JSON.stringify(brief)}.`,
+    `After the delegation is accepted, do not inspect or follow up with the child; end your reply with exactly ${parentMarker}.`,
+  ].join(" ");
+
+  const parent = await sendMessage(page, frames, parentThreadId, parentPrompt);
+  const childThread = await poll("native child Task publication", () => latestFrame(
+    frames,
+    frame => frame.type === "thread_upsert" && frame.thread.parent_thread_id === parentThreadId && frame.thread.title === childTitle,
+  )?.frame.thread);
+  const childThreadId = childThread.id;
+  const firstTurn = await poll("native child turn acceptance", () => latestFrame(
+    frames,
+    frame => frame.type === "thread_turn" && frame.turn.thread_id === childThreadId
+      && frame.turn.requester_thread_id === parentThreadId && frame.turn.requester_turn_id === parent.turnId,
+  )?.frame.turn);
+  await waitForTurn(frames, firstTurn.id, turn => turn.state === "running", "native child turn running");
+  await selectThreadInBrowser(page, childThreadId, parentThreadId);
+
+  const secondCommand = await poll("passing focused test command started", () => {
+    const commands = startedTools(frames, firstTurn.id).filter(event => event.name === "exec_command");
+    if (commands.length < 2) return null;
+    const candidate = commands[1];
+    return toolEvents(frames, firstTurn.id).some(event => event.kind === "tool_done" && event.id === candidate.id) ? null : candidate;
+  });
+  await selectThreadInBrowser(page, parentThreadId);
+  const parentComposer = page.locator(`main[data-thread-id="${parentThreadId}"] textarea`);
+  const draftMarker = `RESPONSIVE_DRAFT_${nonce}`;
+  await parentComposer.fill(draftMarker);
+  assert.equal(await parentComposer.inputValue(), draftMarker);
+  assert.equal(await parentComposer.isEnabled(), true);
+  const responsive = await captureNativeWorker("10-parent-responsive", context, parentThreadId, parentThreadId, childThreadId);
+  const parentDom = responsive.dom.entries.find(entry => entry.messageId === String(parent.owner.id));
+  assert.equal(parentDom?.text, renderedInlineCodeText(parentPrompt), "rendered parent prompt content differs from its raw Markdown");
+  const parentDetail = responsive.detail.messages.find(message => message.id === parent.owner.id);
+  assert.equal(parentDetail?.body, parentPrompt, "authenticated parent prompt differs from the accepted raw Markdown");
+  const parentStore = responsive.store.messages.find(message => message.id === parent.owner.id);
+  assert.equal(parentStore?.body, parentPrompt, "stored parent prompt differs from the accepted raw Markdown");
+  assert.equal(latestFrame(frames, frame => frame.type === "thread_turn" && frame.turn.id === firstTurn.id)?.frame.turn.state, "running");
+  assert.equal(toolEvents(frames, firstTurn.id).some(event => event.kind === "tool_done" && event.id === secondCommand.id), false, "passing command ended before responsiveness evidence");
+  await parentComposer.fill("");
+  await selectThreadInBrowser(page, childThreadId, parentThreadId);
+
+  const firstTerminal = await waitForTurn(frames, firstTurn.id, turn => terminal(turn.state), "native child initial turn terminal");
+  assert.equal(firstTerminal.state, "completed");
+  const parentTerminal = await waitForTurn(frames, parent.turnId, turn => terminal(turn.state), "parent delegation turn terminal");
+  assert.equal(parentTerminal.state, "completed");
+  assert.match(agentReply(await openThread(context.url, context.token, parentThreadId), parentTerminal).body, new RegExp(parentMarker));
+  const firstStarts = startedTools(frames, firstTurn.id);
+  assert.deepEqual([...new Set(firstStarts.map(event => event.name))].sort(), ["edit", "exec_command", "read", "write"]);
+  const firstCommand = firstStarts.find(event => event.name === "exec_command");
+  const edit = firstStarts.find(event => event.name === "edit");
+  const write = firstStarts.find(event => event.name === "write");
+  assert(firstCommand && edit && write);
+  const orderedNames = firstStarts.map(event => event.name);
+  assert(orderedNames.indexOf("read") < orderedNames.indexOf("exec_command"));
+  assert(orderedNames.indexOf("exec_command") < orderedNames.indexOf("edit"));
+  assert(orderedNames.indexOf("edit") < orderedNames.indexOf("write"));
+  assert(orderedNames.lastIndexOf("write") < orderedNames.lastIndexOf("exec_command"));
+  assert.match(payloadText(completedTool(frames, firstTurn.id, firstCommand), "result"), /AssertionError|add must sum both operands|exit(?:ed|_code)?.*[1-9]|status.*[1-9]/i);
+  assert.match(payloadText(completedTool(frames, firstTurn.id, secondCommand), "result"), new RegExp(fixture.passMarker));
+  assert.match(payloadText(edit, "input"), /left - right/);
+  assert.match(payloadText(write, "input"), new RegExp(fixture.summaryMarker));
+  assert.equal(payloadText(edit, "input").includes(contextMarker), false, "edit persisted the private context marker");
+  assert.equal(payloadText(write, "input").includes(contextMarker), false, "write persisted the private context marker");
+  const firstToolIds = firstStarts.map(event => event.id);
+  await expandInlineTools(page, firstToolIds);
+  const firstCapture = await captureNativeWorker("20-initial-complete", context, childThreadId, parentThreadId, childThreadId);
+  assertTimelineSurfaces(firstCapture, frames, [firstTurn.id]);
+  assertTimelineRendered(firstCapture.dom, firstTerminal, durableTimeline(firstCapture.detail, firstTurn.id));
+  assertReasoningIntegrity(firstCapture.dom, firstTerminal, durableTimeline(firstCapture.detail, firstTurn.id));
+  assert(durableTimeline(firstCapture.detail, firstTurn.id).some(record => record.event.kind === "reasoning"));
+  assert(durableTimeline(firstCapture.detail, firstTurn.id).some(record => record.event.kind === "prose"));
+  const initialReply = agentReply(firstCapture.detail, firstTerminal).body;
+  assert.match(initialReply, new RegExp(finalMarker));
+  assert.equal(initialReply.includes(contextMarker), false, "initial reply echoed the private context marker");
+  assertNativeToolCatalog(firstCapture.nativeStore, childThreadId);
+  assertNativeWorkerExecution(firstCapture.nativeStore, firstTurn.id, fixture.fixtureDir);
+  assertChildTaskOpen(firstCapture.nativeStore, parentThreadId, childThreadId);
+  const firstSession = executionStarted(firstCapture.nativeStore, firstTurn.id);
+  assert.deepEqual(
+    { agent: firstSession.agent, provider: firstSession.provider_id, model: firstSession.model },
+    { agent: "lash", provider: "openrouter", model: "deepseek/deepseek-v4.1-flash" },
+  );
+  const reportsBeforeFollowup = firstCapture.nativeStore.reports.length;
+  assert.equal(reportsBeforeFollowup, 1, "initial child turn did not create exactly one terminal parent report");
+
+  const followupPrompt = `Continue this same Task. Without rerunning tests or rereading calculator.mjs or test-calculator.mjs, use read exactly once on worker-summary.txt. Then identify the source file changed in the prior turn and whether its focused test passed. Also recall the private assignment fact from the initial brief and include its exact marker in your reply; its value is intentionally not repeated here. End with exactly ${followupMarker}.`;
+  assert.equal(followupPrompt.includes(contextMarker), false, "follow-up prompt repeated the context answer");
+  const followup = await sendMessage(page, frames, childThreadId, followupPrompt);
+  const followupTerminal = await waitForTurn(frames, followup.turnId, turn => terminal(turn.state), "native child follow-up terminal");
+  assert.equal(followupTerminal.state, "completed");
+  assert.equal(followupTerminal.requester_thread_id, parentThreadId);
+  const followupStarts = startedTools(frames, followup.turnId);
+  assert.deepEqual(followupStarts.map(event => event.name), ["read"]);
+  assert.match(payloadText(followupStarts[0], "input"), /worker-summary\.txt/);
+  assert.equal(payloadText(followupStarts[0], "input").includes(contextMarker), false, "follow-up read input contained the context answer");
+  assert.equal(payloadText(completedTool(frames, followup.turnId, followupStarts[0]), "result").includes(contextMarker), false, "worker summary leaked the context answer");
+  await expandInlineTools(page, followupStarts.map(event => event.id));
+  const followupCapture = await captureNativeWorker("30-followup-complete", context, childThreadId, parentThreadId, childThreadId);
+  assertTimelineSurfaces(followupCapture, frames, [firstTurn.id, followup.turnId]);
+  assertTimelineRendered(followupCapture.dom, followupTerminal, durableTimeline(followupCapture.detail, followup.turnId));
+  const followupReply = agentReply(followupCapture.detail, followupTerminal).body;
+  assert.match(followupReply, /calculator\.mjs/);
+  assert.match(followupReply, /pass/i);
+  assert.match(followupReply, new RegExp(contextMarker));
+  assert.match(followupReply, new RegExp(followupMarker));
+  assertNativeWorkerExecution(followupCapture.nativeStore, followup.turnId, fixture.fixtureDir);
+  assertNativeToolCatalog(followupCapture.nativeStore, childThreadId);
+  assertChildTaskOpen(followupCapture.nativeStore, parentThreadId, childThreadId);
+  const followupSession = executionStarted(followupCapture.nativeStore, followup.turnId);
+  assert.equal(followupSession.session_id, firstSession.session_id, "follow-up did not retain the native worker session");
+  assert.equal(followupCapture.nativeStore.reports.length, reportsBeforeFollowup + 1, "follow-up did not add exactly one terminal parent report");
+  assert.deepEqual(
+    followupCapture.nativeStore.reports.map(report => report.child_turn_id).sort((a, b) => a - b),
+    [firstTurn.id, followup.turnId].sort((a, b) => a - b),
+  );
+  const childReports = followupCapture.nativeStore.activities.filter(activity => activity.thread_id === parentThreadId && activity.kind === "child_report");
+  assert.equal(childReports.length, 2, "parent has missing or duplicate child report activities");
+
+  const [source, test, summary] = await Promise.all([
+    readFile(join(fixture.fixtureDir, "calculator.mjs"), "utf8"),
+    readFile(join(fixture.fixtureDir, "test-calculator.mjs"), "utf8"),
+    readFile(join(fixture.fixtureDir, "worker-summary.txt"), "utf8"),
+  ]);
+  assert.match(source, /return left \+ right;/);
+  assert.equal(summary.trimEnd(), summaryText);
+  for (const [name, content] of [["calculator.mjs", source], ["test-calculator.mjs", test], ["worker-summary.txt", summary]]) {
+    assert.equal(content.includes(contextMarker), false, `${name} persisted the private context marker`);
+  }
+  await writeFile(join(scenarioDir, "fixture-final.json"), `${JSON.stringify({ source, test, summary }, null, 2)}\n`);
+
+  return {
+    parentThreadId,
+    parentTurnId: parent.turnId,
+    childThreadId,
+    initialWorkerTurnId: firstTurn.id,
+    followupWorkerTurnId: followup.turnId,
+    provider: "openrouter",
+    model: "deepseek/deepseek-v4.1-flash",
+    variant: "default",
+    workerModelTurns: 2,
+    toolCallIds: {
+      initial: firstToolIds,
+      followup: followupStarts.map(event => event.id),
+    },
+    parentReportActivityIds: childReports.map(activity => activity.id),
+    objectiveGates: {
+      acceptedDefault: "PASS",
+      isolatedFourToolCatalog: "PASS",
+      failingFixedPassing: "PASS",
+      chronologicalThreeSurfaceEvidence: "PASS",
+      parentResponsiveDuringCommand: "PASS",
+      sameTaskFollowupContext: "PASS",
+      oneTerminalReportPerWorkerTurn: "PASS",
+      taskRemainsOpen: "PASS",
+    },
+    judgedScorecard: {
+      status: "NOT_JUDGED",
+      instruction: "Inspect 10-parent-responsive.png, 20-initial-complete.png, and 30-followup-complete.png plus their DOM, thread, native-store, and frames evidence before assigning a product verdict.",
+    },
+  };
+}
+
 async function stopProcess(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   try { process.kill(-child.pid, "SIGTERM"); } catch { return; }
@@ -854,6 +1210,9 @@ async function runScenario(scenario) {
   await mkdir(dataDir, { recursive: true });
   const token = `runbook-${crypto.randomUUID()}`;
   const nonce = `${scenario.replaceAll("-", "").slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`;
+  const nativeFixture = scenario === "native-lash-worker"
+    ? await prepareNativeWorkerFixture(scenarioDir, nonce)
+    : null;
   const port = await unusedPort();
   const url = `http://127.0.0.1:${port}`;
   const binary = join(cargoTargetDirectory(), "debug", "hirsel-host");
@@ -896,6 +1255,8 @@ async function runScenario(scenario) {
     port,
     dataDir,
     initialModelCallBudget: scenario === "artifact-presentation" ? 1 : 2,
+    workerModelTurnBudget: scenario === "native-lash-worker" ? 2 : 0,
+    fixtureDir: nativeFixture?.fixtureDir ?? null,
   };
   await writeFile(join(scenarioDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const result = {
@@ -945,7 +1306,7 @@ async function runScenario(scenario) {
     assert.equal(empty.detail.turns.length, 0);
     assert.equal(empty.store.messages.length, 0);
     assert.equal(empty.store.turns.length, 0);
-    assert.equal(empty.store.schemaVersion, 5);
+    assert.equal(empty.store.schemaVersion, 6);
     assert.deepEqual(empty.store.timelineEvents, []);
     assert.deepEqual(empty.detail.turn_timelines, []);
     if (scenario === "artifact-creation" || scenario === "artifact-presentation") assert.equal(empty.store.artifacts.length, 0);
@@ -956,7 +1317,9 @@ async function runScenario(scenario) {
         ? await runTools(context)
         : scenario === "artifact-creation"
           ? await runArtifact(context)
-          : await runArtifactPresentation(context);
+          : scenario === "artifact-presentation"
+            ? await runArtifactPresentation(context)
+            : await runNativeLashWorker(context, nativeFixture);
     assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
     result.objectiveStatus = "OBJECTIVE_PASS";
   } catch (error) {
@@ -975,12 +1338,16 @@ async function runScenario(scenario) {
     result.finishedAt = new Date().toISOString();
     await writeFile(
       join(scenarioDir, "frames.ndjson"),
-      frames.map(row => JSON.stringify(row)).join("\n") + (frames.length ? "\n" : ""),
+      frames.map(row => JSON.stringify(sanitizeEvidence(row))).join("\n") + (frames.length ? "\n" : ""),
     );
-    await writeFile(join(scenarioDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
+    await writeFile(join(scenarioDir, "result.json"), `${JSON.stringify(sanitizeEvidence(result), null, 2)}\n`);
     await browser?.close();
     await stopProcess(host);
-    logStream.end();
+    await new Promise(resolve => logStream.end(resolve));
+    await Promise.all([
+      sanitizeEvidenceFile(join(dataDir, "hirsel.toml")),
+      sanitizeEvidenceFile(join(scenarioDir, "host.log")),
+    ]);
   }
   console.log(`${scenario}: ${result.objectiveStatus}${result.error ? ` — ${result.error}` : ""}`);
   return result;
@@ -988,5 +1355,5 @@ async function runScenario(scenario) {
 
 const results = [];
 for (const scenario of scenarios) results.push(await runScenario(scenario));
-await writeFile(join(evidenceRoot, "summary.json"), `${JSON.stringify(results, null, 2)}\n`);
+await writeFile(join(evidenceRoot, "summary.json"), `${JSON.stringify(sanitizeEvidence(results), null, 2)}\n`);
 if (results.some(result => result.objectiveStatus !== "OBJECTIVE_PASS")) process.exitCode = 1;

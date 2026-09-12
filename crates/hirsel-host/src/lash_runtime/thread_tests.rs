@@ -32,6 +32,360 @@ async fn delegated_cli_turn(
     (delegated.thread_id, delegated.turn_id)
 }
 
+fn native_execution(cwd: std::path::PathBuf) -> crate::storage::ThreadExecution {
+    crate::storage::ThreadExecution::LashWorker {
+        provider: crate::providers::NativeWorkerProviderSnapshot {
+            id: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            revision: "test-route".into(),
+        },
+        model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.into(),
+        variant: "default".into(),
+        cwd,
+        tool_profile: crate::storage::NATIVE_CODING_TOOL_PROFILE.into(),
+    }
+}
+
+#[tokio::test]
+async fn native_worker_rejects_artifact_references_before_acceptance() {
+    let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
+    let store = crate::host_config::ConfigStore::load(
+        dir.path().join("hirsel.toml"),
+        std::path::Path::new("/docs/hirsel-config.md"),
+        &crate::host_config::EnvBootstrap::default(),
+    )
+    .await
+    .unwrap();
+    store
+        .upsert_provider(&crate::host_config::StoredProvider {
+            id: "openrouter".into(),
+            label: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: Some("test-key-no-inference".into()),
+            default_model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.into(),
+        })
+        .await
+        .unwrap();
+    let caller = storage.test_running_caller().await;
+    let before = storage.thread_snapshot().await.unwrap().len();
+    let tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "native-artifact-refusal".into(),
+    };
+    let error = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Native child",
+                "brief":"Use the referenced artifact",
+                "artifact_ids":[1],
+                "agent":"lash"
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("artifact references are not supported"),
+        "{error}"
+    );
+    assert_eq!(storage.thread_snapshot().await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn inherited_native_worker_rejects_artifacts_without_accepting_a_turn() {
+    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
+    let caller = storage.test_running_caller().await;
+    let initial = crate::storage::Delegation {
+        title: "Native child".into(),
+        brief: "Initial native work".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(native_execution(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+    };
+    let child = storage
+        .delegate_thread(
+            &caller,
+            "native-inherited-initial",
+            &initial,
+            &serde_json::to_value(&initial).unwrap(),
+        )
+        .await
+        .unwrap();
+    let before = storage
+        .thread_detail(child.thread_id, None, 100)
+        .await
+        .unwrap()
+        .turns
+        .len();
+    let tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "native-inherited-artifact".into(),
+    };
+    let error = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Native follow-up",
+                "brief":"Use the referenced artifact",
+                "artifact_ids":[1],
+                "child_thread_id":child.thread_id
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("artifact references are not supported"),
+        "{error}"
+    );
+    assert_eq!(
+        storage
+            .thread_detail(child.thread_id, None, 100)
+            .await
+            .unwrap()
+            .turns
+            .len(),
+        before,
+        "policy refusal must precede durable turn acceptance"
+    );
+}
+
+#[tokio::test]
+async fn inherited_native_worker_expands_selected_skills_before_acceptance() {
+    let skill_root = tempfile::tempdir().unwrap();
+    let skill_dir = skill_root.path().join("review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: Review carefully\n---\nInspect the focused diff.\n",
+    )
+    .unwrap();
+    let (executor, storage, _log, _dir) =
+        super::tests::test_event_executor_with_skills(crate::skills::Skills::new(vec![
+            skill_root.path().to_owned(),
+        ]))
+        .await;
+    let caller = storage.test_running_caller().await;
+    let initial = crate::storage::Delegation {
+        title: "Native child".into(),
+        brief: "Initial native work".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(native_execution(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+    };
+    let child = storage
+        .delegate_thread(
+            &caller,
+            "native-skill-initial",
+            &initial,
+            &serde_json::to_value(&initial).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "native-skill-follow-up".into(),
+    };
+    let accepted = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Review follow-up",
+                "brief":"/skill:review check the repair",
+                "artifact_ids":[],
+                "child_thread_id":child.thread_id
+            }),
+        )
+        .await
+        .unwrap();
+    let accepted_turn = accepted["turn_id"].as_u64().unwrap();
+    let (_, request) = storage
+        .pending_thread_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(_, request)| request["turn_id"].as_u64() == Some(accepted_turn))
+        .unwrap();
+    let body = request["body"].as_str().unwrap();
+    assert!(body.contains("<skill name=\"review\""), "{body}");
+    assert!(body.contains("Inspect the focused diff."), "{body}");
+    assert!(body.ends_with("check the repair"), "{body}");
+
+    let before = storage
+        .thread_detail(child.thread_id, None, 100)
+        .await
+        .unwrap()
+        .turns
+        .len();
+    tools.operation_id = "native-missing-skill".into();
+    let error = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Broken follow-up",
+                "brief":"/skill:missing check the repair",
+                "artifact_ids":[],
+                "child_thread_id":child.thread_id
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("Unknown skill 'missing'"), "{error}");
+    assert_eq!(
+        storage
+            .thread_detail(child.thread_id, None, 100)
+            .await
+            .unwrap()
+            .turns
+            .len(),
+        before,
+        "skill expansion failure must precede durable turn acceptance"
+    );
+}
+
+#[tokio::test]
+async fn native_worker_preference_is_captured_for_follow_up_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(dir.path()).await.unwrap();
+    let caller = storage.test_running_caller().await;
+    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let assignment = crate::storage::Delegation {
+        title: "Native child".into(),
+        brief: "Make the focused repair".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(native_execution(cwd.clone())),
+    };
+    let initial = storage
+        .delegate_thread(
+            &caller,
+            "native-initial",
+            &assignment,
+            &serde_json::to_value(&assignment).unwrap(),
+        )
+        .await
+        .unwrap();
+    let follow_up = crate::storage::Delegation {
+        title: "Follow-up".into(),
+        brief: "Now rerun the check".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: Some(initial.thread_id),
+        execution: None,
+    };
+    let follow_up = storage
+        .delegate_thread(
+            &caller,
+            "native-follow-up",
+            &follow_up,
+            &serde_json::to_value(&follow_up).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for turn_id in [initial.turn_id, follow_up.turn_id] {
+        let crate::storage::ThreadExecution::LashWorker {
+            provider,
+            model,
+            variant,
+            cwd: captured_cwd,
+            tool_profile,
+        } = storage.turn_execution(turn_id).await.unwrap()
+        else {
+            panic!("follow-up lost the native worker preference");
+        };
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(model, crate::providers::NATIVE_WORKER_DEFAULT_MODEL);
+        assert_eq!(variant, "default");
+        assert_eq!(captured_cwd, cwd);
+        assert_eq!(tool_profile, crate::storage::NATIVE_CODING_TOOL_PROFILE);
+    }
+}
+
+#[tokio::test]
+async fn restart_interrupts_running_native_worker_without_replaying_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(dir.path()).await.unwrap();
+    let caller = storage.test_running_caller().await;
+    let assignment = crate::storage::Delegation {
+        title: "Native interrupted".into(),
+        brief: "Perform one mutation".into(),
+        artifact_ids: Vec::new(),
+        child_thread_id: None,
+        execution: Some(native_execution(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+    };
+    let delegated = storage
+        .delegate_thread(
+            &caller,
+            "native-interrupted",
+            &assignment,
+            &serde_json::to_value(&assignment).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .run_thread_turn(delegated.turn_id)
+            .await
+            .unwrap()
+            .state,
+        ThreadTurnState::Running
+    );
+    let original_session = storage
+        .reconcile_native_worker_profile(
+            delegated.thread_id,
+            "same-profile",
+            &[
+                "read".into(),
+                "edit".into(),
+                "write".into(),
+                "exec_command".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    drop(storage);
+
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let turn = state.storage.thread_turn(delegated.turn_id).await.unwrap();
+    assert_eq!(turn.state, ThreadTurnState::Interrupted);
+    assert_eq!(turn.agent_message_id, None);
+    let replacement_session = state
+        .storage
+        .reconcile_native_worker_profile(
+            delegated.thread_id,
+            "same-profile",
+            &[
+                "read".into(),
+                "edit".into(),
+                "write".into(),
+                "exec_command".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(replacement_session.rotated);
+    assert_ne!(replacement_session.session_id, original_session.session_id);
+    assert!(
+        state
+            .storage
+            .pending_thread_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|(_, payload)| payload["turn_id"].as_u64() != Some(delegated.turn_id))
+    );
+}
+
 #[tokio::test]
 async fn restart_interrupts_native_input_without_blocking_later_thread_work() {
     let dir = tempfile::tempdir().unwrap();
@@ -451,7 +805,7 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         .unwrap();
     assert!(result["thread"]["settled_at"].is_null());
     assert_eq!(result["thread"]["attention"], "quiet");
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[]);
     let create_schema = definitions
         .iter()
         .find(|definition| definition.name() == "threads_create")

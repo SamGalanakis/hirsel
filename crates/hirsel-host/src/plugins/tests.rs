@@ -58,11 +58,18 @@ async fn test_tools(
     )
     .await
     .unwrap();
+    let providers = crate::providers::ProviderRosterState::new(
+        config_store.clone(),
+        &crate::boot_provider::BootProvider::env_default(crate::config::ProviderMode::Codex),
+        None,
+    );
     let tools = ToolSuite::new(
         ToolsConfig {
             driver_mode: crate::config::DriverMode::Fake,
             fake_fixture: None,
             subagent_models: crate::subagent_models::SubagentModelState::load(config_store),
+            providers,
+            skills: crate::skills::Skills::default(),
         },
         storage.clone(),
         broadcaster.clone(),

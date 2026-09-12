@@ -191,10 +191,41 @@ impl Storage {
             .prepare("SELECT id FROM thread_turns WHERE state='running'")?
             .query_map([], |r| r.get::<_, u64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let turns = ids
-            .into_iter()
-            .map(|id| finish(&tx, id, ThreadTurnState::Interrupted, None))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut turns = Vec::with_capacity(ids.len());
+        for id in ids {
+            let (thread_id, config): (u64, Option<String>) = tx.query_row(
+                "SELECT t.thread_id,e.config FROM thread_turns t LEFT JOIN thread_turn_execution e ON e.turn_id=t.id WHERE t.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if config
+                .as_deref()
+                .map(serde_json::from_str::<super::ThreadExecution>)
+                .transpose()?
+                .is_some_and(|execution| {
+                    matches!(execution, super::ThreadExecution::LashWorker { .. })
+                })
+            {
+                // A direct durable Lash turn may have accepted input or begun a
+                // shell effect before the Host stopped. Abandon this session
+                // generation so a later follow-up cannot drive that uncertain
+                // pending input as if it were new work.
+                let key = format!("thread:{thread_id}:native_worker_fingerprint");
+                let value = format!("interrupted-turn:{id}");
+                tx.execute(
+                    "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![key, value],
+                )?;
+                // The provider or a coding tool may already have observed this
+                // accepted input. Retire the durable request with the turn so
+                // startup cannot later dispatch it as fresh work.
+                tx.execute(
+                    "DELETE FROM thread_requests WHERE json_extract(payload,'$.turn_id')=?1",
+                    [id],
+                )?;
+            }
+            turns.push(finish(&tx, id, ThreadTurnState::Interrupted, None)?);
+        }
         tx.commit()?;
         Ok(turns)
     }
@@ -299,6 +330,16 @@ pub(super) fn finish(
     state: ThreadTurnState,
     agent_message_id: Option<u64>,
 ) -> anyhow::Result<ThreadTurn> {
+    finish_with_failure(c, id, state, agent_message_id, None)
+}
+
+pub(super) fn finish_with_failure(
+    c: &Connection,
+    id: u64,
+    state: ThreadTurnState,
+    agent_message_id: Option<u64>,
+    failure: Option<&str>,
+) -> anyhow::Result<ThreadTurn> {
     let previous = get(c, id)?;
     if previous.finished_at.is_some() {
         return Ok(previous);
@@ -322,6 +363,18 @@ pub(super) fn finish(
             .map(|m| m.body.trim())
             .filter(|s| !s.is_empty())
             .map(|s| s.chars().take(8000).collect::<String>())
+            .or_else(|| {
+                failure.map(|reason| {
+                    format!(
+                        "Child execution {}: {}",
+                        status.as_str().unwrap_or("ended"),
+                        reason
+                    )
+                    .chars()
+                    .take(8000)
+                    .collect::<String>()
+                })
+            })
             .unwrap_or_else(|| {
                 format!(
                     "Child execution {} without a final assistant message.",

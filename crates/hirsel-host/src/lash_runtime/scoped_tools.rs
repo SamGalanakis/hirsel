@@ -318,7 +318,10 @@ impl ScopedThreadTools {
 }
 
 pub(crate) fn scoped_mcp_catalog(tools: &ToolSuite) -> Vec<Value> {
-    let mut definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
+    let mut definitions = hirsel_tool_definitions(
+        &tools.subagent_model_snapshot(),
+        &tools.native_worker_provider_ids(),
+    );
     definitions.extend(tools.plugin_tools().definitions());
     definitions.into_iter().map(|d|json!({"name":d.name(),"description":d.manifest.description,"inputSchema":d.contract.input_schema.canonical})).collect()
 }
@@ -474,6 +477,7 @@ struct DelegateInput {
     artifact_ids: Vec<u64>,
     child_thread_id: Option<u64>,
     agent: Option<String>,
+    provider_id: Option<String>,
     model: Option<String>,
     variant: Option<String>,
     cwd: Option<std::path::PathBuf>,
@@ -483,16 +487,34 @@ impl ScopedThreadTools {
         let input: DelegateInput =
             serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
         let execution = if input.agent.is_none()
+            && input.provider_id.is_none()
             && input.model.is_none()
             && input.variant.is_none()
             && input.cwd.is_none()
             && input.child_thread_id.is_some()
         {
-            None
+            let child_thread_id = input
+                .child_thread_id
+                .ok_or("selector-free dispatch requires an existing child Thread")?;
+            let effective = self
+                .tools
+                .storage()
+                .effective_child_execution(&self.caller, child_thread_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            matches!(
+                effective,
+                crate::storage::ThreadExecution::LashWorker { .. }
+            )
+            .then_some(effective)
         } else if input.agent.as_deref() == Some("host") {
-            if input.model.is_some() || input.variant.is_some() || input.cwd.is_some() {
+            if input.provider_id.is_some()
+                || input.model.is_some()
+                || input.variant.is_some()
+                || input.cwd.is_some()
+            {
                 return Err(
-                    "host delegation uses configured provider/model; CLI selectors do not apply"
+                    "host delegation uses configured provider/model; worker selectors do not apply"
                         .into(),
                 );
             }
@@ -503,7 +525,55 @@ impl ScopedThreadTools {
                     .await
                     .map_err(|e| e.to_string())?,
             )
+        } else if input.agent.as_deref() == Some("lash") {
+            let provider = self
+                .tools
+                .capture_native_worker_provider(input.provider_id.as_deref())
+                .map_err(|e| e.to_string())?;
+            let model = match input.model {
+                Some(model) => {
+                    crate::model_selection::validate_free_text(&model)
+                        .map_err(|e| e.to_string())?
+                        .id
+                }
+                None if provider.id == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID => {
+                    crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string()
+                }
+                None => {
+                    return Err(format!(
+                        "native Lash worker provider `{}` requires an explicit model",
+                        provider.id
+                    ));
+                }
+            };
+            let variant = input.variant.unwrap_or_else(|| "default".to_string());
+            if variant != "default" {
+                return Err(format!(
+                    "native Lash worker variant `{variant}` is unsupported; available variants: default"
+                ));
+            }
+            let cwd = input
+                .cwd
+                .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
+            let cwd = std::fs::canonicalize(cwd)
+                .map_err(|e| format!("invalid execution directory: {e}"))?;
+            if !cwd.is_dir() {
+                return Err(format!(
+                    "invalid execution directory: `{}` is not a directory",
+                    cwd.display()
+                ));
+            }
+            Some(crate::storage::ThreadExecution::LashWorker {
+                provider,
+                model,
+                variant,
+                cwd,
+                tool_profile: crate::storage::NATIVE_CODING_TOOL_PROFILE.to_string(),
+            })
         } else {
+            if input.provider_id.is_some() {
+                return Err("provider_id applies only to agent `lash`".into());
+            }
             let agent = parse_agent_kind(input.agent.as_deref().unwrap_or("claude"))?;
             let selected = self
                 .tools
@@ -521,9 +591,26 @@ impl ScopedThreadTools {
                 cwd,
             })
         };
+        let native_worker = matches!(
+            &execution,
+            Some(crate::storage::ThreadExecution::LashWorker { .. })
+        );
+        if native_worker && !input.artifact_ids.is_empty() {
+            return Err(
+                "native Lash worker artifact references are not supported yet; remove artifact_ids or delegate to another backend"
+                    .into(),
+            );
+        }
+        let brief = if native_worker {
+            self.tools
+                .expand_skill(&input.brief)
+                .map_err(|e| e.to_string())?
+        } else {
+            input.brief
+        };
         Ok(Delegation {
             title: input.title,
-            brief: input.brief,
+            brief,
             artifact_ids: input.artifact_ids,
             child_thread_id: input.child_thread_id,
             execution,

@@ -500,6 +500,9 @@ where
                 .set_subagent_model(&provider, &model_id, enabled, &enabled_variants)
                 .await?;
         }
+        ClientToHost::SetNativeWorker { enabled, model } => {
+            state.set_native_worker(enabled, model.as_deref()).await?;
+        }
         ClientToHost::SetAgentPrompt { text } => {
             state.set_agent_prompt(&text).await?;
         }

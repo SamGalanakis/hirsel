@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { reduce } from "./reducer";
 import { initialState } from "./types";
-import type { ModelSnapshot, SubagentModelCatalog } from "../protocol";
+import type { ModelSnapshot, SubagentModelCatalog, SubagentNativeWorker } from "../protocol";
 
 const MODEL: ModelSnapshot = {
   current: { id: "gpt-5.6-sol", variant: "medium" },
@@ -15,7 +15,19 @@ const MODEL: ModelSnapshot = {
   ],
 };
 
+const NATIVE_WORKER: SubagentNativeWorker = {
+  label: "Native worker",
+  enabled: true,
+  provider_id: "openrouter",
+  eligible_provider_ids: ["openrouter"],
+  model: "deepseek/deepseek-v4.1-flash",
+  default_model: "deepseek/deepseek-v4.1-flash",
+  model_override: null,
+  unavailable_reason: null,
+};
+
 const CATALOG: SubagentModelCatalog = {
+  native_worker: NATIVE_WORKER,
   providers: [
     {
       provider: "codex",
@@ -121,6 +133,7 @@ describe("model config: subagent_models_changed", () => {
   it("replaces the catalog wholesale", () => {
     const seeded = helloOk({ subagent_models: CATALOG });
     const next: SubagentModelCatalog = {
+      native_worker: { ...NATIVE_WORKER, enabled: false },
       providers: [
         {
           provider: "codex",
@@ -163,7 +176,7 @@ describe("model config: defensiveness", () => {
 
   it("does not throw on a subagent_models_changed with no prior catalog", () => {
     expect(() =>
-      reduce(initialState(), { type: "subagent_models_changed", catalog: { providers: [] } }),
+      reduce(initialState(), { type: "subagent_models_changed", catalog: { providers: [], native_worker: NATIVE_WORKER } }),
     ).not.toThrow();
   });
 });

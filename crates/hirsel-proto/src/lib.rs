@@ -23,7 +23,7 @@ pub use client::{AgentSlot, ClientToHost, HelloAuth, PushPlatform, SendMode};
 pub use host::HostToClient;
 pub use models::{
     AvailableModel, ForkAgentConfig, ModelSelection, ModelSnapshot, PromptDoc, PromptSnapshot,
-    SubagentModel, SubagentModelCatalog, SubagentProviderModels,
+    SubagentModel, SubagentModelCatalog, SubagentNativeWorker, SubagentProviderModels,
 };
 pub use process::{ProcessInfo, ProcessKind, ProcessState};
 pub use providers::{

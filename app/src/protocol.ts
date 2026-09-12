@@ -158,10 +158,30 @@ export interface SubagentProviderModels {
   models: SubagentModel[];
 }
 
+/** The native in-process Lash worker as a delegation target. It has no curated
+ * model list and no reasoning variants: only the provider instance its default
+ * route runs on and the model that route opens with.
+ *
+ * `unavailable_reason` is the single availability signal — non-null means no
+ * configured provider can host the worker at all. A null `provider_id` with a
+ * non-empty `eligible_provider_ids` is NOT unavailable: the worker runs, but a
+ * delegation has to name one of those instances itself. */
+export interface SubagentNativeWorker {
+  label: string;
+  enabled: boolean;
+  provider_id: string | null;
+  eligible_provider_ids: string[];
+  model: string;
+  default_model: string;
+  model_override: string | null;
+  unavailable_reason?: string | null;
+}
+
 /** The full sub-agent model catalog carried on `hello_ok` and replaced wholesale
  * by `subagent_models_changed`. */
 export interface SubagentModelCatalog {
   providers: SubagentProviderModels[];
+  native_worker: SubagentNativeWorker;
 }
 
 // ---- Provider roster ----
@@ -295,6 +315,17 @@ export interface SetSubagentModelMsg {
   enabled_variants: string[];
 }
 
+/** Update the native worker row: its master enable switch and the optional
+ * model override its default route opens on. Separate from
+ * `set_subagent_model` because the model is free text, not a catalog id; an
+ * absent `model` clears the override and restores the shipped default. The
+ * host answers with `subagent_models_changed`. */
+export interface SetNativeWorkerMsg {
+  type: "set_native_worker";
+  enabled: boolean;
+  model?: string;
+}
+
 /** Replace the main Agent's editable prompt body. Empty text removes the
  * override, restoring the bundled default from the next turn. */
 export interface SetAgentPromptMsg {
@@ -368,6 +399,7 @@ export type ClientMessage =
   | ViewEventMsg
   | SetModelMsg
   | SetSubagentModelMsg
+  | SetNativeWorkerMsg
   | SetAgentPromptMsg
   | SetForkPromptMsg
   | SetForkModelMsg

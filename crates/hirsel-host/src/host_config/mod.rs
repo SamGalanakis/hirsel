@@ -22,6 +22,24 @@ pub struct SubagentModelOverride {
     pub enabled_variants: Vec<String>,
 }
 
+/// The Owner's stored native-worker row. The shipped defaults stand until the
+/// Owner edits the row, so an absent or malformed section reads as enabled with
+/// no model override rather than as a disabled worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeWorkerOverride {
+    pub enabled: bool,
+    pub model: Option<String>,
+}
+
+impl Default for NativeWorkerOverride {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ConfigStore {
     path: Arc<PathBuf>,
@@ -204,6 +222,46 @@ impl ConfigStore {
         parsed
     }
 
+    /// The Owner's native Lash worker row, from `[native_worker]`. Invalid
+    /// values warn and fall back to the shipped defaults: a config typo must
+    /// not silently take a delegation target away.
+    pub fn native_worker_override(&self) -> NativeWorkerOverride {
+        self.reload_if_changed();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(section) = inner.document.get("native_worker") else {
+            return NativeWorkerOverride::default();
+        };
+        let Some(section) = section.as_table() else {
+            tracing::warn!("invalid native worker config; using defaults");
+            return NativeWorkerOverride::default();
+        };
+        let enabled = match section.get("enabled") {
+            None => true,
+            Some(item) => match item.as_bool() {
+                Some(enabled) => enabled,
+                None => {
+                    tracing::warn!("invalid native worker enabled flag; using defaults");
+                    true
+                }
+            },
+        };
+        let model = match section.get("model") {
+            None => None,
+            Some(item) => match item.as_str() {
+                Some(model) if !model.trim().is_empty() => Some(model.trim().to_string()),
+                Some(_) => None,
+                None => {
+                    tracing::warn!("invalid native worker model override; using the default model");
+                    None
+                }
+            },
+        };
+        NativeWorkerOverride { enabled, model }
+    }
+
     /// The Owner's Agent system-prompt override, or `None` when the key is
     /// absent, empty, or not a string (the bundled prompt then stands). The
     /// value is Owner data: it is never logged, only length-reported.
@@ -344,6 +402,38 @@ impl ConfigStore {
             }
             document["subagent_models"][provider][model_id]["enabled_variants"] =
                 Item::Value(variants.into());
+            let contents = document.to_string();
+            (document, contents)
+        };
+        self.persist_and_replace(document, contents).await
+    }
+
+    /// Persist the native worker row. An absent `model` clears the override
+    /// rather than storing an empty string, so the shipped default is the one
+    /// representation of "no override".
+    pub async fn set_native_worker(
+        &self,
+        enabled: bool,
+        model: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.reload_if_changed();
+        let (document, contents) = {
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let mut document = inner.document.clone();
+            ensure_table(&mut document, "native_worker");
+            document["native_worker"]["enabled"] = value(enabled);
+            match model {
+                Some(model) => document["native_worker"]["model"] = value(model),
+                None => {
+                    if let Some(table) = document["native_worker"].as_table_like_mut() {
+                        table.remove("model");
+                    }
+                }
+            }
             let contents = document.to_string();
             (document, contents)
         };

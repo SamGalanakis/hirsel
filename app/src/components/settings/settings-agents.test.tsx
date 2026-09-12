@@ -6,6 +6,7 @@ import type {
   PromptSnapshot,
   ProviderRoster,
   SubagentModelCatalog,
+  SubagentNativeWorker,
 } from "../../protocol";
 
 // SettingsSheet reads the global `localStorage`; back it with an in-memory store
@@ -36,7 +37,19 @@ const MODEL: ModelSnapshot = {
   free_text_model: false,
 };
 
+const NATIVE_WORKER: SubagentNativeWorker = {
+  label: "Native worker",
+  enabled: true,
+  provider_id: "openrouter",
+  eligible_provider_ids: ["openrouter"],
+  model: "deepseek/deepseek-v4.1-flash",
+  default_model: "deepseek/deepseek-v4.1-flash",
+  model_override: null,
+  unavailable_reason: null,
+};
+
 const CATALOG: SubagentModelCatalog = {
+  native_worker: NATIVE_WORKER,
   providers: [
     {
       provider: "codex",
@@ -168,6 +181,7 @@ const PROMPTS: PromptSnapshot = {
 
 const setModel = vi.fn();
 const setSubagentModel = vi.fn();
+const setNativeWorker = vi.fn();
 const setAgentProvider = vi.fn();
 const setForkModel = vi.fn();
 
@@ -176,6 +190,7 @@ beforeEach(() => {
   memStore.clear();
   setModel.mockReset();
   setSubagentModel.mockReset();
+  setNativeWorker.mockReset();
   setAgentProvider.mockReset();
   setForkModel.mockReset();
   vi.stubGlobal("localStorage", memLocalStorage);
@@ -185,7 +200,7 @@ beforeEach(() => {
   vi.doMock("../../ws/client", () => ({
     clearStoredToken: vi.fn(),
     getStoredToken: () => "tok-abcd",
-    getClient: () => ({ setModel, setSubagentModel, setAgentProvider, setForkModel }),
+    getClient: () => ({ setModel, setSubagentModel, setNativeWorker, setAgentProvider, setForkModel }),
   }));
 });
 
@@ -354,6 +369,7 @@ describe("Settings → Agents: sub-agents", () => {
     store.dispatch({
       type: "subagent_models_changed",
       catalog: {
+        native_worker: NATIVE_WORKER,
         providers: [
           {
             ...CATALOG.providers[0],
@@ -603,6 +619,101 @@ describe("Settings → Agents: providers", () => {
 
   it("describes the preserved CLI choices as child Thread execution", async () => {
     const { getByText } = await mount({ subagent_models: CATALOG, providers: ROSTER });
-    expect(getByText(/Claude and Codex run\s+delegated work in the child conversation/i)).toBeTruthy();
+    expect(getByText(/Claude and Codex run\s+delegated work through their CLIs/i)).toBeTruthy();
+    expect(getByText(/the native worker runs inside this host/i)).toBeTruthy();
+  });
+});
+
+describe("Settings → Agents: native worker", () => {
+  it("renders the row with its effective model, route and controls", async () => {
+    const { getByLabelText, getByText } = await mount({
+      subagent_models: CATALOG,
+      providers: ROSTER,
+    });
+    expect(getByText("deepseek/deepseek-v4.1-flash")).toBeTruthy();
+    // The route names the provider instance by its roster label, not its id.
+    expect(getByText("Runs on OpenRouter.")).toBeTruthy();
+    expect(getByLabelText("Enable Native worker")).toBeTruthy();
+    expect(getByLabelText("Native worker model id")).toBeTruthy();
+  });
+
+  it("toggling enable sends the full row state", async () => {
+    const { getByLabelText } = await mount({ subagent_models: CATALOG });
+    fireEvent.click(getByLabelText("Enable Native worker"));
+    expect(setNativeWorker).toHaveBeenCalledWith(false, undefined);
+  });
+
+  it("saving a model id sends it beside the current enabled state", async () => {
+    const { getByLabelText } = await mount({ subagent_models: CATALOG });
+    const input = getByLabelText("Native worker model id") as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "  vendor/other  " } });
+    fireEvent.click(getByLabelText("Save Native worker model id"));
+    expect(setNativeWorker).toHaveBeenCalledWith(true, "vendor/other");
+  });
+
+  it("an emptied model id clears the override rather than sending a blank", async () => {
+    const { getByLabelText } = await mount({
+      subagent_models: {
+        ...CATALOG,
+        native_worker: {
+          ...NATIVE_WORKER,
+          model: "vendor/other",
+          model_override: "vendor/other",
+        },
+      },
+    });
+    const input = getByLabelText("Native worker model id") as HTMLInputElement;
+    expect(input.value).toBe("vendor/other");
+    fireEvent.input(input, { target: { value: "" } });
+    fireEvent.click(getByLabelText("Save Native worker model id"));
+    expect(setNativeWorker).toHaveBeenCalledWith(true, undefined);
+  });
+
+  it("settles the pending row on the catalog broadcast", async () => {
+    const { getByLabelText } = await mount({ subagent_models: CATALOG });
+    const toggle = () => getByLabelText("Enable Native worker");
+    fireEvent.click(toggle());
+    expect(toggle()).toBeDisabled();
+
+    const store = await import("../../store/store");
+    store.dispatch({
+      type: "subagent_models_changed",
+      catalog: { ...CATALOG, native_worker: { ...NATIVE_WORKER, enabled: false } },
+    });
+    await waitFor(() => expect(toggle()).not.toBeDisabled());
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("says why the worker cannot run when no provider can host it", async () => {
+    const { getByText, getByLabelText } = await mount({
+      subagent_models: {
+        ...CATALOG,
+        native_worker: {
+          ...NATIVE_WORKER,
+          provider_id: null,
+          eligible_provider_ids: [],
+          unavailable_reason: "No configured provider has an API key.",
+        },
+      },
+      providers: ROSTER,
+    });
+    expect(getByText("No configured provider has an API key.")).toBeTruthy();
+    // The row stays editable: the Owner can configure it before adding a key.
+    expect(getByLabelText("Enable Native worker")).not.toBeDisabled();
+  });
+
+  it("names the eligible instances when the default route is not configured", async () => {
+    const { getByText } = await mount({
+      subagent_models: {
+        ...CATALOG,
+        native_worker: {
+          ...NATIVE_WORKER,
+          provider_id: null,
+          eligible_provider_ids: ["local"],
+        },
+      },
+      providers: ROSTER,
+    });
+    expect(getByText("Each delegation names its provider: local.")).toBeTruthy();
   });
 });

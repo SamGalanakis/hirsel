@@ -82,7 +82,35 @@ pub struct SubagentProviderModels {
     pub models: Vec<SubagentModel>,
 }
 
+/// The native in-process Lash coding worker as a delegation target. It is not
+/// a CLI lane: there is no curated model list and no reasoning variant, only
+/// the OpenAI-compatible provider instance it is routed through and the model
+/// that route opens on.
+///
+/// `unavailable_reason` is the single availability signal — `Some` means no
+/// configured provider can host the worker, so the row explains itself instead
+/// of offering a control that cannot work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentNativeWorker {
+    pub label: String,
+    pub enabled: bool,
+    /// The provider instance a delegation that names none is routed through,
+    /// or `None` when that default instance is not configured.
+    pub provider_id: Option<String>,
+    /// Every configured provider instance eligible to host the worker; a
+    /// delegation may name any of them explicitly.
+    pub eligible_provider_ids: Vec<String>,
+    /// The model the default route opens on: the Owner's override when set,
+    /// otherwise the shipped default.
+    pub model: String,
+    pub default_model: String,
+    pub model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentModelCatalog {
     pub providers: Vec<SubagentProviderModels>,
+    pub native_worker: SubagentNativeWorker,
 }

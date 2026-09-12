@@ -1,6 +1,8 @@
 use anyhow::anyhow;
 use hirsel_drivers::AgentKind;
-use hirsel_proto::{SubagentModel, SubagentModelCatalog, SubagentProviderModels};
+use hirsel_proto::{
+    SubagentModel, SubagentModelCatalog, SubagentNativeWorker, SubagentProviderModels,
+};
 use serde_json::{Value, json};
 
 use crate::host_config::ConfigStore;
@@ -96,16 +98,15 @@ impl SubagentModelState {
     }
 
     /// The model-facing `threads.delegate` input contract. This is derived from
-    /// the same refreshed catalog used by Settings and execution validation.
+    /// the same refreshed catalog used by Settings and execution validation —
+    /// including the native worker row, so the Owner's enable switch and the
+    /// configured provider roster reach the tool contract by one path.
     pub fn delegation_input_schema(&self) -> Value {
-        Self::delegation_input_schema_for(&self.snapshot(), &[])
+        Self::delegation_input_schema_for(&self.snapshot())
     }
 
-    pub(crate) fn delegation_input_schema_for(
-        catalog: &SubagentModelCatalog,
-        native_worker_providers: &[String],
-    ) -> Value {
-        delegation_input_schema(catalog, native_worker_providers)
+    pub(crate) fn delegation_input_schema_for(catalog: &SubagentModelCatalog) -> Value {
+        delegation_input_schema(catalog)
     }
 
     pub fn resolve(
@@ -233,6 +234,24 @@ impl SubagentModelState {
             .await?;
         Ok(self.snapshot())
     }
+
+    /// Update the native worker row. The model is free text — there is no
+    /// curated registry behind this route — so it is validated the same way an
+    /// explicit delegate `model` is, and a blank one clears the override.
+    pub async fn set_native_worker(
+        &self,
+        enabled: bool,
+        model: Option<&str>,
+    ) -> anyhow::Result<SubagentModelCatalog> {
+        let model = match model.map(str::trim).filter(|model| !model.is_empty()) {
+            Some(model) => Some(crate::model_selection::validate_free_text(model)?.id),
+            None => None,
+        };
+        self.config_store
+            .set_native_worker(enabled, model.as_deref())
+            .await?;
+        Ok(self.snapshot())
+    }
 }
 
 fn unavailable_model_error(
@@ -273,6 +292,7 @@ fn catalog_from_store(config_store: &ConfigStore) -> SubagentModelCatalog {
         }
     }
     let mut catalog = registry_catalog();
+    catalog.native_worker = native_worker_from_store(config_store);
     for provider in &mut catalog.providers {
         let registry = registry_provider(&provider.provider)
             .expect("catalog provider mirrors static registry");
@@ -319,8 +339,53 @@ fn catalog_from_store(config_store: &ConfigStore) -> SubagentModelCatalog {
     catalog
 }
 
+/// The native worker row as the Owner configured it: the stored enable switch
+/// and model override, resolved against the provider instances that can
+/// actually host the worker right now.
+fn native_worker_from_store(config_store: &ConfigStore) -> SubagentNativeWorker {
+    let stored = config_store.native_worker_override();
+    let eligible = crate::providers::native_worker_provider_ids(config_store);
+    let provider_id = eligible
+        .iter()
+        .find(|id| id.as_str() == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID)
+        .cloned();
+    // Unavailable means exactly one thing: nothing can host the worker. A
+    // roster without the default instance is still usable — a delegation names
+    // one of the eligible instances explicitly — so it is not a refusal.
+    let unavailable_reason = eligible.is_empty().then(|| {
+        "No configured provider has an API key, so there is nothing to run the worker on."
+            .to_string()
+    });
+    SubagentNativeWorker {
+        label: "Native worker".to_string(),
+        enabled: stored.enabled,
+        provider_id,
+        eligible_provider_ids: eligible,
+        model: stored
+            .model
+            .clone()
+            .unwrap_or_else(|| crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string()),
+        default_model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string(),
+        model_override: stored.model,
+        unavailable_reason,
+    }
+}
+
 pub(crate) fn registry_catalog() -> SubagentModelCatalog {
     SubagentModelCatalog {
+        native_worker: SubagentNativeWorker {
+            label: "Native worker".to_string(),
+            enabled: true,
+            provider_id: None,
+            eligible_provider_ids: Vec::new(),
+            model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string(),
+            default_model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string(),
+            model_override: None,
+            unavailable_reason: Some(
+                "No configured provider has an API key, so there is nothing to run the worker on."
+                    .to_string(),
+            ),
+        },
         providers: REGISTRY
             .iter()
             .map(|provider| SubagentProviderModels {
@@ -350,10 +415,12 @@ pub(crate) fn registry_catalog() -> SubagentModelCatalog {
     }
 }
 
-fn delegation_input_schema(
-    catalog: &SubagentModelCatalog,
-    native_worker_providers: &[String],
-) -> Value {
+fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
+    let native_worker_providers: &[String] = if catalog.native_worker.enabled {
+        &catalog.native_worker.eligible_provider_ids
+    } else {
+        &[]
+    };
     let mut agents = vec!["host", "claude", "codex"];
     let mut branches = vec![
         json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["provider_id"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}),
@@ -418,394 +485,4 @@ fn registry_provider(provider: &str) -> Option<&'static RegistryProvider> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn test_state(dir: &tempfile::TempDir) -> SubagentModelState {
-        let store = ConfigStore::load(
-            dir.path().join("hirsel.toml"),
-            std::path::Path::new("/docs/hirsel-config.md"),
-            &crate::host_config::EnvBootstrap::default(),
-        )
-        .await
-        .unwrap();
-        SubagentModelState::load(store)
-    }
-
-    #[test]
-    fn registry_defaults_and_variants_are_valid() {
-        for provider in REGISTRY {
-            assert!(!provider.models.is_empty());
-            for model in provider.models {
-                assert!(!model.variants.is_empty());
-                assert!(model.variants.contains(&model.default_variant));
-            }
-        }
-    }
-
-    /// New choices do not reorder the existing CLI defaults or retune lanes.
-    #[test]
-    fn registry_preserves_existing_lanes_and_adds_supported_models() {
-        let catalog = registry_catalog();
-        let lanes = catalog
-            .providers
-            .iter()
-            .flat_map(|provider| provider.models.iter())
-            .map(|model| {
-                (
-                    model.id.as_str(),
-                    model.enabled,
-                    model.enabled_variants.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            lanes,
-            [
-                ("gpt-5.6-sol", true, vec!["high".to_string()]),
-                ("gpt-5.6-luna", true, vec!["max".to_string()]),
-                (
-                    "gpt-6-astra",
-                    true,
-                    vec!["low", "medium", "high", "xhigh", "max", "ultra"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect()
-                ),
-                ("claude-opus-5", true, vec!["high".to_string()]),
-                (
-                    "claude-fable-5-1",
-                    true,
-                    vec!["low", "medium", "high", "xhigh", "max"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect()
-                ),
-            ]
-        );
-    }
-
-    /// An explicit hirsel.toml override still wins over the shipped defaults.
-    #[tokio::test]
-    async fn overrides_win_over_default_enablement() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let is_enabled = |catalog: &SubagentModelCatalog, id: &str| {
-            catalog
-                .providers
-                .iter()
-                .flat_map(|provider| provider.models.iter())
-                .find(|model| model.id == id)
-                .unwrap()
-                .enabled
-        };
-
-        let catalog = state.snapshot();
-        assert!(is_enabled(&catalog, "gpt-5.6-luna"));
-
-        let catalog = state
-            .set("codex", "gpt-5.6-luna", false, &["max".to_string()])
-            .await
-            .unwrap();
-        assert!(!is_enabled(&catalog, "gpt-5.6-luna"));
-
-        let catalog = state
-            .set("codex", "gpt-5.6-luna", true, &["max".to_string()])
-            .await
-            .unwrap();
-        assert!(is_enabled(&catalog, "gpt-5.6-luna"));
-    }
-
-    #[tokio::test]
-    async fn persistence_round_trips_via_config_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        state
-            .set("claude", "claude-opus-5", false, &["high".to_string()])
-            .await
-            .unwrap();
-
-        let reloaded = test_state(&dir).await;
-        let catalog = reloaded.snapshot();
-        let opus = catalog.providers[1]
-            .models
-            .iter()
-            .find(|model| model.id == "claude-opus-5")
-            .unwrap();
-        assert!(!opus.enabled);
-        assert_eq!(opus.enabled_variants, ["high"]);
-    }
-
-    #[tokio::test]
-    async fn stale_persisted_model_is_ignored() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let mut text = std::fs::read_to_string(dir.path().join("hirsel.toml")).unwrap();
-        // Both a never-known model and a retired lane are ignored, not fatal.
-        text.push_str(
-            "\n[subagent_models.codex.retired-model]\nenabled = false\nenabled_variants = [\"high\"]\n\
-             \n[subagent_models.codex.\"gpt-5.6-terra\"]\nenabled = true\nenabled_variants = [\"medium\"]\n\
-             \n[subagent_models.claude.claude-sonnet-5]\nenabled = true\nenabled_variants = [\"medium\"]\n",
-        );
-        std::fs::write(dir.path().join("hirsel.toml"), text).unwrap();
-        let catalog = state.snapshot();
-        assert_eq!(
-            catalog.providers[0]
-                .models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra"]
-        );
-        assert_eq!(
-            catalog.providers[1]
-                .models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            ["claude-opus-5", "claude-fable-5-1"]
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_defaults_and_rejects_disabled_unknown_and_bad_variants() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        assert_eq!(
-            state.resolve(AgentKind::Claude, None, None).unwrap(),
-            ResolvedSubagentModel {
-                model_id: "claude-opus-5".to_string(),
-                variant: "high".to_string(),
-            }
-        );
-        assert_eq!(
-            state.resolve(AgentKind::Codex, None, None).unwrap(),
-            ResolvedSubagentModel {
-                model_id: "gpt-5.6-sol".to_string(),
-                variant: "high".to_string(),
-            }
-        );
-        assert_eq!(
-            state
-                .resolve(AgentKind::Codex, Some("gpt-5.6-luna"), None)
-                .unwrap()
-                .variant,
-            "max"
-        );
-        state
-            .set("claude", "claude-opus-5", false, &["high".to_string()])
-            .await
-            .unwrap();
-        assert!(
-            state
-                .resolve(AgentKind::Claude, Some("claude-opus-5"), None)
-                .unwrap_err()
-                .to_string()
-                .contains("enabled models: claude-fable-5-1")
-        );
-        assert!(
-            state
-                .resolve(AgentKind::Codex, Some("unknown"), None)
-                .is_err()
-        );
-        // Efforts outside the lane are rejected: there is no per-task tuning.
-        assert!(
-            state
-                .resolve(AgentKind::Codex, None, Some("xhigh"))
-                .is_err()
-        );
-        assert!(state.resolve(AgentKind::Codex, None, Some("high")).is_ok());
-    }
-
-    #[tokio::test]
-    async fn delegation_schema_tracks_enabled_models_and_variants() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let schema = state.delegation_input_schema();
-        let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
-        let spawn = |agent: &str, model: &str, effort: &str| {
-            json!({
-                "agent": agent,
-                "model": model,
-                "variant": effort,
-                "title":"Research", "brief": "Research Linear triage.", "artifact_ids":[]
-            })
-        };
-
-        assert!(
-            validator
-                .validate(&spawn("claude", "claude-opus-5", "high"))
-                .is_ok()
-        );
-        assert!(
-            validator
-                .validate(&spawn("codex", "gpt-5.6-luna", "max"))
-                .is_ok()
-        );
-        assert!(
-            validator
-                .validate(&spawn("codex", "gpt-5.6-luna", "high"))
-                .is_err()
-        );
-        assert!(
-            validator
-                .validate(&spawn("claude", "claude-sonnet-5", "high"))
-                .is_err()
-        );
-
-        state
-            .set("claude", "claude-opus-5", false, &["high".to_string()])
-            .await
-            .unwrap();
-        let validator = jsonschema::JSONSchema::compile(&state.delegation_input_schema()).unwrap();
-        assert!(
-            validator
-                .validate(&spawn("claude", "claude-opus-5", "high"))
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn new_models_resolve_persist_and_refresh_the_delegation_schema() {
-        for (agent, provider, id, default, efforts) in [
-            (
-                AgentKind::Codex,
-                "codex",
-                "gpt-6-astra",
-                "medium",
-                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
-            ),
-            (
-                AgentKind::Claude,
-                "claude",
-                "claude-fable-5-1",
-                "high",
-                &["low", "medium", "high", "xhigh", "max"][..],
-            ),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let state = test_state(&dir).await;
-            assert_eq!(
-                state.resolve(agent, Some(id), None).unwrap().variant,
-                default
-            );
-            let input = |effort: &str| json!({"agent":provider,"model":id,"variant":effort,"title":"Work","brief":"Do the work","artifact_ids":[]});
-            let validator =
-                jsonschema::JSONSchema::compile(&state.delegation_input_schema()).unwrap();
-            for effort in efforts {
-                assert_eq!(
-                    state
-                        .resolve(agent, Some(id), Some(effort))
-                        .unwrap()
-                        .variant,
-                    *effort
-                );
-                assert!(validator.is_valid(&input(effort)));
-            }
-            assert!(state.resolve(agent, Some(id), Some("impossible")).is_err());
-            assert!(!validator.is_valid(&input("impossible")));
-            assert!(
-                state
-                    .set(provider, id, true, &["impossible".into()])
-                    .await
-                    .is_err()
-            );
-
-            state
-                .set(provider, id, true, &["high".into()])
-                .await
-                .unwrap();
-            let restricted = test_state(&dir).await;
-            assert_eq!(
-                restricted.resolve(agent, Some(id), None).unwrap().variant,
-                "high"
-            );
-            assert!(restricted.resolve(agent, Some(id), Some("low")).is_err());
-            let validator =
-                jsonschema::JSONSchema::compile(&restricted.delegation_input_schema()).unwrap();
-            assert!(validator.is_valid(&input("high")));
-            assert!(!validator.is_valid(&input("low")));
-
-            restricted
-                .set(provider, id, false, &["high".into()])
-                .await
-                .unwrap();
-            let disabled = test_state(&dir).await;
-            assert!(disabled.resolve(agent, Some(id), None).is_err());
-            assert!(
-                !jsonschema::JSONSchema::compile(&disabled.delegation_input_schema())
-                    .unwrap()
-                    .is_valid(&input("high"))
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn set_rejects_empty_and_unknown_variant_sets() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        assert!(
-            state
-                .set("codex", "gpt-5.6-sol", true, &[])
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("at least one")
-        );
-        assert!(
-            state
-                .set("codex", "gpt-5.6-sol", true, &["impossible".to_string()],)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("unknown variants")
-        );
-    }
-
-    #[test]
-    fn native_lash_schema_exists_only_for_usable_providers() {
-        let catalog = registry_catalog();
-        let base = json!({
-            "agent":"lash",
-            "title":"Fix it",
-            "brief":"Repair and verify the bug.",
-            "artifact_ids":[]
-        });
-        let absent = SubagentModelState::delegation_input_schema_for(&catalog, &[]);
-        assert_eq!(
-            absent["properties"]["agent"]["enum"],
-            json!(["host", "claude", "codex"])
-        );
-        assert!(
-            !jsonschema::JSONSchema::compile(&absent)
-                .unwrap()
-                .is_valid(&base)
-        );
-
-        let schema = SubagentModelState::delegation_input_schema_for(
-            &catalog,
-            &["openrouter".into(), "local".into()],
-        );
-        let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
-        assert!(
-            validator.is_valid(&base),
-            "OpenRouter has the curated default"
-        );
-        assert!(validator.is_valid(&json!({
-            "agent":"lash", "provider_id":"openrouter", "model":"other/model",
-            "variant":"default", "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-        })));
-        assert!(validator.is_valid(&json!({
-            "agent":"lash", "provider_id":"local", "model":"local-model",
-            "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-        })));
-        assert!(!validator.is_valid(&json!({
-            "agent":"lash", "provider_id":"local",
-            "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-        })));
-        assert!(!validator.is_valid(&json!({
-            "agent":"lash", "provider_id":"missing", "model":"m",
-            "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-        })));
-    }
-}
+mod tests;

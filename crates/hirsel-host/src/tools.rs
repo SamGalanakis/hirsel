@@ -116,10 +116,6 @@ impl ToolSuite {
         self.subagent_models.snapshot()
     }
 
-    pub(crate) fn native_worker_provider_ids(&self) -> Vec<String> {
-        self.providers.native_worker_provider_ids()
-    }
-
     pub(crate) fn capture_native_worker_provider(
         &self,
         provider_id: Option<&str>,

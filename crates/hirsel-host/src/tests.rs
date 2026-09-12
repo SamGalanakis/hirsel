@@ -394,6 +394,39 @@ async fn set_subagent_model_persists_and_broadcasts_catalog() {
     assert!(persisted.contains("enabled_variants = [\"high\"]"));
 }
 
+/// The native worker row settles like any other Sub-agent model edit: persisted
+/// to `hirsel.toml`, then broadcast as the whole catalog.
+#[tokio::test]
+async fn set_native_worker_persists_and_broadcasts_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(test_config(dir.path())).await.unwrap();
+    let catalog = state
+        .set_native_worker(false, Some("vendor/owner-choice"))
+        .await
+        .unwrap();
+    assert!(!catalog.native_worker.enabled);
+    assert_eq!(catalog.native_worker.model, "vendor/owner-choice");
+    assert!(state.broadcast_log.recent().iter().any(|event| matches!(
+        event,
+        HostToClient::SubagentModelsChanged { catalog }
+            if !catalog.native_worker.enabled
+                && catalog.native_worker.model == "vendor/owner-choice"
+    )));
+    let persisted = std::fs::read_to_string(dir.path().join("hirsel.toml")).unwrap();
+    assert!(persisted.contains("[native_worker]"), "{persisted}");
+    assert!(
+        persisted.contains("model = \"vendor/owner-choice\""),
+        "{persisted}"
+    );
+    // Re-sending the same row is a no-op edit and does not re-broadcast.
+    let before = state.broadcast_log.recent().len();
+    state
+        .set_native_worker(false, Some("vendor/owner-choice"))
+        .await
+        .unwrap();
+    assert_eq!(state.broadcast_log.recent().len(), before);
+}
+
 #[tokio::test]
 async fn canvas_view_event_enters_its_origin_thread_as_owner_message() {
     let dir = tempfile::tempdir().unwrap();

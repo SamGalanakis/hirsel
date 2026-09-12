@@ -514,6 +514,16 @@ fn model_selection_frames_use_snake_case_protocol_names() {
                 enabled: true,
             }],
         }],
+        native_worker: SubagentNativeWorker {
+            label: "Native worker".to_string(),
+            enabled: true,
+            provider_id: Some("openrouter".to_string()),
+            eligible_provider_ids: vec!["openrouter".to_string()],
+            model: "deepseek/deepseek-v4.1-flash".to_string(),
+            default_model: "deepseek/deepseek-v4.1-flash".to_string(),
+            model_override: None,
+            unavailable_reason: None,
+        },
     };
     let event = HostToClient::SubagentModelsChanged {
         catalog: catalog.clone(),
@@ -533,7 +543,16 @@ fn model_selection_frames_use_snake_case_protocol_names() {
                         "enabled_variants": ["low", "high"],
                         "enabled": true
                     }]
-                }]
+                }],
+                "native_worker": {
+                    "label": "Native worker",
+                    "enabled": true,
+                    "provider_id": "openrouter",
+                    "eligible_provider_ids": ["openrouter"],
+                    "model": "deepseek/deepseek-v4.1-flash",
+                    "default_model": "deepseek/deepseek-v4.1-flash",
+                    "model_override": null
+                }
             }
         })
     );
@@ -549,6 +568,44 @@ fn model_selection_frames_use_snake_case_protocol_names() {
     assert_eq!(
         serde_json::from_value::<HostToClient>(serde_json::to_value(event).unwrap()).unwrap(),
         HostToClient::SubagentModelsChanged { catalog }
+    );
+
+    // The native worker row travels as its own command: a free-text model and
+    // no variants do not fit `set_subagent_model`'s curated-row shape.
+    let command = ClientToHost::SetNativeWorker {
+        enabled: true,
+        model: Some("z-ai/glm-5".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&command).unwrap(),
+        json!({"type": "set_native_worker", "enabled": true, "model": "z-ai/glm-5"})
+    );
+    assert_eq!(
+        serde_json::from_value::<ClientToHost>(serde_json::to_value(command).unwrap()).unwrap(),
+        ClientToHost::SetNativeWorker {
+            enabled: true,
+            model: Some("z-ai/glm-5".to_string()),
+        }
+    );
+    // An absent model is "use the shipped default", and it stays absent on the
+    // wire rather than travelling as an empty string.
+    assert_eq!(
+        serde_json::to_value(ClientToHost::SetNativeWorker {
+            enabled: false,
+            model: None,
+        })
+        .unwrap(),
+        json!({"type": "set_native_worker", "enabled": false})
+    );
+    assert_eq!(
+        serde_json::from_value::<ClientToHost>(
+            json!({"type": "set_native_worker", "enabled": false})
+        )
+        .unwrap(),
+        ClientToHost::SetNativeWorker {
+            enabled: false,
+            model: None,
+        }
     );
 }
 

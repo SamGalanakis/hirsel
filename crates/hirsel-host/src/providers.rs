@@ -306,17 +306,7 @@ impl ProviderRosterState {
     /// Built-in CLI logins are intentionally absent: they are execution
     /// backends, not OpenAI-compatible API credentials.
     pub(crate) fn native_worker_provider_ids(&self) -> Vec<String> {
-        self.config_store
-            .providers()
-            .into_iter()
-            .filter(|provider| {
-                provider
-                    .api_key
-                    .as_deref()
-                    .is_some_and(|key| !key.is_empty())
-            })
-            .map(|provider| provider.id)
-            .collect()
+        native_worker_provider_ids(&self.config_store)
     }
 
     /// Capture public identity plus a private-config revision at acceptance.
@@ -413,6 +403,23 @@ impl ProviderRosterState {
             _ => provider_detect::detect_codex(home).await,
         }
     }
+}
+
+/// Provider ids currently usable by an in-process native Lash worker, read
+/// straight from the stored roster. The Sub-agent model catalog needs the same
+/// answer without owning a [`ProviderState`], so the rule lives here once.
+pub(crate) fn native_worker_provider_ids(config_store: &ConfigStore) -> Vec<String> {
+    config_store
+        .providers()
+        .into_iter()
+        .filter(|provider| {
+            provider
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.is_empty())
+        })
+        .map(|provider| provider.id)
+        .collect()
 }
 
 fn native_worker_snapshot(provider: &StoredProvider) -> NativeWorkerProviderSnapshot {

@@ -201,6 +201,27 @@ enabled = true
 enabled_variants = ["low", "medium", "high", "xhigh", "max"]
 ```
 
+### Native worker
+
+The in-process Lash coding worker (`agent = "lash"` in `threads.delegate`) is
+not a CLI lane: it has no curated model list and no reasoning efforts, so it has
+its own row. `enabled` is the master switch — while it is off, the `lash` branch
+is absent from the delegation contract entirely. `model` overrides the model the
+default route opens on; omit it for the shipped default
+(`deepseek/deepseek-v4.1-flash`). A delegation that names its own `model` still
+wins over both.
+
+The worker runs on the provider instances in `[providers]` that have an API key.
+A delegation that names no `provider_id` is routed through `openrouter`; any
+other eligible instance has to be named explicitly, together with a model. With
+no keyed instance configured the worker is unavailable and Settings says so.
+
+```toml
+[native_worker]
+enabled = true
+model = "deepseek/deepseek-v4.1-flash"
+```
+
 Generative-UI templates live in the templates directory; see `templates/CATALOG.md`.
 
 ## Filesystem skills

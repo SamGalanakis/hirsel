@@ -1,8 +1,8 @@
-import { ChevronDown } from "@/components/ui/icons";
+import { ChevronDown, LoaderCircle } from "@/components/ui/icons";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { type JSX } from "@solidjs/web";
 import { createPendingKeys } from "../../lib/pending";
-import type { ModelSelection, SubagentModel } from "../../protocol";
+import type { ModelSelection, SubagentModel, SubagentNativeWorker } from "../../protocol";
 import { state } from "../../store/store";
 import { getClient } from "../../ws/client";
 import {
@@ -14,6 +14,8 @@ import {
   providerLabel,
   settleOnProtocolError,
 } from "./agent-config";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import { ForkAgentSection } from "./ForkAgentSection";
 import { titleCase } from "./prefs";
 import { Group, SubHeading, Toggle } from "./rows";
@@ -234,20 +236,135 @@ function SubagentModelRow(props: {
   );
 }
 
+
+/** Where a native-worker delegation actually lands, said plainly. Three honest
+ * states: nothing can host it, the default instance hosts it, or the roster has
+ * instances but not the default one — in which case each delegation names its
+ * own, and saying so is more use than a badge that reads "unavailable". */
+function nativeWorkerRoute(worker: SubagentNativeWorker): string {
+  if (worker.unavailable_reason) return worker.unavailable_reason;
+  const label = (id: string) =>
+    state.providers?.instances.find((instance) => instance.id === id)?.label ?? id;
+  if (worker.provider_id) return `Runs on ${label(worker.provider_id)}.`;
+  return `Each delegation names its provider: ${worker.eligible_provider_ids
+    .map(label)
+    .join(", ")}.`;
+}
+
+/** The native worker row: one in-process coding worker, not a CLI lane. It has
+ * no curated model list and no reasoning variants, so the row is an enable
+ * switch plus the free-text model its default route opens on — the same
+ * full-state upsert and broadcast settle as the rows above it. */
+function NativeWorkerRow(props: {
+  worker: SubagentNativeWorker;
+  pending: boolean;
+  onChange: (next: { enabled: boolean; model?: string }) => void;
+}) {
+  const [draft, setDraft] = createSignal(props.worker.model_override ?? "");
+  let settled = props.worker.model_override ?? "";
+  createEffect(() => props.worker.model_override ?? "", (next) => {
+    if (next !== settled) {
+      settled = next;
+      setDraft(next);
+    }
+  });
+
+  const override = () => {
+    const trimmed = draft().trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+
+  return (
+    <>
+      <div class={["py-3 transition-opacity", { "opacity-60": props.pending }]}>
+        <div class="flex items-center gap-3">
+          {/* The group heading already names the worker, so the row's own
+              identity is the model this route opens on — the one fact the
+              toggle is actually switching on and off. */}
+          <div class="min-w-0 flex-1">
+            <div class="truncate font-mono text-sm text-foreground">{props.worker.model}</div>
+            <div class="mt-0.5 text-xs leading-snug text-muted-foreground">
+              {nativeWorkerRoute(props.worker)}
+            </div>
+          </div>
+          <Toggle
+            ariaLabel={`Enable ${props.worker.label}`}
+            checked={props.worker.enabled}
+            disabled={props.pending}
+            onChange={(enabled) => props.onChange({ enabled, model: override() })}
+          />
+        </div>
+      </div>
+      <div
+        class={["py-3 transition-opacity", { "opacity-45": !props.worker.enabled }]}
+        aria-disabled={(!props.worker.enabled) ? "true" : "false"}
+      >
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex min-w-0 items-center gap-2">
+            <span class="text-sm text-foreground">Model</span>
+            <Show when={props.pending}>
+              <LoaderCircle
+                class="size-3.5 shrink-0 animate-spin text-muted-foreground"
+                aria-label="Saving"
+              />
+            </Show>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <Input
+              aria-label={`${props.worker.label} model id`}
+              class="h-9 w-[12rem] rounded-lg border border-border bg-surface px-2.5 font-mono text-xs text-foreground transition-colors hover:border-input focus-visible:ring-2 focus-visible:ring-ring"
+              value={draft()}
+              disabled={props.pending || !props.worker.enabled}
+              placeholder={props.worker.default_model}
+              autocomplete="off"
+              spellcheck={false}
+              onInput={(event) => setDraft(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter")
+                  props.onChange({ enabled: props.worker.enabled, model: override() });
+              }}
+            />
+            <Button
+              size="sm"
+              class="h-9"
+              aria-label={`Save ${props.worker.label} model id`}
+              disabled={props.pending || !props.worker.enabled}
+              onClick={() => props.onChange({ enabled: props.worker.enabled, model: override() })}
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+        <p class="mt-1.5 text-xs leading-snug text-muted-foreground">
+          Leave it empty to use the shipped default. A delegation that names its own model still
+          wins.
+        </p>
+      </div>
+    </>
+  );
+}
+
 /** The Sub-agent model catalog, grouped by provider. Hidden when the host
  * reports no catalog (older hosts). */
 function SubagentModels() {
   const catalog = () => state.subagentModels;
   const [collapsedProviders, setCollapsedProviders] = createSignal<Set<string>>(new Set());
-  const catalogVersion = () =>
-    catalog()
-      ?.providers.flatMap((provider) =>
+  const catalogVersion = () => {
+    const current = catalog();
+    if (!current) return "";
+    const worker = current.native_worker;
+    return [
+      ...current.providers.flatMap((provider) =>
         provider.models.map(
           (model) =>
             `${provider.provider}:${model.id}:${model.enabled}:${model.enabled_variants.join(",")}`,
         ),
-      )
-      .join("|") ?? "";
+      ),
+      // The native worker settles on the same broadcast, so its state is part
+      // of the version the pending set is cleared by.
+      `lash:${worker?.enabled}:${worker?.model}:${worker?.provider_id}:${worker?.eligible_provider_ids.join(",")}`,
+    ].join("|");
+  };
 
   // Rows awaiting the broadcast, keyed `provider\u0000modelId`. Cleared whenever
   // the catalog content changes (a broadcast settled the truth); Solid's store
@@ -264,6 +381,7 @@ function SubagentModels() {
   const keyOf = (provider: string, id: string) => `${provider}\u0000${id}`;
   const providerPanelId = (provider: string) => `subagent-provider-${provider}`;
   const isCollapsed = (provider: string) => collapsedProviders().has(provider);
+  const NATIVE_WORKER_GROUP = "native-worker";
 
   function toggleProvider(provider: string) {
     setCollapsedProviders((current) => {
@@ -290,7 +408,8 @@ function SubagentModels() {
       <SubHeading>Delegation models</SubHeading>
       <p class="mb-2 text-xs leading-snug text-muted-foreground">
         Choose models and reasoning levels for focused child Threads. Claude and Codex run
-        delegated work in the child conversation; its progress and results return to its parent.
+        delegated work through their CLIs; the native worker runs inside this host on a configured
+        provider. Progress and results return to the parent conversation either way.
       </p>
       <div class="flex flex-col gap-3">
         <For each={catalog()?.providers ?? []}>
@@ -331,6 +450,42 @@ function SubagentModels() {
             </div>
           )}
         </For>
+        <Show when={catalog()?.native_worker}>
+          {(worker) => (
+            <div>
+              <button
+                type="button"
+                aria-expanded={(!isCollapsed(NATIVE_WORKER_GROUP)) ? "true" : "false"}
+                aria-controls={providerPanelId(NATIVE_WORKER_GROUP)}
+                aria-label={`${isCollapsed(NATIVE_WORKER_GROUP) ? "Expand" : "Collapse"} ${worker().label}`}
+                onClick={() => toggleProvider(NATIVE_WORKER_GROUP)}
+                class="mb-1 flex min-h-8 w-full items-center justify-between rounded-lg text-xs font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11"
+              >
+                <span>{worker().label}</span>
+                <ChevronDown
+                  aria-hidden="true"
+                  class={["size-3.5 transition-transform duration-200 ease-out", { "-rotate-90": isCollapsed(NATIVE_WORKER_GROUP) }]}
+
+                />
+              </button>
+              <Show when={!isCollapsed(NATIVE_WORKER_GROUP)}>
+                <Group
+                  id={providerPanelId(NATIVE_WORKER_GROUP)}
+                  class="divide-y divide-border"
+                >
+                  <NativeWorkerRow
+                    worker={worker()}
+                    pending={pending.isPending(NATIVE_WORKER_GROUP)}
+                    onChange={(next) => {
+                      pending.begin(NATIVE_WORKER_GROUP);
+                      getClient()?.setNativeWorker(next.enabled, next.model);
+                    }}
+                  />
+                </Group>
+              </Show>
+            </div>
+          )}
+        </Show>
       </div>
     </Show>
   );

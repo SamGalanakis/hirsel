@@ -207,6 +207,18 @@ class HirselWsClient {
     });
   }
 
+  /** Update the native worker row's full state (enabled + model override). An
+   * empty or absent model clears the override. Settles on
+   * `subagent_models_changed`. */
+  setNativeWorker(enabled: boolean, model?: string): void {
+    const trimmed = model?.trim();
+    this.enqueue({
+      type: "set_native_worker",
+      enabled,
+      ...(trimmed ? { model: trimmed } : {}),
+    });
+  }
+
   /** Persist the main Agent's editable prompt body. Empty resets to bundled. */
   setAgentPrompt(text: string): void {
     this.enqueue({ type: "set_agent_prompt", text });

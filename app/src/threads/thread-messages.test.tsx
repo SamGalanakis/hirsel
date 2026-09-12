@@ -8,12 +8,13 @@ import type { ThreadActivity } from "./types";
 const message = (author: ChatMessage["author"]): ChatMessage => ({ id: 1, thread_id: 1, author, body: "Ready when you are", ref: null, ts: "2026-09-09T10:00:00Z", tool_calls: [] });
 const row = (author: ChatMessage["author"]) => render(() => <ThreadMessage entry={{ key: `message-1`, kind: "message", message: message(author) }} history={emptyHistory()} threadId={1} />).container.querySelector<HTMLElement>("article")!;
 describe("who is speaking", () => {
-  it("seats the Owner right in a light fill at conversational width", () => {
+  it("seats the Owner right in the filled emphasis pair at conversational width", () => {
     const article = row("owner");
     expect(article).toHaveAttribute("data-author", "owner");
     expect(article.className).toContain("flex-row-reverse");
     const bubble = article.querySelector<HTMLElement>('[data-slot="owner-message"]')!;
-    expect(bubble.className).toContain("bg-muted");
+    expect(bubble.className).toContain("bg-primary");
+    expect(bubble.className).toContain("text-primary-foreground");
     expect(bubble.className).toContain("sm:max-w-[60%]");
   });
   it("seats the Agent left on a neutral surface that keeps the measure", () => {

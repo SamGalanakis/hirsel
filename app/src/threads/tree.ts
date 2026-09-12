@@ -33,7 +33,9 @@ function rootOrder(a: Thread, b: Thread): number {
 export interface ThreadTreeRow { thread: Thread; depth: number; context: boolean; hasChildren: boolean; expanded: boolean }
 /** Filter matches keep their ancestry. Pinned roots sort first in the same forest;
  * every Thread appears once. Defensive traversal keeps malformed snapshots bounded. */
-export function threadTree(threads: Thread[], section: ThreadSection, now: number, expanded: ReadonlySet<number>): ThreadTreeRow[] {
+export type ThreadExpansion = ReadonlySet<number> | ((thread: Thread, depth: number) => boolean);
+export function threadTree(threads: Thread[], section: ThreadSection, now: number, expanded: ThreadExpansion): ThreadTreeRow[] {
+  const isExpanded = typeof expanded === "function" ? expanded : (thread: Thread) => expanded.has(thread.id);
   const included = new Set<number>();
   const matches = new Set(threads.filter(thread => threadSection(thread, now) === section).map(thread => thread.id));
   const contextParents = new Set<number>();
@@ -59,7 +61,7 @@ export function threadTree(threads: Thread[], section: ThreadSection, now: numbe
       if (seen.has(thread.id)) continue;
       seen.add(thread.id);
       const nested = children.get(thread.id) ?? [];
-      const open = expanded.has(thread.id) || contextParents.has(thread.id);
+      const open = nested.length > 0 && (isExpanded(thread, depth) || contextParents.has(thread.id));
       rows.push({ thread, depth, context: !matches.has(thread.id), hasChildren: nested.length > 0, expanded: open });
       if (open) stack.push(...nested.toReversed().map(child => ({ thread: child, depth: depth + 1 })));
       else {

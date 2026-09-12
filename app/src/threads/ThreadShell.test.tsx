@@ -189,6 +189,8 @@ describe("thread workspace", () => {
   it("creates through the correlated host contract and focuses its visible row", async () => {
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
+    // Creation is summoned, not standing: the drawer's own "+" opens the inline draft row.
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Spaces and Tasks" })).getByRole("button", { name: "New Space or Task" }));
     fireEvent.input(screen.getByLabelText("New space or task title"), { target: { value: "Buy milk" } });
     fireEvent.click(screen.getByRole("button", { name: "New Space" }));
     const frame = sent.find(f => f.type === "create_thread");
@@ -233,7 +235,10 @@ describe("thread workspace", () => {
       ],
     }; }));
     const screen = render(() => <ThreadShell />);
-    expect(screen.getByText("Your shopping list is ready.").closest("details")).toBeNull();
+    // A routine note is one centred muted line, not a third speaking bubble.
+    const note = screen.getByText(/Your shopping list is ready\./);
+    expect(note.closest("details")).toBeNull();
+    expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
     expect(screen.queryByText(/"message": "Execution diagnostics"/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Turn options" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Technical details" }));
@@ -292,10 +297,16 @@ describe("thread workspace", () => {
     flush(() => setThreadState(draft => { draft.threads[1].running_turn = draft.histories[1].turns[0]; }));
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
-    const row = within(screen.container.querySelector<HTMLElement>('[data-thread-row="1"]')!);
+    const element = screen.container.querySelector<HTMLElement>('[data-thread-row="1"]')!;
+    const row = within(element);
     expect(row.getByRole("img", { name: "Unread" })).toBeInTheDocument();
-    expect(row.getByText("Needs you")).toBeInTheDocument();
-    expect(row.getByText(/Working/)).toBeInTheDocument();
+    // The dense row states attention and execution in one accessible sentence,
+    // shows attention as the leading indicator and the elapsed time as its measure.
+    expect(element.getAttribute("aria-label")).toContain("Needs you");
+    expect(element.getAttribute("aria-label")).toContain("Working");
+    expect(element.getAttribute("title")).toContain("Working");
+    expect(element.querySelector('[data-slot="thread-row-indicator"]')).toHaveAttribute("data-indicator", "attention");
+    expect(element.querySelector('[data-slot="thread-row-meta"]')?.textContent).toMatch(/^\d+[mhd]/);
     for (const [section, id] of [["done", 2], ["snoozed", 3], ["archived", 4]] as const) {
       fireEvent.click(screen.getByRole("button", { name: /Filter work:/ }));
       fireEvent.click(screen.getByRole("menuitemradio", { name: section }));

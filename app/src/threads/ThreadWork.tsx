@@ -16,7 +16,15 @@ export function ActivityEntry(props: { activity: ThreadActivity }) {
   const data = () => props.activity.data as Record<string, unknown>;
   const report = () => props.activity.kind === "child_report";
   const assignment = () => props.activity.kind === "delegation_received";
-  return <article data-activity-id={props.activity.id} class="space-y-2">
+  /** A routine note is neither party speaking: one centred muted line between
+   * the two columns, never a third bubble competing with them. */
+  const note = () => !report() && !assignment() && props.activity.artifact_ids.length === 0 && ownerFacingActivity(props.activity)
+    && !activityText(props.activity).includes("\n") && activityText(props.activity).length <= 120;
+  return <Show when={!note()} fallback={<article data-activity-id={props.activity.id} data-slot="conversation-note" class="flex items-center gap-3 text-meta text-muted-foreground">
+    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
+    <span class="min-w-0 max-w-[80%] truncate text-center">{activityText(props.activity)} · <time datetime={props.activity.ts}>{new Date(props.activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>
+    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
+  </article>}><article data-activity-id={props.activity.id} class="space-y-2">
     <Show when={ownerFacingActivity(props.activity)} fallback={<ThreadWork activities={[props.activity]} events={[]} />}>
       <p class="flex flex-wrap items-center gap-x-1 text-xs font-medium text-muted-foreground">
         <Show when={report()} fallback={<Show when={assignment()} fallback="Hirsel">Brief from <ThreadLink id={Number(data().requester_thread_id)} /></Show>}>
@@ -27,7 +35,7 @@ export function ActivityEntry(props: { activity: ThreadActivity }) {
       <Markdown>{activityText(props.activity)}</Markdown>
       <For each={props.activity.artifact_ids}>{id => <ArtifactCard id={id} />}</For>
     </Show>
-  </article>;
+  </article></Show>;
 }
 /** One exact turn/message. No global inspector and no positional association. */
 export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; activities: ThreadActivity[]; events: TimelineEvent[]; live?: boolean }) {

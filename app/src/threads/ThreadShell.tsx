@@ -147,7 +147,7 @@ function PendingMessageRow(props: { message: (typeof threadState.pending)[number
       document.querySelector<HTMLTextAreaElement>(`main[data-thread-id="${threadId}"] [data-composer="main"]`)?.focus();
     });
   });
-  return <article class={`ml-6 rounded-xl bg-muted/65 px-4 py-3 ${props.message.failed ? "" : "opacity-70"}`}><Markdown>{props.message.body}</Markdown><For each={props.message.artifactIds}>{id => <ArtifactCard id={id} />}</For><span class="text-xs">{props.message.failed ? "Failed to send" : state.connection === "connected" ? "Sending…" : "Waiting for connection…"}</span><Show when={props.message.failed}><button class={button} ref={node => { retryButton = node; }} onFocus={() => { ownsFocus = true; }} onClick={() => retryThreadMessage(props.message.clientId)}>Retry</button></Show></article>;
+  return <article data-author="owner" class={`ml-auto max-w-[85%] rounded-xl rounded-br-sm bg-muted px-3.5 py-2.5 sm:max-w-[60%] ${props.message.failed ? "" : "opacity-70"}`}><Markdown>{props.message.body}</Markdown><For each={props.message.artifactIds}>{id => <ArtifactCard id={id} />}</For><span class="text-xs">{props.message.failed ? "Failed to send" : state.connection === "connected" ? "Sending…" : "Waiting for connection…"}</span><Show when={props.message.failed}><button class={button} ref={node => { retryButton = node; }} onFocus={() => { ownsFocus = true; }} onClick={() => retryThreadMessage(props.message.clientId)}>Retry</button></Show></article>;
 }
 
 function ThreadStart(props: { globalArtifacts: boolean; onSelect: (id: number) => void }) {

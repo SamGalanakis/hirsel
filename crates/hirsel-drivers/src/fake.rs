@@ -32,6 +32,8 @@ struct FakeFixture {
     #[serde(default = "default_fake_progress")]
     progress: Vec<String>,
     #[serde(default)]
+    events: Vec<SubagentEvent>,
+    #[serde(default)]
     delay_ms: u64,
     #[serde(default = "default_fake_terminal")]
     terminal: TerminalOutcome,
@@ -61,6 +63,7 @@ impl Default for FakeFixture {
         Self {
             external_id: default_fake_external_id(),
             progress: default_fake_progress(),
+            events: Vec::new(),
             delay_ms: 10,
             terminal: default_fake_terminal(),
             assistant_output: Some("fake driver completed".into()),
@@ -100,6 +103,15 @@ impl SubagentDriver for FakeDriver {
                 let _ = events.emit(SubagentEvent::Progress {
                     summary: short_line(progress),
                 });
+            }
+            for event in fixture.events {
+                if fixture.delay_ms > 0 {
+                    sleep(Duration::from_millis(fixture.delay_ms)).await;
+                }
+                if events.is_terminal() {
+                    return;
+                }
+                let _ = events.emit(event);
             }
             if fixture.delay_ms > 0 {
                 sleep(Duration::from_millis(fixture.delay_ms)).await;

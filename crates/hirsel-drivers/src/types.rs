@@ -6,6 +6,7 @@ use std::{collections::HashSet, ffi::OsString, fmt, path::PathBuf, pin::Pin};
 use async_trait::async_trait;
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = SubagentEvent> + Send>>;
@@ -129,6 +130,17 @@ pub enum SubagentEvent {
     },
     Progress {
         summary: String,
+    },
+    ToolStarted {
+        call_id: String,
+        name: String,
+        args: Value,
+    },
+    ToolCompleted {
+        call_id: String,
+        name: String,
+        ok: bool,
+        output: Value,
     },
     /// Complete final assistant text, independent of bounded process summaries.
     AssistantOutput {

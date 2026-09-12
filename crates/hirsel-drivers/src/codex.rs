@@ -35,7 +35,7 @@ mod config;
 #[path = "codex_io.rs"]
 mod io;
 pub(crate) use io::{codex_agent_message, codex_terminal_outcome};
-use io::{codex_progress, read_codex_stdout};
+use io::{codex_progress, codex_tool_event, read_codex_stdout};
 
 #[derive(Default)]
 pub struct CodexDriver {
@@ -257,7 +257,9 @@ impl CodexSession {
             // An unknown-phase message preceding more work is not a final answer.
             state.last_agent_message = None;
         }
-        if let Some(summary) = codex_progress(&value) {
+        if let Some(event) = codex_tool_event(&value) {
+            let _ = self.events.emit(event);
+        } else if let Some(summary) = codex_progress(&value) {
             let _ = self.events.emit(SubagentEvent::Progress { summary });
         }
         if method == Some("turn/completed") {

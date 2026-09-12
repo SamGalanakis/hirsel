@@ -523,6 +523,48 @@ async fn supplied_mcp_helper_is_launched_and_recursive_tools_are_called() {
 }
 
 #[tokio::test]
+async fn command_and_mcp_items_emit_structured_tool_pairs() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "tool-events").await.unwrap();
+    let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
+    let structured = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SubagentEvent::ToolStarted { .. } | SubagentEvent::ToolCompleted { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        structured.as_slice(),
+        [
+            SubagentEvent::ToolStarted { call_id: command_start, name: command_name, args: command_args },
+            SubagentEvent::ToolCompleted { call_id: command_done, name: command_done_name, ok: true, output: command_output },
+            SubagentEvent::ToolStarted { call_id: mcp_start, name: mcp_name, args: mcp_args },
+            SubagentEvent::ToolCompleted { call_id: mcp_done, name: mcp_done_name, ok: true, output: mcp_output }
+        ] if command_start == "cmd-1"
+            && command_done == command_start
+            && command_name == "shell_run"
+            && command_done_name == command_name
+            && command_args["cmd"] == "printf hello"
+            && command_output["stdout"] == "hello"
+            && mcp_start == "mcp-1"
+            && mcp_done == mcp_start
+            && mcp_name == "mcp__external__lookup"
+            && mcp_done_name == mcp_name
+            && mcp_args == &json!({"query":"hirsel"})
+            && mcp_output["content"][0]["text"] == "found"
+    ));
+    assert!(!events.iter().any(
+        |event| matches!(event, SubagentEvent::Progress { summary } if matches!(summary.as_str(), "userMessage" | "reasoning" | ""))
+    ));
+    driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
 async fn complete_output_precedes_one_terminal_and_is_never_the_bounded_summary() {
     for mode in [
         "long-output",

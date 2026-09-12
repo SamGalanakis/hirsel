@@ -171,6 +171,14 @@ for line in sys.stdin:
             event('item/completed', item={'type': 'agentMessage', 'text': json.dumps({'context': context, 'child': child})})
             complete()
             sys.exit(0)
+        if mode == 'tool-events':
+            event('item/started', item={'type': 'commandExecution', 'id': 'cmd-1', 'command': 'printf hello', 'cwd': directory, 'commandActions': [], 'status': 'inProgress'})
+            event('item/completed', item={'type': 'commandExecution', 'id': 'cmd-1', 'command': 'printf hello', 'cwd': directory, 'commandActions': [], 'status': 'completed', 'aggregatedOutput': 'hello', 'exitCode': 0, 'durationMs': 12})
+            event('item/started', item={'type': 'mcpToolCall', 'id': 'mcp-1', 'server': 'external', 'tool': 'lookup', 'arguments': {'query': 'hirsel'}, 'status': 'inProgress'})
+            event('item/completed', item={'type': 'mcpToolCall', 'id': 'mcp-1', 'server': 'external', 'tool': 'lookup', 'arguments': {'query': 'hirsel'}, 'status': 'completed', 'result': {'content': [{'type': 'text', 'text': 'found'}]}, 'durationMs': 7})
+            event('item/completed', item={'type': 'agentMessage', 'text': 'tool events complete'})
+            complete()
+            sys.exit(0)
         if mode in ['missing-status', 'invalid-status', 'empty-done', 'long-output', 'failed-final']:
             if mode in ['long-output', 'failed-final']:
                 event('item/completed', item={'type': 'agentMessage', 'text': 'z' * 30000})

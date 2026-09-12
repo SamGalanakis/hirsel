@@ -276,20 +276,13 @@ impl LashAgentRuntime {
                 if integrity_failure.is_none()
                     && let Some(output) = output
                 {
-                    for tool in tool_call_summaries(output) {
-                        let activity = self
-                            .tools
-                            .storage()
-                            .append_thread_activity_once(
-                                &format!("turn:{turn_id}:tool:{}", tool.id),
-                                active.thread_id,
-                                Some(turn_id),
-                                "tool_completed",
-                                &serde_json::to_value(tool)?,
-                            )
-                            .await?;
-                        self.tools.publish_thread_activity(activity).await;
-                    }
+                    persist_tool_call_summaries(
+                        &self.tools,
+                        active.thread_id,
+                        turn_id,
+                        &tool_call_summaries(output),
+                    )
+                    .await?;
                 }
                 let terminal_output = if integrity_failure.is_some() {
                     None

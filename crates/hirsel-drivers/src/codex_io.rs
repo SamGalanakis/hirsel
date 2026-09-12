@@ -102,15 +102,96 @@ pub(super) fn codex_progress(value: &Value) -> Option<String> {
         return None;
     }
     let item = value.pointer("/params/item")?;
-    let item_type = item.get("type").and_then(Value::as_str).unwrap_or("item");
-    let status = item.get("status").and_then(Value::as_str).unwrap_or("");
-    if let Some(text) = item.get("text").and_then(Value::as_str) {
-        return Some(short_line(text));
+    match item.get("type").and_then(Value::as_str) {
+        Some("agentMessage" | "plan") => item
+            .get("text")
+            .and_then(Value::as_str)
+            .map(short_line)
+            .filter(|summary| !summary.is_empty()),
+        Some("reasoning") => {
+            let text = ["summary", "content"]
+                .into_iter()
+                .filter_map(|key| item.get(key).and_then(Value::as_array))
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then(|| short_line(text))
+        }
+        _ => None,
     }
-    if let Some(command) = item.get("command").and_then(Value::as_str) {
-        return Some(short_line(format!("{item_type} {status}: {command}")));
+}
+
+pub(super) fn codex_tool_event(value: &Value) -> Option<SubagentEvent> {
+    let method = value.get("method").and_then(Value::as_str)?;
+    let completed = match method {
+        "item/started" => false,
+        "item/completed" => true,
+        _ => return None,
+    };
+    let item = value.pointer("/params/item")?;
+    let call_id = item.get("id").and_then(Value::as_str)?.to_string();
+    let item_type = item.get("type").and_then(Value::as_str)?;
+    let (name, args, output, ok) = match item_type {
+        "commandExecution" => (
+            "shell_run".to_string(),
+            json!({
+                "cmd": item.get("command").cloned().unwrap_or(Value::Null),
+                "cwd": item.get("cwd").cloned().unwrap_or(Value::Null),
+                "command_actions": item.get("commandActions").cloned().unwrap_or_else(|| json!([]))
+            }),
+            json!({
+                "stdout": item.get("aggregatedOutput").cloned().unwrap_or(Value::Null),
+                "status": item.get("exitCode").cloned().unwrap_or(Value::Null),
+                "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null)
+            }),
+            item.get("status").and_then(Value::as_str) == Some("completed"),
+        ),
+        "fileChange" => (
+            "file_change".to_string(),
+            json!({"changes": item.get("changes").cloned().unwrap_or_else(|| json!([]))}),
+            json!({
+                "changes": item.get("changes").cloned().unwrap_or_else(|| json!([])),
+                "status": item.get("status").cloned().unwrap_or(Value::Null)
+            }),
+            item.get("status").and_then(Value::as_str) == Some("completed"),
+        ),
+        "mcpToolCall" => {
+            let server = item.get("server").and_then(Value::as_str)?;
+            let tool = item.get("tool").and_then(Value::as_str)?;
+            let server = if server.starts_with("hirsel_thread_") {
+                "hirsel"
+            } else {
+                server
+            };
+            (
+                format!("mcp__{server}__{tool}"),
+                item.get("arguments").cloned().unwrap_or_else(|| json!({})),
+                item.get("result")
+                    .filter(|result| !result.is_null())
+                    .cloned()
+                    .or_else(|| item.get("error").cloned())
+                    .unwrap_or(Value::Null),
+                item.get("status").and_then(Value::as_str) == Some("completed")
+                    && item.get("error").is_none_or(Value::is_null),
+            )
+        }
+        _ => return None,
+    };
+    if completed {
+        Some(SubagentEvent::ToolCompleted {
+            call_id,
+            name,
+            ok,
+            output,
+        })
+    } else {
+        Some(SubagentEvent::ToolStarted {
+            call_id,
+            name,
+            args,
+        })
     }
-    Some(short_line(format!("{item_type} {status}")))
 }
 
 pub(crate) fn codex_agent_message(value: &Value) -> Option<&str> {

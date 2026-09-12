@@ -1,6 +1,173 @@
 use super::*;
 use futures_util::StreamExt;
 
+fn initialized_claude_output() -> (ClaudeOutput, Arc<EventHub>) {
+    let events = EventHub::new(32);
+    let mut output = ClaudeOutput::new(&[]);
+    output
+        .handle(
+            &json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "claude-session",
+                "tools": ["Read", "Bash"],
+                "mcp_servers": [{"name": "hirsel", "status": "connected"}],
+                "plugins": []
+            }),
+            &events,
+        )
+        .unwrap();
+    (output, events)
+}
+
+#[tokio::test]
+async fn tool_heartbeat_surfaces_progress_while_forwarded_subagent_output_still_fails() {
+    let (mut output, events) = initialized_claude_output();
+    output
+        .handle(
+            &json!({
+                "type": "assistant",
+                "session_id": "claude-session",
+                "parent_tool_use_id": null,
+                "message": {"stop_reason": "tool_use", "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_bash",
+                    "name": "Bash",
+                    "input": {"command": "sleep 31"}
+                }]}
+            }),
+            &events,
+        )
+        .unwrap();
+    output
+        .handle(
+            &json!({
+                "type": "tool_progress",
+                "session_id": "claude-session",
+                "tool_use_id": "toolu_bash-heartbeat-0",
+                "tool_name": "Bash",
+                "parent_tool_use_id": "toolu_bash",
+                "elapsed_time_seconds": 30,
+                "heartbeat": true
+            }),
+            &events,
+        )
+        .unwrap();
+    output
+        .handle(
+            &json!({
+                "type": "tool_progress",
+                "session_id": "claude-session",
+                "tool_name": "Bash",
+                "parent_tool_use_id": "unknown-tool",
+                "elapsed_time_seconds": 10
+            }),
+            &events,
+        )
+        .unwrap();
+
+    events
+        .complete(
+            TerminalOutcome::Done {
+                summary: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+    let replay = events.stream().unwrap().collect::<Vec<_>>().await;
+    assert!(replay.iter().any(|event| {
+        matches!(event, SubagentEvent::Progress { summary } if summary.contains("Bash") && summary.contains("30"))
+    }));
+    assert!(replay.iter().any(|event| {
+        matches!(event, SubagentEvent::Progress { summary } if summary.contains("unknown") && summary.contains("10"))
+    }));
+
+    let (mut guard_output, guard_events) = initialized_claude_output();
+    let error = guard_output
+        .handle(
+            &json!({
+                "type": "assistant",
+                "session_id": "claude-session",
+                "parent_tool_use_id": "toolu_agent",
+                "message": {"content": [{"type": "text", "text": "forwarded"}]}
+            }),
+            &guard_events,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "provider protocol error: unexpected native Claude subagent output"
+    );
+}
+
+#[tokio::test]
+async fn tool_use_and_result_emit_one_bounded_structured_pair() {
+    let (mut output, events) = initialized_claude_output();
+    output
+        .handle(
+            &json!({
+                "type": "assistant",
+                "session_id": "claude-session",
+                "message": {"stop_reason": "tool_use", "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_read",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/example"}
+                }]}
+            }),
+            &events,
+        )
+        .unwrap();
+    output
+        .handle(
+            &json!({
+                "type": "user",
+                "session_id": "claude-session",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_read",
+                    "content": [{"type": "text", "text": "x".repeat(5000)}],
+                    "is_error": false
+                }]}
+            }),
+            &events,
+        )
+        .unwrap();
+
+    events
+        .complete(
+            TerminalOutcome::Done {
+                summary: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+    let structured = events
+        .stream()
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SubagentEvent::ToolStarted { .. } | SubagentEvent::ToolCompleted { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        &structured[0],
+        SubagentEvent::ToolStarted { call_id, name, args }
+            if call_id == "toolu_read" && name == "Read" && args == &json!({"file_path":"/tmp/example"})
+    ));
+    assert!(matches!(
+        &structured[1],
+        SubagentEvent::ToolCompleted { call_id, name, ok: true, output: Value::String(text) }
+            if call_id == "toolu_read" && name == "Read" && text.len() <= 4096 && text.starts_with('x')
+    ));
+}
+
 #[tokio::test]
 async fn fable_model_and_effort_reach_the_cli_unchanged() {
     let (_dir, mut task, command) = fixture(

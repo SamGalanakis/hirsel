@@ -4,6 +4,22 @@ use hirsel_drivers::{ScopedMcpLaunch, SessionHandle, SpawnSpec, SubagentDriver, 
 use hirsel_proto::ThreadTurnState;
 use tokio_util::sync::CancellationToken;
 
+fn is_scoped_bridge_tool(name: &str) -> bool {
+    name.starts_with("mcp__hirsel__")
+}
+
+fn is_execution_diagnostic(summary: &str) -> bool {
+    let summary = summary.to_ascii_lowercase();
+    [
+        "configuration warning",
+        "rate limit",
+        "unparsed ",
+        "unsupported codex server request",
+    ]
+    .iter()
+    .any(|marker| summary.contains(marker))
+}
+
 pub(super) struct CliTurn {
     pub(super) turn_id: u64,
     pub(super) cancel: CancellationToken,
@@ -209,6 +225,10 @@ impl CliTurn {
                 expected_tools: bridge.expected_tools.clone(),
             },
         };
+        let mut started_tools = HashMap::<String, (String, Value)>::new();
+        let mut completed_tools = HashSet::<String>::new();
+        let mut cli_tool_calls = Vec::<hirsel_proto::ToolCallSummary>::new();
+        let mut persisted_diagnostic = false;
         let result=async {
         let handle = self.driver.spawn(spec).await?;
         *self.handle.lock().await = Some(handle.clone());
@@ -237,7 +257,91 @@ impl CliTurn {
                         .await?;
                     tools.publish_thread_activity(activity).await;
                 }
+                Some(SubagentEvent::ToolStarted {
+                    call_id,
+                    name,
+                    args,
+                }) => {
+                    if is_scoped_bridge_tool(&name) {
+                        continue;
+                    }
+                    if let Some((previous_name, previous_args)) = started_tools.get(&call_id) {
+                        anyhow::ensure!(
+                            previous_name == &name && previous_args == &args,
+                            "CLI reused a tool call id with different input"
+                        );
+                        continue;
+                    }
+                    tools
+                        .publish_turn_event(
+                            request.thread_id,
+                            self.turn_id,
+                            hirsel_proto::TurnEventKind::ToolStart {
+                                id: call_id.clone(),
+                                name: name.clone(),
+                                summary: condense_args(&name, &args),
+                                input: Some(bounded_turn_payload(&args)),
+                            },
+                        )
+                        .await?;
+                    started_tools.insert(call_id, (name, args));
+                }
+                Some(SubagentEvent::ToolCompleted {
+                    call_id,
+                    name,
+                    ok,
+                    output: tool_output,
+                }) => {
+                    if is_scoped_bridge_tool(&name) || completed_tools.contains(&call_id) {
+                        continue;
+                    }
+                    let args = match started_tools.get(&call_id) {
+                        Some((started_name, args)) => {
+                            anyhow::ensure!(
+                                started_name == &name,
+                                "CLI completed a tool call with another name"
+                            );
+                            args.clone()
+                        }
+                        None => Value::Null,
+                    };
+                    tools
+                        .publish_turn_event(
+                            request.thread_id,
+                            self.turn_id,
+                            hirsel_proto::TurnEventKind::ToolDone {
+                                id: call_id.clone(),
+                                name: name.clone(),
+                                ok,
+                                summary: condense_result_with_status(
+                                    &name,
+                                    &args,
+                                    &tool_output,
+                                    ok,
+                                ),
+                                result: Some(bounded_turn_payload(&tool_output)),
+                            },
+                        )
+                        .await?;
+                    let summary = hirsel_proto::ToolCallSummary {
+                        id: call_id.clone(),
+                        name,
+                        ok,
+                    };
+                    persist_tool_call_summaries(
+                        tools,
+                        request.thread_id,
+                        self.turn_id,
+                        std::slice::from_ref(&summary),
+                    )
+                    .await?;
+                    completed_tools.insert(call_id);
+                    cli_tool_calls.push(summary);
+                }
                 Some(SubagentEvent::Progress { summary }) => {
+                    if persisted_diagnostic || !is_execution_diagnostic(&summary) {
+                        continue;
+                    }
                     let activity = tools
                         .storage()
                         .append_thread_activity(
@@ -248,6 +352,7 @@ impl CliTurn {
                         )
                         .await?;
                     tools.publish_thread_activity(activity).await;
+                    persisted_diagnostic = true;
                 }
                 None => {
                     return Ok(TerminalOutcome::Failed {
@@ -258,7 +363,15 @@ impl CliTurn {
         }
         }.await;
         bridge.finish().await;
-        *tool_calls = bridge.tool_calls().await;
+        let bridge_tool_calls = bridge.tool_calls().await;
+        persist_tool_call_summaries(tools, request.thread_id, self.turn_id, &bridge_tool_calls)
+            .await?;
+        cli_tool_calls.extend(
+            bridge_tool_calls
+                .into_iter()
+                .filter(|call| completed_tools.insert(call.id.clone())),
+        );
+        *tool_calls = cli_tool_calls;
         result
     }
 }

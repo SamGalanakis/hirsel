@@ -1,5 +1,5 @@
 //! Claude's provider messages remain diagnostics until an actual final result.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
@@ -7,6 +7,7 @@ pub(super) struct ClaudeOutput {
     expected: BTreeSet<String>,
     session_id: Option<String>,
     assistant: Option<String>,
+    started_tools: BTreeMap<String, String>,
 }
 
 impl ClaudeOutput {
@@ -18,6 +19,7 @@ impl ClaudeOutput {
                 .collect(),
             session_id: None,
             assistant: None,
+            started_tools: BTreeMap::new(),
         }
     }
 
@@ -33,15 +35,17 @@ impl ClaudeOutput {
         if events.is_terminal() {
             return Ok(());
         }
-        if value
-            .get("parent_tool_use_id")
-            .is_some_and(|id| !id.is_null())
+        let kind = value.get("type").and_then(Value::as_str);
+        if matches!(kind, Some("assistant" | "user" | "stream_event"))
+            && value
+                .get("parent_tool_use_id")
+                .is_some_and(|id| !id.is_null())
         {
             return Err(DriverError::Protocol(
                 "unexpected native Claude subagent output".into(),
             ));
         }
-        match value.get("type").and_then(Value::as_str) {
+        match kind {
             Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
                 let id = value
                     .get("session_id")
@@ -125,8 +129,42 @@ impl ClaudeOutput {
                     == Some("end_turn")
                     && !text.is_empty())
                 .then_some(text);
-                for summary in claude_assistant_progress(value) {
-                    events.emit(SubagentEvent::Progress { summary })?;
+                for block in content.into_iter().flatten() {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                let summary = short_line(text);
+                                if !summary.is_empty() {
+                                    events.emit(SubagentEvent::Progress { summary })?;
+                                }
+                            }
+                        }
+                        Some("tool_use") => {
+                            let Some(call_id) = block.get("id").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let Some(name) = block.get("name").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let args = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                            match self.started_tools.get(call_id) {
+                                Some(previous) if previous != name => {
+                                    return Err(DriverError::Protocol(
+                                        "Claude reused a tool call id with another name".into(),
+                                    ));
+                                }
+                                Some(_) => continue,
+                                None => {}
+                            }
+                            self.started_tools.insert(call_id.into(), name.into());
+                            events.emit(SubagentEvent::ToolStarted {
+                                call_id: call_id.into(),
+                                name: name.into(),
+                                args,
+                            })?;
+                        }
+                        _ => {}
+                    }
                 }
             }
             Some("stream_event") => {
@@ -138,9 +176,61 @@ impl ClaudeOutput {
                 }
             }
             Some("user") => {
-                if let Some(summary) = claude_tool_result(value) {
-                    events.emit(SubagentEvent::Progress { summary })?;
+                for block in value
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "tool_result")
+                {
+                    let Some(call_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(name) = self.started_tools.remove(call_id) else {
+                        events.emit(SubagentEvent::Progress {
+                            summary: short_line(format!("tool result for unknown call {call_id}")),
+                        })?;
+                        continue;
+                    };
+                    events.emit(SubagentEvent::ToolCompleted {
+                        call_id: call_id.into(),
+                        name,
+                        ok: block.get("is_error").and_then(Value::as_bool) != Some(true),
+                        output: Value::String(bounded_tool_result(block.get("content"))),
+                    })?;
                 }
+            }
+            Some("tool_progress") => {
+                self.check_session(value)?;
+                let parent = value.get("parent_tool_use_id").and_then(Value::as_str);
+                let elapsed = value.get("elapsed_time_seconds").and_then(Value::as_u64);
+                let known_name = parent.and_then(|id| self.started_tools.get(id));
+                let provider_name = value.get("tool_name").and_then(Value::as_str);
+                let summary = match (known_name.map(String::as_str).or(provider_name), elapsed) {
+                    (Some(name), Some(seconds)) if known_name.is_some() => {
+                        format!("{name} running · {seconds}s")
+                    }
+                    (Some(name), None) if known_name.is_some() => format!("{name} running"),
+                    (Some(name), Some(seconds)) => format!(
+                        "{name} progress for unknown call {} · {seconds}s",
+                        parent.unwrap_or("unknown")
+                    ),
+                    (Some(name), None) => format!(
+                        "{name} progress for unknown call {}",
+                        parent.unwrap_or("unknown")
+                    ),
+                    (None, Some(seconds)) => format!(
+                        "tool progress for unknown call {} · {seconds}s",
+                        parent.unwrap_or("unknown")
+                    ),
+                    (None, None) => format!(
+                        "tool progress for unknown call {}",
+                        parent.unwrap_or("unknown")
+                    ),
+                };
+                events.emit(SubagentEvent::Progress {
+                    summary: short_line(summary),
+                })?;
             }
             Some("result") => {
                 self.check_session(value)?;
@@ -178,37 +268,29 @@ impl ClaudeOutput {
     }
 }
 
-fn claude_assistant_progress(value: &Value) -> Vec<String> {
-    value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(
-            |content| match content.get("type").and_then(Value::as_str) {
-                Some("text") => content.get("text").and_then(Value::as_str).map(short_line),
-                Some("tool_use") => content
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(|name| short_line(format!("tool {name}"))),
-                _ => None,
-            },
-        )
-        .collect()
-}
-
-fn claude_tool_result(value: &Value) -> Option<String> {
-    value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-        .and_then(|blocks| blocks.iter().find(|block| block["type"] == "tool_result"))
-        .map(|block| {
-            short_line(if block["is_error"] == true {
-                "tool failed"
-            } else {
-                "tool completed"
-            })
-        })
+fn bounded_tool_result(content: Option<&Value>) -> String {
+    let text = match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(value) => value.to_string(),
+        None => String::new(),
+    };
+    const LIMIT: usize = 4096;
+    const MARKER: &str = "…[truncated]";
+    if text.len() <= LIMIT {
+        return text;
+    }
+    let mut end = LIMIT.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = text[..end].to_string();
+    bounded.push_str(MARKER);
+    bounded
 }
 
 pub(crate) fn claude_terminal_outcome(value: &Value) -> TerminalOutcome {

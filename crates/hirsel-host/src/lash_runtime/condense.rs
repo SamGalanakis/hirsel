@@ -27,7 +27,15 @@ pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
 }
 
 pub(super) fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
-    let ok = tool_output_ok(output);
+    condense_result_with_status(name, args, output, tool_output_ok(output))
+}
+
+pub(super) fn condense_result_with_status(
+    name: &str,
+    args: &Value,
+    output: &Value,
+    ok: bool,
+) -> Option<String> {
     let prefix = if ok { "ok" } else { "err" };
     let payload = tool_output_payload(output).unwrap_or(output);
     let detail = match name {

@@ -328,6 +328,28 @@ pub(super) fn tool_call_summaries(output: &lash::TurnOutput) -> Vec<ToolCallSumm
         .collect()
 }
 
+pub(super) async fn persist_tool_call_summaries(
+    tools: &ToolSuite,
+    thread_id: u64,
+    turn_id: u64,
+    calls: &[ToolCallSummary],
+) -> anyhow::Result<()> {
+    for tool in calls {
+        let activity = tools
+            .storage()
+            .append_thread_activity_once(
+                &format!("turn:{turn_id}:tool:{}", tool.id),
+                thread_id,
+                Some(turn_id),
+                "tool_completed",
+                &serde_json::to_value(tool)?,
+            )
+            .await?;
+        tools.publish_thread_activity(activity).await;
+    }
+    Ok(())
+}
+
 pub(super) fn turn_chat_payload(
     output: &lash::TurnOutput,
 ) -> Option<(String, Vec<ToolCallSummary>)> {

@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_drivers::{AgentKind, DriverResult, EventStream};
+use hirsel_drivers::{AgentKind, DriverResult, EventStream, FakeDriver};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct TerminalPeer {
@@ -60,6 +60,17 @@ impl SubagentDriver for ToolCallingPeer {
     }
     fn events(&self, _: &SessionHandle) -> DriverResult<EventStream> {
         Ok(Box::pin(futures_util::stream::iter([
+            SubagentEvent::ToolStarted {
+                call_id: "provider-call".into(),
+                name: "mcp__hirsel__threads_context".into(),
+                args: json!({}),
+            },
+            SubagentEvent::ToolCompleted {
+                call_id: "provider-call".into(),
+                name: "mcp__hirsel__threads_context".into(),
+                ok: true,
+                output: json!({"content":[{"type":"text","text":"duplicate provider view"}]}),
+            },
             SubagentEvent::AssistantOutput {
                 text: "must not be published".into(),
             },
@@ -70,6 +81,166 @@ impl SubagentDriver for ToolCallingPeer {
             },
         ])))
     }
+}
+
+#[tokio::test]
+async fn fake_cli_tools_publish_and_replay_structured_events_with_bounded_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("cli-events.json");
+    std::fs::write(
+        &fixture,
+        serde_json::to_vec(&json!({
+            "external_id": "fake-tools",
+            "delay_ms": 0,
+            "progress": ["reasoning token one", "reasoning token two", "rate limit status updated"],
+            "events": [
+                {"type":"tool_started", "call_id":"call-1", "name":"shell_run", "args":{"cmd":"printf hi"}},
+                {"type":"tool_completed", "call_id":"call-1", "name":"shell_run", "ok":true, "output":{"stdout":"hi", "status":0}}
+            ],
+            "assistant_output": "done",
+            "terminal": {"status":"done", "summary":"done"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut config = crate::tests::test_config(dir.path());
+    config.fake_fixture = Some(fixture);
+    let state = crate::build_state(config).await.unwrap();
+    let request = request(&state).await;
+    let turn_id = request.turn_id.unwrap();
+    CliTurn::new(turn_id, Arc::new(FakeDriver::default()))
+        .run(
+            &state.tools,
+            request,
+            crate::storage::ThreadExecution::Cli {
+                agent: AgentKind::Claude,
+                model: "fixture".into(),
+                variant: "fixture".into(),
+                cwd: std::env::temp_dir(),
+            },
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        )
+        .await
+        .unwrap();
+
+    let turn = state.storage.thread_turn(turn_id).await.unwrap();
+    let detail = state
+        .storage
+        .thread_detail(turn.thread_id, None, 30)
+        .await
+        .unwrap();
+    let timeline = detail
+        .turn_timelines
+        .iter()
+        .find(|timeline| timeline.turn_id == turn_id)
+        .unwrap();
+    assert!(matches!(
+        timeline.events.as_slice(),
+        [
+            hirsel_proto::TurnEvent { seq: 0, event: hirsel_proto::TurnEventKind::ToolStart { id: start, name: start_name, .. } },
+            hirsel_proto::TurnEvent { seq: 1, event: hirsel_proto::TurnEventKind::ToolDone { id: done, name: done_name, ok: true, .. } }
+        ] if start == "call-1" && done == start && start_name == "shell_run" && done_name == start_name
+    ));
+    let live = state
+        .broadcast_log
+        .recent()
+        .into_iter()
+        .filter_map(|frame| match frame {
+            hirsel_proto::HostToClient::TurnEvent {
+                turn_id: event_turn,
+                event,
+                ..
+            } if event_turn == turn_id => Some(event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        live.as_slice(),
+        [
+            hirsel_proto::TurnEventKind::ToolStart { id: start, .. },
+            hirsel_proto::TurnEventKind::ToolDone { id: done, .. }
+        ] if start == done
+    ));
+    let completed = detail
+        .activities
+        .iter()
+        .filter(|activity| activity.turn_id == Some(turn_id) && activity.kind == "tool_completed")
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        completed[0].data,
+        json!({"id":"call-1", "name":"shell_run", "ok":true})
+    );
+    let progress = detail
+        .activities
+        .iter()
+        .filter(|activity| {
+            activity.turn_id == Some(turn_id) && activity.kind == "execution_progress"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(progress.len(), 1);
+    assert_eq!(progress[0].data["summary"], "rate limit status updated");
+}
+
+#[tokio::test]
+async fn bridge_mcp_telemetry_wins_over_duplicate_cli_tool_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let request = request(&state).await;
+    let turn_id = request.turn_id.unwrap();
+    let peer = Arc::new(ToolCallingPeer {
+        retired: AtomicBool::new(false),
+    });
+    CliTurn::new(turn_id, peer)
+        .run(
+            &state.tools,
+            request,
+            crate::storage::ThreadExecution::Cli {
+                agent: AgentKind::Claude,
+                model: "fixture".into(),
+                variant: "fixture".into(),
+                cwd: std::env::temp_dir(),
+            },
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        )
+        .await
+        .unwrap();
+    let turn = state.storage.thread_turn(turn_id).await.unwrap();
+    let detail = state
+        .storage
+        .thread_detail(turn.thread_id, None, 30)
+        .await
+        .unwrap();
+    let timeline = detail
+        .turn_timelines
+        .iter()
+        .find(|timeline| timeline.turn_id == turn_id)
+        .unwrap();
+    assert_eq!(
+        timeline.events.len(),
+        2,
+        "bridge and provider duplicated one MCP call"
+    );
+    assert!(matches!(
+        timeline.events[0].event,
+        hirsel_proto::TurnEventKind::ToolStart { .. }
+    ));
+    assert!(matches!(
+        timeline.events[1].event,
+        hirsel_proto::TurnEventKind::ToolDone { .. }
+    ));
+    assert_eq!(
+        detail
+            .activities
+            .iter()
+            .filter(
+                |activity| activity.turn_id == Some(turn_id) && activity.kind == "tool_completed"
+            )
+            .count(),
+        1
+    );
 }
 #[async_trait::async_trait]
 impl SubagentDriver for TerminalPeer {

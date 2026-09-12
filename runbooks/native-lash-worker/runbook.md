@@ -8,6 +8,11 @@ Follow [`../RULES.md`](../RULES.md). This runbook is a bounded real-provider pro
 - Build and serve the production frontend and Host from the same reviewed checkout.
 - Configure a private `openrouter` provider entry with a usable API key. Do not copy or print the key into evidence.
 - Confirm `hello_ok` reports the intended Host configuration. The accepted worker execution must record provider `openrouter`, model `deepseek/deepseek-v4.1-flash`, variant `default`, and the isolated test checkout cwd.
+- In Settings › Thread models, confirm the Native worker row is present, enabled,
+  and reports `Runs on OpenRouter.` with the shipped default model; Settings ›
+  Providers shows the `Native worker` marker on that same instance. The row is
+  the Owner's switch: while it is off, `agent: "lash"` is absent from the
+  delegation contract and this scenario cannot start.
 - Prepare a tiny repository with one focused failing test and no valuable state.
 
 Run the dedicated scenario from the repository root after building the reviewed

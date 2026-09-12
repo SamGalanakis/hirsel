@@ -12,10 +12,8 @@ pub(super) struct HirselToolProvider {
 
 impl HirselToolProvider {
     pub(super) fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = hirsel_tool_definitions(
-            &self.executor.tools.subagent_model_snapshot(),
-            &self.executor.tools.native_worker_provider_ids(),
-        );
+        let mut definitions =
+            hirsel_tool_definitions(&self.executor.tools.subagent_model_snapshot());
         definitions.extend(self.executor.tools.plugin_tools().definitions());
         definitions
     }

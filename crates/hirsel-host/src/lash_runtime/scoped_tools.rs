@@ -318,10 +318,7 @@ impl ScopedThreadTools {
 }
 
 pub(crate) fn scoped_mcp_catalog(tools: &ToolSuite) -> Vec<Value> {
-    let mut definitions = hirsel_tool_definitions(
-        &tools.subagent_model_snapshot(),
-        &tools.native_worker_provider_ids(),
-    );
+    let mut definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
     definitions.extend(tools.plugin_tools().definitions());
     definitions.into_iter().map(|d|json!({"name":d.name(),"description":d.manifest.description,"inputSchema":d.contract.input_schema.canonical})).collect()
 }
@@ -526,6 +523,16 @@ impl ScopedThreadTools {
                     .map_err(|e| e.to_string())?,
             )
         } else if input.agent.as_deref() == Some("lash") {
+            // The Owner's row is the gate. The delegation schema already drops
+            // the branch while the worker is off, so this refusal is for a
+            // stale tool surface, not the ordinary path.
+            let native_worker = self.tools.subagent_model_snapshot().native_worker;
+            if !native_worker.enabled {
+                return Err(
+                    "the native Lash worker is turned off in Settings; enable it to delegate with agent `lash`"
+                        .into(),
+                );
+            }
             let provider = self
                 .tools
                 .capture_native_worker_provider(input.provider_id.as_deref())
@@ -536,8 +543,10 @@ impl ScopedThreadTools {
                         .map_err(|e| e.to_string())?
                         .id
                 }
+                // The Owner's model override is the default for this route;
+                // an explicit `model` above still wins.
                 None if provider.id == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID => {
-                    crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string()
+                    native_worker.model.clone()
                 }
                 None => {
                     return Err(format!(

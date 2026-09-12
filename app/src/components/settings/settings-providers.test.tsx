@@ -1,6 +1,6 @@
 import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProviderRoster } from "../../protocol";
+import type { ProviderRoster, SubagentModelCatalog } from "../../protocol";
 import { PENDING_MS } from "../../lib/pending";
 
 const memStore = new Map<string, string>();
@@ -84,9 +84,28 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function mount(roster: ProviderRoster | null = ROSTER) {
+/** A catalog whose native worker routes through the roster's OpenRouter
+ * instance — the only part of the catalog this tab reads. */
+const CATALOG: SubagentModelCatalog = {
+  providers: [],
+  native_worker: {
+    label: "Native worker",
+    enabled: true,
+    provider_id: "openrouter",
+    eligible_provider_ids: ["openrouter"],
+    model: "deepseek/deepseek-v4.1-flash",
+    default_model: "deepseek/deepseek-v4.1-flash",
+    model_override: null,
+    unavailable_reason: null,
+  },
+};
+
+async function mount(
+  roster: ProviderRoster | null = ROSTER,
+  catalog: SubagentModelCatalog | null = null,
+) {
   const store = await import("../../store/store");
-  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", providers: roster, history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null } });
+  store.dispatch({ type: "hello_ok", payload: { type: "hello_ok", providers: roster, history_id: "test-history", threads: [], processes: [], views: [], host_version: "test", model: null, subagent_models: catalog, prompts: null } });
   store.openSettings("providers");
   const { SettingsSheet } = await import("./SettingsSheet");
   return { store, ...render(() => <SettingsSheet />) };
@@ -329,5 +348,27 @@ describe("Settings → Providers: the roster", () => {
     const { getByText, queryByText } = await mount(null);
     expect(getByText("This host reports no provider roster.")).toBeTruthy();
     expect(queryByText("Add provider")).toBeNull();
+  });
+});
+
+describe("Settings → Providers: the native worker marker", () => {
+  it("marks the instance the native worker routes through, and only that one", async () => {
+    const { getAllByText, getByText } = await mount(ROSTER, CATALOG);
+    expect(getAllByText("Native worker")).toHaveLength(1);
+    // The marker sits beside the instance's own label, not on a built-in login.
+    const row = getByText("OpenRouter").parentElement!;
+    expect(within(row).getByText("Native worker")).toBeTruthy();
+  });
+
+  it("shows no marker when the worker is off or the host reports no catalog", async () => {
+    const { queryByText, unmount } = await mount(ROSTER, {
+      ...CATALOG,
+      native_worker: { ...CATALOG.native_worker, enabled: false },
+    });
+    expect(queryByText("Native worker")).toBeNull();
+    unmount();
+
+    const bare = await mount(ROSTER, null);
+    expect(bare.queryByText("Native worker")).toBeNull();
   });
 });

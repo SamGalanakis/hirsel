@@ -124,6 +124,16 @@ pub enum ClientToHost {
         enabled: bool,
         enabled_variants: Vec<String>,
     },
+    /// Update the native Lash worker row: its master enable switch and the
+    /// optional model override the default route opens on. A separate message
+    /// from `set_subagent_model` because the worker has no curated model
+    /// registry and no reasoning variants — `model` is free text, and an
+    /// absent one means "use the shipped default", not "no model".
+    SetNativeWorker {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     /// Replace the Agent's system prompt body. An empty or whitespace-only
     /// `text` clears the override and restores the bundled default.
     SetAgentPrompt {

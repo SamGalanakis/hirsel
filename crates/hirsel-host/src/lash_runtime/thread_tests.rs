@@ -46,9 +46,9 @@ fn native_execution(cwd: std::path::PathBuf) -> crate::storage::ThreadExecution 
     }
 }
 
-#[tokio::test]
-async fn native_worker_rejects_artifact_references_before_acceptance() {
-    let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
+/// The executor's own config file, with the default native-worker provider
+/// instance configured so `agent: "lash"` has somewhere to land.
+async fn native_worker_store(dir: &tempfile::TempDir) -> crate::host_config::ConfigStore {
     let store = crate::host_config::ConfigStore::load(
         dir.path().join("hirsel.toml"),
         std::path::Path::new("/docs/hirsel-config.md"),
@@ -58,7 +58,7 @@ async fn native_worker_rejects_artifact_references_before_acceptance() {
     .unwrap();
     store
         .upsert_provider(&crate::host_config::StoredProvider {
-            id: "openrouter".into(),
+            id: crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID.into(),
             label: "OpenRouter".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
             api_key: Some("test-key-no-inference".into()),
@@ -66,6 +66,13 @@ async fn native_worker_rejects_artifact_references_before_acceptance() {
         })
         .await
         .unwrap();
+    store
+}
+
+#[tokio::test]
+async fn native_worker_rejects_artifact_references_before_acceptance() {
+    let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
+    let _store = native_worker_store(&dir).await;
     let caller = storage.test_running_caller().await;
     let before = storage.thread_snapshot().await.unwrap().len();
     let tools = ScopedThreadTools {
@@ -805,7 +812,7 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         .unwrap();
     assert!(result["thread"]["settled_at"].is_null());
     assert_eq!(result["thread"]["attention"], "quiet");
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog(), &[]);
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
     let create_schema = definitions
         .iter()
         .find(|definition| definition.name() == "threads_create")
@@ -925,4 +932,105 @@ async fn retained_current_store_opens_without_synthesizing_sessions_or_work() {
             .iter()
             .all(|frame| !matches!(frame, HostToClient::TurnEvent { .. }))
     );
+}
+
+/// The Owner's Settings row is what decides the worker exists as a target. The
+/// delegation schema already drops the branch while it is off, so a call that
+/// still arrives is a stale tool surface and is refused rather than accepted
+/// against a route the Owner turned off.
+#[tokio::test]
+async fn native_worker_delegation_is_refused_while_the_row_is_off() {
+    let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
+    let store = native_worker_store(&dir).await;
+    store.set_native_worker(false, None).await.unwrap();
+    let caller = storage.test_running_caller().await;
+    let before = storage.thread_snapshot().await.unwrap().len();
+    let tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller,
+        operation_id: "native-disabled".into(),
+    };
+    let error = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Native child",
+                "brief":"Fix the failing check.",
+                "artifact_ids":[],
+                "agent":"lash"
+            }),
+        )
+        .await
+        .unwrap_err();
+    // The row is off, so the delegation contract no longer offers the agent at
+    // all — the refusal names it, and nothing is accepted.
+    assert!(error.contains("lash"), "{error}");
+    assert_eq!(storage.thread_snapshot().await.unwrap().len(), before);
+}
+
+/// The Owner's model override is the default for the route, and an explicit
+/// `model` in the delegate call still wins over it.
+#[tokio::test]
+async fn native_worker_model_override_is_the_route_default() {
+    let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
+    let store = native_worker_store(&dir).await;
+    store
+        .set_native_worker(true, Some("vendor/owner-choice"))
+        .await
+        .unwrap();
+    let caller = storage.test_running_caller().await;
+    let tools = ScopedThreadTools {
+        tools: executor.tools,
+        caller: caller.clone(),
+        operation_id: "native-override".into(),
+    };
+    let child_of = |value: &serde_json::Value| value["thread_id"].as_u64().unwrap();
+
+    let accepted = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Native child",
+                "brief":"Fix the failing check.",
+                "artifact_ids":[],
+                "agent":"lash"
+            }),
+        )
+        .await
+        .unwrap();
+    let execution = storage
+        .effective_child_execution(&caller, child_of(&accepted))
+        .await
+        .unwrap();
+    let crate::storage::ThreadExecution::LashWorker { model, .. } = execution else {
+        panic!("native delegation must accept a native worker execution");
+    };
+    assert_eq!(model, "vendor/owner-choice");
+
+    let tools = ScopedThreadTools {
+        tools: tools.tools,
+        caller: caller.clone(),
+        operation_id: "native-explicit".into(),
+    };
+    let accepted = tools
+        .execute(
+            "threads_delegate",
+            &json!({
+                "title":"Native child",
+                "brief":"Fix the other failing check.",
+                "artifact_ids":[],
+                "agent":"lash",
+                "model":"vendor/call-choice"
+            }),
+        )
+        .await
+        .unwrap();
+    let execution = storage
+        .effective_child_execution(&caller, child_of(&accepted))
+        .await
+        .unwrap();
+    let crate::storage::ThreadExecution::LashWorker { model, .. } = execution else {
+        panic!("native delegation must accept a native worker execution");
+    };
+    assert_eq!(model, "vendor/call-choice");
 }

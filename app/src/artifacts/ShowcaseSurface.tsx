@@ -76,7 +76,7 @@ function ThreadShowcase(props: { origin: RelatedOrigin }) {
     <Show when={phone()}><ThreadError threadId={props.origin.threadId} /></Show>
     <Show when={error() || showcaseState.error}><div role="alert" class="p-4 text-sm"><p>{error() ?? showcaseState.error}</p><Show when={showcaseState.error}><button class={button} onClick={refreshShowcase}>Retry showcase</button></Show></div></Show>
     <Show when={showcaseState.loading}><p role="status" class="px-4 py-2 text-sm text-muted-foreground">Loading showcase…</p></Show>
-    <Show when={showcaseState.artifact}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} mode={mode()} onDismiss={() => { if (phone()) close(); }} onReturnToComposer={() => { close(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${props.origin.threadId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Show>
+    <Show when={showcaseState.artifact}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} mode={mode()} threadId={props.origin.threadId} onDismiss={() => { if (phone()) close(); }} onReturnToComposer={() => { close(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${props.origin.threadId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Show>
   </dialog>;
 }
 function ShowcasePicker() {

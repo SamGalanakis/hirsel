@@ -43,6 +43,8 @@ npm run e2e:threads
 and stale-revision checks. Artifact and showcase runners use
 `HIRSEL_ARTIFACT_HOST_URL` and `HIRSEL_ARTIFACT_HOST_TOKEN`; an optional
 `HIRSEL_APP_URL` may point the showcase browser at a separate loopback app. The
+OpenUI artifact runner shares those and writes its dark and light dashboard
+screenshots under `HIRSEL_OPENUI_SHOTS`. The
 standalone artifact-runtime and SVG-preview runners use
 `HIRSEL_ARTIFACT_TEST_URL`; SVG preview additionally requires
 `HIRSEL_CAT_ARTIFACT_DB` and optionally accepts

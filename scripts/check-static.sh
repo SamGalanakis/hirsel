@@ -20,3 +20,4 @@ if grep -rn -E '\bleading-' app/src --include=*.tsx --include=*.ts --include=*.c
   echo "leading-* utilities belong to the type ramp in app/src/styles.css, not to call sites" >&2
   exit 1
 fi
+node app/scripts/openui-prompt.mjs --check

@@ -10,6 +10,12 @@ permissions:
   contents: read
   pull-requests: read
 
+# @openuidev/lang-core ships an install-time telemetry script. Nothing in this
+# repository phones home; the standard opt-out is set for every job.
+env:
+  DO_NOT_TRACK: "1"
+  OPENUI_TELEMETRY_DISABLED: "1"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

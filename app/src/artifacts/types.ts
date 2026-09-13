@@ -9,6 +9,7 @@ export type ArtifactKind =
   | { kind: "solid" }
   | { kind: "html" }
   | { kind: "markdown" }
+  | { kind: "openui" }
   | { kind: "image"; mime: string }
   | { kind: "file"; mime: string; filename?: string | null };
 export type ArtifactSummary = ArtifactKind & {

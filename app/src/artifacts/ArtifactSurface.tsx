@@ -13,7 +13,7 @@ import { artifactState, closeArtifact, openArtifact, listArtifacts, inventoryErr
 import { focusThread, threadState } from "../threads/store";
 import type { ArtifactSummary } from "./types";
 const button = "inline-flex min-h-11 min-w-11 items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-const OPEN_LABEL: Record<string, string> = { solid: "Open interactive artifact", html: "Open HTML artifact", markdown: "Open document", image: "Open image", text: "Open file" };
+const OPEN_LABEL: Record<string, string> = { solid: "Open interactive artifact", html: "Open HTML artifact", markdown: "Open document", openui: "Open interactive artifact", image: "Open image", text: "Open file" };
 /** The preview’s failure, when that is the variant it is in. */
 function previewError(): { id: number; message: string } | null { return artifactState.preview.status === "error" ? artifactState.preview : null; }
 export function ArtifactCard(props: { id: number }) {
@@ -95,7 +95,7 @@ function ArtifactPanel() {
       <Switch>
       <Match when={previewError()}>{failure => <div role="alert" class="p-6 text-sm"><p>{failure().message}</p><button class={button} onClick={() => openArtifact(failure().id)}>Try again</button></div>}</Match>
       <Match when={artifactState.preview.status === "loading"}><p role="status" class="p-6 text-sm text-muted-foreground">Loading artifact…</p></Match>
-      <Match when={openedArtifact()}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} mode={previewMode()} onDismiss={closeArtifact} onReturnToComposer={() => { closeArtifact(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${threadState.focusedId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Match>
+      <Match when={openedArtifact()}>{artifact => <div class="min-h-0 flex-1 overflow-auto"><ArtifactPreview artifact={artifact()} mode={previewMode()} threadId={threadState.focusedId} onDismiss={closeArtifact} onReturnToComposer={() => { closeArtifact(); queueMicrotask(() => document.querySelector<HTMLElement>(`main[data-thread-id="${threadState.focusedId}"] [data-composer="main"]`)?.focus()); }} /></div>}</Match>
       </Switch>
     </dialog>
   </>;

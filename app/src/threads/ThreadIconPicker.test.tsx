@@ -7,7 +7,7 @@ import { ThreadShell } from "./ThreadShell";
 import { ThreadAvatar } from "./ThreadAvatar";
 import { makeThread } from "./fixtures";
 import { closeThreadNavigation } from "./navigation";
-import { openThreadIconPicker, setThreadIconTarget, threadIconError } from "./icon-picker";
+import { openThreadIconPicker, setThreadIconTarget } from "./icon-picker";
 import { attachThreadTransport, disconnectThreads, handleThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage } from "./types";
 
@@ -29,77 +29,79 @@ beforeEach(() => {
   flush(() => {
     setHistoryId("icon-history"); closeThreadNavigation(); setThreadIconTarget(null);
     dispatch({ type: "connection_status", status: "connected" });
-    setThreadState(draft => Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "General" }), makeThread(1, { title: "Garden", read: true }), makeThread(2, { title: "Tools", icon: { kind: "emoji", value: "🛠️" } })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }));
+    setThreadState(draft => Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "General" }), makeThread(1, { title: "Garden", read: true }), makeThread(2, { title: "Tools", icon: { kind: "symbol", name: "hammer", tint: "amber" } })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }));
   });
   attachThreadTransport(frame => sent.push(frame));
 });
 afterEach(() => { disconnectThreads(); });
 
 describe("Thread icons", () => {
-  it("shows defaults and custom icons for ordinary zero, rows and the active header", () => {
+  it("shows monogram defaults and symbol tiles for ordinary zero, rows and the active header", () => {
     const view = render(() => <ThreadShell />);
     expect(view.container.querySelector('header [data-thread-avatar="1"]')).toHaveTextContent("G");
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
-    for (const [id, icon] of [[0, "G"], [1, "G"], [2, "🛠️"]]) {
-      expect(view.container.querySelector(`[data-thread-row="${id}"] [data-thread-avatar]`)).toHaveTextContent(String(icon));
+    for (const id of [0, 1]) {
+      expect(view.container.querySelector(`[data-thread-row="${id}"] [data-thread-avatar]`)).toHaveTextContent("G");
     }
+    const symbol = view.container.querySelector('[data-thread-row="2"] [data-thread-avatar]')!;
+    expect(symbol).toHaveAttribute("data-thread-symbol", "hammer");
+    expect(symbol).toHaveAttribute("data-thread-tint", "amber");
+    expect(symbol.querySelector("svg path")).not.toBeNull();
   });
-  it("opens from row actions, saves a preset with its revision and applies the server update everywhere", async () => {
+  it("opens from row actions, saves a symbol and tint with its revision and applies the server update everywhere", async () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(view.getByRole("button", { name: "Actions for Garden" }));
     fireEvent.click(await view.findByRole("menuitem", { name: "Change Space icon" }));
     const picker = view.getByRole("dialog", { name: "Change thread icon" });
-    fireEvent.click(within(picker).getByRole("button", { name: "Seedling" }));
+    fireEvent.click(within(picker).getByRole("button", { name: "leaf" }));
+    fireEvent.click(within(picker).getByRole("button", { name: "green" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
-    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "icon-history", thread_id: 1, action: "set_icon", data: { icon: { kind: "emoji", value: "🌱" } }, expected_revision: 1 }));
+    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "icon-history", thread_id: 1, action: "set_icon", data: { icon: { kind: "symbol", name: "leaf", tint: "green" } }, expected_revision: 1 }));
     expect(threadState.threads[1].icon).toBeNull();
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Garden", icon: { kind: "emoji", value: "🌱" }, revision: 2 }) }));
-    expect(view.container.querySelector('header [data-thread-avatar="1"]')).toHaveTextContent("🌱");
-    expect(view.container.querySelector('[data-thread-row="1"] [data-thread-avatar]')).toHaveTextContent("🌱");
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Garden", icon: { kind: "symbol", name: "leaf", tint: "green" }, revision: 2 }) }));
+    for (const node of [view.container.querySelector('header [data-thread-avatar="1"]'), view.container.querySelector('[data-thread-row="1"] [data-thread-avatar]')]) {
+      expect(node).toHaveAttribute("data-thread-symbol", "leaf");
+      expect(node).toHaveAttribute("data-thread-tint", "green");
+    }
     expect(threadState.focusedId).toBe(1);
   });
-  it("sends custom joined emoji exactly and resets explicitly to null", () => {
+  it("filters the grid by search and restores the monogram default", () => {
     const view = render(() => <ThreadShell />);
     flush(() => openThreadIconPicker(threadState.threads.find(thread => thread.id === 2)!));
-    fireEvent.input(view.getByRole("textbox", { name: "Custom emoji or symbol" }), { target: { value: "👩🏽‍💻" } });
-    fireEvent.click(view.getByRole("button", { name: "Save icon" }));
-    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: { kind: "emoji", value: "👩🏽‍💻" } }, expected_revision: 1 });
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(2, { title: "Tools", icon: { kind: "emoji", value: "👩🏽‍💻" }, revision: 2 }) }));
-    flush(() => openThreadIconPicker(threadState.threads.find(thread => thread.id === 2)!));
-    fireEvent.click(view.getByRole("button", { name: "Use default" }));
-    expect(view.getByRole("dialog", { name: "Change thread icon" }).querySelector('[data-thread-avatar]')).toHaveTextContent("T");
-    fireEvent.click(view.getByRole("button", { name: "Save icon" }));
-    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: null }, expected_revision: 2 });
+    const picker = view.getByRole("dialog", { name: "Change thread icon" });
+    fireEvent.input(within(picker).getByRole("searchbox", { name: "Search symbols" }), { target: { value: "git b" } });
+    expect(within(picker).getByRole("button", { name: "git-branch" })).toBeInTheDocument();
+    expect(within(picker).queryByRole("button", { name: "hammer" })).toBeNull();
+    fireEvent.input(within(picker).getByRole("searchbox", { name: "Search symbols" }), { target: { value: "zzz" } });
+    expect(within(picker).getByText(/No symbol matches/)).toBeInTheDocument();
+    fireEvent.click(within(picker).getByRole("button", { name: "Use default" }));
+    expect(picker.querySelector('[data-thread-avatar]')).toHaveTextContent("T");
+    fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
+    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: null }, expected_revision: 1 });
   });
   it("previews every selection live and enables save only once the icon changes", async () => {
     const view = render(() => <ThreadShell />);
     flush(() => openThreadIconPicker(threadState.threads.find(thread => thread.id === 2)!));
     const picker = view.getByRole("dialog", { name: "Change thread icon" });
     const preview = () => picker.querySelector('[data-slot="thread-icon-preview"] [data-thread-avatar]')!;
-    expect(preview()).toHaveTextContent("\u{1F6E0}\uFE0F");
-    expect(within(picker).getByText("Emoji")).toBeInTheDocument();
+    expect(preview()).toHaveAttribute("data-thread-symbol", "hammer");
+    expect(within(picker).getByText("hammer")).toBeInTheDocument();
     expect(view.getByRole("button", { name: "Save icon" })).toBeDisabled();
-    fireEvent.click(within(picker).getByRole("button", { name: "Rocket" }));
-    expect(preview()).toHaveTextContent("\u{1F680}");
-    expect(within(picker).getByRole("button", { name: "Rocket" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(within(picker).getByRole("button", { name: "rocket" }));
+    expect(preview()).toHaveAttribute("data-thread-symbol", "rocket");
+    expect(within(picker).getByRole("button", { name: "rocket" })).toHaveAttribute("aria-pressed", "true");
     expect(view.getByRole("button", { name: "Save icon" })).toBeEnabled();
-    fireEvent.input(within(picker).getByRole("textbox", { name: "Custom emoji or symbol" }), { target: { value: "\u{1F41D}" } });
-    expect(preview()).toHaveTextContent("\u{1F41D}");
-    expect(within(picker).getByRole("button", { name: "Rocket" })).toHaveAttribute("aria-pressed", "false");
     const file = new File(["image bytes"], "bee.png", { type: "image/png" });
     fireEvent.change(within(picker).getByLabelText("Choose icon image"), { target: { files: [file] } });
     await waitFor(() => expect(preview().querySelector("img")).toHaveAttribute("src", "https://example.test/blob/image-blob"));
     expect(within(picker).getByText("Uploaded image")).toBeInTheDocument();
     fireEvent.click(within(picker).getByRole("button", { name: "Remove image" }));
     expect(preview().querySelector("img")).toBeNull();
-    expect(preview()).toHaveTextContent("\u{1F41D}");
-    expect(within(picker).getByText("Emoji")).toBeInTheDocument();
-    fireEvent.click(within(picker).getByRole("button", { name: "Use default" }));
     expect(preview()).toHaveTextContent("T");
-    expect(within(picker).getByText("Default")).toBeInTheDocument();
+    fireEvent.click(within(picker).getByRole("button", { name: "rocket" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
-    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: null }, expected_revision: 1 });
+    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: { kind: "symbol", name: "rocket", tint: "amber" } }, expected_revision: 1 });
   });
   it("uploads a mock image, previews the signed blob, and sends the typed image icon", async () => {
     const view = render(() => <ThreadShell />);
@@ -112,7 +114,7 @@ describe("Thread icons", () => {
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
     expect(sent.at(-1)).toMatchObject({ data: { icon: { kind: "image", blob_id: "image-blob" } }, expected_revision: 1 });
   });
-  it("renders an image at avatar size and falls back to the initial after a load error", async () => {
+  it("renders an image at avatar size and falls back to the monogram after a load error", async () => {
     const view = render(() => <ThreadAvatar thread={makeThread(8, { title: "Garden", icon: { kind: "image", blob_id: "garden-image" } })} dense />);
     const image = await waitFor(() => {
       const node = view.container.querySelector("img");
@@ -129,7 +131,7 @@ describe("Thread icons", () => {
     const view = render(() => <ThreadShell />);
     flush(() => openThreadIconPicker(threadState.threads[1]));
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Garden", revision: 2 }) }));
-    fireEvent.click(view.getByRole("button", { name: "Rocket" }));
+    fireEvent.click(view.getByRole("button", { name: "rocket" }));
     fireEvent.click(view.getByRole("button", { name: "Save icon" }));
     expect(sent.at(-1)).toMatchObject({ expected_revision: 1 });
     flush(() => handleThreadMessage({ type: "error", detail: "Thread changed; retry with its current revision" }));
@@ -145,27 +147,20 @@ describe("Thread icons", () => {
     expect(view.queryByRole("button", { name: "Save icon" })).toBeNull();
     expect(sent).toEqual([]);
   });
-  it("rejects invalid input and disables save while disconnected", () => {
+  it("disables save while disconnected", () => {
     const view = render(() => <ThreadShell />);
     flush(() => openThreadIconPicker(threadState.threads[1]));
-    fireEvent.input(view.getByRole("textbox", { name: "Custom emoji or symbol" }), { target: { value: "x".repeat(17) } });
-    expect(view.getByRole("button", { name: "Save icon" })).toBeDisabled();
-    expect(view.getByRole("alert")).toHaveTextContent("16 characters");
-    fireEvent.click(view.getByRole("button", { name: "Use default" }));
+    fireEvent.click(view.getByRole("button", { name: "star" }));
+    expect(view.getByRole("button", { name: "Save icon" })).toBeEnabled();
     flush(() => dispatch({ type: "connection_status", status: "reconnecting" }));
     expect(view.getByRole("button", { name: "Save icon" })).toBeDisabled();
   });
-  it("keeps an ID's fallback color stable across title and lifecycle updates", () => {
+  it("keeps the neutral default tile stable across title and lifecycle updates", () => {
     const view = render(() => <ThreadAvatar thread={threadState.threads[1]} />);
     const avatar = view.container.firstElementChild!;
-    const before = avatar.className;
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Orchard", settled_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
-    expect(avatar.className).toBe(before);
-    expect(avatar).toHaveTextContent("O");
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Orchard Beds", settled_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
+    expect(avatar).toHaveAttribute("data-thread-tint", "neutral");
+    expect(avatar).toHaveTextContent("OB");
     expect(avatar).toHaveAttribute("aria-hidden", "true");
-  });
-  it("accepts Unicode emoji composition but excludes controls and line separators", () => {
-    for (const icon of [null, "🌱", "👩🏽‍💻", "⭐".repeat(16)]) expect(threadIconError(icon)).toBeNull();
-    for (const icon of ["", "   ", "x\n", "x\u0085", "x\u2028", "x\u2029", "x".repeat(17)]) expect(threadIconError(icon)).not.toBeNull();
   });
 });

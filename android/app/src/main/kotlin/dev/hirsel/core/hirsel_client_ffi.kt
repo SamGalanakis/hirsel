@@ -3187,8 +3187,9 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
 
 sealed class ThreadIcon {
     
-    data class Emoji(
-        val `value`: kotlin.String) : ThreadIcon()
+    data class Symbol(
+        val `name`: kotlin.String, 
+        val `tint`: dev.hirsel.core.ThreadTint) : ThreadIcon()
         
     {
         
@@ -3221,8 +3222,9 @@ sealed class ThreadIcon {
 public object FfiConverterTypeThreadIcon : FfiConverterRustBuffer<ThreadIcon>{
     override fun read(buf: ByteBuffer): ThreadIcon {
         return when(buf.getInt()) {
-            1 -> ThreadIcon.Emoji(
+            1 -> ThreadIcon.Symbol(
                 FfiConverterString.read(buf),
+                FfiConverterTypeThreadTint.read(buf),
                 )
             2 -> ThreadIcon.Image(
                 FfiConverterString.read(buf),
@@ -3232,11 +3234,12 @@ public object FfiConverterTypeThreadIcon : FfiConverterRustBuffer<ThreadIcon>{
     }
 
     override fun allocationSize(value: ThreadIcon): ULong = when(value) {
-        is ThreadIcon.Emoji -> {
+        is ThreadIcon.Symbol -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.`value`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterTypeThreadTint.allocationSize(value.`tint`)
             )
         }
         is ThreadIcon.Image -> {
@@ -3250,9 +3253,10 @@ public object FfiConverterTypeThreadIcon : FfiConverterRustBuffer<ThreadIcon>{
 
     override fun write(value: ThreadIcon, buf: ByteBuffer) {
         when(value) {
-            is ThreadIcon.Emoji -> {
+            is ThreadIcon.Symbol -> {
                 buf.putInt(1)
-                FfiConverterString.write(value.`value`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterTypeThreadTint.write(value.`tint`, buf)
                 Unit
             }
             is ThreadIcon.Image -> {
@@ -3382,6 +3386,50 @@ public object FfiConverterTypeThreadRelatedTarget : FfiConverterRustBuffer<Threa
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * The tile colour, mirroring `hirsel_proto::ThreadTint`.
+ */
+
+enum class ThreadTint {
+    
+    NEUTRAL,
+    RED,
+    ORANGE,
+    AMBER,
+    GREEN,
+    TEAL,
+    BLUE,
+    VIOLET,
+    PINK;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadTint: FfiConverterRustBuffer<ThreadTint> {
+    override fun read(buf: ByteBuffer) = try {
+        ThreadTint.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ThreadTint) = 4UL
+
+    override fun write(value: ThreadTint, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 

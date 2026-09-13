@@ -15,36 +15,41 @@ fn png(width: u32, height: u32) -> Vec<u8> {
 }
 
 #[test]
-fn compact_icon_validation_preserves_composed_emoji_and_null_semantics() {
+fn compact_icon_validation_covers_the_symbol_vocabulary_and_null_semantics() {
     assert_eq!(parse_icon(&json!({})).unwrap(), None);
     assert_eq!(parse_icon(&json!({"icon":null})).unwrap(), Some(None));
-    for value in ["🧑🏽‍💻", "👨‍👩‍👧‍👦", "☀️", "★", "🐙".repeat(16).as_str()]
-    {
+    for name in hirsel_proto::THREAD_SYMBOLS {
         assert_eq!(
-            parse_icon(&json!({"icon":{"kind":"emoji","value":value}})).unwrap(),
-            Some(Some(hirsel_proto::ThreadIcon::Emoji {
-                value: value.into()
+            parse_icon(&json!({"icon":{"kind":"symbol","name":name,"tint":"violet"}})).unwrap(),
+            Some(Some(hirsel_proto::ThreadIcon::Symbol {
+                name: name.into(),
+                tint: hirsel_proto::ThreadTint::Violet
             }))
         );
     }
-    for value in [
-        "",
-        " \t",
-        "x\n",
-        "x\r",
-        "x\0",
-        "x\u{0085}",
-        "x\u{2028}",
-        "x\u{2029}",
-        "🐙".repeat(17).as_str(),
+    // An omitted tint is the neutral tile, not a rejection.
+    assert_eq!(
+        parse_icon(&json!({"icon":{"kind":"symbol","name":"rocket"}})).unwrap(),
+        Some(Some(hirsel_proto::ThreadIcon::Symbol {
+            name: "rocket".into(),
+            tint: hirsel_proto::ThreadTint::Neutral
+        }))
+    );
+    for icon in [
+        json!({"kind":"symbol","name":"sparkles"}),
+        json!({"kind":"symbol","name":""}),
+        json!({"kind":"symbol","name":"Rocket"}),
+        json!({"kind":"symbol","name":"rocket","tint":"chartreuse"}),
+        json!({"kind":"symbol","name":"rocket","tint":7}),
+        json!({"kind":"symbol"}),
+        json!({"kind":"emoji","value":"🐙"}),
+        json!(42),
+        json!({}),
+        json!([]),
+        json!(false),
+        json!("rocket"),
     ] {
-        assert!(
-            parse_icon(&json!({"icon":{"kind":"emoji","value":value}})).is_err(),
-            "{value:?}"
-        );
-    }
-    for value in [json!(42), json!({}), json!([]), json!(false), json!("🐙")] {
-        assert!(parse_icon(&json!({"icon":value})).is_err());
+        assert!(parse_icon(&json!({"icon":icon})).is_err(), "{icon}");
     }
 }
 
@@ -87,19 +92,19 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     let created = tools
         .execute(
             "threads_create",
-            &json!({"client_id":"child","kind":"task","title":"Research","icon":{"kind":"emoji","value":"🔬"}}),
+            &json!({"client_id":"child","kind":"task","title":"Research","icon":{"kind":"symbol","name":"flask","tint":"teal"}}),
         )
         .await
         .unwrap();
     let id = created["thread_id"].as_u64().unwrap();
     assert_eq!(
         created["thread"]["icon"],
-        json!({"kind":"emoji","value":"🔬"})
+        json!({"kind":"symbol","name":"flask","tint":"teal"})
     );
     let replayed = tools
         .execute(
             "threads_create",
-            &json!({"client_id":"child","kind":"task","title":"Research","icon":{"kind":"emoji","value":"🔬"}}),
+            &json!({"client_id":"child","kind":"task","title":"Research","icon":{"kind":"symbol","name":"flask","tint":"teal"}}),
         )
         .await
         .unwrap();
@@ -114,7 +119,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
         .unwrap();
     assert_eq!(
         preserved["thread"]["icon"],
-        json!({"kind":"emoji","value":"🔬"})
+        json!({"kind":"symbol","name":"flask","tint":"teal"})
     );
     assert!(
         tools
@@ -130,34 +135,40 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     let updated = tools
         .execute(
             "threads_update",
-            &json!({"thread":id,"icon":{"kind":"emoji","value":"🧑🏽‍💻"}}),
+            &json!({"thread":id,"icon":{"kind":"symbol","name":"users","tint":"blue"}}),
         )
         .await
         .unwrap();
     assert_eq!(
         updated["thread"]["icon"],
-        json!({"kind":"emoji","value":"🧑🏽‍💻"})
+        json!({"kind":"symbol","name":"users","tint":"blue"})
     );
     let revision = updated["thread"]["revision"].as_u64().unwrap();
     let before = state.storage.thread(id).await.unwrap().unwrap();
     for (data, expected) in [
-        (json!({"icon":{"kind":"emoji","value":"🐙"}}), None),
         (
-            json!({"icon":{"kind":"emoji","value":"🐙"}}),
+            json!({"icon":{"kind":"symbol","name":"star","tint":"amber"}}),
+            None,
+        ),
+        (
+            json!({"icon":{"kind":"symbol","name":"star","tint":"amber"}}),
             Some(revision - 1),
         ),
-        (json!({"icon":{"kind":"emoji","value":""}}), Some(revision)),
         (
-            json!({"icon":{"kind":"emoji","value":"x\n"}}),
+            json!({"icon":{"kind":"symbol","name":"sparkles"}}),
             Some(revision),
         ),
         (
-            json!({"icon":{"kind":"emoji","value":"x\u{2028}"}}),
+            json!({"icon":{"kind":"symbol","name":"star","tint":"chartreuse"}}),
+            Some(revision),
+        ),
+        (
+            json!({"icon":{"kind":"emoji","value":"🐙"}}),
             Some(revision),
         ),
         (json!({"icon":42}), Some(revision)),
         (
-            json!({"icon":{"kind":"emoji","value":"🐙"}, "title":"unexpected"}),
+            json!({"icon":{"kind":"symbol","name":"star","tint":"amber"}, "title":"unexpected"}),
             Some(revision),
         ),
         (json!([]), Some(revision)),
@@ -192,20 +203,21 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
             &state.storage.history_id().await.unwrap(),
             id,
             "set_icon".into(),
-            json!({"icon":{"kind":"emoji","value":"🐙"}}),
+            json!({"icon":{"kind":"symbol","name":"star","tint":"amber"}}),
             Some(revision),
         )
         .await
         .unwrap();
     assert_eq!(
         manual.icon,
-        Some(hirsel_proto::ThreadIcon::Emoji {
-            value: "🐙".into()
+        Some(hirsel_proto::ThreadIcon::Symbol {
+            name: "star".into(),
+            tint: hirsel_proto::ThreadTint::Amber
         })
     );
     assert_eq!(manual.revision, revision + 1);
     assert_eq!(manual.last_activity_at, before.last_activity_at);
-    assert!(state.broadcast_log.recent().iter().any(|frame| matches!(frame, HostToClient::ThreadUpsert { thread } if thread.id == id && thread.icon == Some(hirsel_proto::ThreadIcon::Emoji { value: "🐙".into() }))));
+    assert!(state.broadcast_log.recent().iter().any(|frame| matches!(frame, HostToClient::ThreadUpsert { thread } if thread.id == id && thread.icon == Some(hirsel_proto::ThreadIcon::Symbol { name: "star".into(), tint: hirsel_proto::ThreadTint::Amber }))));
     let clear = state
         .handle_addressed_thread_action(
             &state.storage.history_id().await.unwrap(),
@@ -222,7 +234,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     tools
         .execute(
             "threads_update",
-            &json!({"thread":id,"icon":{"kind":"emoji","value":"☀️"}}),
+            &json!({"thread":id,"icon":{"kind":"symbol","name":"sun","tint":"amber"}}),
         )
         .await
         .unwrap();
@@ -241,10 +253,10 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
     );
     let before = state.storage.thread(id).await.unwrap().unwrap();
     for (index, icon) in [
-        json!({"kind":"emoji","value":""}),
-        json!({"kind":"emoji","value":"x\n"}),
-        json!({"kind":"emoji","value":"x\u{2029}"}),
-        json!({"kind":"emoji","value":"🐙".repeat(17)}),
+        json!({"kind":"symbol","name":"sparkles"}),
+        json!({"kind":"symbol","name":""}),
+        json!({"kind":"symbol","name":"star","tint":"chartreuse"}),
+        json!({"kind":"emoji","value":"🐙"}),
         json!(42),
     ]
     .into_iter()
@@ -455,7 +467,7 @@ async fn agent_image_artifacts_are_normalized_and_scope_is_enforced() {
     let refused = tools
         .execute(
             "threads_update",
-            &json!({"thread":foreign.id,"icon":{"kind":"emoji","value":"⛔"}}),
+            &json!({"thread":foreign.id,"icon":{"kind":"symbol","name":"shield","tint":"red"}}),
         )
         .await
         .unwrap();

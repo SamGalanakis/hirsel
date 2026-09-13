@@ -12,7 +12,7 @@ After hello, fetch the focused conversation with `open_thread`. A reconnect to t
 
 ## Spaces, Tasks and messages
 
-A Thread is explicitly either `kind:"space"` or `kind:"task"`. Both kinds may be roots. Spaces may contain Spaces and Tasks, while Tasks may contain Tasks only. A Thread also has an ID, title, description, mutable constrained instrument, revision, timestamps, independent attention/read/visibility, running turn, queue count, latest finished turn and factual activity recency. Its nullable typed icon is `{"kind":"emoji","value":"…"}` or `{"kind":"image","blob_id":"…"}`; `null` selects the generated initial. Tasks alone can be settled; completing execution or reading a Task never settles it. Required `parent_thread_id:number|null` is immutable; `pinned_at:string|null` gives independent pin state and stable ordering. All IDs are ordinary, including retained 0. An empty Hello has no Threads.
+A Thread is explicitly either `kind:"space"` or `kind:"task"`. Both kinds may be roots. Spaces may contain Spaces and Tasks, while Tasks may contain Tasks only. A Thread also has an ID, title, description, mutable constrained instrument, revision, timestamps, independent attention/read/visibility, running turn, queue count, latest finished turn and factual activity recency. Its nullable typed icon is `{"kind":"symbol","name":"…","tint":"…"}` or `{"kind":"image","blob_id":"…"}`; `null` selects the title monogram. `name` is one of 45 curated symbol names and `tint` one of `neutral|red|orange|amber|green|teal|blue|violet|pink` (defaulting to `neutral` when omitted); anything else is refused. Tasks alone can be settled; completing execution or reading a Task never settles it. Required `parent_thread_id:number|null` is immutable; `pinned_at:string|null` gives independent pin state and stable ordering. All IDs are ordinary, including retained 0. An empty Hello has no Threads.
 
 | Client frame | Fields and result |
 | --- | --- |
@@ -69,7 +69,7 @@ Human Hello contains the full flat forest; agents receive a separate trusted cal
 
 Selection uses an explicit route, then a valid saved selection from this history, otherwise no recipient. An unavailable explicit route remains unavailable rather than selecting another Thread. `/t/0?history={uuid}` is an ordinary route. Portable links require their history UUID; unqualified, malformed, wrong-history and missing destinations have no recipient. The incoming URL survives a history reset until validated by the current hello. Cached IDs do not authorize navigation or sending before that handshake. The overview `/` has no implicit composer; reset clears old focus before replay. Native push destinations carry history and Thread identity and reject obsolete histories.
 
-Agent tools are fenced, not scoped away: every tool accepts any numeric Thread or artifact ID as well as caller-relative child paths, and a target outside the caller's reach returns a typed refusal result rather than an error (see Reach and grants). `threads_create` and `threads_update` accept typed emoji icons plus image `blob_id` or accessible base64 file `artifact_id` sources; the Host applies the same raster validation and stores a center-cropped 256 px WebP, with a bounded JPEG fallback for high-entropy images. Dispatch and messaging reach anything inside the grant, but never the caller's own ancestors; reports have a captured upward route. Human UI remains full-tree. Explicit message/activity/brief artifact references authorize current-content access and edits without disclosing other conversations. No client filtering substitutes for host enforcement.
+Agent tools are fenced, not scoped away: every tool accepts any numeric Thread or artifact ID as well as caller-relative child paths, and a target outside the caller's reach returns a typed refusal result rather than an error (see Reach and grants). `threads_create` and `threads_update` accept typed symbol icons (a vocabulary name plus an optional tint) plus image `blob_id` or accessible base64 file `artifact_id` sources; the Host applies the same raster validation and stores a center-cropped 256 px WebP, with a bounded JPEG fallback for high-entropy images. Dispatch and messaging reach anything inside the grant, but never the caller's own ancestors; reports have a captured upward route. Human UI remains full-tree. Explicit message/activity/brief artifact references authorize current-content access and edits without disclosing other conversations. No client filtering substitutes for host enforcement.
 
 ## Human artifact references
 
@@ -97,8 +97,9 @@ Naming an unreachable Thread or artifact is never an error and never a lie. The 
 
 Copy thread link emits an absolute same-origin `/t/{id}?history={uuid}` HTTP(S) URL. Copy reference emits ordinary Markdown `[Thread #id](URL)`. Local `#id` shorthand resolves only in its message's current history. Conversation Markdown links, including reference-style links, use one native anchor renderer with adjacent Open, Copy and explicit Add to Related actions. Local Thread URLs resolve only at the app origin; lookalikes are external links. Related combines saved references with the canonical artifact inventory; artifact preview Markdown remains inert inside its isolated frame.
 
-The Host uses one canonical storage schema 11: emoji/image Thread icons with the
-`threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
+The Host uses one canonical storage schema 12: symbol/image Thread icons whose
+`threads.icon_symbol` and `threads.icon_tint` are CHECK-constrained to the
+vocabulary and palette and exclusive with the `threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
 authority, durable `thread_grants` reach whose NULL `target_thread_id` is the
 root, and no `monitors` table. Only the exact
 layout or an empty store is accepted; older and branch-specific layouts are

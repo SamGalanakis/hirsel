@@ -1,7 +1,7 @@
 package dev.hirsel.android.chat
 
 import dev.hirsel.core.Thread
-import dev.hirsel.core.ThreadIcon
+import dev.hirsel.core.ThreadTint
 import dev.hirsel.core.ThreadKind
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -17,16 +17,21 @@ class ThreadNavigationTest {
         lastFinishedTurn = null, lastActivityAt = "2026-09-10T00:00:00Z",
     )
 
-    @Test fun iconsSupportCustomResetAndUnicodeBounds() {
-        assertEquals("T", threadIconText(thread(0uL)))
-        assertEquals(
-            "👩🏽‍💻",
-            threadIconText(thread(1uL).copy(icon = ThreadIcon.Emoji("👩🏽‍💻"))),
-        )
-        assertEquals("T", threadIconText(thread(1uL).copy(icon = null)))
-        listOf(null, "🌱", "👩🏽‍💻", "⭐".repeat(16)).forEach { assertEquals(null, threadIconError(it)) }
-        listOf("", " ", "x\n", "x\u0085", "x\u2028", "x\u2029", "x".repeat(17)).forEach {
-            org.junit.Assert.assertNotNull(threadIconError(it))
+    @Test fun monogramsCoverOneWordTwoWordsAndEmptyTitles() {
+        assertEquals("T0", threadIconText(thread(0uL)))
+        assertEquals("OB", threadMonogram("Orchard Beds"))
+        assertEquals("RT", threadMonogram("  rebuild the android apk "))
+        assertEquals("#", threadMonogram("   "))
+    }
+
+    @Test fun everyVocabularySymbolHasArtworkAndATintedTile() {
+        assertEquals(45, THREAD_SYMBOL_DRAWABLES.size)
+        THREAD_SYMBOL_DRAWABLES.values.forEach { org.junit.Assert.assertNotEquals(0, it) }
+        ThreadTint.entries.forEach { tint ->
+            listOf(true, false).forEach { isLight ->
+                val (tile, glyph) = threadTintColors(tint, isLight)
+                org.junit.Assert.assertNotEquals(tile, glyph)
+            }
         }
     }
 

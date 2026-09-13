@@ -541,7 +541,7 @@ async fn websocket_thread_actions_return_their_exact_request_identity() {
             "history_id": history_id,
             "thread_id": second.id,
             "action": "set_icon",
-            "data": {"icon": {"kind": "emoji", "value": "x"}}
+            "data": {"icon": {"kind": "symbol", "name": "star", "tint": "amber"}}
         })
         .to_string(),
     ))

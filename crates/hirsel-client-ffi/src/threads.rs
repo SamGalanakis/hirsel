@@ -6,15 +6,62 @@ pub enum ThreadKind {
     Task,
 }
 
+/// The tile colour, mirroring `hirsel_proto::ThreadTint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ThreadTint {
+    Neutral,
+    Red,
+    Orange,
+    Amber,
+    Green,
+    Teal,
+    Blue,
+    Violet,
+    Pink,
+}
+impl From<core::ThreadTint> for ThreadTint {
+    fn from(tint: core::ThreadTint) -> Self {
+        match tint {
+            core::ThreadTint::Neutral => Self::Neutral,
+            core::ThreadTint::Red => Self::Red,
+            core::ThreadTint::Orange => Self::Orange,
+            core::ThreadTint::Amber => Self::Amber,
+            core::ThreadTint::Green => Self::Green,
+            core::ThreadTint::Teal => Self::Teal,
+            core::ThreadTint::Blue => Self::Blue,
+            core::ThreadTint::Violet => Self::Violet,
+            core::ThreadTint::Pink => Self::Pink,
+        }
+    }
+}
+impl From<ThreadTint> for core::ThreadTint {
+    fn from(tint: ThreadTint) -> Self {
+        match tint {
+            ThreadTint::Neutral => Self::Neutral,
+            ThreadTint::Red => Self::Red,
+            ThreadTint::Orange => Self::Orange,
+            ThreadTint::Amber => Self::Amber,
+            ThreadTint::Green => Self::Green,
+            ThreadTint::Teal => Self::Teal,
+            ThreadTint::Blue => Self::Blue,
+            ThreadTint::Violet => Self::Violet,
+            ThreadTint::Pink => Self::Pink,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ThreadIcon {
-    Emoji { value: String },
+    Symbol { name: String, tint: ThreadTint },
     Image { blob_id: String },
 }
 impl From<core::ThreadIcon> for ThreadIcon {
     fn from(icon: core::ThreadIcon) -> Self {
         match icon {
-            core::ThreadIcon::Emoji { value } => Self::Emoji { value },
+            core::ThreadIcon::Symbol { name, tint } => Self::Symbol {
+                name,
+                tint: tint.into(),
+            },
             core::ThreadIcon::Image { blob_id } => Self::Image { blob_id },
         }
     }
@@ -22,7 +69,10 @@ impl From<core::ThreadIcon> for ThreadIcon {
 impl From<ThreadIcon> for core::ThreadIcon {
     fn from(icon: ThreadIcon) -> Self {
         match icon {
-            ThreadIcon::Emoji { value } => Self::Emoji { value },
+            ThreadIcon::Symbol { name, tint } => Self::Symbol {
+                name,
+                tint: tint.into(),
+            },
             ThreadIcon::Image { blob_id } => Self::Image { blob_id },
         }
     }
@@ -209,15 +259,16 @@ mod tests {
     use super::*;
     #[test]
     fn thread_ffi_keeps_lifecycle_instrument_and_revision() {
-        let wire = serde_json::json!({"id":5,"kind":"task","parent_thread_id":2,"pinned_at":"2026-09-09T10:00:00Z","title":"Groceries","icon":{"kind":"emoji","value":"🧑🏽‍💻"},"showcased_artifact_id":42,"description":"Milk","instrument":{"type":"text","text":"Milk"},"attention":"needs_owner","settled_at":null,"archived_at":null,"snoozed_until":null,"read":true,"created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z","revision":8,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":"2026-09-09T10:00:00Z"});
+        let wire = serde_json::json!({"id":5,"kind":"task","parent_thread_id":2,"pinned_at":"2026-09-09T10:00:00Z","title":"Groceries","icon":{"kind":"symbol","name":"rocket","tint":"violet"},"showcased_artifact_id":42,"description":"Milk","instrument":{"type":"text","text":"Milk"},"attention":"needs_owner","settled_at":null,"archived_at":null,"snoozed_until":null,"read":true,"created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z","revision":8,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":"2026-09-09T10:00:00Z"});
         let thread = Thread::from(serde_json::from_value::<core::Thread>(wire).unwrap());
         assert_eq!(thread.id, 5);
         assert_eq!(thread.kind, ThreadKind::Task);
         assert_eq!(thread.showcased_artifact_id, Some(42));
         assert_eq!(
             thread.icon,
-            Some(ThreadIcon::Emoji {
-                value: "🧑🏽‍💻".into()
+            Some(ThreadIcon::Symbol {
+                name: "rocket".into(),
+                tint: ThreadTint::Violet
             })
         );
         assert_eq!(thread.parent_thread_id, Some(2));

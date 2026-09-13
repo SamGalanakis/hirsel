@@ -1,7 +1,8 @@
 import type { ChatMessage, ThreadTurnTimeline, ViewSpec } from "../protocol";
+import type { ThreadSymbol, ThreadTint } from "./thread-symbols";
 export type ThreadKind = "space" | "task";
 export type ThreadIcon =
-  | { kind: "emoji"; value: string }
+  | { kind: "symbol"; name: ThreadSymbol; tint: ThreadTint }
   | { kind: "image"; blob_id: string };
 /** Where the Owner chose this Thread's next turn to run. Absent or null means
  * it inherits the configured default Native provider and model. */

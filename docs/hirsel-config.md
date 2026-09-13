@@ -22,7 +22,7 @@ an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 project files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
-Schema 8 keeps Thread icons, execution preferences and process deliveries. Its
+Schema 12 keeps Thread icons, execution preferences and process deliveries. Its
 CHECKs link terminal states to completion timestamps and enforce absent starts
 for queued work and actual starts for running work. Immutable `accepted_at`
 records acceptance separately. Instruments use SQL NULL for absence; nonempty

@@ -1,7 +1,7 @@
 //! One typed icon contract for owner edits and execution-scoped agent tools.
 use super::{Storage, threads};
 use base64::Engine;
-use hirsel_proto::{Thread, ThreadIcon};
+use hirsel_proto::{Thread, ThreadIcon, ThreadTint};
 use image::{GenericImageView, ImageEncoder, ImageFormat, imageops::FilterType};
 use rusqlite::params;
 use serde_json::Value;
@@ -13,36 +13,30 @@ const ICON_EDGE: u32 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IconSource {
-    Emoji(String),
+    Symbol { name: String, tint: ThreadTint },
     Blob(String),
     Artifact(u64),
 }
 
-fn validate_emoji(value: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !value.trim().is_empty()
-            && value.len() <= 64
-            && value.chars().count() <= 16
-            && !value
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')),
-        "emoji icon must be nonblank and at most 16 Unicode code points / 64 UTF-8 bytes without controls or line separators"
-    );
-    Ok(())
+/// The three exclusive icon columns for one typed icon.
+pub(super) fn icon_columns(
+    icon: Option<&ThreadIcon>,
+) -> (Option<&str>, Option<&'static str>, Option<&str>) {
+    match icon {
+        Some(ThreadIcon::Symbol { name, tint }) => (Some(name.as_str()), Some(tint.as_str()), None),
+        Some(ThreadIcon::Image { blob_id }) => (None, None, Some(blob_id.as_str())),
+        None => (None, None, None),
+    }
 }
 
 pub(super) fn validate_icon(icon: Option<&ThreadIcon>) -> anyhow::Result<()> {
     match icon {
-        Some(ThreadIcon::Emoji { value }) => validate_emoji(value),
-        Some(ThreadIcon::Image { blob_id }) => {
-            anyhow::ensure!(!blob_id.trim().is_empty(), "image icon requires a blob_id");
-            Ok(())
-        }
+        Some(icon) => icon.validate().map_err(|error| anyhow::anyhow!(error)),
         None => Ok(()),
     }
 }
 
-/// Outer None means omitted; Some(None) explicitly restores the generated avatar.
+/// Outer None means omitted; Some(None) explicitly restores the monogram default.
 pub(crate) fn parse_icon(args: &Value) -> anyhow::Result<Option<Option<ThreadIcon>>> {
     args.get("icon")
         .map(|value| {
@@ -68,16 +62,42 @@ pub(crate) fn parse_agent_icon(args: &Value) -> anyhow::Result<Option<Option<Ico
                 .ok_or_else(|| anyhow::anyhow!("icon must be a typed object or null"))?;
             let kind = object.get("kind").and_then(Value::as_str);
             match kind {
-                Some("emoji") => {
+                Some("symbol") => {
                     anyhow::ensure!(
-                        object.len() == 2 && object.contains_key("value"),
-                        "emoji icon requires only kind and value"
+                        object.len() <= 3
+                            && object.contains_key("name")
+                            && object.keys().all(|key| matches!(key.as_str(), "kind" | "name" | "tint")),
+                        "symbol icon accepts only kind, name and tint"
                     );
-                    let value = object["value"]
+                    let name = object["name"]
                         .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("emoji icon value must be a string"))?;
-                    validate_emoji(value)?;
-                    Ok(Some(IconSource::Emoji(value.to_owned())))
+                        .ok_or_else(|| anyhow::anyhow!("symbol icon name must be a string"))?;
+                    let tint = match object.get("tint") {
+                        None | Some(Value::Null) => ThreadTint::Neutral,
+                        Some(value) => ThreadTint::parse(
+                            value
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("symbol icon tint must be a string"))?,
+                        )
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "unknown Thread tint; choose one of: {}",
+                                ThreadTint::ALL
+                                    .iter()
+                                    .map(|tint| tint.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })?,
+                    };
+                    validate_icon(Some(&ThreadIcon::Symbol {
+                        name: name.to_owned(),
+                        tint,
+                    }))?;
+                    Ok(Some(IconSource::Symbol {
+                        name: name.to_owned(),
+                        tint,
+                    }))
                 }
                 Some("image") => {
                     anyhow::ensure!(
@@ -99,7 +119,7 @@ pub(crate) fn parse_agent_icon(args: &Value) -> anyhow::Result<Option<Option<Ico
                         ),
                     }
                 }
-                _ => anyhow::bail!("icon kind must be emoji or image"),
+                _ => anyhow::bail!("icon kind must be symbol or image"),
             }
         })
         .transpose()
@@ -204,7 +224,7 @@ impl Storage {
         client_id: &str,
     ) -> anyhow::Result<ThreadIcon> {
         match source {
-            IconSource::Emoji(value) => Ok(ThreadIcon::Emoji { value }),
+            IconSource::Symbol { name, tint } => Ok(ThreadIcon::Symbol { name, tint }),
             IconSource::Blob(blob_id) => {
                 let blob = self
                     .blob(&blob_id)
@@ -271,14 +291,10 @@ impl Storage {
             "thread changed; reload before updating its icon"
         );
         if let Some(icon) = icon {
-            let (emoji, blob_id) = match icon {
-                Some(ThreadIcon::Emoji { value }) => (Some(value.as_str()), None),
-                Some(ThreadIcon::Image { blob_id }) => (None, Some(blob_id.as_str())),
-                None => (None, None),
-            };
+            let (symbol, tint, blob_id) = icon_columns(icon);
             c.execute(
-                "UPDATE threads SET icon=?2,icon_blob_id=?3,updated_at=?4,revision=revision+1 WHERE id=?1",
-                params![id, emoji, blob_id, chrono::Utc::now().to_rfc3339()],
+                "UPDATE threads SET icon_symbol=?2,icon_tint=?3,icon_blob_id=?4,updated_at=?5,revision=revision+1 WHERE id=?1",
+                params![id, symbol, tint, blob_id, chrono::Utc::now().to_rfc3339()],
             )?;
         }
         threads::get(&c, id)

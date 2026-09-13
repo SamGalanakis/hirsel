@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hirsel_client_core::{
     AgentActivityState, ChatAuthor, ChatMessage, Client, ClientConfig, ClientObserver,
-    ClientSnapshot, ConnectionState, LifecycleEvent, ProcessInfo, ProcessState, ReconnectPolicy,
+    ClientSnapshot, LifecycleEvent, ProcessInfo, ProcessState, ReconnectPolicy,
     SendThreadMessageRequest, Thread, ThreadAttention, ThreadKind,
 };
 use hirsel_proto::{ClientToHost, HelloAuth, HostToClient};
@@ -205,7 +205,7 @@ async fn connect_loads_state_and_observer_sees_online() {
     client.connect().await.unwrap();
 
     let snapshot = wait_for_snapshot(&client, |state| {
-        state.connection == ConnectionState::Online && state.messages.len() == 2
+        state.history_id.as_deref() == Some("test-store-a") && state.messages.len() == 2
     })
     .await;
     assert_eq!(snapshot.messages.len(), 2);
@@ -217,7 +217,7 @@ async fn connect_loads_state_and_observer_sees_online() {
             .lifecycle
             .lock()
             .unwrap()
-            .contains(&LifecycleEvent::Online)
+            .contains(&LifecycleEvent::Online { device_token: None })
     );
     assert!(
         observer
@@ -225,7 +225,7 @@ async fn connect_loads_state_and_observer_sees_online() {
             .lock()
             .unwrap()
             .iter()
-            .any(|state| state.connection == ConnectionState::Online)
+            .any(|state| state.history_id.as_deref() == Some("test-store-a"))
     );
 
     let _ = release_tx.send(());
@@ -290,7 +290,10 @@ async fn thread_and_process_upserts_replace_existing_rows() {
 
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |state| state.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |state| {
+        state.history_id.as_deref() == Some("test-store-a")
+    })
+    .await;
     push_tx.send(()).unwrap();
     let snapshot = wait_for_snapshot(&client, |state| {
         state.threads.first().is_some_and(|item| item.read)
@@ -349,7 +352,10 @@ async fn optimistic_send_reconciles_with_owner_echo() {
 
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |state| state.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |state| {
+        state.history_id.as_deref() == Some("test-store-a")
+    })
+    .await;
     let receipt = client
         .send_message(SendThreadMessageRequest::new(
             "test-store-a".into(),
@@ -417,15 +423,29 @@ async fn offline_queue_flushes_in_order_on_same_store_reconnect() {
     });
 
     let client = Client::new(test_config(address)).unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    client.set_observer(Some(observer.clone()));
     client.connect().await.unwrap();
     wait_for_snapshot(&client, |state| {
         state.messages.iter().any(|m| m.id() == Some(7))
     })
     .await;
-    wait_for_snapshot(&client, |state| {
-        state.connection == ConnectionState::Offline
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if observer
+                .lifecycle
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, LifecycleEvent::Offline { .. }))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
     })
-    .await;
+    .await
+    .expect("client did not report offline");
     let first_receipt = client
         .send_message(SendThreadMessageRequest::new(
             "test-store-a".into(),
@@ -661,7 +681,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     let observer = Arc::new(RecordingObserver::default());
     client.set_observer(Some(observer.clone()));
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     let created = client
         .create_thread(
             "test-store-a".into(),
@@ -776,7 +796,7 @@ async fn lost_create_ack_retries_same_identity_after_reconnect() {
     });
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     let receipt = client
         .create_thread(
             "test-store-a".into(),
@@ -856,7 +876,7 @@ async fn lost_open_ack_retries_same_identity_after_reconnect() {
     let observer = Arc::new(RecordingObserver::default());
     client.set_observer(Some(observer.clone()));
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     let receipt = client.open_thread(5, None);
     wait_for_snapshot(&client, |s| {
         s.briefs.iter().any(|brief| brief.text == "Retried open")
@@ -951,7 +971,7 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
     let observer = Arc::new(RecordingObserver::default());
     client.set_observer(Some(observer.clone()));
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     client.open_thread(5, None);
     wait_for_snapshot(&client, |s| s.opened_threads.contains(&5)).await;
     let receipt = client.open_thread(5, Some(10));
@@ -1114,7 +1134,7 @@ async fn live_assignment_refreshes_current_brief_without_user_reopen() {
     });
     let client = Client::new(test_config(address)).unwrap();
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     client.open_thread(5, None);
     let state = wait_for_snapshot(&client, |s| {
         s.briefs.iter().any(|b| b.text == "Changed assignment")
@@ -1262,7 +1282,7 @@ async fn saved_link_commands_snapshots_and_correlated_results_cross_native_trans
     let observer = Arc::new(RecordingObserver::default());
     client.set_observer(Some(observer.clone()));
     client.connect().await.unwrap();
-    wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     client.open_thread(5, None);
     let opened = wait_for_snapshot(&client, |s| !s.related_items.is_empty()).await;
     assert_eq!(opened.related_items[0].id, 7);
@@ -1321,6 +1341,83 @@ async fn saved_link_commands_snapshots_and_correlated_results_cross_native_trans
                 && s.opened_threads.contains(&5)
                 && s.related_items.is_empty())
     );
+    release_tx.send(()).unwrap();
+    client.disconnect().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn related_add_and_remove_errors_surface_with_their_client_ids() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        receive_client(&mut socket).await;
+        send_hello(&mut socket, vec![], vec![thread(5, false, false)], vec![]).await;
+
+        for detail in ["Add rejected", "Remove rejected"] {
+            let operation = receive_client(&mut socket).await;
+            let client_id = match operation {
+                ClientToHost::AddThreadRelated { client_id, .. }
+                | ClientToHost::RemoveThreadRelated { client_id, .. } => client_id,
+                other => panic!("unexpected related operation: {other:?}"),
+            };
+            send_server(
+                &mut socket,
+                &HostToClient::Error {
+                    detail: detail.into(),
+                    client_id: Some(client_id),
+                },
+            )
+            .await;
+        }
+        let _ = release_rx.await;
+    });
+
+    let client = Client::new(test_config(address)).unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    client.set_observer(Some(observer.clone()));
+    client.connect().await.unwrap();
+    wait_for_snapshot(&client, |snapshot| {
+        snapshot.history_id.as_deref() == Some("test-store-a")
+    })
+    .await;
+
+    let added = client.add_thread_related(
+        "test-store-a".into(),
+        5,
+        hirsel_proto::ThreadRelatedTarget::Url {
+            url: "https://example.com".into(),
+        },
+        Some("Reference".into()),
+    );
+    let removed = client.remove_thread_related("test-store-a".into(), 5, 7);
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let (add_surfaced, remove_surfaced) = {
+                let events = observer.lifecycle.lock().unwrap();
+                let add_surfaced = events.iter().any(|event| {
+                    matches!(event, LifecycleEvent::ProtocolError { detail, client_id: Some(client_id) }
+                        if detail == "Add rejected" && client_id == &added.client_id)
+                });
+                let remove_surfaced = events.iter().any(|event| {
+                    matches!(event, LifecycleEvent::ProtocolError { detail, client_id: Some(client_id) }
+                        if detail == "Remove rejected" && client_id == &removed.client_id)
+                });
+                (add_surfaced, remove_surfaced)
+            };
+            if add_surfaced && remove_surfaced {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("related operation errors were not surfaced");
+
     release_tx.send(()).unwrap();
     client.disconnect().await;
     server.await.unwrap();
@@ -1414,7 +1511,8 @@ async fn typed_navigation_rechecks_native_history_when_displayed_snapshot_lags_r
     let client = Client::new(test_config(address)).unwrap();
     assert!(client.open_related_thread(target()).is_none());
     client.connect().await.unwrap();
-    let displayed = wait_for_snapshot(&client, |s| s.connection == ConnectionState::Online).await;
+    let displayed =
+        wait_for_snapshot(&client, |s| s.history_id.as_deref() == Some("test-store-a")).await;
     assert!(
         client
             .open_related_thread(ThreadRelatedTarget::Thread {

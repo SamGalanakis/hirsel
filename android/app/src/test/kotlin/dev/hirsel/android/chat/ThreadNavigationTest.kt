@@ -1,6 +1,7 @@
 package dev.hirsel.android.chat
 
 import dev.hirsel.core.Thread
+import dev.hirsel.core.ThreadIcon
 import dev.hirsel.core.ThreadKind
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -18,7 +19,10 @@ class ThreadNavigationTest {
 
     @Test fun iconsSupportCustomResetAndUnicodeBounds() {
         assertEquals("T", threadIconText(thread(0uL)))
-        assertEquals("👩🏽‍💻", threadIconText(thread(1uL).copy(icon = "👩🏽‍💻")))
+        assertEquals(
+            "👩🏽‍💻",
+            threadIconText(thread(1uL).copy(icon = ThreadIcon.Emoji("👩🏽‍💻"))),
+        )
         assertEquals("T", threadIconText(thread(1uL).copy(icon = null)))
         listOf(null, "🌱", "👩🏽‍💻", "⭐".repeat(16)).forEach { assertEquals(null, threadIconError(it)) }
         listOf("", " ", "x\n", "x\u0085", "x\u2028", "x\u2029", "x".repeat(17)).forEach {

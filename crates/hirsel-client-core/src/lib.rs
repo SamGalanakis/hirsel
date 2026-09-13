@@ -11,9 +11,10 @@ pub use client::{Client, ClientError, SendReceipt, SendThreadMessageRequest};
 pub use config::{ClientConfig, ConfigError, ReconnectPolicy};
 pub use identity::generate_iroh_identity;
 pub use observer::{ClientObserver, LifecycleEvent};
+pub(crate) use store::ConnectionState;
 pub use store::{
-    AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, ConnectionState, CreatedThread,
-    PendingSend, ThreadBrief, ThreadStream,
+    AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, CreatedThread, PendingSend,
+    ThreadBrief, ThreadStream,
 };
 
 pub use hirsel_proto::{

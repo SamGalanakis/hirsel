@@ -5,9 +5,9 @@ use hirsel_proto::{
 };
 use std::collections::{HashMap, HashSet};
 
-/// Connection state exposed to client UIs.
+/// Internal transport readiness used to gate identity-sensitive commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ConnectionState {
+pub(crate) enum ConnectionState {
     Connecting,
     Online,
     #[default]
@@ -138,7 +138,6 @@ impl Default for AgentActivity {
 /// Complete state view delivered to observers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSnapshot {
-    pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
@@ -170,15 +169,8 @@ pub(crate) struct LocalStore {
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
-    pub requests: Vec<(String, u64)>,
+    pub pending_ops: HashMap<String, PendingOp>,
     pub history_has_more: Vec<u64>,
-    pub pending_creates: Vec<(
-        String,
-        String,
-        String,
-        hirsel_proto::ThreadKind,
-        Option<u64>,
-    )>,
     pub processes: Vec<ProcessInfo>,
     pub history_id: Option<String>,
     pub recovered_drafts: Vec<String>,
@@ -200,9 +192,8 @@ impl Default for LocalStore {
             streams: Vec::new(),
             opened_threads: Vec::new(),
             created_threads: Vec::new(),
-            requests: Vec::new(),
+            pending_ops: HashMap::new(),
             history_has_more: Vec::new(),
-            pending_creates: Vec::new(),
             processes: Vec::new(),
 
             host_version: None,
@@ -215,7 +206,6 @@ impl Default for LocalStore {
 impl LocalStore {
     pub fn snapshot(&self) -> ClientSnapshot {
         ClientSnapshot {
-            connection: self.connection,
             messages: self.messages.clone(),
             threads: self.threads.clone(),
             turns: self.turns.clone(),
@@ -234,7 +224,48 @@ impl LocalStore {
     }
 
     pub fn add_optimistic_send(&mut self, pending: PendingSend) {
+        self.pending_ops.insert(
+            pending.client_id.clone(),
+            PendingOp::SendMessage {
+                thread_id: pending.thread_id,
+            },
+        );
         self.messages.push(ChatEntry::Pending(pending));
+    }
+
+    pub fn track_pending(&mut self, client_id: String, operation: PendingOp) {
+        self.pending_ops.insert(client_id, operation);
+    }
+
+    pub fn complete_pending(&mut self, client_id: &str) -> Option<PendingOp> {
+        self.pending_ops.remove(client_id)
+    }
+
+    pub fn pending_thread_creates(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &String,
+            &String,
+            &String,
+            hirsel_proto::ThreadKind,
+            Option<u64>,
+        ),
+    > {
+        self.pending_ops
+            .iter()
+            .filter_map(|(client_id, operation)| {
+                let PendingOp::CreateThread {
+                    history_id,
+                    title,
+                    kind,
+                    parent_thread_id,
+                } = operation
+                else {
+                    return None;
+                };
+                Some((client_id, history_id, title, *kind, *parent_thread_id))
+            })
     }
 
     pub fn pending_sends(&self) -> impl Iterator<Item = &PendingSend> {
@@ -278,7 +309,14 @@ impl LocalStore {
 
     pub fn apply_message(&mut self, message: ChatMessage) {
         if let Some(client_id) = &message.client_id {
-            self.messages.retain(|entry| !matches!(entry, ChatEntry::Pending(send) if send.client_id == *client_id && send.thread_id == message.thread_id));
+            let pending_send = matches!(
+                self.pending_ops.get(client_id),
+                Some(PendingOp::SendMessage { thread_id }) if *thread_id == message.thread_id
+            );
+            if pending_send {
+                self.pending_ops.remove(client_id);
+                self.messages.retain(|entry| !matches!(entry, ChatEntry::Pending(send) if send.client_id == *client_id && send.thread_id == message.thread_id));
+            }
         }
         if self.removed_message_ids.contains(&message.id) {
             return;
@@ -311,14 +349,13 @@ impl LocalStore {
     }
 
     pub fn apply_detail(&mut self, client_id: &str, detail: hirsel_proto::ThreadDetail) -> bool {
-        let Some(index) = self
-            .requests
-            .iter()
-            .position(|(id, thread)| id == client_id && *thread == detail.thread.id)
-        else {
+        let Some(PendingOp::OpenThread { thread_id }) = self.pending_ops.get(client_id) else {
             return false;
         };
-        self.requests.remove(index);
+        if *thread_id != detail.thread.id {
+            return false;
+        }
+        self.pending_ops.remove(client_id);
         let thread_id = detail.thread.id;
         self.replace_related_items(thread_id, detail.thread.revision, detail.related_items);
         self.briefs.retain(|b| b.thread_id != thread_id);
@@ -402,7 +439,7 @@ impl LocalStore {
             return None;
         }
         let client_id = uuid::Uuid::new_v4().to_string();
-        self.requests.push((client_id.clone(), thread_id));
+        self.track_pending(client_id.clone(), PendingOp::OpenThread { thread_id });
         Some(hirsel_proto::ClientToHost::OpenThread {
             client_id,
             thread_id,
@@ -475,6 +512,34 @@ impl LocalStore {
             self.processes.push(process);
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingOp {
+    SendMessage {
+        thread_id: u64,
+    },
+    CreateThread {
+        history_id: String,
+        title: String,
+        kind: hirsel_proto::ThreadKind,
+        parent_thread_id: Option<u64>,
+    },
+    OpenThread {
+        thread_id: u64,
+    },
+    ThreadAction {
+        history_id: String,
+        thread_id: u64,
+    },
+    AddThreadRelated {
+        history_id: String,
+        thread_id: u64,
+    },
+    RemoveThreadRelated {
+        history_id: String,
+        thread_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

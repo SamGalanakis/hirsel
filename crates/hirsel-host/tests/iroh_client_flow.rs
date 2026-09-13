@@ -4,8 +4,8 @@ use std::{
 };
 
 use hirsel_client_core::{
-    ChatEntry, Client, ClientConfig, ClientObserver, ClientSnapshot, ConnectionState,
-    LifecycleEvent, ReconnectPolicy, SendThreadMessageRequest, generate_iroh_identity,
+    ChatEntry, Client, ClientConfig, ClientObserver, ClientSnapshot, LifecycleEvent,
+    ReconnectPolicy, SendThreadMessageRequest, generate_iroh_identity,
 };
 use hirsel_host::{
     build_state,
@@ -99,10 +99,12 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
         jitter_ratio: 0.0,
     };
     let client = Client::new(client_config).unwrap();
+    let pairing_observer = Arc::new(RecordingObserver::default());
+    client.set_observer(Some(pairing_observer.clone()));
     client.connect().await.unwrap();
 
     let online = wait_for_snapshot(&client, |snapshot| {
-        snapshot.connection == ConnectionState::Online
+        snapshot.history_id.is_some() && snapshot.threads.iter().any(|item| item.id == thread.id)
     })
     .await;
     assert!(
@@ -111,9 +113,27 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
             .iter()
             .any(|item| { item.id == thread.id && item.settled_at.is_none() })
     );
-    let device_token = client
-        .paired_device_token()
-        .expect("pairing did not surface the issued device token");
+    let device_token = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(token) = pairing_observer
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|event| match event {
+                    LifecycleEvent::Online {
+                        device_token: Some(token),
+                    } => Some(token.clone()),
+                    _ => None,
+                })
+            {
+                break token;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pairing did not surface the issued device token");
     assert!(device_token.len() >= 32);
 
     let devices: serde_json::Value = http
@@ -151,7 +171,7 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     );
     reconnected_client.connect().await.unwrap();
     let reconnected = wait_for_snapshot(&reconnected_client, |snapshot| {
-        snapshot.connection == ConnectionState::Online
+        snapshot.history_id.is_some() && snapshot.threads.iter().any(|item| item.id == thread.id)
     })
     .await;
     assert!(reconnected.messages.iter().any(|entry| {

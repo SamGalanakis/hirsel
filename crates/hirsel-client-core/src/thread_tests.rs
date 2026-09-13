@@ -1,4 +1,4 @@
-use crate::store::{LocalStore, PendingSend};
+use crate::store::{LocalStore, PendingOp, PendingSend};
 use chrono::Utc;
 use hirsel_proto::{
     ChatAuthor, ChatMessage, ClientToHost, Thread, ThreadAttention, ThreadDetail, ThreadKind,
@@ -169,7 +169,7 @@ fn echo_and_reconnect_reconcile_by_client_and_owner_thread_never_body() {
 #[test]
 fn open_requires_matching_request_and_message_ownership() {
     let mut store = LocalStore::default();
-    store.requests.push(("open".into(), 5));
+    store.track_pending("open".into(), PendingOp::OpenThread { thread_id: 5 });
     let detail = ThreadDetail {
         related_items: vec![],
         brief: hirsel_proto::ThreadBrief {
@@ -240,7 +240,7 @@ fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
         vec![],
         "test".into(),
     );
-    store.requests.push(("history".into(), 5));
+    store.track_pending("history".into(), PendingOp::OpenThread { thread_id: 5 });
     store.apply_detail(
         "history",
         ThreadDetail {
@@ -267,14 +267,16 @@ fn changed_history_clears_owned_state_but_preserves_plain_unsent_text() {
     store.apply_hello_ok("A".into(), vec![thread(1)], vec![], "test".into());
     store.add_optimistic_send(pending(5, "old-send"));
     let text = store.pending_sends().next().unwrap().body.clone();
-    store.pending_creates.push((
+    store.track_pending(
         "old-create".into(),
-        "A".into(),
-        "Title".into(),
-        ThreadKind::Space,
-        None,
-    ));
-    store.requests.push(("old-open".into(), 5));
+        PendingOp::CreateThread {
+            history_id: "A".into(),
+            title: "Title".into(),
+            kind: ThreadKind::Space,
+            parent_thread_id: None,
+        },
+    );
+    store.track_pending("old-open".into(), PendingOp::OpenThread { thread_id: 5 });
     store.opened_threads.push(5);
     store.apply_delta(
         5,
@@ -290,8 +292,7 @@ fn changed_history_clears_owned_state_but_preserves_plain_unsent_text() {
     assert!(store.apply_hello_ok("B".into(), vec![thread(1)], vec![], "test".into()));
     assert!(
         store.messages.is_empty()
-            && store.pending_creates.is_empty()
-            && store.requests.is_empty()
+            && store.pending_ops.is_empty()
             && store.opened_threads.is_empty()
             && store.streams.is_empty()
     );
@@ -377,7 +378,7 @@ fn current_brief_is_per_thread_and_survives_paginated_history() {
         let mut t = thread(1);
         t.id = id;
         let request = format!("open-{id}");
-        store.requests.push((request.clone(), id));
+        store.track_pending(request.clone(), PendingOp::OpenThread { thread_id: id });
         store.apply_detail(
             &request,
             ThreadDetail {
@@ -425,7 +426,10 @@ fn assignment_refresh_fetches_authoritative_detail_only_for_opened_thread() {
         panic!("expected detail request")
     };
     assert_eq!((thread_id, before_id), (5, None));
-    assert_eq!(store.requests, vec![(client_id, 5)]);
+    assert_eq!(
+        store.pending_ops.get(&client_id),
+        Some(&PendingOp::OpenThread { thread_id: 5 })
+    );
     assert!(store.refresh_open_thread(6).is_none());
 }
 
@@ -465,13 +469,16 @@ fn related_items_are_complete_per_thread_even_in_paginated_detail() {
     assert!(store.apply_thread_related("A", 6, 1, vec![other.clone()]));
     let first = link(1, 5);
     let second = link(2, 5);
-    store.requests.push(("open".into(), 5));
+    store.track_pending("open".into(), PendingOp::OpenThread { thread_id: 5 });
     store.apply_detail("open", link_detail(1, vec![first.clone(), second.clone()]));
     assert_eq!(
         store.snapshot().related_items,
         vec![other.clone(), first, second.clone()]
     );
-    store.requests.push(("older-messages".into(), 5));
+    store.track_pending(
+        "older-messages".into(),
+        PendingOp::OpenThread { thread_id: 5 },
+    );
     store.apply_detail("older-messages", link_detail(2, vec![second.clone()]));
     assert_eq!(store.snapshot().related_items, vec![other.clone(), second]);
     assert_eq!(store.briefs[0].artifact_ids, vec![44]);
@@ -500,7 +507,10 @@ fn related_items_accept_equal_revision_after_upsert_and_reject_stale_or_foreign_
     // An event may precede its metadata upsert. Its revision still prevents regression.
     assert!(store.apply_thread_related("A", 5, 4, vec![]));
     assert!(!store.apply_thread_related("A", 5, 3, vec![saved.clone()]));
-    store.requests.push(("stale-detail".into(), 5));
+    store.track_pending(
+        "stale-detail".into(),
+        PendingOp::OpenThread { thread_id: 5 },
+    );
     store.apply_detail("stale-detail", link_detail(3, vec![saved.clone()]));
     assert!(store.related_items.is_empty());
     // Equal revision no-op retries remain valid, including empty snapshots.
@@ -517,7 +527,7 @@ fn related_item_identity_and_revision_are_discarded_on_history_reset() {
     assert!(!store.apply_thread_related("A", 5, 1, vec![saved.clone()]));
     store.apply_hello_ok("A".into(), vec![thread(10)], vec![], "test".into());
     assert!(store.apply_thread_related("A", 5, 10, vec![saved.clone()]));
-    store.requests.push(("old-open".into(), 5));
+    store.track_pending("old-open".into(), PendingOp::OpenThread { thread_id: 5 });
     store.apply_hello_ok("B".into(), vec![thread(1)], vec![], "test".into());
     assert!(store.snapshot().related_items.is_empty());
     store.apply_detail("old-open", link_detail(10, vec![saved.clone()]));
@@ -556,7 +566,10 @@ fn related_revision_orders_independently_of_metadata_and_detail_advances_it() {
     assert_eq!(store.threads[0], metadata);
     assert!(!store.apply_thread_related("A", 5, 1, vec![link(1, 5)]));
     assert!(store.apply_thread_related("A", 5, 2, vec![target.clone()]));
-    store.requests.push(("fresh-detail".into(), 5));
+    store.track_pending(
+        "fresh-detail".into(),
+        PendingOp::OpenThread { thread_id: 5 },
+    );
     store.apply_detail("fresh-detail", link_detail(4, vec![link(3, 5), target]));
     let fresh = store.snapshot();
     assert_eq!(fresh.related_items.len(), 2);

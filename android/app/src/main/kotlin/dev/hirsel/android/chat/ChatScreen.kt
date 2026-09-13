@@ -80,6 +80,7 @@ import dev.hirsel.core.ChatAuthor
 import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ToolCall
 import dev.hirsel.core.ThreadKind
+import dev.hirsel.core.ThreadTurnState
 import kotlinx.coroutines.launch
 
 /** Durable thread inventory and focused, independently owned conversation. */
@@ -92,10 +93,18 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
     val focused = connection.focusedThreadId
     BackHandler(enabled = focused != null) { connection.focusedThreadId = null }
     val thread = snapshot?.threads?.find { it.id == focused }
-    val messages = snapshot?.messages.orEmpty().filter { it.threadId == focused }
+    val messages = snapshot?.messages.orEmpty().filter { message ->
+        when (message) {
+            is ChatMessage.Confirmed -> message.threadId == focused
+            is ChatMessage.Pending -> message.threadId == focused
+        }
+    }
     val stream = snapshot?.streams?.find { it.threadId == focused && !it.finished }
     val thinking = stream?.activity?.state == AgentActivityState.THINKING
-    val executing = snapshot?.turns.orEmpty().any { it.threadId == focused && it.state in listOf("queued", "running") }
+    val executing = snapshot?.turns.orEmpty().any {
+        it.threadId == focused &&
+            (it.state == ThreadTurnState.QUEUED || it.state == ThreadTurnState.RUNNING)
+    }
     var iconTarget by remember { mutableStateOf<Pair<String, dev.hirsel.core.Thread>?>(null) }
     LaunchedEffect(snapshot?.historyId) { iconTarget = null }
     iconTarget?.let { selected -> ThreadIconPicker(selected.second, selected.first, connection) { iconTarget = null } }
@@ -208,16 +217,19 @@ fun ChatScreen(connection: Connection, onOpenSettings: () -> Unit) {
                 }
                 if (snapshot?.openedThreads?.contains(focused) != true) item { Text("Loading conversation…", color = c.MutedForeground) }
                 if (snapshot?.historyHasMore?.contains(focused) == true) item {
-                    Button(onClick = { connection.openThread(focused, messages.mapNotNull { it.id }.minOrNull()) }) { Text("Load earlier messages") }
+                    Button(onClick = {
+                        val beforeId = messages.mapNotNull { (it as? ChatMessage.Confirmed)?.id }.minOrNull()
+                        connection.openThread(focused, beforeId)
+                    }) { Text("Load earlier messages") }
                 }
-                items(messages, key = { "message-${it.id ?: it.clientId}" }) { message ->
-                    Spacer(Modifier.height(8.dp)); MessageRow(message)
-                    if (message.artifactIds.isNotEmpty()) Text("About artifacts ${message.artifactIds.joinToString { "#$it" }}", color = c.MutedForeground)
-                    message.error?.let { error ->
-                        Text(error, color = c.StatusDanger)
-                        Button(onClick = { message.clientId?.let { connection.client?.retrySend(it) } }) { Text("Retry") }
+                items(messages, key = { message ->
+                    when (message) {
+                        is ChatMessage.Confirmed -> "message-${message.id}"
+                        is ChatMessage.Pending -> "message-${message.clientId}"
                     }
-                    if (message.mentions.isNotEmpty()) FlowRow { message.mentions.forEach { id -> ReplyChip("#$id") { connection.openThread(id) } } }
+                }) { message ->
+                    Spacer(Modifier.height(8.dp))
+                    MessageRow(message, connection)
                 }
                 items(connection.failedSends.filter { it.threadId == focused }, key = { "failed-${it.id}" }) { failed -> FailedMessageRow(failed) { connection.retry(failed) } }
                 if (stream != null) item {
@@ -327,10 +339,64 @@ private fun WorkingRow(text: String?) {
 }
 
 @Composable
-private fun MessageRow(message: ChatMessage) {
+private fun MessageRow(message: ChatMessage, connection: Connection) {
     val c = LocalHirselColors.current
-    val owner = message.author == ChatAuthor.OWNER
-    val time = shortTime(message.timestamp)
+    when (message) {
+        is ChatMessage.Confirmed -> {
+            MessageBubble(
+                author = message.author,
+                body = message.body,
+                attachments = message.attachments,
+                toolCalls = message.toolCalls,
+                footer = shortTime(message.timestamp),
+            )
+            MessageReferences(message.artifactIds, message.mentions, connection)
+        }
+        is ChatMessage.Pending -> {
+            MessageBubble(
+                author = ChatAuthor.OWNER,
+                body = message.body,
+                attachments = emptyList(),
+                toolCalls = emptyList(),
+                footer = if (message.error == null) "sending…" else "Not sent",
+            )
+            if (message.attachments.isNotEmpty()) {
+                Text(
+                    "${message.attachments.size} attachment${if (message.attachments.size == 1) "" else "s"} queued",
+                    color = c.MutedForeground,
+                    fontSize = 11.sp,
+                )
+            }
+            MessageReferences(message.artifactIds, message.mentions, connection)
+            message.error?.let { error ->
+                Text(error, color = c.StatusDanger)
+                Button(onClick = { connection.client?.retrySend(message.clientId) }) { Text("Retry") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageReferences(artifactIds: List<ULong>, mentions: List<ULong>, connection: Connection) {
+    val c = LocalHirselColors.current
+    if (artifactIds.isNotEmpty()) {
+        Text("About artifacts ${artifactIds.joinToString { "#$it" }}", color = c.MutedForeground)
+    }
+    if (mentions.isNotEmpty()) {
+        FlowRow { mentions.forEach { id -> ReplyChip("#$id") { connection.openThread(id) } } }
+    }
+}
+
+@Composable
+private fun MessageBubble(
+    author: ChatAuthor,
+    body: String,
+    attachments: List<Blob>,
+    toolCalls: List<ToolCall>,
+    footer: String?,
+) {
+    val c = LocalHirselColors.current
+    val owner = author == ChatAuthor.OWNER
     val metaColor = if (owner) c.OnAccent.copy(alpha = 0.72f) else c.MutedForeground
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -343,28 +409,22 @@ private fun MessageRow(message: ChatMessage) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             // Agent tool activity — a collapsed summary that expands per-tool (D8).
-            if (!owner && message.toolCalls.isNotEmpty()) {
-                ToolCallsSummary(message.toolCalls)
-                if (message.body.isNotBlank()) Spacer(Modifier.height(6.dp))
+            if (!owner && toolCalls.isNotEmpty()) {
+                ToolCallsSummary(toolCalls)
+                if (body.isNotBlank()) Spacer(Modifier.height(6.dp))
             }
-            if (message.body.isNotBlank()) {
+            if (body.isNotBlank()) {
                 Text(
-                    message.body,
+                    body,
                     color = if (owner) c.OnAccent else c.Foreground,
                     fontSize = 14.sp,
                     lineHeight = 21.sp,
                 )
             }
             // Attachments — thumbnails at a phone-appropriate fidelity (D8).
-            if (message.attachments.isNotEmpty()) {
+            if (attachments.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
-                AttachmentStrip(message.attachments)
-            }
-            val footer = when {
-                owner && message.error != null -> "Not sent"
-                owner && message.pending -> "sending…"
-                time != null -> time
-                else -> null
+                AttachmentStrip(attachments)
             }
             if (footer != null) {
                 Spacer(Modifier.height(3.dp))

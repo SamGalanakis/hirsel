@@ -123,6 +123,15 @@ for line in sys.stdin:
         if mode == 'reject-turn':
             reject(request)
             continue
+        if mode == 'early-turn-events':
+            event('turn/started', turn={'id': 'turn-a'})
+            item = {'type': 'commandExecution', 'command': 'printf early', 'cwd': directory, 'commandActions': [], 'status': 'inProgress'}
+            event('item/started', item=item)
+            reply(request, {'turn': {'id': 'turn-a'}})
+            event('item/completed', item={**item, 'status': 'completed', 'aggregatedOutput': 'early', 'exitCode': 0, 'durationMs': 12})
+            event('item/completed', item={'type': 'agentMessage', 'text': 'early events complete'})
+            complete()
+            sys.exit(0)
         reply(request, {'turn': {'id': 'turn-a'}})
         event('turn/started', turn={'id': 'turn-a'})
         if mode in ['commentary-eof', 'commentary-failed', 'unknown-eof', 'unknown-failed', 'commentary-done']:
@@ -189,6 +198,15 @@ for line in sys.stdin:
             event('item/started', item={'type': 'mcpToolCall', 'id': 'mcp-1', 'server': 'hirsel_thread_fixture', 'tool': 'lookup', 'arguments': {'query': large}, 'status': 'inProgress'})
             event('item/completed', item={'type': 'mcpToolCall', 'id': 'mcp-1', 'server': 'hirsel_thread_fixture', 'tool': 'lookup', 'arguments': {'query': large}, 'status': 'completed', 'result': {'content': [{'type': 'text', 'text': large}]}, 'durationMs': 7})
             event('item/completed', item={'type': 'agentMessage', 'text': 'tool edge events complete'})
+            complete()
+            sys.exit(0)
+        if mode == 'duplicate-tool-starts':
+            item = {'type': 'commandExecution', 'id': 'cmd-reused', 'command': 'printf original', 'cwd': directory, 'commandActions': [], 'status': 'inProgress'}
+            event('item/started', item=item)
+            event('item/started', item=item)
+            event('item/started', item={**item, 'command': 'printf conflicting'})
+            event('item/completed', item={**item, 'status': 'completed', 'aggregatedOutput': 'original', 'exitCode': 0, 'durationMs': 12})
+            event('item/completed', item={'type': 'agentMessage', 'text': 'duplicate starts complete'})
             complete()
             sys.exit(0)
         if mode in ['missing-status', 'invalid-status', 'empty-done', 'long-output', 'failed-final']:

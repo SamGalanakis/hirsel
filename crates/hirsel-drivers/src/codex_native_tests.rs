@@ -664,6 +664,130 @@ async fn missing_ids_pair_and_all_codex_tool_payloads_are_bounded() {
 }
 
 #[tokio::test]
+async fn duplicate_and_conflicting_identified_starts_never_split_a_tool_pair() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "duplicate-tool-starts").await.unwrap();
+    let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
+    let structured = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SubagentEvent::ToolStarted { .. } | SubagentEvent::ToolCompleted { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        structured.as_slice(),
+        [
+            SubagentEvent::ToolStarted { call_id: start, name: start_name, .. },
+            SubagentEvent::ToolCompleted { call_id: done, name: done_name, ok: true, .. },
+        ] if start == "cmd-reused"
+            && done == start
+            && start_name == "shell_run"
+            && done_name == start_name
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                SubagentEvent::Progress { summary }
+                    if summary == "conflicting Codex tool start reused id cmd-reused"
+            ))
+            .count(),
+        1
+    );
+    driver.retire(&handle).await.unwrap();
+}
+
+#[test]
+fn repeated_turn_establishment_preserves_anonymous_pair_and_new_turn_resets_state() {
+    let started = |id: Option<&str>, command: &str| {
+        json!({
+            "method": "item/started",
+            "params": { "item": {
+                "type": "commandExecution",
+                "id": id,
+                "command": command,
+                "cwd": "/tmp",
+                "commandActions": [],
+                "status": "inProgress"
+            }}
+        })
+    };
+    let completed = |command: &str| {
+        json!({
+            "method": "item/completed",
+            "params": { "item": {
+                "type": "commandExecution",
+                "command": command,
+                "cwd": "/tmp",
+                "commandActions": [],
+                "status": "completed",
+                "aggregatedOutput": "done",
+                "exitCode": 0
+            }}
+        })
+    };
+
+    let mut state = CodexToolState::default();
+    state.begin_turn("turn-a");
+    let Some(SubagentEvent::ToolStarted { call_id: start, .. }) =
+        codex_tool_event(&mut state, &started(None, "printf first"))
+    else {
+        panic!("anonymous start was not decoded")
+    };
+    state.begin_turn("turn-a");
+    let Some(SubagentEvent::ToolCompleted { call_id: done, .. }) =
+        codex_tool_event(&mut state, &completed("printf first"))
+    else {
+        panic!("anonymous completion was not decoded")
+    };
+    assert_eq!(done, start);
+
+    state.begin_turn("turn-b");
+    assert!(matches!(
+        codex_tool_event(&mut state, &started(Some("cmd-reused"), "printf second")),
+        Some(SubagentEvent::ToolStarted { call_id, .. }) if call_id == "cmd-reused"
+    ));
+    state.begin_turn("turn-c");
+    assert!(matches!(
+        codex_tool_event(&mut state, &started(Some("cmd-reused"), "printf third")),
+        Some(SubagentEvent::ToolStarted { call_id, .. }) if call_id == "cmd-reused"
+    ));
+}
+
+#[tokio::test]
+async fn early_turn_notification_and_items_survive_the_delayed_start_response() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "early-turn-events").await.unwrap();
+    let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
+    let structured = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SubagentEvent::ToolStarted { .. } | SubagentEvent::ToolCompleted { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        structured.as_slice(),
+        [
+            SubagentEvent::ToolStarted { call_id: start, name: start_name, .. },
+            SubagentEvent::ToolCompleted { call_id: done, name: done_name, ok: true, .. },
+        ] if start.starts_with("codex:")
+            && done == start
+            && start_name == "shell_run"
+            && done_name == start_name
+    ));
+    driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
 async fn complete_output_precedes_one_terminal_and_is_never_the_bounded_summary() {
     for mode in [
         "long-output",

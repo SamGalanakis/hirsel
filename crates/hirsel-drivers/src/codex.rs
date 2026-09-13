@@ -205,11 +205,14 @@ impl CodexSession {
                         }
                     }
                     if method == "turn/start" && !self.events.is_terminal() {
-                        state.tools.begin_turn();
-                        state.active_turn_id = result
+                        let turn_id = result
                             .pointer("/turn/id")
                             .and_then(Value::as_str)
                             .map(str::to_string);
+                        if let Some(turn_id) = turn_id.as_deref() {
+                            state.tools.begin_turn(turn_id);
+                        }
+                        state.active_turn_id = turn_id;
                     }
                     Ok(result.clone())
                 } else {
@@ -239,8 +242,14 @@ impl CodexSession {
         let method = value.get("method").and_then(Value::as_str);
         if method == Some("turn/started") {
             let turn_id = value.pointer("/params/turn/id").and_then(Value::as_str);
-            if state.active_turn_id.is_none() {
-                state.active_turn_id = turn_id.map(str::to_string);
+            if let Some(turn_id) = turn_id
+                && (state.active_turn_id.is_none()
+                    || state.active_turn_id.as_deref() == Some(turn_id))
+            {
+                state.tools.begin_turn(turn_id);
+                state
+                    .active_turn_id
+                    .get_or_insert_with(|| turn_id.to_string());
             }
         }
         if matches!(method, Some("item/started" | "item/completed"))

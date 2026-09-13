@@ -11,6 +11,7 @@ const TOOL_EVENT_TRUNCATION_MARKER: &str = "…[truncated]";
 
 #[derive(Default)]
 pub(super) struct CodexToolState {
+    turn_id: Option<String>,
     next_synthetic_id: u64,
     active: Vec<ActiveCodexTool>,
     used_event_ids: HashSet<String>,
@@ -24,13 +25,47 @@ struct ActiveCodexTool {
     fingerprint: u64,
 }
 
+enum ToolStartDisposition {
+    Emit(String),
+    Duplicate,
+    Conflict,
+}
+
 impl CodexToolState {
-    pub(super) fn begin_turn(&mut self) {
+    pub(super) fn begin_turn(&mut self, turn_id: &str) {
+        if self.turn_id.as_deref() == Some(turn_id) {
+            return;
+        }
         *self = Self::default();
+        self.turn_id = Some(turn_id.to_string());
     }
 
-    fn start_id(&mut self, source_id: Option<&str>) -> String {
-        self.unique_event_id(source_id)
+    fn start(
+        &mut self,
+        source_id: Option<&str>,
+        name: &str,
+        fingerprint: u64,
+    ) -> ToolStartDisposition {
+        let Some(source_id) = source_id else {
+            return ToolStartDisposition::Emit(self.unique_event_id(None));
+        };
+        if let Some(active) = self
+            .active
+            .iter()
+            .find(|active| active.source_id.as_deref() == Some(source_id))
+        {
+            return if active.name == name && active.fingerprint == fingerprint {
+                ToolStartDisposition::Duplicate
+            } else {
+                ToolStartDisposition::Conflict
+            };
+        }
+        if self.completed_source_ids.contains(source_id) || self.used_event_ids.contains(source_id)
+        {
+            return ToolStartDisposition::Conflict;
+        }
+        self.used_event_ids.insert(source_id.to_string());
+        ToolStartDisposition::Emit(source_id.to_string())
     }
 
     fn completion_id(
@@ -39,6 +74,10 @@ impl CodexToolState {
         name: &str,
         fingerprint: u64,
     ) -> Option<String> {
+        // Provider identity is authoritative when present. Anonymous events
+        // have no stronger identity than their repeated fields: pair the
+        // earliest exact match, then the earliest same-name call. A completion
+        // with no active match remains visible under a fresh synthetic ID.
         let position = source_id
             .and_then(|source_id| {
                 self.active
@@ -285,7 +324,18 @@ pub(super) fn codex_tool_event(state: &mut CodexToolState, value: &Value) -> Opt
             output,
         })
     } else {
-        let call_id = state.start_id(source_id);
+        let call_id = match state.start(source_id, &name, fingerprint) {
+            ToolStartDisposition::Emit(call_id) => call_id,
+            ToolStartDisposition::Duplicate => return None,
+            ToolStartDisposition::Conflict => {
+                return Some(SubagentEvent::Progress {
+                    summary: short_line(format!(
+                        "conflicting Codex tool start reused id {}",
+                        source_id.unwrap_or("unknown")
+                    )),
+                });
+            }
+        };
         state.active.push(ActiveCodexTool {
             source_id: source_id.map(str::to_string),
             event_id: call_id.clone(),
@@ -304,7 +354,7 @@ fn codex_tool_fingerprint(item_type: &str, item: &Value) -> u64 {
     let mut hasher = DefaultHasher::new();
     item_type.hash(&mut hasher);
     let keys: &[&str] = match item_type {
-        "commandExecution" => &["command", "cwd"],
+        "commandExecution" => &["command", "cwd", "commandActions"],
         "fileChange" => &["changes"],
         "mcpToolCall" => &["server", "tool", "arguments"],
         _ => &[],

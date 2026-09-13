@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_proto::{MessageOrigin, ProcessOutcome, TriggerLabel};
 
 const PROCESS_RESULT_CHARS: usize = 8 * 1024;
 
@@ -117,17 +118,23 @@ impl LashAgentRuntime {
                     .as_ref()
                     .map(|process| process.label.clone())
                     .unwrap_or_else(|| wake.process_id.clone());
-                let trigger = self.trigger_label(wake.process_caused_by.as_ref()).await?;
+                let (trigger, subscription_key) = self
+                    .trigger_label(&wake.process_id, wake.process_caused_by.as_ref())
+                    .await?;
                 self.tools
                     .storage()
                     .stage_process_delivery(&crate::storage::ProcessDelivery {
                         key: format!("process-wake:{}", wake.wake_id),
                         thread_id: self.thread_id,
-                        process_id: wake.process_id.clone(),
-                        process_name: name,
-                        trigger,
-                        outcome: "woke".to_string(),
-                        result: bound_text(&wake.input),
+                        origin: MessageOrigin::Process {
+                            process_id: wake.process_id.clone(),
+                            name,
+                            trigger,
+                            subscription_key,
+                            outcome: ProcessOutcome::Woke,
+                            result: Value::String(wake.input),
+                            error: None,
+                        },
                     })
                     .await?;
                 captured = true;
@@ -152,7 +159,16 @@ impl LashAgentRuntime {
             else {
                 continue;
             };
-            delivery.trigger = self.trigger_label(item.process.caused_by.as_ref()).await?;
+            let (label, key) = self
+                .trigger_label(&item.process.process_id, item.process.caused_by.as_ref())
+                .await?;
+            let MessageOrigin::Process {
+                trigger,
+                subscription_key,
+                ..
+            } = &mut delivery.origin;
+            *trigger = label;
+            *subscription_key = key;
             debug_assert!(delivery.key.ends_with(&event.sequence.to_string()));
             self.tools
                 .storage()
@@ -162,49 +178,98 @@ impl LashAgentRuntime {
         Ok(())
     }
 
-    async fn deliver_process_event(&self, key: &str) -> anyhow::Result<()> {
+    pub(super) async fn deliver_process_event(&self, key: &str) -> anyhow::Result<()> {
         let delivered = self.tools.storage().deliver_process_message(key).await?;
-        let text = delivered.message.body.clone();
-        if delivered.newly_appended {
-            self.tools.publish_thread_message(delivered.message).await;
-        }
         anyhow::ensure!(
-            self.fork_wake.dispatch(crate::fork_wake::WakeMessage::new(
-                self.thread_id,
-                crate::fork_wake::WakeSource::Process {
-                    process_id: delivered.delivery.process_id,
-                    name: delivered.delivery.process_name,
-                    trigger: delivered.delivery.trigger,
-                },
-                text,
-                key.to_string(),
-            )),
-            "process event requires its Thread triage dispatcher"
+            delivered.message.thread_id == self.thread_id,
+            "process wake destination mismatch"
         );
-        self.tools
+        if delivered.newly_appended {
+            self.tools
+                .publish_thread_message(delivered.message.clone())
+                .await;
+        }
+        let client_id = format!("process-delivery:{key}");
+        let request = OwnerTurn {
+            history_id: self.history_id.clone(),
+            turn_id: None,
+            thread_id: self.thread_id,
+            thread_action: None,
+            message_id: None,
+            report_triggered: false,
+            client_id: client_id.clone(),
+            body: format!(
+                "Solicited process delivery (message #{}):\n{}",
+                delivered.message.id,
+                serde_json::to_string(&delivered.message)?
+            ),
+            anchor: None,
+            attachments: Vec::new(),
+            mode: SendMode::NextTurn,
+        };
+        // queue_background_thread_request retains a durable acceptance key even
+        // after the request is consumed. A crash at any boundary can replay this.
+        let turn = self
+            .tools
             .storage()
-            .mark_process_triage_dispatched(key)
+            .queue_background_thread_request(
+                &client_id,
+                self.thread_id,
+                &serde_json::to_value(request)?,
+            )
             .await?;
+        self.publish_background_acceptance(&client_id, turn).await?;
+        self.tools.storage().mark_process_enqueued(key).await?;
+        self.notify.notify_one();
         Ok(())
     }
 
-    async fn trigger_label(&self, cause: Option<&lash_core::CausalRef>) -> anyhow::Result<String> {
+    async fn trigger_label(
+        &self,
+        process_id: &str,
+        cause: Option<&lash_core::CausalRef>,
+    ) -> anyhow::Result<(TriggerLabel, Option<String>)> {
         let Some(lash_core::CausalRef::TriggerOccurrence {
-            subscription_id: Some(subscription_id),
+            subscription_id: Some(id),
             ..
         }) = cause
         else {
-            return Ok("direct start".to_string());
+            return Ok((
+                TriggerLabel::Other {
+                    key: "direct start".into(),
+                },
+                None,
+            ));
         };
-        let records = self
-            .trigger_store
-            .list_subscriptions(TriggerSubscriptionFilter::for_session(&self.session_id))
-            .await?;
-        Ok(records
-            .iter()
-            .find(|record| &record.subscription_id == subscription_id)
-            .map(trigger_display)
-            .unwrap_or_else(|| format!("trigger {subscription_id}")))
+        let Some(record) = trigger_registration(
+            self.trigger_store.as_ref(),
+            &self.session_id,
+            process_id,
+            id,
+        )
+        .await?
+        else {
+            return Ok((
+                TriggerLabel::Other {
+                    key: "unavailable trigger".into(),
+                },
+                None,
+            ));
+        };
+        let mut label = structured_trigger(&record);
+        if let TriggerLabel::Thread {
+            thread_id, title, ..
+        } = &mut label
+        {
+            *title = self
+                .tools
+                .storage()
+                .thread(*thread_id)
+                .await?
+                .map(|thread| thread.title)
+                .unwrap_or_else(|| "Unavailable Thread".into());
+        }
+        Ok((label, Some(record.subscription_key.clone())))
     }
 
     pub(super) async fn cancel_process(&self, process_id: &str) -> anyhow::Result<()> {
@@ -279,11 +344,22 @@ pub(super) fn terminal_process_delivery(
                 item.process.process_id, item.process.incarnation, event.sequence
             ),
             thread_id,
-            process_id: item.process.process_id.clone(),
-            process_name: item.label.clone(),
-            trigger: "direct start".to_string(),
-            outcome: item.process.lifecycle.label().to_string(),
-            result: terminal_result(&event.payload),
+            origin: MessageOrigin::Process {
+                process_id: item.process.process_id.clone(),
+                name: item.label.clone(),
+                trigger: TriggerLabel::Other {
+                    key: "direct start".into(),
+                },
+                subscription_key: None,
+                outcome: match item.process.lifecycle {
+                    lash_core::ProcessStatus::Failed => ProcessOutcome::Failed,
+                    lash_core::ProcessStatus::Cancelled => ProcessOutcome::Cancelled,
+                    _ => ProcessOutcome::Completed,
+                },
+                result: terminal_result(&event.payload),
+                error: (item.process.lifecycle == lash_core::ProcessStatus::Failed)
+                    .then(|| terminal_error(&event.payload)),
+            },
         },
     ))
 }
@@ -403,14 +479,14 @@ fn bound_json(value: &Value) -> String {
     bound_text(&serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()))
 }
 
-fn terminal_result(payload: &Value) -> String {
+fn terminal_result(payload: &Value) -> Value {
     payload
         .get("await_output")
         .cloned()
         .and_then(|value| serde_json::from_value::<ProcessAwaitOutput>(value).ok())
         .map(ProcessAwaitOutput::into_tool_output)
-        .map(|output| bound_json(&output.into_value_for_projection()))
-        .unwrap_or_else(|| bound_json(payload))
+        .map(|output| output.into_value_for_projection())
+        .unwrap_or_else(|| payload.clone())
 }
 
 fn bound_text(value: &str) -> String {
@@ -419,4 +495,88 @@ fn bound_text(value: &str) -> String {
         text.push('…');
     }
     text
+}
+
+fn terminal_error(payload: &Value) -> String {
+    let result = terminal_result(payload);
+    result
+        .pointer("/error/message")
+        .or_else(|| result.get("message"))
+        .or_else(|| result.get("reason"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::storage::process_deliveries::result_body(&result))
+}
+
+/// Delivery reservations retain the exact registration revision, including
+/// one-shot subscriptions that were deleted before their process completed.
+pub(super) async fn trigger_registration(
+    store: &dyn lash_core::TriggerStore,
+    session_id: &str,
+    process_id: &str,
+    subscription_id: &str,
+) -> anyhow::Result<Option<lash_core::TriggerSubscriptionRecord>> {
+    Ok(store
+        .list_deliveries_by_process_id(process_id)
+        .await?
+        .into_iter()
+        .map(|delivery| delivery.subscription)
+        .find(|record| {
+            record.subscription_id == subscription_id
+                && record.registrant_session_id() == Some(session_id)
+        }))
+}
+
+pub(super) fn structured_trigger(record: &lash_core::TriggerSubscriptionRecord) -> TriggerLabel {
+    let value = record
+        .source
+        .get("$lash_host_descriptor_value")
+        .unwrap_or(&Value::Null);
+    let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+    match record.source_type.as_str() {
+        TIMER_SOURCE_TYPE => TriggerLabel::Timer {
+            label: text("label")
+                .or_else(|| record.name.clone())
+                .unwrap_or_else(|| "timer".into()),
+            in_secs: value.get("in_secs").and_then(Value::as_u64),
+            every_secs: value.get("every_secs").and_then(Value::as_u64),
+            at: text("at"),
+        },
+        "cron.Schedule" => TriggerLabel::Cron {
+            expr: text("expr").unwrap_or_default(),
+            tz: text("tz"),
+        },
+        source if source.starts_with("thread.") => {
+            match value.get("thread_id").and_then(Value::as_u64) {
+                Some(thread_id) => TriggerLabel::Thread {
+                    event: match source {
+                        "thread.Reported" => "thread.Report",
+                        "thread.Completed" => "thread.Complete",
+                        "thread.Messaged" => "thread.Message",
+                        "thread.Turned" => "thread.Turn",
+                        other => other,
+                    }
+                    .into(),
+                    thread_id,
+                    title: String::new(),
+                },
+                None => TriggerLabel::Other { key: source.into() },
+            }
+        }
+        source => TriggerLabel::Other { key: source.into() },
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    #[test]
+    fn failed_await_output_becomes_plain_error_text() {
+        let output = lash_core::ToolCallOutput::failure(lash_core::ToolFailure::io(
+            "denied",
+            "Permission denied",
+        ));
+        let payload = json!({"await_output": ProcessAwaitOutput::Settled { output }});
+        assert_eq!(terminal_error(&payload), "Permission denied");
+    }
 }

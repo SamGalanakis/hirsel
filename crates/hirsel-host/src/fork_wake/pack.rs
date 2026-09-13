@@ -9,19 +9,13 @@ pub(crate) const PACK_CHAT_LIMIT: usize = 10;
 /// Per-line truncation for anything quoted out of chat or an event.
 const PACK_LINE_CHARS: usize = 240;
 /// The triggering message is the one thing that is never summarised, but it is
-/// still bounded: a runaway process result must not blow the fork's window.
+/// still bounded: a runaway event must not blow the fork's window.
 const TRIGGER_CHARS: usize = 8 * 1024;
 
 /// Where a non-owner message came from. The fork is told this verbatim because
-/// "a Sub-agent finished" and "a process woke" call for different triage.
+/// unsolicited sources may call for different triage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakeSource {
-    /// A durable Lash process emitted a wake or terminal event.
-    Process {
-        process_id: String,
-        name: String,
-        trigger: String,
-    },
     /// Anything else the host routed in (debug injection, external notifier).
     External { origin: String },
 }
@@ -29,11 +23,6 @@ pub enum WakeSource {
 impl WakeSource {
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Process {
-                process_id,
-                name,
-                trigger,
-            } => format!("process {name} ({process_id}), triggered by {trigger}"),
             Self::External { origin } => format!("external {origin}"),
         }
     }
@@ -41,7 +30,6 @@ impl WakeSource {
     /// A stable prefix for log fields and enqueue source keys.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
-            Self::Process { .. } => "process",
             Self::External { .. } => "external",
         }
     }

@@ -27,7 +27,19 @@ function worldFor(token) {
     if (process.env.MOCK_SEED !== "none") threads.push(makeThread(1, "Home", "space"));
     tenants.set(token, { token, history_id: randomUUID(), threads, messages: [], relatedItems: [], nextRelatedItem: 1, relatedReceipts: new Map(), artifacts: [], artifactOperations: new Map(), nextArtifact: 1, turns: [], activities: [], clients: new Set(), requests: new Map(), blobs: new Map(), timers: new Map(), queue: [], nextThread: Math.max(0, ...threads.map(thread => thread.id)) + 1, nextMessage: 1, nextTurn: 1 });
   }
-  return tenants.get(token);
+  const world = tenants.get(token);
+  if (process.env.MOCK_SEED === "process-wakes" && world.messages.length === 0) {
+    const samples = [
+      { name: "wakeAfterThirtySeconds", trigger: { kind: "timer", label: "wake", in_secs: 30 }, outcome: "completed", result: "I'm awake — 30 seconds have passed." },
+      { name: "nightlyCheck", trigger: { kind: "cron", expr: "*/5 * * * *" }, outcome: "failed", result: null, error: "Permission denied" },
+      { name: "reportReady", trigger: { kind: "thread", event: "thread.Report", thread_id: 12, title: "Release checks" }, outcome: "completed", result: { ok: true } },
+    ];
+    for (const [index, sample] of samples.entries()) {
+      const body = sample.error ?? (typeof sample.result === "string" ? sample.result : `\`\`\`json\n${JSON.stringify(sample.result, null, 2)}\n\`\`\``);
+      addMessage(world, 1, "agent", body, { origin: { kind: "process", process_id: `mock-process-${index}`, ...sample } });
+    }
+  }
+  return world;
 }
 function summary(world, thread) {
   const turns = world.turns.filter(turn => turn.thread_id === thread.id);

@@ -95,6 +95,8 @@ mod tool_call_tests {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChatMessage {
+    /// Lossless MessageOrigin JSON from the wire, absent on ordinary messages.
+    pub origin_json: Option<String>,
     pub error: Option<String>,
     pub thread_id: u64,
     pub mentions: Vec<u64>,
@@ -114,6 +116,9 @@ impl From<core::ChatEntry> for ChatMessage {
     fn from(value: core::ChatEntry) -> Self {
         match value {
             core::ChatEntry::Confirmed(message) => Self {
+                origin_json: message.origin.map(|origin| {
+                    serde_json::to_string(&origin).expect("message origin serializes")
+                }),
                 error: None,
                 id: Some(message.id),
                 thread_id: message.thread_id,
@@ -129,6 +134,7 @@ impl From<core::ChatEntry> for ChatMessage {
                 pending: false,
             },
             core::ChatEntry::Pending(send) => Self {
+                origin_json: None,
                 error: send.error,
                 id: None,
                 thread_id: send.thread_id,

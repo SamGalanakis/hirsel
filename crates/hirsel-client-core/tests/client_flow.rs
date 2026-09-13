@@ -18,6 +18,7 @@ type ServerSocket = WebSocketStream<TcpStream>;
 
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
+        origin: None,
         artifact_ids: Vec::new(),
         thread_id: 0,
         client_id: None,
@@ -320,6 +321,7 @@ async fn optimistic_send_reconciles_with_owner_echo() {
             &mut socket,
             &HostToClient::Msg {
                 message: ChatMessage {
+                    origin: None,
                     artifact_ids: Vec::new(),
                     client_id: Some(client_id),
                     thread_id,
@@ -568,6 +570,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
                     },
                     thread: thread(5, false, false),
                     messages: vec![ChatMessage {
+                        origin: None,
                         artifact_ids: Vec::new(),
                         thread_id: 5,
                         ..chat(1, ChatAuthor::Agent, "Milk")

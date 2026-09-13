@@ -77,3 +77,20 @@ The Host uses one canonical storage schema 7: emoji/image Thread icons with the
 `threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
 authority, and no `monitors` table. Only the exact layout or an empty store is
 accepted; older and branch-specific schema 7 layouts are refused without modification.
+
+### Process conversation delivery
+
+`ChatMessage.origin` is optional and omitted for ordinary conversation messages.
+A delivery has `{kind:"process",process_id,name,trigger,subscription_key?,outcome,result,error?}`.
+`outcome` is `completed | failed | cancelled | woke` (the last represents an explicit process wake).
+`result` retains its JSON type. The separate debug-only subscription key is never a display label.
+`trigger` is one of `{kind:"timer",label,in_secs?,every_secs?,at?}`, `{kind:"cron",expr,tz?}`,
+`{kind:"thread",event,thread_id,title}`, or `{kind:"other",key}`. Thread events name
+`thread.Report`, `thread.Complete`, `thread.Message`, or `thread.Turn`; titles are captured at delivery.
+Trigger metadata comes from the registered source descriptor retained in the durable trigger delivery snapshot, including after a one-shot subscription is deleted, with a neutral label when unavailable.
+The message body is a bare JSON string, scalar text, a fenced JSON object/array, or the failure error text.
+Process notes retain `author:"agent"` for compatibility but are rendered as ConversationNotes.
+The owning Thread receives one durable normal turn with this message as context, bypassing fork triage.
+Native clients preserve the optional origin losslessly as `ChatMessage.originJson` in the generated Kotlin binding.
+Schema 7's existing delivery receipt stores the origin JSON in `result`; the historical
+`triage_dispatched` column now records durable normal-turn acceptance. No store schema is changed.

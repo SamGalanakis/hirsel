@@ -115,7 +115,7 @@ impl LashAgentRuntime {
             .messages
             .into_iter()
             .filter(|m| turn.message_id.is_none_or(|id|m.id<id))
-            .map(|m| json!({"id":m.id,"author":m.author,"body":m.body,"artifact_ids":m.artifact_ids}))
+            .map(|m| json!({"id":m.id,"author":m.author,"body":m.body,"origin":m.origin,"artifact_ids":m.artifact_ids}))
             .collect::<Vec<_>>();
         let current_artifacts = self
             .tools

@@ -15,7 +15,7 @@
 //!
 //! The core advertises the main Agent's tools to every session it opens, so
 //! the fork's catalog is narrowed *after* open: its own provider is added, and
-//! every catalog member that is not one of its five exits is dropped from
+//! every catalog member that is not one of its four exit tools is dropped from
 //! membership. Membership is lash's execution gate, so a dropped tool does not
 //! exist to the fork — it cannot be called, and it is not advertised.
 //!
@@ -101,6 +101,13 @@ impl TriageRunner for LashForkRunner {
                     .turn_budget(TurnBudget::bounded(FORK_TURN_BUDGET)),
             )
             .provider(self.provider.clone())
+            .plugin_option(
+                lash::rlm::RLM_PROTOCOL_PLUGIN_ID,
+                lash::rlm::RlmCreateExtras {
+                    dialect: Some(lash::rlm::RlmDialect::Typescript),
+                    ..Default::default()
+                },
+            )?
             .parent(self.main_session_id.clone())
             // In-memory: no fork state survives the turn (ADR-0015).
             .store(Arc::new(lash::persistence::InMemorySessionStore::new()))
@@ -169,7 +176,7 @@ async fn run_one_triage_turn(
 /// land inside it — `hirsel.fork_decide` (the side-chat fork tool) already
 /// would — and a tool that leaks into a triage fork by resembling one is
 /// exactly the failure this narrowing exists to prevent.
-async fn narrow_to_fork_exits(session: &lash::LashSession) -> anyhow::Result<()> {
+pub(super) async fn narrow_to_fork_exits(session: &lash::LashSession) -> anyhow::Result<()> {
     let allowed = fork_tool_definitions()
         .iter()
         .map(|definition| definition.id().to_string())

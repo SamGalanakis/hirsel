@@ -32,6 +32,7 @@ fn thread(revision: u64) -> Thread {
 }
 fn message(id: u64, thread_id: u64, client_id: Option<&str>) -> ChatMessage {
     ChatMessage {
+        origin: None,
         artifact_ids: vec![],
         id,
         thread_id,

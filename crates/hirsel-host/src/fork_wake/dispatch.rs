@@ -1,7 +1,7 @@
 //! Fork dispatch: one ephemeral triage fork per incoming non-owner message.
 //!
 //! This is the whole of ADR-0015's mechanical change to the host. Every
-//! non-owner message that used to turn the resident main Agent now lands here
+//! unsolicited notification that used to turn the resident main Agent now lands here
 //! instead, and the main Agent turns only if a fork decides it should.
 //!
 //! The rulings this implements, and where:
@@ -32,7 +32,7 @@ use crate::{storage::Storage, tools::ToolSuite};
 /// How many triage forks may be in flight at once.
 ///
 /// Four: enough that a Sub-agent fan-out finishing together is triaged
-/// promptly, small enough that a process-event storm cannot open dozens of provider
+/// promptly, small enough that a notification storm cannot open dozens of provider
 /// sessions at once. Forks are single-turn and short, so the queue behind this
 /// drains quickly; the alternative — unbounded spawning — turns a burst of
 /// cheap events into a rate-limit incident on the provider the *main* Agent

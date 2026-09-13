@@ -23,7 +23,23 @@ export interface ToolCall {
   ok: boolean;
 }
 
+export type TriggerLabel =
+  | { kind: "timer"; label: string; in_secs?: number; every_secs?: number; at?: string }
+  | { kind: "cron"; expr: string; tz?: string }
+  | { kind: "thread"; event: string; thread_id: number; title: string }
+  | { kind: "other"; key: string };
+export interface ProcessOrigin {
+  kind: "process";
+  process_id: string;
+  name: string;
+  trigger: TriggerLabel;
+  subscription_key?: string;
+  outcome: "completed" | "failed" | "cancelled" | "woke";
+  result: unknown;
+  error?: string;
+}
 export interface ChatMessage {
+  origin?: ProcessOrigin;
   artifact_ids?: number[];
   thread_id: number;
   client_id?: string;

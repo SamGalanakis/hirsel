@@ -43,6 +43,7 @@ impl ChatEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedMessage {
+    pub origin: Option<Box<hirsel_proto::MessageOrigin>>,
     pub thread_id: u64,
     pub client_id: Option<String>,
     pub mentions: Vec<u64>,
@@ -59,6 +60,7 @@ pub struct ConfirmedMessage {
 impl From<ChatMessage> for ConfirmedMessage {
     fn from(message: ChatMessage) -> Self {
         Self {
+            origin: message.origin.map(Box::new),
             id: message.id,
             thread_id: message.thread_id,
             client_id: message.client_id,

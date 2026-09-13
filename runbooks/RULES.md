@@ -86,3 +86,8 @@ just product-runbook native-lash-worker
 `HIRSEL_RUNBOOK_ARTIFACTS` to choose the evidence root. The runner prints that
 path even when a scenario aborts. The native worker scenario is a separate,
 explicitly selected two-worker-turn check and is not included in `all`.
+
+The explicitly selected `process-wakes` scenario uses one Owner turn to register
+a three-second timer and one normal process-delivery turn. It is separate from
+`all` and never retries model calls. It checks DOM, live frames, reload, receipt
+JSON, and the owning Thread's exact turn count.

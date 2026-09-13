@@ -730,8 +730,46 @@ finish("registered");
         lash_core::ProcessStatus::Completed,
         "terminal process: {item:#?}"
     );
+    // The production timer loop tombstones one-shot subscriptions immediately
+    // after emission. Projection must use the retained delivery snapshot.
+    trigger_store
+        .execute_command(
+            "e2e-one-shot-delete",
+            lash::triggers::TriggerCommand::Delete {
+                owner_scope: subscription.owner_scope.clone(),
+                actor: subscription.registrant.clone(),
+                subscription_key: subscription.subscription_key.clone(),
+                expected_revision: subscription.revision,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        trigger_store
+            .list_subscriptions(TriggerSubscriptionFilter::for_session(&session_id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let captured = super::process_bridge::trigger_registration(
+        trigger_store.as_ref(),
+        &session_id,
+        &item.process.process_id,
+        &subscription.subscription_id,
+    )
+    .await
+    .unwrap()
+    .expect("retained registration");
+    assert_eq!(captured, *subscription);
     let (_, mut delivery) = terminal_process_delivery(route.thread_id, &item).unwrap();
-    delivery.trigger = trigger_display(subscription);
+    let hirsel_proto::MessageOrigin::Process {
+        trigger,
+        subscription_key,
+        ..
+    } = &mut delivery.origin;
+    *trigger = super::process_bridge::structured_trigger(&captured);
+    *subscription_key = Some(subscription.subscription_key.clone());
     storage.stage_process_delivery(&delivery).await.unwrap();
     let delivered = storage
         .deliver_process_message(&delivery.key)
@@ -739,9 +777,24 @@ finish("registered");
         .unwrap();
 
     assert!(delivered.newly_appended);
-    assert!(delivered.message.body.contains("timer_shell_check"));
-    assert!(delivered.message.body.contains("in 1s"));
-    assert!(delivered.message.body.contains("primitive-ok"));
+    assert_eq!(delivered.message.body, "primitive-ok");
+    assert_eq!(
+        delivered.message.origin,
+        Some(hirsel_proto::MessageOrigin::Process {
+            process_id: item.process.process_id,
+            name: "timer_shell_check".into(),
+            trigger: hirsel_proto::TriggerLabel::Timer {
+                label: "e2e".into(),
+                in_secs: Some(1),
+                every_secs: None,
+                at: None
+            },
+            subscription_key: Some(subscription.subscription_key.clone()),
+            outcome: hirsel_proto::ProcessOutcome::Completed,
+            result: json!("primitive-ok"),
+            error: None,
+        })
+    );
 }
 
 #[test]
@@ -1901,4 +1954,39 @@ async fn complete_fixture_turn(
     } else {
         Ok(false)
     }
+}
+
+#[test]
+fn structured_trigger_uses_registration_metadata_not_subscription_identity() {
+    use hirsel_proto::TriggerLabel;
+    let mut record = timer_registration(json!({"label":"reminder","in_secs":30}), 1000);
+    assert_eq!(trigger_display(&record), "in 30s");
+    assert_eq!(
+        super::process_bridge::structured_trigger(&record),
+        TriggerLabel::Timer {
+            label: "reminder".into(),
+            in_secs: Some(30),
+            every_secs: None,
+            at: None
+        }
+    );
+    record.source_type = "thread.Reported".into();
+    record.source = json!({"$lash_host_descriptor_value":{"thread_id":12}});
+    assert_eq!(
+        super::process_bridge::structured_trigger(&record),
+        TriggerLabel::Thread {
+            event: "thread.Report".into(),
+            thread_id: 12,
+            title: String::new()
+        }
+    );
+    record.source_type = "cron.Schedule".into();
+    record.source = json!({"$lash_host_descriptor_value":{"expr":"*/5 * * * *","tz":"UTC"}});
+    assert_eq!(
+        super::process_bridge::structured_trigger(&record),
+        TriggerLabel::Cron {
+            expr: "*/5 * * * *".into(),
+            tz: Some("UTC".into())
+        }
+    );
 }

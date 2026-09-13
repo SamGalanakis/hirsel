@@ -77,10 +77,10 @@ export function executionLabel(execution: ThreadExecutionTarget | null | undefin
     const coordinator = [providerLabel(state.model?.provider_id), state.model?.current.id].filter(Boolean).join(" · ");
     return { text: coordinator ? `Default coordinator · ${coordinator}` : "Default coordinator", muted: true };
   }
-  if (execution.kind === "host") return { text: [providerLabel(execution.provider_id) || execution.provider_id, execution.model].join(" · "), muted: false };
+  if (execution.kind === "host") return { text: ["Coordinator", providerLabel(execution.provider_id) || execution.provider_id, execution.model].join(" · "), muted: false };
   if (execution.kind === "lash") {
     const worker = state.subagentModels?.native_worker.label ?? "Native worker";
-    return { text: [worker, providerLabel(execution.provider_id) || execution.provider_id, execution.model].join(" · "), muted: false };
+    return { text: [worker, providerLabel(execution.provider_id) || execution.provider_id, execution.model, titleCase(execution.variant)].join(" · "), muted: false };
   }
   const group = state.subagentModels?.providers.find(provider => provider.provider === execution.agent);
   return { text: [group?.label ?? titleCase(execution.agent), execution.model, titleCase(execution.variant)].join(" · "), muted: false };
@@ -197,11 +197,18 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
     <button type="button" class={quiet} aria-label="Change where this Thread runs" title="Change where this Thread runs" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1" data-slot="thread-execution-editor">
-      <div class="flex items-center justify-between gap-3 py-1">
-        <span class="text-sm">Runs on</span>
-        <Select ariaLabel="Where this Thread runs" class="w-[10.5rem] shrink-0" value={draft().backend}
+      {/* The `dt` beside this editor already says "Runs on"; a second label
+          inside it only repeats the row's own name. */}
+      <div class="py-1">
+        <Select ariaLabel="Where this Thread runs" class="w-full" value={draft().backend}
           options={options()} onChange={backend => setDraft(previous => ({ ...previous, backend: backend as Backend, model: "", variant: "" }))} />
       </div>
+      {/* A select with one choice is a dead control unless it says why it is
+          alone: the other backends are the CLI agents this host can see and the
+          native worker, both configured in Settings, not here. */}
+      <Show when={options().length === 1}>
+        <p class="text-meta text-muted-foreground">No other backend is available. The Claude and Codex CLI agents appear here once this host can see them, and the native worker once it is turned on in Settings.</p>
+      </Show>
       <Show when={draft().backend === "lash" && worker()}>{native => <div class="flex items-center justify-between gap-3 py-1">
         <span class="text-sm">Provider</span>
         <Select ariaLabel="Native worker provider" class="w-[10.5rem] shrink-0" value={draft().providerId}

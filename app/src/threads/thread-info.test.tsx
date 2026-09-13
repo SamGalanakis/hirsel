@@ -142,4 +142,29 @@ describe("thread info pane", () => {
     expect(view.queryByLabelText("Where this Thread runs")).toBeNull();
     expect(runsOn()).toHaveTextContent("Default coordinator");
   });
+
+  it("names the row once and reads every backend shape in full", () => {
+    const view = openInfo();
+    const runsOn = () => view.container.querySelector<HTMLElement>('[data-fact="Runs on"]')!;
+    fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
+    // The dt names the row; the editor inside it must not say "Runs on" again.
+    expect(view.container.querySelector<HTMLElement>('[data-slot="thread-execution-editor"]')!).not.toHaveTextContent("Runs on");
+    fireEvent.click(view.getByRole("button", { name: "Cancel execution change" }));
+
+    // A stored coordinator target names its kind, not just a bare provider.
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "host", provider_id: "anthropic", model: "claude-opus-4-7" } }) }));
+    expect(runsOn()).toHaveTextContent("Coordinator · anthropic · claude-opus-4-7");
+
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: { kind: "lash", provider_id: "anthropic", model: "local-model", variant: "default" } }) }));
+    expect(runsOn()).toHaveTextContent("Native worker · anthropic · local-model · Default");
+  });
+
+  it("says why the backend select is alone rather than showing a dead control", () => {
+    flush(() => dispatch({ type: "subagent_models_changed", catalog: { ...CATALOG, providers: [] } }));
+    const view = openInfo();
+    fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
+    const select = view.getByLabelText("Where this Thread runs") as HTMLSelectElement;
+    expect([...select.options].map(option => option.value)).toEqual(["default"]);
+    expect(view.container.querySelector<HTMLElement>('[data-slot="thread-execution-editor"]')!).toHaveTextContent("No other backend is available");
+  });
 });

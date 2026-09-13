@@ -69,7 +69,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
           inside the card, never the page. */}
       <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex", owner() ? "flex-row-reverse" : ""]}>
         <Show when={pending()}>
-          <p data-slot="turn-pending" role="status" class="flex min-h-5 items-center text-muted-foreground/70">
+          <p data-slot="turn-pending" role="status" class="flex min-h-5 items-center text-muted-foreground">
             <LoaderCircle class={`size-4 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
             <span class="sr-only">{workLabel(turn(), events(), activities(turn()?.id), 0, false)}</span>
           </p>

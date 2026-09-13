@@ -118,7 +118,7 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
         <ChevronRight class={`size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
         <span class="shrink-0">{runOriginLabel(origin())}</span>
         <span aria-hidden="true">·</span>
-        <span class={`min-w-0 truncate font-mono ${executor().muted ? "text-muted-foreground/70" : ""}`} data-slot="run-card-executor">{executor().text}</span>
+        <span class={`min-w-0 truncate font-mono ${executor().muted ? "italic" : ""}`} data-slot="run-card-executor">{executor().text}</span>
         <Show when={duration()}><span aria-hidden="true">·</span><span class="shrink-0 tabular-nums">{duration()}</span></Show>
         <span class="ml-auto inline-flex shrink-0 items-center gap-1" data-slot="run-card-outcome">
           <OutcomeMark outcome={outcome()} />

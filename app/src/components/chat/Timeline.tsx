@@ -267,7 +267,7 @@ function StepDetail(props: { item: StepRowItem }) {
           <div class={["min-w-0", { "text-destructive/90": failed() }]}>
             <CodeBlock code={cell().code} lang={cell().language || null} wrap bare />
             <Show when={cell().truncated}>
-              <p class="px-1 pt-1 text-meta text-muted-foreground/70">… truncated by the host</p>
+              <p class="px-1 pt-1 text-meta text-muted-foreground">… truncated by the host</p>
             </Show>
           </div>
         }</Match>

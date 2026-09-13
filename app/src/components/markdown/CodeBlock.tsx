@@ -53,8 +53,11 @@ function CopyButton(props: { text: string }) {
  * A fenced code block: language label, copy affordance, and highlighting that
  * lazy-loads. Plain mono text paints first and is replaced in place once the
  * highlighter chunk resolves, so nothing blocks the message.
+ *
+ * `wrap` trades the sideways scrollbar for wrapped lines — what a transcript
+ * entry wants, where a horizontal scroll would hide most of the program.
  */
-export function CodeBlock(props: { code: string; lang?: string | null }) {
+export function CodeBlock(props: { code: string; lang?: string | null; wrap?: boolean }) {
   const tree = createMemo(async (): Promise<HastRoot | null> => {
     const code = props.code;
     const lang = props.lang ?? null;
@@ -69,7 +72,7 @@ export function CodeBlock(props: { code: string; lang?: string | null }) {
         <span class="font-mono text-meta text-muted-foreground">{props.lang ?? "text"}</span>
         <CopyButton text={props.code} />
       </div>
-      <pre class="overflow-x-auto rounded-md border border-border/60 px-2.5 py-2 text-xs leading-5">
+      <pre class={["rounded-md border border-border/60 px-2.5 py-2 text-xs leading-5", props.wrap ? "whitespace-pre-wrap wrap-break-word" : "overflow-x-auto"]}>
         <code class="font-mono">
           <Loading fallback={props.code}><Show when={tree()} fallback={props.code}>
             {(highlighted) => <For each={highlighted().children}>{(node) => renderHast([node])}</For>}

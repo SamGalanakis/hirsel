@@ -179,9 +179,12 @@ function stepPairing() {
   };
 }
 
-/** A program that only reports "nothing to say" — the wake protocol's own
- * `finish("")`, with no work in it. It is never worth a Code entry. */
-const TRIVIAL_FINISH = /^(?:await\s+)?finish\(\s*(?:""|''|``)?\s*\)\s*;?$/;
+/** A program that only reports back: `finish(<string literal>)`, with or without
+ * an argument, an `await`, or a trailing semicolon, and nothing else in it.
+ * There is nothing to read — an empty finish is the wake protocol, and a
+ * literal one says exactly what the prose right below the entry already says.
+ * Another statement, a tool call, or a computed argument makes it real work. */
+const TRIVIAL_FINISH = /^(?:await\s+)?finish\(\s*(?:"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|`(?:[^`\\$]|\\[\s\S]|\$(?!\{))*`)?\s*\)\s*;?$/;
 function trivialProgram(code: string): boolean {
   return TRIVIAL_FINISH.test(code.trim());
 }

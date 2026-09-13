@@ -277,7 +277,7 @@ function CodeEntry(props: { item: Extract<TimelineItem, { kind: "code" }>; settl
         </Show>
       </div>
       <Show when={props.item.code.length > 0}>
-        <CodeBlock code={source()} lang={language()} />
+        <CodeBlock code={source()} lang={language()} wrap />
       </Show>
       <Show when={long()}>
         <button

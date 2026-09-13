@@ -259,18 +259,31 @@ describe("Timeline component", () => {
     expect(timelineTools(items).map(tool => tool.toolId)).toEqual(["t1", "t2"]);
   });
 
-  it("drops a cell whose whole program is a trivial finish", () => {
+  it("drops a cell whose whole program is one finish call", () => {
     const trivial = evs(
       { kind: "code_start", id: "c1", language: "typescript", code: 'finish("")', truncated: false },
       { kind: "code_done", id: "c1", ok: true, summary: null },
     );
     expect(buildTimeline(trivial)).toEqual([]);
+    // A finish carrying a literal is the prose rendered right below it: the
+    // entry would only say the same thing twice.
+    const spoken = evs(
+      { kind: "code_start", id: "c1", language: "typescript", code: 'await finish("Your list is ready.");', truncated: false },
+      { kind: "code_done", id: "c1", ok: true, summary: null },
+    );
+    expect(buildTimeline(spoken)).toEqual([]);
     // Anything beyond the bare finish is real work and keeps its entry.
     const real = evs(
-      { kind: "code_start", id: "c1", language: "typescript", code: 'finish("done")', truncated: false },
+      { kind: "code_start", id: "c1", language: "typescript", code: 'const list = await shell.run({ cmd: "ls" });\nfinish("done");', truncated: false },
       { kind: "code_done", id: "c1", ok: true, summary: null },
     );
     expect(buildTimeline(real).map(i => i.kind)).toEqual(["code"]);
+    // So does a finish whose argument had to be computed.
+    const computed = evs(
+      { kind: "code_start", id: "c2", language: "typescript", code: "finish(await subagents_list());", truncated: false },
+      { kind: "code_done", id: "c2", ok: true, summary: null },
+    );
+    expect(buildTimeline(computed).map(i => i.kind)).toEqual(["code"]);
   });
 
   it("renders a long program clipped to its first lines until the Owner asks for the rest", () => {

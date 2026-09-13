@@ -7,6 +7,7 @@ import { ThreadShell } from "./ThreadShell";
 import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
 import { closeThreadNavigation } from "./navigation";
+import { closeThreadCreate } from "./create";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage, ThreadTurn } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
@@ -39,6 +40,7 @@ beforeEach(() => {
   flush(() => dispatch({ type: "connection_status", status: "connected" }));
   flush(() => setHistoryId("test-history"));
   flush(() => closeThreadNavigation());
+  flush(() => closeThreadCreate());
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { kind: "task", read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
@@ -152,14 +154,17 @@ describe("thread workspace", () => {
   it("gives creation and browsing one deterministic initial focus owner", async () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "New Space or Task" }));
-    const title = view.getByLabelText("New space or task title");
+    // Creation opens as a modal whose first field is the brief, so typing starts there.
+    const draft = view.getByLabelText("First message");
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    expect(document.activeElement).toBe(title);
-    fireEvent.input(title, { target: { value: "Immediate typing" } });
-    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
+    expect(document.activeElement).toBe(draft);
+    fireEvent.input(draft, { target: { value: "Immediate typing" } });
+    fireEvent.keyDown(draft, { key: "Escape" });
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     await waitFor(() => expect(document.activeElement).toBe(view.container.querySelector('[data-thread-row="1"]')));
-    expect(title).toHaveValue("Immediate typing");
+    // Escape dismissed the modal without discarding what the Owner had written.
+    fireEvent.click(within(view.getByRole("dialog", { name: "Spaces and Tasks" })).getByRole("button", { name: "New Space or Task" }));
+    expect(view.getByLabelText("First message")).toHaveValue("Immediate typing");
   });
   it("keeps attention visible on the closed rail and refreshes when a snooze expires", () => {
     vi.useFakeTimers(); const now = Date.parse("2026-09-10T10:00:00Z"); vi.setSystemTime(now);

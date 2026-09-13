@@ -244,6 +244,7 @@ export const X = (props: IconProps) => <Icon {...props} nodes={[
   ["path", { d: "m6 6 12 12" }]
 ]} />;
 
+export const ArrowRight = (props: IconProps) => <Icon {...props} nodes={[["path", { d: "M5 12h14" }], ["path", { d: "m12 5 7 7-7 7" }]]} />;
 export const ArrowLeft = (props: IconProps) => <Icon {...props} nodes={[
   ["path", { d: "m12 19-7-7 7-7" }],
   ["path", { d: "M19 12H5" }]

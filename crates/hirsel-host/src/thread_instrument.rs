@@ -18,6 +18,10 @@ const MAX_ACTION_NAME_BYTES: usize = 64;
 
 /// Validate the current closed Thread-instrument vocabulary before publication.
 pub fn validate(ui: &Value) -> anyhow::Result<()> {
+    validated_contract(ui).map(|_| ())
+}
+
+fn validated_contract(ui: &Value) -> anyhow::Result<Contract> {
     let mut nodes = 0;
     match ui {
         Value::Array(items) => {
@@ -30,15 +34,14 @@ pub fn validate(ui: &Value) -> anyhow::Result<()> {
     if nodes == 0 {
         anyhow::bail!("Thread UI must contain at least one component");
     }
-    Contract::from_ui(ui)?;
-    Ok(())
+    Contract::from_ui(ui)
 }
 
 /// Return whether `action` is declared by the current Thread UI and whether its
 /// node explicitly marks it non-settling. This prevents a client from
 /// inventing producer actions that were not rendered authoritatively.
 pub fn action_contract(ui: &Value, action: &str) -> Option<bool> {
-    Contract::from_ui(ui)
+    validated_contract(ui)
         .ok()?
         .actions
         .get(action)
@@ -48,14 +51,13 @@ pub fn action_contract(ui: &Value, action: &str) -> Option<bool> {
 /// Validate the payload for an action declared by the current instrument and
 /// return the authoritative action intent derived from that declaration.
 pub fn validate_action(ui: &Value, action: &str, data: &Value) -> anyhow::Result<ValidatedAction> {
-    validate(ui)?;
+    let contract = validated_contract(ui)?;
     if serde_json::to_vec(data)?.len() > MAX_ACTION_DATA_BYTES {
         anyhow::bail!("Thread action data exceeds {MAX_ACTION_DATA_BYTES} bytes");
     }
     let object = data
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("Thread action data must be an object"))?;
-    let contract = Contract::from_ui(ui)?;
     let spec = contract.actions.get(action).ok_or_else(|| {
         anyhow::anyhow!("action `{action}` is not declared by the current Thread UI")
     })?;
@@ -619,5 +621,17 @@ mod tests {
                 .to_string()
                 .contains("16 fields")
         );
+    }
+    #[test]
+    fn action_contract_requires_a_structurally_valid_instrument() {
+        let invalid =
+            serde_json::json!({"type":"submit","action":"advance","label":"Go","unexpected":true});
+        assert!(validate(&invalid).is_err());
+        assert_eq!(action_contract(&invalid, "advance"), None);
+        assert!(validate_action(&invalid, "advance", &serde_json::json!({})).is_err());
+        let valid = serde_json::json!({"type":"submit","action":"advance","label":"Go"});
+        assert!(validate(&valid).is_ok());
+        assert_eq!(action_contract(&valid, "advance"), Some(true));
+        assert!(validate_action(&valid, "advance", &serde_json::json!({})).is_ok());
     }
 }

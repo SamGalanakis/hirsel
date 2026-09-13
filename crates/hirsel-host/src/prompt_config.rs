@@ -102,12 +102,16 @@ impl PromptConfig {
         if self.provider == ProviderMode::Anthropic {
             return None;
         }
-        let fallback =
-            || default_in_mode(mode, true).or_else(|| default_fork_selection(self.provider));
-        let Some((id, variant)) = self.config_store.fork_model_selection() else {
+        let fallback = || {
+            default_in_mode(mode, AgentSlot::Fork).or_else(|| default_fork_selection(self.provider))
+        };
+        let Some((id, variant)) = self
+            .config_store
+            .model_selection(hirsel_proto::AgentSlot::Fork)
+        else {
             return fallback();
         };
-        match validate_in_mode(mode, true, &id, &variant) {
+        match validate_in_mode(mode, AgentSlot::Fork, &id, &variant) {
             Ok(selection) => Some(selection),
             Err(error) => {
                 tracing::warn!(
@@ -123,11 +127,13 @@ impl PromptConfig {
     pub fn fork(&self) -> Option<ForkAgentConfig> {
         let mode = self.fork_mode();
         Some(ForkAgentConfig {
-            current: self.fork_model_in(&mode)?,
-            available: available_in_mode(&mode, true),
             prompt: doc(self.config_store.fork_prompt_override(), FORK_PROMPT),
-            provider_id: mode.provider_id().map(str::to_string),
-            free_text_model: mode.is_free_text(),
+            model: hirsel_proto::AgentModelConfig {
+                current: self.fork_model_in(&mode)?,
+                available: available_in_mode(&mode, AgentSlot::Fork),
+                provider_id: mode.provider_id().map(str::to_string),
+                free_text_model: mode.is_free_text(),
+            },
         })
     }
 
@@ -176,9 +182,13 @@ impl PromptConfig {
                 "fork model selection requires HIRSEL_PROVIDER=codex or HIRSEL_PROVIDER=openrouter"
             );
         }
-        let selection = validate_in_mode(&self.fork_mode(), true, model_id, variant)?;
+        let selection = validate_in_mode(&self.fork_mode(), AgentSlot::Fork, model_id, variant)?;
         self.config_store
-            .set_fork_model(&selection.id, &selection.variant)
+            .set_model_selection(
+                hirsel_proto::AgentSlot::Fork,
+                &selection.id,
+                &selection.variant,
+            )
             .await?;
         Ok(selection)
     }
@@ -370,10 +380,10 @@ mod tests {
             .unwrap();
 
         let fork = prompts.fork().unwrap();
-        assert!(fork.free_text_model);
-        assert!(fork.available.is_empty());
-        assert_eq!(fork.provider_id.as_deref(), Some("router"));
-        assert_eq!(fork.current.id, "some/model");
+        assert!(fork.model.free_text_model);
+        assert!(fork.model.available.is_empty());
+        assert_eq!(fork.model.provider_id.as_deref(), Some("router"));
+        assert_eq!(fork.model.current.id, "some/model");
 
         // Any id goes; shape is the only check, and the variant is the
         // provider's own.
@@ -393,15 +403,25 @@ mod tests {
         let prompts = config(&dir, ProviderMode::Codex).await;
         prompts
             .config_store
-            .set_agent_provider_and_model("fork", "retired", "model", "some/model", "default")
+            .set_agent_provider_and_model(
+                hirsel_proto::AgentSlot::Fork,
+                "retired",
+                "some/model",
+                "default",
+            )
             .await
             .unwrap();
 
         let fork = prompts.fork().unwrap();
-        assert!(!fork.free_text_model);
-        assert_eq!(fork.provider_id.as_deref(), Some("codex"));
-        assert_eq!(fork.current.id, "gpt-5.6-luna");
-        assert!(fork.available.iter().any(|model| model.id == "gpt-5.6-sol"));
+        assert!(!fork.model.free_text_model);
+        assert_eq!(fork.model.provider_id.as_deref(), Some("codex"));
+        assert_eq!(fork.model.current.id, "gpt-5.6-luna");
+        assert!(
+            fork.model
+                .available
+                .iter()
+                .any(|model| model.id == "gpt-5.6-sol")
+        );
     }
 
     #[tokio::test]
@@ -427,11 +447,12 @@ mod tests {
         let fork = prompts.fork().unwrap();
         assert_eq!(fork.prompt.text, FORK_PROMPT);
         assert!(fork.prompt.is_default);
-        assert_eq!(fork.current.id, "google/gemini-3.7-flash");
+        assert_eq!(fork.model.current.id, "google/gemini-3.7-flash");
         assert!(
-            fork.available
+            fork.model
+                .available
                 .iter()
-                .any(|model| model.id == fork.current.id)
+                .any(|model| model.id == fork.model.current.id)
         );
 
         prompts.set_fork_prompt("Triage quietly.").await.unwrap();

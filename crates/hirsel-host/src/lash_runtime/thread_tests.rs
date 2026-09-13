@@ -564,9 +564,7 @@ async fn durable_admission_is_fifo_with_independent_thread_sessions() {
     config.agent = AgentMode::Lash;
     config.anthropic_api_key = Some("test-key-no-inference".into());
     let state = crate::build_state(config).await.unwrap();
-    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
-        panic!("registry")
-    };
+    let registry = &state.agent.registry;
     registry.capacity.close();
     let mut lanes = Vec::new();
     for key in ["alpha", "beta"] {
@@ -908,9 +906,7 @@ async fn retained_current_store_opens_without_synthesizing_sessions_or_work() {
     config.agent = AgentMode::Lash;
     config.anthropic_api_key = Some("copy-proof-no-real-credential".into());
     let state = crate::build_state(config).await.unwrap();
-    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
-        panic!("current store requires independent Thread registry");
-    };
+    let registry = &state.agent.registry;
     registry.capacity.close();
     assert!(registry.opened().await.is_empty());
     assert!(!path.join("thread-runtime").exists());

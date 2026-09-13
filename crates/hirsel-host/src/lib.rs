@@ -419,17 +419,8 @@ impl AppState {
         agent: AgentSlot,
         choice: &providers::AgentProviderChoice,
     ) -> anyhow::Result<ModelSelection> {
-        let mode = match choice.is_free_text() {
-            true => model_selection::SelectionMode::FreeText {
-                provider_id: choice.id.clone(),
-                default_model: choice.default_model.clone(),
-            },
-            false => model_selection::SelectionMode::Curated {
-                provider: config::ProviderMode::Codex,
-                provider_id: Some(choice.id.clone()),
-            },
-        };
-        model_selection::default_in_mode(&mode, matches!(agent, AgentSlot::Fork)).ok_or_else(|| {
+        let mode = model_selection::SelectionMode::for_choice(choice);
+        model_selection::default_in_mode(&mode, agent).ok_or_else(|| {
             anyhow::anyhow!(
                 "provider `{}` offers no default model to seed; set one first",
                 choice.id
@@ -443,11 +434,11 @@ impl AppState {
         let configured = match agent {
             AgentSlot::Main => self
                 .model_snapshot()
-                .and_then(|snapshot| snapshot.provider_id),
+                .and_then(|snapshot| snapshot.model.provider_id),
             AgentSlot::Fork => self
                 .prompt_snapshot()
                 .fork
-                .and_then(|fork| fork.provider_id),
+                .and_then(|fork| fork.model.provider_id),
         };
         match configured.as_deref() {
             Some(configured) if configured == provider_id => Ok(()),

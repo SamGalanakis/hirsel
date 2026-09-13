@@ -43,15 +43,16 @@ pub struct ClaudeCodeDriver {
     sessions: SessionRegistry<ProcessSession>,
 }
 
-struct PendingRequest {
-    input: bool,
-    sender: oneshot::Sender<DriverResult<()>>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum RequestId {
+    Input(String),
+    Control(String),
 }
 
 struct ProcessSession {
     events: Arc<EventHub>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
-    pending: Mutex<HashMap<String, PendingRequest>>,
+    pending: Mutex<HashMap<RequestId, oneshot::Sender<DriverResult<()>>>>,
     process_group: ProcessGroup,
     output: Mutex<ClaudeOutput>,
     ready: tokio::sync::Notify,
@@ -60,7 +61,7 @@ struct ProcessSession {
 // A cancelled request cannot leave a pending waiter alive in the session.
 struct RequestGuard<'a> {
     session: &'a ProcessSession,
-    id: String,
+    id: RequestId,
 }
 impl Drop for RequestGuard<'_> {
     fn drop(&mut self) {
@@ -71,18 +72,13 @@ impl Drop for RequestGuard<'_> {
 }
 
 impl ProcessSession {
-    async fn request(
-        &self,
-        value: Value,
-        id: String,
-        input: bool,
-        limit: Duration,
-    ) -> DriverResult<()> {
+    async fn request(&self, value: Value, id: RequestId, limit: Duration) -> DriverResult<()> {
         if self.events.is_terminal() {
             return Err(DriverError::SessionClosed);
         }
         let (tx, rx) = oneshot::channel();
-        lock(&self.pending)?.insert(id.clone(), PendingRequest { input, sender: tx });
+        let input = matches!(id, RequestId::Input(_));
+        lock(&self.pending)?.insert(id.clone(), tx);
         let _guard = RequestGuard { session: self, id };
         timeout(limit, async {
             {
@@ -112,8 +108,7 @@ impl ProcessSession {
             .request(
                 json!({"type":"control_request", "request_id":id,
                     "request":{"subtype":"interrupt"}}),
-                id,
-                false,
+                RequestId::Control(id),
                 limit,
             )
             .await;
@@ -144,12 +139,12 @@ impl ProcessSession {
         if let Ok(mut pending) = self.pending.lock() {
             let ids = pending
                 .iter()
-                .filter(|(_, request)| !inputs_only || request.input)
+                .filter(|(id, _)| !inputs_only || matches!(id, RequestId::Input(_)))
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>();
             for id in ids {
                 if let Some(request) = pending.remove(&id) {
-                    let _ = request.sender.send(Err(DriverError::SessionClosed));
+                    let _ = request.send(Err(DriverError::SessionClosed));
                 }
             }
         }
@@ -173,25 +168,22 @@ impl ProcessSession {
                         "invalid Claude control response".into(),
                     )),
                 };
-                Some((id, false, result))
+                Some((RequestId::Control(id.to_owned()), result))
             })
         } else if kind == Some("user") && value.get("parent_tool_use_id").is_none_or(Value::is_null)
         {
             value
                 .get("uuid")
                 .and_then(Value::as_str)
-                .map(|id| (id, true, Ok(())))
+                .map(|id| (RequestId::Input(id.to_owned()), Ok(())))
         } else {
             None
         };
-        if let Some((id, input, result)) = receipt
+        if let Some((id, result)) = receipt
             && let Ok(mut pending) = self.pending.lock()
-            && pending
-                .get(id)
-                .is_some_and(|request| request.input == input)
-            && let Some(request) = pending.remove(id)
+            && let Some(request) = pending.remove(&id)
         {
-            let _ = request.sender.send(result);
+            let _ = request.send(result);
         }
         let result = lock(&self.output).and_then(|mut output| output.handle(value, &self.events));
         if let Err(error) = result {
@@ -273,7 +265,11 @@ impl ClaudeCodeDriver {
         let id = Uuid::new_v4().to_string();
         // Publish no handle until the CLI has echoed this exact input UUID.
         session
-            .request(claude_user_message(&task.prompt, &id), id, true, limit)
+            .request(
+                claude_user_message(&task.prompt, &id),
+                RequestId::Input(id),
+                limit,
+            )
             .await?;
         timeout(limit, async {
             loop {
@@ -310,7 +306,11 @@ impl SubagentDriver for ClaudeCodeDriver {
         let session = self.sessions.get(handle)?;
         let id = Uuid::new_v4().to_string();
         session
-            .request(claude_user_message(&text, &id), id, true, REQUEST_TIMEOUT)
+            .request(
+                claude_user_message(&text, &id),
+                RequestId::Input(id),
+                REQUEST_TIMEOUT,
+            )
             .await
     }
 

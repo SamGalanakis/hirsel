@@ -154,12 +154,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        7
+        8
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 6).unwrap();
+    conn.pragma_update(None, "user_version", 7).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -187,29 +187,93 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    for layout in [
-        include_str!("icons-only-v7.sql"),
-        include_str!("processes-only-v7.sql"),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hirsel.sqlite");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(layout).unwrap();
-        conn.execute(
-            "INSERT INTO meta(key,value) VALUES('history_id',?1)",
-            [uuid::Uuid::new_v4().to_string()],
-        )
-        .unwrap();
-        conn.pragma_update(None, "user_version", 7).unwrap();
-        drop(conn);
-        let before = std::fs::read(&path).unwrap();
-        let error = Storage::open(dir.path()).await.err().unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported Hirsel history layout")
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert!(!dir.path().join("hirsel.sqlite-wal").exists());
+    for version in [7, 8] {
+        for layout in [
+            include_str!("icons-only-v7.sql"),
+            include_str!("processes-only-v7.sql"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("hirsel.sqlite");
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(layout).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('history_id',?1)",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+            drop(conn);
+            let before = std::fs::read(&path).unwrap();
+            let error = Storage::open(dir.path()).await.err().unwrap();
+            assert!(error.to_string().contains(if version == 7 {
+                "unsupported Hirsel history schema"
+            } else {
+                "unsupported Hirsel history layout"
+            }));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(!dir.path().join("hirsel.sqlite-wal").exists());
+        }
     }
+}
+
+#[tokio::test]
+async fn turn_state_and_completion_timestamp_must_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let (thread, _) = storage
+        .create_thread(
+            "constraints",
+            "Constraints",
+            "",
+            &serde_json::Value::Null,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap();
+    let turn = storage.queue_thread_turn(thread.id, None).await.unwrap();
+    let conn = storage.conn.lock().await;
+    for (state, finished, valid) in [
+        ("queued", None, true),
+        ("running", None, true),
+        ("completed", Some("2026-09-13T00:00:00Z"), true),
+        ("failed", Some("2026-09-13T00:00:00Z"), true),
+        ("cancelled", Some("2026-09-13T00:00:00Z"), true),
+        ("interrupted", Some("2026-09-13T00:00:00Z"), true),
+        ("completed", None, false),
+        ("running", Some("2026-09-13T00:00:00Z"), false),
+        ("typo", None, false),
+        ("typo", Some("2026-09-13T00:00:00Z"), false),
+    ] {
+        assert_eq!(
+            conn.execute(
+                "UPDATE thread_turns SET state=?2,finished_at=?3 WHERE id=?1",
+                rusqlite::params![turn.id, state, finished]
+            )
+            .is_ok(),
+            valid,
+            "{state}, {finished:?}"
+        );
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='thread_cancellations'",
+            [],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let report_columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('thread_reports') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        report_columns,
+        ["child_turn_id", "operation_id", "activity_id"]
+    );
 }

@@ -7,9 +7,7 @@ async fn runtime_fixture() -> (crate::AppState, tempfile::TempDir) {
     config.agent = AgentMode::Lash;
     config.anthropic_api_key = Some("test-key-no-inference".into());
     let state = crate::build_state(config).await.unwrap();
-    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
-        panic!("registry")
-    };
+    let registry = &state.agent.registry;
     // Closed capacity makes automatic provider dispatch impossible; tests drive
     // durable admission manually and only drain already-cancelled inputs.
     registry.capacity.close();
@@ -393,7 +391,7 @@ async fn stop_after_admission_before_dispatch_cancels_exact_thread_without_provi
         .cancel_thread_turn(&turn.history_id, turn.thread_id)
         .await
         .unwrap();
-    let id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let id = runtime.anchors.lock().await.drain_id.clone().unwrap();
     let output = tokio::time::timeout(Duration::from_secs(5), runtime.run_admitted_drain(&id))
         .await
         .unwrap()
@@ -507,7 +505,7 @@ async fn background_wake_receipt_survives_delivery_and_rejects_duplicate_turn() 
     let pending = state.storage.pending_thread_requests().await.unwrap();
     assert_eq!(pending.len(), 1);
     runtime.admit_next_thread_request().await.unwrap();
-    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let drain_id = runtime.anchors.lock().await.drain_id.clone().unwrap();
     runtime.timeline_commits.record(drain_id).await;
     let output = super::tests::test_turn_output(
         lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
@@ -559,7 +557,7 @@ async fn late_timeline_failure_wins_before_terminal_reply() {
     let runtime = runtime_lane(&state, Some(request.thread_id)).await;
     let _turn_pump = runtime.pump_lock.lock().await;
     runtime.admit_next_thread_request().await.unwrap();
-    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let drain_id = runtime.anchors.lock().await.drain_id.clone().unwrap();
     let turn_id = runtime
         .anchors
         .lock()
@@ -567,8 +565,7 @@ async fn late_timeline_failure_wins_before_terminal_reply() {
         .active
         .as_ref()
         .unwrap()
-        .thread_turn_id
-        .unwrap();
+        .thread_turn_id;
     let output = super::tests::test_turn_output(
         lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
             text: "must not be published".into(),
@@ -679,7 +676,7 @@ async fn process_observation_fixture(
             &runtime.tools,
             timeline,
             &runtime.timeline_commits,
-            &runtime.active_turn_id,
+            &runtime.anchors,
         )
         .await
     );
@@ -694,7 +691,7 @@ async fn observation_gap_midturn_fails_before_a_later_commit_can_publish_success
     let runtime = runtime_lane(&state, Some(request.thread_id)).await;
     let _turn_pump = runtime.pump_lock.lock().await;
     runtime.admit_next_thread_request().await.unwrap();
-    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let drain_id = runtime.anchors.lock().await.drain_id.clone().unwrap();
     let turn_id = runtime
         .anchors
         .lock()
@@ -702,8 +699,7 @@ async fn observation_gap_midturn_fails_before_a_later_commit_can_publish_success
         .active
         .as_ref()
         .unwrap()
-        .thread_turn_id
-        .unwrap();
+        .thread_turn_id;
     let mut timeline = TurnIngest::unrouted(&runtime.history_id, json!({"agent":"host"}));
     process_observation_fixture(
         &runtime,
@@ -775,8 +771,7 @@ async fn observation_gap_across_commit_releases_only_a_failed_terminal_projectio
         .active
         .as_ref()
         .unwrap()
-        .thread_turn_id
-        .unwrap();
+        .thread_turn_id;
     let mut timeline = TurnIngest::unrouted(&runtime.history_id, json!({"agent":"host"}));
     process_observation_fixture(&runtime, &mut timeline, remote_observation_gap()).await;
 
@@ -819,7 +814,7 @@ async fn rlm_observer_retains_integrity_failure_until_recovery_and_failed_termin
     let runtime = runtime_lane(&state, Some(failed_request.thread_id)).await;
     let _turn_pump = runtime.pump_lock.lock().await;
     runtime.admit_next_thread_request().await.unwrap();
-    let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let drain_id = runtime.anchors.lock().await.drain_id.clone().unwrap();
     let turn_id = runtime
         .anchors
         .lock()
@@ -827,8 +822,7 @@ async fn rlm_observer_retains_integrity_failure_until_recovery_and_failed_termin
         .active
         .as_ref()
         .unwrap()
-        .thread_turn_id
-        .unwrap();
+        .thread_turn_id;
     let attempts = state.storage.track_completion_failures().await.unwrap();
     let conn = rusqlite::Connection::open(dir.path().join("hirsel.sqlite")).unwrap();
     conn.execute_batch(
@@ -918,9 +912,10 @@ async fn rlm_observer_retains_integrity_failure_until_recovery_and_failed_termin
         .await
         .unwrap();
     let unaffected_drain = unaffected_runtime
-        .active_turn_id
+        .anchors
         .lock()
         .await
+        .drain_id
         .clone()
         .unwrap();
     unaffected_runtime
@@ -987,12 +982,12 @@ async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
     let route = runtime.anchors.lock().await.active.clone().unwrap();
     assert_eq!(route.thread_id, runtime.thread_id);
     assert!(route.request_id.is_none());
-    let id = runtime.active_turn_id.lock().await.clone().unwrap();
+    let id = runtime.anchors.lock().await.drain_id.clone().unwrap();
     assert_eq!(
         super::bridges::observation_thread_route(&id),
-        Some((runtime.thread_id, route.thread_turn_id.unwrap()))
+        Some((runtime.thread_id, route.thread_turn_id))
     );
-    runtime.cancel_turn().await.unwrap();
+    runtime.cancel_owned_turn(None).await.unwrap();
     let output = tokio::time::timeout(Duration::from_secs(5), runtime.run_admitted_drain(&id))
         .await
         .unwrap()
@@ -1107,9 +1102,7 @@ pub(super) async fn runtime_lane(
     state: &crate::AppState,
     id: Option<u64>,
 ) -> Arc<LashAgentRuntime> {
-    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
-        panic!("registry")
-    };
+    let registry = &state.agent.registry;
     let id = match id {
         Some(id) => id,
         None => {
@@ -1131,7 +1124,7 @@ pub(super) async fn runtime_lane(
         }
     };
     let lane = registry.lane(id).await.unwrap();
-    let AgentBackend::Lash(runtime) = lane.as_ref() else {
+    let LaneRuntime::Lash(runtime) = lane.as_ref() else {
         panic!("Lash lane")
     };
     runtime.clone()
@@ -1254,4 +1247,53 @@ async fn solicited_process_deliveries_enqueue_once_without_triage() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn stop_during_empty_drain_retry_cancels_owned_input_without_provider() {
+    let (state, _dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let turn = request(&state, "stop-drain-retry").await;
+    let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
+    let _pump = runtime.pump_lock.lock().await;
+    runtime.admit_next_thread_request().await.unwrap();
+    let drain = runtime.anchors.lock().await.drain_id.clone().unwrap();
+    // The exact ownership transition made after an empty drain, with the pump
+    // held so the retry cannot run or call a provider before Stop arrives.
+    runtime.clear_active_turn_id(&drain).await;
+    assert!(runtime.anchors.lock().await.active.is_some());
+    runtime
+        .cancel_owned_turn(Some(turn.thread_id))
+        .await
+        .unwrap();
+    assert!(runtime.anchors.lock().await.active.is_none());
+    assert!(
+        runtime
+            .session
+            .pending_turn_inputs()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !state
+            .storage
+            .pending_thread_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == &turn.client_id)
+    );
+    assert_eq!(
+        state
+            .storage
+            .thread_detail(turn.thread_id, None, 30)
+            .await
+            .unwrap()
+            .turns[0]
+            .state,
+        ThreadTurnState::Cancelled
+    );
+    assert!(runtime.admit_next_thread_request().await.unwrap().is_none());
 }

@@ -47,22 +47,13 @@ impl Storage {
         output: Option<(String, Vec<ToolCallSummary>)>,
         failure: Option<&str>,
     ) -> anyhow::Result<ThreadCompletion> {
-        anyhow::ensure!(
-            matches!(
-                state,
-                ThreadTurnState::Completed
-                    | ThreadTurnState::Failed
-                    | ThreadTurnState::Cancelled
-                    | ThreadTurnState::Interrupted
-            ),
-            "completion must be terminal"
-        );
+        anyhow::ensure!(state.is_terminal(), "completion must be terminal");
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         thread_scope::validate_history(&tx, history)?;
         let before = thread_activity::get(&tx, id)?;
         let failure_key = format!("cli-terminal-failure:{history}:{id}");
-        if before.finished_at.is_some() {
+        if before.state.is_terminal() {
             let message = before
                 .agent_message_id
                 .map(|id| chat::get_chat_message(&tx, id))

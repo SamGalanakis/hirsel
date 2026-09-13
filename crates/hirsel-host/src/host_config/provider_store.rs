@@ -141,9 +141,8 @@ impl ConfigStore {
         providers
     }
 
-    /// The provider instance id a resident agent is pointed at. `section` is
-    /// `model` for the main Agent and `fork` for the wake-triage fork.
-    pub fn agent_provider(&self, section: &str) -> Option<String> {
+    /// The provider instance id a resident agent is pointed at.
+    pub fn agent_provider(&self, slot: hirsel_proto::AgentSlot) -> Option<String> {
         self.reload_if_changed();
         let inner = self
             .inner
@@ -151,7 +150,7 @@ impl ConfigStore {
             .unwrap_or_else(|poison| poison.into_inner());
         let id = inner
             .document
-            .get(section)?
+            .get(super::SlotKeys::for_slot(slot).section)?
             .as_table()?
             .get("provider")?
             .as_str()?;
@@ -213,9 +212,8 @@ impl ConfigStore {
     /// same write, so a reader never sees a provider without its model.
     pub async fn set_agent_provider_and_model(
         &self,
-        section: &str,
+        slot: hirsel_proto::AgentSlot,
         provider_id: &str,
-        model_key: &str,
         model_id: &str,
         variant: &str,
     ) -> Result<()> {
@@ -227,6 +225,10 @@ impl ConfigStore {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             let mut document = inner.document.clone();
+            let super::SlotKeys {
+                section,
+                model: model_key,
+            } = super::SlotKeys::for_slot(slot);
             ensure_table(&mut document, section);
             document[section]["provider"] = value(provider_id);
             document[section][model_key] = value(model_id);
@@ -306,7 +308,12 @@ mod tests {
         );
         assert_eq!(seeded[0].default_model, "google/gemini-3.7-flash");
         assert_eq!(seeded[0].api_key.as_deref(), Some("sk-first-key"));
-        assert_eq!(store.agent_provider("model").as_deref(), Some("codex"));
+        assert_eq!(
+            store
+                .agent_provider(hirsel_proto::AgentSlot::Main)
+                .as_deref(),
+            Some("codex")
+        );
 
         // A second load with a different key leaves the stored one alone: the
         // `[providers]` table is the once-only marker.
@@ -322,7 +329,12 @@ mod tests {
             reloaded.providers()[0].api_key.as_deref(),
             Some("sk-first-key")
         );
-        assert_eq!(reloaded.agent_provider("model").as_deref(), Some("codex"));
+        assert_eq!(
+            reloaded
+                .agent_provider(hirsel_proto::AgentSlot::Main)
+                .as_deref(),
+            Some("codex")
+        );
     }
 
     #[tokio::test]
@@ -341,7 +353,12 @@ mod tests {
         .await
         .unwrap();
         assert!(store.providers().is_empty());
-        assert_eq!(store.agent_provider("model").as_deref(), Some("codex"));
+        assert_eq!(
+            store
+                .agent_provider(hirsel_proto::AgentSlot::Main)
+                .as_deref(),
+            Some("codex")
+        );
         // The `[providers]` marker is still written, so a later key in the
         // environment cannot re-seed over a file the Owner has since edited.
         let contents = tokio::fs::read_to_string(codex.path().join("hirsel.toml"))
@@ -386,8 +403,8 @@ mod tests {
         assert!(store.providers().is_empty());
         // No HIRSEL_PROVIDER to seed from means no agent is pointed anywhere:
         // both stay on whatever the host booted with.
-        assert_eq!(store.agent_provider("model"), None);
-        assert_eq!(store.agent_provider("fork"), None);
+        assert_eq!(store.agent_provider(hirsel_proto::AgentSlot::Main), None);
+        assert_eq!(store.agent_provider(hirsel_proto::AgentSlot::Fork), None);
     }
 
     #[tokio::test]
@@ -411,7 +428,7 @@ mod tests {
         .await
         .unwrap();
         assert!(store.providers().is_empty());
-        assert_eq!(store.agent_provider("model"), None);
+        assert_eq!(store.agent_provider(hirsel_proto::AgentSlot::Main), None);
     }
 
     #[tokio::test]

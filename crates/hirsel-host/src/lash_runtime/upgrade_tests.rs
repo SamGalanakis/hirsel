@@ -7,9 +7,7 @@ async fn history_reset_reaps_an_owned_native_shell_command() {
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
-    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
-        panic!("Thread registry")
-    };
+    let registry = &state.agent.registry;
     let tools = Arc::new(
         crate::native_coding_tools::NativeCodingTools::new(dir.path().to_path_buf()).unwrap(),
     );
@@ -108,9 +106,7 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
     config.agent = AgentMode::Lash;
     config.anthropic_api_key = Some("test-key-no-inference".into());
     let state = crate::build_state(config).await.unwrap();
-    let AgentBackend::Threaded(registry) = state.agent.backend.as_ref() else {
-        panic!("Thread registry")
-    };
+    let registry = &state.agent.registry;
     registry.capacity.close();
     assert!(registry.opened().await.is_empty());
     assert!(state.storage.thread_snapshot().await.unwrap().is_empty());
@@ -129,7 +125,7 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
         .unwrap()
         .0;
     let lane = registry.lane(thread.id).await.unwrap();
-    let AgentBackend::Lash(runtime) = lane.as_ref() else {
+    let LaneRuntime::Lash(runtime) = lane.as_ref() else {
         panic!("Lash lane")
     };
     let manifests = runtime
@@ -183,7 +179,7 @@ async fn lash_sessions_are_lazy_thread_local_and_current_only() {
         .0;
     assert_eq!(fresh.id, thread.id);
     let new_lane = registry.lane(fresh.id).await.unwrap();
-    let AgentBackend::Lash(new_runtime) = new_lane.as_ref() else {
+    let LaneRuntime::Lash(new_runtime) = new_lane.as_ref() else {
         panic!("fresh Lash lane")
     };
     assert_ne!(runtime.session_id, new_runtime.session_id);

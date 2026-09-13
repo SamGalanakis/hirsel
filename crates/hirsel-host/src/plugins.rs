@@ -71,17 +71,10 @@ enum PluginRuntime {
     Errored { detail: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PluginStatus {
-    Running,
-    Disabled,
-    Errored { detail: String },
-}
-
-impl PluginStatus {
+impl PluginRuntime {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Running => "running",
+            Self::Running { .. } => "running",
             Self::Disabled => "disabled",
             Self::Errored { .. } => "errored",
         }
@@ -225,20 +218,17 @@ impl PluginHost {
         self.inner.plugins.iter().find(|loaded| loaded.id == id)
     }
 
-    async fn status(&self, id: &str) -> PluginStatus {
-        match self.inner.runtimes.lock().await.get(id) {
-            Some(PluginRuntime::Running { .. }) => PluginStatus::Running,
-            Some(PluginRuntime::Errored { detail }) => PluginStatus::Errored {
-                detail: detail.clone(),
-            },
-            Some(PluginRuntime::Disabled) | None => PluginStatus::Disabled,
-        }
+    async fn inspect_runtime<R>(&self, id: &str, inspect: impl FnOnce(&PluginRuntime) -> R) -> R {
+        let runtimes = self.inner.runtimes.lock().await;
+        inspect(runtimes.get(id).unwrap_or(&PluginRuntime::Disabled))
     }
 
-    /// True while the plugin's routes and tools should be live. `errored`
-    /// plugins stay mounted (the owner can see why) but are not running.
+    /// True while the plugin's routes and tools should be live.
     pub(crate) async fn is_running(&self, id: &str) -> bool {
-        self.status(id).await == PluginStatus::Running
+        self.inspect_runtime(id, |runtime| {
+            matches!(runtime, PluginRuntime::Running { .. })
+        })
+        .await
     }
 
     /// Persist a new enable flag and start or stop the plugin's tools, daemon,

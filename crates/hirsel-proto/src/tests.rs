@@ -491,18 +491,20 @@ fn model_selection_frames_use_snake_case_protocol_names() {
 
     let event = HostToClient::ModelChanged {
         model: ModelSnapshot {
-            current: ModelSelection {
-                id: "gpt-5.6-sol".to_string(),
-                variant: "high".to_string(),
+            model: AgentModelConfig {
+                current: ModelSelection {
+                    id: "gpt-5.6-sol".to_string(),
+                    variant: "high".to_string(),
+                },
+                available: vec![AvailableModel {
+                    id: "gpt-5.6-sol".to_string(),
+                    label: "GPT-5.6 Sol".to_string(),
+                    variants: vec!["low".to_string(), "high".to_string()],
+                    default_variant: "low".to_string(),
+                }],
+                provider_id: Some("codex".to_string()),
+                free_text_model: false,
             },
-            available: vec![AvailableModel {
-                id: "gpt-5.6-sol".to_string(),
-                label: "GPT-5.6 Sol".to_string(),
-                variants: vec!["low".to_string(), "high".to_string()],
-                default_variant: "low".to_string(),
-            }],
-            provider_id: Some("codex".to_string()),
-            free_text_model: false,
         },
     };
     assert_eq!(
@@ -978,4 +980,13 @@ fn process_origin_is_additive_and_preserves_json_results() {
         serde_json::from_value::<ChatMessage>(encoded).unwrap(),
         message
     );
+}
+
+#[test]
+fn fork_model_config_is_flattened_with_unchanged_wire_fields() {
+    let wire = json!({"current":{"id":"m","variant":"default"},"available":[],
+        "provider_id":"router","free_text_model":true,"prompt":{"text":"Read","is_default":true}});
+    let fork: ForkAgentConfig = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(fork.model.current.id, "m");
+    assert_eq!(serde_json::to_value(fork).unwrap(), wire);
 }

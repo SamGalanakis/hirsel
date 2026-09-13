@@ -87,7 +87,7 @@ impl ToolSuite {
         let thread_id = turn.thread_id;
         let parent = turn.requester_thread_id;
         let turn_id = turn.id;
-        let terminal = turn.finished_at.is_some();
+        let terminal = turn.state.is_terminal();
         self.broadcast(HostToClient::ThreadTurn { turn });
         self.publish_thread_summary(thread_id).await;
         if terminal {

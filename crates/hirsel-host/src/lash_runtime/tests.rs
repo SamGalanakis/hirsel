@@ -761,10 +761,11 @@ pub(super) async fn test_event_executor_with_skills(
         views,
     );
     let anchors = Arc::new(Mutex::new(TurnAnchorState {
+        drain_id: None,
         active: Some(TurnAnchors {
             request_id: None,
             thread_id: caller.thread_id,
-            thread_turn_id: Some(caller.turn_id),
+            thread_turn_id: caller.turn_id,
         }),
     }));
     (
@@ -1697,8 +1698,7 @@ async fn complete_fixture_turn(
         .active
         .as_ref()
         .unwrap()
-        .thread_turn_id
-        .unwrap();
+        .thread_turn_id;
     let history = executor.tools.storage().history_id().await?;
     let reply = turn_chat_payload(output);
     let terminal = match &output.result.outcome {

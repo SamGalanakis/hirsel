@@ -136,6 +136,20 @@ pub enum SelectionMode {
 }
 
 impl SelectionMode {
+    pub fn for_choice(choice: &crate::providers::AgentProviderChoice) -> Self {
+        if choice.is_free_text() {
+            Self::FreeText {
+                provider_id: choice.id.clone(),
+                default_model: choice.default_model.clone(),
+            }
+        } else {
+            Self::Curated {
+                provider: ProviderMode::Codex,
+                provider_id: Some(choice.id.clone()),
+            }
+        }
+    }
+
     pub fn provider_id(&self) -> Option<&str> {
         match self {
             Self::Curated { provider_id, .. } => provider_id.as_deref(),
@@ -157,14 +171,7 @@ pub fn selection_mode(
     agent: AgentSlot,
 ) -> SelectionMode {
     match roster.agent_provider(agent) {
-        Some(choice) if choice.is_free_text() => SelectionMode::FreeText {
-            provider_id: choice.id,
-            default_model: choice.default_model,
-        },
-        Some(choice) => SelectionMode::Curated {
-            provider: ProviderMode::Codex,
-            provider_id: Some(choice.id),
-        },
+        Some(choice) => SelectionMode::for_choice(&choice),
         None => SelectionMode::Curated {
             provider: booted,
             provider_id: roster.booted_provider_id().map(str::to_string),
@@ -194,13 +201,13 @@ pub fn validate_free_text(model_id: &str) -> anyhow::Result<ModelSelection> {
 /// Validate a model id + variant under whichever mode the agent is in.
 pub fn validate_in_mode(
     mode: &SelectionMode,
-    fork: bool,
+    slot: AgentSlot,
     model_id: &str,
     variant: &str,
 ) -> anyhow::Result<ModelSelection> {
     match mode {
         SelectionMode::FreeText { .. } => validate_free_text(model_id),
-        SelectionMode::Curated { provider, .. } if fork => {
+        SelectionMode::Curated { provider, .. } if slot == AgentSlot::Fork => {
             validate_fork_selection(*provider, model_id, variant)
         }
         SelectionMode::Curated { provider, .. } => validate_selection(*provider, model_id, variant),
@@ -209,20 +216,24 @@ pub fn validate_in_mode(
 
 /// What a picker may offer under this mode: the curated registry, or nothing
 /// at all because the Owner types the id.
-pub fn available_in_mode(mode: &SelectionMode, fork: bool) -> Vec<AvailableModel> {
+pub fn available_in_mode(mode: &SelectionMode, slot: AgentSlot) -> Vec<AvailableModel> {
     match mode {
         SelectionMode::FreeText { .. } => Vec::new(),
-        SelectionMode::Curated { provider, .. } if fork => available_fork_models(*provider),
+        SelectionMode::Curated { provider, .. } if slot == AgentSlot::Fork => {
+            available_fork_models(*provider)
+        }
         SelectionMode::Curated { provider, .. } => available_models(*provider),
     }
 }
 
 /// The selection an agent lands on when nothing usable is stored: the
 /// provider's own default model at its default variant.
-pub fn default_in_mode(mode: &SelectionMode, fork: bool) -> Option<ModelSelection> {
+pub fn default_in_mode(mode: &SelectionMode, slot: AgentSlot) -> Option<ModelSelection> {
     match mode {
         SelectionMode::FreeText { default_model, .. } => validate_free_text(default_model).ok(),
-        SelectionMode::Curated { provider, .. } if fork => default_fork_selection(*provider),
+        SelectionMode::Curated { provider, .. } if slot == AgentSlot::Fork => {
+            default_fork_selection(*provider)
+        }
         SelectionMode::Curated { provider, .. } => {
             let entry = registry(*provider).first()?;
             Some(ModelSelection {
@@ -308,15 +319,17 @@ impl ModelSelectionState {
     pub fn snapshot(&self) -> ModelSnapshot {
         let mode = self.mode();
         ModelSnapshot {
-            current: self.selection_in(&mode),
-            available: available_in_mode(&mode, false),
-            provider_id: mode.provider_id().map(str::to_string),
-            free_text_model: mode.is_free_text(),
+            model: hirsel_proto::AgentModelConfig {
+                current: self.selection_in(&mode),
+                available: available_in_mode(&mode, AgentSlot::Main),
+                provider_id: mode.provider_id().map(str::to_string),
+                free_text_model: mode.is_free_text(),
+            },
         }
     }
 
     pub fn validate(&self, model_id: &str, variant: &str) -> anyhow::Result<ModelSelection> {
-        validate_in_mode(&self.mode(), false, model_id, variant)
+        validate_in_mode(&self.mode(), AgentSlot::Main, model_id, variant)
     }
 
     /// Whether the stored choice is the one the live session actually runs on.
@@ -331,7 +344,11 @@ impl ModelSelectionState {
 
     pub async fn persist_and_select(&self, selection: ModelSelection) -> anyhow::Result<()> {
         self.config_store
-            .set_model_selection(&selection.id, &selection.variant)
+            .set_model_selection(
+                hirsel_proto::AgentSlot::Main,
+                &selection.id,
+                &selection.variant,
+            )
             .await?;
         Ok(())
     }
@@ -354,15 +371,19 @@ impl ModelSelectionState {
     }
 
     fn selection_in(&self, mode: &SelectionMode) -> ModelSelection {
-        let fallback = || default_in_mode(mode, false).unwrap_or_else(|| self.fallback.clone());
-        let Some((model_id, variant)) = self.config_store.model_selection() else {
+        let fallback =
+            || default_in_mode(mode, AgentSlot::Main).unwrap_or_else(|| self.fallback.clone());
+        let Some((model_id, variant)) = self
+            .config_store
+            .model_selection(hirsel_proto::AgentSlot::Main)
+        else {
             tracing::warn!(
                 path = %self.config_store.path().display(),
                 "host config [model] section is missing or malformed; falling back to the provider's default model"
             );
             return fallback();
         };
-        match validate_in_mode(mode, false, &model_id, &variant) {
+        match validate_in_mode(mode, AgentSlot::Main, &model_id, &variant) {
             Ok(selection) => selection,
             Err(error) => {
                 tracing::warn!(
@@ -608,6 +629,7 @@ mod tests {
         assert_eq!(state.current().id, "gpt-5.6-sol");
         let snapshot = state.snapshot();
         let astra = snapshot
+            .model
             .available
             .iter()
             .find(|model| model.id == "gpt-6-astra")
@@ -724,7 +746,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir).await;
         store
-            .set_model_selection("retired-model", "impossible")
+            .set_model_selection(hirsel_proto::AgentSlot::Main, "retired-model", "impossible")
             .await
             .unwrap();
         let roster = roster(&dir, &store, ProviderMode::Codex);
@@ -747,7 +769,7 @@ mod tests {
         // What `data/hirsel.toml` holds after running in Codex mode; booting in
         // OpenRouter mode must degrade to the configured default, not fail.
         store
-            .set_model_selection("gpt-5.6-sol", "high")
+            .set_model_selection(hirsel_proto::AgentSlot::Main, "gpt-5.6-sol", "high")
             .await
             .unwrap();
         let roster = roster(&dir, &store, ProviderMode::OpenRouter);
@@ -804,11 +826,11 @@ mod tests {
         let state = router_state(&dir, ProviderMode::Codex).await;
 
         let snapshot = state.snapshot();
-        assert!(snapshot.free_text_model);
-        assert!(snapshot.available.is_empty());
-        assert_eq!(snapshot.provider_id.as_deref(), Some("router"));
-        assert_eq!(snapshot.current.id, "some/model");
-        assert_eq!(snapshot.current.variant, "default");
+        assert!(snapshot.model.free_text_model);
+        assert!(snapshot.model.available.is_empty());
+        assert_eq!(snapshot.model.provider_id.as_deref(), Some("router"));
+        assert_eq!(snapshot.model.current.id, "some/model");
+        assert_eq!(snapshot.model.current.variant, "default");
 
         // Any id the endpoint might offer is accepted, and the variant is the
         // provider's own: the host has no effort ladder to promise.
@@ -851,10 +873,11 @@ mod tests {
         .unwrap();
 
         let snapshot = state.snapshot();
-        assert!(!snapshot.free_text_model);
-        assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
+        assert!(!snapshot.model.free_text_model);
+        assert_eq!(snapshot.model.provider_id.as_deref(), Some("codex"));
         assert_eq!(
             snapshot
+                .model
                 .available
                 .iter()
                 .map(|model| model.id.as_str())
@@ -871,7 +894,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let elsewhere = router_state(&dir, ProviderMode::Codex).await;
         // Stored and reported...
-        assert_eq!(elsewhere.snapshot().provider_id.as_deref(), Some("router"));
+        assert_eq!(
+            elsewhere.snapshot().model.provider_id.as_deref(),
+            Some("router")
+        );
         assert_eq!(elsewhere.current().id, "some/model");
         // ...but the session was built on the booted provider's handle, so the
         // spec it runs stays the booted provider's own.

@@ -2,7 +2,30 @@
 use super::Storage;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
+
+pub(super) fn state_list(terminal: Option<bool>) -> String {
+    hirsel_proto::ThreadTurnState::ALL
+        .into_iter()
+        .filter(|state| terminal.is_none_or(|terminal| state.is_terminal() == terminal))
+        .map(|state| {
+            format!(
+                "'{}'",
+                serde_json::to_value(state)
+                    .expect("turn state serializes")
+                    .as_str()
+                    .expect("turn state is a string")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn current_schema() -> String {
+    include_str!("current.sql")
+        .replace("$TURN_STATES", &state_list(None))
+        .replace("$TERMINAL_TURN_STATES", &state_list(Some(true)))
+}
 
 /// Match the complete current layout before touching an existing store.
 fn catalog(conn: &Connection) -> anyhow::Result<Vec<(String, String, String)>> {
@@ -12,7 +35,7 @@ fn catalog(conn: &Connection) -> anyhow::Result<Vec<(String, String, String)>> {
 }
 fn validate_existing(conn: &Connection) -> anyhow::Result<()> {
     let expected = Connection::open_in_memory()?;
-    expected.execute_batch(include_str!("current.sql"))?;
+    expected.execute_batch(&current_schema())?;
     anyhow::ensure!(
         catalog(conn)? == catalog(&expected)?,
         "unsupported Hirsel history layout; existing store was not modified"
@@ -41,7 +64,7 @@ pub(super) fn initialize(conn: &mut Connection) -> anyhow::Result<()> {
     )?;
     if fresh {
         let tx = conn.transaction()?;
-        tx.execute_batch(include_str!("current.sql"))?;
+        tx.execute_batch(&current_schema())?;
         tx.execute(
             "INSERT INTO meta(key,value) VALUES('history_id',?1)",
             [uuid::Uuid::new_v4().to_string()],

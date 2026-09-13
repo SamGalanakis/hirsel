@@ -102,10 +102,10 @@ impl Storage {
             }
             ThreadMutation::Cancel { thread } => {
                 let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
-                let turn:Option<u64>=tx.query_row("SELECT id FROM thread_turns WHERE thread_id=?1 AND state IN ('running','queued') ORDER BY CASE state WHEN 'running' THEN 0 ELSE 1 END,id LIMIT 1",[id],|r|r.get(0)).optional()?;
+                let turn:Option<u64>=tx.query_row(&format!("SELECT id FROM thread_turns WHERE thread_id=?1 AND state IN ({}) ORDER BY CASE state WHEN 'running' THEN 0 ELSE 1 END,id LIMIT 1", super::schema::state_list(Some(false))),[id],|r|r.get(0)).optional()?;
                 if let Some(turn) = turn {
                     tx.execute(
-                        "INSERT OR IGNORE INTO thread_cancellations(turn_id) VALUES(?1)",
+                        "UPDATE thread_turns SET cancel_requested_at=COALESCE(cancel_requested_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?1",
                         [turn],
                     )?;
                 }

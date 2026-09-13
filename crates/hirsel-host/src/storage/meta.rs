@@ -209,7 +209,7 @@ impl Storage {
         super::threads::get(&tx, thread_id)?;
         let turn = super::thread_activity::get(&tx, turn_id)?;
         anyhow::ensure!(
-            turn.thread_id == thread_id && turn.finished_at.is_some(),
+            turn.thread_id == thread_id && turn.state.is_terminal(),
             "native worker watermark requires its terminal Task turn"
         );
         let turn_key = format!("thread:{thread_id}:native_worker_conversation_turn_watermark");

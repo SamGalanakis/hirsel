@@ -286,7 +286,7 @@ async fn set_agent_model_changes_the_next_turn_model_spec() {
     assert!(state.broadcast_log.recent().iter().any(|event| matches!(
         event,
         HostToClient::ModelChanged { model }
-            if model.current.id == "gpt-5.6-sol" && model.current.variant == "high"
+            if model.model.current.id == "gpt-5.6-sol" && model.model.current.variant == "high"
     )));
 }
 
@@ -332,7 +332,7 @@ async fn set_agent_model_rejects_cross_provider_models_and_variants() {
     assert!(error.contains("configured for `codex`"), "{error}");
     let snapshot = state.model_snapshot().unwrap();
     assert_eq!(
-        snapshot.current,
+        snapshot.model.current,
         ModelSelection {
             id: "gpt-5.6-sol".to_string(),
             variant: "medium".to_string(),
@@ -340,6 +340,7 @@ async fn set_agent_model_rejects_cross_provider_models_and_variants() {
     );
     assert_eq!(
         snapshot
+            .model
             .available
             .iter()
             .map(|model| model.id.as_str())
@@ -549,19 +550,19 @@ async fn removing_the_provider_an_agent_points_at_republishes_its_surface() {
     for agent in [AgentSlot::Main, AgentSlot::Fork] {
         state.set_agent_provider(agent, "router").await.unwrap();
     }
-    assert!(state.model_snapshot().unwrap().free_text_model);
+    assert!(state.model_snapshot().unwrap().model.free_text_model);
     state.broadcast_log.clear();
 
     state.remove_provider("router").await.unwrap();
 
     // Both agents are back on the booted provider's curated registry...
     let snapshot = state.model_snapshot().unwrap();
-    assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
-    assert!(!snapshot.free_text_model);
-    assert_eq!(snapshot.current.id, "gpt-5.6-sol");
+    assert_eq!(snapshot.model.provider_id.as_deref(), Some("codex"));
+    assert!(!snapshot.model.free_text_model);
+    assert_eq!(snapshot.model.current.id, "gpt-5.6-sol");
     let fork = state.prompt_snapshot().fork.unwrap();
-    assert_eq!(fork.provider_id.as_deref(), Some("codex"));
-    assert_eq!(fork.current.id, "gpt-5.6-luna");
+    assert_eq!(fork.model.provider_id.as_deref(), Some("codex"));
+    assert_eq!(fork.model.current.id, "gpt-5.6-luna");
 
     // ...and every client was told, not just about the roster.
     let broadcasts = state.broadcast_log.recent();
@@ -602,7 +603,10 @@ async fn changing_the_pointed_at_default_model_republishes_the_model_surface() {
     config.provider = ProviderMode::Codex;
     config.model = "gpt-5.6-sol".to_string();
     let state = build_state(config).await.unwrap();
-    assert_eq!(state.model_snapshot().unwrap().current.id, "some/model");
+    assert_eq!(
+        state.model_snapshot().unwrap().model.current.id,
+        "some/model"
+    );
     state.broadcast_log.clear();
 
     state
@@ -611,10 +615,10 @@ async fn changing_the_pointed_at_default_model_republishes_the_model_surface() {
         .unwrap();
 
     let snapshot = state.model_snapshot().unwrap();
-    assert_eq!(snapshot.current.id, "vendor/next-model");
+    assert_eq!(snapshot.model.current.id, "vendor/next-model");
     assert!(state.broadcast_log.recent().iter().any(|event| matches!(
         event,
-        HostToClient::ModelChanged { model } if model.current.id == "vendor/next-model"
+        HostToClient::ModelChanged { model } if model.model.current.id == "vendor/next-model"
     )));
 
     // A label-only edit moves nothing an agent renders, so nothing is claimed.
@@ -647,9 +651,9 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
     // Booted shape: OpenRouter is an OpenAI-compatible endpoint, so the Model
     // row is one free-text id with no reasoning ladder at all.
     let booted = state.model_snapshot().unwrap();
-    assert_eq!(booted.provider_id.as_deref(), Some("openrouter"));
-    assert!(booted.free_text_model);
-    assert!(booted.available.is_empty());
+    assert_eq!(booted.model.provider_id.as_deref(), Some("openrouter"));
+    assert!(booted.model.free_text_model);
+    assert!(booted.model.available.is_empty());
     state.broadcast_log.clear();
 
     state
@@ -658,11 +662,11 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
         .unwrap();
 
     let snapshot = state.model_snapshot().unwrap();
-    assert_eq!(snapshot.provider_id.as_deref(), Some("codex"));
-    assert!(!snapshot.free_text_model);
-    assert_eq!(snapshot.current.id, "gpt-5.6-sol");
+    assert_eq!(snapshot.model.provider_id.as_deref(), Some("codex"));
+    assert!(!snapshot.model.free_text_model);
+    assert_eq!(snapshot.model.current.id, "gpt-5.6-sol");
     assert_eq!(
-        snapshot.available[0].variants,
+        snapshot.model.available[0].variants,
         ["low", "medium", "high", "xhigh", "max"]
     );
     // The whole reshaped snapshot goes out, so a connected client renders the
@@ -685,7 +689,10 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
         .await
         .unwrap();
     assert_eq!(selected.variant, "xhigh");
-    assert_eq!(state.model_snapshot().unwrap().current.variant, "xhigh");
+    assert_eq!(
+        state.model_snapshot().unwrap().model.current.variant,
+        "xhigh"
+    );
     let spec = state
         .agent
         .next_turn_model_spec()
@@ -694,7 +701,7 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
 
     // ...and a fresh hello serves the reshaped snapshot too.
     assert_eq!(
-        state.model_snapshot().unwrap().provider_id.as_deref(),
+        state.model_snapshot().unwrap().model.provider_id.as_deref(),
         Some("codex")
     );
 }
@@ -726,10 +733,10 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     // The choice is stored with the provider's default model seeded...
     assert_eq!(roster.booted_provider_id.as_deref(), Some("codex"));
     let snapshot = state.model_snapshot().unwrap();
-    assert_eq!(snapshot.provider_id.as_deref(), Some("router"));
-    assert_eq!(snapshot.current.id, "some/model");
-    assert!(snapshot.free_text_model);
-    assert!(snapshot.available.is_empty());
+    assert_eq!(snapshot.model.provider_id.as_deref(), Some("router"));
+    assert_eq!(snapshot.model.current.id, "some/model");
+    assert!(snapshot.model.free_text_model);
+    assert!(snapshot.model.available.is_empty());
     // ...and both the roster and the model surface are told — the WHOLE
     // snapshot, so the client learns the control's new shape and not just a
     // selection it cannot render.
@@ -741,10 +748,10 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     assert!(state.broadcast_log.recent().iter().any(|event| matches!(
         event,
         HostToClient::ModelChanged { model }
-            if model.current.id == "some/model"
-                && model.free_text_model
-                && model.available.is_empty()
-                && model.provider_id.as_deref() == Some("router")
+            if model.model.current.id == "some/model"
+                && model.model.free_text_model
+                && model.model.available.is_empty()
+                && model.model.provider_id.as_deref() == Some("router")
     )));
     // The key never rides along on any broadcast.
     let broadcasts = serde_json::to_string(&state.broadcast_log.recent()).unwrap();
@@ -756,9 +763,9 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
         .await
         .unwrap();
     let fork = state.prompt_snapshot().fork.unwrap();
-    assert_eq!(fork.provider_id.as_deref(), Some("codex"));
-    assert_eq!(fork.current.id, "gpt-5.6-luna");
-    assert_eq!(fork.current.variant, "max");
+    assert_eq!(fork.model.provider_id.as_deref(), Some("codex"));
+    assert_eq!(fork.model.current.id, "gpt-5.6-luna");
+    assert_eq!(fork.model.current.variant, "max");
     let error = state
         .set_fork_model("router", "some/model", "default")
         .await
@@ -808,8 +815,8 @@ async fn the_stored_main_agent_provider_is_what_the_host_boots_on() {
     assert_eq!(roster.boot_notice, None);
     // The model picker follows the same choice, in free text.
     let snapshot = state.model_snapshot().unwrap();
-    assert_eq!(snapshot.provider_id.as_deref(), Some("acme"));
-    assert!(snapshot.free_text_model);
+    assert_eq!(snapshot.model.provider_id.as_deref(), Some("acme"));
+    assert!(snapshot.model.free_text_model);
     let encoded = serde_json::to_string(&roster).unwrap();
     assert!(!encoded.contains("sk-acme-boot-key"), "{encoded}");
 }
@@ -876,7 +883,7 @@ async fn claude_is_rejected_for_both_resident_agents_and_broadcasts_nothing() {
     }
     // A rejected command settles on the error frame alone.
     assert!(state.broadcast_log.recent().is_empty());
-    assert!(state.model_snapshot().unwrap().provider_id.as_deref() == Some("codex"));
+    assert!(state.model_snapshot().unwrap().model.provider_id.as_deref() == Some("codex"));
 }
 
 #[tokio::test]

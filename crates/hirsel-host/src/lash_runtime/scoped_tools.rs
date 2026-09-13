@@ -474,36 +474,141 @@ impl ScopedThreadTools {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DelegateInput {
+struct DelegateCommon {
     title: String,
     brief: String,
     artifact_ids: Vec<u64>,
-    child_thread_id: Option<u64>,
-    agent: Option<String>,
-    provider_id: Option<String>,
-    model: Option<String>,
-    variant: Option<String>,
-    cwd: Option<std::path::PathBuf>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HostAgent {
+    Host,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum NativeAgent {
+    Lash,
+}
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CliAgent {
+    #[default]
+    Claude,
+    Codex,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum DelegateInput {
+    Existing {
+        #[serde(flatten)]
+        common: DelegateCommon,
+        child_thread_id: u64,
+    },
+    Host {
+        #[serde(flatten)]
+        common: DelegateCommon,
+        child_thread_id: Option<u64>,
+        agent: HostAgent,
+    },
+    Native {
+        #[serde(flatten)]
+        common: DelegateCommon,
+        child_thread_id: Option<u64>,
+        agent: NativeAgent,
+        provider_id: Option<String>,
+        model: Option<String>,
+        variant: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+    },
+    Cli {
+        #[serde(flatten)]
+        common: DelegateCommon,
+        child_thread_id: Option<u64>,
+        #[serde(default)]
+        agent: CliAgent,
+        model: Option<String>,
+        variant: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+    },
 }
 impl ScopedThreadTools {
     async fn resolve_assignment(&self, args: &Value) -> Result<Delegation, String> {
         let input: DelegateInput =
             serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
-        let execution = if input.agent.is_none()
-            && input.provider_id.is_none()
-            && input.model.is_none()
-            && input.variant.is_none()
-            && input.cwd.is_none()
-            && input.child_thread_id.is_some()
-        {
-            let child_thread_id = input
-                .child_thread_id
-                .ok_or("selector-free dispatch requires an existing child Thread")?;
+        use crate::execution_selection::{ExecutionSelectors, resolve_execution};
+        let (input, child_thread_id, selectors) = match input {
+            DelegateInput::Existing {
+                common,
+                child_thread_id,
+            } => (common, Some(child_thread_id), None),
+            DelegateInput::Host {
+                common,
+                child_thread_id,
+                agent: HostAgent::Host,
+            } => (
+                common,
+                child_thread_id,
+                Some(ExecutionSelectors {
+                    agent: Some("host".into()),
+                    ..Default::default()
+                }),
+            ),
+            DelegateInput::Native {
+                common,
+                child_thread_id,
+                agent: NativeAgent::Lash,
+                provider_id,
+                model,
+                variant,
+                cwd,
+            } => (
+                common,
+                child_thread_id,
+                Some(ExecutionSelectors {
+                    agent: Some("lash".into()),
+                    provider_id,
+                    model,
+                    variant,
+                    cwd,
+                }),
+            ),
+            DelegateInput::Cli {
+                common,
+                child_thread_id,
+                agent,
+                model,
+                variant,
+                cwd,
+            } => (
+                common,
+                child_thread_id,
+                Some(ExecutionSelectors {
+                    agent: Some(
+                        match agent {
+                            CliAgent::Claude => "claude",
+                            CliAgent::Codex => "codex",
+                        }
+                        .into(),
+                    ),
+                    provider_id: None,
+                    model,
+                    variant,
+                    cwd,
+                }),
+            ),
+        };
+        let execution = if let Some(selectors) = selectors {
+            Some(resolve_execution(&self.tools, selectors).await?)
+        } else {
             let effective = self
                 .tools
                 .storage()
-                .effective_child_execution(&self.caller, child_thread_id)
+                .effective_child_execution(
+                    &self.caller,
+                    child_thread_id.expect("existing-child variant has an identity"),
+                )
                 .await
                 .map_err(|error| error.to_string())?;
             matches!(
@@ -511,20 +616,6 @@ impl ScopedThreadTools {
                 crate::storage::ThreadExecution::LashWorker { .. }
             )
             .then_some(effective)
-        } else {
-            Some(
-                crate::execution_selection::resolve_execution(
-                    &self.tools,
-                    crate::execution_selection::ExecutionSelectors {
-                        agent: input.agent,
-                        provider_id: input.provider_id,
-                        model: input.model,
-                        variant: input.variant,
-                        cwd: input.cwd,
-                    },
-                )
-                .await?,
-            )
         };
         let native_worker = matches!(
             &execution,
@@ -547,8 +638,64 @@ impl ScopedThreadTools {
             title: input.title,
             brief,
             artifact_ids: input.artifact_ids,
-            child_thread_id: input.child_thread_id,
+            child_thread_id,
             execution,
         })
+    }
+}
+
+#[cfg(test)]
+mod delegate_input_tests {
+    use super::*;
+
+    #[test]
+    fn delegation_variants_reject_mixed_selectors() {
+        let base = json!({"title":"Work", "brief":"Do it", "artifact_ids":[]});
+        let parse = |extra: Value| {
+            let mut value = base.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<DelegateInput>(value)
+        };
+        assert!(matches!(
+            parse(json!({"child_thread_id":7})).unwrap(),
+            DelegateInput::Existing {
+                child_thread_id: 7,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(json!({"agent":"host"})).unwrap(),
+            DelegateInput::Host { .. }
+        ));
+        assert!(matches!(
+            parse(json!({"agent":"lash","provider_id":"router","model":"m"})).unwrap(),
+            DelegateInput::Native { .. }
+        ));
+        for agent in ["claude", "codex"] {
+            assert!(matches!(
+                parse(json!({"agent":agent,"model":"m","variant":"high"})).unwrap(),
+                DelegateInput::Cli { .. }
+            ));
+        }
+        assert!(matches!(
+            parse(json!({})).unwrap(),
+            DelegateInput::Cli {
+                agent: CliAgent::Claude,
+                ..
+            }
+        ));
+        for invalid in [
+            json!({"agent":"host","model":"m"}),
+            json!({"agent":"host","cwd":"/tmp"}),
+            json!({"agent":"codex","provider_id":"router"}),
+            json!({"child_thread_id":7,"provider_id":"router"}),
+            json!({"agent":"typo"}),
+            json!({"unknown":true}),
+        ] {
+            assert!(parse(invalid.clone()).is_err(), "{invalid}");
+        }
     }
 }

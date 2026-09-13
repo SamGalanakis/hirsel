@@ -56,7 +56,6 @@ struct CodexState {
     last_agent_message: Option<String>,
     final_agent_message: Option<String>,
     tools: CodexToolState,
-    closed: bool,
     pending: HashMap<u64, (&'static str, PendingReply)>,
 }
 
@@ -104,7 +103,7 @@ impl CodexSession {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = lock(&self.state)?;
-            if state.closed {
+            if self.events.is_terminal() {
                 return Err(DriverError::SessionClosed);
             }
             state.pending.insert(id, (method, tx));
@@ -144,7 +143,7 @@ impl CodexSession {
 
     fn active_turn(&self) -> DriverResult<(String, String)> {
         let state = lock(&self.state)?;
-        if state.closed || self.events.is_terminal() {
+        if self.events.is_terminal() {
             return Err(DriverError::NoActiveTurn);
         }
         Ok((
@@ -161,7 +160,6 @@ impl CodexSession {
 
     fn fail(&self, reason: &str) {
         if let Ok(mut state) = self.state.lock() {
-            state.closed = true;
             state.active_turn_id = None;
             for (_, (_, tx)) in state.pending.drain() {
                 let _ = tx.send(Err(reason.to_string()));
@@ -224,7 +222,7 @@ impl CodexSession {
             }
             return Ok(());
         }
-        if state.closed || self.events.is_terminal() {
+        if self.events.is_terminal() {
             return Ok(());
         }
         if value.get("method").and_then(Value::as_str) == Some("configWarning") {

@@ -109,6 +109,24 @@ pub enum ThreadTurnState {
     Interrupted,
 }
 
+impl ThreadTurnState {
+    pub const ALL: [Self; 6] = [
+        Self::Queued,
+        Self::Running,
+        Self::Completed,
+        Self::Failed,
+        Self::Cancelled,
+        Self::Interrupted,
+    ];
+
+    pub const fn is_terminal(self) -> bool {
+        match self {
+            Self::Queued | Self::Running => false,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadTurn {
     pub id: u64,

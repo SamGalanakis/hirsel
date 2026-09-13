@@ -174,10 +174,7 @@ impl Storage {
         state: ThreadTurnState,
         agent_message_id: Option<u64>,
     ) -> anyhow::Result<ThreadTurn> {
-        anyhow::ensure!(
-            !matches!(state, ThreadTurnState::Queued | ThreadTurnState::Running),
-            "finish requires terminal state"
-        );
+        anyhow::ensure!(state.is_terminal(), "finish requires terminal state");
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         let turn = finish(&tx, id, state, agent_message_id)?;
@@ -342,8 +339,12 @@ pub(super) fn finish_with_failure(
     agent_message_id: Option<u64>,
     failure: Option<&str>,
 ) -> anyhow::Result<ThreadTurn> {
+    anyhow::ensure!(
+        state.is_terminal(),
+        "turn completion requires a terminal state"
+    );
     let previous = get(c, id)?;
-    if previous.finished_at.is_some() {
+    if previous.state.is_terminal() {
         return Ok(previous);
     }
     if let Some(mid) = agent_message_id {

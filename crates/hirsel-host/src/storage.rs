@@ -103,7 +103,6 @@ impl Storage {
             tx.execute_batch(
                 "
                 DELETE FROM meta WHERE key LIKE 'thread:%';
-                DELETE FROM thread_cancellations;
                 DELETE FROM turn_output_artifacts;
                 DELETE FROM artifact_operations;
                 DELETE FROM message_artifacts;

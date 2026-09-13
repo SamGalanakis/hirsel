@@ -76,7 +76,7 @@ pub(super) fn validate_caller(c: &Connection, caller: &ThreadCaller) -> anyhow::
          JOIN meta m ON m.key='history_id' AND m.value=b.history_id
          WHERE b.history_id=?1 AND b.session_id=?2 AND b.execution_id=?3
          AND b.turn_id=?4 AND t.thread_id=?5 AND t.state='running' AND b.revoked=0
-         AND NOT EXISTS(SELECT 1 FROM thread_cancellations x WHERE x.turn_id=t.id))",
+         AND t.cancel_requested_at IS NULL)",
         params![
             caller.history_id,
             caller.session_id,
@@ -411,7 +411,7 @@ impl Storage {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
         validate_history(&tx, history_id)?;
-        tx.execute("INSERT OR IGNORE INTO thread_cancellations(turn_id) SELECT id FROM thread_turns WHERE thread_id=?1 AND state='running'",[thread_id])?;
+        tx.execute("UPDATE thread_turns SET cancel_requested_at=COALESCE(cancel_requested_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE thread_id=?1 AND state='running'",[thread_id])?;
         tx.commit()?;
         Ok(())
     }

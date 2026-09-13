@@ -1,7 +1,7 @@
 use chrono::Utc;
 use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, ProcessInfo, Thread, ThreadActivity,
-    ThreadRelatedItem, ThreadTurn, ThreadTurnState, ToolCallSummary, TurnEventKind,
+    ThreadRelatedItem, ThreadTurn, ToolCallSummary, TurnEventKind,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -418,7 +418,7 @@ impl LocalStore {
 
     pub fn upsert_turn(&mut self, turn: ThreadTurn) {
         if let Some(old) = self.turns.iter_mut().find(|t| t.id == turn.id) {
-            if old.finished_at.is_some() {
+            if old.state.is_terminal() {
                 return;
             }
             *old = turn.clone();
@@ -430,10 +430,7 @@ impl LocalStore {
             .iter_mut()
             .find(|s| s.thread_id == turn.thread_id && s.turn_id == turn.id)
         {
-            stream.finished = !matches!(
-                turn.state,
-                ThreadTurnState::Queued | ThreadTurnState::Running
-            );
+            stream.finished = turn.state.is_terminal();
         }
     }
 
@@ -441,7 +438,7 @@ impl LocalStore {
         if self
             .turns
             .iter()
-            .any(|t| t.id == turn_id && t.finished_at.is_some())
+            .any(|t| t.id == turn_id && t.state.is_terminal())
         {
             return None;
         }

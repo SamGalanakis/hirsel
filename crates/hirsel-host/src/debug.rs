@@ -575,7 +575,9 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, D
         latest_msg_id: state.storage.latest_msg_id().await?,
         debug: state.debug_enabled,
         started_at_unix,
-        model: state.model_snapshot().map(|snapshot| snapshot.current),
+        model: state
+            .model_snapshot()
+            .map(|snapshot| snapshot.model.current),
     }))
 }
 

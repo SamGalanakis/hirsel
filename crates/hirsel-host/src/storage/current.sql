@@ -50,8 +50,9 @@ END;
         id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL REFERENCES threads(id),
         requester_thread_id INTEGER REFERENCES threads(id),
         requester_turn_id INTEGER REFERENCES thread_turns(id),
-        owner_message_id INTEGER UNIQUE, agent_message_id INTEGER, state TEXT NOT NULL,
-        started_at TEXT NOT NULL, finished_at TEXT,
+        owner_message_id INTEGER UNIQUE, agent_message_id INTEGER, state TEXT NOT NULL CHECK(state IN ($TURN_STATES)),
+        started_at TEXT NOT NULL, finished_at TEXT, cancel_requested_at TEXT,
+        CHECK((state IN ($TERMINAL_TURN_STATES)) = (finished_at IS NOT NULL)),
         CHECK(requester_turn_id IS NULL OR requester_thread_id IS NOT NULL));
 CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='running';
         CREATE TABLE thread_activities (
@@ -165,8 +166,8 @@ CREATE TABLE thread_delegations (
     PRIMARY KEY(requester_turn_id,operation_id));
 CREATE TABLE thread_reports (
     child_turn_id INTEGER NOT NULL REFERENCES thread_turns(id), operation_id TEXT NOT NULL,
-    report_seq INTEGER NOT NULL, payload TEXT NOT NULL, activity_id INTEGER NOT NULL REFERENCES thread_activities(id),
-    PRIMARY KEY(child_turn_id,operation_id), UNIQUE(child_turn_id,report_seq));
+    activity_id INTEGER NOT NULL REFERENCES thread_activities(id),
+    PRIMARY KEY(child_turn_id,operation_id));
 CREATE TABLE thread_execution_bindings (
     history_id TEXT NOT NULL, session_id TEXT NOT NULL, execution_id TEXT NOT NULL,
     turn_id INTEGER NOT NULL REFERENCES thread_turns(id), revoked INTEGER NOT NULL DEFAULT 0,
@@ -189,7 +190,6 @@ CREATE TABLE plugin_thread_kv (
 
 CREATE TABLE turn_output_artifacts (turn_id INTEGER NOT NULL REFERENCES thread_turns(id),artifact_id INTEGER NOT NULL REFERENCES artifacts(id),PRIMARY KEY(turn_id,artifact_id));
 
-CREATE TABLE thread_cancellations (turn_id INTEGER PRIMARY KEY REFERENCES thread_turns(id));
 
 CREATE TABLE thread_related_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -41,28 +41,6 @@ pub(super) fn agent_guidance_with_handoff(
     guidance
 }
 
-#[derive(Clone)]
-pub(super) struct DegradedAgentRuntime {
-    pub(super) reason: String,
-}
-
-impl DegradedAgentRuntime {
-    pub(super) async fn enqueue(&self, _turn: OwnerTurn) -> anyhow::Result<()> {
-        anyhow::bail!("Lash store unavailable: {}", self.reason)
-    }
-
-    pub(super) async fn cancel_turn(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub(super) async fn cancel_queued(
-        &self,
-        _client_id: &str,
-    ) -> anyhow::Result<CancelQueuedResult> {
-        Ok(CancelQueuedResult::AlreadyClaimed)
-    }
-}
-
 pub(super) struct ProviderUnavailable {
     pub(super) message: String,
 }

@@ -78,7 +78,7 @@ finish("registered");
             &storage.history_id().await.unwrap(),
             &session_id,
             DRAIN,
-            route.thread_turn_id.unwrap(),
+            route.thread_turn_id,
         )
         .await
         .unwrap();

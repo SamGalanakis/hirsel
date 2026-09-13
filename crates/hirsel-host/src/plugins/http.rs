@@ -18,7 +18,7 @@ use hirsel_plugin_api::SettingKind;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::{PluginHost, PluginStatus};
+use super::{PluginHost, PluginRuntime};
 use crate::{AppState, auth::owner_bearer_matches};
 
 /// The value a client sees in place of a stored secret, and the value it may
@@ -104,17 +104,27 @@ async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let host = &state.plugins;
     let mut plugins = Vec::new();
     for loaded in &host.inner.plugins {
-        let status = host.status(&loaded.id).await;
+        let (status, error) = host
+            .inspect_runtime(&loaded.id, |runtime| {
+                (
+                    runtime.as_str(),
+                    match runtime {
+                        PluginRuntime::Errored { detail } => Some(detail.clone()),
+                        _ => None,
+                    },
+                )
+            })
+            .await;
         let values = loaded.settings();
         let mut entry = json!({
             "id": loaded.id,
             "label": loaded.label,
             "version": loaded.version,
-            "state": status.as_str(),
+            "state": status,
             "settings": loaded.descriptors,
             "values": masked_values(&loaded.descriptors, &values),
         });
-        if let PluginStatus::Errored { detail } = status {
+        if let Some(detail) = error {
             entry["error"] = Value::String(detail);
         }
         plugins.push(entry);
@@ -143,10 +153,12 @@ async fn set_enabled(
             .refresh_plugin_tools(&host.tool_names())
             .await?;
     }
-    let status = host.status(&manage.plugin_id).await;
+    let status = host
+        .inspect_runtime(&manage.plugin_id, PluginRuntime::as_str)
+        .await;
     Ok(Json(json!({
         "id": manage.plugin_id,
-        "state": status.as_str(),
+        "state": status,
     })))
 }
 

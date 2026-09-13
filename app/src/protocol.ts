@@ -140,7 +140,7 @@ export interface AvailableModel {
 
 /** The main-agent model snapshot carried on `hello_ok` and kept current by
  * `model_changed`: what's selected now, and everything selectable. */
-export interface ModelSnapshot {
+export interface AgentModelConfig {
   current: ModelSelection;
   available: AvailableModel[];
   /** The provider instance this agent runs on. Null when no provider is configured. */
@@ -149,6 +149,8 @@ export interface ModelSnapshot {
    * is then empty and `current.id` is whatever the Owner typed. */
   free_text_model?: boolean;
 }
+
+export type ModelSnapshot = AgentModelConfig;
 
 /** One editable prompt as the Host actually resolves it. `is_default` means
  * no non-empty override is stored; `text` still carries the bundled body so
@@ -159,15 +161,8 @@ export interface PromptDoc {
 }
 
 /** Persisted configuration for the ephemeral incoming-event triage fork. */
-export interface ForkAgentConfig {
-  current: ModelSelection;
-  available: AvailableModel[];
+export interface ForkAgentConfig extends AgentModelConfig {
   prompt: PromptDoc;
-  /** The provider instance this agent runs on. Null when no provider is configured. */
-  provider_id?: string;
-  /** True when the selected provider takes a free-text model id: `available`
-   * is then empty and `current.id` is whatever the Owner typed. */
-  free_text_model?: boolean;
 }
 
 /** The complete prompt surface carried on `hello_ok` and replaced wholesale

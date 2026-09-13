@@ -8,8 +8,10 @@ import type { ThreadExecutionTarget } from "./types";
  * fact about the installation rather than a choice made for this Thread. */
 export function executionLabel(execution: ThreadExecutionTarget | null | undefined): { text: string; muted: boolean } {
   if (!execution) {
-    const fallback = [providerLabel(state.model?.provider_id), state.model?.current.id].filter(Boolean).join(" · ");
-    return { text: fallback ? `Default Native · ${fallback}` : "Default Native", muted: true };
+    // No explicit choice: the same Native sentence, resolved from the
+    // installation's default provider and model. "Default" is not a backend
+    // the Owner can pick, so it is not a word the row says either.
+    return { text: ["Native", providerLabel(state.model?.provider_id), state.model?.current.id].filter(Boolean).join(" · "), muted: true };
   }
   if (execution.kind === "native") return { text: ["Native", providerLabel(execution.provider_id) || execution.provider_id, execution.model].join(" · "), muted: false };
   const group = state.subagentModels?.providers.find(provider => provider.provider === execution.agent);

@@ -38,7 +38,7 @@ import { closeRightRegion, openProcesses, openSettings, state } from "../store/s
 import { ThreadInstrument } from "../views/ThreadInstrument";
 import { getClient } from "../ws/client";
 import { ThreadNavigation, type ThreadNavigationMode } from "./ThreadNavigation";
-import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThreadNavigation, closeThreadNavigation } from "./navigation";
+import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThreadNavigation, closeThreadNavigation, popThreadVisit, previousThread, recordThreadVisit } from "./navigation";
 import { artifactState } from "../artifacts/store";
 import type { Thread } from "./types";
 import { focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
@@ -72,11 +72,31 @@ function NeedsYouPill(props: { thread: { attention: string; last_activity_at: st
     </span>
   </Show>;
 }
-function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void; onBrowse: () => void }) {
+function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void }) {
   const [pane, setPane] = createSignal<"conversation" | "related" | "info">("conversation");
   const showRelated = () => pane() === "related" || props.globalArtifacts;
   /** The Thread's own facts, in the frame, in place of the conversation. */
   const showInfo = () => pane() === "info" && !props.globalArtifacts;
+  /** A pane of this Thread standing in place of its conversation. The global
+   * artifact browser is not one: it is a layer over the addressed Thread and
+   * keeps its destination, so it keeps its composer too. */
+  const threadPane = () => showInfo() || (pane() === "related" && !props.globalArtifacts);
+  /** Info and Related end at their content — no composer, no bottom chrome. */
+  const writable = () => !threadPane();
+  /** Back has one meaning — go back. A pane or browser standing in for the
+   * conversation returns to it; otherwise the Thread this session came from;
+   * otherwise the overview. It never opens the inventory: the rail and the
+   * phone bar own that, and with the column docked opening it does nothing. */
+  const backsToConversation = () => threadPane() || props.globalArtifacts;
+  const backTitle = () => {
+    if (backsToConversation()) return "Back to conversation";
+    const previous = previousThread();
+    return previous === null ? "Back to overview" : `Back to #${previous}`;
+  };
+  const goBack = () => {
+    if (backsToConversation()) { setPane("conversation"); props.onConversation(); return; }
+    focusThread(popThreadVisit());
+  };
   const attachments = props.attachments;
   const current = () => threadState.threads.find(t => t.id === props.id);
   const history = () => threadState.histories[props.id];
@@ -128,7 +148,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   const relatedCount = () => artifactCount() + (relatedState.lists[props.id]?.items.length ?? 0);
   return <RelatedContext value={origin}><main class="thread-focus-frame flex min-h-0 w-full min-w-0 flex-1 flex-col rounded-xl border border-border bg-background split:min-w-[26rem]" data-thread-id={props.id} aria-label={current()?.title ?? "Thread conversation"}>
       <header class="flex min-h-14 shrink-0 flex-wrap items-center gap-0.5 border-b border-border/60 px-1.5 pb-1 sm:gap-1 sm:px-2" data-slot="thread-context">
-        <button class={iconButton} aria-label={props.globalArtifacts ? "Back to conversation" : "Browse Spaces and Tasks"} title={props.globalArtifacts ? "Back to conversation" : "Browse Spaces and Tasks"} onClick={() => { if (props.globalArtifacts) props.onConversation(); else props.onBrowse(); }}><ArrowLeft class="size-4" /></button>
+        <button class={iconButton} aria-label="Back" title={backTitle()} onClick={goBack}><ArrowLeft class="size-4" /></button>
         <ThreadAvatar thread={{ id: props.id, kind: current()?.kind ?? "space", title: current()?.title ?? "Thread", icon: current()?.icon }} />
         <h1 class="min-w-0 flex-1 text-sm font-medium"><button class="block min-h-11 w-full truncate rounded-lg px-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={current()?.title ?? "Loading thread…"} title="Show full name in Spaces and Tasks" aria-controls="thread-navigation" onClick={() => openThreadNavigation()}><span class="flex min-w-0 items-center gap-1.5"><span class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">#{props.id}</span><span class="truncate">{current()?.title ?? "Loading thread…"}</span></span></button></h1>
         <Show when={current()}>{thread => <NeedsYouPill thread={thread()} />}</Show>
@@ -167,11 +187,13 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     </div>
     <ThreadError threadId={props.id} />
     <Show when={!showRelated() && !showInfo()}><ReachStrip origin={origin} /></Show>
+    <Show when={writable()}>
     <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} shortLabel={`Message #${props.id}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
         sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds);
       }}
       onStop={() => getClient()?.cancelTurn(props.historyId, props.id)} getLastOwnerBody={() => messages().findLast(m => m.author === "owner")?.body ?? null} />
+    </Show>
   </main></RelatedContext>;
 }
 
@@ -323,6 +345,9 @@ export function ThreadShell() {
   };
   createEffect(historyId, () => { for (const [key, composer] of composers) if (!key.startsWith(`${historyId()}:`)) { composer.dispose(); composers.delete(key); } });
   onCleanup(() => { for (const composer of composers.values()) composer.dispose(); });
+  /** Back needs a trail, and every way into a Thread — the drawer, a link, the
+   * queue, the browser's own Back — ends here. */
+  createEffect(() => threadState.focusedId, id => recordThreadVisit(id));
   const onPop = () => followThreadLocation();
   window.addEventListener("popstate", onPop);
   onCleanup(() => window.removeEventListener("popstate", onPop));
@@ -348,7 +373,7 @@ export function ThreadShell() {
       <Show when={recoveredDrafts().length > 0}><details class="px-3 py-2 text-sm"><summary class="cursor-pointer text-muted-foreground">Saved drafts from another history</summary><p class="py-2">Copy any text you want to keep into a new conversation.</p><For each={recoveredDrafts()}>{draft => <pre class="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border p-2 text-xs">{draft.text}</pre>}</For></details></Show>
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>
       <div class="flex min-h-0 flex-1 gap-2 py-2 pr-2 pl-2 sm:gap-3 sm:pr-3">
-        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart globalArtifacts={globalArtifacts()} browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} globalArtifacts={globalArtifacts()} onConversation={() => setGlobalArtifacts(false)} onBrowse={() => openThreadNavigation()} />}</Show>
+        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart globalArtifacts={globalArtifacts()} browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} globalArtifacts={globalArtifacts()} onConversation={() => setGlobalArtifacts(false)} />}</Show>
         <Show when={!sideCollapsed()} fallback={<Show when={collapsedShowcase()}>
           <button type="button" data-slot="collapsed-pane-tab" class="flex w-8 shrink-0 items-center justify-center rounded-lg border border-border text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Show the showcase and close the utility pane" title="Show the showcase" onClick={closeRightRegion}>
             <span class="[writing-mode:vertical-rl] rotate-180">Showcase</span>

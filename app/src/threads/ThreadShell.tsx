@@ -5,7 +5,7 @@ import { RelatedList } from "../related/RelatedList";
 import { relatedState } from "../related/store";
 import { anyOverlayOpen, createMediaFlag } from "../lib/focus";
 import { consumeDraftArtifact, draftArtifact, stageDraftArtifact } from "../artifacts/draft-context";
-import { historyId, recoveredDrafts } from "../lib/history";
+import { historyId } from "../lib/history";
 import { ArtifactCard, ArtifactList, ArtifactSurface } from "../artifacts/ArtifactSurface";
 import { createEffect, createMemo, createRoot, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 
@@ -370,7 +370,6 @@ export function ThreadShell() {
     <ThreadNavigation mode={navigationMode()} intent={threadNavigationIntent()} onClose={closeNavigation} onSelect={selectThread} onExpand={() => openNavigation()} />
     <ThreadCreate onSelect={selectThread} />
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-      <Show when={recoveredDrafts().length > 0}><details class="px-3 py-2 text-sm"><summary class="cursor-pointer text-muted-foreground">Saved drafts from another history</summary><p class="py-2">Copy any text you want to keep into a new conversation.</p><For each={recoveredDrafts()}>{draft => <pre class="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border p-2 text-xs">{draft.text}</pre>}</For></details></Show>
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>
       <div class="flex min-h-0 flex-1 gap-2 py-2 pr-2 pl-2 sm:gap-3 sm:pr-3">
         <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart globalArtifacts={globalArtifacts()} browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} globalArtifacts={globalArtifacts()} onConversation={() => setGlobalArtifacts(false)} />}</Show>

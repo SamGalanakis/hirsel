@@ -1,5 +1,5 @@
 import { parseThreadLink, threadPath } from "../lib/thread-url";
-import { historyId, preservePendingDrafts } from "../lib/history";
+import { historyId } from "../lib/history";
 import { createStore, reconcile } from "solid-js";
 
 import type { Blob, ChatMessage, SendMode, ServerMessage } from "../protocol";
@@ -370,7 +370,6 @@ export function focusedThreadRunning(): boolean {
 export function resetThreads(): void {
   historyGeneration++;
   selectionGeneration++;
-  preservePendingDrafts(threadState.pending);
   disconnectThreads();
   setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, expandedTurns: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });
   // Keep an incoming qualified destination until the next hello validates its history.

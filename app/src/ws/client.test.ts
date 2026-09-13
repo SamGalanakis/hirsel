@@ -389,11 +389,12 @@ describe("current history boundary", () => {
     expect(conversationEntries(threads.threadState.histories[1])).toContainEqual({ key: "turn-1", kind: "message", message: final, turn: completed });
     c.close();
   });
-  it("clears stale cache, uploads and queued operations on reset while retaining unsent text for recovery", async () => {
+  it("clears stale cache, uploads, queued operations and drafts from the old history on reset", async () => {
     vi.useFakeTimers(); const { client } = await load();
     const threads = await import("../threads/store"); const artifacts = await import("../artifacts/store");
     const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
     flush(() => { threads.sendThreadMessage("test-history",4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; draft.histories[4] = { brief: { text: "Old", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: true }; }); artifacts.setArtifactState({ preview: { status: "loading", id: 2 } }); });
+    localStorage.setItem("hirsel.draft.test-history:4","Saved unsent text"); localStorage.setItem("hirsel.draft.recovered-old","Stale stash"); localStorage.setItem("hirsel.draft.fresh-history:4","Draft for the new history");
     const upload = c.uploadBlob("upload-old","old.txt","text/plain","eA==").catch(error=>error.message);
     first.serverClose(1006); c.setAgentPrompt("Stale queued operation"); vi.advanceTimersByTime(2000);
     const next = FakeWebSocket.instances[1]; next.serverOpen(); next.serverSend({ ...HELLO_OK, history_id: "fresh-history" }); await Promise.resolve(); flush();
@@ -401,6 +402,7 @@ describe("current history boundary", () => {
     expect(threads.threadState.pending).toEqual([]); expect(threads.threadState.focusedId).toBeNull(); expect(threads.threadState.error).toBeNull();
     expect(threads.threadState.histories).toEqual({});
     expect(artifacts.artifactState.preview).toEqual({ status: "idle" }); expect(await upload).toContain("History was reset");
-    const { recoveredDrafts } = await import("../lib/history"); expect(recoveredDrafts().map(row=>row.text)).toContain("Saved unsent text"); c.close();
+    const draftKeys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)).filter(key => key?.startsWith("hirsel.draft."));
+    expect(draftKeys).toEqual(["hirsel.draft.fresh-history:4"]); c.close();
   });
 });

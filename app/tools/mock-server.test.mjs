@@ -83,3 +83,31 @@ test("Thread mock preserves identity, owned history and lifecycle across reconne
     await once(server, "exit");
   }
 });
+
+test("process wake seed preserves structured messages on open_thread", async () => {
+  const server = spawn(process.execPath, [new URL("mock-server.mjs", import.meta.url).pathname], { env: { ...process.env, MOCK_PORT: "0", MOCK_SEED: "process-wakes" }, stdio: ["ignore", "pipe", "inherit"] });
+  let connection;
+  try {
+    const [output] = await once(server.stdout, "data");
+    const port = output.toString().match(/127\.0\.0\.1:(\d+)/)?.[1];
+    assert.ok(port);
+    connection = client(`ws://127.0.0.1:${port}/ws`);
+    await once(connection.ws, "open");
+    connection.send({ type: "hello", auth: { static_token: "process-wake-test" } });
+    const hello = await connection.next("hello_ok");
+    connection.send({ type: "open_thread", thread_id: 1, history_id: hello.history_id, client_id: "open-processes" });
+    const frame = await connection.next("thread_opened");
+    const messages = frame.detail.messages;
+    assert.equal(messages.length, 3);
+    assert.equal(messages[0].body, "I'm awake — 30 seconds have passed.");
+    assert.equal(messages[0].origin.trigger.in_secs, 30);
+    assert.equal(messages[1].origin.outcome, "failed");
+    assert.equal(messages[1].body, messages[1].origin.error);
+    assert.deepEqual(messages[2].origin.trigger, { kind: "thread", event: "thread.Report", thread_id: 12, title: "Release checks" });
+    assert.deepEqual(messages[2].origin.result, { ok: true });
+  } finally {
+    connection?.ws.terminate();
+    server.kill("SIGTERM");
+    await once(server, "exit");
+  }
+});

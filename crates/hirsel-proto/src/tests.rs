@@ -320,6 +320,8 @@ fn chat_message_without_attachments_deserializes_as_empty() {
 fn process_upsert_round_trips() {
     let ts = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
     let process = ProcessInfo {
+        active_process_id: None,
+        trigger_recurring: true,
         thread_id: 1,
         id: "proc-1".to_string(),
         name: "watch file".to_string(),
@@ -340,7 +342,7 @@ fn process_upsert_round_trips() {
     let encoded = serde_json::to_string(&upsert).unwrap();
     assert_eq!(
         encoded,
-        r#"{"type":"process_upsert","process":{"thread_id":1,"id":"proc-1","name":"watch file","trigger":"every 30s","trigger_subscription_key":"watch-file","trigger_revision":2,"trigger_enabled":true,"cancellable":true,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","last_fired_ts":"2026-07-09T12:00:00Z","last_outcome":"ready"}}"#
+        r#"{"type":"process_upsert","process":{"thread_id":1,"id":"proc-1","trigger_recurring":true,"name":"watch file","trigger":"every 30s","trigger_subscription_key":"watch-file","trigger_revision":2,"trigger_enabled":true,"cancellable":true,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","last_fired_ts":"2026-07-09T12:00:00Z","last_outcome":"ready"}}"#
     );
     let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, upsert);
@@ -651,6 +653,7 @@ fn main_scope_frames_omit_sc() {
     let frames = [
         HostToClient::Msg {
             message: ChatMessage {
+                origin: None,
                 artifact_ids: Vec::new(),
                 client_id: None,
                 thread_id: 0,
@@ -939,5 +942,40 @@ fn related_commands_and_snapshots_preserve_typed_targets_and_history_scope() {
             serde_json::json!({"kind":"url","url":"https://example.com","thread_id":8})
         )
         .is_err()
+    );
+}
+
+#[test]
+fn process_origin_is_additive_and_preserves_json_results() {
+    let old = serde_json::json!({"id":1,"thread_id":2,"author":"agent","body":"hello","ref":null,"ts":"2026-09-13T10:18:00Z"});
+    let mut message: ChatMessage = serde_json::from_value(old).unwrap();
+    assert!(message.origin.is_none());
+    assert!(
+        serde_json::to_value(&message)
+            .unwrap()
+            .get("origin")
+            .is_none()
+    );
+    message.origin = Some(crate::MessageOrigin::Process {
+        process_id: "p1".into(),
+        name: "check".into(),
+        trigger: crate::TriggerLabel::Cron {
+            expr: "*/5 * * * *".into(),
+            tz: Some("UTC".into()),
+        },
+        subscription_key: None,
+        outcome: crate::ProcessOutcome::Completed,
+        result: serde_json::json!({"ok":true,"items":[1,null]}),
+        error: None,
+    });
+    let encoded = serde_json::to_value(&message).unwrap();
+    assert_eq!(encoded["origin"]["kind"], "process");
+    assert_eq!(
+        encoded["origin"]["result"]["items"],
+        serde_json::json!([1, null])
+    );
+    assert_eq!(
+        serde_json::from_value::<ChatMessage>(encoded).unwrap(),
+        message
     );
 }

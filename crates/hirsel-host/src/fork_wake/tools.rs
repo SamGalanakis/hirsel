@@ -404,7 +404,7 @@ impl ForkToolProvider {
             }
             other => anyhow::bail!(
                 "a triage fork has no tool `{other}`; its only exits are fork_record_info, \
-                 fork_record_summary, fork_close_task, fork_escalate and fork_drop"
+                 fork_record_summary, fork_escalate and fork_drop"
             ),
         }
     }

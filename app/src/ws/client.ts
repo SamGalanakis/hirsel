@@ -423,6 +423,10 @@ class HirselWsClient {
         this.flushOutbox();
         break;
       }
+      case "process_removed": {
+        dispatch({ type: "process_removed", payload: message });
+        break;
+      }
       case "process_upsert": {
         dispatch({ type: "process_upsert", payload: message });
         break;

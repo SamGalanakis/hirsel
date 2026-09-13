@@ -47,7 +47,13 @@ Artifacts are explicitly published global results without owners or revisions. C
 
 Current host-authored Canvas Views retain `view_upsert {instance_id,thread_id,spec}`, `view_removed {instance_id}`, and `view_event {instance_id,action,data}`. Thread instruments have their own constrained JSON controls and revision validation.
 
-ProcessInfo requires `thread_id,id,name,cancellable,state,started_ts,last_event_ts` and carries nullable trigger subscription metadata, `last_fired_ts`, and `last_outcome`; processes use `process_upsert {process}`. A registered trigger is visible before its first run with `cancellable=false`. `cancel_process` and `disable_process_trigger` are history- and Thread-addressed writes acknowledged by `process_action_applied {client_id}`; the Host validates the process belongs to that Thread and fences trigger disable by subscription revision. Views are Canvas-only and the conversation Canvas filters them by selected Thread. Settings use set_model, set_subagent_model, set_native_worker, set_agent_prompt, set_fork_prompt, set_fork_model, set_agent_provider, add_provider, update_provider, remove_provider and redetect_provider. The sub-agent catalog carries a `native_worker` row alongside its CLI providers; `set_native_worker` updates it and a provider edit that changes which instances can host it republishes the catalog too. Authoritative model_changed, subagent_models_changed, prompts_changed and providers_changed snapshots acknowledge updates. Provider capability nullability is distinct from compatibility support.
+ProcessInfo requires `thread_id,id,name,trigger_recurring,cancellable,state,started_ts,last_event_ts` and carries optional `active_process_id`, nullable trigger subscription metadata, `last_fired_ts`, and `last_outcome`. Its `id` is a stable identity for one process name within its owning Thread, not an execution ID. Subscriptions and all runs of that name fold into one row; `process_upsert {process}` replaces it and `process_removed {thread_id,id}` removes a row absent from the authoritative projection. `hello_ok` replaces the full list on reconnect.
+
+An in-flight incarnation is `running` (including a suspended Lash process). With no active incarnation, the row is `waiting` only if an enabled subscription can fire again; otherwise it shows the latest execution's terminal state. Disabled, never-fired subscriptions are `cancelled`. A consumed `in_secs` or `at` one-shot is tombstoned through Lash Delete, preserving its delivery history and label. Recurring schedules remain waiting between executions. `last_fired_ts` is the latest durable trigger occurrence time; `last_outcome` remains the most recently completed terminal result while a later incarnation runs. If same-name runs overlap, `active_process_id` selects the newest active run by creation time, then ID; Cancel targets that incarnation. Row start time is the earliest retained registration/run.
+
+A registered trigger is visible before its first run with `cancellable=false`. Cancel is offered only with state `running` and `active_process_id`; Disable only with a live recurring subscription (`trigger_recurring`, `trigger_enabled`, key and revision). When several recurring registrations share a name, Disable selects the most recently updated enabled registration, then ID; subsequent updates expose the next remaining registration. `cancel_process` and `disable_process_trigger` are history- and Thread-addressed writes acknowledged by `process_action_applied {client_id}`; the Host validates the active process belongs to that Thread and fences recurring-trigger disable by subscription revision.
+
+Views are Canvas-only and the conversation Canvas filters them by selected Thread. Settings use set_model, set_subagent_model, set_native_worker, set_agent_prompt, set_fork_prompt, set_fork_model, set_agent_provider, add_provider, update_provider, remove_provider and redetect_provider. The sub-agent catalog carries a `native_worker` row alongside its CLI providers; `set_native_worker` updates it and a provider edit that changes which instances can host it republishes the catalog too. Authoritative model_changed, subagent_models_changed, prompts_changed and providers_changed snapshots acknowledge updates. Provider capability nullability is distinct from compatibility support.
 
 `upload_blob {client_id,name,mime,data_b64}` returns `blob_ok {client_id,blob}`. The general attachment limit remains 15 MiB; choosing a blob as a Thread icon applies the stricter raster contract above. `get_blob_url {client_id,blob_id}` returns `blob_url {client_id,blob_id,url,expires_at}` with a short-lived signed relative URL. Upload and retrieval requests are bounded and fail visibly. Authenticated plugin HTTP and `plugin_push {plugin,topic,data}` remain current operational contracts. `error {detail,client_id?}` echoes the request ID for action and other request failures; errors without a client ID remain global. Action clients retain the captured history and Thread until the matching success, error or timeout, and discard late or duplicate results after settlement or reset. A pre-auth failure returns to authentication.
 
@@ -81,3 +87,20 @@ The Host uses one canonical storage schema 7: emoji/image Thread icons with the
 `threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
 authority, and no `monitors` table. Only the exact layout or an empty store is
 accepted; older and branch-specific schema 7 layouts are refused without modification.
+
+### Process conversation delivery
+
+`ChatMessage.origin` is optional and omitted for ordinary conversation messages.
+A delivery has `{kind:"process",process_id,name,trigger,subscription_key?,outcome,result,error?}`.
+`outcome` is `completed | failed | cancelled | woke` (the last represents an explicit process wake).
+`result` retains its JSON type. The separate debug-only subscription key is never a display label.
+`trigger` is one of `{kind:"timer",label,in_secs?,every_secs?,at?}`, `{kind:"cron",expr,tz?}`,
+`{kind:"thread",event,thread_id,title}`, or `{kind:"other",key}`. Thread events name
+`thread.Report`, `thread.Complete`, `thread.Message`, or `thread.Turn`; titles are captured at delivery.
+Trigger metadata comes from the registered source descriptor retained in the durable trigger delivery snapshot, including after a one-shot subscription is deleted, with a neutral label when unavailable.
+The message body is a bare JSON string, scalar text, a fenced JSON object/array, or the failure error text.
+Process notes retain `author:"agent"` for compatibility but are rendered as ConversationNotes.
+The owning Thread receives one durable normal turn with this message as context, bypassing fork triage.
+Native clients preserve the optional origin losslessly as `ChatMessage.originJson` in the generated Kotlin binding.
+Schema 7's existing delivery receipt stores the origin JSON in `result`; the historical
+`triage_dispatched` column now records durable normal-turn acceptance. No store schema is changed.

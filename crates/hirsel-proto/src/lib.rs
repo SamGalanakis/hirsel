@@ -18,7 +18,9 @@ mod thread;
 mod turn;
 mod view;
 
-pub use chat::{Blob, ChatAuthor, ChatMessage, ToolCallSummary};
+pub use chat::{
+    Blob, ChatAuthor, ChatMessage, MessageOrigin, ProcessOutcome, ToolCallSummary, TriggerLabel,
+};
 pub use client::{AgentSlot, ClientToHost, HelloAuth, PushPlatform, SendMode};
 pub use host::HostToClient;
 pub use models::{

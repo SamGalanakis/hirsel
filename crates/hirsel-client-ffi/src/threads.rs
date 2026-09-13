@@ -361,6 +361,7 @@ mod tests {
     fn message_ffi_keeps_confirmed_send_identity_and_citations() {
         let message =
             crate::ChatMessage::from(core::ChatEntry::Confirmed(core::ConfirmedMessage {
+                origin: None,
                 id: 42,
                 thread_id: 5,
                 client_id: Some("send-1".into()),

@@ -1,11 +1,12 @@
 import { For, onCleanup, Show } from "solid-js";
 import { Markdown } from "../components/Markdown";
 import { BrandMark } from "../components/BrandMark";
-import { LoaderCircle, UserRound } from "../components/ui/icons";
+import { Clock, LoaderCircle, MessagesSquare, UserRound } from "../components/ui/icons";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { getClient } from "../ws/client";
 import { buildTimeline, splitStreamingReply } from "../components/chat/timeline";
-import { ActivityEntry, ThreadWork, WorkTail } from "./ThreadWork";
+import { ActivityEntry, ConversationNote, ThreadWork, WorkTail } from "./ThreadWork";
+import type { ChatMessage, ProcessOrigin, TriggerLabel } from "../protocol";
 import type { ConversationEntry } from "./conversation";
 import type { ThreadHistory } from "./model";
 import { threadState } from "./store";
@@ -38,6 +39,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   let releaseFocus: (() => void) | undefined;
   onCleanup(() => releaseFocus?.());
   const message = () => props.entry.kind === "message" ? props.entry.message : undefined;
+  const process = () => message()?.origin?.kind === "process" ? message() : undefined;
   const turn = () => props.entry.kind === "activity" ? undefined : props.entry.turn;
   const owner = () => message()?.author === "owner";
   const activity = () => (props.entry as Extract<ConversationEntry, {kind:"activity"}>).activity;
@@ -50,7 +52,8 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   const pending = () => !owner() && !message() && turn()?.state === "running"
     && activities(turn()?.id).length === 0 && split().reply === "" && buildTimeline(split().activity).length === 0;
   return <>
-    <Show when={props.entry.kind !== "activity"}>
+    <Show when={process()}>{delivery => <ProcessNote message={delivery()} origin={delivery().origin!} />}</Show>
+    <Show when={props.entry.kind !== "activity" && !process()}>
       {/* Who is speaking is readable before a word is: the Owner sits right in
           the filled emphasis pair (a near-white fill on the dark theme, the
           accent on the light one) at conversational width, the Agent sits left
@@ -79,4 +82,30 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
     </Show>
     <Show when={props.entry.kind === "activity"}><ActivityEntry activity={activity()} /></Show>
   </>;
+}
+
+function triggerText(trigger: TriggerLabel): string {
+  switch (trigger.kind) {
+    case "timer": return `timer · ${trigger.in_secs !== undefined ? `in ${trigger.in_secs}s` : trigger.every_secs !== undefined ? `every ${trigger.every_secs}s` : trigger.at !== undefined ? `at ${trigger.at}` : trigger.label}`;
+    case "cron": return `cron · ${trigger.expr}${trigger.tz ? ` (${trigger.tz})` : ""}`;
+    case "thread": return `${trigger.event} · #${trigger.thread_id} ${trigger.title}`;
+    case "other": return trigger.key;
+  }
+}
+function ProcessNote(props: { message: ChatMessage; origin: ProcessOrigin }) {
+  const json = () => props.origin.result !== null && typeof props.origin.result === "object" && !props.origin.error;
+  return <article data-message-id={props.message.id} data-slot="process-message" aria-label="Process delivery">
+    <ConversationNote expanded>
+      <div class="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
+        <span aria-hidden="true"><Show when={props.origin.trigger.kind === "thread"} fallback={<Clock class="size-3.5 shrink-0" />}><MessagesSquare class="size-3.5 shrink-0" /></Show></span>
+        <code class="max-w-[40%] shrink-0 truncate font-mono" title={props.origin.name}>{props.origin.name}</code><span>·</span>
+        <span class="min-w-0 truncate" title={triggerText(props.origin.trigger)}>{triggerText(props.origin.trigger)}</span><span>·</span>
+        <span class={props.origin.outcome === "failed" ? "text-destructive" : "text-muted-foreground"}>{props.origin.outcome}</span>
+        <time class="ml-auto shrink-0" datetime={props.message.ts}>{new Date(props.message.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+      </div>
+      <div class="mt-1 text-base text-foreground">
+        <Show when={json()} fallback={<p class="whitespace-pre-wrap break-words">{props.origin.error ?? props.message.body}</p>}><Markdown>{props.message.body}</Markdown></Show>
+      </div>
+    </ConversationNote>
+  </article>;
 }

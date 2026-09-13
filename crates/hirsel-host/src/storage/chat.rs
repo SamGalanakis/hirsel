@@ -145,6 +145,7 @@ pub(super) fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<C
         .optional()?;
     message.artifact_ids = super::artifacts::message_artifacts(conn, id)?;
     message.attachments = message_attachments(conn, id)?;
+    message.origin = super::process_deliveries::message_origin(conn, id)?;
     Ok(message)
 }
 
@@ -162,6 +163,7 @@ pub(super) fn load_attachments_for_messages(
             .optional()?;
         message.artifact_ids = super::artifacts::message_artifacts(conn, message.id)?;
         message.attachments = message_attachments(conn, message.id)?;
+        message.origin = super::process_deliveries::message_origin(conn, message.id)?;
     }
     Ok(())
 }
@@ -171,6 +173,7 @@ pub(super) fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
     let ts: String = row.get(4)?;
     let tool_calls: String = row.get(5)?;
     Ok(ChatMessage {
+        origin: None,
         artifact_ids: Vec::new(),
         client_id: None,
         thread_id: row.get(6)?,

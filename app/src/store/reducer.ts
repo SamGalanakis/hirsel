@@ -6,6 +6,7 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, hostVersion: hello.host_version, model: hello.model, subagentModels: hello.subagent_models, prompts: hello.prompts, providers: hello.providers, processes: hello.processes, views: hello.views };
     }
     case "connection_status": return { ...state, connection: action.status };
+    case "process_removed": return { ...state, processes: state.processes.filter(row => row.thread_id !== action.payload.thread_id || row.id !== action.payload.id) };
     case "process_upsert": return { ...state, processes: [...state.processes.filter(row => row.id !== action.payload.process.id), action.payload.process] };
     case "view_upsert": {
       const { instance_id, thread_id, spec } = action.payload;

@@ -1,3 +1,5 @@
+mod timer_process;
+
 use std::collections::BTreeMap;
 
 use crate::{
@@ -557,193 +559,6 @@ async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
     assert!(responses.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn timer_triggered_typescript_process_calls_hirsel_tool_and_delivers_message() {
-    use lash_core::{LlmOutputPart, llm::types::LlmResponse};
-
-    const DRAIN: &str = "process-e2e-drain";
-    let source = r#"<typescript>
-const timer_shell_check = defineProcess({
-  name: "timer_shell_check",
-  signals: {},
-  run: async (_event: unknown) => {
-    const output = await shell.run({ cmd: "printf primitive-ok" });
-    return output.stdout;
-  }
-});
-const source = timer.Schedule({ label: "e2e", in_secs: 1 });
-await registerTrigger({
-  source,
-  target: timer_shell_check,
-  inputs: { _event: trigger.event },
-  name: "timer shell check"
-});
-finish("registered");
-</typescript>"#;
-    let provider = lash_core::testing::TestProvider::builder()
-        .kind("hirsel-process-e2e")
-        .complete(move |_request| async move {
-            Ok(LlmResponse {
-                parts: vec![LlmOutputPart::Text {
-                    text: source.to_string(),
-                    response_meta: None,
-                }],
-                ..LlmResponse::default()
-            })
-        })
-        .build()
-        .into_handle();
-    let (executor, storage, _log, _dir) = test_event_executor().await;
-    let route = executor.anchors.lock().await.active.clone().unwrap();
-    let session_id = storage
-        .reconcile_agent_tool_surface(
-            route.thread_id,
-            "process-e2e-surface",
-            &["shell_run".to_string()],
-        )
-        .await
-        .unwrap()
-        .session_id;
-    storage
-        .bind_thread_execution(
-            &storage.history_id().await.unwrap(),
-            &session_id,
-            DRAIN,
-            route.thread_turn_id.unwrap(),
-        )
-        .await
-        .unwrap();
-    let trigger_store = Arc::new(lash_core::facade_support::InMemoryTriggerStore::default());
-    let process_registry = Arc::new(lash_core::TestLocalProcessRegistry::default());
-    let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        hirsel_rlm_config(HirselRlmSession::Coordinator),
-        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
-    );
-    let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
-        .with_native_queued_work()
-        .provider(provider)
-        .model(provider_rebind_test_model("hirsel-process-e2e-model"))
-        .store_factory(Arc::new(
-            lash_core::facade_support::InMemorySessionStoreFactory::new(),
-        ))
-        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
-        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-        .process_env_store(Arc::new(
-            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
-        ))
-        .process_registry(process_registry)
-        .trigger_store(trigger_store.clone())
-        .tools(Arc::new(HirselToolProvider {
-            executor: executor.clone(),
-        }))
-        .plugin(Arc::new(HirselPluginFactory))
-        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
-        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
-        .build(lash_core::testing::runtime_lease_owner())
-        .unwrap();
-    let session = core
-        .session(&session_id)
-        .plugin_option(
-            RLM_PROTOCOL_PLUGIN_ID,
-            RlmCreateExtras {
-                dialect: Some(AGENT_RLM_DIALECT),
-                ..RlmCreateExtras::default()
-            },
-        )
-        .unwrap()
-        .open()
-        .await
-        .unwrap();
-    session
-        .enqueue(lash::TurnInput::text("register the process"))
-        .id("process-e2e-input")
-        .ingress(TurnInputIngress::next_turn())
-        .send()
-        .await
-        .unwrap();
-    let registration = session
-        .queued_turn()
-        .turn_id(DRAIN)
-        .run()
-        .await
-        .unwrap()
-        .expect("registration turn");
-    assert_eq!(
-        registration.final_value(),
-        Some(&json!("registered")),
-        "registration output: {registration:#?}"
-    );
-
-    let subscriptions = trigger_store
-        .list_subscriptions(TriggerSubscriptionFilter::for_session(&session_id))
-        .await
-        .unwrap();
-    let subscription = subscriptions.first().expect("registered timer trigger");
-    let report = core
-        .triggers()
-        .emit(
-            lash::triggers::TriggerOccurrenceRequest::new(
-                TIMER_SOURCE_TYPE,
-                subscription.source_key.clone(),
-                json!({
-                    "label": "e2e",
-                    "fired_at": Utc::now().to_rfc3339(),
-                    "scheduled_at": Utc::now().to_rfc3339(),
-                    "source_key": subscription.source_key,
-                    "subscription_key": subscription.subscription_key,
-                }),
-                "process-e2e-timer",
-            )
-            .with_source(subscription.source.clone()),
-            inline_trigger_scope("process-e2e-timer"),
-        )
-        .await
-        .unwrap();
-    let process_id = report
-        .started_process_ids()
-        .first()
-        .cloned()
-        .expect("process start");
-    let item = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let snapshot = core
-                .processes()
-                .session_snapshot(&session_id)
-                .await
-                .unwrap();
-            if let Some(item) = snapshot.items.into_iter().find(|item| {
-                item.process.process_id == process_id
-                    && !matches!(
-                        item.process.lifecycle,
-                        lash_core::ProcessStatus::Running | lash_core::ProcessStatus::Waiting
-                    )
-            }) {
-                break item;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("process completes");
-    assert_eq!(
-        item.process.lifecycle,
-        lash_core::ProcessStatus::Completed,
-        "terminal process: {item:#?}"
-    );
-    let (_, mut delivery) = terminal_process_delivery(route.thread_id, &item).unwrap();
-    delivery.trigger = trigger_display(subscription);
-    storage.stage_process_delivery(&delivery).await.unwrap();
-    let delivered = storage
-        .deliver_process_message(&delivery.key)
-        .await
-        .unwrap();
-
-    assert!(delivered.newly_appended);
-    assert!(delivered.message.body.contains("timer_shell_check"));
-    assert!(delivered.message.body.contains("in 1s"));
-    assert!(delivered.message.body.contains("primitive-ok"));
-}
-
 #[test]
 fn agent_host_section_references_runtime_config_and_docs_paths() {
     let dir = tempfile::tempdir().unwrap();
@@ -1239,7 +1054,8 @@ fn registered_trigger_projects_before_its_first_process_run() {
         }),
         1_000,
     );
-    let process = super::process_bridge::subscription_process_info(7, &registration);
+    let rows = super::process_projection::process_rows(7, &[], &[registration], &[]);
+    let process = &rows[0];
 
     assert_eq!(process.thread_id, 7);
     assert_eq!(process.name, "timer-test");
@@ -1901,4 +1717,39 @@ async fn complete_fixture_turn(
     } else {
         Ok(false)
     }
+}
+
+#[test]
+fn structured_trigger_uses_registration_metadata_not_subscription_identity() {
+    use hirsel_proto::TriggerLabel;
+    let mut record = timer_registration(json!({"label":"reminder","in_secs":30}), 1000);
+    assert_eq!(trigger_display(&record), "in 30s");
+    assert_eq!(
+        super::process_bridge::structured_trigger(&record),
+        TriggerLabel::Timer {
+            label: "reminder".into(),
+            in_secs: Some(30),
+            every_secs: None,
+            at: None
+        }
+    );
+    record.source_type = "thread.Reported".into();
+    record.source = json!({"$lash_host_descriptor_value":{"thread_id":12}});
+    assert_eq!(
+        super::process_bridge::structured_trigger(&record),
+        TriggerLabel::Thread {
+            event: "thread.Report".into(),
+            thread_id: 12,
+            title: String::new()
+        }
+    );
+    record.source_type = "cron.Schedule".into();
+    record.source = json!({"$lash_host_descriptor_value":{"expr":"*/5 * * * *","tz":"UTC"}});
+    assert_eq!(
+        super::process_bridge::structured_trigger(&record),
+        TriggerLabel::Cron {
+            expr: "*/5 * * * *".into(),
+            tz: Some("UTC".into())
+        }
+    );
 }

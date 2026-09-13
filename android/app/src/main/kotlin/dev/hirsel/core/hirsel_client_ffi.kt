@@ -1976,6 +1976,11 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 
 data class ChatMessage (
+    /**
+     * Lossless MessageOrigin JSON from the wire, absent on ordinary messages.
+     */
+    var `originJson`: kotlin.String?
+    ,
     var `error`: kotlin.String?
     ,
     var `threadId`: kotlin.ULong
@@ -2018,6 +2023,7 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
     override fun read(buf: ByteBuffer): ChatMessage {
         return ChatMessage(
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterSequenceULong.read(buf),
             FfiConverterSequenceULong.read(buf),
@@ -2034,6 +2040,7 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
     }
 
     override fun allocationSize(value: ChatMessage) = (
+            FfiConverterOptionalString.allocationSize(value.`originJson`) +
             FfiConverterOptionalString.allocationSize(value.`error`) +
             FfiConverterULong.allocationSize(value.`threadId`) +
             FfiConverterSequenceULong.allocationSize(value.`mentions`) +
@@ -2050,6 +2057,7 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
     )
 
     override fun write(value: ChatMessage, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`originJson`, buf)
             FfiConverterOptionalString.write(value.`error`, buf)
             FfiConverterULong.write(value.`threadId`, buf)
             FfiConverterSequenceULong.write(value.`mentions`, buf)

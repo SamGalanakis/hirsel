@@ -15,12 +15,14 @@ import {
   renderedTimelineExpectation,
 } from "./product-runbook-oracles.mjs";
 
+import { runProcessWakes } from "./process-wakes-runbook.mjs";
+
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const requested = process.argv[2] ?? "all";
 const scenarios = requested === "all"
   ? ["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]
   : [requested];
-const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-lash-worker"]);
+const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-lash-worker", "process-wakes"]);
 for (const scenario of scenarios) assert(knownScenarios.has(scenario), `Unknown product runbook: ${scenario}`);
 if (scenarios.includes("native-lash-worker")) {
   assert(process.env.OPENROUTER_API_KEY?.trim(), "native-lash-worker requires OPENROUTER_API_KEY; no model call was started");
@@ -253,17 +255,12 @@ async function captureNativeWorker(label, context, threadId, parentThreadId, chi
 }
 
 async function createThread(page, nonce) {
-  const emptyState = page.locator('[data-slot="thread-empty"]');
-  const emptyStateTitle = emptyState.getByLabel("First space or task title", { exact: true });
-  let creationSurface = emptyState;
-  let titleInput = emptyStateTitle;
-  if (!(await emptyStateTitle.isVisible())) {
-    await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
-    creationSurface = page.locator('[data-slot="thread-drawer"]');
-    await creationSurface.waitFor({ state: "visible" });
-    titleInput = creationSurface.getByLabel("New space or task title", { exact: true });
-  }
-  await titleInput.waitFor({ state: "visible" });
+  const start = page.getByRole("button", { name: "Start a Space or Task", exact: true });
+  if (await start.isVisible()) await start.click();
+  else await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
+  const creationSurface = page.getByRole("dialog", { name: "New Space or Task", exact: true });
+  await creationSurface.waitFor({ state: "visible" });
+  const titleInput = creationSurface.getByLabel("New space or task title", { exact: true });
   const title = `Runbook ${nonce}`;
   await titleInput.fill(title);
   await creationSurface.getByRole("button", { name: "New Space", exact: true }).click();
@@ -326,7 +323,7 @@ function storeTimeline(store, turnId) {
 }
 
 function assertTimelineSurfaces(snapshot, frames, turnIds) {
-  assert.equal(snapshot.store.schemaVersion, 6, "runbook store is not durable schema 6");
+  assert.equal(snapshot.store.schemaVersion, 7, "runbook store is not durable schema 7");
   for (const turnId of turnIds) {
     const live = liveTimeline(frames, turnId);
     assert(live.length > 0, `turn ${turnId} streamed no timeline events`);
@@ -1306,12 +1303,14 @@ async function runScenario(scenario) {
     assert.equal(empty.detail.turns.length, 0);
     assert.equal(empty.store.messages.length, 0);
     assert.equal(empty.store.turns.length, 0);
-    assert.equal(empty.store.schemaVersion, 6);
+    assert.equal(empty.store.schemaVersion, 7);
     assert.deepEqual(empty.store.timelineEvents, []);
     assert.deepEqual(empty.detail.turn_timelines, []);
     if (scenario === "artifact-creation" || scenario === "artifact-presentation") assert.equal(empty.store.artifacts.length, 0);
 
-    result.detail = scenario === "chat-chronology"
+    result.detail = scenario === "process-wakes"
+      ? await runProcessWakes(context, { sendMessage, poll, openThread, capture, sqliteJson })
+      : scenario === "chat-chronology"
       ? await runChat(context)
       : scenario === "tool-execution"
         ? await runTools(context)

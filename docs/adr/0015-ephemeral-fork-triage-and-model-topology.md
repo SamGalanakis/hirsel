@@ -1,10 +1,10 @@
-# Thread-local ephemeral triage for process and scheduled wakes
+# Thread-local ephemeral triage for unsolicited wakes
 
 Updated for the nested Thread decision in [ADR-0016](0016-threads-own-conversation.md).
 
 Each Lash-backed Thread has its own lazy resident session. Human input and
-child reports enter that Thread's durable FIFO directly. Process and scheduled
-wakes carry their originating Thread and history; an ephemeral triage fork
+child reports enter that Thread's durable FIFO directly. Unsolicited notifications
+carry their originating Thread and history; an ephemeral triage fork
 receives only that Thread's context. No global resident or Task transcript is
 retained.
 
@@ -15,10 +15,8 @@ conversations, invoke shell/plugin tools, or choose another destination.
 Triage policy remains in the editable fork prompt; the host enforces resource
 scope and validates execution/history at storage boundaries.
 
-A Lash process emits durable wake and terminal events with no direct resident
-wake selector. The installed Thread dispatcher performs triage. There
-is no alternate pre-triage event or fallback into a global Agent. Fork failure
-uses the current Thread-addressed fallback brief and preserves provenance.
+Process deliveries are solicited work and exempt from triage: they append a structured message and enqueue a normal turn on their owning Thread (ADR-0021).
+Fork failure for unsolicited sources uses the current Thread-addressed fallback brief and preserves provenance.
 
 The main and fork prompts and current provider/model selections remain Settings
 features. Child conversations use the enabled delegation model catalog exposed

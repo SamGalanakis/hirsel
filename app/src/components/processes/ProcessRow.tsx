@@ -190,12 +190,12 @@ export function ProcessRow(props: Props) {
             <span>Updated {formatRelativeTime(p().last_event_ts)}</span>
           </div>
           <div class="flex flex-wrap gap-2">
-            <Show when={running() && p().cancellable && props.onCancel}>
+            <Show when={p().state === "running" && p().active_process_id && p().cancellable && props.onCancel}>
               <button type="button" class="rounded border border-border px-2 py-1 text-xs" onClick={() => props.onCancel?.(p())}>
                 Cancel process
               </button>
             </Show>
-            <Show when={p().trigger_enabled && p().trigger_subscription_key && p().trigger_revision !== null && props.onDisableTrigger}>
+            <Show when={p().trigger_recurring && p().trigger_enabled && p().trigger_subscription_key && p().trigger_revision !== null && props.onDisableTrigger}>
               <button type="button" class="rounded border border-border px-2 py-1 text-xs" onClick={() => props.onDisableTrigger?.(p())}>
                 Disable trigger
               </button>

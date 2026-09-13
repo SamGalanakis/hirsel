@@ -15,12 +15,12 @@ import { state } from "../store/store";
 import { failureReason, mergePersistedToolCalls, toolSummary, workDuration, workLabel } from "./work-summary";
 /** A line owned by neither party: centred, muted, one line, between the two
  * columns of the conversation. */
-export function ConversationNote(props: { title?: string; children: JSX.Element }) {
-  return <p data-slot="conversation-note" title={props.title} class="flex items-center gap-3 text-meta text-muted-foreground">
-    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
-    <span class="min-w-0 max-w-[80%] truncate text-center">{props.children}</span>
-    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
-  </p>;
+export function ConversationNote(props: { title?: string; children: JSX.Element; expanded?: boolean }) {
+  return <div data-slot="conversation-note" title={props.title} class="flex items-center gap-3 text-meta text-muted-foreground">
+    <Show when={!props.expanded}><span aria-hidden="true" class="h-px flex-1 bg-border/60" /></Show>
+    <div class={props.expanded ? "min-w-0 max-w-full flex-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2" : "min-w-0 max-w-[80%] truncate text-center"}>{props.children}</div>
+    <Show when={!props.expanded}><span aria-hidden="true" class="h-px flex-1 bg-border/60" /></Show>
+  </div>;
 }
 export function ActivityEntry(props: { activity: ThreadActivity }) {
   const data = () => props.activity.data as Record<string, unknown>;

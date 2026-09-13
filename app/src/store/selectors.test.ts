@@ -15,6 +15,8 @@ function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
     trigger_subscription_key: "timer-task",
     trigger_revision: 1,
     trigger_enabled: true,
+    active_process_id: "incarnation-1",
+    trigger_recurring: true,
     cancellable: true,
     state: "running",
     started_ts: "2026-07-09T00:00:00Z",

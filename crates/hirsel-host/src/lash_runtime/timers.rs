@@ -93,6 +93,9 @@ impl LashAgentRuntime {
                 )),
             )
             .await?;
+        if occurrence.one_shot {
+            retire_delivered_one_shot(trigger_store.as_ref(), record, &report).await?;
+        }
         if !report.deliveries.is_empty() {
             if let Some(label) = digest_label {
                 self.tools
@@ -109,22 +112,6 @@ impl LashAgentRuntime {
                     .await?;
             }
             self.process_notify.notify_one();
-        }
-        if occurrence.one_shot {
-            // Subscription mutation is a fenced, receipted command now: a
-            // delete names the owner scope, the actor, and the revision it
-            // expects, so a concurrent update cannot be silently clobbered.
-            let _receipt = trigger_store
-                .execute_command(
-                    &format!("timer:one-shot-delete:{}", record.subscription_key),
-                    lash::triggers::TriggerCommand::Delete {
-                        owner_scope: record.owner_scope.clone(),
-                        actor: record.registrant.clone(),
-                        subscription_key: record.subscription_key.clone(),
-                        expected_revision: record.revision,
-                    },
-                )
-                .await?;
         }
         Ok(())
     }
@@ -269,4 +256,46 @@ pub(super) fn timestamp_ms_rfc3339(timestamp_ms: u64) -> String {
     DateTime::<Utc>::from_timestamp_millis(timestamp_ms as i64)
         .map(|ts| ts.to_rfc3339())
         .unwrap_or_else(|| timestamp_ms.to_string())
+}
+
+/// Delete tombstones the consumed subscription and retains delivery history.
+/// Both store failures and revision-fence failures must reach the retrying poll.
+pub(super) async fn retire_delivered_one_shot(
+    store: &dyn TriggerStore,
+    record: &lash_core::TriggerSubscriptionRecord,
+    report: &lash_core::facade_support::TriggerEmitReport,
+) -> anyhow::Result<()> {
+    if record.source_type != TIMER_SOURCE_TYPE
+        || TimerSchedule::from_registration(record)
+            .map_err(anyhow::Error::msg)?
+            .every_secs
+            .is_some()
+    {
+        return Ok(());
+    }
+    if !report.deliveries.iter().any(|delivery| {
+        delivery.subscription_id == record.subscription_id
+            && matches!(
+                delivery.outcome,
+                lash_core::facade_support::TriggerDeliveryEmitOutcome::Started
+                    | lash_core::facade_support::TriggerDeliveryEmitOutcome::AlreadyReserved
+            )
+    }) {
+        return Ok(());
+    }
+    store
+        .execute_command(
+            &format!(
+                "timer:one-shot-delete:{}:{}:{}",
+                record.subscription_key, record.incarnation, record.revision
+            ),
+            lash::triggers::TriggerCommand::Delete {
+                owner_scope: record.owner_scope.clone(),
+                actor: record.registrant.clone(),
+                subscription_key: record.subscription_key.clone(),
+                expected_revision: record.revision,
+            },
+        )
+        .await??;
+    Ok(())
 }

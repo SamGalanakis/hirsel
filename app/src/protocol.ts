@@ -23,7 +23,23 @@ export interface ToolCall {
   ok: boolean;
 }
 
+export type TriggerLabel =
+  | { kind: "timer"; label: string; in_secs?: number; every_secs?: number; at?: string }
+  | { kind: "cron"; expr: string; tz?: string }
+  | { kind: "thread"; event: string; thread_id: number; title: string }
+  | { kind: "other"; key: string };
+export interface ProcessOrigin {
+  kind: "process";
+  process_id: string;
+  name: string;
+  trigger: TriggerLabel;
+  subscription_key?: string;
+  outcome: "completed" | "failed" | "cancelled" | "woke";
+  result: unknown;
+  error?: string;
+}
 export interface ChatMessage {
+  origin?: ProcessOrigin;
   artifact_ids?: number[];
   thread_id: number;
   client_id?: string;
@@ -51,6 +67,8 @@ export type ProcessState =
   | "caller_departed";
 
 export interface ProcessInfo {
+  active_process_id?: string;
+  trigger_recurring: boolean;
   thread_id: number;
   id: string;
   name: string;
@@ -487,7 +505,14 @@ export interface MsgRemovedMsg {
   id: number;
 }
 
-/** v1.4: full-process upsert broadcast on any state/summary change. */
+/** Remove a named row absent from the authoritative registry projection. */
+export interface ProcessRemovedMsg {
+  type: "process_removed";
+  thread_id: number;
+  id: string;
+}
+
+/** Full named-process row broadcast on any state/summary change. */
 export interface ProcessUpsertMsg {
   type: "process_upsert";
   process: ProcessInfo;
@@ -602,6 +627,7 @@ export type ServerMessage =
   | BlobOkMsg
   | BlobUrlMsg
   | MsgRemovedMsg
+  | ProcessRemovedMsg
   | ProcessUpsertMsg
   | ProcessActionAppliedMsg
   | TurnEventMsg

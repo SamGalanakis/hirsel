@@ -15,6 +15,7 @@ export interface AppState {
 export type Action =
   | { type: "hello_ok"; payload: HelloOkMsg }
   | { type: "connection_status"; status: ConnectionStatus }
+  | { type: "process_removed"; payload: { type: "process_removed"; thread_id: number; id: string } }
   | { type: "process_upsert"; payload: { type: "process_upsert"; process: ProcessInfo } }
   | { type: "view_upsert"; payload: ViewUpsertMsg }
   | { type: "view_removed"; payload: { type: "view_removed"; instance_id: string } }

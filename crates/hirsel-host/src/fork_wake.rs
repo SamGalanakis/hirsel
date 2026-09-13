@@ -8,7 +8,8 @@
 //!
 //! * **Owner message** → the main Agent's queue, unchanged
 //!   (`AgentRuntime::enqueue`). Owner messages never pass through a fork.
-//! * **Anything else** → [`ForkWake::dispatch`], which spawns one ephemeral
+//! * **Solicited process delivery** → durable owning-Thread message and normal queue.
+//! * **Unsolicited notification** → [`ForkWake::dispatch`], which spawns one ephemeral
 //!   child session per message. It reads a curated [`pack`], takes exactly one
 //!   exit from [`tools`], and is deleted. Only its Escalate exit puts a turn
 //!   on the main Agent's queue.

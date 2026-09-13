@@ -639,7 +639,7 @@ impl LashAgentRuntime {
 
     /// Put one distilled fork brief on the main Agent's queue.
     ///
-    /// This is the *only* way a non-owner message reaches the main session
+    /// This is the way an unsolicited notification reaches the main session
     /// after ADR-0015, and it deliberately reuses the Owner queued-turn path
     /// (`enqueue` → the pump's `queued_turn` drain) rather than inventing a
     /// second one. The brief is marked so both the main prompt and the client

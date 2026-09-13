@@ -150,6 +150,7 @@ fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
 
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
+        origin: None,
         artifact_ids: Vec::new(),
         thread_id: 1,
         client_id: None,
@@ -246,10 +247,8 @@ fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
 fn the_pack_bounds_every_section_and_never_dumps_history() {
     let message = WakeMessage::new(
         1,
-        WakeSource::Process {
-            process_id: "proc-1".to_string(),
-            name: "ci".to_string(),
-            trigger: "cron */5 * * * *".to_string(),
+        WakeSource::External {
+            origin: "subagent terminal".into(),
         },
         "x".repeat(64 * 1024),
         "process:proc-1:1",
@@ -444,12 +443,10 @@ async fn concurrent_forks_are_capped_by_the_semaphore() {
         handles.push(tokio::spawn(async move {
             fork.dispatch_now(WakeMessage::new(
                 1,
-                WakeSource::Process {
-                    process_id: format!("proc-{index}"),
-                    name: "ci".to_string(),
-                    trigger: "thread.Message #1".to_string(),
+                WakeSource::External {
+                    origin: "subagent terminal".into(),
                 },
-                "Process finished.",
+                "Sub-agent finished.",
                 format!("process:proc-{index}:1"),
             ))
             .await;
@@ -512,10 +509,8 @@ async fn owner_messages_bypass_forks_entirely() {
         WakeSource::External {
             origin: "proc-1".to_string(),
         },
-        WakeSource::Process {
-            process_id: "proc-1".to_string(),
-            name: "disk".to_string(),
-            trigger: "timer every 30s".to_string(),
+        WakeSource::External {
+            origin: "subagent terminal".into(),
         },
         WakeSource::External {
             origin: "webhook".to_string(),
@@ -524,7 +519,7 @@ async fn owner_messages_bypass_forks_entirely() {
         match &source {
             // Exhaustive on purpose: adding an Owner-shaped variant must break
             // this test rather than quietly route Owner traffic into a fork.
-            WakeSource::Process { .. } | WakeSource::External { .. } => {}
+            WakeSource::External { .. } => {}
         }
         assert!(handle.dispatch(WakeMessage::new(1, source, "fired", "k")));
     }
@@ -669,4 +664,117 @@ async fn a_recording_fork_appends_activity_without_creating_work_or_waking_main(
     );
 
     assert!(sink.briefs().await.is_empty());
+}
+
+#[tokio::test]
+async fn fork_prompt_names_resolve_in_typescript_catalog_and_take_an_exit() {
+    use lash::rlm::{RLM_PROTOCOL_PLUGIN_ID, RlmCreateExtras, RlmDialect};
+    use lash::{PromptLayerSink, prompt::PromptContribution};
+    use lash_core::{LlmOutputPart, llm::types::LlmResponse};
+    let prompt = include_str!("../../../../prompts/fork.md");
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let tools = Arc::new(ForkTools::new(
+        state.storage.history_id().await.unwrap(),
+        state.tools.clone(),
+        Arc::new(RecordingSink::default()),
+        external_message(),
+        None,
+    ));
+    let provider = lash_core::testing::TestProvider::builder().kind("fork-bindings-test")
+        .complete(|_| async { Ok(LlmResponse {
+            parts: vec![LlmOutputPart::Text { text: "<typescript>await fork.drop({reason: \"Already handled\"}); finish(\"\");</typescript>".into(), response_meta: None }], ..Default::default()
+        }) }).build().into_handle();
+    let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::builder()
+            .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
+            .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
+            .memory_limit(lash_protocol_rlm::MemoryBound::mebibytes(64))
+            .build(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(lash::TurnBudget::bounded(2), protocol)
+        .provider(provider)
+        .model(
+            lash::ModelSpec::builder("fork-test")
+                .variant(lash::provider::ReasoningSelection::ProviderDefault)
+                .context_window_tokens(200_000)
+                .build()
+                .unwrap(),
+        )
+        .store_factory(Arc::new(
+            lash_core::facade_support::InMemorySessionStoreFactory::new(),
+        ))
+        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+        .without_queued_work()
+        .build(lash_core::testing::runtime_lease_owner())
+        .unwrap();
+    let session = core
+        .session("fork-binding-test")
+        .plugin_option(
+            RLM_PROTOCOL_PLUGIN_ID,
+            RlmCreateExtras {
+                dialect: Some(RlmDialect::Typescript),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .prompt_contribution(PromptContribution::guidance("Hirsel Fork", prompt))
+        .open()
+        .await
+        .unwrap();
+    session
+        .admin()
+        .tools()
+        .add_provider(Arc::new(ForkToolProvider::new(Arc::clone(&tools))))
+        .await
+        .unwrap();
+    super::session::narrow_to_fork_exits(&session)
+        .await
+        .unwrap();
+    let state = session.admin().tools().state().await.unwrap();
+    let names = fork_tool_definitions()
+        .iter()
+        .map(|definition| {
+            assert!(
+                state
+                    .iter()
+                    .any(|(id, _)| id.as_str() == definition.id().as_str())
+            );
+            let binding = definition.manifest().bindings["lashlang.tool"].clone();
+            format!(
+                "{}.{}",
+                binding["module_path"][0].as_str().unwrap(),
+                binding["operation"].as_str().unwrap()
+            )
+        })
+        .collect::<Vec<_>>();
+    let referenced = prompt
+        .split('`')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, text)| text)
+        .filter(|text| text.starts_with("fork."))
+        .collect::<Vec<_>>();
+    assert_eq!(referenced.len(), 4);
+    for name in &referenced {
+        assert!(
+            names.iter().any(|bound| bound == name),
+            "unbound prompt tool: {name}"
+        );
+    }
+    let output = session
+        .turn(lash::TurnInput::text("Already handled notification"))
+        .run()
+        .await
+        .unwrap();
+    assert!(output.is_success(), "{output:?}");
+    assert!(matches!(tools.exit().await, Some(ForkExit::Dropped { .. })));
+    session.close().await.unwrap();
 }

@@ -1136,3 +1136,122 @@ pub(super) async fn runtime_lane(
     };
     runtime.clone()
 }
+
+#[tokio::test]
+async fn solicited_process_deliveries_enqueue_once_without_triage() {
+    use hirsel_proto::{MessageOrigin, ProcessOutcome, TriggerLabel};
+    let (state, _dir) = runtime_fixture().await;
+    let runtime = runtime_lane(&state, None).await;
+    let _pump = runtime.pump_lock.lock().await;
+    for outcome in [
+        ProcessOutcome::Completed,
+        ProcessOutcome::Failed,
+        ProcessOutcome::Cancelled,
+        ProcessOutcome::Woke,
+    ] {
+        let key = format!("process-test:{outcome:?}");
+        let origin = MessageOrigin::Process {
+            process_id: "p1".into(),
+            name: "wake".into(),
+            trigger: TriggerLabel::Timer {
+                label: "reminder".into(),
+                in_secs: Some(30),
+                every_secs: None,
+                at: None,
+            },
+            subscription_key: Some("debug-key".into()),
+            outcome,
+            result: json!("awake"),
+            error: (outcome == ProcessOutcome::Failed).then(|| "failure reason".into()),
+        };
+        let delivery = crate::storage::ProcessDelivery {
+            key: key.clone(),
+            thread_id: runtime.thread_id,
+            origin: origin.clone(),
+        };
+        state
+            .storage
+            .stage_process_delivery(&delivery)
+            .await
+            .unwrap();
+        // Reproduce a restart boundary after appending but before queue acceptance.
+        let first = state.storage.deliver_process_message(&key).await.unwrap();
+        assert!(first.newly_appended);
+        runtime.deliver_process_event(&key).await.unwrap();
+        runtime.deliver_process_event(&key).await.unwrap();
+        let pending = state.storage.pending_thread_requests().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, format!("process-delivery:{key}"));
+        assert!(
+            pending[0].1["body"]
+                .as_str()
+                .unwrap()
+                .contains("Solicited process delivery")
+        );
+        let detail = state
+            .storage
+            .thread_detail(runtime.thread_id, None, 30)
+            .await
+            .unwrap();
+        let messages = detail
+            .messages
+            .iter()
+            .filter(|m| m.origin.as_ref() == Some(&origin))
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].body,
+            if outcome == ProcessOutcome::Failed {
+                "failure reason"
+            } else {
+                "awake"
+            }
+        );
+        runtime.admit_next_thread_request().await.unwrap();
+        let inputs = runtime.session.pending_turn_inputs().await.unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            serde_json::to_string(&inputs)
+                .unwrap()
+                .contains("process_id")
+        );
+        let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+        runtime.timeline_commits.record(drain_id).await;
+        let output = super::tests::test_turn_output(
+            lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+                text: String::new(),
+            }),
+            "",
+            Vec::new(),
+        );
+        runtime
+            .finish_thread_request(&pending[0].0, Some(&output))
+            .await
+            .unwrap();
+        // Acceptance survives consumption and cannot create a second turn.
+        runtime.deliver_process_event(&key).await.unwrap();
+        assert!(
+            state
+                .storage
+                .pending_thread_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let detail = state
+        .storage
+        .thread_detail(runtime.thread_id, None, 30)
+        .await
+        .unwrap();
+    assert_eq!(detail.messages.len(), 4);
+    assert_eq!(detail.turns.len(), 4);
+    assert!(
+        state
+            .storage
+            .pending_process_deliveries(runtime.thread_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

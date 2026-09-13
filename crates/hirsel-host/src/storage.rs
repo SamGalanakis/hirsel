@@ -10,7 +10,7 @@ mod common;
 mod devices;
 mod meta;
 mod plugins;
-mod process_deliveries;
+pub(crate) mod process_deliveries;
 mod push_tokens;
 mod schema;
 

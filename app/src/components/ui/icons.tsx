@@ -283,11 +283,6 @@ export const MessageCircle = (props: IconProps) => <Icon {...props} nodes={[
   ]
 ]} />;
 
-export const UserRound = (props: IconProps) => <Icon {...props} nodes={[
-  ["circle", { cx: "12", cy: "8", r: "5" }],
-  ["path", { d: "M20 21a8 8 0 0 0-16 0" }]
-]} />;
-
 export const ArrowUpRight = (props: IconProps) => <Icon {...props} nodes={[
   ["path", { d: "M7 7h10v10" }],
   ["path", { d: "M7 17 17 7" }]

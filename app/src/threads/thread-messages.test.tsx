@@ -27,27 +27,34 @@ describe("who is speaking", () => {
     const bubble = article.querySelector<HTMLElement>('[data-slot="agent-message"]')!;
     expect(bubble.className).toContain("bg-surface");
     expect(bubble.className).not.toContain("flex-1");
-    expect(bubble.className).toContain("max-w-[92%]");
+    expect(bubble.className).toContain("max-w-[96%]");
     expect(bubble.className).toContain("sm:max-w-[80%]");
     expect(bubble.className).not.toContain("max-w-[60%]");
   });
-  it("shows a started turn with nothing to say as the turning avatar, with no card", () => {
+  it("gives neither side an avatar gutter: alignment already says who is speaking", () => {
+    for (const author of ["owner", "agent"] as const) {
+      const article = row(author);
+      expect(article.querySelector('[data-slot="message-avatar"]')).toBeNull();
+      expect(article.querySelector("svg")).toBeNull();
+      expect(article.children).toHaveLength(1);
+    }
+  });
+  it("shows a started turn with nothing to say as one spinner on the margin, with no card", () => {
     const turn: ThreadTurn = { id: 4, requester_thread_id: null, requester_turn_id: null, thread_id: 1, owner_message_id: null, agent_message_id: null, state: "running", started_at: "2026-09-09T10:00:00Z", finished_at: null };
     flush(() => { dispatch({ type: "connection_status", status: "connected" }); setThreadState(draft => { draft.turnDetails = {}; }); });
     const view = render(() => <ThreadMessage entry={{ key: "turn-4", kind: "turn", turn }} history={emptyHistory()} threadId={1} />);
-    const avatar = view.container.querySelector<HTMLElement>('[data-slot="message-avatar"]')!;
-    expect(avatar).toHaveAttribute("role", "status");
-    expect(avatar).not.toHaveAttribute("aria-hidden");
-    expect(avatar.querySelector(".animate-spin")).toBeInTheDocument();
-    expect(avatar.textContent).toContain("Hirsel is working");
+    const spinner = view.container.querySelector<HTMLElement>('[data-slot="turn-pending"]')!;
+    expect(spinner).toHaveAttribute("role", "status");
+    expect(spinner.querySelector(".animate-spin")).toBeInTheDocument();
+    expect(spinner.textContent).toContain("Hirsel is working");
     expect(view.container.querySelector('[data-slot="agent-message"]')).toBeNull();
     expect(view.container.querySelector('[data-slot="thread-work"]')).toBeNull();
     // The first word the Agent produces brings the card, left-anchored as usual.
     flush(() => setThreadState(draft => { draft.turnDetails = { 4: [{ seq: 1, event: { kind: "reasoning", text: "Checking" } }] }; }));
     const bubble = view.container.querySelector<HTMLElement>('[data-slot="agent-message"]')!;
     expect(bubble).toBeInTheDocument();
-    expect(bubble.className).toContain("max-w-[92%]");
-    expect(view.container.querySelector('[data-slot="message-avatar"]')).toHaveAttribute("aria-hidden", "true");
+    expect(bubble.className).toContain("max-w-[96%]");
+    expect(view.container.querySelector('[data-slot="turn-pending"]')).toBeNull();
     expect(view.container.querySelector('[data-slot="work-live"]')).toBeInTheDocument();
   });
   it("renders a routine note as one centred line owned by neither party", () => {

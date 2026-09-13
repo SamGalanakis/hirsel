@@ -1,7 +1,6 @@
 import { For, onCleanup, Show } from "solid-js";
 import { Markdown } from "../components/Markdown";
-import { BrandMark } from "../components/BrandMark";
-import { Clock, LoaderCircle, MessagesSquare, UserRound } from "../components/ui/icons";
+import { Clock, LoaderCircle, MessagesSquare } from "../components/ui/icons";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { getClient } from "../ws/client";
 import { buildTimeline, splitStreamingReply } from "../components/chat/timeline";
@@ -47,8 +46,8 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   const events = () => turn() === undefined ? [] : threadState.turnDetails[turn()!.id] ?? [];
   const split = () => splitStreamingReply(events());
   /** A turn that has started but said nothing yet is not a card: an empty box
-   * with a spinner in its corner claims the Agent produced something. Until the
-   * first reasoning line, pill or word arrives it is the avatar alone, turning. */
+   * claims the Agent produced something. Until the first reasoning line, pill or
+   * word arrives it is one spinner on the margin where the card will open. */
   const pending = () => !owner() && !message() && turn()?.state === "running"
     && activities(turn()?.id).length === 0 && split().reply === "" && buildTimeline(split().activity).length === 0;
   return <>
@@ -58,19 +57,20 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
           the filled emphasis pair (a near-white fill on the dark theme, the
           accent on the light one) at conversational width, the Agent sits left
           on a neutral surface that hugs its own content, so the two never share an
-          edge and the column reads left against right. Wide work rows and code
-          scroll inside the card, never the page. */}
-      <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex items-start gap-2 sm:gap-3", owner() ? "flex-row-reverse" : ""]}>
-        <span data-slot="message-avatar" data-pending={pending() ? "true" : undefined} role={pending() ? "status" : undefined} aria-hidden={pending() ? undefined : "true"}
-          class="relative grid size-8 shrink-0 place-items-center rounded-full bg-muted/45">
-          <Show when={owner()} fallback={<BrandMark size={22} />}><UserRound class="size-4 text-muted-foreground" /></Show>
-          <Show when={pending()}>
-            <LoaderCircle class={`absolute inset-0 size-8 text-muted-foreground/60 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
+          edge and the column reads left against right. Alignment carries the
+          speaker on its own, so neither side spends a 56px avatar gutter saying
+          again what the fill and the edge already said: both sit on the one
+          gutter the scroller gives every row. Wide work rows and code scroll
+          inside the card, never the page. */}
+      <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex", owner() ? "flex-row-reverse" : ""]}>
+        <Show when={pending()}>
+          <p data-slot="turn-pending" role="status" class="flex min-h-5 items-center text-muted-foreground/70">
+            <LoaderCircle class={`size-4 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
             <span class="sr-only">{workLabel(turn(), events(), activities(turn()?.id), 0, false)}</span>
-          </Show>
-        </span>
+          </p>
+        </Show>
         <Show when={!pending()}>
-        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 max-w-[92%] rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5 sm:max-w-[80%]"}>
+        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 max-w-[96%] rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5 sm:max-w-[80%]"}>
           <Show when={!owner()}><ThreadWork message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} /></Show>
           <Markdown>{message()?.body ?? split().reply}</Markdown>
           <For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For>

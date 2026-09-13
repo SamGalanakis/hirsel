@@ -100,8 +100,8 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
   const stopped = () => props.turn?.state === "cancelled" || props.turn?.state === "interrupted";
   const running = () => props.turn?.state === "running";
   const visible = () => hasDetails() || failed() || stopped() || running() || props.turn?.state === "queued" || (props.turn?.state === "completed" && !props.message);
-  /** The card says who is speaking by where it sits and whose avatar is beside
-   * it; a "Activity"/"completed" header only repeats that. A label survives
+  /** The card says who is speaking by where it sits and how it is filled;
+   * a "Activity"/"completed" header only repeats that. A label survives
    * only for the states that are NOT the default: queued, stopped, failed. */
   const notable = () => props.turn?.state === "queued" || stopped() || failed();
   const label = () => workLabel(props.turn, resolvedEvents(), props.activities, toolCount(), Boolean(props.message));

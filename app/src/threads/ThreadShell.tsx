@@ -120,7 +120,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
           <ThreadActions thread={current()!} />
         </Show>
       </header>
-    <div ref={node => { scroller = node; }} class="min-h-0 flex-1 overflow-y-auto px-3 py-6 sm:px-gutter" data-slot="thread-scroll" onScroll={() => { if (scroller) following = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; }}>
+    <div ref={node => { scroller = node; }} class="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-gutter" data-slot="thread-scroll" onScroll={() => { if (scroller) following = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; }}>
       <Show when={!showRelated()} fallback={<Show when={props.globalArtifacts} fallback={<RelatedList origin={origin} />}><ArtifactList onResume={props.onConversation} /></Show>}>
       <Show when={showInfo() && current()} fallback={
       <div class="mx-auto flex w-full max-w-measure flex-col gap-6">

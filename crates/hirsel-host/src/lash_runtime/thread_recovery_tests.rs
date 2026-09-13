@@ -1470,7 +1470,7 @@ async fn a_main_provider_change_repoints_the_default_native_route_without_a_rest
     let mut config = crate::tests::test_config(dir.path());
     config.agent = AgentMode::Lash;
     config.provider = crate::config::ProviderMode::OpenRouter;
-    config.model = "google/gemini-3.7-flash".into();
+    config.model = "deepseek/deepseek-v4.1-flash".into();
     config.openrouter_api_key = Some("test-key-no-inference".into());
     let state = crate::build_state(config).await.unwrap();
     state.agent.registry.capacity.close();

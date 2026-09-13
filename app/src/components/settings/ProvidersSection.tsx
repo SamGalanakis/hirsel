@@ -37,12 +37,11 @@ function cliName(instance: ProviderInstance): string {
   return instance.kind === "claude" ? "claude" : "codex";
 }
 
-/** Whether the native Lash worker's default delegation route lands on this
- * instance. A quiet marker, not a control: the switch and the model live in
- * Agents, and this only answers "which of these is it using?". */
-function hostsNativeWorker(instance: ProviderInstance): boolean {
-  const worker = state.subagentModels?.native_worker;
-  return !!worker?.enabled && worker.provider_id === instance.id;
+/** Whether Native execution defaults to this instance. A quiet marker, not a
+ * control: the provider and model live in Agents, and this only answers "which
+ * of these is it using?". */
+function hostsNative(instance: ProviderInstance): boolean {
+  return state.model?.provider_id === instance.id;
 }
 
 /** What the host reported about the stored key — presence and a short tail are
@@ -201,9 +200,9 @@ function OpenAiRow(props: {
             <div class="min-w-0 flex-1">
               <div class="flex min-w-0 items-center gap-2">
                 <span class="truncate text-sm text-foreground">{props.instance.label}</span>
-                <Show when={hostsNativeWorker(props.instance)}>
+                <Show when={hostsNative(props.instance)}>
                   <span class="shrink-0 rounded-full border border-border px-1.5 py-0.5 text-meta text-muted-foreground">
-                    Native worker
+                    Native
                   </span>
                 </Show>
               </div>

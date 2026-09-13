@@ -52,7 +52,7 @@ pub(super) async fn build_provider(
 }
 
 /// Build the transport for one resolved plan. The host boots on
-/// `config.boot_plan`; a Thread that names its own coordinator resolves a plan
+/// `config.boot_plan`; a Thread that names its own Native provider resolves a plan
 /// of its own through `boot_provider::plan_for` and arrives here with it, so
 /// both routes construct the same handles from the same credentials.
 pub(super) async fn build_provider_for_plan(

@@ -64,7 +64,7 @@ pub(super) fn agent_tool_surface_for_dialect(
 pub(super) fn hirsel_tool_definitions(
     subagent_models: &SubagentModelCatalog,
 ) -> Vec<ToolDefinition> {
-    vec![
+    let mut definitions = vec![
         tool_definition(
             "hirsel.artifacts_create",
             "artifacts_create",
@@ -336,7 +336,12 @@ pub(super) fn hirsel_tool_definitions(
             ["shell"],
             "run",
         ),
-    ]
+    ];
+    // One Native session, one tool surface: the Thread tool set and the four
+    // coding operations are advertised together, so a Thread never has to be
+    // handed to a second session to touch a file.
+    definitions.extend(crate::native_coding_tools::definitions());
+    definitions
 }
 
 #[allow(clippy::too_many_arguments)]

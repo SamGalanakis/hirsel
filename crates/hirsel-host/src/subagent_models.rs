@@ -1,8 +1,6 @@
 use anyhow::anyhow;
 use hirsel_drivers::AgentKind;
-use hirsel_proto::{
-    SubagentModel, SubagentModelCatalog, SubagentNativeWorker, SubagentProviderModels,
-};
+use hirsel_proto::{SubagentModel, SubagentModelCatalog, SubagentProviderModels};
 use serde_json::{Value, json};
 
 use crate::host_config::ConfigStore;
@@ -97,10 +95,8 @@ impl SubagentModelState {
         catalog_from_store(&self.config_store)
     }
 
-    /// The model-facing `threads.delegate` input contract. This is derived from
-    /// the same refreshed catalog used by Settings and execution validation —
-    /// including the native worker row, so the Owner's enable switch and the
-    /// configured provider roster reach the tool contract by one path.
+    /// The model-facing `threads.delegate` input contract, derived from the
+    /// same refreshed catalog Settings and execution validation use.
     pub fn delegation_input_schema(&self) -> Value {
         Self::delegation_input_schema_for(&self.snapshot())
     }
@@ -234,24 +230,6 @@ impl SubagentModelState {
             .await?;
         Ok(self.snapshot())
     }
-
-    /// Update the native worker row. The model is free text — there is no
-    /// curated registry behind this route — so it is validated the same way an
-    /// explicit delegate `model` is, and a blank one clears the override.
-    pub async fn set_native_worker(
-        &self,
-        enabled: bool,
-        model: Option<&str>,
-    ) -> anyhow::Result<SubagentModelCatalog> {
-        let model = match model.map(str::trim).filter(|model| !model.is_empty()) {
-            Some(model) => Some(crate::model_selection::validate_free_text(model)?.id),
-            None => None,
-        };
-        self.config_store
-            .set_native_worker(enabled, model.as_deref())
-            .await?;
-        Ok(self.snapshot())
-    }
 }
 
 fn unavailable_model_error(
@@ -292,7 +270,6 @@ fn catalog_from_store(config_store: &ConfigStore) -> SubagentModelCatalog {
         }
     }
     let mut catalog = registry_catalog();
-    catalog.native_worker = native_worker_from_store(config_store);
     for provider in &mut catalog.providers {
         let registry = registry_provider(&provider.provider)
             .expect("catalog provider mirrors static registry");
@@ -339,53 +316,8 @@ fn catalog_from_store(config_store: &ConfigStore) -> SubagentModelCatalog {
     catalog
 }
 
-/// The native worker row as the Owner configured it: the stored enable switch
-/// and model override, resolved against the provider instances that can
-/// actually host the worker right now.
-fn native_worker_from_store(config_store: &ConfigStore) -> SubagentNativeWorker {
-    let stored = config_store.native_worker_override();
-    let eligible = crate::providers::native_worker_provider_ids(config_store);
-    let provider_id = eligible
-        .iter()
-        .find(|id| id.as_str() == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID)
-        .cloned();
-    // Unavailable means exactly one thing: nothing can host the worker. A
-    // roster without the default instance is still usable — a delegation names
-    // one of the eligible instances explicitly — so it is not a refusal.
-    let unavailable_reason = eligible.is_empty().then(|| {
-        "No configured provider has an API key, so there is nothing to run the worker on."
-            .to_string()
-    });
-    SubagentNativeWorker {
-        label: "Native worker".to_string(),
-        enabled: stored.enabled,
-        provider_id,
-        eligible_provider_ids: eligible,
-        model: stored
-            .model
-            .clone()
-            .unwrap_or_else(|| crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string()),
-        default_model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string(),
-        model_override: stored.model,
-        unavailable_reason,
-    }
-}
-
 pub(crate) fn registry_catalog() -> SubagentModelCatalog {
     SubagentModelCatalog {
-        native_worker: SubagentNativeWorker {
-            label: "Native worker".to_string(),
-            enabled: true,
-            provider_id: None,
-            eligible_provider_ids: Vec::new(),
-            model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string(),
-            default_model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.to_string(),
-            model_override: None,
-            unavailable_reason: Some(
-                "No configured provider has an API key, so there is nothing to run the worker on."
-                    .to_string(),
-            ),
-        },
         providers: REGISTRY
             .iter()
             .map(|provider| SubagentProviderModels {
@@ -416,21 +348,19 @@ pub(crate) fn registry_catalog() -> SubagentModelCatalog {
 }
 
 fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
-    let native_worker_providers: &[String] = if catalog.native_worker.enabled {
-        &catalog.native_worker.eligible_provider_ids
-    } else {
-        &[]
-    };
-    let mut agents = vec!["host", "claude", "codex"];
-    // The coordinator takes a provider and a model, both optional: omitting
-    // both is the configured default coordinator. They are free strings here
-    // because the roster they are judged against is the Owner's, not a
-    // registry — the host validates them and refuses with the reason.
+    let agents = vec!["native", "claude", "codex"];
+    // Native takes a provider, a model and a working directory, all optional:
+    // omitting them inherits this Thread's own Native execution. They are free
+    // strings here because the roster they are judged against is the Owner's,
+    // not a registry — the host validates them and refuses with the reason.
     let mut branches = vec![
-        json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["variant"]},{"required":["cwd"]}]}}),
+        json!({"required":["agent"],"properties":{"agent":{"const":"native"}},"not":{"required":["variant"]}}),
     ];
     // An existing child with no new selectors keeps its accepted backend.
     branches.push(json!({"required":["child_thread_id"],"not":{"anyOf":[{"required":["agent"]},{"required":["provider_id"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}));
+    // Naming no agent at all is Native too, so the ordinary delegation is the
+    // one that needs no selectors.
+    branches.push(json!({"not":{"anyOf":[{"required":["agent"]},{"required":["variant"]}]},"anyOf":[{"not":{"required":["child_thread_id"]}},{"required":["provider_id"]},{"required":["model"]},{"required":["cwd"]}]}));
     for provider in &catalog.providers {
         let enabled = provider
             .models
@@ -446,40 +376,7 @@ fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
         for model in enabled {
             models.push(json!({"required":["model"],"properties":{"model":{"const":model.id},"variant":{"enum":model.enabled_variants}}}));
         }
-        let explicit = json!({"required":["agent"],"properties":{"agent":{"const":provider.provider}},"not":{"required":["provider_id"]},"oneOf":models});
-        branches.push(explicit);
-        if provider.provider == "claude" {
-            branches.push(json!({"not":{"anyOf":[{"required":["agent"]},{"required":["provider_id"]}]},"anyOf":[{"not":{"required":["child_thread_id"]}},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}],"oneOf":models}));
-        }
-    }
-    if !native_worker_providers.is_empty() {
-        agents.push("lash");
-        let mut provider_branches = native_worker_providers
-            .iter()
-            .map(|provider| {
-                let requires_model =
-                    provider != crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID;
-                let mut branch = json!({
-                    "required":["provider_id"],
-                    "properties":{"provider_id":{"const":provider}}
-                });
-                if requires_model {
-                    branch["required"] = json!(["provider_id", "model"]);
-                }
-                branch
-            })
-            .collect::<Vec<_>>();
-        if native_worker_providers
-            .iter()
-            .any(|provider| provider == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID)
-        {
-            provider_branches.push(json!({"not":{"required":["provider_id"]}}));
-        }
-        branches.push(json!({
-            "required":["agent"],
-            "properties":{"agent":{"const":"lash"},"variant":{"const":"default"}},
-            "oneOf":provider_branches
-        }));
+        branches.push(json!({"required":["agent"],"properties":{"agent":{"const":provider.provider}},"not":{"required":["provider_id"]},"oneOf":models}));
     }
     json!({"type":"object","additionalProperties":false,"required":["title","brief","artifact_ids"],"properties":{"title":{"type":"string","minLength":1},"brief":{"type":"string","minLength":1},"artifact_ids":{"type":"array","maxItems":100,"items":{"type":"integer","minimum":1}},"child_thread_id":{"type":"integer","minimum":0},"agent":{"type":"string","enum":agents},"provider_id":{"type":"string"},"model":{"type":"string","minLength":1},"variant":{"type":"string"},"cwd":{"type":"string"}},"oneOf":branches})
 }

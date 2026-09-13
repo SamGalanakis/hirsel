@@ -1,17 +1,20 @@
 //! Accepted execution settings contain no credentials and are immutable per turn.
-use super::{Storage, ThreadCaller, thread_scope};
+use super::{Storage, thread_scope};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub(crate) const NATIVE_CODING_TOOL_PROFILE: &str = "hirsel.native-coding.v1";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ThreadExecution {
-    Host {
+    /// Hirsel's own session: the full Thread tool set plus the four coding
+    /// operations, on one roster provider and one model. `cwd` is the working
+    /// directory those coding operations are rooted at — execution context,
+    /// never a filesystem sandbox — so it is captured, not public.
+    Native {
         provider_id: String,
         model: lash::ModelSpec,
+        cwd: PathBuf,
     },
     Cli {
         agent: hirsel_drivers::AgentKind,
@@ -19,16 +22,9 @@ pub(crate) enum ThreadExecution {
         variant: String,
         cwd: PathBuf,
     },
-    LashWorker {
-        provider: crate::providers::NativeWorkerProviderSnapshot,
-        model: String,
-        variant: String,
-        cwd: PathBuf,
-        tool_profile: String,
-    },
 }
 /// The stored preference as the public, key-free identity of a backend.
-/// Absent means the Thread inherits the configured default coordinator.
+/// Absent means the Thread inherits the configured default Native execution.
 pub(super) fn preference(
     c: &Connection,
     thread_id: u64,
@@ -48,7 +44,9 @@ pub(super) fn preference(
 
 pub(crate) fn public_target(execution: ThreadExecution) -> hirsel_proto::ThreadExecutionTarget {
     match execution {
-        ThreadExecution::Host { provider_id, model } => hirsel_proto::ThreadExecutionTarget::Host {
+        ThreadExecution::Native {
+            provider_id, model, ..
+        } => hirsel_proto::ThreadExecutionTarget::Native {
             provider_id,
             model: model.id,
         },
@@ -62,16 +60,6 @@ pub(crate) fn public_target(execution: ThreadExecution) -> hirsel_proto::ThreadE
                 hirsel_drivers::AgentKind::Claude => "claude".to_string(),
                 hirsel_drivers::AgentKind::Codex => "codex".to_string(),
             },
-            model,
-            variant,
-        },
-        ThreadExecution::LashWorker {
-            provider,
-            model,
-            variant,
-            ..
-        } => hirsel_proto::ThreadExecutionTarget::Lash {
-            provider_id: provider.id,
             model,
             variant,
         },
@@ -157,13 +145,13 @@ pub(super) fn select(
             .map(|s| serde_json::from_str::<ThreadExecution>(&s))
             .transpose()?;
         match preferred {
-            // Every stored backend is the Thread's own, the coordinator
-            // included: a Host preference names the provider and model this
-            // Thread's coordinator session runs on, not the Settings default.
+            // Every stored backend is the Thread's own, Native included: a
+            // Native preference names the provider and model this Thread's own
+            // session runs on, not the Settings default.
             Some(preferred) => Some(preferred),
             None => c
                 .query_row(
-                    "SELECT value FROM meta WHERE key='host_execution_default'",
+                    "SELECT value FROM meta WHERE key='native_execution_default'",
                     [],
                     |r| r.get::<_, String>(0),
                 )
@@ -174,35 +162,15 @@ pub(super) fn select(
     })
 }
 impl Storage {
-    /// Resolve a direct child's backend before backend-specific input policy is
-    /// applied. The same preference is captured atomically when delegation is
-    /// accepted; this read exists to reject unsupported native input first.
-    pub(crate) async fn effective_child_execution(
-        &self,
-        caller: &ThreadCaller,
-        child_thread_id: u64,
-    ) -> anyhow::Result<ThreadExecution> {
-        let c = self.conn.lock().await;
-        thread_scope::validate_caller(&c, caller)?;
-        let direct_child: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 AND parent_thread_id=?2)",
-            params![child_thread_id, caller.thread_id],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(direct_child, "dispatch requires a direct child Thread");
-        select(&c, child_thread_id, None)?
-            .ok_or_else(|| anyhow::anyhow!("child Thread has no executable backend"))
-    }
-
-    pub(crate) async fn set_host_execution_default(
+    pub(crate) async fn set_native_execution_default(
         &self,
         execution: &ThreadExecution,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            matches!(execution, ThreadExecution::Host { .. }),
-            "host default must name a host provider"
+            matches!(execution, ThreadExecution::Native { .. }),
+            "the default execution must name a Native provider"
         );
-        self.conn.lock().await.execute("INSERT INTO meta(key,value) VALUES('host_execution_default',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(execution)?])?;
+        self.conn.lock().await.execute("INSERT INTO meta(key,value) VALUES('native_execution_default',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(execution)?])?;
         Ok(())
     }
     pub(crate) async fn turn_execution(&self, turn_id: u64) -> anyhow::Result<ThreadExecution> {
@@ -214,9 +182,9 @@ impl Storage {
         Ok(serde_json::from_str(&value)?)
     }
 
-    pub(crate) async fn host_execution_default(&self) -> anyhow::Result<ThreadExecution> {
+    pub(crate) async fn native_execution_default(&self) -> anyhow::Result<ThreadExecution> {
         let value: String = self.conn.lock().await.query_row(
-            "SELECT value FROM meta WHERE key='host_execution_default'",
+            "SELECT value FROM meta WHERE key='native_execution_default'",
             [],
             |r| r.get(0),
         )?;

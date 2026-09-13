@@ -4,16 +4,31 @@ use super::*;
 #[tokio::test]
 async fn history_reset_reaps_an_owned_native_shell_command() {
     let dir = tempfile::tempdir().unwrap();
-    let state = crate::build_state(crate::tests::test_config(dir.path()))
-        .await
-        .unwrap();
+    let mut config = crate::tests::test_config(dir.path());
+    config.agent = AgentMode::Lash;
+    config.anthropic_api_key = Some("test-key-no-inference".into());
+    let state = crate::build_state(config).await.unwrap();
     let registry = &state.agent.registry;
-    let tools = Arc::new(
-        crate::native_coding_tools::NativeCodingTools::new(dir.path().to_path_buf()).unwrap(),
-    );
-    let work = super::native_worker::NativeWorkerTurn::new(1);
-    work.install_active_tools_for_test(tools.clone()).await;
-    registry.install_native_turn_for_test(1, work).await;
+    let thread = state
+        .storage
+        .create_thread(
+            "fixture-coding-root",
+            "Coding root",
+            "",
+            None,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let lane = registry.lane(thread.id).await.unwrap();
+    let LaneRuntime::Lash(runtime) = lane.as_ref() else {
+        panic!("Lash lane")
+    };
+    runtime.coding.bind(dir.path()).await.unwrap();
+    let tools = runtime.coding.tools_for_test().await;
 
     let prepared = lash_core::PreparedToolCall::from_parts(
         "history-reset-call",

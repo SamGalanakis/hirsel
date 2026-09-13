@@ -29,7 +29,7 @@ mod thread_requests;
 mod thread_scope;
 mod thread_summary;
 mod threads;
-pub(crate) use thread_execution::{NATIVE_CODING_TOOL_PROFILE, ThreadExecution};
+pub(crate) use thread_execution::ThreadExecution;
 pub(crate) use thread_icons::{parse_agent_icon, parse_icon};
 pub(crate) use threads::ThreadPublication;
 mod thread_mutations;
@@ -69,12 +69,6 @@ pub(crate) struct AgentSessionState {
     pub session_id: String,
     pub rotated: bool,
     pub added_tools: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NativeWorkerConversation {
-    pub messages: Vec<hirsel_proto::ChatMessage>,
-    pub unowned_message_watermark: Option<u64>,
 }
 
 impl Storage {

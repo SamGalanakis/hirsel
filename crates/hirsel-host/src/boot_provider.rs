@@ -178,7 +178,7 @@ pub async fn resolve(store: &ConfigStore, mode: ProviderMode, home: Option<&Path
 /// be used.
 ///
 /// This is the boot resolution above minus the boot: it is what a per-Thread
-/// coordinator choice resolves through, so a Thread and the host default can
+/// Native choice resolves through, so a Thread and the host default can
 /// never disagree about what an instance id means. `codex` is not probed here
 /// — building the handle reads the login and reports its own failure — so the
 /// only refusals are roster facts.

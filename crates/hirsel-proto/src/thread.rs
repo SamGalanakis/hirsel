@@ -33,17 +33,11 @@ pub enum ThreadIcon {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ThreadExecutionTarget {
-    Host {
-        provider_id: String,
-        model: String,
-    },
+    /// Hirsel's own session: one provider instance and one model, with the
+    /// full Thread tool set and the four coding operations.
+    Native { provider_id: String, model: String },
     Cli {
         agent: String,
-        model: String,
-        variant: String,
-    },
-    Lash {
-        provider_id: String,
         model: String,
         variant: String,
     },
@@ -64,7 +58,8 @@ pub struct Thread {
     pub showcased_artifact_id: Option<u64>,
     pub description: String,
     /// The Owner's chosen backend for the next turn. None inherits the
-    /// configured default coordinator; a running turn keeps what it captured.
+    /// configured default Native provider and model; a running turn keeps what
+    /// it captured.
     #[serde(default)]
     pub execution: Option<ThreadExecutionTarget>,
     pub instrument: Option<serde_json::Value>,

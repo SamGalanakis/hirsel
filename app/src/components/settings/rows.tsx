@@ -173,7 +173,7 @@ export function Select<T extends string>(props: {
   );
 }
 
-/** A sub-heading within a section (e.g. "Main agent" / a provider name inside
+/** A sub-heading within a section (e.g. "Native agent" / a provider name inside
  * the Agents tab). Quieter than a SectionHeader — it must not outrank the
  * heading it lives under. */
 export function SubHeading(props: { children: JSX.Element }) {

@@ -1,6 +1,6 @@
 // The controls the two resident agents share: the provider select over the
 // roster, the model control in whichever of its two shapes the chosen provider
-// takes, and the prompt editor. Written once here so Main agent and Fork agent
+// takes, and the prompt editor. Written once here so Native agent and Fork agent
 // cannot drift apart — they are the same three questions asked of two slots.
 import { LoaderCircle, Maximize2, SquarePen } from "@/components/ui/icons";
 import { createEffect, createSignal, onSettled, Show, untrack } from "solid-js";
@@ -58,7 +58,7 @@ export function providerLabel(id: string | null | undefined): string {
  * instance (or on an error frame, or on the timeout). */
 export function AgentProviderRow(props: {
   slot: AgentSlot;
-  /** The aria-name prefix — "Main agent" / "Fork agent". */
+  /** The aria-name prefix — "Native agent" / "Fork agent". */
   name: string;
   providerId?: string;
   selectedProviderId?: string;

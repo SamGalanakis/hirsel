@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "so
 import { type JSX } from "@solidjs/web";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { Markdown } from "../components/Markdown";
-import { AgentModelRows, agentModelView, agentProviders, providerLabel } from "../components/settings/agent-config";
+import { AgentModelRows, agentModelView, agentProviders } from "../components/settings/agent-config";
 import { executionLabel } from "./execution-label";
 import { Select } from "../components/settings/rows";
 import { SquarePen } from "../components/ui/icons";
@@ -123,12 +123,12 @@ function DescriptionSection(props: { thread: Thread; historyId: string }) {
   </section>;
 }
 
-type Backend = "default" | "host" | `cli:${string}` | "lash";
+type Backend = "default" | "native" | `cli:${string}`;
 
-/** The model id a freshly chosen coordinator provider starts on. A free-text
+/** The model id a freshly chosen Native provider starts on. A free-text
  * endpoint has nothing to pick from, so it opens on the provider's own default
  * rather than an empty field; a curated one resolves its first model below. */
-function coordinatorSeedModel(providerId: string): string {
+function nativeSeedModel(providerId: string): string {
   const provider = state.providers?.instances.find(instance => instance.id === providerId);
   return provider?.selection?.mode === "free_text" ? provider.default_model ?? "" : "";
 }
@@ -139,27 +139,19 @@ function coordinatorSeedModel(providerId: string): string {
 function RunsOnRow(props: { thread: Thread; historyId: string }) {
   const edit = createEdit(() => props.thread, () => props.historyId);
   const catalog = () => state.subagentModels;
-  const worker = () => {
-    const native = catalog()?.native_worker;
-    return native && native.enabled && !native.unavailable_reason ? native : null;
-  };
-  // Every agent-selectable roster instance can host the coordinator: the same
+  // Every agent-selectable roster instance can run the Native session: the same
   // rule the Settings provider picker obeys, and the same one the Host
   // re-validates the request against.
-  const coordinators = () => agentProviders();
+  const nativeProviders = () => agentProviders();
   const defaultProviderId = (backend: Backend): string => {
-    if (backend === "host") {
-      const configured = state.model?.provider_id;
-      return (configured && coordinators().some(instance => instance.id === configured) ? configured : coordinators()[0]?.id) ?? "";
-    }
-    if (backend === "lash") return worker()?.provider_id ?? worker()?.eligible_provider_ids[0] ?? "";
-    return "";
+    if (backend !== "native") return "";
+    const configured = state.model?.provider_id;
+    return (configured && nativeProviders().some(instance => instance.id === configured) ? configured : nativeProviders()[0]?.id) ?? "";
   };
   const initial = (): { backend: Backend; model: string; variant: string; providerId: string } => {
     const execution = props.thread.execution;
     if (execution?.kind === "cli") return { backend: `cli:${execution.agent}`, model: execution.model, variant: execution.variant, providerId: "" };
-    if (execution?.kind === "lash") return { backend: "lash", model: execution.model, variant: "default", providerId: execution.provider_id };
-    if (execution?.kind === "host") return { backend: "host", model: execution.model, variant: "default", providerId: execution.provider_id };
+    if (execution?.kind === "native") return { backend: "native", model: execution.model, variant: "default", providerId: execution.provider_id };
     return { backend: "default", model: "", variant: "", providerId: defaultProviderId("default") };
   };
   const [draft, setDraft] = createSignal(initial());
@@ -167,14 +159,13 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
   // change, and here the change is local, so settle immediately.
   const pending = createPendingKeys();
   const options = createMemo(() => [
-    { value: "default" as Backend, label: "Default coordinator" },
-    ...(coordinators().length > 0 ? [{ value: "host" as Backend, label: "Coordinator" }] : []),
+    { value: "default" as Backend, label: "Default Native" },
+    ...(nativeProviders().length > 0 ? [{ value: "native" as Backend, label: "Native" }] : []),
     ...(catalog()?.providers ?? []).map(group => ({ value: `cli:${group.provider}` as Backend, label: group.label })),
-    ...(worker() ? [{ value: "lash" as Backend, label: worker()!.label }] : []),
   ]);
-  // The coordinator's model question in whichever shape its provider takes —
+  // The Native session's model question in whichever shape its provider takes —
   // the Settings main-agent view, asked of the draft instead of the store.
-  const coordinator = createMemo(() => agentModelView("main", draft().providerId, draft().providerId, { id: draft().model, variant: draft().variant || "default" }, [], false));
+  const nativeModel = createMemo(() => agentModelView("main", draft().providerId, draft().providerId, { id: draft().model, variant: draft().variant || "default" }, [], false));
   const group = () => {
     const backend = draft().backend;
     return backend.startsWith("cli:") ? catalog()?.providers.find(entry => entry.provider === backend.slice(4)) : undefined;
@@ -190,14 +181,13 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
   const target = (): ThreadExecutionTarget | null => {
     const { backend, providerId } = draft();
     if (backend === "default") return null;
-    if (backend === "host") return { kind: "host", provider_id: providerId, model: coordinator().current.id.trim() };
-    if (backend === "lash") return { kind: "lash", provider_id: providerId, model: draft().model.trim(), variant: "default" };
+    if (backend === "native") return { kind: "native", provider_id: providerId, model: nativeModel().current.id.trim() };
     return { kind: "cli", agent: backend.slice(4), model: current().id, variant: current().variant };
   };
   const ready = () => {
     const chosen = target();
     if (!chosen) return true;
-    if (chosen.kind === "host" || chosen.kind === "lash") return Boolean(chosen.provider_id && chosen.model);
+    if (chosen.kind === "native") return Boolean(chosen.provider_id && chosen.model);
     return Boolean(chosen.model && chosen.variant);
   };
   const open = () => { setDraft(initial()); edit.setEditing(true); };
@@ -214,41 +204,33 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
           options={options()} onChange={value => {
             const backend = value as Backend;
             const providerId = defaultProviderId(backend);
-            setDraft({ backend, providerId, model: backend === "host" ? coordinatorSeedModel(providerId) : "", variant: "" });
+            setDraft({ backend, providerId, model: backend === "native" ? nativeSeedModel(providerId) : "", variant: "" });
           }} />
       </div>
       {/* A select with one choice is a dead control unless it says why it is
-          alone: the other backends are the CLI agents this host can see and the
-          native worker, both configured in Settings, not here. */}
+          alone: the other backends are Native and the CLI agents this host can
+          see, both configured in Settings, not here. */}
       <Show when={options().length === 1}>
-        <p class="text-meta text-muted-foreground">No other backend is available. The coordinator appears here once a provider is configured, the Claude and Codex CLI agents once this host can see them, and the native worker once it is turned on in Settings.</p>
+        <p class="text-meta text-muted-foreground">No other backend is available. Native appears here once a provider is configured, and the Claude and Codex CLI agents once this host can see them.</p>
       </Show>
-      <Show when={draft().backend === "host"}>
+      <Show when={draft().backend === "native"}>
         <div class="flex items-center justify-between gap-3 py-1">
           <span class="text-sm">Provider</span>
-          <Select ariaLabel="Coordinator provider" class="w-[10.5rem] shrink-0" value={draft().providerId}
-            options={coordinators().map(instance => ({ value: instance.id, label: instance.label }))}
-            onChange={providerId => setDraft(previous => ({ ...previous, providerId, model: coordinatorSeedModel(providerId), variant: "" }))} />
+          <Select ariaLabel="Native provider" class="w-[10.5rem] shrink-0" value={draft().providerId}
+            options={nativeProviders().map(instance => ({ value: instance.id, label: instance.label }))}
+            onChange={providerId => setDraft(previous => ({ ...previous, providerId, model: nativeSeedModel(providerId), variant: "" }))} />
         </div>
-      </Show>
-      <Show when={draft().backend === "lash" && worker()}>{native => <div class="flex items-center justify-between gap-3 py-1">
-        <span class="text-sm">Provider</span>
-        <Select ariaLabel="Native worker provider" class="w-[10.5rem] shrink-0" value={draft().providerId}
-          options={native().eligible_provider_ids.map(id => ({ value: id, label: providerLabel(id) || id }))}
-          onChange={providerId => setDraft(previous => ({ ...previous, providerId }))} />
-      </div>}</Show>
-      <Show when={draft().backend === "host"}>
         <div class="divide-y divide-border">
-          <AgentModelRows name="This Thread" freeText={coordinator().freeText} current={coordinator().current} available={coordinator().available}
-            placeholder={coordinator().placeholder} pending={pending} modelKey="thread-model" variantKey="thread-variant"
+          <AgentModelRows name="This Thread" freeText={nativeModel().freeText} current={nativeModel().current} available={nativeModel().available}
+            placeholder={nativeModel().placeholder} pending={pending} modelKey="thread-model" variantKey="thread-variant"
             onSelect={selection => { setDraft(previous => ({ ...previous, model: selection.id, variant: selection.variant })); pending.settleAll(); }}
             onFreeText={model => { setDraft(previous => ({ ...previous, model })); pending.settleAll(); }} />
         </div>
       </Show>
-      <Show when={draft().backend !== "default" && draft().backend !== "host"}>
+      <Show when={draft().backend !== "default" && draft().backend !== "native"}>
         <div class="divide-y divide-border">
-          <AgentModelRows name="This Thread" freeText={draft().backend === "lash"} current={draft().backend === "lash" ? { id: draft().model, variant: "default" } : current()}
-            available={draft().backend === "lash" ? [] : available()} placeholder={worker()?.model} pending={pending} modelKey="thread-model" variantKey="thread-variant"
+          <AgentModelRows name="This Thread" freeText={false} current={current()}
+            available={available()} pending={pending} modelKey="thread-model" variantKey="thread-variant"
             onSelect={selection => { setDraft(previous => ({ ...previous, model: selection.id, variant: selection.variant })); pending.settleAll(); }}
             onFreeText={model => { setDraft(previous => ({ ...previous, model })); pending.settleAll(); }} />
         </div>

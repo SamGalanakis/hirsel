@@ -30,18 +30,9 @@ pub(super) async fn reconcile_opened_session_provider(
     Ok(())
 }
 
-/// The protocol posture shared by the coordinator and native coding worker.
-/// Keeping the execution bounds and Lashlang abilities here prevents the two
-/// resident RLM session families from drifting.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum HirselRlmSession {
-    Coordinator,
-    NativeWorker,
-}
-
-pub(super) fn hirsel_rlm_config(
-    _session: HirselRlmSession,
-) -> lash_protocol_rlm::RlmProtocolPluginConfig {
+/// The Native session's protocol posture: execution bounds and the Lashlang
+/// abilities a code cell may reach for.
+pub(super) fn hirsel_rlm_config() -> lash_protocol_rlm::RlmProtocolPluginConfig {
     lash_protocol_rlm::RlmProtocolPluginConfig::builder()
         .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
         .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
@@ -122,7 +113,7 @@ impl LashAgentRuntime {
         // Execution bounds have no defaults on the plugin config: the host names
         // every one. These match the reference-host budgets — a cell may run a
         // million instructions, for thirty seconds, inside 64 MiB.
-        let rlm_config = hirsel_rlm_config(HirselRlmSession::Coordinator);
+        let rlm_config = hirsel_rlm_config();
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
         let mut tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
@@ -148,7 +139,15 @@ impl LashAgentRuntime {
             anchors: Arc::new(Mutex::new(TurnAnchorState::default())),
         };
         let anchors = executor.anchors.clone();
-        let tool_provider = Arc::new(HirselToolProvider { executor });
+        // The coding operations open on the host's own directory until a
+        // Thread's accepted execution names its own.
+        let coding = Arc::new(NativeCodingBinding::new(std::fs::canonicalize(
+            std::env::current_dir()?,
+        )?));
+        let tool_provider = Arc::new(HirselToolProvider {
+            executor,
+            coding: Arc::clone(&coding),
+        });
         let notify = Arc::new(Notify::new());
         let process_notify = Arc::new(Notify::new());
         // The process bridge is installed after the runtime is built; this
@@ -211,10 +210,11 @@ impl LashAgentRuntime {
             thread_id,
             history_id,
             tasks,
-            coordinator: std::sync::RwLock::new(CoordinatorBinding {
+            native: std::sync::RwLock::new(NativeBinding {
                 provider_id: config.boot_plan.label().into(),
                 provider,
             }),
+            coding,
             config: config.clone(),
             capacity,
             core: core.clone(),
@@ -265,40 +265,41 @@ impl LashAgentRuntime {
         Ok(LashStartup::Ready(runtime))
     }
 
-    /// The transport the coordinator session currently rides.
-    pub(super) fn coordinator_provider(&self) -> ProviderHandle {
-        self.coordinator
+    /// The transport this Native session currently rides.
+    pub(super) fn native_provider(&self) -> ProviderHandle {
+        self.native
             .read()
-            .expect("coordinator binding poisoned")
+            .expect("native binding poisoned")
             .provider
             .clone()
     }
 
-    /// The roster id of the coordinator this session currently runs on.
-    pub(super) fn coordinator_provider_id(&self) -> String {
-        self.coordinator
+    /// The roster id of the provider this Native session currently runs on.
+    pub(super) fn native_provider_id(&self) -> String {
+        self.native
             .read()
-            .expect("coordinator binding poisoned")
+            .expect("native binding poisoned")
             .provider_id
             .clone()
     }
 
-    /// Point the live session at the coordinator an admitted turn was accepted
-    /// for.
+    /// Point the live session at the provider, model and working directory an
+    /// admitted turn was accepted for.
     ///
-    /// A Thread may name its own provider and model, so the session that
-    /// opened on the booted coordinator is rebound here, before the input is
-    /// enqueued and therefore before the turn runs on it — which is exactly
-    /// what "applies from the next turn" means. Idempotent: an unchanged
-    /// binding writes nothing. The provider is compared by roster id, never by
-    /// transport kind, because two OpenAI-compatible instances are different
-    /// coordinators with the same kind.
-    pub(super) async fn bind_coordinator(
+    /// A Thread may name its own, so the session that opened on the booted
+    /// provider is rebound here, before the input is enqueued and therefore
+    /// before the turn runs on it — which is exactly what "applies from the
+    /// next turn" means. Idempotent: an unchanged binding writes nothing. The
+    /// provider is compared by roster id, never by transport kind, because two
+    /// OpenAI-compatible instances are different providers with the same kind.
+    pub(super) async fn bind_native(
         &self,
         provider_id: &str,
         model: lash::ModelSpec,
+        cwd: &std::path::Path,
     ) -> anyhow::Result<()> {
-        if self.coordinator_provider_id() == provider_id {
+        self.coding.bind(cwd).await?;
+        if self.native_provider_id() == provider_id {
             if self.session.policy_snapshot().model != model {
                 self.session
                     .admin()
@@ -311,7 +312,7 @@ impl LashAgentRuntime {
             }
             return Ok(());
         }
-        // The coordinator the host booted on is always reachable, roster or
+        // The provider the host booted on is always reachable, roster or
         // not: the legacy `anthropic` mode and the env provider modes are boot
         // labels rather than roster instances, and a Thread returning to the
         // Settings default names one of them.
@@ -320,13 +321,13 @@ impl LashAgentRuntime {
         } else {
             crate::boot_provider::plan_for(&self.config.config_store, provider_id).map_err(
                 |reason| {
-                    anyhow::anyhow!("coordinator provider `{provider_id}` is unavailable: {reason}")
+                    anyhow::anyhow!("Native provider `{provider_id}` is unavailable: {reason}")
                 },
             )?
         };
         let provider = build_provider_for_plan(&self.config, &plan).await.map_err(
             |ProviderUnavailable { message }| {
-                anyhow::anyhow!("coordinator provider `{provider_id}` is unavailable: {message}")
+                anyhow::anyhow!("Native provider `{provider_id}` is unavailable: {message}")
             },
         )?;
         self.session
@@ -338,13 +339,10 @@ impl LashAgentRuntime {
                 ..lash::SessionConfigPatch::default()
             })
             .await
-            .context("rebind the coordinator session to this Thread's provider")?;
+            .context("rebind the Native session to this Thread's provider")?;
         let previous = std::mem::replace(
-            &mut *self
-                .coordinator
-                .write()
-                .expect("coordinator binding poisoned"),
-            CoordinatorBinding {
+            &mut *self.native.write().expect("native binding poisoned"),
+            NativeBinding {
                 provider_id: provider_id.to_string(),
                 provider,
             },
@@ -354,7 +352,7 @@ impl LashAgentRuntime {
             thread_id = self.thread_id,
             old_provider = %previous.provider_id,
             new_provider = provider_id,
-            "Thread coordinator rebound"
+            "Thread Native provider rebound"
         );
         Ok(())
     }
@@ -684,7 +682,7 @@ impl LashAgentRuntime {
             self.history_id.clone(),
             crate::fork_wake::LashForkRunner::new(
                 self.core.clone(),
-                self.coordinator_provider(),
+                self.native_provider(),
                 self.prompts.clone(),
                 self.session_id.clone(),
             ),

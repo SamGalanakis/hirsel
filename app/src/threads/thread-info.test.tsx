@@ -19,9 +19,8 @@ const CATALOG: SubagentModelCatalog = {
     { id: "claude-opus-4-7", label: "Opus 4.7", variants: ["default", "high"], enabled_variants: ["default", "high"], enabled: true },
     { id: "claude-sonnet-4-7", label: "Sonnet 4.7", variants: ["default"], enabled_variants: ["default"], enabled: false },
   ] }],
-  native_worker: { label: "Native worker", enabled: false, provider_id: null, eligible_provider_ids: [], model: "local-model", default_model: "local-model", model_override: null },
 };
-/** Two coordinator-capable instances: one curated (Codex) and one free-text
+/** Two Native-capable instances: one curated (Codex) and one free-text
  * OpenAI-compatible endpoint, so the model control is exercised in both shapes. */
 const ROSTER: ProviderRoster = {
   booted_provider_id: "codex",
@@ -125,7 +124,7 @@ describe("thread info pane", () => {
   it("names where the next turn runs and lets the Owner move it", () => {
     const view = openInfo();
     const runsOn = () => view.container.querySelector<HTMLElement>('[data-fact="Runs on"]')!;
-    expect(runsOn()).toHaveTextContent("Default coordinator · anthropic · claude-opus-4-7");
+    expect(runsOn()).toHaveTextContent("Default Native · anthropic · claude-opus-4-7");
 
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
     fireEvent.change(view.getByLabelText("Where this Thread runs"), { target: { value: "cli:claude" } });
@@ -152,7 +151,7 @@ describe("thread info pane", () => {
     expect(sent.at(-1)).toMatchObject({ action: "set_execution", expected_revision: 4, data: { execution: null } });
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: null }) }));
     expect(view.queryByLabelText("Where this Thread runs")).toBeNull();
-    expect(runsOn()).toHaveTextContent("Default coordinator");
+    expect(runsOn()).toHaveTextContent("Default Native");
   });
 
   it("names the row once and reads every backend shape in full", () => {
@@ -163,54 +162,54 @@ describe("thread info pane", () => {
     expect(view.container.querySelector<HTMLElement>('[data-slot="thread-execution-editor"]')!).not.toHaveTextContent("Runs on");
     fireEvent.click(view.getByRole("button", { name: "Cancel execution change" }));
 
-    // A stored coordinator target names its kind, not just a bare provider.
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "host", provider_id: "anthropic", model: "claude-opus-4-7" } }) }));
-    expect(runsOn()).toHaveTextContent("Coordinator · anthropic · claude-opus-4-7");
+    // A stored Native target names its kind, not just a bare provider.
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "native", provider_id: "anthropic", model: "claude-opus-4-7" } }) }));
+    expect(runsOn()).toHaveTextContent("Native · anthropic · claude-opus-4-7");
 
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: { kind: "lash", provider_id: "anthropic", model: "local-model", variant: "default" } }) }));
-    expect(runsOn()).toHaveTextContent("Native worker · anthropic · local-model · Default");
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: { kind: "cli", agent: "claude", model: "claude-opus-4-7", variant: "high" } }) }));
+    expect(runsOn()).toHaveTextContent("Claude Code · claude-opus-4-7 · High");
   });
 
-  it("lets the Owner name this Thread's coordinator provider and model", () => {
+  it("lets the Owner name this Thread's Native provider and model", () => {
     flush(() => dispatch({ type: "providers_changed", roster: ROSTER }));
     const view = openInfo();
     const runsOn = () => view.container.querySelector<HTMLElement>('[data-fact="Runs on"]')!;
 
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
     const backend = view.getByLabelText("Where this Thread runs") as HTMLSelectElement;
-    expect([...backend.options].map(option => option.value)).toEqual(["default", "host", "cli:claude"]);
-    fireEvent.change(backend, { target: { value: "host" } });
+    expect([...backend.options].map(option => option.value)).toEqual(["default", "native", "cli:claude"]);
+    fireEvent.change(backend, { target: { value: "native" } });
 
-    // Only agent-selectable instances host the coordinator: claude is Sub-agents only.
-    const provider = view.getByLabelText("Coordinator provider") as HTMLSelectElement;
+    // Only agent-selectable instances run Native: claude is Sub-agents only.
+    const provider = view.getByLabelText("Native provider") as HTMLSelectElement;
     expect([...provider.options].map(option => option.value)).toEqual(["codex", "acme"]);
     // A curated provider offers its own models, at the model's own default effort.
     const model = view.getByLabelText("This Thread model") as HTMLSelectElement;
     expect([...model.options].map(option => option.value)).toEqual(["gpt-5.6-sol", "gpt-6-astra"]);
     fireEvent.change(model, { target: { value: "gpt-6-astra" } });
     fireEvent.click(view.getByRole("button", { name: "Save where this Thread runs" }));
-    expect(sent.at(-1)).toMatchObject({ action: "set_execution", expected_revision: 3, data: { execution: { kind: "host", provider_id: "codex", model: "gpt-6-astra" } } });
+    expect(sent.at(-1)).toMatchObject({ action: "set_execution", expected_revision: 3, data: { execution: { kind: "native", provider_id: "codex", model: "gpt-6-astra" } } });
 
     // A refusal keeps the Owner's choice on screen with the reason beside it.
-    flush(() => setThreadState(draft => { draft.error = { operation: "request", detail: "coordinator provider `codex`: model `gpt-6-astra` is not available on this provider", threadId: 4 }; }));
+    flush(() => setThreadState(draft => { draft.error = { operation: "request", detail: "Native provider `codex`: model `gpt-6-astra` is not available on this provider", threadId: 4 }; }));
     expect(within(view.pane()).getByRole("alert")).toHaveTextContent("not available on this provider");
-    expect(view.getByLabelText("Where this Thread runs")).toHaveValue("host");
+    expect(view.getByLabelText("Where this Thread runs")).toHaveValue("native");
 
     // A free-text endpoint types its model id, seeded with the provider's default.
-    fireEvent.change(view.getByLabelText("Coordinator provider"), { target: { value: "acme" } });
+    fireEvent.change(view.getByLabelText("Native provider"), { target: { value: "acme" } });
     expect(view.getByLabelText("This Thread model id")).toHaveValue("acme/fast");
     fireEvent.input(view.getByLabelText("This Thread model id"), { target: { value: "acme/deep" } });
     fireEvent.click(view.getByRole("button", { name: "Save This Thread model id" }));
     fireEvent.click(view.getByRole("button", { name: "Save where this Thread runs" }));
-    expect(sent.at(-1)).toMatchObject({ action: "set_execution", data: { execution: { kind: "host", provider_id: "acme", model: "acme/deep" } } });
+    expect(sent.at(-1)).toMatchObject({ action: "set_execution", data: { execution: { kind: "native", provider_id: "acme", model: "acme/deep" } } });
 
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "host", provider_id: "acme", model: "acme/deep" } }) }));
-    expect(runsOn()).toHaveTextContent("Coordinator · Acme · acme/deep");
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "native", provider_id: "acme", model: "acme/deep" } }) }));
+    expect(runsOn()).toHaveTextContent("Native · Acme · acme/deep");
 
-    // Reopening the editor opens on the stored coordinator, not the default.
+    // Reopening the editor opens on the stored Native route, not the default.
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
-    expect(view.getByLabelText("Where this Thread runs")).toHaveValue("host");
-    expect(view.getByLabelText("Coordinator provider")).toHaveValue("acme");
+    expect(view.getByLabelText("Where this Thread runs")).toHaveValue("native");
+    expect(view.getByLabelText("Native provider")).toHaveValue("acme");
     expect(view.getByLabelText("This Thread model id")).toHaveValue("acme/deep");
   });
 

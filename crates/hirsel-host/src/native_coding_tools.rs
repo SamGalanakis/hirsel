@@ -1,8 +1,8 @@
-//! Fixed coding-tool profile for in-process Lash workers.
+//! The four coding operations of Hirsel's Native execution.
 //!
-//! This provider is intentionally the complete worker tool catalog. It must
-//! not be combined with Lash's standard tool stack, which exposes additional
-//! shell and process-control tools.
+//! `files.read`, `files.edit`, `files.write` and `shell.exec` are advertised
+//! beside the Thread tool set on one session. They are rooted at an accepted
+//! working directory, which is execution context and not a filesystem sandbox.
 
 mod file_tools;
 mod shell;
@@ -26,12 +26,19 @@ use tokio_util::sync::CancellationToken;
 use self::file_tools::execute_file_tool;
 use self::shell::{ShellArgs, ShellExecutor};
 
-const READ: &str = "read";
-const EDIT: &str = "edit";
-const WRITE: &str = "write";
-const EXEC_COMMAND: &str = "exec_command";
+pub(crate) const READ: &str = "read";
+pub(crate) const EDIT: &str = "edit";
+pub(crate) const WRITE: &str = "write";
+pub(crate) const EXEC_COMMAND: &str = "exec_command";
 
-/// The complete, four-tool profile for a native coding worker.
+/// Whether a tool call belongs to the coding operations rather than to the
+/// Thread tool set. One list, so the advertised surface and the routing cannot
+/// disagree.
+pub(crate) fn is_coding_tool(name: &str) -> bool {
+    matches!(name, READ | EDIT | WRITE | EXEC_COMMAND)
+}
+
+/// The four coding operations, rooted at one accepted working directory.
 pub(crate) struct NativeCodingTools {
     cwd: Arc<PathBuf>,
     shell: ShellExecutor,
@@ -40,7 +47,7 @@ pub(crate) struct NativeCodingTools {
 }
 
 impl NativeCodingTools {
-    /// Creates a tool profile rooted at an already accepted worker cwd.
+    /// Creates a tool profile rooted at an already accepted working directory.
     ///
     /// The cwd is execution context, not a filesystem sandbox. Absolute file
     /// paths retain their ordinary meaning.
@@ -241,7 +248,8 @@ impl ToolProvider for NativeCodingTools {
     }
 }
 
-fn definitions() -> Vec<ToolDefinition> {
+/// The four coding operations, as the Native session advertises them.
+pub(crate) fn definitions() -> Vec<ToolDefinition> {
     vec![
         read_definition(),
         edit_definition(),

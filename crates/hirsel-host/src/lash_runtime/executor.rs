@@ -8,6 +8,70 @@ pub(super) struct HirselToolExecutor {
 
 pub(super) struct HirselToolProvider {
     pub(super) executor: HirselToolExecutor,
+    pub(super) coding: Arc<NativeCodingBinding>,
+}
+
+/// The coding operations' working directory for one Native lane.
+///
+/// The tools are built on first use and rebuilt when a Thread names a different
+/// directory, so a lane that never touches a file never spawns a shell, and a
+/// rebind reaps the previous root's owned commands rather than leaving them to
+/// outlive the directory they were started in.
+pub(super) struct NativeCodingBinding {
+    default_cwd: PathBuf,
+    state: Mutex<Option<(PathBuf, Arc<crate::native_coding_tools::NativeCodingTools>)>>,
+}
+
+impl NativeCodingBinding {
+    pub(super) fn new(default_cwd: PathBuf) -> Self {
+        Self {
+            default_cwd,
+            state: Mutex::new(None),
+        }
+    }
+
+    pub(super) async fn bind(&self, cwd: &std::path::Path) -> anyhow::Result<()> {
+        let mut state = self.state.lock().await;
+        if state.as_ref().is_some_and(|(bound, _)| bound == cwd) {
+            return Ok(());
+        }
+        let tools = Arc::new(crate::native_coding_tools::NativeCodingTools::new(
+            cwd.to_path_buf(),
+        )?);
+        if let Some((_, previous)) = state.replace((cwd.to_path_buf(), tools)) {
+            previous.shutdown().await;
+        }
+        Ok(())
+    }
+
+    /// Reap every owned command and drop the root. A later call rebuilds the
+    /// tools, so this is a quiesce, not a permanent teardown.
+    pub(super) async fn shutdown(&self) {
+        let previous = self.state.lock().await.take();
+        if let Some((_, tools)) = previous {
+            tools.shutdown().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn tools_for_test(
+        &self,
+    ) -> Arc<crate::native_coding_tools::NativeCodingTools> {
+        self.tools().await.expect("test working directory is valid")
+    }
+
+    async fn tools(&self) -> Result<Arc<crate::native_coding_tools::NativeCodingTools>, String> {
+        let mut state = self.state.lock().await;
+        if state.is_none() {
+            let cwd = self.default_cwd.clone();
+            let tools = Arc::new(
+                crate::native_coding_tools::NativeCodingTools::new(cwd.clone())
+                    .map_err(|error| error.to_string())?,
+            );
+            *state = Some((cwd, tools));
+        }
+        Ok(Arc::clone(&state.as_ref().expect("just populated above").1))
+    }
 }
 
 impl HirselToolProvider {
@@ -36,10 +100,31 @@ impl ToolProvider for HirselToolProvider {
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolOutcome {
+        if crate::native_coding_tools::is_coding_tool(call.name) {
+            return match self.coding.tools().await {
+                Ok(tools) => tools.execute(call).await,
+                Err(error) => ToolOutcome::err_fmt(error),
+            };
+        }
         StaticToolExecute::execute(&self.executor, call).await
     }
 
     async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptOutcome {
+        if crate::native_coding_tools::is_coding_tool(call.name) {
+            return match self.coding.tools().await {
+                Ok(tools) => tools.execute_attempt(call).await,
+                Err(error) => lash_core::ToolAttemptOutcome::done_without_intents(
+                    lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
+                        class: lash_core::ToolFailureClass::Execution,
+                        code: "tool_error".to_string(),
+                        message: error,
+                        source: lash_core::ToolFailureSource::Tool,
+                        retry: lash_core::ToolRetryStatus::Never,
+                        raw: None,
+                    }),
+                ),
+            };
+        }
         StaticToolExecute::execute_attempt(&self.executor, call).await
     }
 }

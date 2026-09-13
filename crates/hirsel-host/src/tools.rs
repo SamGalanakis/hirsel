@@ -58,7 +58,6 @@ pub struct ToolSuite {
 pub(crate) struct AgentSessionBootstrap {
     pub session_id: String,
     pub handoff_seed: Option<String>,
-    pub unowned_message_watermark: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,28 +117,14 @@ impl ToolSuite {
         self.subagent_models.snapshot()
     }
 
-    /// Resolve one roster instance as a coordinator (Host RLM) provider. The
-    /// same roster rules the Settings picker obeys: the instance must exist,
-    /// and `claude` is Sub-agents only (ADR-0015).
-    pub(crate) fn coordinator_provider(
+    /// Resolve one roster instance as a Native-execution provider. The same
+    /// roster rules the Settings picker obeys: the instance must exist, and
+    /// `claude` is Sub-agents only (ADR-0015).
+    pub(crate) fn native_provider(
         &self,
         id: &str,
     ) -> anyhow::Result<crate::providers::AgentProviderChoice> {
         self.providers.selection_for(id)
-    }
-
-    pub(crate) fn capture_native_worker_provider(
-        &self,
-        provider_id: Option<&str>,
-    ) -> anyhow::Result<crate::providers::NativeWorkerProviderSnapshot> {
-        self.providers.capture_native_worker_provider(provider_id)
-    }
-
-    pub(crate) fn resolve_native_worker_provider(
-        &self,
-        accepted: &crate::providers::NativeWorkerProviderSnapshot,
-    ) -> anyhow::Result<crate::providers::NativeWorkerProvider> {
-        self.providers.resolve_native_worker_provider(accepted)
     }
 
     pub(crate) fn expand_skill(&self, brief: &str) -> anyhow::Result<String> {

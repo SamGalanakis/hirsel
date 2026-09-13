@@ -13,7 +13,7 @@ impl LashAgentRuntime {
         let ownership = self.anchors.clone();
         self.tasks.spawn(async move {
             let mut cursor = initial_cursor;
-            let mut ingest = TurnIngest::unrouted(&history_id, json!({"agent":"host"}));
+            let mut ingest = TurnIngest::unrouted(&history_id, json!({"agent":"native"}));
             let mut retry = ObservationRetryBackoff::default();
             loop {
                 let mut stream = match observable.subscribe_and_recover_remote(cursor.clone()) {

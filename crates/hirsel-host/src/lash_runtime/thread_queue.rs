@@ -59,7 +59,7 @@ impl LashAgentRuntime {
         let accepted = turn.stored_turn(&self.tools.storage()).await?;
         if !matches!(
             self.tools.storage().turn_execution(accepted.id).await?,
-            crate::storage::ThreadExecution::Host { .. }
+            crate::storage::ThreadExecution::Native { .. }
         ) {
             return Ok(None);
         }
@@ -133,10 +133,15 @@ impl LashAgentRuntime {
             turn.body.push_str(&format!("\n[Explicitly referenced Threads: {}. References do not change the owning Thread; use threads.read for their context.]",message.mentions.iter().map(|id|format!("#{id}")).collect::<Vec<_>>().join(", ")));
         }
         let execution = self.tools.storage().turn_execution(queued.id).await?;
-        let crate::storage::ThreadExecution::Host { provider_id, model } = execution else {
+        let crate::storage::ThreadExecution::Native {
+            provider_id,
+            model,
+            cwd,
+        } = execution
+        else {
             anyhow::bail!("CLI turn must run on the CLI lane");
         };
-        self.bind_coordinator(&provider_id, model).await?;
+        self.bind_native(&provider_id, model, &cwd).await?;
         let input = owner_turn_input(&turn, &self.tools.storage()).await?;
         let source_key = owner_turn_source_key(&client_id);
         let anchors = TurnAnchors {
@@ -267,7 +272,7 @@ impl LashAgentRuntime {
         }))
     }
 
-    /// Old or interrupted requests must never drain as unaddressed coordinator input.
+    /// Old or interrupted requests must never drain as unaddressed Native input.
     pub(super) async fn reconcile_unowned_inputs(&self) -> anyhow::Result<()> {
         let sources = self
             .tools

@@ -69,7 +69,7 @@ async fn ingest_remote_events(
         &caller.history_id,
         caller.thread_id,
         caller.turn_id,
-        json!({"agent":"host"}),
+        json!({"agent":"native"}),
     );
     for payload in events {
         if let Some(event) = host_executor_event(&payload) {
@@ -825,24 +825,28 @@ fn tool_prose_never_names_a_dialect() {
 }
 
 #[test]
-fn both_session_postures_are_typescript_rlm_with_processes_and_triggers() {
-    for session in [
-        HirselRlmSession::Coordinator,
-        HirselRlmSession::NativeWorker,
-    ] {
-        let config = hirsel_rlm_config(session);
-        assert_eq!(AGENT_RLM_DIALECT, RlmDialect::Typescript, "{session:?}");
-        assert!(config.lashlang_abilities.processes, "{session:?}");
-        assert!(config.lashlang_abilities.triggers, "{session:?}");
-    }
+fn the_native_session_is_typescript_rlm_with_processes_and_triggers() {
+    let config = hirsel_rlm_config();
+    assert_eq!(AGENT_RLM_DIALECT, RlmDialect::Typescript);
+    assert!(config.lashlang_abilities.processes);
+    assert!(config.lashlang_abilities.triggers);
 
-    // RLM changes the worker protocol, not its deliberately narrow profile.
-    assert!(
-        native_worker::ensure_native_tool_surface(
-            &["read", "edit", "write", "exec_command"].map(str::to_string)
-        )
-        .is_ok()
-    );
+    // One session, one surface: the Thread tool set and the four coding
+    // operations are advertised together.
+    let names = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+        .iter()
+        .map(|definition| definition.name().to_string())
+        .collect::<HashSet<_>>();
+    for expected in [
+        "threads_delegate",
+        "artifacts_create",
+        "read",
+        "edit",
+        "write",
+        "exec_command",
+    ] {
+        assert!(names.contains(expected), "missing tool {expected}");
+    }
 }
 
 #[test]
@@ -970,7 +974,14 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     }
     results.insert("threads_add_related", added_examples);
     results.insert("threads_remove_related", removed_examples);
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    // The four coding operations own real child processes and a real working
+    // directory, so their results are exercised by the coding-tool tests rather
+    // than by this static executor table; every other advertised tool must
+    // appear here.
+    let definitions: Vec<_> = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+        .into_iter()
+        .filter(|definition| !crate::native_coding_tools::is_coding_tool(definition.name()))
+        .collect();
     assert_eq!(results.len(), definitions.len());
     for definition in definitions {
         let examples = results
@@ -1165,7 +1176,12 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
     .unwrap();
 
     let tools = executor.tools.clone();
-    let provider = HirselToolProvider { executor };
+    let provider = HirselToolProvider {
+        executor,
+        coding: Arc::new(NativeCodingBinding::new(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+    };
     assert!(
         provider
             .tool_manifests()
@@ -1352,336 +1368,6 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
             .handoff_seed
             .is_none()
     );
-}
-
-#[tokio::test]
-async fn native_session_seeds_first_and_intervening_same_task_conversation_only() {
-    let (executor, storage, _log, _dir) = test_event_executor().await;
-    let thread = storage.test_running_caller().await.thread_id;
-    let (other, _) = storage
-        .create_thread(
-            "other-history",
-            "Other",
-            "",
-            None,
-            hirsel_proto::ThreadAttention::Quiet,
-            hirsel_proto::ThreadKind::Task,
-            None,
-        )
-        .await
-        .unwrap();
-    storage
-        .append_thread_chat(
-            other.id,
-            ChatAuthor::Agent,
-            "UNRELATED TASK MESSAGE",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    storage
-        .append_thread_chat(
-            thread,
-            ChatAuthor::Owner,
-            "host owner message",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    storage
-        .append_thread_chat(thread, ChatAuthor::Agent, "host answer", None, Vec::new())
-        .await
-        .unwrap();
-    let first_turn = storage.queue_thread_turn(thread, None).await.unwrap();
-
-    let first = executor
-        .tools
-        .prepare_native_worker_session(thread, first_turn.id, "profile", &["read".into()])
-        .await
-        .unwrap();
-    let seed = first.handoff_seed.expect("first native use needs history");
-    assert!(seed.contains("host owner message"), "{seed}");
-    assert!(seed.contains("host answer"), "{seed}");
-    assert!(!seed.contains("UNRELATED TASK MESSAGE"), "{seed}");
-
-    let native_answer = storage
-        .append_thread_chat(
-            thread,
-            ChatAuthor::Agent,
-            "native answer already in its session",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    storage
-        .finish_thread_turn(
-            first_turn.id,
-            hirsel_proto::ThreadTurnState::Completed,
-            Some(native_answer.id),
-        )
-        .await
-        .unwrap();
-    storage
-        .mark_native_worker_conversation_seen(
-            thread,
-            first_turn.id,
-            first.unowned_message_watermark,
-        )
-        .await
-        .unwrap();
-    let resumed_turn = storage.queue_thread_turn(thread, None).await.unwrap();
-    assert!(
-        executor
-            .tools
-            .prepare_native_worker_session(thread, resumed_turn.id, "profile", &["read".into()])
-            .await
-            .unwrap()
-            .handoff_seed
-            .is_none(),
-        "an unchanged reusable native session must not receive duplicate history"
-    );
-
-    storage
-        .append_thread_chat(
-            thread,
-            ChatAuthor::Owner,
-            "cli owner message",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    storage
-        .append_thread_chat(thread, ChatAuthor::Agent, "cli answer", None, Vec::new())
-        .await
-        .unwrap();
-    let resumed = executor
-        .tools
-        .prepare_native_worker_session(thread, resumed_turn.id, "profile", &["read".into()])
-        .await
-        .unwrap();
-    assert_eq!(resumed.session_id, first.session_id);
-    let seed = resumed
-        .handoff_seed
-        .expect("intervening backend conversation needs a handoff");
-    assert!(seed.contains("cli owner message"), "{seed}");
-    assert!(seed.contains("cli answer"), "{seed}");
-    assert!(!seed.contains("host owner message"), "{seed}");
-    assert!(!seed.contains("native answer already"), "{seed}");
-    assert!(!seed.contains("UNRELATED TASK MESSAGE"), "{seed}");
-}
-
-#[tokio::test]
-async fn native_session_handoff_uses_terminal_turn_order_across_queued_owner_messages() {
-    let (executor, storage, _log, _dir) = test_event_executor().await;
-    let caller = storage.test_running_caller().await;
-    let cli = crate::storage::Delegation {
-        title: "Queued-order Task".into(),
-        brief: "CLI assignment".into(),
-        artifact_ids: Vec::new(),
-        child_thread_id: None,
-        execution: Some(crate::storage::ThreadExecution::Cli {
-            agent: hirsel_drivers::AgentKind::Claude,
-            model: "fake-cli".into(),
-            variant: "default".into(),
-            cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
-        }),
-    };
-    let cli_turn = storage
-        .delegate_thread(&caller, "queued-order-cli", &cli, &json!(cli))
-        .await
-        .unwrap();
-    storage.run_thread_turn(cli_turn.turn_id).await.unwrap();
-    let native = crate::storage::Delegation {
-        title: "Native preference".into(),
-        brief: "Native assignment that will be cancelled".into(),
-        artifact_ids: Vec::new(),
-        child_thread_id: Some(cli_turn.thread_id),
-        execution: Some(crate::storage::ThreadExecution::LashWorker {
-            provider: crate::providers::NativeWorkerProviderSnapshot {
-                id: "openrouter".into(),
-                base_url: lash_provider_openai::OPENROUTER_BASE_URL.into(),
-                revision: "queued-order-route".into(),
-            },
-            model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.into(),
-            variant: "default".into(),
-            cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
-            tool_profile: crate::storage::NATIVE_CODING_TOOL_PROFILE.into(),
-        }),
-    };
-    let cancelled_native = storage
-        .delegate_thread(&caller, "queued-order-native", &native, &json!(native))
-        .await
-        .unwrap();
-    let history = storage.history_id().await.unwrap();
-    let request = json!({"mode":"send","thread_action":null,"body":"CURRENT NATIVE OWNER"});
-    storage
-        .append_thread_owner_request(
-            &history,
-            cli_turn.thread_id,
-            "queued-order-current",
-            "CURRENT NATIVE OWNER".into(),
-            &[],
-            &[],
-            &[],
-            &request,
-        )
-        .await
-        .unwrap();
-    let current = storage
-        .thread_request("queued-order-current")
-        .await
-        .unwrap()
-        .unwrap()["turn_id"]
-        .as_u64()
-        .unwrap();
-    storage
-        .append_thread_owner_request(
-            &history,
-            cli_turn.thread_id,
-            "queued-order-future",
-            "FUTURE QUEUED OWNER".into(),
-            &[],
-            &[],
-            &[],
-            &json!({"mode":"send","thread_action":null,"body":"FUTURE QUEUED OWNER"}),
-        )
-        .await
-        .unwrap();
-    let future = storage
-        .thread_request("queued-order-future")
-        .await
-        .unwrap()
-        .unwrap()["turn_id"]
-        .as_u64()
-        .unwrap();
-    storage
-        .finish_thread_turn(
-            cancelled_native.turn_id,
-            hirsel_proto::ThreadTurnState::Cancelled,
-            None,
-        )
-        .await
-        .unwrap();
-    storage
-        .complete_thread_turn(
-            &history,
-            cli_turn.turn_id,
-            hirsel_proto::ThreadTurnState::Completed,
-            Some(("CLI FINAL AFTER CURRENT ACCEPTANCE".into(), Vec::new())),
-        )
-        .await
-        .unwrap();
-    let (other, _) = storage
-        .create_thread(
-            "queued-order-other",
-            "Other",
-            "",
-            None,
-            hirsel_proto::ThreadAttention::Quiet,
-            hirsel_proto::ThreadKind::Task,
-            None,
-        )
-        .await
-        .unwrap();
-    storage
-        .append_thread_chat(
-            other.id,
-            ChatAuthor::Agent,
-            "UNRELATED QUEUED ORDER",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-
-    let first = executor
-        .tools
-        .prepare_native_worker_session(
-            cli_turn.thread_id,
-            current,
-            "queued-order-profile",
-            &["read".into()],
-        )
-        .await
-        .unwrap();
-    let seed = first.handoff_seed.as_deref().unwrap();
-    assert!(
-        seed.contains("CLI FINAL AFTER CURRENT ACCEPTANCE"),
-        "{seed}"
-    );
-    assert!(!seed.contains("CURRENT NATIVE OWNER"), "{seed}");
-    assert!(!seed.contains("FUTURE QUEUED OWNER"), "{seed}");
-    assert!(!seed.contains("UNRELATED QUEUED ORDER"), "{seed}");
-
-    storage
-        .complete_thread_turn(
-            &history,
-            current,
-            hirsel_proto::ThreadTurnState::Completed,
-            Some(("CURRENT NATIVE FINAL".into(), Vec::new())),
-        )
-        .await
-        .unwrap();
-    storage
-        .mark_native_worker_conversation_seen(
-            cli_turn.thread_id,
-            current,
-            first.unowned_message_watermark,
-        )
-        .await
-        .unwrap();
-    storage
-        .complete_thread_turn(
-            &history,
-            future,
-            hirsel_proto::ThreadTurnState::Cancelled,
-            None,
-        )
-        .await
-        .unwrap();
-    storage
-        .append_thread_owner_request(
-            &history,
-            cli_turn.thread_id,
-            "queued-order-latest",
-            "LATEST NATIVE OWNER".into(),
-            &[],
-            &[],
-            &[],
-            &json!({"mode":"send","thread_action":null,"body":"LATEST NATIVE OWNER"}),
-        )
-        .await
-        .unwrap();
-    let latest = storage
-        .thread_request("queued-order-latest")
-        .await
-        .unwrap()
-        .unwrap()["turn_id"]
-        .as_u64()
-        .unwrap();
-    let resumed = executor
-        .tools
-        .prepare_native_worker_session(
-            cli_turn.thread_id,
-            latest,
-            "queued-order-profile",
-            &["read".into()],
-        )
-        .await
-        .unwrap();
-    let seed = resumed.handoff_seed.as_deref().unwrap();
-    assert!(seed.contains("FUTURE QUEUED OWNER"), "{seed}");
-    assert!(
-        !seed.contains("CLI FINAL AFTER CURRENT ACCEPTANCE"),
-        "{seed}"
-    );
-    assert!(!seed.contains("CURRENT NATIVE OWNER"), "{seed}");
-    assert!(!seed.contains("CURRENT NATIVE FINAL"), "{seed}");
-    assert!(!seed.contains("LATEST NATIVE OWNER"), "{seed}");
 }
 
 #[test]

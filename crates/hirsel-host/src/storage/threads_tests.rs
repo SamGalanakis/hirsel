@@ -929,7 +929,7 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
         .unwrap()
         .0;
     let id = thread.id;
-    // Nothing chosen means the Thread inherits the configured coordinator.
+    // Nothing chosen means the Thread inherits the configured Native default.
     assert_eq!(
         state.storage.thread(id).await.unwrap().unwrap().execution,
         None

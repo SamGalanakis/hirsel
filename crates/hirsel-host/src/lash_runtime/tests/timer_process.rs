@@ -85,7 +85,7 @@ finish("registered");
     let trigger_store = Arc::new(lash_core::facade_support::InMemoryTriggerStore::default());
     let process_registry = Arc::new(lash_core::TestLocalProcessRegistry::default());
     let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        hirsel_rlm_config(HirselRlmSession::Coordinator),
+        hirsel_rlm_config(),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
@@ -104,6 +104,9 @@ finish("registered");
         .trigger_store(trigger_store.clone())
         .tools(Arc::new(HirselToolProvider {
             executor: executor.clone(),
+            coding: Arc::new(NativeCodingBinding::new(
+                std::env::current_dir().unwrap().canonicalize().unwrap(),
+            )),
         }))
         .plugin(Arc::new(HirselPluginFactory))
         .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))

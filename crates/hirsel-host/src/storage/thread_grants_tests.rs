@@ -188,7 +188,7 @@ async fn out_of_reach_calls_return_a_readable_refusal_and_log_every_attempt() {
 }
 
 #[tokio::test]
-async fn a_coordinator_hands_on_only_reach_it_holds_and_never_widens_itself() {
+async fn an_ancestor_hands_on_only_reach_it_holds_and_never_widens_itself() {
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await

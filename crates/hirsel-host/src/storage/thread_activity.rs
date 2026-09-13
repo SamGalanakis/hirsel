@@ -194,33 +194,25 @@ impl Storage {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut turns = Vec::with_capacity(ids.len());
         for id in ids {
-            let (thread_id, config): (u64, Option<String>) = tx.query_row(
-                "SELECT t.thread_id,e.config FROM thread_turns t LEFT JOIN thread_turn_execution e ON e.turn_id=t.id WHERE t.id=?1",
+            // An admitted Native turn may have accepted input or begun a real
+            // shell effect before the Host stopped. Abandon this session
+            // generation so a later follow-up cannot drive that uncertain
+            // pending input as if it were new work, and retire the durable
+            // request with the turn so startup cannot dispatch it as fresh.
+            let thread_id: u64 = tx.query_row(
+                "SELECT thread_id FROM thread_turns WHERE id=?1",
                 [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )?;
-            if config
-                .as_deref()
-                .map(serde_json::from_str::<super::ThreadExecution>)
-                .transpose()?
-                .is_some_and(|execution| {
-                    matches!(execution, super::ThreadExecution::LashWorker { .. })
-                })
-            {
-                // A direct durable Lash turn may have accepted input or begun a
-                // shell effect before the Host stopped. Abandon this session
-                // generation so a later follow-up cannot drive that uncertain
-                // pending input as if it were new work.
-                let value = format!("interrupted-turn:{id}");
-                super::meta::invalidate_native_worker_profile(&tx, thread_id, &value)?;
-                // The provider or a coding tool may already have observed this
-                // accepted input. Retire the durable request with the turn so
-                // startup cannot later dispatch it as fresh work.
-                tx.execute(
-                    "DELETE FROM thread_requests WHERE json_extract(payload,'$.turn_id')=?1",
-                    [id],
-                )?;
-            }
+            super::meta::invalidate_agent_session_profile(
+                &tx,
+                thread_id,
+                &format!("interrupted-turn:{id}"),
+            )?;
+            tx.execute(
+                "DELETE FROM thread_requests WHERE json_extract(payload,'$.turn_id')=?1",
+                [id],
+            )?;
             turns.push(finish(&tx, id, ThreadTurnState::Interrupted, None)?);
         }
         tx.commit()?;

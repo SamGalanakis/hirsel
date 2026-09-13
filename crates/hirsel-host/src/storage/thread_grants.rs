@@ -171,7 +171,7 @@ pub(super) fn authorize_widening(
     );
     anyhow::ensure!(
         thread_scope::is_ancestor(c, caller, thread_id)?,
-        "only an ancestor coordinator can change a Thread's reach"
+        "only an ancestor Thread can change a Thread's reach"
     );
     if let Some(target) = target {
         thread_scope::authorize(c, caller, target)?;

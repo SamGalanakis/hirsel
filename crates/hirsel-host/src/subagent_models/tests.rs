@@ -343,228 +343,48 @@ async fn set_rejects_empty_and_unknown_variant_sets() {
     );
 }
 
-/// A catalog whose native worker runs on `providers`, with the row's own
-/// enable switch left on.
-fn catalog_with_worker_providers(providers: &[&str]) -> SubagentModelCatalog {
-    let mut catalog = registry_catalog();
-    catalog.native_worker.eligible_provider_ids =
-        providers.iter().map(|id| (*id).to_string()).collect();
-    catalog.native_worker.provider_id = providers
-        .iter()
-        .find(|id| **id == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID)
-        .map(|id| (*id).to_string());
-    catalog.native_worker.unavailable_reason =
-        providers.is_empty().then(|| "none configured".to_string());
-    catalog
-}
-
-fn lash_delegation() -> Value {
-    json!({
-        "agent":"lash",
-        "title":"Fix it",
-        "brief":"Repair and verify the bug.",
-        "artifact_ids":[]
-    })
-}
-
+/// The Native branch is always available: a Thread that names no agent, or
+/// names `native`, runs on Hirsel's own session.
 #[test]
-fn native_lash_schema_exists_only_for_usable_providers() {
-    let base = lash_delegation();
-    let absent =
-        SubagentModelState::delegation_input_schema_for(&catalog_with_worker_providers(&[]));
-    assert_eq!(
-        absent["properties"]["agent"]["enum"],
-        json!(["host", "claude", "codex"])
-    );
-    assert!(
-        !jsonschema::JSONSchema::compile(&absent)
-            .unwrap()
-            .is_valid(&base)
-    );
-
-    let schema =
-        SubagentModelState::delegation_input_schema_for(&catalog_with_worker_providers(&[
-            "openrouter",
-            "local",
-        ]));
+fn native_branch_accepts_inherited_and_explicit_selectors() {
+    let schema = SubagentModelState::delegation_input_schema_for(&registry_catalog());
     let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
-    assert!(
-        validator.is_valid(&base),
-        "OpenRouter has the curated default"
-    );
-    assert!(validator.is_valid(&json!({
-        "agent":"lash", "provider_id":"openrouter", "model":"other/model",
-        "variant":"default", "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-    })));
-    assert!(validator.is_valid(&json!({
-        "agent":"lash", "provider_id":"local", "model":"local-model",
-        "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-    })));
-    assert!(!validator.is_valid(&json!({
-        "agent":"lash", "provider_id":"local",
-        "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-    })));
-    assert!(!validator.is_valid(&json!({
-        "agent":"lash", "provider_id":"missing", "model":"m",
-        "title":"Fix it", "brief":"Repair it", "artifact_ids":[]
-    })));
-}
+    let base = json!({"title":"Work","brief":"Do it","artifact_ids":[]});
+    let with = |extra: Value| {
+        let mut value = base.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value
+    };
 
-/// The Owner's switch, not the roster, decides whether the branch exists:
-/// a configured provider is not consent to delegate to the worker.
-#[test]
-fn disabling_the_native_worker_drops_the_lash_branch() {
-    let mut catalog = catalog_with_worker_providers(&["openrouter"]);
-    catalog.native_worker.enabled = false;
-    let schema = SubagentModelState::delegation_input_schema_for(&catalog);
-    assert_eq!(
-        schema["properties"]["agent"]["enum"],
-        json!(["host", "claude", "codex"])
+    // Naming nothing is Native, inheriting this Thread's provider and model.
+    assert!(validator.validate(&base).is_ok());
+    assert!(validator.validate(&with(json!({"agent":"native"}))).is_ok());
+    assert!(
+        validator
+            .validate(&with(
+                json!({"agent":"native","provider_id":"local","model":"m","cwd":"/tmp"})
+            ))
+            .is_ok()
+    );
+    // Native has no reasoning variant, and provider_id is Native's alone.
+    assert!(
+        validator
+            .validate(&with(json!({"agent":"native","variant":"high"})))
+            .is_err()
     );
     assert!(
-        !jsonschema::JSONSchema::compile(&schema)
-            .unwrap()
-            .is_valid(&lash_delegation())
+        validator
+            .validate(&with(json!({"agent":"codex","provider_id":"local"})))
+            .is_err()
     );
-    // The CLI lanes beside it are untouched by the native worker's switch.
-    assert!(jsonschema::JSONSchema::compile(&schema).unwrap().is_valid(
-        &json!({"agent":"codex","model":"gpt-5.6-sol","variant":"high","title":"Work","brief":"Do it","artifact_ids":[]})
-    ));
-}
-
-/// A store with one keyed OpenAI-compatible instance, so the native worker
-/// section has somewhere to run.
-async fn worker_state(dir: &tempfile::TempDir, provider_id: &str) -> SubagentModelState {
-    let state = test_state(dir).await;
-    let path = dir.path().join("hirsel.toml");
-    let mut text = std::fs::read_to_string(&path).unwrap();
-    text.push_str(&format!(
-        "\n[providers.{provider_id}]\nkind = \"openai_compatible\"\nbase_url = \"https://example.invalid/v1\"\napi_key = \"sk-test\"\ndefault_model = \"vendor/model\"\n"
-    ));
-    std::fs::write(&path, text).unwrap();
-    state
-}
-
-#[tokio::test]
-async fn native_worker_section_reports_the_route_and_its_absence() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = test_state(&dir).await;
-
-    // Nothing configured: present, but honest that it cannot run.
-    let worker = state.snapshot().native_worker;
-    assert!(worker.enabled);
-    assert_eq!(worker.provider_id, None);
-    assert!(worker.eligible_provider_ids.is_empty());
-    assert_eq!(worker.model, crate::providers::NATIVE_WORKER_DEFAULT_MODEL);
-    assert!(worker.unavailable_reason.is_some());
-
-    // The default instance: routed, and available.
-    let state = worker_state(&dir, crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID).await;
-    let worker = state.snapshot().native_worker;
-    assert_eq!(
-        worker.provider_id.as_deref(),
-        Some(crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID)
+    assert!(
+        validator
+            .validate(&with(
+                json!({"agent":"lash","provider_id":"local","model":"m"})
+            ))
+            .is_err()
     );
-    assert_eq!(
-        worker.eligible_provider_ids,
-        [crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID]
-    );
-    assert_eq!(worker.unavailable_reason, None);
-
-    // An instance that is not the default one still hosts the worker; it
-    // just cannot be the implicit route, so this is not "unavailable".
-    let dir = tempfile::tempdir().unwrap();
-    let state = worker_state(&dir, "local").await;
-    let worker = state.snapshot().native_worker;
-    assert_eq!(worker.provider_id, None);
-    assert_eq!(worker.eligible_provider_ids, ["local"]);
-    assert_eq!(worker.unavailable_reason, None);
-}
-
-#[tokio::test]
-async fn native_worker_toggle_and_override_round_trip_through_the_store() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = worker_state(&dir, crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID).await;
-
-    let catalog = state
-        .set_native_worker(true, Some("  vendor/other  "))
-        .await
-        .unwrap();
-    assert_eq!(
-        catalog.native_worker.model_override.as_deref(),
-        Some("vendor/other")
-    );
-    assert_eq!(catalog.native_worker.model, "vendor/other");
-    assert_eq!(
-        catalog.native_worker.default_model,
-        crate::providers::NATIVE_WORKER_DEFAULT_MODEL
-    );
-
-    // The override survives a reload of the same file.
-    let reloaded = test_state(&dir).await.snapshot().native_worker;
-    assert_eq!(reloaded.model, "vendor/other");
-    assert!(reloaded.enabled);
-
-    // Blank clears the override rather than storing an empty model.
-    let catalog = state.set_native_worker(false, Some("   ")).await.unwrap();
-    assert_eq!(catalog.native_worker.model_override, None);
-    assert_eq!(
-        catalog.native_worker.model,
-        crate::providers::NATIVE_WORKER_DEFAULT_MODEL
-    );
-    assert!(!catalog.native_worker.enabled);
-    let persisted = std::fs::read_to_string(dir.path().join("hirsel.toml")).unwrap();
-    assert!(persisted.contains("[native_worker]"), "{persisted}");
-    assert!(!persisted.contains("model = \"\""), "{persisted}");
-
-    let reloaded = test_state(&dir).await.snapshot().native_worker;
-    assert!(!reloaded.enabled);
-    assert_eq!(reloaded.model_override, None);
-}
-
-/// The override goes through the same validation as an explicit delegate
-/// `model`, so the two cannot disagree about what this route accepts.
-#[tokio::test]
-async fn native_worker_override_is_validated_like_a_delegate_model() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = worker_state(&dir, crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID).await;
-    for model in ["vendor/model", "vendor/model:free", "local-model"] {
-        assert!(crate::model_selection::validate_free_text(model).is_ok());
-        assert_eq!(
-            state
-                .set_native_worker(true, Some(model))
-                .await
-                .unwrap()
-                .native_worker
-                .model,
-            model
-        );
-    }
-    // Whitespace-only is not a model id; it clears the override instead of
-    // being stored, and the shipped default stands.
-    assert_eq!(
-        state
-            .set_native_worker(true, Some("   \n  "))
-            .await
-            .unwrap()
-            .native_worker
-            .model,
-        crate::providers::NATIVE_WORKER_DEFAULT_MODEL
-    );
-}
-
-/// A malformed `[native_worker]` section is a config typo, not a reason to
-/// silently take the delegation target away.
-#[tokio::test]
-async fn invalid_native_worker_config_falls_back_to_the_shipped_row() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = worker_state(&dir, crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID).await;
-    let path = dir.path().join("hirsel.toml");
-    let mut text = std::fs::read_to_string(&path).unwrap();
-    text.push_str("\n[native_worker]\nenabled = \"yes\"\nmodel = 7\n");
-    std::fs::write(&path, text).unwrap();
-    let worker = state.snapshot().native_worker;
-    assert!(worker.enabled);
-    assert_eq!(worker.model_override, None);
-    assert_eq!(worker.model, crate::providers::NATIVE_WORKER_DEFAULT_MODEL);
 }

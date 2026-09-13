@@ -92,7 +92,7 @@ impl ScriptedAgentRuntime {
                     };
                     if !matches!(
                         self.tools.storage().turn_execution(record.id).await?,
-                        crate::storage::ThreadExecution::Host { .. }
+                        crate::storage::ThreadExecution::Native { .. }
                     ) {
                         continue;
                     }
@@ -186,7 +186,7 @@ impl ScriptedAgentRuntime {
             &turn.history_id,
             turn.thread_id,
             record.id,
-            json!({"agent":"host","model":self.config.model,"driver":"scripted"}),
+            json!({"agent":"native","model":self.config.model,"driver":"scripted"}),
         );
         ingest
             .accept(&self.tools, ExecutorEvent::Started { external_id: None })

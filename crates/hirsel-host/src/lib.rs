@@ -29,6 +29,7 @@ pub mod storage;
 pub mod subagent_models;
 pub mod templates;
 mod thread_commands;
+pub(crate) mod thread_identity;
 pub mod thread_instrument;
 pub mod thread_tool_bridge;
 pub mod tools;

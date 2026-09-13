@@ -1,7 +1,7 @@
 import { createStore } from "solid-js";
 import { historyId } from "../lib/history";
 import type { ServerMessage } from "../protocol";
-import type { ReachTarget, ThreadClientMessage, ThreadGrant } from "../threads/types";
+import type { ReachTarget, ThreadClientMessage, ThreadGrant, ThreadGrantTarget } from "../threads/types";
 
 export interface GrantOrigin { readonly historyId: string; readonly threadId: number }
 interface ReachList { grants: ThreadGrant[]; revision: number; loaded: boolean }
@@ -28,11 +28,15 @@ export function resetGrants(): void {
 export function holdsRoot(threadId: number): boolean {
   return threadGrants(threadId).some(grant => grant.target.kind === "root");
 }
+/** One granted Thread named the way the Owner sees it everywhere else. */
+export function grantLabel(target: Extract<ThreadGrantTarget, { kind: "thread" }>): string {
+  return `${target.thread_kind === "space" ? "Space" : "Task"} #${target.thread_id} "${target.title}"`;
+}
 /** What a Thread can address, in the one line the Agent reads in its own context. */
 export function reachSummary(threadId: number): string {
   if (holdsRoot(threadId)) return "everything (root)";
   const grants = grantState.lists[threadId]?.grants ?? [];
-  return ["self + subtree", ...grants.flatMap(grant => grant.target.kind === "thread" ? [`+Thread ${grant.target.thread_id} '${grant.target.title}'`] : [])].join(" · ");
+  return ["self + subtree", ...grants.flatMap(grant => grant.target.kind === "thread" ? [`+${grantLabel(grant.target)}`] : [])].join(" · ");
 }
 export function threadGrants(threadId: number): ThreadGrant[] { return grantState.lists[threadId]?.grants ?? []; }
 function request(origin: GrantOrigin, frame: Extract<ThreadClientMessage, {client_id: string}>): Promise<void> {

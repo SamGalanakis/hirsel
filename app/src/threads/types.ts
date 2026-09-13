@@ -64,7 +64,7 @@ export interface ThreadRelatedItem {
 export type ThreadGrantSource = { kind: "owner" } | { kind: "thread"; thread_id: number };
 /** What one grant widens a Thread's reach to: one Thread and its subtree, or
  * the root — every Thread in the history, including ones created later. */
-export type ThreadGrantTarget = { kind: "thread"; thread_id: number; title: string } | { kind: "root" };
+export type ThreadGrantTarget = { kind: "thread"; thread_id: number; title: string; thread_kind: ThreadKind } | { kind: "root" };
 /** A reach target as an op names it: a Thread ID, or the literal "root". */
 export type ReachTarget = number | "root";
 /** One durable widening of a Thread's reach beyond self + descendants. */

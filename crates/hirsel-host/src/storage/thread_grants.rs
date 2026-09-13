@@ -23,7 +23,7 @@ const MAX_GRANTS: u64 = 100;
 
 pub(super) fn list(c: &Connection, thread_id: u64) -> anyhow::Result<Vec<ThreadGrant>> {
     Ok(c.prepare(
-        "SELECT g.thread_id,g.target_thread_id,t.title,g.granted_by,g.granted_by_thread_id,g.granted_at,g.note
+        "SELECT g.thread_id,g.target_thread_id,t.title,g.granted_by,g.granted_by_thread_id,g.granted_at,g.note,t.kind
          FROM thread_grants g LEFT JOIN threads t ON t.id=g.target_thread_id
          WHERE g.thread_id=?1 ORDER BY g.target_key",
     )?
@@ -32,11 +32,27 @@ pub(super) fn list(c: &Connection, thread_id: u64) -> anyhow::Result<Vec<ThreadG
         let by_thread: Option<u64> = r.get(4)?;
         Ok(ThreadGrant {
             thread_id: r.get(0)?,
+            // A root grant has no target row at all, so the LEFT JOIN columns
+            // are NULL together with the target id.
             target: match r.get::<_, Option<u64>>(1)? {
-                Some(thread_id) => ThreadGrantTarget::Thread {
-                    thread_id,
-                    title: r.get(2)?,
-                },
+                Some(thread_id) => {
+                    let kind = r.get::<_, String>(7)?;
+                    ThreadGrantTarget::Thread {
+                        thread_id,
+                        title: r.get(2)?,
+                        thread_kind: threads::parse_kind(&kind).ok_or_else(|| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                7,
+                                rusqlite::types::Type::Text,
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("invalid Thread kind `{kind}`"),
+                                )
+                                .into(),
+                            )
+                        })?,
+                    }
+                }
                 None => ThreadGrantTarget::Root,
             },
             granted_by: match by_thread {
@@ -68,8 +84,21 @@ pub(super) fn reach_summary(c: &Connection, thread_id: u64) -> anyhow::Result<St
     }
     let mut summary = String::from("self + subtree");
     for grant in list(c, thread_id)? {
-        if let ThreadGrantTarget::Thread { thread_id, title } = grant.target {
-            summary.push_str(&format!(" · +Thread {thread_id} '{title}'"));
+        if let ThreadGrantTarget::Thread {
+            thread_id,
+            title,
+            thread_kind,
+        } = grant.target
+        {
+            summary.push_str(&format!(
+                " · +{}",
+                crate::thread_identity::ThreadIdentityRef {
+                    id: thread_id,
+                    kind: thread_kind,
+                    title,
+                }
+                .label()
+            ));
         }
     }
     Ok(summary)

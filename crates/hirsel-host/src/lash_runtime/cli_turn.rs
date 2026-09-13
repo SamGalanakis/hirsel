@@ -209,8 +209,16 @@ impl CliTurn {
             .storage()
             .accepted_message_references(&request.history_id, self.turn_id)
             .await?;
+        // The same block the Native system prompt opens with, ahead of the
+        // machine-readable context: a CLI executor is told where it is in the
+        // Owner's vocabulary before it is handed any JSON.
+        let identity = tools
+            .storage()
+            .thread_identity(request.thread_id)
+            .await?
+            .block();
         let mut prompt = format!(
-            "You execute one accepted Hirsel Thread turn. Use the supplied scoped Thread tools for coordination. Only this Thread and its descendants are visible; create/delegate focused children and report upward. Parent/peer transcripts are not available. Artifacts require explicit creation and references.\n\nIdentity and accepted brief:\n{}\n\nThis Thread's recent conversation:\n{}\n\nAccepted input:\n{}",
+            "You execute one accepted Hirsel Thread turn. Use the supplied scoped Thread tools for coordination. Only this Thread and its descendants are visible; create/delegate focused children and report upward. Parent/peer transcripts are not available. Artifacts require explicit creation and references.\n\n{identity}\nIdentity and accepted brief:\n{}\n\nThis Thread's recent conversation:\n{}\n\nAccepted input:\n{}",
             serde_json::to_string(&context)?,
             serde_json::to_string(&history)?,
             request.body

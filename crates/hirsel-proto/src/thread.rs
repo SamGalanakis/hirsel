@@ -161,6 +161,9 @@ pub enum ThreadGrantTarget {
         thread_id: u64,
         /// The target's current title, so a reach list needs no second lookup.
         title: String,
+        /// The target's kind, so every surface names it the way the Owner
+        /// does. Not `kind`: that name is the variant tag.
+        thread_kind: ThreadKind,
     },
     Root,
 }

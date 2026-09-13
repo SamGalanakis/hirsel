@@ -136,6 +136,7 @@ impl LashAgentRuntime {
             .await
             .context("prepare main-agent session generation")?;
         let session_guidance = agent_guidance_with_handoff(
+            &tools.storage().thread_identity(thread_id).await?,
             config.prompts.agent_guidance(),
             session_bootstrap.handoff_seed.as_deref(),
         );
@@ -370,8 +371,14 @@ impl LashAgentRuntime {
     /// edit of `hirsel.toml` lands without a restart) and right after a
     /// Settings edit (so the change is applied by the time the op returns).
     /// Idempotent: an unchanged layer is not written back.
+    ///
+    /// This is also what keeps the identity block current: a Thread renamed,
+    /// re-described or granted new reach mid-session is re-read here, so the
+    /// next turn is prompted with the new values rather than the ones the
+    /// session opened on.
     pub(super) async fn apply_agent_prompt(&self) -> anyhow::Result<()> {
         let guidance = agent_guidance_with_handoff(
+            &self.tools.storage().thread_identity(self.thread_id).await?,
             self.prompts.agent_guidance(),
             self.handoff_seed.as_deref(),
         );

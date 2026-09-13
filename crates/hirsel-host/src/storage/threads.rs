@@ -34,11 +34,10 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     };
     Ok(Thread {
         id: r.get(0)?,
-        kind: match r.get::<_, String>(17)?.as_str() {
-            "space" => ThreadKind::Space,
-            "task" => ThreadKind::Task,
-            kind => {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
+        kind: {
+            let kind = r.get::<_, String>(17)?;
+            parse_kind(&kind).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
                     17,
                     rusqlite::types::Type::Text,
                     std::io::Error::new(
@@ -46,8 +45,8 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
                         format!("invalid Thread kind `{kind}`"),
                     )
                     .into(),
-                ));
-            }
+                )
+            })?
         },
         parent_thread_id,
         pinned_at: time(13)?,
@@ -125,6 +124,14 @@ pub(super) fn attention(value: ThreadAttention) -> &'static str {
     match value {
         ThreadAttention::Quiet => "quiet",
         ThreadAttention::NeedsOwner => "needs_owner",
+    }
+}
+/// The inverse of [`kind_name`]. `None` for a value no release ever wrote.
+pub(super) fn parse_kind(value: &str) -> Option<ThreadKind> {
+    match value {
+        "space" => Some(ThreadKind::Space),
+        "task" => Some(ThreadKind::Task),
+        _ => None,
     }
 }
 pub(super) fn kind_name(value: ThreadKind) -> &'static str {

@@ -11,7 +11,7 @@ import { attachGrantTransport, disconnectGrants, handleGrantMessage, holdsRoot, 
 
 const historyId = "ab123456-1234-5678-9abc-123456789abc";
 const frames: ThreadClientMessage[] = [];
-const grant = (patch: Partial<ThreadGrant> = {}): ThreadGrant => ({ thread_id: 1, target: { kind: "thread", thread_id: 2, title: "Billing" }, granted_by: { kind: "owner" }, granted_at: "2026-09-13T10:00:00Z", note: null, ...patch });
+const grant = (patch: Partial<ThreadGrant> = {}): ThreadGrant => ({ thread_id: 1, target: { kind: "thread", thread_id: 2, title: "Billing", thread_kind: "task" }, granted_by: { kind: "owner" }, granted_at: "2026-09-13T10:00:00Z", note: null, ...patch });
 const rootGrant = (): ThreadGrant => grant({ target: { kind: "root" } });
 const changed = (revision: number, grants: ThreadGrant[], clientId: string | null = null) =>
   handleGrantMessage({ type: "thread_grants_changed", client_id: clientId, history_id: historyId, thread_id: 1, revision, grants });
@@ -36,8 +36,8 @@ describe("Thread reach dialog", () => {
     const dialog = screen.getByRole("dialog", { name: "Reach of Space #1 “lash”" });
     expect(dialog.textContent).toContain("Itself and everything below it");
     flush(() => changed(2, [grant()]));
-    expect(dialog.textContent).toContain("#2 Billing");
-    expect(reachSummary(1)).toBe("self + subtree · +Thread 2 'Billing'");
+    expect(dialog.textContent).toContain('Task #2 "Billing"');
+    expect(reachSummary(1)).toBe('self + subtree · +Task #2 "Billing"');
   });
 
   it("lets the Owner grant a Thread and revoke it again", async () => {
@@ -97,8 +97,8 @@ describe("Thread reach dialog", () => {
   it("keeps a reach snapshot from rolling back behind newer Thread metadata", () => {
     flush(() => changed(5, [grant()]));
     flush(() => changed(3, []));
-    expect(reachSummary(1)).toContain("+Thread 2");
+    expect(reachSummary(1)).toContain('+Task #2');
     flush(() => handleGrantMessage({ type: "thread_grants_changed", client_id: null, history_id: "other-history", thread_id: 1, revision: 9, grants: [] }));
-    expect(reachSummary(1)).toContain("+Thread 2");
+    expect(reachSummary(1)).toContain('+Task #2');
   });
 });

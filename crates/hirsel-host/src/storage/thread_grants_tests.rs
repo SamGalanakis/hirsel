@@ -63,7 +63,8 @@ async fn an_owner_grant_widens_reach_and_revoking_it_narrows_again() {
         granted.grants[0].target,
         ThreadGrantTarget::Thread {
             thread_id: billing,
-            title: "billing".into()
+            title: "billing".into(),
+            thread_kind: hirsel_proto::ThreadKind::Task
         }
     );
     assert_eq!(granted.grants[0].note.as_deref(), Some("shared work"));
@@ -85,7 +86,10 @@ async fn an_owner_grant_widens_reach_and_revoking_it_narrows_again() {
             .unwrap(),
         detail
     );
-    assert!(s.thread_reach(&actor).await.unwrap().contains("+Thread"));
+    assert_eq!(
+        s.thread_reach(&actor).await.unwrap(),
+        format!("self + subtree · +Task #{billing} \"billing\"")
+    );
     // Reach is one-way: the target gains nothing.
     assert!(!s.thread_in_scope(billing, worker).await.unwrap());
 
@@ -252,7 +256,7 @@ async fn an_ancestor_hands_on_only_reach_it_holds_and_never_widens_itself() {
         .unwrap();
     assert_eq!(
         granted["grants"][0]["target"],
-        json!({"kind":"thread","thread_id":billing,"title":"billing"})
+        json!({"kind":"thread","thread_id":billing,"title":"billing","thread_kind":"task"})
     );
     assert_eq!(
         granted["grants"][0]["granted_by"],

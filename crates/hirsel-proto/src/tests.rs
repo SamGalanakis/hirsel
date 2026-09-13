@@ -1040,15 +1040,16 @@ fn reach_grants_round_trip_a_named_thread_and_the_root() {
     }
 
     let value = json!({"type":"thread_grants_changed","client_id":null,"history_id":"history-a","thread_id":4,"revision":3,"grants":[
-        {"thread_id":4,"target":{"kind":"thread","thread_id":8,"title":"Billing"},"granted_by":{"kind":"owner"},"granted_at":"2026-09-13T10:00:00Z","note":null},
+        {"thread_id":4,"target":{"kind":"thread","thread_id":8,"title":"Billing","thread_kind":"space"},"granted_by":{"kind":"owner"},"granted_at":"2026-09-13T10:00:00Z","note":null},
         {"thread_id":4,"target":{"kind":"root"},"granted_by":{"kind":"thread","thread_id":2},"granted_at":"2026-09-13T10:01:00Z","note":"stands in for me"}
     ]});
     let snapshot: HostToClient = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(snapshot).unwrap(), value);
-    // The Thread variant is closed: no missing title, no extra fields.
+    // The Thread variant is closed: no missing title or kind, no extra fields.
     for bad in [
         json!({"kind":"thread","thread_id":8}),
-        json!({"kind":"thread","thread_id":8,"title":"Billing","extra":1}),
+        json!({"kind":"thread","thread_id":8,"title":"Billing"}),
+        json!({"kind":"thread","thread_id":8,"title":"Billing","thread_kind":"space","extra":1}),
     ] {
         assert!(serde_json::from_value::<ThreadGrantTarget>(bad).is_err());
     }

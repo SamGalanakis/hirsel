@@ -5,7 +5,7 @@ import { historyId } from "../lib/history";
 import { filterThreadCandidates } from "../lib/thread-ref";
 import { threadState } from "../threads/store";
 import { closeThreadReach, reachDialogTitle, threadReachTarget } from "./reach";
-import { grantReach, holdsRoot, revokeReach, threadGrants, type GrantOrigin } from "./store";
+import { grantLabel, grantReach, holdsRoot, revokeReach, threadGrants, type GrantOrigin } from "./store";
 import type { ReachTarget } from "../threads/types";
 
 const remove = "inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
@@ -91,7 +91,7 @@ export function ReachDialog() {
           </li>
         </Show>
         <For each={grants()}>{grant => <Show when={grant.target.kind === "thread" ? grant.target : null}>{thread => <li class={row}>
-          <span class="min-w-0 flex-1 truncate" title={grant.note ?? undefined}>#{thread().thread_id} {thread().title}</span>
+          <span class="min-w-0 flex-1 truncate" title={grant.note ?? undefined}>{grantLabel(thread())}</span>
           <button type="button" class={remove} disabled={busy()} aria-label={`Remove reach to Thread ${thread().thread_id}`} title="Remove this reach" onClick={() => drop(thread().thread_id)}><X class="size-3.5" /></button>
         </li>}</Show>}</For>
       </ul>

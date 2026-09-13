@@ -111,6 +111,8 @@ mod executor_conformance_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod thread_identity_tests;
+#[cfg(test)]
 mod thread_recovery_tests;
 #[cfg(test)]
 mod thread_tests;

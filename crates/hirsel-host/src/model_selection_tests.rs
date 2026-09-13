@@ -317,23 +317,20 @@ async fn the_codex_registry_stays_curated_when_it_is_the_selected_provider() {
 }
 
 #[tokio::test]
-async fn a_main_provider_the_host_did_not_boot_on_leaves_the_live_spec_alone() {
+async fn a_main_provider_the_host_did_not_boot_on_still_reaches_the_live_spec() {
     let dir = tempfile::tempdir().unwrap();
     let elsewhere = router_state(&dir, ProviderMode::Codex).await;
-    // Stored and reported...
+    // Stored, reported...
     assert_eq!(
         elsewhere.snapshot().model.provider_id.as_deref(),
         Some("router")
     );
     assert_eq!(elsewhere.current().id, "some/model");
-    // ...but the session was built on the booted provider's handle, so the
-    // spec it runs stays the booted provider's own.
+    // ...and run: the session is rebound to the chosen provider before its next
+    // turn, so the spec it runs is that provider's own.
     let spec = elsewhere.model_spec().unwrap();
-    assert_eq!(spec.id, "gpt-5.6-sol");
-    assert_eq!(spec.variant.effort(), Some("medium"));
-    // ...which is exactly what `applies_to_live_session` reports, so a model
-    // edit knows to persist without reconfiguring the running session.
-    assert!(!elsewhere.applies_to_live_session());
+    assert_eq!(spec.id, "some/model");
+    assert!(elsewhere.applies_to_live_session());
 
     // An agent still on the booted provider runs exactly what it selected.
     let booted_dir = tempfile::tempdir().unwrap();
@@ -347,6 +344,40 @@ async fn a_main_provider_the_host_did_not_boot_on_leaves_the_live_spec_alone() {
         .unwrap();
     assert_eq!(booted.model_spec().unwrap().variant.effort(), Some("xhigh"));
     assert!(booted.applies_to_live_session());
+
+    // A provider with no stored key is no route at all: the selection is kept
+    // and reported, while the live session stays on what it can still reach.
+    let keyless_dir = tempfile::tempdir().unwrap();
+    let store = store(&keyless_dir).await;
+    let roster = roster(&keyless_dir, &store, ProviderMode::Codex);
+    roster
+        .add(
+            "keyless",
+            "Keyless",
+            "https://example.invalid/v1",
+            "",
+            "k/m",
+        )
+        .await
+        .unwrap();
+    let choice = roster.selection_for("keyless").unwrap();
+    roster
+        .point_agent_at(
+            AgentSlot::Main,
+            &choice,
+            &ModelSelection {
+                id: "k/m".to_string(),
+                variant: "default".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let keyless = ModelSelectionState::load(ProviderMode::Codex, store, roster, "gpt-5.6-sol")
+        .await
+        .unwrap();
+    assert_eq!(keyless.current().id, "k/m");
+    assert_eq!(keyless.model_spec().unwrap().id, "gpt-5.6-sol");
+    assert!(!keyless.applies_to_live_session());
 }
 
 #[test]

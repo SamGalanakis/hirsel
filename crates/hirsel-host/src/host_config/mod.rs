@@ -140,6 +140,22 @@ impl ConfigStore {
         inner.source = source;
     }
 
+    /// A cheap identity for the configuration as it currently stands on disk.
+    /// It changes whenever the file's contents change — a Settings write or the
+    /// Owner's own editor, it makes no difference — so a caller that has to
+    /// *react* to configuration rather than merely read it can tell when to.
+    pub fn revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        self.reload_if_changed();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        inner.source.hash(&mut hasher);
+        hasher.finish()
+    }
+
     pub fn model_selection(&self, slot: hirsel_proto::AgentSlot) -> Option<(String, String)> {
         self.reload_if_changed();
         let inner = self
@@ -429,7 +445,7 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 # out to stay on whatever HIRSEL_PROVIDER booted. An OpenAI-compatible provider
 # takes any model id its endpoint offers; codex offers gpt-5.6-sol (low, medium,
 # high, xhigh, max) and gpt-6-astra (the same plus ultra). A model change applies
-# from the Agent's next turn; a provider change applies at the next host start.
+# from the Agent's next turn, and so does a provider change.
 [model]
 id = "deepseek/deepseek-v4.1-flash"
 variant = "default"

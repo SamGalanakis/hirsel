@@ -1,6 +1,6 @@
 # Hirsel host configuration
 
-Runtime-tunable host settings live in `hirsel.toml`, normally under `HIRSEL_DATA_DIR`. Set `HIRSEL_CONFIG` to use another path. The file is safe for the Owner or an Agent to edit and is hot-reloaded without restarting the host. Deployment/bootstrap settings such as ports, tokens, driver, and data directory remain environment variables. `HIRSEL_PROVIDER` is one too: it decides which provider the Host boots its agent session on, while the roster below decides which providers exist and which one each agent is pointed at from the next start.
+Runtime-tunable host settings live in `hirsel.toml`, normally under `HIRSEL_DATA_DIR`. Set `HIRSEL_CONFIG` to use another path. The file is safe for the Owner or an Agent to edit and is hot-reloaded without restarting the host. Deployment/bootstrap settings such as ports, tokens, driver, and data directory remain environment variables. `HIRSEL_PROVIDER` is one too: it decides which provider the Host boots its agent session on, while the roster below decides which providers exist and which one each agent is pointed at from its next turn.
 
 For loopback development, `HIRSEL_DEBUG=1` accepts any non-empty Owner token
 across WebSocket and authenticated HTTP routes. Debug mode forces the Host to
@@ -112,12 +112,19 @@ variant = "default"
 longer exists — or naming `claude` — is not a boot error either: the Host logs a
 warning and falls back to the booted provider.
 
-For the main Agent, `[model].provider` is what the Host boots on. At startup it
-resolves the main-agent provider once: the stored instance when it is set and
-can actually boot, the `HIRSEL_PROVIDER` default otherwise. An
-`openai_compatible` instance boots on **its own** `base_url` and `api_key` — an
-edit to either is picked up at the next start, and `OPENROUTER_API_KEY` is a
-first-boot seed that is never consulted again.
+For the main Agent, `[model].provider` is what every Thread runs on. At startup
+the Host resolves it once for the session it opens: the stored instance when it
+is set and can actually boot, the `HIRSEL_PROVIDER` default otherwise. It is not
+frozen there — a later change to `[model].provider`, from Settings or from this
+file, repoints the default route and every Thread session is rebound to it
+before its next turn. An `openai_compatible` instance runs on **its own**
+`base_url` and `api_key` — an edit to either is picked up when the Thread is next
+bound, and `OPENROUTER_API_KEY` is a first-boot seed that is never consulted
+again.
+
+A provider the Host cannot build a transport for — no `api_key` stored, an id
+that is not in the roster — is not a route: the choice stays stored and
+reported, a warning names it, and Threads keep running on the booted provider.
 
 A stored choice that cannot boot — no `api_key` stored, an id that is not in the
 roster, `claude` (Sub-agents only, ADR-0015), or `codex` with no readable

@@ -12,6 +12,9 @@ pub(super) struct ThreadRuntimeRegistry {
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
     lanes: Mutex<HashMap<u64, Arc<OnceCell<Arc<LaneRuntime>>>>>,
+    /// The configuration revision the default Native route was last derived
+    /// from, so admission re-derives it exactly when the file has changed.
+    config_revision: AtomicU64,
     pub(super) capacity: Arc<Semaphore>,
 }
 impl ThreadRuntimeRegistry {
@@ -36,6 +39,7 @@ impl ThreadRuntimeRegistry {
             broadcaster,
             broadcast_log,
             lanes: Mutex::new(HashMap::new()),
+            config_revision: AtomicU64::new(0),
             capacity: Arc::new(Semaphore::new(4)),
         })
     }
@@ -55,6 +59,14 @@ impl ThreadRuntimeRegistry {
         });
     }
 
+    /// Re-derive the default Native execution from the Owner's configuration.
+    ///
+    /// The default route is the Settings choice as it stands now, not the label
+    /// the host happened to boot with: a Thread session is rebound to whatever
+    /// provider its admitted turn was accepted for, so a provider change is
+    /// live rather than pending a restart. Called at startup, after a Settings
+    /// edit, and whenever the config file itself changes under the host.
+    /// Idempotent: an unchanged default is not written back.
     pub(super) async fn refresh_execution_default(&self) -> anyhow::Result<()> {
         let model = match &self.model_selection {
             Some(selection) => selection.model_spec()?,
@@ -64,16 +76,21 @@ impl ThreadRuntimeRegistry {
                 .build()
                 .map_err(|e| anyhow::anyhow!("invalid model metadata: {e}"))?,
         };
+        let (provider_id, _) = self.config.native_default_route();
         // The coding operations are rooted where the host was started, until a
         // Thread names its own directory.
         let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
+        let default = crate::storage::ThreadExecution::Native {
+            provider_id,
+            model,
+            cwd,
+        };
+        if self.tools.storage().native_execution_default().await.ok() == Some(default.clone()) {
+            return Ok(());
+        }
         self.tools
             .storage()
-            .set_native_execution_default(&crate::storage::ThreadExecution::Native {
-                provider_id: self.config.boot_plan.label().into(),
-                model,
-                cwd,
-            })
+            .set_native_execution_default(&default)
             .await
     }
     pub(super) async fn lane(&self, id: u64) -> anyhow::Result<Arc<LaneRuntime>> {
@@ -125,6 +142,18 @@ impl ThreadRuntimeRegistry {
     }
     async fn pump_pending(&self) -> anyhow::Result<()> {
         let _admission = self.admission.lock().await;
+        // `hirsel.toml` is hot-reloaded, and the provider it points the main
+        // Agent at is part of that promise: an edit — from Settings or from the
+        // Owner's own editor — repoints the default Native route before the
+        // next turn is admitted onto it.
+        let revision = self.config.config_store.revision();
+        if self
+            .config_revision
+            .swap(revision, std::sync::atomic::Ordering::SeqCst)
+            != revision
+        {
+            self.refresh_execution_default().await?;
+        }
         self.open_persisted_process_lanes().await?;
         for turn in self
             .tools

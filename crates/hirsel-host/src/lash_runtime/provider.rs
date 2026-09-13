@@ -19,6 +19,19 @@ pub struct RuntimeConfig {
     pub prompts: PromptConfig,
 }
 
+impl RuntimeConfig {
+    /// The provider a Thread runs on when it has not named one of its own, and
+    /// the plan that builds it. Derived from live configuration, so a Settings
+    /// or hand edit repoints it without a restart.
+    pub(crate) fn native_default_route(&self) -> (String, BootPlan) {
+        crate::boot_provider::native_default_route(
+            &self.config_store,
+            &self.providers,
+            &self.boot_plan,
+        )
+    }
+}
+
 /// The host-generated tail of the Agent's guidance: what the Owner's prompt
 /// body is followed by, whatever that body says. Not editable — a prompt edit
 /// must never be able to hide where the runtime configuration lives.
@@ -45,16 +58,10 @@ pub(super) struct ProviderUnavailable {
     pub(super) message: String,
 }
 
-pub(super) async fn build_provider(
-    config: &RuntimeConfig,
-) -> Result<ProviderHandle, ProviderUnavailable> {
-    build_provider_for_plan(config, &config.boot_plan).await
-}
-
-/// Build the transport for one resolved plan. The host boots on
-/// `config.boot_plan`; a Thread that names its own Native provider resolves a plan
-/// of its own through `boot_provider::plan_for` and arrives here with it, so
-/// both routes construct the same handles from the same credentials.
+/// Build the transport for one resolved plan. The default Native route and a
+/// Thread that names its own provider both resolve a plan through
+/// `boot_provider` and arrive here with it, so every route constructs its
+/// handle from the same credentials.
 pub(super) async fn build_provider_for_plan(
     config: &RuntimeConfig,
     plan: &BootPlan,

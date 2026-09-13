@@ -58,7 +58,12 @@ impl LashAgentRuntime {
         tasks: RuntimeTasks,
         capacity: Arc<tokio::sync::Semaphore>,
     ) -> anyhow::Result<LashStartup> {
-        let provider = match build_provider(&config).await {
+        // The session opens on the Owner's current default Native route, not on
+        // the label the host booted with: a provider change is live, and the
+        // first turn on this Thread is bound to the same route that Settings
+        // and Thread Info report.
+        let (route_provider_id, route_plan) = config.native_default_route();
+        let provider = match build_provider_for_plan(&config, &route_plan).await {
             Ok(provider) => provider,
             Err(ProviderUnavailable { message }) => {
                 tracing::warn!(%message, "Lash Agent provider unavailable; using degraded runtime");
@@ -211,7 +216,7 @@ impl LashAgentRuntime {
             history_id,
             tasks,
             native: std::sync::RwLock::new(NativeBinding {
-                provider_id: config.boot_plan.label().into(),
+                provider_id: route_provider_id.clone(),
                 provider,
             }),
             coding,
@@ -256,7 +261,7 @@ impl LashAgentRuntime {
         tracing::info!(
             model = %runtime.session.policy_snapshot().model.id,
             variant = ?runtime.session.policy_snapshot().model.variant,
-            provider = config.boot_plan.label(),
+            provider = %route_provider_id,
             env_mode = ?config.provider_mode,
             data_dir = %config.data_dir.display(),
             session_id = %runtime.session_id,
@@ -315,7 +320,7 @@ impl LashAgentRuntime {
         // The provider the host booted on is always reachable, roster or
         // not: the legacy `anthropic` mode and the env provider modes are boot
         // labels rather than roster instances, and a Thread returning to the
-        // Settings default names one of them.
+        // Settings default may name one of them.
         let plan = if provider_id == self.config.boot_plan.label() {
             self.config.boot_plan.clone()
         } else {

@@ -368,14 +368,31 @@ impl ModelSelectionState {
         validate_in_mode(&self.mode(), AgentSlot::Main, model_id, variant)
     }
 
-    /// Whether the stored choice is the one the live session actually runs on.
+    /// Whether the stored choice is one the live session can actually be put
+    /// on.
     ///
-    /// False means the Owner has pointed the main Agent at some other provider:
-    /// the selection is still stored and reported, but nothing about it may
-    /// reach the running session — its `ProviderHandle` was baked in at boot
-    /// and a model id from the new provider's registry means nothing there.
+    /// A Native session is rebound to whatever provider an admitted turn was
+    /// accepted for, so the booted provider is no longer special: the only
+    /// thing that can keep a stored choice off the live session is a provider
+    /// the host cannot build a transport for at all — a roster instance with no
+    /// stored key, say. That one stays stored and reported while the session
+    /// keeps running on the booted provider.
     pub fn applies_to_live_session(&self) -> bool {
-        self.mode().provider_id() == self.roster.booted_provider_id()
+        self.is_routable(&self.mode())
+    }
+
+    /// Whether a mode's provider can be built right now. The booted provider
+    /// always can — the env modes are boot labels rather than roster instances
+    /// and carry their own credentials — and every other id resolves through
+    /// the same plan the Native route resolves through.
+    fn is_routable(&self, mode: &SelectionMode) -> bool {
+        match mode.provider_id() {
+            None => true,
+            Some(id) => {
+                Some(id) == self.roster.booted_provider_id()
+                    || crate::boot_provider::plan_for(&self.config_store, id).is_ok()
+            }
+        }
     }
 
     pub async fn persist_and_select(&self, selection: ModelSelection) -> anyhow::Result<()> {
@@ -389,14 +406,14 @@ impl ModelSelectionState {
         Ok(())
     }
 
-    /// What the live Lash session runs. The `ProviderHandle` is built once at
-    /// boot and baked into the session, so a main-agent provider pointed
-    /// somewhere else is stored and reported but never applied: the running
-    /// session keeps the booted provider's own selection until the host
-    /// restarts.
+    /// What the live Lash session runs: the stored selection under the stored
+    /// provider, because the session is rebound to that provider before the
+    /// next turn is enqueued. Only a provider the host cannot build a transport
+    /// for falls back — to the booted provider's own selection, which is what
+    /// the session stays on.
     pub fn model_spec(&self) -> anyhow::Result<lash::ModelSpec> {
         let mode = self.mode();
-        if mode.provider_id() == self.roster.booted_provider_id() {
+        if self.is_routable(&mode) {
             return model_spec_in(&mode, &self.selection_in(&mode));
         }
         let booted = SelectionMode::Curated {

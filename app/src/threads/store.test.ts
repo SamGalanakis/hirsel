@@ -8,7 +8,7 @@ import { setHistoryId } from "../lib/history";
 const sent: ThreadClientMessage[] = [];
 beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localStorage",{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}); sent.length = 0; history.replaceState(null, "", "/"); setHistoryId("test-history"); flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: 0, error: null }); })); attachThreadTransport(frame => sent.push(frame)); });
 afterEach(() => { disconnectThreads(); vi.useRealTimers();vi.unstubAllGlobals(); });
-const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], turn_timelines: [], activities: [], related_items: [], has_more: false });
+const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], turn_timelines: [], activities: [], related_items: [], grants: [], has_more: false });
 describe("thread transport projection", () => {
   it("clears an archived focused Thread only after its correlated action is accepted, preserving history and draft", async () => {
     const retained = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 1, thread_id: 1, author: "owner" as const, body: "Keep this conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false };

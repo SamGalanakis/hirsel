@@ -1,8 +1,87 @@
-//! Thread coordination authority. Topology is immutable; IDs never grant access.
+//! Thread coordination authority. Topology is immutable; reach is durable data.
+//!
+//! Every ID is addressable: an out-of-reach target is refused in the open, as a
+//! typed [`OutsideGrant`] the tool layer turns into a readable refusal, never a
+//! pretence that the Thread does not exist.
 use super::{Storage, thread_activity, threads};
-use hirsel_proto::{Thread, ThreadBrief, ThreadTurnState};
+use hirsel_proto::{Thread, ThreadBrief, ThreadGrant, ThreadTurnState};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+
+/// The reachable set: the caller's own subtree, plus the subtree of every
+/// Thread its durable grants name. Bound `?1` is the calling Thread.
+pub(super) const REACH_CTE: &str = "WITH RECURSIVE roots(id) AS (
+    SELECT ?1 UNION SELECT target_thread_id FROM thread_grants WHERE thread_id=?1
+), scope(id) AS (
+    SELECT id FROM roots UNION SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id
+)";
+
+/// What the caller addressed and could not reach. Carried as a typed error so
+/// one refusal reads the same at every layer it crosses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutsideGrant {
+    pub target: RefusedTarget,
+    pub reason: RefusalReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RefusedTarget {
+    Thread { thread_id: u64 },
+    Artifact { artifact_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RefusalReason {
+    /// The target exists and is simply not in this Thread's reach.
+    OutsideGrant,
+    /// The one fence a grant cannot open: a Thread never messages upward.
+    OwnerFence,
+}
+
+impl RefusalReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::OutsideGrant => "outside_grant",
+            Self::OwnerFence => "owner_fence",
+        }
+    }
+}
+impl std::fmt::Display for OutsideGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target = match self.target {
+            RefusedTarget::Thread { thread_id } => format!("Thread #{thread_id}"),
+            RefusedTarget::Artifact { artifact_id } => format!("Artifact {artifact_id}"),
+        };
+        match self.reason {
+            RefusalReason::OutsideGrant => {
+                write!(f, "{target} is outside this Thread's grant")
+            }
+            RefusalReason::OwnerFence => write!(
+                f,
+                "{target} is an ancestor; report to your requester instead of messaging upward"
+            ),
+        }
+    }
+}
+impl std::error::Error for OutsideGrant {}
+impl OutsideGrant {
+    fn thread(thread_id: u64) -> anyhow::Error {
+        Self {
+            target: RefusedTarget::Thread { thread_id },
+            reason: RefusalReason::OutsideGrant,
+        }
+        .into()
+    }
+    pub(super) fn owner_fence(thread_id: u64) -> anyhow::Error {
+        Self {
+            target: RefusedTarget::Thread { thread_id },
+            reason: RefusalReason::OwnerFence,
+        }
+        .into()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -35,11 +114,26 @@ enum ThreadCallerAuthority {
 
 pub(super) fn authorize(c: &Connection, caller: u64, target: u64) -> anyhow::Result<()> {
     let allowed: bool = c.query_row(
-        "WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT EXISTS(SELECT 1 FROM scope WHERE id=?2)",
-        params![caller,target], |r| r.get(0),
+        &format!("{REACH_CTE} SELECT EXISTS(SELECT 1 FROM scope WHERE id=?2)"),
+        params![caller, target],
+        |r| r.get(0),
     )?;
-    anyhow::ensure!(allowed, "Thread is unavailable in this scope");
-    Ok(())
+    if allowed {
+        return Ok(());
+    }
+    Err(OutsideGrant::thread(target))
+}
+/// True when `ancestor` is a strict ancestor of `thread`. Topology is immutable,
+/// so this is the one relation a grant is never allowed to reverse.
+pub(super) fn is_ancestor(c: &Connection, ancestor: u64, thread: u64) -> anyhow::Result<bool> {
+    Ok(c.query_row(
+        "WITH RECURSIVE up(id) AS (
+            SELECT parent_thread_id FROM threads WHERE id=?2
+            UNION SELECT t.parent_thread_id FROM threads t JOIN up u ON t.id=u.id
+        ) SELECT EXISTS(SELECT 1 FROM up WHERE id=?1)",
+        params![ancestor, thread],
+        |r| r.get(0),
+    )?)
 }
 pub(super) fn validate_history(c: &Connection, history_id: &str) -> anyhow::Result<()> {
     let current: String =
@@ -114,7 +208,9 @@ pub(super) fn resolve(c: &Connection, caller: u64, reference: &ThreadRef) -> any
                     params![id, parent],
                     |r| r.get(0),
                 )?;
-                anyhow::ensure!(valid, "Thread is unavailable in this scope");
+                if !valid {
+                    return Err(OutsideGrant::thread(id));
+                }
                 parent = id;
             }
             parent
@@ -130,14 +226,21 @@ pub(super) fn authorize_artifact(
     artifact_id: u64,
 ) -> anyhow::Result<()> {
     let allowed: bool = c.query_row(
-        "WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id)
+        &format!("{REACH_CTE}
         SELECT EXISTS(SELECT 1 FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id WHERE r.artifact_id=?2
         UNION ALL SELECT 1 FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id WHERE r.artifact_id=?2
-        UNION ALL SELECT 1 FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id=?2)",
-        params![caller,artifact_id], |r| r.get(0),
+        UNION ALL SELECT 1 FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id=?2)"),
+        params![caller, artifact_id],
+        |r| r.get(0),
     )?;
-    anyhow::ensure!(allowed, "Artifact is unavailable in this scope");
-    Ok(())
+    if allowed {
+        return Ok(());
+    }
+    Err(OutsideGrant {
+        target: RefusedTarget::Artifact { artifact_id },
+        reason: RefusalReason::OutsideGrant,
+    }
+    .into())
 }
 
 #[derive(Debug, Serialize)]
@@ -160,8 +263,25 @@ pub(crate) struct ThreadContext {
     pub thread: Thread,
     pub ancestors: Vec<AncestorIdentity>,
     pub brief: ThreadBrief,
+    /// Durable widenings beyond self + descendants, with the one-line summary
+    /// the Owner sees in the web reach strip.
+    pub grants: Vec<ThreadGrant>,
+    pub reach: String,
 }
 impl Storage {
+    /// A Thread never addresses its own ancestors with work: it reports to the
+    /// requester that asked for it. Reach can widen sideways, never upward.
+    pub(crate) async fn refuse_upward(
+        &self,
+        caller: &ThreadCaller,
+        target: u64,
+    ) -> anyhow::Result<()> {
+        let c = self.conn.lock().await;
+        if is_ancestor(&c, target, caller.thread_id)? {
+            return Err(OutsideGrant::owner_fence(target));
+        }
+        Ok(())
+    }
     pub(crate) async fn thread_in_scope(
         &self,
         caller_thread_id: u64,
@@ -256,6 +376,8 @@ impl Storage {
             thread,
             ancestors,
             brief,
+            grants: super::thread_grants::list(&c, caller.thread_id)?,
+            reach: super::thread_grants::reach_summary(&c, caller.thread_id)?,
         })
     }
     pub(crate) async fn authorize_thread_artifact(

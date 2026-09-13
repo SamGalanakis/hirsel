@@ -45,5 +45,6 @@ mod tests;
 
 pub use thread::{
     Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail, ThreadExecutionTarget,
-    ThreadIcon, ThreadKind, ThreadRelatedItem, ThreadRelatedTarget, ThreadTurn, ThreadTurnState,
+    ThreadGrant, ThreadGrantSource, ThreadIcon, ThreadKind, ThreadRelatedItem, ThreadRelatedTarget,
+    ThreadTurn, ThreadTurnState,
 };

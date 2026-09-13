@@ -451,14 +451,18 @@ async fn agent_image_artifacts_are_normalized_and_scope_is_enforced() {
         .unwrap()
         .0;
     tools.operation_id = "foreign-image".into();
-    assert!(
-        tools
-            .execute(
-                "threads_update",
-                &json!({"thread":foreign.id,"icon":{"kind":"emoji","value":"⛔"}}),
-            )
-            .await
-            .is_err()
+    // The ID is addressable; the write is refused in the open and changes nothing.
+    let refused = tools
+        .execute(
+            "threads_update",
+            &json!({"thread":foreign.id,"icon":{"kind":"emoji","value":"⛔"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused["refused"], json!(true));
+    assert_eq!(
+        refused["target"],
+        json!({"kind":"thread","thread_id":foreign.id})
     );
     assert!(
         state

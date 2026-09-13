@@ -62,8 +62,19 @@ export interface ThreadRelatedItem {
   title: string | null;
   created_at: string;
 }
+export type ThreadGrantSource = { kind: "owner" } | { kind: "thread"; thread_id: number };
+/** One durable widening of a Thread's reach beyond self + descendants. */
+export interface ThreadGrant {
+  thread_id: number;
+  target_thread_id: number;
+  title: string;
+  granted_by: ThreadGrantSource;
+  granted_at: string;
+  note: string | null;
+}
 export interface ThreadDetail {
   related_items: ThreadRelatedItem[];
+  grants: ThreadGrant[];
   brief: { text: string; artifact_ids: number[] };
   thread: Thread;
   messages: ChatMessage[];
@@ -74,6 +85,7 @@ export interface ThreadDetail {
 }
 export type ThreadServerMessage =
   | { type: "thread_related_changed"; client_id: string | null; history_id: string; thread_id: number; revision: number; items: ThreadRelatedItem[] }
+  | { type: "thread_grants_changed"; client_id: string | null; history_id: string; thread_id: number; revision: number; grants: ThreadGrant[] }
   | { type: "thread_upsert"; thread: Thread }
   | { type: "thread_created"; client_id: string; thread: Thread }
   | { type: "thread_action_applied"; client_id: string; history_id: string; thread_id: number }
@@ -83,6 +95,8 @@ export type ThreadServerMessage =
 export type ThreadClientMessage =
   | { type: "add_thread_related"; client_id: string; history_id: string; thread_id: number; target: RelatedTarget; title: string | null }
   | { type: "remove_thread_related"; client_id: string; history_id: string; thread_id: number; item_id: number }
+  | { type: "grant_thread_reach"; client_id: string; history_id: string; thread_id: number; target_thread_id: number; note: string | null }
+  | { type: "revoke_thread_reach"; client_id: string; history_id: string; thread_id: number; target_thread_id: number }
   | { type: "create_thread"; client_id: string; history_id: string; title: string; kind: ThreadKind; parent_thread_id: number | null }
   | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null }
   | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }

@@ -69,7 +69,7 @@ Human Hello contains the full flat forest; agents receive a separate trusted cal
 
 Selection uses an explicit route, then a valid saved selection from this history, otherwise no recipient. An unavailable explicit route remains unavailable rather than selecting another Thread. `/t/0?history={uuid}` is an ordinary route. Portable links require their history UUID; unqualified, malformed, wrong-history and missing destinations have no recipient. The incoming URL survives a history reset until validated by the current hello. Cached IDs do not authorize navigation or sending before that handshake. The overview `/` has no implicit composer; reset clears old focus before replay. Native push destinations carry history and Thread identity and reject obsolete histories.
 
-Agent tools enforce self/subtree access after resolving numeric or caller-relative child paths. `threads_create` and `threads_update` accept typed emoji icons plus image `blob_id` or accessible base64 file `artifact_id` sources; the Host applies the same raster validation and stores a center-cropped 256 px WebP, with a bounded JPEG fallback for high-entropy images. Direct dispatch is restricted to direct children; reports have a captured upward route. Human UI remains full-tree. Explicit message/activity/brief artifact references authorize current-content access and edits without disclosing other conversations. No client filtering substitutes for host enforcement.
+Agent tools are fenced, not scoped away: every tool accepts any numeric Thread or artifact ID as well as caller-relative child paths, and a target outside the caller's reach returns a typed refusal result rather than an error (see Reach and grants). `threads_create` and `threads_update` accept typed emoji icons plus image `blob_id` or accessible base64 file `artifact_id` sources; the Host applies the same raster validation and stores a center-cropped 256 px WebP, with a bounded JPEG fallback for high-entropy images. Dispatch and messaging reach anything inside the grant, but never the caller's own ancestors; reports have a captured upward route. Human UI remains full-tree. Explicit message/activity/brief artifact references authorize current-content access and edits without disclosing other conversations. No client filtering substitutes for host enforcement.
 
 ## Human artifact references
 
@@ -85,12 +85,23 @@ Human acceptance validates existing IDs using human-global authority and atomica
 
 `thread_related_changed {client_id: string|null, history_id, thread_id, revision, items}` carries the complete current list. Durable human mutation receipts acknowledge retries with the current list, so replaying an old add after removal cannot resurrect an item. Clients reject a different history and revisions older than the last applied **Related snapshot**, independently of newer unrelated Thread metadata revisions. Equal revisions are accepted. Read responses are correlated to their original history/Thread so delayed pre-reset results cannot populate reused IDs. Reconnect/open reloads this snapshot.
 
+## Reach and grants
+
+A Thread's reach is itself and its descendants, widened by explicit grants. `ThreadDetail.grants` is a required complete list of `{thread_id, target_thread_id, title, granted_by, granted_at, note}`; `granted_by` is `{kind:"owner"}` or `{kind:"thread", thread_id}`. A grant makes the named Thread **and its whole subtree** addressable, exactly like the default subtree. Reach is one-way, a grant restating the default reach is rejected rather than stored, and reach never reparents a Thread or changes human visibility.
+
+Human `grant_thread_reach {client_id, history_id, thread_id, target_thread_id, note}` and `revoke_thread_reach {client_id, history_id, thread_id, target_thread_id}` are the Owner's edits. Agents use the `threads.grant`/`threads.revoke` tools, which are themselves fenced: only a strict ancestor may widen a Thread, only with reach it already holds, and never itself. Narrowing needs no reach of its own, so an ancestor may remove a grant the Owner made.
+
+`thread_grants_changed {client_id: string|null, history_id, thread_id, revision, grants}` carries the complete current list. Durable mutation receipts acknowledge retries with the current list. Clients reject a different history and revisions older than the last applied **reach snapshot**, independently of newer unrelated Thread metadata revisions; equal revisions are accepted. Reconnect/open reloads this snapshot from `thread_opened`.
+
+Naming an unreachable Thread or artifact is never an error and never a lie. The tool result is `{refused: true, reason, target, tool, grant_summary, detail}`, where `reason` is `outside_grant` or `owner_fence` and `target` is `{kind:"thread", thread_id}` or `{kind:"artifact", artifact_id}`. Each refusal writes exactly one durable `refusal` Thread activity, never deduplicated, rendered in conversation as a note. `owner_fence` covers the one fence a grant cannot open: a Thread never addresses its own ancestors with work, it reports to its requester.
+
 Copy thread link emits an absolute same-origin `/t/{id}?history={uuid}` HTTP(S) URL. Copy reference emits ordinary Markdown `[Thread #id](URL)`. Local `#id` shorthand resolves only in its message's current history. Conversation Markdown links, including reference-style links, use one native anchor renderer with adjacent Open, Copy and explicit Add to Related actions. Local Thread URLs resolve only at the app origin; lookalikes are external links. Related combines saved references with the canonical artifact inventory; artifact preview Markdown remains inert inside its isolated frame.
 
-The Host uses one canonical storage schema 7: emoji/image Thread icons with the
+The Host uses one canonical storage schema 9: emoji/image Thread icons with the
 `threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
-authority, and no `monitors` table. Only the exact layout or an empty store is
-accepted; older and branch-specific schema 7 layouts are refused without modification.
+authority, durable `thread_grants` reach, and no `monitors` table. Only the exact
+layout or an empty store is accepted; older and branch-specific layouts are
+refused without modification.
 
 ### Process conversation delivery
 

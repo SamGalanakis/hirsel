@@ -26,11 +26,13 @@ async fn scoped_views_and_shell_reject_foreign_or_cancelled_execution() {
         .await
         .is_err()
     );
-    assert!(
-        peer.execute("views_clear", &json!({"instance_id":"same-name"}))
-            .await
-            .is_err()
-    );
+    // A peer's view is addressable and refused, never silently reachable.
+    let refused = peer
+        .execute("views_clear", &json!({"instance_id":"same-name"}))
+        .await
+        .unwrap();
+    assert_eq!(refused["refused"], json!(true));
+    assert_eq!(refused["reason"], json!("outside_grant"));
     storage
         .request_thread_cancellation(&a.history_id, a.thread_id)
         .await

@@ -1,4 +1,5 @@
 import { attachRelatedTransport, disconnectRelated, handleRelatedMessage, resetRelated, trackRelatedRead } from "../related/store";
+import { attachGrantTransport, disconnectGrants, handleGrantMessage, resetGrants } from "../grants/store";
 import { acceptHistory } from "../lib/history";
 import { attachArtifactTransport, disconnectArtifacts, handleArtifactMessage, resetArtifacts } from "../artifacts/store";
 import { attachThreadTransport, disconnectThreads, handleThreadMessage, resetThreads } from "../threads/store";
@@ -108,6 +109,7 @@ class HirselWsClient {
     this.closedByClient = true;
     disconnectThreads();
     disconnectRelated();
+    disconnectGrants();
     disconnectArtifacts();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.clearRequests("Connection closed.");
@@ -361,6 +363,7 @@ class HirselWsClient {
       this.authenticated = false;
       disconnectThreads();
     disconnectRelated();
+    disconnectGrants();
     disconnectArtifacts();
       if (this.closedByClient) return;
       if (AUTH_REJECT_CODES.has((event as CloseEvent).code)) {
@@ -386,6 +389,7 @@ class HirselWsClient {
     this.closedByClient = true;
     disconnectThreads();
     disconnectRelated();
+    disconnectGrants();
     disconnectArtifacts(); // suppress any in-flight reconnect/close paths
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -414,14 +418,16 @@ class HirselWsClient {
 
   private handleServerMessage(message: ServerMessage): void {
     if (message.type === "hello_ok") {
-      if (acceptHistory(message.history_id)) { this.clearRequests("History was reset. Start this request again."); resetThreads(); resetArtifacts(); resetRelated(); }
+      if (acceptHistory(message.history_id)) { this.clearRequests("History was reset. Start this request again."); resetThreads(); resetArtifacts(); resetRelated(); resetGrants(); }
       this.authenticated = true;
       attachThreadTransport(frame => { trackRelatedRead(frame, message.history_id); this.sendFrame(frame); });
       attachRelatedTransport(frame => this.sendFrame(frame));
+      attachGrantTransport(frame => this.sendFrame(frame));
       attachArtifactTransport(frame => this.sendFrame(frame));
     }
     handleArtifactMessage(message);
     handleRelatedMessage(message);
+    handleGrantMessage(message);
     handleThreadMessage(message);
     switch (message.type) {
       case "hello_ok": {

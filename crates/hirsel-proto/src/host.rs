@@ -86,6 +86,15 @@ pub enum HostToClient {
         revision: u64,
         items: Vec<crate::ThreadRelatedItem>,
     },
+    /// A Thread's durable reach changed. Like related items, the snapshot is
+    /// complete and carries the Thread revision it was read at.
+    ThreadGrantsChanged {
+        client_id: Option<String>,
+        history_id: String,
+        thread_id: u64,
+        revision: u64,
+        grants: Vec<crate::ThreadGrant>,
+    },
     ThreadCreated {
         client_id: String,
         thread: crate::Thread,

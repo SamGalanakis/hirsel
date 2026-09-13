@@ -6,10 +6,20 @@ export type ConversationEntry =
   | { key: string; kind: "turn"; turn: ThreadTurn }
   | { key: string; kind: "activity"; activity: ThreadActivity };
 function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+/** A refusal is a durable fact the Owner reads in the conversation: what the
+ * Thread tried to address, and why its reach did not cover it. */
+function refusalText(data: Record<string, unknown>): string {
+  const target = record(data.target);
+  const named = target.kind === "artifact" ? `Artifact ${String(target.artifact_id)}` : `Thread ${String(target.thread_id)}`;
+  const tool = typeof data.tool === "string" ? data.tool.replace(/_/g, ".") : "call";
+  const reason = data.reason === "owner_fence" ? "reports go to its requester, not upward" : "outside grant";
+  return `Refused: ${tool} ${named} — ${reason}`;
+}
 /** Plugin envelopes are a current protocol shape, selected by kind. */
 export function activityText(activity: ThreadActivity): string {
   const data = activity.kind.startsWith("plugin.") ? record(record(activity.data).payload) : record(activity.data);
   const kind = activity.kind.replace(/^plugin\./, "");
+  if (kind === "refusal") return refusalText(data);
   const fields = kind === "child_report" ? [data.summary] : kind === "delegation_received" ? [data.brief] : kind === "info" || kind === "summary" ? [data.description, data.content_md] : kind === "process_completed" ? [data.summary] : kind === "scheduled_digest" ? [data.text] : [];
   return fields.filter((value): value is string => typeof value === "string" && value.length > 0).join("\n\n");
 }

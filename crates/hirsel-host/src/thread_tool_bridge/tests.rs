@@ -124,7 +124,14 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
     )
     .await
     .unwrap();
-    assert_eq!(denied["result"]["isError"], true);
+    // Out of reach is a readable refusal, not a transport failure: the call
+    // succeeded and its result says exactly what was refused and why.
+    assert_eq!(denied["result"]["isError"], false, "{denied}");
+    let refusal: serde_json::Value =
+        serde_json::from_str(denied["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(refusal["refused"], true);
+    assert_eq!(refusal["reason"], "outside_grant");
+    assert_eq!(refusal["target"]["thread_id"], other.id);
     let calls = bridge.tool_calls().await;
     assert_eq!(
         calls,
@@ -137,7 +144,7 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
             hirsel_proto::ToolCallSummary {
                 id: "actual:denied".into(),
                 name: "threads_read".into(),
-                ok: false
+                ok: true
             }
         ]
     );

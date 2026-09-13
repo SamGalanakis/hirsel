@@ -103,7 +103,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_context",
             "threads_context",
-            "Read your identity, bounded ancestor names and this accepted turn assignment. No parent or peer transcript.",
+            "Read your identity, bounded ancestor names, this accepted turn assignment, and your current reach: the grants that widen you beyond self + descendants. No parent or peer transcript.",
             empty_object_input_schema(),
             json!({"type":"object"}),
             ["threads"],
@@ -123,7 +123,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_send",
             "threads_send",
-            "Send a follow-up only to a direct child, using its stored execution backend. Returns its accepted turn identity.",
+            "Send a message to any Thread within your reach — a child, or a peer the Owner or an ancestor granted you — using its stored execution backend. Returns its accepted turn identity. Never addresses an ancestor: work reports upward through threads.report, it does not message upward.",
             thread_send_schema(),
             json!({"type":"object"}),
             ["threads"],
@@ -200,6 +200,24 @@ pub(super) fn hirsel_tool_definitions(
             json!({"type":"object"}),
             ["threads"],
             "remove_related",
+        ),
+        tool_definition(
+            "hirsel.threads_grant",
+            "threads_grant",
+            "Widen one descendant Thread's reach to a Thread you can already reach, so it may address that Thread and its subtree directly. You cannot widen yourself, and you cannot hand on reach you do not hold. Durable and visible to the Owner, who can revoke it.",
+            thread_grant_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "grant",
+        ),
+        tool_definition(
+            "hirsel.threads_revoke",
+            "threads_revoke",
+            "Remove one grant from a descendant Thread's reach. Narrowing always succeeds for an ancestor, including for a grant the Owner made. Default reach — self and descendants — is not a grant and cannot be removed.",
+            thread_revoke_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "revoke",
         ),
         tool_definition(
             "hirsel.threads_activity",

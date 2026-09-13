@@ -14,6 +14,8 @@ pub(crate) mod process_deliveries;
 mod push_tokens;
 mod schema;
 
+mod thread_grants;
+pub(crate) use thread_grants::ThreadGrants;
 mod thread_related;
 pub(crate) use thread_related::ThreadRelated;
 mod thread_activity;
@@ -35,7 +37,7 @@ mod thread_read;
 pub(crate) use thread_mutations::{RelatedTargetInput, ThreadMutation};
 mod thread_delegation;
 pub(crate) use thread_delegation::Delegation;
-pub(crate) use thread_scope::{ThreadCaller, ThreadRef};
+pub(crate) use thread_scope::{OutsideGrant, ThreadCaller, ThreadRef};
 
 use std::path::Path;
 use std::path::PathBuf;

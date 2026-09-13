@@ -598,6 +598,7 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
                 client_id,
                 detail: hirsel_proto::ThreadDetail {
                     related_items: vec![],
+                    grants: vec![],
                     brief: hirsel_proto::ThreadBrief {
                         text: "Current assignment".into(),
                         artifact_ids: vec![44],
@@ -856,6 +857,7 @@ async fn lost_open_ack_retries_same_identity_after_reconnect() {
                 client_id: retry_id,
                 detail: hirsel_proto::ThreadDetail {
                     related_items: vec![],
+                    grants: vec![],
                     brief: hirsel_proto::ThreadBrief {
                         text: "Retried open".into(),
                         artifact_ids: vec![],
@@ -914,6 +916,7 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
                 client_id,
                 detail: hirsel_proto::ThreadDetail {
                     related_items: vec![],
+                    grants: vec![],
                     brief: hirsel_proto::ThreadBrief {
                         text: "Initial detail".into(),
                         artifact_ids: vec![],
@@ -1105,6 +1108,7 @@ async fn live_assignment_refreshes_current_brief_without_user_reopen() {
                     client_id,
                     detail: hirsel_proto::ThreadDetail {
                         related_items: vec![],
+                        grants: vec![],
                         thread: thread(5, false, false),
                         brief: hirsel_proto::ThreadBrief {
                             text: text.into(),
@@ -1180,6 +1184,7 @@ async fn saved_link_commands_snapshots_and_correlated_results_cross_native_trans
                         artifact_ids: vec![44],
                     },
                     related_items: vec![saved.clone()],
+                    grants: vec![],
                     messages: vec![],
                     turns: vec![],
                     turn_timelines: vec![],

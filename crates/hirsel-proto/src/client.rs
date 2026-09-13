@@ -82,6 +82,22 @@ pub enum ClientToHost {
         thread_id: u64,
         item_id: u64,
     },
+    /// Owner widening of one Thread's reach. The target and its subtree become
+    /// addressable from `thread_id`; no other Thread is affected.
+    GrantThreadReach {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        target_thread_id: u64,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    RevokeThreadReach {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        target_thread_id: u64,
+    },
     SendThreadMessage {
         client_id: String,
         history_id: String,

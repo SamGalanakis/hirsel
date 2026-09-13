@@ -210,3 +210,20 @@ CREATE TABLE thread_related_receipts (
     client_id TEXT PRIMARY KEY,
     payload TEXT NOT NULL
 );
+
+CREATE TABLE thread_grants (
+    thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    target_thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    granted_by TEXT NOT NULL CHECK(granted_by IN ('owner','thread')),
+    granted_by_thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE,
+    granted_at TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY(thread_id,target_thread_id),
+    CHECK(thread_id != target_thread_id),
+    CHECK((granted_by='thread') = (granted_by_thread_id IS NOT NULL))
+);
+CREATE INDEX thread_grants_target ON thread_grants(target_thread_id,thread_id);
+CREATE TABLE thread_grant_receipts (
+    client_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL
+);

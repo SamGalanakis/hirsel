@@ -117,7 +117,7 @@ describe("thread workspace", () => {
     fireEvent.click(retry);
     const retryRequest = sent.findLast(frame => frame.type === "open_thread")!;
     if (retryRequest.type !== "open_thread") throw new Error("missing retry");
-    flush(() => handleThreadMessage({ type: "thread_opened", client_id: retryRequest.client_id, detail: { brief: { text: "", artifact_ids: [] }, thread: makeThread(1), messages: [], activities: [], turns: [], turn_timelines: [], related_items: [], has_more: false } }));
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: retryRequest.client_id, detail: { brief: { text: "", artifact_ids: [] }, thread: makeThread(1), messages: [], activities: [], turns: [], turn_timelines: [], related_items: [], grants: [], has_more: false } }));
     await waitFor(() => expect(view.queryByRole("button", { name: "Retry loading conversation" })).toBeNull());
     expect(view.container.querySelector("textarea")!.value).toBe("Keep this draft");
     expect(threadState.focusedId).toBe(1);
@@ -367,7 +367,7 @@ it("renders the exact persisted timeline from a fresh open_thread snapshot", asy
   const agent = { id: 71, thread_id: 1, author: "agent" as const, body: "Inspection complete", ref: 70, ts: "2026-09-10T10:00:02Z", tool_calls: [{ id: "shell-1", name: "shell_run", ok: true }] };
   const turn = { requester_thread_id: null, requester_turn_id: null, id: 72, thread_id: 1, owner_message_id: 70, agent_message_id: 71, state: "completed" as const, accepted_at: owner.ts, started_at: owner.ts, finished_at: agent.ts };
   flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
-    ...({ brief: { text: "", artifact_ids: [] }, thread: makeThread(1), activities: [], related_items: [], has_more: false }),
+    ...({ brief: { text: "", artifact_ids: [] }, thread: makeThread(1), activities: [], related_items: [], grants: [], has_more: false }),
     messages: [owner, agent], turns: [turn],
     turn_timelines: [{ turn_id: 72, events: [
       { seq: 1, event: { kind: "reasoning", text: "Checking storage first." } },
@@ -530,7 +530,7 @@ it("keeps current brief reachable beyond the visible history page without moving
   if (frame?.type !== "open_thread") throw new Error("Missing open");
   const assignment = { id: 10, thread_id: 1, turn_id: 9, kind: "delegation_received", artifact_ids: [44], data: { requester_thread_id: 0, requester_turn_id: null, brief: "Review only the keyboard flow." }, ts: "2026-09-01T10:00:00Z" };
   flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
-    thread: makeThread(1, { parent_thread_id: 0 }), brief: { text: "Review only the keyboard flow.", artifact_ids: [44] }, related_items: [], has_more: true,
+    thread: makeThread(1, { parent_thread_id: 0 }), brief: { text: "Review only the keyboard flow.", artifact_ids: [44] }, related_items: [], grants: [], has_more: true,
     messages: [{ id: 100, thread_id: 1, author: "owner", body: "Latest conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], turn_timelines: [], activities: [assignment],
   } }));
   expect(view.container.querySelector('[data-activity-id="10"]')).toBeNull();

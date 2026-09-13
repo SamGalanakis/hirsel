@@ -27,6 +27,29 @@ impl ToolSuite {
         });
         Ok(())
     }
+    pub(crate) async fn publish_thread_grants(
+        &self,
+        client_id: Option<String>,
+        result: crate::storage::ThreadGrants,
+    ) -> anyhow::Result<()> {
+        // Reach is Owner-visible state: the broadcast is a fresh complete
+        // snapshot read while history cannot reset, never the caller's view.
+        let (_guard, current) = self
+            .storage
+            .grants_publication_snapshot(&result.history_id, result.thread_id)
+            .await?;
+        self.broadcast(HostToClient::ThreadUpsert {
+            thread: current.thread,
+        });
+        self.broadcast(HostToClient::ThreadGrantsChanged {
+            client_id,
+            history_id: current.history_id,
+            thread_id: current.thread_id,
+            revision: current.revision,
+            grants: current.grants,
+        });
+        Ok(())
+    }
     pub(crate) async fn publish_showcase_artifacts(
         &self,
         history: &str,

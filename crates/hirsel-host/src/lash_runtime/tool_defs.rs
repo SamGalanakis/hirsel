@@ -124,7 +124,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_send",
             "threads_send",
-            "Send a message to any Thread within your reach — a child, or a peer the Owner or an ancestor granted you — using its stored execution backend. Returns its accepted turn identity. Never addresses an ancestor: work reports upward through threads.report, it does not message upward.",
+            "Send a message to any Thread within your reach — a child, or a peer the Owner or an ancestor granted you — using its stored execution backend. Returns its accepted turn identity. Never addresses an ancestor unless this Thread holds root reach: otherwise work reports upward through threads.report, it does not message upward.",
             thread_send_schema(),
             json!({"type":"object"}),
             ["threads"],

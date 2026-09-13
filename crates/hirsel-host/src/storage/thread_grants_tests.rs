@@ -322,7 +322,7 @@ async fn a_granted_peer_is_messageable_but_an_ancestor_never_is() {
         operation_id: "send-upward".into(),
     };
 
-    // The one fence a grant cannot open.
+    // The fence an ordinary grant does not open: only root reaches upward.
     s.set_thread_reach(
         "reach-lead",
         &history,
@@ -417,7 +417,8 @@ async fn a_root_grant_reaches_threads_that_did_not_exist_when_it_was_made() {
         deeper
     );
     assert_eq!(s.thread_reach(&actor).await.unwrap(), "everything (root)");
-    // Reach stays one-way, and one root grant is one row however often it is asked for.
+    // Reach is not mutual — the grant widens the worker, not the Threads it now
+    // reaches — and one root grant is one row however often it is asked for.
     assert!(!s.thread_in_scope(stranger, worker).await.unwrap());
     let again = s
         .set_thread_reach("root-2", &history, worker, ReachTarget::Root, None, true)
@@ -486,22 +487,30 @@ async fn only_a_root_holder_hands_root_on_and_the_refusal_says_so() {
         stranger
     );
 
-    // A root holder still never messages its own ancestors, and the refusal it
-    // reads names the reach it does hold.
-    let worker_tools = ScopedThreadTools {
+    // Root addresses every level: a root holder messages and delegates to its
+    // own ancestors, where every other Thread meets the owner fence.
+    let mut worker_tools = ScopedThreadTools {
         tools: state.tools.clone(),
         caller: worker_actor.clone(),
         operation_id: "send-upward".into(),
     };
-    let refused = worker_tools
+    let accepted = worker_tools
         .execute(
             "threads_send",
             &json!({"client_id":"m1","thread": lead, "text": "hello"}),
         )
         .await
         .unwrap();
-    assert_eq!(refused["reason"], json!("owner_fence"));
-    assert_eq!(refused["grant_summary"], json!("everything (root)"));
+    assert_eq!(accepted["thread_id"], json!(lead));
+    worker_tools.operation_id = "delegate-upward".into();
+    let accepted = worker_tools
+        .execute(
+            "threads_delegate",
+            &json!({"child_thread_id": lead, "title": "take this back", "brief": "your turn", "artifact_ids": []}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted["thread_id"], json!(lead));
 
     tools.operation_id = "revoke-root".into();
     let revoked = tools

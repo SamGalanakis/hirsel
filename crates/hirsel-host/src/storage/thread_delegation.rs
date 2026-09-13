@@ -86,11 +86,10 @@ impl Storage {
         let child = if let Some(id) = assignment.child_thread_id {
             // Any Thread in reach can be addressed — a direct child today, an
             // explicitly granted peer once the Owner or an ancestor widens it.
-            // The single exception is upward: that is a report, not a message.
+            // Upward is a report rather than a message, unless this Thread
+            // holds root reach, which addresses every level.
             thread_scope::authorize(&tx, caller.thread_id, id)?;
-            if thread_scope::is_ancestor(&tx, id, caller.thread_id)? {
-                return Err(thread_scope::OutsideGrant::owner_fence(id));
-            }
+            thread_scope::owner_fence(&tx, caller.thread_id, id)?;
             id
         } else {
             let now = chrono::Utc::now().to_rfc3339();

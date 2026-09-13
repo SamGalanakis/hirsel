@@ -289,8 +289,8 @@ impl ScopedThreadTools {
                     self.resolve_assignment(args).await?
                 } else {
                     let child = self.resolve(args, "thread").await?;
-                    // The one fence a grant cannot open: work reports upward,
-                    // it never messages upward.
+                    // The fence only root reach opens: work reports upward, it
+                    // never messages upward unless it addresses everything.
                     storage.refuse_upward(&self.caller, child).await?;
                     Delegation {
                         title: "Follow-up".into(),

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// The reachable set: the caller's own subtree, plus the subtree of every
 /// Thread its durable grants name — and, when it holds a root grant, every
-/// Thread in the history, whenever it was created. Bound `?1` is the caller.
+/// Thread in the history, at every level and whenever it was created, its own
+/// ancestors included. Bound `?1` is the caller.
 pub(super) const REACH_CTE: &str = "WITH RECURSIVE roots(id) AS (
     SELECT ?1
     UNION SELECT target_thread_id FROM thread_grants WHERE thread_id=?1 AND target_thread_id IS NOT NULL
@@ -46,7 +47,8 @@ pub(crate) enum RefusedTarget {
 pub(crate) enum RefusalReason {
     /// The target exists and is simply not in this Thread's reach.
     OutsideGrant,
-    /// The one fence a grant cannot open: a Thread never messages upward.
+    /// The fence only a root grant opens: a Thread without root reach never
+    /// messages upward.
     OwnerFence,
 }
 
@@ -141,8 +143,9 @@ pub(super) fn authorize(c: &Connection, caller: u64, target: u64) -> anyhow::Res
     }
     Err(OutsideGrant::thread(target))
 }
-/// True when `ancestor` is a strict ancestor of `thread`. Topology is immutable,
-/// so this is the one relation a grant is never allowed to reverse.
+/// True when `ancestor` is a strict ancestor of `thread`. Topology is
+/// immutable, so this relation is the shape of the owner fence: only a root
+/// grant reaches back across it (see [`owner_fence`]).
 pub(super) fn is_ancestor(c: &Connection, ancestor: u64, thread: u64) -> anyhow::Result<bool> {
     Ok(c.query_row(
         "WITH RECURSIVE up(id) AS (
@@ -152,6 +155,16 @@ pub(super) fn is_ancestor(c: &Connection, ancestor: u64, thread: u64) -> anyhow:
         params![ancestor, thread],
         |r| r.get(0),
     )?)
+}
+/// The owner fence: a Thread reports to its requester instead of messaging an
+/// ancestor. Root is the one reach that opens it — a Thread holding a root
+/// grant addresses every Thread at every level, ancestors included. For
+/// everyone else the fence stays closed.
+pub(super) fn owner_fence(c: &Connection, caller: u64, target: u64) -> anyhow::Result<()> {
+    if is_ancestor(c, target, caller)? && !super::thread_grants::holds_root(c, caller)? {
+        return Err(OutsideGrant::owner_fence(target));
+    }
+    Ok(())
 }
 pub(super) fn validate_history(c: &Connection, history_id: &str) -> anyhow::Result<()> {
     let current: String =
@@ -282,18 +295,16 @@ pub(crate) struct ThreadContext {
     pub reach: String,
 }
 impl Storage {
-    /// A Thread never addresses its own ancestors with work: it reports to the
-    /// requester that asked for it. Reach can widen sideways, never upward.
+    /// A Thread without root reach never addresses its own ancestors with work:
+    /// it reports to the requester that asked for it. Reach widens sideways and
+    /// downward by grant; only root widens it upward as well.
     pub(crate) async fn refuse_upward(
         &self,
         caller: &ThreadCaller,
         target: u64,
     ) -> anyhow::Result<()> {
         let c = self.conn.lock().await;
-        if is_ancestor(&c, target, caller.thread_id)? {
-            return Err(OutsideGrant::owner_fence(target));
-        }
-        Ok(())
+        owner_fence(&c, caller.thread_id, target)
     }
     pub(crate) async fn thread_in_scope(
         &self,

@@ -19,8 +19,8 @@ interface Candidate { key: string; label: string; detail: string; target: ReachT
 /**
  * Reach, read and edited in one place. Default reach is this Thread and
  * everything below it; each grant names one more Thread whose subtree is
- * addressable too, and a root grant is everything in the history, including
- * Threads made after the grant.
+ * addressable too, and a root grant is everything in the history at every
+ * level — ancestors included — Threads made after the grant among them.
  */
 export function ReachDialog() {
   let dialog: HTMLDialogElement | undefined;
@@ -43,7 +43,7 @@ export function ReachDialog() {
     const self = origin()?.threadId;
     const text = query().trim().replace(/^#/, "");
     const rootOffer: Candidate[] = text === "" || "everything root".includes(text.toLowerCase())
-      ? [{ key: "root", label: "Everything (root)", detail: "every Thread, including later ones", target: "root" }]
+      ? [{ key: "root", label: "Everything (root)", detail: "every Thread at every level, ancestors included, and Threads made later", target: "root" }]
       : [];
     return [...rootOffer, ...filterThreadCandidates(threadState.ready ? threadState.threads : [], text, 12)
       .filter(thread => thread.id !== self && !held().has(thread.id))

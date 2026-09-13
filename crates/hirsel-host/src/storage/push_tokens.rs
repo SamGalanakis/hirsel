@@ -13,6 +13,7 @@ use serde::Serialize;
 impl Storage {
     pub async fn register_push_token(
         &self,
+        device_token: &str,
         platform: PushPlatform,
         token: impl Into<String>,
     ) -> anyhow::Result<PushToken> {
@@ -24,29 +25,44 @@ impl Storage {
         let conn = self.conn.lock().await;
         conn.execute(
             "
-            INSERT INTO push_tokens (token, platform, created_ts, last_seen_ts)
-            VALUES (?1, ?2, ?3, ?3)
+            INSERT INTO push_tokens (token, device_token, platform, created_ts, last_seen_ts)
+            VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(token) DO UPDATE SET
+                device_token = excluded.device_token,
                 platform = excluded.platform,
                 last_seen_ts = excluded.last_seen_ts
             ",
-            params![token, push_platform_to_str(platform), now.to_rfc3339()],
+            params![
+                token,
+                device_token,
+                push_platform_to_str(platform),
+                now.to_rfc3339()
+            ],
         )?;
         get_push_token(&conn, &token).map_err(Into::into)
     }
 
-    pub async fn unregister_push_token(&self, token: &str) -> anyhow::Result<bool> {
+    pub async fn unregister_push_token(
+        &self,
+        device_token: &str,
+        token: &str,
+    ) -> anyhow::Result<bool> {
         let conn = self.conn.lock().await;
-        Ok(conn.execute("DELETE FROM push_tokens WHERE token = ?1", params![token])? > 0)
+        Ok(conn.execute(
+            "DELETE FROM push_tokens WHERE token = ?1 AND device_token = ?2",
+            params![token, device_token],
+        )? > 0)
     }
 
-    pub async fn push_tokens(&self) -> anyhow::Result<Vec<PushToken>> {
+    pub async fn active_push_tokens(&self) -> anyhow::Result<Vec<PushToken>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "
-            SELECT token, platform, created_ts, last_seen_ts
-            FROM push_tokens
-            ORDER BY created_ts ASC, token ASC
+            SELECT p.token, p.platform, p.created_ts, p.last_seen_ts
+            FROM push_tokens p
+            JOIN device_tokens d ON d.token = p.device_token
+            WHERE d.revoked_ts IS NULL
+            ORDER BY p.created_ts ASC, p.token ASC
             ",
         )?;
         let rows = stmt.query_map([], push_token_from_row)?;

@@ -117,12 +117,14 @@ struct TriggerDigestRequest {
 
 #[derive(Debug, Deserialize)]
 struct RegisterPushTokenRequest {
+    device_token: String,
     platform: PushPlatform,
     token: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct UnregisterPushTokenRequest {
+    device_token: String,
     token: String,
 }
 
@@ -441,7 +443,7 @@ async fn register_push_token(
     Ok(Json(
         state
             .storage
-            .register_push_token(request.platform, request.token)
+            .register_push_token(&request.device_token, request.platform, request.token)
             .await?,
     ))
 }
@@ -450,7 +452,10 @@ async fn unregister_push_token(
     State(state): State<AppState>,
     Json(request): Json<UnregisterPushTokenRequest>,
 ) -> Result<Json<serde_json::Value>, DebugError> {
-    let removed = state.storage.unregister_push_token(&request.token).await?;
+    let removed = state
+        .storage
+        .unregister_push_token(&request.device_token, &request.token)
+        .await?;
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 

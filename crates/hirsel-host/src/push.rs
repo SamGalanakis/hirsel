@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::Write,
     path::Path,
     process::{Command, Stdio},
@@ -247,9 +247,22 @@ pub struct PushGateway {
 #[derive(Default)]
 struct PushDeliveryState {
     history_id: String,
-    episodes: HashMap<u64, (bool, u64)>,
-    in_flight: HashSet<(u64, u64)>,
-    delivered: HashSet<(u64, u64)>,
+    threads: HashMap<u64, ThreadDelivery>,
+}
+
+#[derive(Default)]
+struct ThreadDelivery {
+    eligible: bool,
+    episode: u64,
+    status: DeliveryStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum DeliveryStatus {
+    #[default]
+    Idle,
+    InFlight,
+    Delivered,
 }
 
 impl PushGateway {
@@ -321,7 +334,7 @@ impl PushGateway {
             return;
         };
 
-        let tokens = match self.storage.push_tokens().await {
+        let tokens = match self.storage.active_push_tokens().await {
             Ok(tokens) => tokens
                 .into_iter()
                 .map(|registered| registered.token)
@@ -361,13 +374,20 @@ impl PushGateway {
             if state.history_id != history_id {
                 return;
             }
-            state.in_flight.remove(&delivery);
-            if result.is_ok() {
-                if state.episodes.get(&thread_id) == Some(&(true, delivery.1)) {
-                    state.delivered.insert(delivery);
+            let Some(thread_delivery) = state.threads.get_mut(&thread_id) else {
+                return;
+            };
+            if thread_delivery.episode != delivery.1
+                || thread_delivery.status != DeliveryStatus::InFlight
+            {
+                return;
+            }
+            match result {
+                Ok(()) => thread_delivery.status = DeliveryStatus::Delivered,
+                Err(error) => {
+                    thread_delivery.status = DeliveryStatus::Idle;
+                    tracing::warn!(thread_id, %error, "push delivery failed after retries");
                 }
-            } else if let Err(error) = result {
-                tracing::warn!(thread_id, %error, "push delivery failed after retries");
             }
         });
     }
@@ -388,27 +408,30 @@ impl PushGateway {
                 ..Default::default()
             };
         }
-        let episode = state.episodes.entry(thread_id).or_insert((false, 0));
-        if episode.0 != eligible {
-            episode.0 = eligible;
-            episode.1 += 1;
+        let delivery = state.threads.entry(thread_id).or_default();
+        if delivery.eligible != eligible {
+            delivery.eligible = eligible;
+            delivery.episode += 1;
+            delivery.status = DeliveryStatus::Idle;
         }
-        let key = (thread_id, episode.1);
-        state
-            .delivered
-            .retain(|old| old.0 != thread_id || *old == key);
-        if !eligible || state.delivered.contains(&key) || !state.in_flight.insert(key) {
+        if !eligible || delivery.status != DeliveryStatus::Idle {
             return None;
         }
-        Some(key)
+        delivery.status = DeliveryStatus::InFlight;
+        Some((thread_id, delivery.episode))
     }
 
     fn release_delivery(&self, delivery: (u64, u64)) {
-        self.delivery_state
+        let mut state = self
+            .delivery_state
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .in_flight
-            .remove(&delivery);
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(current) = state.threads.get_mut(&delivery.0)
+            && current.episode == delivery.1
+            && current.status == DeliveryStatus::InFlight
+        {
+            current.status = DeliveryStatus::Idle;
+        }
     }
 
     pub fn recorded_pushes(&self) -> Vec<RecordedPush> {
@@ -554,6 +577,18 @@ mod tests {
             .0
     }
 
+    async fn register_device_push(storage: &Storage, push_token: &str) -> String {
+        let device_token = storage
+            .issue_device_token("Owner phone", "node-a")
+            .await
+            .unwrap();
+        storage
+            .register_push_token(&device_token, PushPlatform::Android, push_token)
+            .await
+            .unwrap();
+        device_token
+    }
+
     async fn enqueue_current(gateway: &PushGateway, storage: &Storage, thread: &Thread) {
         gateway
             .enqueue_thread(&ThreadPublication::test(
@@ -618,10 +653,7 @@ mod tests {
     async fn history_reset_retains_registration_for_new_history_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
-        storage
-            .register_push_token(PushPlatform::Android, "durable-token")
-            .await
-            .unwrap();
+        register_device_push(&storage, "durable-token").await;
         let (gateway, _) = PushGateway::recording(storage.clone());
 
         let old_history = storage.history_id().await.unwrap();
@@ -633,7 +665,7 @@ mod tests {
         assert_ne!(new_history, old_history);
         assert_eq!(
             storage
-                .push_tokens()
+                .active_push_tokens()
                 .await
                 .unwrap()
                 .into_iter()
@@ -654,10 +686,7 @@ mod tests {
     async fn current_thread_delivery_retries_then_deduplicates() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
-        storage
-            .register_push_token(PushPlatform::Android, "test-token")
-            .await
-            .unwrap();
+        register_device_push(&storage, "test-token").await;
         let sender = Arc::new(FailOnceSender::default());
         let gateway = PushGateway::new(storage.clone(), sender.clone(), None);
         let thread = attention_thread(&storage).await;
@@ -682,10 +711,7 @@ mod tests {
     async fn new_attention_episode_survives_older_in_flight_completion() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).await.unwrap();
-        storage
-            .register_push_token(PushPlatform::Android, "test-token")
-            .await
-            .unwrap();
+        register_device_push(&storage, "test-token").await;
         let sender = Arc::new(HeldSender {
             attempts: AtomicUsize::new(0),
             release: tokio::sync::Semaphore::new(0),
@@ -702,7 +728,14 @@ mod tests {
         sender.release.add_permits(2);
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if gateway.delivery_state.lock().unwrap().in_flight.is_empty() {
+                if gateway
+                    .delivery_state
+                    .lock()
+                    .unwrap()
+                    .threads
+                    .values()
+                    .all(|delivery| delivery.status != DeliveryStatus::InFlight)
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -721,5 +754,18 @@ mod tests {
         enqueue_current(&gateway, &storage, &thread).await;
         wait_attempts(&sender.attempts, 3).await;
         sender.release.add_permits(1);
+    }
+
+    #[tokio::test]
+    async fn revoked_device_is_absent_from_delivery_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let device_token = register_device_push(&storage, "revoked-push").await;
+        assert_eq!(storage.revoke_device(&device_token).await.unwrap(), 1);
+        let (gateway, _) = PushGateway::recording(storage.clone());
+
+        enqueue_current(&gateway, &storage, &attention_thread(&storage).await).await;
+
+        assert!(gateway.recorded_pushes().is_empty());
     }
 }

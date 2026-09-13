@@ -37,6 +37,31 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
     assert_eq!(icon_foreign_key, ("blobs".into(), "id".into()));
+    let push_columns = conn
+        .prepare("SELECT name FROM pragma_table_xinfo('push_tokens') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        push_columns,
+        vec![
+            "token",
+            "device_token",
+            "platform",
+            "created_ts",
+            "last_seen_ts",
+        ]
+    );
+    let push_foreign_key: (String, String) = conn
+        .query_row(
+            r#"SELECT "table", "to" FROM pragma_foreign_key_list('push_tokens') WHERE "from"='device_token'"#,
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(push_foreign_key, ("device_tokens".into(), "token".into()));
     assert_eq!(
         conn.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, u64>(0))
             .unwrap(),
@@ -154,12 +179,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        7
+        8
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 6).unwrap();
+    conn.pragma_update(None, "user_version", 7).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -207,7 +232,7 @@ async fn branch_specific_schema_seven_layouts_are_refused_without_modification()
         assert!(
             error
                 .to_string()
-                .contains("unsupported Hirsel history layout")
+                .contains("unsupported Hirsel history schema")
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(!dir.path().join("hirsel.sqlite-wal").exists());

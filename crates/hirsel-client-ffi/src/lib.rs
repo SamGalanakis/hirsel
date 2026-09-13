@@ -383,12 +383,11 @@ impl Client {
     pub fn new_iroh_pairing(
         ticket: String,
         code: String,
-        device_label: String,
         iroh_secret_key: String,
         observer: Box<dyn ClientObserver>,
     ) -> Result<Arc<Self>, ClientError> {
         Self::from_config(
-            core::ClientConfig::new_iroh_pairing(ticket, code, device_label, iroh_secret_key),
+            core::ClientConfig::new_iroh_pairing(ticket, code, iroh_secret_key),
             observer,
         )
     }

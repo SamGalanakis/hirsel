@@ -5,8 +5,9 @@ use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
 use serde_json::json;
 
 use super::{
-    IncomingFrame, POST_AUTH_MAX_FRAME_BYTES, PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel,
-    authenticate, build_snapshot, handle_client_frame, run_protocol,
+    Authenticated, HelloBroadcastDedupe, IncomingFrame, POST_AUTH_MAX_FRAME_BYTES,
+    PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel, authenticate, build_snapshot, handle_client_frame,
+    run_protocol,
 };
 use crate::{
     auth::AuthPeer,
@@ -15,7 +16,7 @@ use crate::{
 };
 
 #[tokio::test]
-async fn pairing_uses_the_apps_device_label() {
+async fn pairing_uses_the_owners_label() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(Config {
         token: "test-token".to_string(),
@@ -41,26 +42,88 @@ async fn pairing_uses_the_apps_device_label() {
         .await
         .unwrap();
 
-    let device_token = authenticate(
+    let authenticated = authenticate(
         &state,
-        HelloAuth::PairingCode {
-            code,
-            device_label: "App-chosen label".to_string(),
-        },
+        HelloAuth::PairingCode(code),
         &AuthPeer::Iroh("node-a".to_string()),
     )
     .await
-    .unwrap()
-    .expect("pairing should issue a device token");
+    .unwrap();
+    assert_eq!(authenticated.device_label(), Some("Mint-time label"));
+    let device_token = authenticated
+        .newly_paired_device_token()
+        .expect("pairing should issue a device token");
 
     state
         .storage
-        .authenticate_device_token(&device_token, Some("node-a"))
+        .authenticate_device_token(device_token, Some("node-a"))
         .await
         .unwrap();
     let devices = state.storage.list_devices().await.unwrap();
     assert_eq!(devices.len(), 1);
-    assert_eq!(devices[0].device_label, "App-chosen label");
+    assert_eq!(devices[0].device_label, "Mint-time label");
+}
+
+#[tokio::test]
+async fn revoked_authenticated_device_cannot_receive_registered_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let code = state
+        .storage
+        .mint_pairing_code("Owner phone", Duration::from_secs(60))
+        .await
+        .unwrap();
+    let authenticated = authenticate(
+        &state,
+        HelloAuth::PairingCode(code),
+        &AuthPeer::Iroh("node-a".to_string()),
+    )
+    .await
+    .unwrap();
+    let device_token = authenticated.device_token().unwrap().to_string();
+    let mut channel = TestChannel {
+        incoming: VecDeque::new(),
+        sent: Vec::new(),
+    };
+    handle_client_frame(
+        &state,
+        &mut channel,
+        &authenticated,
+        ClientToHost::RegisterPushToken {
+            platform: hirsel_proto::PushPlatform::Android,
+            token: "fcm-token".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.storage.active_push_tokens().await.unwrap().len(), 1);
+    assert_eq!(state.storage.revoke_device(&device_token).await.unwrap(), 1);
+
+    let thread = state
+        .storage
+        .create_thread(
+            "revoked-push",
+            "Private title",
+            "Private description",
+            &json!({}),
+            hirsel_proto::ThreadAttention::NeedsOwner,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    state
+        .pushes
+        .enqueue_thread(&crate::storage::ThreadPublication::test(
+            state.storage.history_id().await.unwrap(),
+            thread,
+        ))
+        .await;
+
+    assert!(state.pushes.recorded_pushes().is_empty());
 }
 
 #[tokio::test]
@@ -126,10 +189,7 @@ async fn websocket_rejects_iroh_only_auth() {
     assert_eq!(
         authenticate(
             &state,
-            HelloAuth::PairingCode {
-                code: "pairing-code".to_string(),
-                device_label: "Browser".to_string(),
-            },
+            HelloAuth::PairingCode("pairing-code".to_string()),
             &peer,
         )
         .await
@@ -216,6 +276,24 @@ fn pre_auth_frames_have_a_stricter_limit() {
     const { assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES) };
 }
 
+#[test]
+fn repeated_view_upserts_stay_deduplicated() {
+    let view = hirsel_proto::ViewInstance {
+        thread_id: 7,
+        instance_id: "status".to_string(),
+        spec: json!({ "type": "text", "text": "Ready" }),
+    };
+    let event = HostToClient::ViewUpsert {
+        thread_id: view.thread_id,
+        instance_id: view.instance_id.clone(),
+        spec: view.spec.clone(),
+    };
+    let mut dedupe = HelloBroadcastDedupe::new(vec![view]);
+
+    assert!(!dedupe.should_send(&event));
+    assert!(!dedupe.should_send(&event));
+}
+
 struct TestChannel {
     incoming: VecDeque<IncomingFrame>,
     sent: Vec<HostToClient>,
@@ -231,6 +309,14 @@ impl ProtocolChannel for TestChannel {
         self.sent.push(frame.clone());
         Ok(())
     }
+}
+
+async fn handle_as_owner(
+    state: &crate::AppState,
+    channel: &mut TestChannel,
+    frame: ClientToHost,
+) -> anyhow::Result<()> {
+    handle_client_frame(state, channel, &Authenticated::Owner, frame).await
 }
 
 #[tokio::test]
@@ -251,7 +337,7 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
         client_id: "groceries-create".into(),
         title: "Buy groceries".into(),
     };
-    handle_client_frame(&state, &mut channel, frame.clone())
+    handle_as_owner(&state, &mut channel, frame.clone())
         .await
         .unwrap();
     let HostToClient::ThreadCreated { thread, .. } = &channel.sent[0] else {
@@ -268,9 +354,7 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
                 thread: thread.clone()
             })
     );
-    handle_client_frame(&state, &mut channel, frame)
-        .await
-        .unwrap();
+    handle_as_owner(&state, &mut channel, frame).await.unwrap();
     assert_eq!(state.storage.thread_snapshot().await.unwrap().len(), 1);
     let (snapshot, mut dedupe) = build_snapshot(&state).await.unwrap();
     let HostToClient::HelloOk { threads, .. } = snapshot else {
@@ -285,7 +369,7 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
     assert!(!dedupe.should_send(&HostToClient::ThreadUpsert {
         thread: thread.clone()
     }));
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::OpenThread {
@@ -344,7 +428,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
         incoming: VecDeque::new(),
         sent: Vec::new(),
     };
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::SendThreadMessage {
@@ -420,7 +504,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
             thread_id: fresh.id,
         },
     ] {
-        let error = handle_client_frame(&state, &mut channel, stale)
+        let error = handle_as_owner(&state, &mut channel, stale)
             .await
             .unwrap_err();
         assert!(
@@ -435,7 +519,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     assert_eq!(state.storage.thread_snapshot().await.unwrap().len(), 1);
     assert_eq!(state.storage.all_chat().await.unwrap().len(), 1);
 
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::CreateThread {
@@ -448,7 +532,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     )
     .await
     .unwrap();
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::ThreadAction {
@@ -462,7 +546,7 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     )
     .await
     .unwrap();
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::CancelTurn {
@@ -576,7 +660,7 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
         incoming: VecDeque::new(),
         sent: Vec::new(),
     };
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::ListArtifacts {
@@ -589,7 +673,7 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
     assert!(
         matches!(channel.sent.last(),Some(HostToClient::ArtifactsListed{client_id,artifacts}) if client_id=="list" && artifacts[0].id==artifact.summary.id)
     );
-    handle_client_frame(
+    handle_as_owner(
         &state,
         &mut channel,
         ClientToHost::OpenArtifact {
@@ -798,7 +882,7 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
             sent: Vec::new(),
         };
         dedupe.before_request(&request);
-        handle_client_frame(&state, &mut channel, request)
+        handle_as_owner(&state, &mut channel, request)
             .await
             .unwrap();
         let direct = match channel.sent.last().unwrap() {

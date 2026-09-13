@@ -105,12 +105,6 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 triage_dispatched INTEGER NOT NULL DEFAULT 0 CHECK(triage_dispatched IN (0,1))
             );
 
-            CREATE TABLE push_tokens (
-                token TEXT PRIMARY KEY,
-                platform TEXT NOT NULL,
-                created_ts TEXT NOT NULL,
-                last_seen_ts TEXT NOT NULL
-            );
             CREATE TABLE device_tokens (
                 token TEXT PRIMARY KEY,
                 device_label TEXT NOT NULL,
@@ -118,6 +112,13 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 created_ts TEXT NOT NULL,
                 last_seen_ts TEXT NOT NULL,
                 revoked_ts TEXT NULL
+            );
+            CREATE TABLE push_tokens (
+                token TEXT PRIMARY KEY,
+                device_token TEXT NOT NULL REFERENCES device_tokens(token),
+                platform TEXT NOT NULL CHECK(platform IN ('android','web','ios')),
+                created_ts TEXT NOT NULL,
+                last_seen_ts TEXT NOT NULL
             );
             CREATE TABLE meta (
                 key TEXT PRIMARY KEY,

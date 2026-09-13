@@ -623,6 +623,23 @@ async fn native_worker_sessions_are_distinct_and_rotate_on_profile_change() {
         )
         .await
         .unwrap();
+    {
+        let conn = storage.conn.lock().await;
+        let profile_keys = conn
+            .prepare("SELECT key FROM meta WHERE key LIKE 'thread:%session_profile' ORDER BY key")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            profile_keys,
+            vec![
+                format!("thread:{id}:agent_session_profile"),
+                format!("thread:{id}:native_worker_session_profile"),
+            ]
+        );
+    }
     assert_ne!(coordinator.session_id, worker.session_id);
     assert!(worker.session_id.contains("native-thread-"));
     assert!(!worker.rotated);

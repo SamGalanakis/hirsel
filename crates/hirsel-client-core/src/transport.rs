@@ -157,7 +157,7 @@ async fn run_session(
         return SessionEnd::Stop;
     };
     let auth = client.current_auth();
-    let mut awaiting_paired = matches!(auth, hirsel_proto::HelloAuth::PairingCode { .. });
+    let mut awaiting_paired = matches!(auth, hirsel_proto::HelloAuth::PairingCode(_));
     let hello = ClientToHost::Hello { auth };
     drop(client);
     if let Err(error) = channel.send(&hello).await {

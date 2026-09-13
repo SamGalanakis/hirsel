@@ -238,9 +238,18 @@ async fn stale_pre_reset_thread_cannot_be_published_as_the_reused_current_id() {
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await
         .unwrap();
+    let device_token = state
+        .storage
+        .issue_device_token("Owner phone", "node-a")
+        .await
+        .unwrap();
     state
         .storage
-        .register_push_token(hirsel_proto::PushPlatform::Android, "durable-token")
+        .register_push_token(
+            &device_token,
+            hirsel_proto::PushPlatform::Android,
+            "durable-token",
+        )
         .await
         .unwrap();
     let old_history = state.storage.history_id().await.unwrap();

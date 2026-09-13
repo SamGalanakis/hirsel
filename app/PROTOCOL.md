@@ -4,7 +4,7 @@ WebSocket JSON text frames connect an authenticated Owner to one Host. The curre
 
 ## Authentication and reconnect
 
-Send `{"type":"hello","auth":{"static_token":"…"}}`. Native clients can instead send `auth:{device_token:string}` or `auth:{pairing_code:{code:string,device_label:string}}`. Never place bearer credentials in URLs.
+Send `{"type":"hello","auth":{"static_token":"…"}}`. Native clients can instead send `auth:{device_token:string}` or the Owner-minted `auth:{pairing_code:string}`. A pairing label belongs to that one-time code and is never supplied by the redeeming client. Never place bearer credentials in URLs.
 
 The required `hello_ok` snapshot contains `history_id`, `threads`, `processes`, `host_version`, `views`, `model`, `subagent_models`, `prompts`, and `providers`. Arrays are present even when empty. Model/provider/prompt snapshots are explicitly null when unavailable for the configured runtime. `history_id` is a stable UUID for the current history store.
 

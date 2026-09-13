@@ -87,17 +87,12 @@ impl ClientConfig {
         }
     }
 
-    pub fn new_iroh_pairing(
-        ticket: String,
-        code: String,
-        device_label: String,
-        iroh_secret_key: String,
-    ) -> Self {
+    pub fn new_iroh_pairing(ticket: String, code: String, iroh_secret_key: String) -> Self {
         Self {
             host: String::new(),
             iroh_ticket: Some(ticket),
             iroh_secret_key: Some(iroh_secret_key),
-            auth: HelloAuth::PairingCode { code, device_label },
+            auth: HelloAuth::PairingCode(code),
             reconnect: ReconnectPolicy::default(),
         }
     }
@@ -214,20 +209,13 @@ mod tests {
     }
 
     #[test]
-    fn pairing_constructor_carries_code_and_label() {
+    fn pairing_constructor_carries_only_the_owner_minted_code() {
         let config = ClientConfig::new_iroh_pairing(
             "endpointticket".into(),
             "pairing-code".into(),
-            "Owner phone".into(),
             crate::generate_iroh_identity(),
         );
-        assert_eq!(
-            config.auth,
-            HelloAuth::PairingCode {
-                code: "pairing-code".into(),
-                device_label: "Owner phone".into(),
-            }
-        );
+        assert_eq!(config.auth, HelloAuth::PairingCode("pairing-code".into()));
         assert_eq!(config.validate(), Ok(()));
     }
 

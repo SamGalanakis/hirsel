@@ -267,7 +267,7 @@ export type AgentSlot = "main" | "fork";
 
 export interface HelloMsg {
   type: "hello";
-  auth: { static_token: string } | { device_token: string } | { pairing_code: { code: string; device_label: string } };
+  auth: { static_token: string } | { device_token: string } | { pairing_code: string };
 }
 
 /** v1.2 send mode. "send" = plain Enter (Early Injection if a turn is active,

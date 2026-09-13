@@ -30,8 +30,10 @@ describe("Thread rich links",()=>{
   const {container}=render(()=><RelatedContext value={{historyId,threadId:1}}><Markdown>{"Working in #2 now."}</Markdown></RelatedContext>);
   // The agent writes the id; the sentence reads as the name, exactly once.
   expect(container.querySelectorAll('a')).toHaveLength(1);expect(container.querySelector('[data-slot="thread-chip-label"]')?.textContent).toBe('Current project');
-  // Only the avatar's own glyph sits between the prose and the name.
-  expect(container.textContent?.replace('C','')).toBe('Working in Current project now.');
+  // Only the avatar's own monogram sits between the prose and the name.
+  const monogram=container.querySelector('[data-slot="thread-avatar"]')?.textContent??'';
+  expect(monogram).toBe('CP');
+  expect(container.textContent?.replace(monogram,'')).toBe('Working in Current project now.');
   expect(screen.getByRole('link',{name:'Thread #2 · Current project'})).toHaveTextContent('Current project');
  });
  it("opens its actions from the chip itself, Open first",async()=>{

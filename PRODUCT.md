@@ -2,6 +2,12 @@
 
 Hirsel coordinates work through conversational **Spaces** and **Tasks**. A Space is an ongoing place for context and organization; a Task is a finishable outcome. Both share one durable Thread identity, conversation, generated instrument, execution turns and factual activity. Humans can browse the whole tree.
 
+## Platform
+
+adaptive
+
+Hirsel ships a web client (`app/`, SolidJS) and a native Android client (`android/`, Jetpack Compose over the shared Rust core). Both speak the same Thread contract.
+
 ## Work and conversation
 
 Each Space or Task has a stable numeric identity, title, description and optional instrument. It appears in the inventory before any message, decision or execution is required. “Household” can be a Space containing a “Buy groceries” Task; the shopping list, store decision and progress stay in that Task’s conversation. Thread names their common identity, not a third kind.

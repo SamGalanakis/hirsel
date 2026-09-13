@@ -1,6 +1,6 @@
 # Hirsel interface
 
-The primary screen is one selected Space or Task conversation, or an unaddressed overview for choosing and creating either kind. A compact rail opens the nested Thread inventory. The composer exists only for an actual selected Thread and names its conversation.
+The primary screen is one selected Space or Task conversation, or an unaddressed overview for choosing and creating either kind. A narrow icon rail and a dense hierarchical inventory of Spaces and Tasks reach every other conversation. The composer exists only for an actual selected Thread and names its conversation.
 
 A Thread row shows its title and useful independent signals: needs your input, unseen activity, execution, snooze and settlement. Informational content is never a reason to hide a Thread. An empty Thread remains real work and shows an empty conversation with its instrument, if any.
 
@@ -16,9 +16,21 @@ An ordinary Thread coordinates its children. The parent conversation shows conci
 
 [ADR 0018](docs/adr/0018-spaces-and-tasks.md) refines the common conversation ownership in [ADR 0016](docs/adr/0016-threads-own-conversation.md); these are authoritative where older design notes describe Tasks, Pings, or a single shared conversation history.
 
+## Colors
+
+Tokens in `app/src/styles.css` are the only source of color. `--primary` is green (`oklch(0.48 0.12 158)` light, `oklch(0.79 0.105 158)` dark); neutrals are slate with a teal cast around hue 220; `--background`, `--card`, `--surface`, `--muted`, `--border` and `--ring` each carry a light and a dark value. Status has its own named ramp: `--status-active`, `--status-idle`, `--status-success`, `--status-danger`, `--status-attention`. The cube mark has four facet tokens. New UI reads these variables; a literal color is drift.
+
+## Typography
+
+Type is Inter Variable over a system sans fallback, with a mono stack for IDs, commands and program text. `--text-meta` (0.72rem) is the one named size below `text-xs` and the floor for ids, timings and summaries. Radii derive from `--radius` (0.625rem). Layout keeps one horizontal rhythm — a 42rem reading measure, a 1.5rem gutter and the frame derived from them — and keys width off the named breakpoints `split` (900px), `rail` (1100px) and `workspace` (1280px) rather than literal pixel values.
+
+## Components
+
+Components live in `app/src/components/ui`: button (default, outline, secondary, ghost, destructive, link; xs to lg plus icon sizes), badge, card, input, textarea, dropdown menu, empty state, attachment and pane header, with licensed Lucide icons in `icons.tsx`. Touch targets reach 44px through `pointer-coarse` variants rather than a separate mobile component set.
+
 ## Thread workspace surface
 
-The established visual system remains authoritative in `app/src/styles.css`: Inter, mint primary, slate neutrals, theme-aware surfaces, and the cube mark. The Thread workspace uses a compact icon rail and a named Thread drawer at every width. Selected rows have a quiet fill; Conversation and Artifacts have explicit selected states. Lifecycle operations are grouped in Thread actions.
+The established visual system remains authoritative in `app/src/styles.css`. The Thread workspace keeps the icon rail at every width; the inventory beside it is a dense one-line-per-Thread tree, modal below 1280px and a persistent 288px column above it, where the Owner's last open/closed choice persists. Selected rows have a quiet fill; Conversation and Artifacts have explicit selected states. Lifecycle operations are grouped in Thread actions.
 
 Conversation contains messages, artifact reference cards, and explicit owner-facing summaries. A concise status names the current action or completed outcome beside the exact request or response. Reasoning, tool activity and provisional prose follow inline in durable chronological order; each tool with recorded detail has its own input/result expander. Raw IDs and event data are available through the turn's Technical details overflow. Completed, failed and stopped timelines replay after reconnect, while plain replies carry no empty work disclosure. The focused frame and context strip keep the addressed Thread clear while another result is open; its composer also names the destination for assistive technology. The conversation viewport follows its latest content when the composer grows, preserving the user's position when they scroll back.
 
@@ -28,9 +40,9 @@ The surface brief is `.impeccable/briefs/thread-workspace.md`.
 
 ### Compact rail and focused frame
 
-The approved nested Thread direction retains the established 56px icon rail, framed conversations and Lucide identity. The rail carries Thread overview, Threads, New thread, global artifacts and Processes, with Settings at its foot. Utilities appear once and use licensed Lucide icons with accessible names, tooltips and 44px targets. The Thread inventory is a drawer, closed at rest, retaining creation, filters and attention status.
+The approved nested Thread direction retains the established 56px icon rail, framed conversations and Lucide identity. The rail carries Thread overview, Spaces and Tasks, New Space or Task, All artifacts and Processes, with Settings at its foot. Utilities appear once and use licensed Lucide icons with accessible names, tooltips and 44px targets. The Thread inventory is a drawer, closed at rest on narrower screens, retaining creation, filters and attention status.
 
-A focused Thread has an inset fine frame, a line connecting it to the selected branch control, and a compact back/name/view/actions strip. The visible name belongs to this context strip; the composer conveys its destination through its accessible name without a repeated address row. Conversation and artifact controls use icons; actual Thread titles, artifact titles and conversation prose remain text. Messages use sender icons and compact referenced-artifact rows. Send is visible on desktop and phone, while Enter and touch queue gestures remain available.
+A focused Thread has an inset fine frame, a line connecting it to the selected branch control, and a compact back/name/view/actions strip. The visible name belongs to this context strip; the composer conveys its destination through its accessible name without a repeated address row. Conversation and artifact controls use icons; actual Thread titles, artifact titles and conversation prose remain text. Owner messages sit right in a filled primary bubble and Agent messages left on the surface; alignment alone identifies the speaker, so no message carries an avatar. Referenced artifacts stay compact rows. Send is visible on desktop and phone, while Enter and touch queue gestures remain available.
 
 At phone widths the same rail and frame distinguish context; the drawer is modal and the artifact preview is full-screen. Keyboard navigation can enter an interactive artifact, return to its controls, and dismiss with Escape without granting host capabilities. The approved hierarchy changes the conversation model; mockup icon replacements are not part of the implementation.
 
@@ -39,6 +51,16 @@ Inventory rows identify Space or Task and show real working duration and queued 
 The Thread drawer uses a compact filter menu beside Search, preserving its selected view when reopened. Creation and browsing have explicit opening intent with one focus owner. A quiet rail marker aggregates visible needs-owner Threads independently of unread state, and updates at snooze expiry. The existing command palette searches Thread titles and exact #references; filtering preserves the addressed conversation until a result is chosen.
 
 Execution details are compact disclosures beneath their exact final assistant message. A running or no-final turn remains beside its addressed Owner request; ownerless background execution follows its real start time. Pagination never pulls unloaded historic execution into the visible page. Explicit Markdown file artifacts render through the same safe parser as conversation, inside the isolated preview, with original-source downloads retained. The selected Thread filter has a quiet caption; Search opens the existing palette with Thread intent. Phone context retains an untruncated numeric Thread reference. Saved drafts from another history are available for manual copying without attaching to reused IDs.
+
+### Thread identity, work steps and processes
+
+Every Thread carries an avatar: a generated letter default, a chosen emoji, or an uploaded PNG, JPEG or WebP center-cropped to a square. Shape carries kind — rounded square for a Space, circle for a Task — and the same icon appears in inventory rows, the Thread header, the Info pane and inline Thread chips. Icon edits are revision-guarded and start no execution.
+
+A turn's work is one flat wrapping row of step pills in chronological order; the Agent's program cell is a peer of the tool calls beside it, not their parent. One step is open at a time and its detail panel opens below the whole row. Reasoning and provisional prose are full-width rows in the same sequence, and raw turn data stays in the Technical details overflow.
+
+Thread Info is a pane inside the same frame, not a separate sheet. It holds the Thread's own facts and the Owner's in-place edits: title, description and **Runs on**, which chooses the default coordinator, a coordinator provider and model, a CLI agent, or the native Lash worker. Each edit is revision-guarded and settles only when the Host's revision advances.
+
+A process delivery is a structured note in its owning Thread: process name, the trigger that fired, the outcome and the body. A wake that produced nothing to read gets no card at all; consecutive ones fold into a single quiet line. Processes list one entry per process — a dense row at rest, promoted to a card while running or expanded — grouped Running and Finished, scoped to the selected Thread and its descendants, with Cancel process and Disable trigger.
 
 ## Hierarchy and pinning
 

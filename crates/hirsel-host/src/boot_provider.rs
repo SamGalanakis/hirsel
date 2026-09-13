@@ -22,7 +22,9 @@ use crate::{
     config::ProviderMode,
     host_config::ConfigStore,
     provider_detect,
-    providers::{CLAUDE_ID, CLAUDE_NOT_SELECTABLE, CODEX_ID, booted_provider_id},
+    providers::{
+        CLAUDE_ID, CLAUDE_NOT_SELECTABLE, CODEX_ID, ProviderRosterState, booted_provider_id,
+    },
 };
 
 /// What the host booted the main agent on, after reconciling the stored roster
@@ -187,6 +189,51 @@ pub fn plan_for(store: &ConfigStore, id: &str) -> Result<BootPlan, String> {
         CODEX_ID => Ok(BootPlan::Codex),
         CLAUDE_ID => Err(CLAUDE_NOT_SELECTABLE.to_string()),
         _ => stored_plan(store, id),
+    }
+}
+
+/// The default Native route: the provider instance a Thread runs on when it has
+/// not named one of its own, with the plan that builds that instance's
+/// transport.
+///
+/// Resolved from live configuration, never from the label the host happened to
+/// boot with. Every Native session is rebindable — `bind_native` rebuilds the
+/// handle for whatever provider an admitted turn was accepted for — so a
+/// boot-frozen label would strand every Thread on a provider the Owner has
+/// already moved off, while Settings and Thread Info showed them the new one.
+///
+/// The boot plan stays the answer for its own label, because the env provider
+/// modes are boot labels rather than roster instances and carry the only
+/// credentials they have. It is also the honest fallback when the configured
+/// instance cannot be built: the reason is reported by the caller that tries.
+pub fn native_default_route(
+    store: &ConfigStore,
+    roster: &ProviderRosterState,
+    boot_plan: &BootPlan,
+) -> (String, BootPlan) {
+    let booted = || (boot_plan.label().to_string(), boot_plan.clone());
+    // The legacy anthropic boot mode has no roster and no model-selection
+    // machinery behind it — `resolve` refuses a stored choice there for exactly
+    // that reason — so it stays on the provider it booted with.
+    if matches!(boot_plan, BootPlan::Env(ProviderMode::Anthropic)) {
+        return booted();
+    }
+    let Some(choice) = roster.agent_provider(hirsel_proto::AgentSlot::Main) else {
+        return booted();
+    };
+    if choice.id == boot_plan.label() {
+        return booted();
+    }
+    match plan_for(store, &choice.id) {
+        Ok(plan) => (choice.id, plan),
+        Err(reason) => {
+            tracing::warn!(
+                provider = %choice.id,
+                reason,
+                "configured main-agent provider cannot be routed to; the default Native route stays on the booted provider"
+            );
+            booted()
+        }
     }
 }
 
@@ -387,6 +434,94 @@ mod tests {
                 .is_some_and(|notice| notice.contains("legacy boot mode")),
             "{:?}",
             boot.notice
+        );
+    }
+
+    /// The live regression: a host that booted on one provider, then had the
+    /// main Agent pointed at another. The default Native route follows the
+    /// Owner's choice, because every Native session is rebound to it — a
+    /// boot-frozen label stranded every Thread on the provider the Owner left,
+    /// while Settings and Thread Info showed them the new one.
+    #[tokio::test]
+    async fn the_default_native_route_follows_the_configured_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = with_router(&dir, Some(FAKE_KEY)).await;
+        let roster = crate::providers::ProviderRosterState::new(
+            store.clone(),
+            &BootProvider {
+                id: Some(CODEX_ID.to_string()),
+                plan: BootPlan::Codex,
+                notice: None,
+            },
+            Some(dir.path().to_path_buf()),
+        );
+
+        let (provider_id, plan) = native_default_route(&store, &roster, &BootPlan::Codex);
+
+        assert_eq!(provider_id, "acme");
+        assert_eq!(
+            plan,
+            BootPlan::OpenAiCompatible {
+                id: "acme".to_string(),
+                base_url: "https://acme.invalid/v1".to_string(),
+                api_key: FAKE_KEY.to_string(),
+            }
+        );
+    }
+
+    /// A provider the host cannot build a transport for is not a route: the
+    /// default stays on what booted, and the reason is a warning rather than a
+    /// Thread that fails at its first turn.
+    #[tokio::test]
+    async fn an_unbuildable_choice_leaves_the_default_route_on_the_booted_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = with_router(&dir, None).await;
+        let boot = BootPlan::Env(ProviderMode::OpenRouter);
+        let roster = crate::providers::ProviderRosterState::new(
+            store.clone(),
+            &BootProvider::env_default(ProviderMode::OpenRouter),
+            Some(dir.path().to_path_buf()),
+        );
+
+        assert_eq!(
+            native_default_route(&store, &roster, &boot),
+            ("openrouter".to_string(), boot.clone())
+        );
+
+        // The legacy anthropic mode has no roster to follow at all.
+        let boot = BootPlan::Env(ProviderMode::Anthropic);
+        let store = with_router(&dir, Some(FAKE_KEY)).await;
+        assert_eq!(
+            native_default_route(&store, &roster, &boot),
+            ("anthropic".to_string(), boot.clone())
+        );
+    }
+
+    /// The booted provider keeps its own plan even when the roster names the
+    /// same id: an env boot label carries credentials no roster entry has.
+    #[tokio::test]
+    async fn the_booted_label_keeps_its_own_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+        store
+            .set_agent_provider_and_model(
+                hirsel_proto::AgentSlot::Main,
+                "openrouter",
+                "deepseek/deepseek-v4.1-flash",
+                "default",
+            )
+            .await
+            .unwrap();
+        let boot = BootPlan::Env(ProviderMode::OpenRouter);
+        let roster = crate::providers::ProviderRosterState::new(
+            store.clone(),
+            &BootProvider::env_default(ProviderMode::OpenRouter),
+            Some(dir.path().to_path_buf()),
+        );
+
+        assert_eq!(
+            native_default_route(&store, &roster, &boot),
+            ("openrouter".to_string(), boot)
         );
     }
 }

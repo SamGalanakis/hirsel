@@ -245,8 +245,9 @@ export interface ProviderInstance {
 /** The whole roster, carried on `hello_ok` and replaced by `providers_changed`. */
 export interface ProviderRoster {
   instances: ProviderInstance[];
-  /** The provider the resident session actually booted on — a main-agent
-   * provider change is stored at once but only takes effect on restart. */
+  /** The provider the resident session booted on — a main-agent provider
+   * change reaches the session from its next turn, so this is what a Thread
+   * keeps running on only when the stored choice cannot be built. */
   booted_provider_id?: string;
   /** Set when a stored provider choice could not be honoured at boot and the
    * host fell back to its environment default. Carries no key material. */

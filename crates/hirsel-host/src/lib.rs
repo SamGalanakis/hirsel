@@ -265,11 +265,9 @@ impl AppState {
     /// Point one resident agent at a provider instance, seeding that provider's
     /// default model and variant in the same write.
     ///
-    /// The main Agent's `ProviderHandle` is built once at boot and baked into
-    /// the live session, so this stores and broadcasts the choice but does not
-    /// swap the running session's provider — `booted_provider_id` is what lets
-    /// a client say when the change takes effect. The fork is stored only; no
-    /// fork runtime consumes it yet.
+    /// The main Agent's choice is live: it repoints the default Native route,
+    /// and every Thread session is rebound to that route before its next turn
+    /// is enqueued. The fork is stored only; no fork runtime consumes it yet.
     pub async fn set_agent_provider(
         &self,
         agent: AgentSlot,
@@ -295,7 +293,13 @@ impl AppState {
             // already the new shape by now — but only a full broadcast tells the
             // client that, and choosing a reasoning effort has to be possible
             // the moment the provider that offers one is chosen.
-            AgentSlot::Main => self.broadcast_model_snapshot(previous_model),
+            AgentSlot::Main => {
+                // The route every Thread binds to is derived from the same
+                // stored choice: re-derive it here so the change has landed by
+                // the time this op returns, rather than at the next admission.
+                self.agent.refresh_execution_default().await?;
+                self.broadcast_model_snapshot(previous_model)
+            }
             AgentSlot::Fork => {
                 let snapshot = self.prompt_snapshot();
                 self.broadcast_prompts(&snapshot);

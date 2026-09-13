@@ -95,9 +95,10 @@ impl ProviderRosterState {
         }
     }
 
-    /// The provider the resident main-agent session actually booted on. A
-    /// main-agent provider change is stored immediately but only takes effect
-    /// at the next host start, and this is what lets a client say so.
+    /// The provider the resident main-agent session booted on. A provider
+    /// change takes effect from the next turn, so this is no longer a deadline
+    /// a client has to report — it is the provider that stays reachable when a
+    /// stored choice cannot be built, and the env boot labels live only here.
     pub fn booted_provider_id(&self) -> Option<&str> {
         self.booted_provider_id.as_deref()
     }

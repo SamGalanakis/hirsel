@@ -106,6 +106,12 @@ impl AgentRuntime {
         })
     }
 
+    /// Re-derive the default Native execution after a configuration change, so
+    /// the change is applied by the time the op that made it returns.
+    pub(crate) async fn refresh_execution_default(&self) -> anyhow::Result<()> {
+        self.registry.refresh_execution_default().await
+    }
+
     pub(crate) async fn reset_history(&self) -> anyhow::Result<()> {
         self.registry.reset_history().await
     }
@@ -125,9 +131,8 @@ impl AgentRuntime {
         let selection = state.validate(model_id, variant)?;
         state.persist_and_select(selection.clone()).await?;
         // Stored-only when the main Agent has been pointed at a provider the
-        // host did not boot on: persist and report, but leave the running
-        // session strictly alone — it is on another provider's handle and takes
-        // the new selection at the next host restart.
+        // host cannot build a transport for at all: persist and report, but
+        // leave the default route on the provider the session can still reach.
         if !state.applies_to_live_session() {
             return Ok(selection);
         }

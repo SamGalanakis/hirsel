@@ -1457,3 +1457,64 @@ async fn a_native_target_is_judged_by_the_provider_roster() {
         );
     }
 }
+
+/// The regression this file's rebind machinery was missing: the Owner points
+/// the main Agent at another provider while the host runs. The default Native
+/// route is the Owner's current choice, so a Thread opened after the change
+/// opens on it — a boot-frozen label stranded every Thread on the provider the
+/// host happened to start with, while Settings and Thread Info reported the new
+/// one and every turn failed on a transport the Owner had already left.
+#[tokio::test]
+async fn a_main_provider_change_repoints_the_default_native_route_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::tests::test_config(dir.path());
+    config.agent = AgentMode::Lash;
+    config.provider = crate::config::ProviderMode::OpenRouter;
+    config.model = "google/gemini-3.7-flash".into();
+    config.openrouter_api_key = Some("test-key-no-inference".into());
+    let state = crate::build_state(config).await.unwrap();
+    state.agent.registry.capacity.close();
+    assert_eq!(
+        state.providers_roster.booted_provider_id(),
+        Some("openrouter")
+    );
+
+    state
+        .add_provider(
+            "acme",
+            "Acme",
+            "https://acme.invalid/v1",
+            "test-key-no-inference",
+            "acme/deep",
+        )
+        .await
+        .unwrap();
+    state
+        .set_agent_provider(hirsel_proto::AgentSlot::Main, "acme")
+        .await
+        .unwrap();
+
+    // The default every Thread without its own execution resolves through names
+    // the chosen provider and its model...
+    let crate::storage::ThreadExecution::Native {
+        provider_id, model, ..
+    } = state.storage.native_execution_default().await.unwrap()
+    else {
+        panic!("the configured default execution is a Native backend");
+    };
+    assert_eq!(provider_id, "acme");
+    assert_eq!(model.id, "acme/deep");
+
+    // ...and a Thread opened now runs on exactly that, with no restart between.
+    let runtime = runtime_lane(&state, None).await;
+    assert_eq!(runtime.native_provider_id(), "acme");
+    assert_eq!(runtime.session.policy_snapshot().model.id, "acme/deep");
+    assert_eq!(
+        runtime.native_provider().kind(),
+        openai_compatible_handle(
+            "unused-in-this-assertion".to_string(),
+            "https://acme.invalid/v1".to_string(),
+        )
+        .kind()
+    );
+}

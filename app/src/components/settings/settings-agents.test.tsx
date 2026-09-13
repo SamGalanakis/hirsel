@@ -507,22 +507,23 @@ describe("Settings → Agents: providers", () => {
     expect(getByLabelText("Fork agent reasoning variant")).toBeTruthy();
   });
 
-  it("says nothing while the chosen provider is the one the host booted on", async () => {
+  it("never promises a restart while the chosen provider is the booted one", async () => {
     const { queryByText } = await mount({
       model: { ...MODEL, provider_id: "codex" },
       providers: ROSTER,
     });
-    expect(queryByText(/until the host restarts/i)).toBeNull();
+    expect(queryByText(/restart/i)).toBeNull();
   });
 
-  it("names the booted provider once the stored choice has moved on", async () => {
-    const { getByText } = await mount({
+  it("puts a provider change on the same clock as a model change", async () => {
+    const { getByText, queryByText } = await mount({
       model: { ...MODEL, provider_id: "openrouter", free_text_model: true, available: [] },
       providers: ROSTER,
     });
-    expect(
-      getByText("Saved. The running Agent stays on Codex until the host restarts."),
-    ).toBeTruthy();
+    // Booted on Codex, stored on OpenRouter: the session is rebound before its
+    // next turn, so there is no restart to warn about.
+    expect(queryByText(/restart/i)).toBeNull();
+    expect(getByText("Applies from the Agent's next turn.")).toBeTruthy();
   });
 
   // The field-observed defect: booted on OpenRouter, the Owner picks Codex, and
@@ -556,11 +557,8 @@ describe("Settings → Agents: providers", () => {
     expect((getByLabelText("Native agent model") as HTMLSelectElement).value).toBe(
       "gpt-5.6-sol",
     );
-    // ...and both captions now tell the truth about the restart.
-    expect(
-      getByText("Saved. The running Agent stays on OpenRouter until the host restarts."),
-    ).toBeTruthy();
-    expect(getByText("Takes effect when the host restarts.")).toBeTruthy();
+    // ...and the caption still names the one clock both rows are on.
+    expect(getByText("Applies from the Agent's next turn.")).toBeTruthy();
   });
 
   it("takes a free-text model id, refusing a blank one without sending", async () => {

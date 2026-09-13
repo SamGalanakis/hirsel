@@ -11,7 +11,6 @@ import {
   agentModelView,
   createAgentPending,
   PromptEditor,
-  providerLabel,
   settleOnProtocolError,
 } from "./agent-config";
 import { ForkAgentSection } from "./ForkAgentSection";
@@ -22,10 +21,9 @@ const EMPTY_PROMPT = { text: "", is_default: true };
 
 /** The main Agent's provider, model and prompt.
  *
- * Two changes here take effect on two different clocks, and the copy says which
- * is which: a model change reaches the live session and holds from its next
- * turn, while a provider change is stored now and the resident session keeps
- * running on the provider the host booted with. */
+ * Provider and model are on one clock, and the copy says so: both reach the
+ * live session from its next turn, because a Thread is rebound to the stored
+ * choice before that turn is enqueued. */
 function MainAgent() {
   const pending = createAgentPending();
   const snapshot = () => state.model;
@@ -73,14 +71,6 @@ function MainAgent() {
     getClient()?.setModel(selectedProvider, selection.id, selection.variant);
   }
 
-  /** The running session boots on one provider and stays there. When the stored
-   * choice has moved on, say so plainly and once — no toast, no alarm colour. */
-  const bootedElsewhere = () => {
-    const booted = state.providers?.booted_provider_id;
-    const chosen = providerId();
-    return booted && chosen && booted !== chosen ? providerLabel(booted) : null;
-  };
-
   return (
     <>
       <SubHeading>Native</SubHeading>
@@ -95,13 +85,6 @@ function MainAgent() {
               pending={pending}
               onProviderChange={setSelectedProviderId}
             />
-            <Show when={bootedElsewhere()}>
-              {(booted) => (
-                <p class="pb-3 text-xs leading-snug text-muted-foreground">
-                  Saved. The running Agent stays on {booted()} until the host restarts.
-                </p>
-              )}
-            </Show>
           </div>
         </Show>
         <Show when={modelView()}>
@@ -123,14 +106,11 @@ function MainAgent() {
                   }
                 />
               </div>
-              {/* One caption, honest about which clock this edit is on: the
-                  model reaches the live session only while the stored provider
-                  IS the booted one. Otherwise it is stored for the restart,
-                  exactly like the provider choice above it. */}
+              {/* One caption for both rows above it: a provider change and a
+                  model change are on the same clock, because a Thread session
+                  is rebound to the stored choice before its next turn. */}
               <p class="pb-3 text-xs leading-snug text-muted-foreground">
-                {bootedElsewhere()
-                  ? "Takes effect when the host restarts."
-                  : "Applies from the Agent's next turn."}
+                Applies from the Agent's next turn.
               </p>
             </div>
           )}

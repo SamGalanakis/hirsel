@@ -95,9 +95,10 @@ pub struct ProviderInstance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderRoster {
     pub instances: Vec<ProviderInstance>,
-    /// The provider the resident main-agent session actually booted on. A
-    /// main-agent provider change is stored at once but only takes effect on
-    /// the next host start, so the client can say so plainly.
+    /// The provider the resident main-agent session booted on. A provider
+    /// change reaches the session from its next turn, so this is not a
+    /// deadline: it is what a Thread keeps running on when a stored choice
+    /// cannot be built.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub booted_provider_id: Option<String>,
     /// Set when a stored provider choice could not be honoured at boot and the

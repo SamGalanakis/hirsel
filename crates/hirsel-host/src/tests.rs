@@ -649,8 +649,10 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
         .expect("a provider move must broadcast the whole model snapshot");
     assert_eq!(broadcast, snapshot);
 
-    // An effort chosen now persists and is reported, while the session the host
-    // actually booted keeps running OpenRouter's own spec until a restart.
+    // An effort chosen now persists, is reported, and is what the next turn
+    // runs: a Native session is rebound to the Owner's chosen provider before
+    // its next turn is enqueued, so neither the provider move nor the effort
+    // waits for a restart.
     let selected = state
         .set_agent_model("codex", "gpt-5.6-sol", "xhigh")
         .await
@@ -664,7 +666,8 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
         .agent
         .next_turn_model_spec()
         .expect("OpenRouter runtime has a selectable model");
-    assert_eq!(spec.id, "google/gemini-3.7-flash");
+    assert_eq!(spec.id, "gpt-5.6-sol");
+    assert_eq!(spec.variant.effort(), Some("xhigh"));
 
     // ...and a fresh hello serves the reshaped snapshot too.
     assert_eq!(

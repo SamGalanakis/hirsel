@@ -48,7 +48,6 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   /** The exact message that asked for this turn, joined by ID — it is what the
    * card's header names as the run's origin. */
   const trigger = () => { const id = turn()?.owner_message_id; return id === null || id === undefined ? undefined : props.history.messages.find(row => row.id === id); };
-  const thread = () => threadState.threads.find(row => row.id === props.threadId);
   const split = () => splitStreamingReply(events());
   /** A turn that has started but said nothing yet is not a card: an empty box
    * claims the Agent produced something. Until the first reasoning line, pill or
@@ -80,7 +79,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
               ran, its trace, its reply and whatever it published. The Owner
               side is the message itself, which is all there is to say. */}
           <Show when={!owner()} fallback={<><Markdown>{message()?.body ?? ""}</Markdown><For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For></>}>
-            <RunCard turn={turn()} message={message()} trigger={trigger()} thread={thread()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} />
+            <RunCard turn={turn()} message={message()} trigger={trigger()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} />
           </Show>
           <Show when={message()?.attachments?.length}><ul class="mt-2 text-xs text-muted-foreground"><For each={message()?.attachments}>{blob => <li><button class="underline" onClick={() => { void getClient()?.getBlobUrl(blob.id).then(url => window.open(url, "_blank", "noopener,noreferrer")); }}>{blob.name}</button></li>}</For></ul></Show>
         </div>

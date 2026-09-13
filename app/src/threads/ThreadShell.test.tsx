@@ -391,7 +391,7 @@ it("renders the exact persisted timeline from a fresh open_thread snapshot", asy
   const view = render(() => <ThreadShell />);
   const article = view.container.querySelector('[data-message-id="71"]')!;
   // A run the Owner did not watch opens from its header.
-  const header = within(article as HTMLElement).getByRole("button", { name: /Owner message/ });
+  const header = within(article as HTMLElement).getByRole("button", { name: /done/ });
   expect(header).toHaveAttribute("aria-expanded", "false");
   fireEvent.click(header);
   expect(article.querySelectorAll('[data-slot="timeline"] > li')).toHaveLength(2);
@@ -421,7 +421,7 @@ it("folds a settling run onto its header and keeps the same trace reachable ther
   // The run is over: its trace folds into the card header, which takes the
   // focus that was inside it rather than dropping it on the document.
   const card = view.container.querySelector('[data-message-id="93"]')!;
-  const header = within(card as HTMLElement).getByRole("button", { name: /Owner message/ });
+  const header = within(card as HTMLElement).getByRole("button", { name: /done/ });
   await waitFor(() => expect(document.activeElement).toBe(header));
   expect(result.isConnected).toBe(false);
   expect(header).toHaveAttribute("aria-expanded", "false");

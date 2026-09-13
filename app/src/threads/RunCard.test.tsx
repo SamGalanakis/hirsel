@@ -21,9 +21,11 @@ beforeEach(() => { flush(() => setThreadState(draft => { draft.expandedTurns = {
 describe("the run card", () => {
   it("names the run, keeps a finished trace closed, and opens it on the header", () => {
     const view = render(() => <RunCard turn={turn("completed")} message={message} events={events} activities={[]} />);
-    const header = view.getByRole("button", { name: /Owner message/ });
+    const header = view.getByRole("button", { name: /done/ });
     expect(header).toHaveAttribute("aria-expanded", "false");
-    expect(header).toHaveTextContent("Done");
+    // A completed run that replied says nothing but its mark: the reply is the evidence.
+    expect(header.textContent).not.toContain("done");
+    expect(header.querySelector('[data-slot="run-card-origin"]')).toBeNull();
     expect(view.container.querySelector('[data-slot="timeline"]')).toBeNull();
     expect(view.getByText("Finished")).toBeInTheDocument();
     fireEvent.click(header);
@@ -39,24 +41,25 @@ describe("the run card", () => {
   it("opens a running run by default and keeps the Owner's close through the turn", () => {
     const [current, setCurrent] = createSignal(turn("running"));
     const view = render(() => <RunCard turn={current()} events={events} activities={[]} live />);
-    expect(view.getByRole("button", { name: /Running/ })).toHaveAttribute("aria-expanded", "true");
+    expect(view.getByRole("button", { name: /running/ })).toHaveAttribute("aria-expanded", "true");
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
-    fireEvent.click(view.getByRole("button", { name: /Running/ }));
+    fireEvent.click(view.getByRole("button", { name: /running/ }));
     expect(view.container.querySelector('[data-slot="run-card-trace"]')).toBeNull();
     flush(() => setCurrent(turn("completed")));
-    expect(view.getByRole("button", { name: /Owner message/ })).toHaveAttribute("aria-expanded", "false");
+    // It settled with no reply of its own, so the word stays: "quiet", not a tick.
+    expect(view.getByRole("button", { name: /quiet/ })).toHaveAttribute("aria-expanded", "false");
   });
   it("names a process wake and a delegation as the run's origin", () => {
     const wake: ThreadActivity = { ...activity, id: 2, kind: "process_completed", data: { name: "morningReview", summary: "" } };
     const process = render(() => <RunCard turn={{ ...turn("completed"), owner_message_id: null }} message={message} events={[]} activities={[wake]} />);
-    expect(process.getByRole("button", { name: /Process wake · morningReview/ })).toBeInTheDocument();
+    expect(process.getByRole("button", { name: /morningReview woke this/ })).toBeInTheDocument();
     const trigger: ChatMessage = { id: 9, thread_id: 1, author: "agent", body: "wake", ref: null, ts: activity.ts, origin: { kind: "process", process_id: "p1", name: "nightly", trigger: { kind: "cron", expr: "0 9 * * *" }, outcome: "completed", result: null } };
     const triggered = render(() => <RunCard turn={{ ...turn("completed"), owner_message_id: 9 }} trigger={trigger} message={message} events={[]} activities={[]} />);
-    expect(triggered.getByRole("button", { name: /Process wake · nightly/ })).toBeInTheDocument();
+    expect(triggered.getByRole("button", { name: /nightly woke this/ })).toBeInTheDocument();
     const background = render(() => <RunCard turn={{ ...turn("completed"), owner_message_id: null }} message={message} events={[]} activities={[]} />);
-    expect(background.getByRole("button", { name: /Background run/ })).toBeInTheDocument();
+    expect(background.getByRole("button", { name: /Background/ })).toBeInTheDocument();
     const delegated = render(() => <RunCard turn={{ ...turn("completed"), requester_thread_id: 7 }} message={message} events={[]} activities={[]} />);
-    expect(delegated.getByRole("button", { name: /Delegation report · #7/ })).toBeInTheDocument();
+    expect(delegated.getByRole("button", { name: /Report from #7/ })).toBeInTheDocument();
   });
   it("shows each artifact the run produced once, whatever repeats it", () => {
     const published: ChatMessage = { ...message, artifact_ids: [44, 44, 45] };
@@ -66,7 +69,7 @@ describe("the run card", () => {
   });
   it("shows failure and recovery beside the reply, not behind the disclosure", () => {
     const view = render(() => <RunCard turn={turn("failed")} events={[]} activities={[{ ...activity, kind: "execution_failed", data: { reason: "Browser checks failed: the page did not load." } }]} />);
-    expect(view.getByRole("button", { name: /Failed/ })).toBeInTheDocument();
+    expect(view.getByRole("button", { name: /failed/ })).toBeInTheDocument();
     const failure = view.container.querySelector('[data-slot="work-failure"]')!;
     expect(failure).toHaveTextContent("Browser checks failed: the page did not load.");
     expect(failure.closest("details")).toBeNull();
@@ -77,7 +80,7 @@ describe("the run card", () => {
   });
   it("keeps a plain reply's trace closed and its reply plain", () => {
     const view = render(() => <RunCard turn={turn("completed")} message={{ ...message, tool_calls: [] }} events={[]} activities={[]} />);
-    expect(view.getByRole("button", { name: /Done/ })).toHaveAttribute("aria-expanded", "false");
+    expect(view.getByRole("button", { name: /done/ })).toHaveAttribute("aria-expanded", "false");
     expect(view.container.querySelector('[data-slot="timeline"]')).toBeNull();
     expect(view.getByText("Finished")).toBeInTheDocument();
   });
@@ -85,13 +88,13 @@ describe("the run card", () => {
     const [current, setCurrent] = createSignal(turn("queued"));
     const events: TimelineEvent[] = [{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null, input: null } }];
     const view = render(() => <RunCard turn={current()} events={events} activities={[]} />);
-    expect(view.getByRole("button", { name: /Queued/ })).toBeInTheDocument();
+    expect(view.getByRole("button", { name: /queued/ })).toBeInTheDocument();
     flush(() => setCurrent(turn("running")));
-    expect(view.getByRole("button", { name: /Running/ })).toBeInTheDocument();
+    expect(view.getByRole("button", { name: /running/ })).toBeInTheDocument();
     // What the run is doing right now stays available to assistive technology.
     expect(view.getByText("Gathering context")).toBeInTheDocument();
     flush(() => setCurrent(turn("cancelled")));
-    expect(view.getByRole("button", { name: /Cancelled/ })).toBeInTheDocument();
+    expect(view.getByRole("button", { name: /cancelled/ })).toBeInTheDocument();
     expect(view.getByText(/Your conversation is kept/)).toBeInTheDocument();
     flush(() => setTurnExpanded(1, true));
     expect(view.getByText("No result recorded")).toBeInTheDocument();

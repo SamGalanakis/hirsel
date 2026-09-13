@@ -8,10 +8,9 @@ import type { ChatMessage } from "../protocol";
 import { state } from "../store/store";
 import type { TimelineEvent } from "../store/types";
 import { ownerFacingActivity } from "./conversation";
-import { executionLabel } from "./execution-label";
 import { hasTrace, runOrigin, runOriginLabel, runOutcome, runOutcomeLabel, turnArtifactIds, type RunOutcome } from "./run-card";
 import { setTurnExpanded, threadState } from "./store";
-import type { Thread, ThreadActivity, ThreadTurn } from "./types";
+import type { ThreadActivity, ThreadTurn } from "./types";
 import { failureReason, mergePersistedToolCalls, toolSummary, workDuration, workLabel } from "./work-summary";
 
 /** Everything the run recorded while it was working: the ordered step rows the
@@ -54,14 +53,14 @@ function OutcomeMark(props: { outcome: RunOutcome }) {
 /**
  * One finished — or running — agent turn, as one card.
  *
- * The header names the run: what started it, where it ran, how long it took and
- * how it ended. Under it sits the execution trace, collapsed once the run is
- * over and open while it is live, so watching a turn work and re-opening it
+ * The header names the run in one quiet line: what started it when that is not
+ * the Owner asking, how long it took and how it ended. Under it sits the
+ * execution trace, collapsed once the run is over and open while it is live, so watching a turn work and re-opening it
  * afterwards are the same component in two states rather than two surfaces.
  * The reply, and whatever the run published, follow underneath, where they stay
  * readable without opening anything.
  */
-export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigger?: ChatMessage; thread?: Thread; activities: ThreadActivity[]; events: TimelineEvent[]; live?: boolean }) {
+export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigger?: ChatMessage; activities: ThreadActivity[]; events: TimelineEvent[]; live?: boolean }) {
   const [now, setNow] = createSignal(Date.now());
   const running = () => props.turn?.state === "running";
   createEffect(() => running() && state.connection === "connected", active => {
@@ -76,8 +75,11 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
   const body = () => props.message?.body ?? split().reply;
   const outcome = () => runOutcome(props.turn, props.message, props.events);
   const origin = () => runOrigin(props.turn, props.trigger, props.activities);
-  const executor = () => executionLabel(props.thread?.execution);
   const duration = () => workDuration(props.turn, now());
+  const originLabel = () => runOriginLabel(origin());
+  /** A completed run that replied has the reply as its evidence; the word
+   * "done" over it only repeats what the mark already says. */
+  const outcomeWord = () => outcome() === "done" ? null : runOutcomeLabel(outcome());
   const artifacts = () => turnArtifactIds(props.message, props.activities);
   /** A live run is open because the Owner is watching it happen; a finished one
    * is closed because its reply is the answer. Either way the Owner's own last
@@ -104,25 +106,29 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
   const label = () => workLabel(props.turn, events(), props.activities, buildTimeline(events()).filter(item => item.kind === "tool").length, Boolean(props.message));
   return <section class="min-w-0" data-slot="run-card" onFocusIn={event => { focusInTrace = trace !== undefined && event.target instanceof Node && trace.contains(event.target); }} data-turn-id={props.turn?.id} data-outcome={props.turn ? outcome() : undefined}>
     <Show when={props.turn}>
-      {/* Dense one-line identity: what asked for the run, where it ran, how long
-          it took, how it ended — and the one control that opens its trace. */}
+      {/* Dense one-line identity: what started the run when that is worth
+          saying, how long it took, how it ended — and the one control that
+          opens its trace. The spoken name keeps the outcome word the quiet
+          line drops, so a header showing only a mark still announces itself. */}
       <button
         type="button"
         ref={node => { header = node; }}
         data-slot="run-card-header"
+        aria-label={[runOutcomeLabel(outcome()), originLabel(), duration()].filter(Boolean).join(" · ")}
         aria-expanded={expanded() ? "true" : "false"}
         aria-controls={expanded() ? traceId() : undefined}
         class="-mx-1 mb-1.5 flex min-h-8 w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-meta text-muted-foreground transition-colors hover:bg-muted/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-h-11"
         onClick={() => props.turn && setTurnExpanded(props.turn.id, !expanded())}
       >
         <ChevronRight class={`size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
-        <span class="shrink-0">{runOriginLabel(origin())}</span>
-        <span aria-hidden="true">·</span>
-        <span class={`min-w-0 truncate font-mono ${executor().muted ? "italic" : ""}`} data-slot="run-card-executor">{executor().text}</span>
-        <Show when={duration()}><span aria-hidden="true">·</span><span class="shrink-0 tabular-nums">{duration()}</span></Show>
+        <Show when={originLabel()}>{label => <span class="min-w-0 truncate" data-slot="run-card-origin">{label()}</span>}</Show>
+        <Show when={duration()}>
+          <Show when={originLabel()}><span aria-hidden="true">·</span></Show>
+          <span class="shrink-0 tabular-nums">{duration()}</span>
+        </Show>
         <span class="ml-auto inline-flex shrink-0 items-center gap-1" data-slot="run-card-outcome">
           <OutcomeMark outcome={outcome()} />
-          <span>{runOutcomeLabel(outcome())}</span>
+          <Show when={outcomeWord()}>{word => <span>{word()}</span>}</Show>
         </span>
       </button>
       <Show when={running()}><p class="sr-only" role="status">{label()}</p></Show>

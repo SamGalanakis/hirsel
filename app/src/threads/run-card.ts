@@ -35,12 +35,14 @@ export function runOrigin(turn: ThreadTurn | undefined, trigger: ChatMessage | u
   return { kind: "background" };
 }
 
-export function runOriginLabel(origin: RunOrigin): string {
+/** What to say about where the run came from, in plain words. An Owner message
+ * is the default origin and says nothing, so it gets no words at all. */
+export function runOriginLabel(origin: RunOrigin): string | null {
   switch (origin.kind) {
-    case "owner": return "Owner message";
-    case "process": return origin.name ? `Process wake · ${origin.name}` : "Process wake";
-    case "delegation": return `Delegation report · #${origin.threadId}`;
-    case "background": return "Background run";
+    case "owner": return null;
+    case "process": return origin.name ? `${origin.name} woke this` : "Woken by a process";
+    case "delegation": return `Report from #${origin.threadId}`;
+    case "background": return "Background";
   }
 }
 
@@ -66,13 +68,13 @@ export function runOutcome(turn: ThreadTurn | undefined, message: ChatMessage | 
 
 export function runOutcomeLabel(outcome: RunOutcome): string {
   switch (outcome) {
-    case "queued": return "Queued";
-    case "running": return "Running";
-    case "done": return "Done";
-    case "quiet": return "Quiet";
-    case "failed": return "Failed";
-    case "cancelled": return "Cancelled";
-    case "interrupted": return "Interrupted";
+    case "queued": return "queued";
+    case "running": return "running";
+    case "done": return "done";
+    case "quiet": return "quiet";
+    case "failed": return "failed";
+    case "cancelled": return "cancelled";
+    case "interrupted": return "interrupted";
   }
 }
 

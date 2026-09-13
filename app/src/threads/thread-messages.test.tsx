@@ -58,7 +58,7 @@ describe("who is speaking", () => {
     // A live run card opens on arrival: the Owner is watching it happen.
     const header = view.container.querySelector('[data-slot="run-card-header"]')!;
     expect(header).toHaveAttribute("aria-expanded", "true");
-    expect(header.textContent).toContain("Running");
+    expect(header.textContent).toContain("running");
     expect(view.container.querySelector('[data-slot="run-card-trace"]')).toBeInTheDocument();
   });
   it("renders a routine note as one centred line owned by neither party", () => {
@@ -76,7 +76,7 @@ describe("who is speaking", () => {
 it("renders stopped queued work without an execution duration or running avatar", () => {
   const turn: ThreadTurn = { id: 44, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "cancelled", accepted_at: "2026-09-09T09:00:00Z", started_at: null, finished_at: "2026-09-09T10:00:00Z" };
   const view = render(() => <ThreadMessage entry={{ key: "turn-44", kind: "turn", turn }} history={emptyHistory()} threadId={1} />);
-  expect(view.getByRole("button", { name: /Cancelled/ })).toBeInTheDocument();
+  expect(view.getByRole("button", { name: /cancelled/ })).toBeInTheDocument();
   expect(view.container.querySelector(".animate-spin")).toBeNull();
   expect(view.container.textContent).not.toContain("1h");
 });

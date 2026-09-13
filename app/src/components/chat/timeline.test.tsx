@@ -105,7 +105,8 @@ describe("Timeline component", () => {
       />
     ));
     expect(done.container.querySelector('[aria-label="ok"]')).toBeTruthy();
-    expect(done.getByText("x.ts · Succeeded")).toBeTruthy();
+    expect(done.getByText("x.ts")).toBeTruthy();
+    expect(done.container.querySelector('[data-slot="timeline-tool"]')?.textContent).not.toContain("Succeeded");
   });
 
   it("keeps reasoning readable inline without repeated disclosure chrome", () => {
@@ -165,7 +166,9 @@ describe("Timeline component", () => {
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
     expect(row.textContent).toContain("shell_run");
     expect(row.textContent).toContain("cmd: printf");
-    expect(row.textContent).toContain("Succeeded");
+    // The glyph carries the outcome; the summary slot never repeats it.
+    expect(row.querySelector('[aria-label="ok"]')).toBeTruthy();
+    expect(row.textContent).not.toContain("Succeeded");
     expect(row.textContent).not.toContain("ok status 0");
     fireEvent.click(within(row).getByRole("button"));
     const payload = container.querySelector('[data-slot="tool-result"]') as HTMLElement;
@@ -204,8 +207,8 @@ describe("Timeline component", () => {
     )} />);
     const rows = [...container.querySelectorAll('[data-slot="timeline-tool"]')];
     expect(rows.map(row => row.textContent)).toEqual(expect.arrayContaining([
-      expect.stringContaining("cmd: printf first · Succeeded"),
-      expect.stringContaining("cmd: printf second · Succeeded"),
+      expect.stringContaining("cmd: printf first"),
+      expect.stringContaining("cmd: printf second"),
     ]));
     expect(rows[0].textContent).not.toBe(rows[1].textContent);
   });

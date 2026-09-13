@@ -121,7 +121,9 @@ function rowClass(state: { failed?: boolean; open?: boolean }): string {
   return `${ROW} text-muted-foreground hover:bg-accent/40 hover:text-foreground`;
 }
 /** The row's own summary takes whatever width is left and truncates; the timing
- * is pinned to the right edge so a column of steps reads as a column of times. */
+ * is pinned to the right edge so a column of steps reads as a column of times.
+ * The slot holds a measured duration or nothing: a live turn's events are
+ * stamped on arrival, a replayed timeline carries no clock and shows none. */
 const ROW_DETAIL = "min-w-0 flex-1 truncate";
 const ROW_TIME = "ml-auto shrink-0 pl-1.5 tabular-nums text-muted-foreground/70";
 
@@ -185,7 +187,9 @@ function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settle
     const ms = done()?.durationMs;
     return ms === undefined || ms === null ? "" : formatDuration(ms);
   };
-  const detail = () => done()?.result || programPreview(props.item.code);
+  // The collapsed cell names itself by its first statement; its output lives
+  // in the panel, never in the summary slot where it read as a duration.
+  const detail = () => programPreview(props.item.code);
   const body = () => (
     <>
       <StatusGlyph status={props.item.status} settled={props.settled} />
@@ -218,14 +222,13 @@ function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settle
 const OPAQUE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{16,}$/i;
 /** What a collapsed tool row says about itself: its bounded start summary (the
  * argument that tells two calls of one tool apart), else the tool's own
- * outcome summary, else nothing — and never a bare id. */
+ * outcome summary, else nothing — and never a bare id. The outcome itself is
+ * the glyph's word, not this slot's: "Succeeded" printed after every summary
+ * said nothing the mark had not. */
 function toolDetail(item: ToolItem): string | null {
   const outcome = item.status.state === "done" ? item.status : null;
   const readable = (text: string | null | undefined) => text && !OPAQUE_ID.test(text.trim()) ? text : null;
-  const start = readable(item.summary);
-  if (!outcome) return start;
-  const identity = start ?? readable(outcome.summary?.replace(/^(?:ok|err)\s+/i, ""));
-  return [identity, outcome.ok ? "Succeeded" : "Failed"].filter(Boolean).join(" · ");
+  return readable(item.summary) ?? (outcome ? readable(outcome.summary?.replace(/^(?:ok|err)\s+/i, "")) : null);
 }
 /** Everything the open panel shows for a tool: its result, then its input. */
 function toolPayload(item: ToolItem): string {

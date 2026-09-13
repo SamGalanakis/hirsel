@@ -10,7 +10,7 @@ import {
   Square,
   X,
 } from "@/components/ui/icons";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onCleanup, Show } from "solid-js";
 
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
@@ -47,9 +47,17 @@ const LONG_PRESS_MS = 450;
 /** The one place the composer's destination is written, so its accessible name
  * and its visible placeholder can never disagree. The phone header truncates
  * the title to a few characters, so the composer is where the name survives:
- * it is never swapped for a bare `#id`, only shortened with an ellipsis. */
+ * it is never swapped for a bare `#id`, only shortened with an ellipsis. The
+ * limit follows the field's measured width (`placeholderLimit`): a placeholder
+ * that wraps grows the textarea, and a grown textarea covers the last message. */
 export function composerPlaceholder(name: string, limit = 44): string {
   return name.length > limit ? `${name.slice(0, limit - 1).trimEnd()}…` : name;
+}
+/** How many characters of placeholder fit on one line of a field this wide:
+ * the ramp's 14px sans averages ~7.5px per glyph, and the floor keeps
+ * "Message …" plus a few letters of the name at any width. */
+export function placeholderLimit(width: number): number {
+  return Math.max(16, Math.floor(width / 7.5));
 }
 interface Props {
   ariaLabel?: string;
@@ -88,6 +96,7 @@ export function Composer(props: Props) {
   // with any future constrained compact input.
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, props.draftKey ?? "main");
   const [sending, setSending] = createSignal(false);
+  const [fitsChars, setFitsChars] = createSignal(44);
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
   let textRef: HTMLTextAreaElement | undefined;
@@ -358,6 +367,10 @@ export function Composer(props: Props) {
           ref={(node: HTMLTextAreaElement) => {
             setRef(node);
             textRef = node;
+            if (typeof ResizeObserver === "undefined") return;
+            const observer = new ResizeObserver(entries => setFitsChars(placeholderLimit(entries[0]?.contentRect.width ?? node.clientWidth)));
+            observer.observe(node);
+            onCleanup(() => observer.disconnect());
           }}
           rows={1}
           data-composer="main"
@@ -367,7 +380,7 @@ export function Composer(props: Props) {
              thumbs use it. */
           class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
           aria-label={props.ariaLabel ?? "Message Hirsel"}
-          placeholder={composerPlaceholder(props.ariaLabel ?? "Message Hirsel")}
+          placeholder={composerPlaceholder(props.ariaLabel ?? "Message Hirsel", fitsChars())}
           aria-expanded={(picker.open() ? true : undefined) ? "true" : "false"}
           aria-controls={picker.open() ? THREAD_REF_PICKER_ID : undefined}
           aria-activedescendant={

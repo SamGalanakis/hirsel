@@ -33,6 +33,7 @@ import { ThreadActions } from "./ThreadActions";
 import { SettingsSheet } from "../components/settings/SettingsSheet";
 import { ProcessesSheet } from "../components/processes/ProcessesSheet";
 import { PaneHeader } from "../components/ui/PaneHeader";
+import { SectionLabel } from "../components/ui/section-label";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../components/ui/empty";
 import { CanvasRail, CanvasSheet, CanvasButton } from "../components/views/CanvasSurface";
 import { ConnectionPill } from "../components/ConnectionPill";
@@ -265,17 +266,24 @@ function ThreadStart(props: { browsable: boolean; onSelect: (id: number) => void
         <Show when={threadState.threads.length > 0 && threadState.focusedId === null} fallback={<div class="m-auto w-full max-w-md space-y-4">
           <h1 class="text-lg font-medium">{threadState.focusedId !== null ? `Thread #${threadState.focusedId} is unavailable` : "Start with a Space or Task"}</h1>
           <p class="text-sm text-muted-foreground">{threadState.focusedId !== null ? "It may have been removed, or it belongs to another history." : "Spaces hold ongoing context. Tasks hold work you can mark done."}</p>
-          <Show when={threadState.threads.length > 0 && props.browsable}><button class={button} onClick={() => openThreadNavigation()}>Browse Spaces &amp; Tasks</button></Show>
-          <button class={`${button} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />Start a Space or Task</button>
+          {/* Below `split` the bottom bar owns Browse and New; the body does
+              not say them a second time under the same sentence. The wrapper
+              hides, not the buttons: `hidden` on a button that is itself
+              `inline-flex` loses the cascade. */}
+          <div class="hidden flex-wrap gap-2 split:flex">
+            <Show when={threadState.threads.length > 0 && props.browsable}><button class={button} onClick={() => openThreadNavigation()}>Browse Spaces &amp; Tasks</button></Show>
+            <button class={`${button} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />Start a Space or Task</button>
+          </div>
         </div>}>
         <div class="mx-auto flex w-full max-w-measure flex-col gap-5" data-slot="attention-queue">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <h1 class="text-lg font-medium">What needs you</h1>
-            <div class="flex items-center gap-1">
+            {/* Below `split` the bottom bar owns Browse, New and Settings;
+                the header does not say them twice. The wrapper hides, not
+                the buttons: `hidden` on an `inline-flex` button loses. */}
+            <div class="hidden items-center gap-1 split:flex">
               <Show when={props.browsable}><button class={button} onClick={() => openThreadNavigation()}>Browse Spaces &amp; Tasks</button></Show>
-              {/* Below `split` the bottom bar owns New and Settings; the
-                  header does not say them twice. */}
-              <button class={`${button} hidden bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground split:inline-flex`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />New</button>
+              <button class={`${button} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />New</button>
             </div>
           </div>
           {/* The queue is what needs the Owner and what is new, not the tree
@@ -290,7 +298,7 @@ function ThreadStart(props: { browsable: boolean; onSelect: (id: number) => void
             </EmptyHeader>
           </Empty>}>
             <For each={grouped()}>{group => <section class="flex flex-col gap-1" aria-label={group.label}>
-              <h2 class="px-2 text-meta font-medium uppercase tracking-wider text-muted-foreground">{group.label}</h2>
+              <SectionLabel as="h2" class="px-2">{group.label}</SectionLabel>
               <ul class="flex flex-col"><For each={group.entries}>{entry => <QueueRow entry={entry} onSelect={props.onSelect} />}</For></ul>
             </section>}</For>
           </Show>

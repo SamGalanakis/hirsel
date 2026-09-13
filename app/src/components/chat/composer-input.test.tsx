@@ -266,5 +266,10 @@ describe("composer placeholder", () => {
     const long = `Message ${"Quarterly planning ".repeat(4)}`;
     expect(composerPlaceholder(long)).toHaveLength(44);
     expect(composerPlaceholder(long).endsWith("…")).toBe(true);
+    // A 390px phone field (~250px of text) keeps one line: the name, shortened.
+    const { placeholderLimit } = await import("./Composer");
+    expect(placeholderLimit(250)).toBe(33);
+    expect(composerPlaceholder(long, placeholderLimit(250))).toHaveLength(33);
+    expect(placeholderLimit(40)).toBe(16);
   });
 });

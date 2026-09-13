@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { ArrowRight, Check, GitBranch, Layers, Paperclip, X } from "../components/ui/icons";
+import { SectionLabel } from "../components/ui/section-label";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
 import { createMediaFlag, createOverlayPresence } from "../lib/focus";
 import { historyId } from "../lib/history";
@@ -15,7 +16,7 @@ const chip = "inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border b
 /** ONE labelled-field shape for this dialog: the label above the box at meta
  * size, the box itself at the reading size with a real border and a real focus
  * ring. */
-const fieldLabel = "flex flex-col gap-1 text-meta font-medium uppercase tracking-wide text-muted-foreground";
+const field = "flex flex-col gap-1";
 const fieldBox = "w-full min-w-0 rounded-lg border border-border bg-background px-2.5 text-sm font-normal normal-case tracking-normal text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const icon = "inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
 /** The Thread's name is the first thing the Owner wrote, unless they say otherwise. */
@@ -104,12 +105,12 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       </div>
       {/* A single-line name: Enter ends it, on every pointer. The first-message
           textarea keeps its own rule, where Enter is a newline on touch. */}
-      <label class={fieldLabel}>Name
+      <label class={field}><SectionLabel as="span">Name</SectionLabel>
         <input aria-label="New space or task title" placeholder={derivedTitle(body()) || "Optional — the first message names it"} value={name()} onInput={event => setName(event.currentTarget.value)}
           onKeyDown={event => { if (event.key !== "Enter" || event.shiftKey || event.isComposing) return; event.preventDefault(); if (ready()) void submit(); }}
           class={`${fieldBox} h-9 pointer-coarse:h-11`} />
       </label>
-      <label class={`${fieldLabel} min-h-0 flex-1`}>First message
+      <label class={`${field} min-h-0 flex-1`}><SectionLabel as="span">First message</SectionLabel>
         <textarea ref={node => { textarea = node; }} aria-label="First message" placeholder="What is this about? Your first message starts it off…" value={body()} onInput={event => setBody(event.currentTarget.value)}
           onKeyDown={event => handleSubmitKeys(event, { value: body, coarse, onSend: () => void submit() })}
           class={`${fieldBox} min-h-24 flex-1 resize-none py-2`} />

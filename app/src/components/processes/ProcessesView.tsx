@@ -8,6 +8,7 @@ import { threadState } from "../../threads/store";
 import { getClient } from "../../ws/client";
 import type { ProcessInfo } from "../../protocol";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
+import { SectionLabel } from "../ui/section-label";
 import { ProcessRow } from "./ProcessRow";
 
 export function ProcessesView() {
@@ -46,9 +47,7 @@ export function ProcessesView() {
       <div class="flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
         <Show when={groups().running.length > 0}>
           <section class="flex flex-col gap-3">
-            <h3 class="mx-3 text-meta font-medium uppercase tracking-wider text-muted-foreground">
-              Running ({groups().running.length})
-            </h3>
+            <SectionLabel as="h3" class="mx-3">Running ({groups().running.length})</SectionLabel>
             <For each={groups().running}>
               {(process) => <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />}
             </For>
@@ -57,9 +56,7 @@ export function ProcessesView() {
 
         <Show when={groups().finished.length > 0}>
           <section class="flex flex-col gap-3">
-            <h3 class="mx-3 text-meta font-medium uppercase tracking-wider text-muted-foreground">
-              Finished ({groups().finished.length})
-            </h3>
+            <SectionLabel as="h3" class="mx-3">Finished ({groups().finished.length})</SectionLabel>
             <For each={groups().finished}>
               {(process) => <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />}
             </For>

@@ -113,7 +113,9 @@ function DescriptionRow(props: { thread: Thread; historyId: string }) {
   return <div class="flex flex-col gap-1.5" data-slot="thread-description">
     <Show when={edit.editing()} fallback={
       <div class="flex items-start gap-1">
-        <div class="min-w-0 flex-1">
+        {/* The pencil follows the value, not the measure: a one-line
+            description keeps its pencil at its own end, where the eye is. */}
+        <div class="min-w-0">
           <Show when={props.thread.description} fallback={<p class="text-muted-foreground">No description yet — add one</p>}>
             <Markdown>{props.thread.description}</Markdown>
           </Show>
@@ -215,7 +217,7 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
     {/* One line on every width: a long provider/model path truncates and
         keeps its full text in the tooltip, rather than wrapping under the
         label and pushing the pencil onto a line of its own. */}
-    <span class={`min-w-0 flex-1 truncate ${summary().muted ? "text-muted-foreground" : ""}`} data-slot="thread-execution" title={summary().text}>{summary().text}</span>
+    <span class={`min-w-0 truncate ${summary().muted ? "text-muted-foreground" : ""}`} data-slot="thread-execution" title={summary().text}>{summary().text}</span>
     <button type="button" class={pencil} aria-label="Change where this Thread runs" title="Change where this Thread runs" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1" data-slot="thread-execution-editor">

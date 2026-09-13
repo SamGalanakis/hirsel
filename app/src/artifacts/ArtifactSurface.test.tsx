@@ -35,10 +35,12 @@ describe("artifact navigation", () => {
     expect(trigger.isConnected).toBe(true);
   });
   it("names retained zero backlinks from the actual Thread title", () => {
-    setThreadState(draft => { draft.threads = [makeThread(0, { title: "General" })]; });
+    setThreadState(draft => { draft.ready = true; draft.threads = [makeThread(0, { title: "General" })]; });
     setArtifactState({ summaries: [{ ...artifact, thread_ids: [0] }] });
+    setHistoryId("h1");
     render(() => <ArtifactList />);
-    expect(screen.getByRole("button", { name: "General" })).toBeTruthy();
+    // The backlink is the Thread chip — tile and "#0 General" — not a bare button.
+    expect(screen.getByRole("link", { name: /General/ })).toBeTruthy();
   });
   it("distinguishes unavailable inventory from an empty result and offers a read-only retry", () => {
     setArtifactState({ summaries: [], inventory: { status: "loading" } });

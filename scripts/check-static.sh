@@ -23,4 +23,11 @@ if grep -rn -E '\b(leading-|text-[23]xl)' app/src --include=*.tsx --include=*.ts
   echo "leading-* and text-2xl/3xl utilities belong to the type ramp in app/src/styles.css, not to call sites" >&2
   exit 1
 fi
+# Every label over a group is `SectionLabel` (app/src/components/ui/section-label.tsx):
+# sentence case at text-meta, per DESIGN.md. An `uppercase` utility at a call
+# site is an eyebrow the ramp does not have.
+if grep -rn -E '\buppercase\b' app/src --include=*.tsx --include=*.ts | grep -v -E '\.test\.tsx?:'; then
+  echo "uppercase labels are not in the type vocabulary; use SectionLabel from app/src/components/ui/section-label.tsx" >&2
+  exit 1
+fi
 node app/scripts/openui-prompt.mjs --check

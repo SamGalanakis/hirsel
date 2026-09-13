@@ -1,10 +1,10 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import { Plus, X } from "../components/ui/icons";
+import { Plus, Radar, X } from "../components/ui/icons";
 import { createOverlayPresence } from "../lib/focus";
 import { historyId } from "../lib/history";
 import { filterThreadCandidates } from "../lib/thread-ref";
 import { threadState } from "../threads/store";
-import { ThreadAvatar } from "../threads/ThreadAvatar";
+import { NeutralTile, ThreadAvatar } from "../threads/ThreadAvatar";
 import { closeThreadReach, reachDialogTitle, threadReachTarget } from "./reach";
 import { grantLabel, grantReach, holdsRoot, revokeReach, threadGrants, type GrantOrigin } from "./store";
 import type { ReachTarget } from "../threads/types";
@@ -87,6 +87,7 @@ export function ReachDialog() {
         <li class={`${row} text-muted-foreground`}>Itself and everything below it</li>
         <Show when={root()}>
           <li class={row}>
+            <NeutralTile><Radar class="size-3" /></NeutralTile>
             <span class="min-w-0 flex-1">Everything (root)</span>
             <button type="button" class={remove} disabled={busy()} aria-label="Remove reach to everything" title="Remove this reach" onClick={() => drop("root")}><X class="size-3.5" /></button>
           </li>
@@ -112,7 +113,9 @@ export function ReachDialog() {
         <ul class="max-h-56 overflow-y-auto">
           <For each={candidates()}>{candidate => <li>
             <button type="button" class={option} disabled={busy()} onClick={() => add(candidate.target)}>
-              <Show when={typeof candidate.target === "number" ? threadState.threads.find(thread => thread.id === candidate.target) : null}>{found => <ThreadAvatar thread={found()} dense />}</Show>
+              {/* Root is a destination like any Thread in this list, so it
+                  carries a tile like any Thread: the rows line up. */}
+              <Show when={typeof candidate.target === "number" ? threadState.threads.find(thread => thread.id === candidate.target) : null} fallback={<NeutralTile><Radar class="size-3" /></NeutralTile>}>{found => <ThreadAvatar thread={found()} dense />}</Show>
               <span class="min-w-0 flex-1 wrap-break-word">{candidate.label}</span>
               <span class="shrink-0 text-meta tabular-nums text-muted-foreground">{candidate.detail}</span>
             </button>

@@ -214,7 +214,8 @@ describe("execution result preservation", () => {
     const rows = [...view.container.querySelectorAll('[data-slot="timeline-tool"]')];
     expect(rows).toHaveLength(2);
     expect(rows.map(row => row.getAttribute("data-tool-call-id"))).toEqual(["call-a", "call-b"]);
-    expect(view.getByText("Reading B · Failed")).toBeTruthy();
+    expect(view.getByText("Reading B")).toBeTruthy();
+    expect(rows[1].querySelector('[aria-label="failed"]')).toBeTruthy();
     expect(view.getAllByText("read_file")).toHaveLength(2);
   });
 

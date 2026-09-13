@@ -781,13 +781,13 @@ describe("tree keyboard model", () => {
 });
 
 describe("row actions menu", () => {
-  it("separates the three groups, marks Archive destructive, and drills into snooze durations", () => {
+  it("separates the three groups, keeps reversible Archive neutral, and drills into snooze durations", () => {
     responsiveMedia(1440);
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
     const menu = within(document.body);
     expect(document.body.querySelectorAll('[data-slot="dropdown-menu-separator"]').length).toBe(2);
-    expect(menu.getByRole("menuitem", { name: /Archive Task/ }).className).toContain("text-destructive");
+    expect(menu.getByRole("menuitem", { name: /Archive Task/ }).className).not.toContain("text-destructive");
     const snooze = menu.getByRole("menuitem", { name: /Snooze Task/ });
     expect(snooze).toHaveAttribute("aria-haspopup", "menu");
     fireEvent.click(snooze);

@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { createOverlayPresence } from "../lib/focus";
 import { Plus, X, Search, Funnel, Check, ChevronRight, Clock, PanelRight, Settings } from "../components/ui/icons";
+import { SectionLabel } from "../components/ui/section-label";
 import { type ThreadSection } from "./model";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
 import type { ThreadNavigationIntent } from "./navigation";
@@ -25,7 +26,6 @@ export type ThreadNavigationMode = "hidden" | "compact" | "modal" | "docked";
  * a coarse pointer keeps the 44px target DESIGN.md requires on phones. */
 const ROW = "h-7 pointer-coarse:h-11";
 const control = "inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
-const label = "px-2 pt-3 pb-1 text-meta font-medium uppercase tracking-wider text-muted-foreground";
 /** Tone for the row's one state token. */
 const metaTone = { attention: "text-status-attention", active: "text-status-active", danger: "text-destructive", muted: "text-muted-foreground" } as const;
 /** Manual expand/collapse is the Owner's own choice, so it outlives a reload;
@@ -242,10 +242,13 @@ export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: Th
 
     <ThreadError navigation />
     {/* The Threads waiting on the Owner, named at the top of their own
-        inventory — the same selector the overview queue reads. */}
-    <Show when={waiting().length > 0}>
+        inventory — the same selector the overview queue reads. When that queue
+        is itself on screen beside the docked column, the band would name each
+        waiting Thread a third time (band, tree row, queue): there the queue
+        is the band, and the tree keeps only its rows. */}
+    <Show when={waiting().length > 0 && !(props.mode === "docked" && threadState.focusedId === null)}>
       <section data-slot="thread-attention-band" aria-label={`Needs you (${waiting().length})`} class="mb-1 shrink-0 rounded-md border border-status-attention/40 bg-status-attention/5 p-1">
-        <p class={`${label} pt-1 text-status-attention`}>Needs you ({waiting().length})</p>
+        <SectionLabel tone="attention" class="px-2 pt-1 pb-1">Needs you ({waiting().length})</SectionLabel>
         <ul class="flex flex-col">
           <For each={waiting()}>{thread => <li><button type="button" data-attention-thread={thread.id} class={`flex ${ROW} w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring`} aria-label={describe(thread, false)} onClick={() => props.onSelect(thread.id)}>
             <ThreadAvatar thread={thread} dense />
@@ -259,7 +262,7 @@ export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: Th
       <ul role="tree" aria-label="Threads" class="flex flex-col">
         <For each={listItems()} keyed={item => item.key}>{entry => {
           const item = () => entry();
-          return <Show when={item().row} fallback={<li role="presentation" class={label}>{item().label}</li>}>{row => {
+          return <Show when={item().row} fallback={<SectionLabel as="li" role="presentation" class="px-2 pt-3 pb-1">{item().label}</SectionLabel>}>{row => {
             const thread = () => row().thread;
             const summary = () => threadRowSummary(thread(), now(), state.connection === "connected");
             const done = () => thread().kind === "task" && !!thread().settled_at;

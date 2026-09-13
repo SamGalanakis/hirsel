@@ -6,6 +6,7 @@
 // boxes, no all-caps. Selection is carried by foreground weight plus one mint
 // indicator on the active tab's leading edge — the tab's left edge in the rail,
 // its bottom edge in the strip.
+import { SectionLabel } from "../ui/section-label";
 import { For, Show } from "solid-js";
 
 import type { SettingsTab } from "../../store/store";
@@ -105,12 +106,7 @@ export function SettingsTabs(props: {
       <For each={SETTINGS_GROUPS}>
         {(group) => (
           <div data-slot="settings-group" class="contents rail:flex rail:flex-col rail:gap-0.5 rail:pt-4 rail:first:pt-0">
-            <p
-              aria-hidden="true"
-              class="hidden px-3 pb-1 text-meta font-medium uppercase tracking-wide text-muted-foreground rail:block"
-            >
-              {group.heading}
-            </p>
+            <SectionLabel aria-hidden="true" class="hidden px-3 pb-1 rail:block">{group.heading}</SectionLabel>
             <div class="contents rail:flex rail:flex-col rail:gap-0">
             <For each={group.tabs}>
               {(tab) => {

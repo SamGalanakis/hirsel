@@ -413,6 +413,40 @@ body {
   }
 }
 
+/* A wide table's scroll box. The message column never widens, so a table
+   wider than the measure scrolls inside its own box — and must SAY so: the
+   mask fade was invisible against the card fill, so a cut-off table looked
+   like a table that ended. Three affordances, all token-drawn: an always-
+   present thin scrollbar (gutter reserved, so the row under it never jumps),
+   an ink shadow at whichever edge has more table behind it (the shadow layers
+   are pinned to the box while the `--table-ground` cover layers travel with
+   the content, so each shadow shows only when there is content beyond it),
+   and — below `split`, where two of five columns survive — a sticky first
+   column so a row keeps its name while the Owner scrolls its values. The
+   sticky cells paint on the same ground the box sits on. */
+@utility table-scroll {
+  --table-ground: var(--surface);
+  --table-shadow: color-mix(in oklch, var(--foreground) 28%, transparent);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+  background:
+    linear-gradient(to right, var(--table-ground) 45%, transparent) 0 0 / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--table-ground) 45%, transparent) 100% 0 / 2.5rem 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--table-shadow), transparent) 0 0 / 0.875rem 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--table-shadow), transparent) 100% 0 / 0.875rem 100% no-repeat scroll;
+
+  @media (max-width: 899.98px) {
+    & th:first-child,
+    & td:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      background: var(--table-ground);
+    }
+  }
+}
+
 /* Used by the ported AttachmentGroup's horizontal snap row. */
 @utility no-scrollbar {
   -ms-overflow-style: none;

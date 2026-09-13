@@ -30,7 +30,8 @@ describe("Space and Task actions", () => {
     expect(space.map(action => action.label)).toEqual(expect.arrayContaining(["Change Space icon", "Archive Space", "Copy Space link"]));
     // Three decisions, in order: what it is, what its work does, who sees it.
     expect([...new Set(space.map(action => action.group))]).toEqual(["identity", "work", "visibility"]);
-    expect(space.find(action => action.id === "archive")!.destructive).toBe(true);
+    // Archive is reversible (Unarchive sits in the same menu), so it is a neutral item.
+    expect(space.find(action => action.id === "archive")!.destructive).toBeUndefined();
     expect(space.find(action => action.id === "snooze")!.options?.length).toBe(4);
 
     const task = threadActions(makeThread(2, { kind: "task", revision: 8 }));

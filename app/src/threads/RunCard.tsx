@@ -5,6 +5,7 @@ import { buildTimeline, splitStreamingReply } from "../components/chat/timeline"
 import { Markdown } from "../components/Markdown";
 import { CubeSpinner } from "../components/CubeSpinner";
 import { Check, ChevronRight, CircleAlert, Square } from "../components/ui/icons";
+import { SectionLabel } from "../components/ui/section-label";
 import type { ChatMessage } from "../protocol";
 import { state } from "../store/store";
 import type { TimelineEvent } from "../store/types";
@@ -33,7 +34,7 @@ function TurnTrace(props: { ref?: (node: HTMLElement) => void; turn?: ThreadTurn
      40dvh window with the app's edge fade, and the JSON records keep their own
      smaller cap inside it. */
   return <section ref={node => props.ref?.(node)} id={props.id} data-slot="run-card-trace" class="scroll-fade-y mb-2 max-h-[40dvh] min-w-0 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-xs text-muted-foreground" aria-label="Run steps">
-    <p class="mb-1.5 text-meta font-medium uppercase tracking-wide text-muted-foreground">Steps</p>
+    <SectionLabel class="mb-1.5">Steps</SectionLabel>
     <Show when={props.events.length > 0}>
       <Timeline events={props.events} live={props.live} settled={settled()} />
     </Show>

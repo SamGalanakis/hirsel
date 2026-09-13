@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { getClient } from "../ws/client";
 import { THREAD_SYMBOL_ART } from "./thread-symbol-art";
 import { threadMonogram, tintStyle, type ThreadSymbol, type ThreadTint } from "./thread-symbols";
@@ -13,6 +14,13 @@ export function ThreadSymbolGlyph(props: { name: ThreadSymbol; class?: string })
   </svg>;
 }
 
+/** The dense (20px) tile for a thing that is not a Thread — an artifact, the
+ * root of a reach — drawn in the neutral tint so it sits in a list beside
+ * Thread tiles at the same size and weight instead of as a bare icon. */
+export function NeutralTile(props: { children: JSX.Element }) {
+  return <span aria-hidden="true" data-slot="neutral-tile" style={tintStyle("neutral")}
+    class="inline-flex size-5 shrink-0 select-none items-center justify-center overflow-hidden rounded-md">{props.children}</span>;
+}
 export interface ThreadAvatarIdentity { id: number; kind: "space" | "task"; title: string; icon?: ThreadIcon | null }
 /** A durable Thread identity cue, independent of activity or lifecycle state:
  * a tinted vocabulary symbol, an uploaded square image, or — the default — a

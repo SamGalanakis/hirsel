@@ -5,6 +5,7 @@ import { createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { Markdown as MarkdownBody } from "../../components/Markdown";
 import { cn } from "@/lib/utils";
+import { sectionLabelClass } from "@/components/ui/section-label";
 import type { OpenUiRenderer, RenderProps } from "../context";
 
 const GAP: Record<string, string> = { none: "gap-0", sm: "gap-2", md: "gap-4", lg: "gap-6" };
@@ -27,7 +28,7 @@ export const Section: OpenUiRenderer<{ title?: string; children?: unknown; descr
   </section>;
 
 export const Heading: OpenUiRenderer<{ text?: string; level?: number }> = p => {
-  const size = () => (p.props.level === 1 ? "text-base font-semibold" : p.props.level === 3 ? "text-xs font-semibold uppercase tracking-wide text-muted-foreground" : "text-sm font-semibold");
+  const size = () => (p.props.level === 1 ? "text-base font-semibold" : p.props.level === 3 ? sectionLabelClass : "text-sm font-semibold");
   return <h3 class={cn("min-w-0 break-words text-foreground", size())}>{p.props.text}</h3>;
 };
 
@@ -56,16 +57,19 @@ export const Card: OpenUiRenderer<{ children?: unknown; title?: string; descript
     {p.renderNode(p.props.children)}
   </div>;
 
-const CALLOUT: Record<string, string> = {
-  info: "border-border text-foreground",
-  success: "border-status-success/40 text-foreground",
-  warning: "border-status-attention/50 text-foreground",
-  danger: "border-status-danger/50 text-foreground",
+/** A callout's tone is its border at full token strength and its title in
+ * the same ink; the body stays foreground. A half-alpha border over the
+ * muted fill did not survive light mode — attention read as a hairline. */
+const CALLOUT: Record<string, { frame: string; title: string }> = {
+  info: { frame: "border-border", title: "text-foreground" },
+  success: { frame: "border-status-success", title: "text-status-success" },
+  warning: { frame: "border-status-attention", title: "text-status-attention" },
+  danger: { frame: "border-status-danger", title: "text-status-danger" },
 };
 export const Callout: OpenUiRenderer<{ text?: string; variant?: string; title?: string }> = p =>
   <div role={p.props.variant === "danger" ? "alert" : undefined} data-slot="openui-callout" data-variant={p.props.variant ?? "info"}
-    class={cn("flex min-w-0 flex-col gap-1 rounded-lg border bg-muted/40 px-3 py-2", CALLOUT[p.props.variant ?? "info"] ?? CALLOUT.info)}>
-    <Show when={p.props.title}><span class="text-sm font-semibold">{p.props.title}</span></Show>
+    class={cn("flex min-w-0 flex-col gap-1 rounded-lg border bg-muted/40 px-3 py-2 text-foreground", (CALLOUT[p.props.variant ?? "info"] ?? CALLOUT.info).frame)}>
+    <Show when={p.props.title}><span class={cn("text-sm font-semibold", (CALLOUT[p.props.variant ?? "info"] ?? CALLOUT.info).title)}>{p.props.title}</span></Show>
     <span class="text-sm">{p.props.text}</span>
   </div>;
 

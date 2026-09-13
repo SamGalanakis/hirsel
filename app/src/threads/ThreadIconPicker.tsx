@@ -1,3 +1,4 @@
+import { SectionLabel } from "../components/ui/section-label";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { createOverlayPresence } from "../lib/focus";
 import { fileToBase64 } from "../lib/format";
@@ -154,7 +155,7 @@ export function ThreadIconPicker() {
       <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-3">
         <Show when={!empty()} fallback={<p class="py-6 text-center text-meta text-muted-foreground">No symbol matches “{query()}”.</p>}>
           <For each={groups()}>{group => <section class="pt-2">
-            <h3 class="pb-1 text-meta uppercase tracking-wide text-muted-foreground">{group.label}</h3>
+            <SectionLabel as="h3" class="pb-1">{group.label}</SectionLabel>
             <div class="grid grid-cols-8 justify-items-center gap-1 pointer-coarse:grid-cols-6" role="group" aria-label={group.label}>
               <For each={group.names}>{name => <button type="button" class={swatch} aria-label={name} title={name}
                 aria-pressed={symbol() === name && !image() ? "true" : "false"} onClick={() => chooseSymbol(name)}>

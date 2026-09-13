@@ -345,7 +345,10 @@ export function handleThreadMessage(message: ServerMessage): void {
       break;
     }
     case "turn_event":
-      mergeTimelineEvents(message.turn_id, message.thread_id, [{ seq: message.seq, event: message.event }]);
+      // The wire carries no clock; the arrival time is the one measurement the
+      // client has, and it is what the trace row's duration slot reports. A
+      // replayed timeline (reconnect snapshot, history load) has none.
+      mergeTimelineEvents(message.turn_id, message.thread_id, [{ seq: message.seq, event: message.event, at: Date.now() }]);
       break;
     case "error": {
       if (message.client_id) {

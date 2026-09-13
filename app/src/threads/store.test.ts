@@ -168,15 +168,17 @@ describe("thread transport projection", () => {
       turn_timelines: [{ turn_id: 31, events: [{ seq: 1, event: { kind: "reasoning", text: "persisted first" } }, second] }],
     } }));
     await opening;
-    expect(threadState.turnDetails[31]).toEqual([
+    // The live copy keeps its arrival stamp; the snapshot copy never had one.
+    expect(threadState.turnDetails[31].map(row => ({ seq: row.seq, event: row.event }))).toEqual([
       { seq: 1, event: { kind: "reasoning", text: "persisted first" } },
       second,
     ]);
+    expect(typeof threadState.turnDetails[31][1].at).toBe("number");
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 31, ...second }));
     expect(threadState.turnDetails[31]).toHaveLength(2);
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 31, seq: 2, event: { kind: "prose", text: "conflict" } }));
     expect(threadState.error?.detail).toContain("Conflicting timeline event");
-    expect(threadState.turnDetails[31][1]).toEqual(second);
+    expect(threadState.turnDetails[31][1]).toMatchObject(second);
   });
   it("routes live timeline events only to their owning thread and binds instrument revision", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 2, turn_id: 1, seq: 1, event: { kind: "prose", text: "working" } }));

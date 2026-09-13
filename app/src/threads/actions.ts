@@ -58,7 +58,7 @@ export function threadActions(thread: Thread, now = Date.now()): ThreadActionIte
     ? { id: "snooze", label: `Unsnooze ${noun}`, icon: "snooze", group: "visibility", run: () => send("unsnooze") }
     : { id: "snooze", label: `Snooze ${noun}`, icon: "snooze", group: "visibility", options: snoozeOptions(now, until => send("snooze", { until })), run: () => send("snooze", { until: new Date(now + 86_400_000).toISOString() }) });
   actions.push({ id: "reach", label: "Reach…", icon: "reach", group: "visibility", run: () => openThreadReach(thread) });
-  actions.push({ id: "archive", label: `${thread.archived_at ? "Unarchive" : "Archive"} ${noun}`, icon: "archive", group: "visibility", destructive: !thread.archived_at, run: () => send(thread.archived_at ? "unarchive" : "archive") });
+  actions.push({ id: "archive", label: `${thread.archived_at ? "Unarchive" : "Archive"} ${noun}`, icon: "archive", group: "visibility", run: () => send(thread.archived_at ? "unarchive" : "archive") });
   actions.push({ id: "copy", label: `Copy ${noun} link`, icon: "copy", group: "visibility", run: () => { void (async () => {
     try { await navigator.clipboard.writeText(threadUrl({kind:"thread",history_id:referenceHistory!,thread_id:thread.id})); toast("Thread link copied"); }
     catch { toast("Couldn’t copy the link. Open the thread and copy its address.", { variant: "error" }); }

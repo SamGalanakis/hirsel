@@ -14,11 +14,11 @@ export function ThreadRefText(props: { value: string }) {
 }
 
 /** Exact human destination; missing IDs remain visible, never retargeted. */
-export function ThreadLink(props: { id: number }) {
+export function ThreadLink(props: { id: number; onOpen?: () => void }) {
   const thread = () => threadState.ready && referenceHistory === historyId() ? threadState.threads.find(thread => thread.id === props.id) : undefined;
   const origin = useRelatedOrigin();
   const referenceHistory = origin?.historyId ?? historyId();
   const target = () => ({kind:"thread" as const,history_id:referenceHistory!,thread_id:props.id});
   const label = () => `#${props.id} ${thread()?.title ?? "Unavailable thread"}`;
-  return <Show when={referenceHistory} fallback={label()}><RichLink href={threadUrl(target())} label={label()} target={target()}>{label()}</RichLink></Show>;
+  return <Show when={referenceHistory} fallback={label()}><RichLink href={threadUrl(target())} label={label()} target={target()} onOpen={props.onOpen}>{label()}</RichLink></Show>;
 }

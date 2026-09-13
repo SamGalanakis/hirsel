@@ -80,7 +80,7 @@ describe("Markdown blocks", () => {
       <Markdown>{"| a | b |\n| - | - |\n| 1 | 2 |"}</Markdown>
     ));
     const wrapper = container.querySelector("table")?.parentElement;
-    expect(wrapper?.getAttribute("class")).toContain("overflow-x-auto");
+    expect(wrapper?.getAttribute("class")).toContain("table-scroll");
   });
 
   it("renders ordered, nested, and task lists", () => {
@@ -200,7 +200,7 @@ describe("Markdown safety and streaming", () => {
     expect(container.firstElementChild?.className).toContain("grid-cols-[minmax(0,1fr)]");
     expect(container.querySelector("blockquote")?.className).toContain("grid-cols-[minmax(0,1fr)]");
     for (const table of container.querySelectorAll("table")) {
-      expect(table.parentElement?.className).toContain("overflow-x-auto");
+      expect(table.parentElement?.className).toContain("table-scroll");
     }
   });
 });

@@ -63,7 +63,9 @@ function PlainLink(props: { href: string; title: string; actionable: boolean; ch
   </a>;
 }
 
-export function RichLink(props: { href: string; title?: string; label: string; children: JSX.Element; imageOnly?: boolean; target?: RelatedTarget }) {
+/** `onOpen` runs after the chip's Open action focuses its Thread, so a surface
+ * standing over the workspace (the Artifacts pane) can step aside for it. */
+export function RichLink(props: { href: string; title?: string; label: string; children: JSX.Element; imageOnly?: boolean; target?: RelatedTarget; onOpen?: () => void }) {
   const origin = useRelatedOrigin();
   const parsed = () => parseThreadLink(props.href);
   const threadTarget = () => {
@@ -100,7 +102,7 @@ export function RichLink(props: { href: string; title?: string; label: string; c
       <ThreadChip href={href()} name={label()} text={localThread()?.title ?? `#${ref().thread_id}`} thread={localThread()} actionable={target() !== null} />
     }</Show>
     <Show when={target()}><DropdownMenuContent>
-      <Show when={localThread()}><DropdownMenuItem class="min-h-11" onSelect={() => focusThread(localThread()!.id)}><MessageCircle class="size-4" />Open</DropdownMenuItem></Show>
+      <Show when={localThread()}><DropdownMenuItem class="min-h-11" onSelect={() => { focusThread(localThread()!.id); props.onOpen?.(); }}><MessageCircle class="size-4" />Open</DropdownMenuItem></Show>
       <DropdownMenuItem class="min-h-11" onSelect={() => window.open(href(), "_blank", "noopener,noreferrer")}><ArrowUpRight class="size-4" />Open in new tab</DropdownMenuItem>
       <DropdownMenuItem class="min-h-11" onSelect={() => copied(href())}><Copy class="size-4" />Copy link</DropdownMenuItem>
       <Show when={threadTarget()}><DropdownMenuItem class="min-h-11" onSelect={() => copied(threadReference(threadTarget()!))}><Copy class="size-4" />Copy reference</DropdownMenuItem></Show>

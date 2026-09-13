@@ -21,9 +21,14 @@ import { ThreadActionSymbol } from "../threads/ThreadActions";
 import { focusComposer, goPane, jumpToLatest, SHORTCUTS } from "../lib/keymap";
 import { createFocusTrap } from "../lib/focus";
 import { cn } from "@/lib/utils";
+import { SectionLabel } from "@/components/ui/section-label";
 
 interface Command {
   id: string;
+  /** The section the command is listed under: where to go, what this Thread
+   * can do, which Thread to open. Eleven flat rows read as one list of
+   * unlike things; three labelled groups read as a palette. */
+  group: string;
   label: string;
   description?: string;
   /** Optional keyboard-hint tokens, rendered as mono chips on the right. */
@@ -63,10 +68,12 @@ export const CommandPalette: Component<{
 
   // The full command set, rebuilt reactively so the current task actions and
   // stop-turn action track store state.
+  const GO = "Go";
   const commands = createMemo<Command[]>(() => {
     const out: Command[] = [
       {
         id: "focus-composer",
+        group: GO,
         label: "Focus conversation",
         hint: ["/"],
         keywords: "type write message reply",
@@ -75,6 +82,7 @@ export const CommandPalette: Component<{
       },
       {
         id: "go-threads",
+        group: GO,
         label: "Open Spaces and Tasks",
         hint: ["g", "t"],
         keywords: "threads work needs you",
@@ -83,6 +91,7 @@ export const CommandPalette: Component<{
       },
       {
         id: "go-processes",
+        group: GO,
         label: "Open Processes",
         hint: ["g", "p"],
         keywords: "processes triggers timers background",
@@ -91,6 +100,7 @@ export const CommandPalette: Component<{
       },
       {
         id: "go-settings",
+        group: GO,
         label: "Open Settings",
         hint: ["g", "s"],
         keywords: "theme token endpoint",
@@ -99,6 +109,7 @@ export const CommandPalette: Component<{
       },
       {
         id: "jump-latest",
+        group: GO,
         label: "Jump to latest message",
         hint: ["G"],
         keywords: "bottom newest end",
@@ -108,14 +119,14 @@ export const CommandPalette: Component<{
     ];
 
     const thread = threadState.threads.find(t => t.id === threadState.focusedId);
-    if (thread) for (const action of threadActions(thread)) out.push({ id: `${action.id}-thread`, label: action.label, icon: <ThreadActionSymbol name={action.icon} />, run: action.run });
+    if (thread) for (const action of threadActions(thread)) out.push({ id: `${action.id}-thread`, group: thread.kind === "space" ? "This Space" : "This Task", label: action.label, icon: <ThreadActionSymbol name={action.icon} />, run: action.run });
 
     const index = threadIndex(threadState.threads);
     for (const destination of threadState.threads) {
       const section = threadSection(destination);
       const path = pathIn(index, destination.id);
       const description = [path, destination.parent_thread_id === null && destination.pinned_at ? "Pinned" : null, section === "active" ? null : section, destination.attention === "needs_owner" ? "Needs you" : null, !destination.read ? "Unread" : null].filter(Boolean).join(" · ");
-      out.push({ id: `open-thread-${destination.id}`, label: destination.title, description, keywords: `thread ${path} ${section}`, icon: <ThreadAvatar thread={destination} />, run: () => { closeThreadNavigation(); focusThread(destination.id); focusComposer(); } });
+      out.push({ id: `open-thread-${destination.id}`, group: "Spaces & Tasks", label: destination.title, description, keywords: `thread ${path} ${section}`, icon: <ThreadAvatar thread={destination} />, run: () => { closeThreadNavigation(); focusThread(destination.id); focusComposer(); } });
     }
     return out;
   });
@@ -129,6 +140,17 @@ export const CommandPalette: Component<{
     return candidates.filter((c) => fuzzyMatch(q, `${c.label} ${c.description ?? ""} ${c.keywords ?? ""}`));
   });
 
+  /** The filtered rows in their sections, each row keeping its flat index so
+   * the arrow keys and `aria-activedescendant` still walk one list. */
+  const sections = createMemo(() => {
+    const out: Array<{ group: string; rows: Array<{ cmd: Command; index: number }> }> = [];
+    filtered().forEach((cmd, index) => {
+      const last = out[out.length - 1];
+      if (last && last.group === cmd.group) last.rows.push({ cmd, index });
+      else out.push({ group: cmd.group, rows: [{ cmd, index }] });
+    });
+    return out;
+  });
   // Reset the surface each time it is summoned, and keep the active row in range
   // as the filter narrows.
   createEffect(() => props.open, (open) => {
@@ -209,27 +231,35 @@ export const CommandPalette: Component<{
                   <div class="px-3 py-6 text-center text-sm text-muted-foreground">No matching commands, Spaces or Tasks</div>
                 }
               >
-                <For each={filtered()}>
-                  {(cmd, i) => (
-                    <button
-                      type="button"
-                      id={cmd.id}
-                      role="option"
-                      tabindex={-1}
-                      aria-selected={i() === activeIndex() ? "true" : "false"}
-                      class={cn(
-                        "flex min-h-11 w-full cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground",
-                        i() === activeIndex() && "bg-muted",
-                      )}
-                      onMouseMove={() => setActiveIndex(i())}
-                      onClick={() => runCommand(cmd)}
-                    >
-                      {cmd.icon}
-                      <span class="min-w-0 flex-1"><span class="block break-words">{cmd.label}</span><Show when={cmd.description}><span class="block text-xs text-muted-foreground">{cmd.description}</span></Show></span>
-                      <Show when={cmd.hint}>
-                        <KeyHint keys={cmd.hint!} />
-                      </Show>
-                    </button>
+                <For each={sections()}>
+                  {(section) => (
+                    <div role="group" aria-label={section.group} class="pb-1">
+                      {/* One section needs no name over it: the Thread jump list is only Threads. */}
+                      <Show when={sections().length > 1}><SectionLabel class="px-2.5 pt-2 pb-1" aria-hidden="true">{section.group}</SectionLabel></Show>
+                      <For each={section.rows}>
+                        {({ cmd, index }) => (
+                          <button
+                            type="button"
+                            id={cmd.id}
+                            role="option"
+                            tabindex={-1}
+                            aria-selected={index === activeIndex() ? "true" : "false"}
+                            class={cn(
+                              "flex min-h-11 w-full cursor-default items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground",
+                              index === activeIndex() && "bg-muted",
+                            )}
+                            onMouseMove={() => setActiveIndex(index)}
+                            onClick={() => runCommand(cmd)}
+                          >
+                            {cmd.icon}
+                            <span class="min-w-0 flex-1"><span class="block break-words">{cmd.label}</span><Show when={cmd.description}><span class="block text-xs text-muted-foreground">{cmd.description}</span></Show></span>
+                            <Show when={cmd.hint}>
+                              <KeyHint keys={cmd.hint!} />
+                            </Show>
+                          </button>
+                        )}
+                      </For>
+                    </div>
                   )}
                 </For>
               </Show>
@@ -265,9 +295,7 @@ export const ShortcutHelp: Component<{
               <For each={groups()}>
                 {(g) => (
                   <div>
-                    <div class="mb-1.5 text-meta font-medium uppercase tracking-wide text-muted-foreground">
-                      {g.group}
-                    </div>
+                    <SectionLabel class="mb-1.5">{g.group}</SectionLabel>
                     <div class="flex flex-col gap-1">
                       <For each={g.items}>
                         {(s) => (

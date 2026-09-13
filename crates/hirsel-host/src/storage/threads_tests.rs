@@ -10,7 +10,7 @@ async fn ordinary_work_snapshot_and_lifecycle_are_independent() {
             "groceries",
             "Buy groceries",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -23,7 +23,7 @@ async fn ordinary_work_snapshot_and_lifecycle_are_independent() {
             "groceries",
             "ignored",
             "",
-            &json!({}),
+            None,
             ThreadAttention::NeedsOwner,
             hirsel_proto::ThreadKind::Task,
             None
@@ -57,7 +57,7 @@ async fn message_ownership_citations_and_pagination_survive_restart() {
             "a",
             "A",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -69,7 +69,7 @@ async fn message_ownership_citations_and_pagination_survive_restart() {
             "b",
             "B",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -139,7 +139,7 @@ async fn durable_turns_queue_and_activity_preserve_ownership() {
             "a",
             "A",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -161,6 +161,7 @@ async fn durable_turns_queue_and_activity_preserve_ownership() {
         .unwrap();
     let queued = s.queue_thread_turn(t.id, Some(m.id)).await.unwrap();
     assert_eq!(queued.state, ThreadTurnState::Queued);
+    assert_eq!(queued.started_at, None);
     s.save_thread_request("message", &json!({"thread_id":t.id,"history_id":s.history_id().await.unwrap(),"turn_id":queued.id,"report_triggered":false}))
         .await
         .unwrap();
@@ -173,6 +174,9 @@ async fn durable_turns_queue_and_activity_preserve_ownership() {
     );
     let running = s.run_thread_turn(queued.id).await.unwrap();
     assert_eq!(running.state, ThreadTurnState::Running);
+    assert_eq!(running.accepted_at, queued.accepted_at);
+    assert!(running.started_at.unwrap() >= queued.accepted_at);
+    assert_eq!(s.run_thread_turn(queued.id).await.unwrap(), running);
     assert!(
         s.append_thread_activity(0, Some(queued.id), "progress", &json!({}))
             .await
@@ -217,7 +221,7 @@ async fn accepted_message_and_durable_request_commit_together() {
             "a",
             "A",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -276,7 +280,7 @@ async fn persisted_turn_activity_replay_is_idempotent() {
             "work",
             "Work",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -342,7 +346,7 @@ async fn generated_controls_cannot_shadow_lifecycle_verbs() {
             "a",
             "A",
             "",
-            &ui,
+            Some(&ui),
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None
@@ -355,7 +359,7 @@ async fn generated_controls_cannot_shadow_lifecycle_verbs() {
             "b",
             "B",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -363,7 +367,7 @@ async fn generated_controls_cannot_shadow_lifecycle_verbs() {
         .await
         .unwrap();
     assert!(
-        s.update_thread(t.id, None, None, Some(&ui), None)
+        s.update_thread(t.id, None, None, Some(Some(&ui)), None)
             .await
             .is_err()
     );
@@ -378,7 +382,7 @@ async fn accepted_instrument_revision_is_consumed_and_conflicting_payload_reject
             "t",
             "T",
             "",
-            &json!({"type":"submit","action":"choose","label":"Choose","settles":false}),
+            Some(&json!({"type":"submit","action":"choose","label":"Choose","settles":false})),
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -474,7 +478,7 @@ async fn kinded_thread(
             client_id,
             client_id,
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             kind,
             parent_thread_id,
@@ -501,7 +505,7 @@ async fn kinds_enforce_every_parent_child_pair_and_survive_reload() {
                 "invalid-space-child",
                 "invalid",
                 "",
-                &json!({}),
+                None,
                 ThreadAttention::Quiet,
                 ThreadKind::Space,
                 Some(task.id),
@@ -515,7 +519,7 @@ async fn kinds_enforce_every_parent_child_pair_and_survive_reload() {
                 "task-child",
                 "replay",
                 "",
-                &json!({}),
+                None,
                 ThreadAttention::Quiet,
                 ThreadKind::Space,
                 Some(task.id),
@@ -650,7 +654,6 @@ async fn concurrent_space_child_creation_and_space_to_task_conversion_cannot_bot
     let parent = kinded_thread(&storage, "parent", ThreadKind::Space, None).await;
     let conversion_storage = storage.clone();
     let creation_storage = storage.clone();
-    let empty_instrument = json!({});
     let (conversion, creation) = tokio::join!(
         conversion_storage.set_addressed_thread_kind(
             &history,
@@ -662,7 +665,7 @@ async fn concurrent_space_child_creation_and_space_to_task_conversion_cannot_bot
             "racing-space-child",
             "child",
             "",
-            &empty_instrument,
+            None,
             ThreadAttention::Quiet,
             ThreadKind::Space,
             Some(parent.id),
@@ -704,7 +707,7 @@ async fn generated_completion_and_task_to_space_conversion_commit_atomically() {
                 &format!("racing-task-{suffix}"),
                 "Racing task",
                 "",
-                &instrument,
+                Some(&instrument),
                 ThreadAttention::Quiet,
                 ThreadKind::Task,
                 None,
@@ -794,7 +797,7 @@ async fn owner_title_and_description_edits_are_revision_fenced_and_broadcast() {
             "info",
             "Original title",
             "Original description",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             ThreadKind::Space,
             None,
@@ -917,7 +920,7 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
             "runs-on",
             "Where it runs",
             "",
-            &json!({}),
+            None,
             ThreadAttention::Quiet,
             ThreadKind::Task,
             None,
@@ -1016,4 +1019,96 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
         .unwrap();
     assert_eq!(cleared.execution, None);
     assert_eq!(cleared.revision, chosen.revision + 1);
+}
+
+#[tokio::test]
+async fn cancelled_queued_turn_never_acquires_execution_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let t = kinded_thread(&s, "never-started", ThreadKind::Task, None).await;
+    let queued = s.queue_thread_turn(t.id, None).await.unwrap();
+    let cancelled = s
+        .finish_thread_turn(queued.id, ThreadTurnState::Cancelled, None)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.accepted_at, queued.accepted_at);
+    assert_eq!(cancelled.started_at, None);
+    assert!(cancelled.finished_at.is_some());
+    assert_eq!(s.run_thread_turn(queued.id).await.unwrap(), cancelled);
+    assert_eq!(
+        s.thread_detail(t.id, None, 100).await.unwrap().turns,
+        vec![cancelled]
+    );
+}
+
+#[tokio::test]
+async fn instruments_round_trip_objects_arrays_and_sql_null_and_reject_empty_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let component = json!({"type":"text","text":"Ready"});
+    for (index, instrument) in [None, Some(component.clone()), Some(json!([component]))]
+        .iter()
+        .enumerate()
+    {
+        let (t, _) = s
+            .create_thread(
+                &format!("instrument-{index}"),
+                "Instrument",
+                "",
+                instrument.as_ref(),
+                ThreadAttention::Quiet,
+                ThreadKind::Task,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(&t.instrument, instrument);
+        assert_eq!(
+            s.thread(t.id).await.unwrap().unwrap().instrument,
+            *instrument
+        );
+        let preserved = s
+            .update_thread(t.id, Some("Renamed"), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(&preserved.instrument, instrument);
+        let cleared = s
+            .update_thread(t.id, None, None, Some(None), None)
+            .await
+            .unwrap();
+        assert_eq!(cleared.instrument, None);
+        assert!(
+            s.conn
+                .lock()
+                .await
+                .query_row(
+                    "SELECT instrument IS NULL FROM threads WHERE id=?1",
+                    [t.id],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
+    for invalid in [json!({}), json!([]), json!(null)] {
+        assert!(
+            s.create_thread(
+                "invalid",
+                "Invalid",
+                "",
+                Some(&invalid),
+                ThreadAttention::Quiet,
+                ThreadKind::Task,
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            s.conn
+                .lock()
+                .await
+                .execute("UPDATE threads SET instrument=?1", [invalid.to_string()])
+                .is_err()
+        );
+    }
 }

@@ -344,7 +344,10 @@ impl AppState {
                     "only an active thread accepts instrument actions"
                 );
                 let validated = crate::thread_instrument::validate_action(
-                    &current.instrument,
+                    current
+                        .instrument
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Thread has no instrument"))?,
                     generated,
                     &data,
                 )?;
@@ -411,7 +414,7 @@ mod tests {
                 "create",
                 "Groceries",
                 "",
-                &instrument,
+                Some(&instrument),
                 ThreadAttention::NeedsOwner,
                 hirsel_proto::ThreadKind::Task,
                 None,
@@ -496,7 +499,7 @@ mod tests {
                 "space",
                 "Ongoing",
                 "",
-                &settling,
+                Some(&settling),
                 ThreadAttention::Quiet,
                 ThreadKind::Space,
                 None,

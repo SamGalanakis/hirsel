@@ -641,7 +641,7 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
             "plugin-origin",
             "Plugin origin",
             "",
-            &json!({}),
+            None,
             hirsel_proto::ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,

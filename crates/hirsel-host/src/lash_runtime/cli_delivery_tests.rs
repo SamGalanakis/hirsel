@@ -286,7 +286,7 @@ async fn request(state: &crate::AppState) -> OwnerTurn {
             "delivery-root",
             "Delivery",
             "",
-            &json!({}),
+            None,
             hirsel_proto::ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,

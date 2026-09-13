@@ -82,7 +82,7 @@ async fn lash_parent_delegates_real_cli_and_receives_durable_report_with_human_r
             "peer",
             "Unrelated B",
             "",
-            &json!({}),
+            None,
             hirsel_proto::ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,

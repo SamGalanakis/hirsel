@@ -68,7 +68,7 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
             ("icon_blob_id".into(), "TEXT".into(), false),
             ("showcased_artifact_id".into(), "INTEGER".into(), false),
             ("description".into(), "TEXT".into(), true),
-            ("instrument".into(), "TEXT".into(), true),
+            ("instrument".into(), "TEXT".into(), false),
             ("attention".into(), "TEXT".into(), true),
             ("settled_at".into(), "TEXT".into(), false),
             ("archived_at".into(), "TEXT".into(), false),
@@ -225,7 +225,7 @@ async fn turn_state_and_completion_timestamp_must_agree() {
             "constraints",
             "Constraints",
             "",
-            &serde_json::Value::Null,
+            None,
             hirsel_proto::ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -248,7 +248,7 @@ async fn turn_state_and_completion_timestamp_must_agree() {
     ] {
         assert_eq!(
             conn.execute(
-                "UPDATE thread_turns SET state=?2,finished_at=?3 WHERE id=?1",
+                "UPDATE thread_turns SET state=?2,finished_at=?3,started_at=CASE WHEN ?2='running' THEN accepted_at ELSE NULL END WHERE id=?1",
                 rusqlite::params![turn.id, state, finished]
             )
             .is_ok(),
@@ -264,6 +264,36 @@ async fn turn_state_and_completion_timestamp_must_agree() {
         )
         .unwrap(),
         0
+    );
+    for (state, started, finished, valid) in [
+        ("queued", None, None, true),
+        ("queued", Some("2026-09-13T00:00:00Z"), None, false),
+        ("running", None, None, false),
+        ("running", Some("2026-09-13T00:00:00Z"), None, true),
+        ("cancelled", None, Some("2026-09-13T00:01:00Z"), true),
+        (
+            "cancelled",
+            Some("2026-09-13T00:00:00Z"),
+            Some("2026-09-13T00:01:00Z"),
+            true,
+        ),
+    ] {
+        assert_eq!(
+            conn.execute(
+                "UPDATE thread_turns SET state=?2,started_at=?3,finished_at=?4 WHERE id=?1",
+                rusqlite::params![turn.id, state, started, finished]
+            )
+            .is_ok(),
+            valid,
+            "{state}, {started:?}"
+        );
+    }
+    assert!(
+        conn.execute(
+            "UPDATE thread_turns SET accepted_at=NULL WHERE id=?1",
+            [turn.id]
+        )
+        .is_err()
     );
     let report_columns: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('thread_reports') ORDER BY cid")

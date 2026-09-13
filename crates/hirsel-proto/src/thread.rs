@@ -67,7 +67,7 @@ pub struct Thread {
     /// configured default coordinator; a running turn keeps what it captured.
     #[serde(default)]
     pub execution: Option<ThreadExecutionTarget>,
-    pub instrument: serde_json::Value,
+    pub instrument: Option<serde_json::Value>,
     pub attention: ThreadAttention,
     pub settled_at: Option<DateTime<Utc>>,
     pub archived_at: Option<DateTime<Utc>>,
@@ -80,7 +80,6 @@ pub struct Thread {
     pub running_turn: Option<ThreadTurn>,
     pub queued_turn_count: u64,
     /// Latest terminal outcome, independent of explicit Thread settlement.
-    /// A cancelled queued turn's started_at is its acceptance time, not work time.
     pub last_finished_turn: Option<ThreadTurn>,
     /// Latest factual conversation/execution activity, falling back to creation.
     /// Reading or changing lifecycle metadata does not advance this timestamp.
@@ -136,7 +135,10 @@ pub struct ThreadTurn {
     pub owner_message_id: Option<u64>,
     pub agent_message_id: Option<u64>,
     pub state: ThreadTurnState,
-    pub started_at: DateTime<Utc>,
+    /// Immutable time this work was accepted, before any queue wait.
+    pub accepted_at: DateTime<Utc>,
+    /// Actual execution start; absent for queued work, including cancellation before admission.
+    pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
 }
 

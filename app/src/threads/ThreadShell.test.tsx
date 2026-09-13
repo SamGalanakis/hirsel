@@ -99,7 +99,7 @@ describe("thread workspace", () => {
     expect(drawer.querySelector('[data-thread-row="1"]')).toHaveTextContent(title);
   });
   it("does not invite starting an empty conversation while a turn is running", () => {
-    flush(() => handleThreadMessage({ type: "thread_turn", turn: { requester_thread_id: null, requester_turn_id: null, id: 90, thread_id: 1, state: "running", owner_message_id: null, agent_message_id: null, started_at: "2026-09-09T10:00:00Z", finished_at: null } }));
+    flush(() => handleThreadMessage({ type: "thread_turn", turn: { requester_thread_id: null, requester_turn_id: null, id: 90, thread_id: 1, state: "running", owner_message_id: null, agent_message_id: null, accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: null } }));
     flush(() => setThreadState(draft => { draft.histories[1].loaded = true; }));
     const view = render(() => <ThreadShell />);
     expect(view.queryByText("Start the conversation for this thread.")).toBeNull();
@@ -251,7 +251,7 @@ describe("thread workspace", () => {
     expect(screen.getByRole("textbox", { name: "Message Buy groceries" })).toBeInTheDocument();
   });
   it("folds wakes that produced nothing into one quiet note instead of empty cards", () => {
-    const wake = (id: number): ThreadTurn => ({ id, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "completed", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:07Z" });
+    const wake = (id: number): ThreadTurn => ({ id, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "completed", accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:07Z" });
     const events = [{ seq: 1, event: { kind: "code_start", id: "cell", language: "typescript", code: 'finish("")', truncated: false } }, { seq: 2, event: { kind: "code_done", id: "cell", ok: true, summary: null } }] as const;
     flush(() => setThreadState(draft => {
       draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [], activities: [], loaded: true, hasMore: false, turns: [wake(91), wake(92)] };
@@ -310,7 +310,7 @@ describe("thread workspace", () => {
         makeThread(2, { kind: "task", settled_at: "2026-09-09T10:00:00Z" }),
         makeThread(3, { snoozed_until: "2099-01-01T00:00:00Z" }),
         makeThread(4, { archived_at: "2026-09-09T10:00:00Z" })];
-      draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [], activities: [], loaded: true, hasMore: false, turns: [{ requester_thread_id: null, requester_turn_id: null, id: 4, thread_id: 1, owner_message_id: null, agent_message_id: null, state: "running", started_at: "2026-09-09T10:00:00Z", finished_at: null }] };
+      draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [], activities: [], loaded: true, hasMore: false, turns: [{ requester_thread_id: null, requester_turn_id: null, id: 4, thread_id: 1, owner_message_id: null, agent_message_id: null, state: "running", accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: null }] };
     }));
     flush(() => setThreadState(draft => { draft.threads[1].running_turn = draft.histories[1].turns[0]; }));
     const screen = render(() => <ThreadShell />);
@@ -349,7 +349,7 @@ describe("thread workspace", () => {
 });
 
 it("preserves the exact inline tool rows across message/activity updates", async () => {
-  flush(() => setThreadState(draft => { draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id:1,thread_id:1,author:"agent",body:"Answer",ref:null,ts:"2026-09-09T10:00:00Z",tool_calls:[{id:"call-a",name:"read_file",ok:true},{id:"call-b",name:"read_file",ok:true}] }], turns:[{ requester_thread_id: null, requester_turn_id: null,id:1,thread_id:1,owner_message_id:null,agent_message_id:1,state:"completed",started_at:"2026-09-09T09:59:00Z",finished_at:"2026-09-09T10:00:00Z"}],activities:[],loaded:true,hasMore:false }; }));
+  flush(() => setThreadState(draft => { draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id:1,thread_id:1,author:"agent",body:"Answer",ref:null,ts:"2026-09-09T10:00:00Z",tool_calls:[{id:"call-a",name:"read_file",ok:true},{id:"call-b",name:"read_file",ok:true}] }], turns:[{ requester_thread_id: null, requester_turn_id: null,id:1,thread_id:1,owner_message_id:null,agent_message_id:1,state:"completed",accepted_at: "2026-09-09T09:59:00Z", started_at:"2026-09-09T09:59:00Z",finished_at:"2026-09-09T10:00:00Z"}],activities:[],loaded:true,hasMore:false }; }));
   const view=render(()=> <ThreadShell />);
   const first=view.container.querySelector('[data-message-id="1"] [data-tool-call-id="call-a"]')!;
   flush(()=>handleThreadMessage({type:"thread_activity",activity:{ artifact_ids: [],id:1,thread_id:1,turn_id:1,kind:"tool_completed",data:{id:"call-a",name:"read_file",ok:true},ts:"2026-09-09T10:00:01Z"}}));
@@ -365,7 +365,7 @@ it("renders the exact persisted timeline from a fresh open_thread snapshot", asy
   if (frame?.type !== "open_thread") throw new Error("Missing open");
   const owner = { id: 70, thread_id: 1, author: "owner" as const, body: "Inspect it", ref: null, ts: "2026-09-10T10:00:00Z" };
   const agent = { id: 71, thread_id: 1, author: "agent" as const, body: "Inspection complete", ref: 70, ts: "2026-09-10T10:00:02Z", tool_calls: [{ id: "shell-1", name: "shell_run", ok: true }] };
-  const turn = { requester_thread_id: null, requester_turn_id: null, id: 72, thread_id: 1, owner_message_id: 70, agent_message_id: 71, state: "completed" as const, started_at: owner.ts, finished_at: agent.ts };
+  const turn = { requester_thread_id: null, requester_turn_id: null, id: 72, thread_id: 1, owner_message_id: 70, agent_message_id: 71, state: "completed" as const, accepted_at: owner.ts, started_at: owner.ts, finished_at: agent.ts };
   flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
     ...({ brief: { text: "", artifact_ids: [] }, thread: makeThread(1), activities: [], related_items: [], has_more: false }),
     messages: [owner, agent], turns: [turn],
@@ -388,7 +388,7 @@ it("renders the exact persisted timeline from a fresh open_thread snapshot", asy
 });
 
 it("keeps the same expanded tool result and focus when the live turn becomes its final message", async () => {
-  const turn = { requester_thread_id: null, requester_turn_id: null, id: 91, thread_id: 1, owner_message_id: 90, agent_message_id: null, state: "running" as const, started_at: "2026-09-09T10:00:00Z", finished_at: null };
+  const turn = { requester_thread_id: null, requester_turn_id: null, id: 91, thread_id: 1, owner_message_id: 90, agent_message_id: null, state: "running" as const, accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: null };
   flush(() => {
     handleThreadMessage({ type: "msg", message: { id: 90, thread_id: 1, author: "owner", body: "Check this file", ref: null, ts: turn.started_at } });
     handleThreadMessage({ type: "thread_turn", turn });
@@ -494,7 +494,7 @@ describe("nested Thread workspace", () => {
       draft.threads[2].parent_thread_id = 1;
       draft.histories[1] = { brief: { text: "", artifact_ids: [] }, loaded: true, hasMore: false, turns: [], messages: [{ id: 20, thread_id: 1, author: "owner", body: "Please review", ref: null, ts: "2026-09-10T10:00:00Z" }], activities: [] };
     }));
-    const report = { artifact_ids: [44], id: 33, thread_id: 1, turn_id: null, kind: "child_report", data: { child_thread_id: 2, child_turn_id: 90, requester_turn_id: 80, report_seq: 1, status: "completed", summary: "Review complete. Two issues fixed." }, ts: "2026-09-10T10:01:00Z" };
+    const report = { artifact_ids: [44], id: 33, thread_id: 1, turn_id: null, kind: "child_report", data: { child_thread_id: 2, child_turn_id: 90, requester_turn_id: 80, status: "completed", summary: "Review complete. Two issues fixed." }, ts: "2026-09-10T10:01:00Z" };
     flush(() => { handleThreadMessage({ type: "thread_activity", activity: report }); handleThreadMessage({ type: "thread_activity", activity: report }); });
     const view = render(() => <ThreadShell />);
     const card = view.container.querySelector('[data-activity-id="33"]')!;
@@ -629,4 +629,14 @@ describe("retry keyboard focus", () => {
     if (target) expect(target).toHaveFocus();
     else expect(view.container.querySelector('[data-thread-id="1"] textarea')).not.toHaveFocus();
   });
+});
+
+it("renders array instruments and clears them while Thread Info stays usable", () => {
+  flush(() => setThreadState(draft => { draft.threads = draft.threads.map(thread => thread.id === 1 ? { ...thread, instrument: [{ type: "text", text: "Instrument choice" }] } : thread); }));
+  const view = render(() => <ThreadShell />);
+  expect(view.getByText("Instrument choice")).toBeInTheDocument();
+  flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { kind: "task", instrument: null, revision: 2 }) }));
+  expect(view.queryByText("Instrument choice")).toBeNull();
+  fireEvent.click(view.getByRole("button", { name: "Info" }));
+  expect(view.getByRole("button", { name: "Rename thread" })).toBeInTheDocument();
 });

@@ -36,7 +36,7 @@ async fn skill_submission_captures_instructions_and_retries_after_removal() {
             "skill-work",
             "Review",
             "",
-            &Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -220,7 +220,7 @@ async fn generated_action_labels_are_not_skill_commands() {
             "skill-label",
             "Work",
             "",
-            &instrument,
+            Some(&instrument),
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -249,7 +249,7 @@ async fn request(state: &crate::AppState, key: &str) -> OwnerTurn {
             key,
             key,
             "",
-            &Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -1060,7 +1060,7 @@ async fn artifact_reference_identity_reaches_the_next_turn_context() {
             "artifact-context",
             "Result discussion",
             "",
-            &Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -1112,7 +1112,7 @@ pub(super) async fn runtime_lane(
                     "fixture-runtime",
                     "Fixture",
                     "",
-                    &Value::Null,
+                    None,
                     ThreadAttention::Quiet,
                     hirsel_proto::ThreadKind::Task,
                     None,
@@ -1208,7 +1208,7 @@ async fn solicited_process_deliveries_enqueue_once_without_triage() {
                 .unwrap()
                 .contains("process_id")
         );
-        let drain_id = runtime.active_turn_id.lock().await.clone().unwrap();
+        let drain_id = runtime.anchors.lock().await.drain_id.clone().unwrap();
         runtime.timeline_commits.record(drain_id).await;
         let output = super::tests::test_turn_output(
             lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {

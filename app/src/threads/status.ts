@@ -41,7 +41,7 @@ export function threadRowSummary(thread: Thread, now: number, connected: boolean
     : status.state === "running" ? "running"
     : status.state === "queued" ? "queued"
     : done ? "done" : "none";
-  const running = status.state === "running" && thread.running_turn ? elapsedTime(thread.running_turn.started_at, now) : null;
+  const running = status.state === "running" && thread.running_turn?.started_at ? elapsedTime(thread.running_turn.started_at, now) : null;
   const meta = !connected ? null : running ?? (thread.queued_turn_count > 0 ? `${thread.queued_turn_count} queued` : status.age);
   const parts = [
     thread.attention === "needs_owner" ? "Needs you" : null,

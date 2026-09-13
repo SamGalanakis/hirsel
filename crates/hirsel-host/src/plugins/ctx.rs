@@ -30,7 +30,7 @@ impl PluginThreads for HostThreads {
                 &format!("plugin:{}:{}", self.plugin_id, uuid::Uuid::new_v4()),
                 &input.title,
                 &input.description,
-                &input.instrument,
+                input.instrument.as_ref(),
                 if input.needs_owner {
                     ThreadAttention::NeedsOwner
                 } else {

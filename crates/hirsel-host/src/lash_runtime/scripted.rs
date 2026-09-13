@@ -277,7 +277,7 @@ impl ScriptedAgentRuntime {
                     context.thread.id,
                     None,
                     Some(&format!("Advanced after {label}")),
-                    Some(&instrument),
+                    Some(Some(&instrument)),
                     Some(hirsel_proto::ThreadAttention::Quiet),
                 )
                 .await?;

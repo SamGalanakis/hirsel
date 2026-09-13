@@ -495,7 +495,7 @@ async fn queued_scripted_replies_and_telemetry_keep_their_owning_threads() {
                 key,
                 title,
                 "",
-                &Value::Null,
+                None,
                 ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Task,
                 None,
@@ -574,7 +574,7 @@ async fn durable_admission_is_fifo_with_independent_thread_sessions() {
                 key,
                 key,
                 "",
-                &Value::Null,
+                None,
                 ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Task,
                 None,
@@ -665,7 +665,7 @@ async fn projection_retry_uses_one_thread_reply() {
             "reply",
             "Reply",
             "",
-            &Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -795,6 +795,43 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
 
     executor.operation_id = "update-1".into();
     executor.execute("threads_update",&json!({"thread":id,"attention":"needs_owner","instrument":{"type":"text","text":"Which store?"}})).await.unwrap();
+    executor.operation_id = "update-preserve-instrument".into();
+    executor
+        .execute(
+            "threads_update",
+            &json!({"thread":id,"description":"Preserved"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.thread(id).await.unwrap().unwrap().instrument,
+        Some(json!({"type":"text","text":"Which store?"}))
+    );
+    // Distinct durable replay payloads: omission preserves, explicit null clears.
+    assert!(
+        executor
+            .execute(
+                "threads_update",
+                &json!({"thread":id,"description":"Preserved","instrument":null})
+            )
+            .await
+            .is_err()
+    );
+    for (operation, tool, args) in [
+        (
+            "reject-empty-update",
+            "threads_update",
+            json!({"thread":id,"instrument":{}}),
+        ),
+        (
+            "reject-empty-create",
+            "threads_create",
+            json!({"client_id":"empty-instrument","kind":"task","title":"Invalid","instrument":{}}),
+        ),
+    ] {
+        executor.operation_id = operation.into();
+        assert!(executor.execute(tool, &args).await.is_err());
+    }
     storage.mark_thread_read(id).await.unwrap();
     executor.operation_id = "update-2".into();
     executor
@@ -810,6 +847,7 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         .unwrap();
     assert!(result["thread"]["settled_at"].is_null());
     assert_eq!(result["thread"]["attention"], "quiet");
+    assert!(result["thread"]["instrument"].is_null());
     let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
     let create_schema = definitions
         .iter()
@@ -869,7 +907,7 @@ async fn retained_current_store_opens_without_synthesizing_sessions_or_work() {
                 &format!("validate-{}", thread.id),
                 &thread.title,
                 &thread.description,
-                &thread.instrument,
+                thread.instrument.as_ref(),
                 thread.attention,
                 thread.kind,
                 None,

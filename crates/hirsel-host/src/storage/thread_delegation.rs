@@ -29,7 +29,7 @@ pub(super) fn enqueue(
     requester_turn_id: Option<u64>,
     report_triggered: bool,
 ) -> anyhow::Result<u64> {
-    c.execute("INSERT INTO thread_turns(thread_id,requester_thread_id,requester_turn_id,state,started_at) VALUES(?1,?2,?3,'queued',?4)",params![thread_id,requester_thread_id,requester_turn_id,chrono::Utc::now().to_rfc3339()])?;
+    c.execute("INSERT INTO thread_turns(thread_id,requester_thread_id,requester_turn_id,state,accepted_at) VALUES(?1,?2,?3,'queued',?4)",params![thread_id,requester_thread_id,requester_turn_id,chrono::Utc::now().to_rfc3339()])?;
     let turn_id = c.last_insert_rowid() as u64;
     super::thread_execution::capture(c, thread_id, turn_id, None)?;
     let history_id: String =
@@ -93,7 +93,7 @@ impl Storage {
             id
         } else {
             let now = chrono::Utc::now().to_rfc3339();
-            tx.execute("INSERT INTO threads(kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES('task',?1,?2,'','{}','quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
+            tx.execute("INSERT INTO threads(kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES('task',?1,?2,'',NULL,'quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
             tx.last_insert_rowid() as u64
         };
         if let Some(execution) = &assignment.execution {

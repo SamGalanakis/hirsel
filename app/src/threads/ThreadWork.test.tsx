@@ -12,7 +12,7 @@ const events: TimelineEvent[] = [
 ];
 const activity: ThreadActivity = { artifact_ids: [], id: 1, thread_id: 1, turn_id: 1, kind: "tool_completed", data: { id: "call-a", name: "read_file", ok: true }, ts: "2026-09-09T10:00:00Z" };
 const message: ChatMessage = { id: 1, thread_id: 1, author: "agent", body: "Finished", ref: null, ts: activity.ts, tool_calls: [{ id: "call-a", name: "read_file", ok: true }, { id: "call-b", name: "read_file", ok: false }] };
-const turn = (state: ThreadTurn["state"]): ThreadTurn => ({ id: 1, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: state === "completed" ? 1 : null, state, started_at: "2026-09-09T09:59:00Z", finished_at: ["running", "queued"].includes(state) ? null : activity.ts });
+const turn = (state: ThreadTurn["state"]): ThreadTurn => ({ id: 1, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: state === "completed" ? 1 : null, state, accepted_at: "2026-09-09T09:59:00Z", started_at: state === "queued" ? null : "2026-09-09T09:59:00Z", finished_at: ["running", "queued"].includes(state) ? null : activity.ts });
 
 describe("readable work outcomes", () => {
   it("shows failure and recovery in the inline stream", () => {

@@ -44,7 +44,7 @@ function worldFor(token) {
 function summary(world, thread) {
   const turns = world.turns.filter(turn => turn.thread_id === thread.id);
   const terminal = turns.filter(turn => turn.finished_at).sort((a, b) => Date.parse(b.finished_at) - Date.parse(a.finished_at) || b.id - a.id);
-  const times = [thread.created_at, ...world.messages.filter(row => row.thread_id === thread.id).map(row => row.ts), ...world.activities.filter(row => row.thread_id === thread.id).map(row => row.ts), ...turns.flatMap(turn => [turn.started_at, turn.finished_at]).filter(Boolean)];
+  const times = [thread.created_at, ...world.messages.filter(row => row.thread_id === thread.id).map(row => row.ts), ...world.activities.filter(row => row.thread_id === thread.id).map(row => row.ts), ...turns.flatMap(turn => [turn.accepted_at, turn.started_at, turn.finished_at]).filter(Boolean)];
   return { ...thread, running_turn: turns.find(turn => turn.state === "running") ?? null, queued_turn_count: turns.filter(turn => turn.state === "queued").length, last_finished_turn: terminal[0] ?? null, last_activity_at: new Date(Math.max(...times.map(Date.parse))).toISOString() };
 }
 function createFingerprint(title, kind, parent_thread_id) {
@@ -66,7 +66,7 @@ function addMessage(world, threadId, author, body, extra = {}) {
   return message;
 }
 function startTurn(world, message) {
-  const turn = { id: world.nextTurn++, thread_id: message.thread_id, owner_message_id: message.id, requester_thread_id: threadFor(world, message.thread_id).parent_thread_id, requester_turn_id: null, agent_message_id: null, state: "queued", started_at: now(), finished_at: null };
+  const turn = { id: world.nextTurn++, thread_id: message.thread_id, owner_message_id: message.id, requester_thread_id: threadFor(world, message.thread_id).parent_thread_id, requester_turn_id: null, agent_message_id: null, state: "queued", accepted_at: now(), started_at: null, finished_at: null };
   world.turns.push(turn);
   world.queue.push({ turn, message });
   broadcast(world, { type: "thread_turn", turn });
@@ -78,6 +78,7 @@ function runNext(world) {
   if (!next) return;
   const { turn, message } = next;
   turn.state = "running";
+  turn.started_at = now();
   broadcast(world, { type: "thread_turn", turn });
   broadcast(world, { type: "turn_event", thread_id: turn.thread_id, turn_id: turn.id, seq: 1, event: { kind: "prose", text: "Checking this thread…" } });
   const timer = setTimeout(() => {

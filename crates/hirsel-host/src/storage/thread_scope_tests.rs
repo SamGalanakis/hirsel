@@ -6,7 +6,7 @@ async fn thread(s: &Storage, key: &str, parent: Option<u64>) -> u64 {
         key,
         key,
         "",
-        &json!({}),
+        None,
         ThreadAttention::Quiet,
         hirsel_proto::ThreadKind::Task,
         parent,
@@ -368,7 +368,7 @@ async fn scoped_artifact_receipts_hide_peer_backlinks_and_cancelled_writes_have_
                 title: "late".into(),
                 parent: ThreadRef::default(),
                 description: String::new(),
-                instrument: json!({}),
+                instrument: None,
                 attention: ThreadAttention::Quiet
             }
         )

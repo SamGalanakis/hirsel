@@ -95,7 +95,6 @@ pub(super) fn for_turns(
 mod tests {
     use super::*;
     use hirsel_proto::{ThreadAttention, TurnEventPayload};
-    use serde_json::json;
 
     #[tokio::test]
     async fn concurrent_producers_share_one_sequence_space() {
@@ -106,7 +105,7 @@ mod tests {
                 "timeline",
                 "Timeline",
                 "",
-                &json!({}),
+                None,
                 ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Task,
                 None,
@@ -165,7 +164,7 @@ mod tests {
                 "pages",
                 "Pages",
                 "",
-                &json!({}),
+                None,
                 ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Task,
                 None,
@@ -257,7 +256,7 @@ mod tests {
                 "mixed-page",
                 "Mixed page",
                 "",
-                &json!({}),
+                None,
                 ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Task,
                 None,
@@ -384,7 +383,7 @@ mod tests {
                 "interrupted",
                 "Interrupted",
                 "",
-                &json!({}),
+                None,
                 ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Task,
                 None,

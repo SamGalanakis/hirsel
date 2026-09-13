@@ -9,7 +9,7 @@ async fn thread(s: &Storage, key: &str, parent: Option<u64>) -> u64 {
         key,
         key,
         "",
-        &Value::Null,
+        None,
         ThreadAttention::Quiet,
         hirsel_proto::ThreadKind::Task,
         parent,

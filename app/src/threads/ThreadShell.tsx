@@ -125,7 +125,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       <Show when={showInfo() && current()} fallback={
       <div class="mx-auto flex w-full max-w-measure flex-col gap-6">
         <Show when={current()?.parent_thread_id !== null && current()?.parent_thread_id !== undefined}><nav aria-label="Thread ancestry" class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><For each={threadAncestors(threadState.threads, props.id)}>{parent => <><ThreadLink id={parent.id} /><span aria-hidden="true">/</span></>}</For><span class="break-words">#{props.id} {current()?.title}</span></nav></Show>
-        <Show when={current()?.instrument && Object.keys(current()!.instrument!).length > 0}>
+        <Show when={current()?.instrument}>
           <Show when={current()?.revision} keyed>{revision => <ThreadInstrument ui={current()?.instrument ?? undefined} allowSettlement={current()?.kind === "task"} onAction={(action, data) => threadAction(props.historyId, props.id, action, data, revision)} />}</Show>
         </Show>
         <Show when={history()?.hasMore}><button class={button} disabled={loading()} onClick={() => void earlier()}>{loading() ? "Loading…" : "Load earlier messages"}</button></Show>

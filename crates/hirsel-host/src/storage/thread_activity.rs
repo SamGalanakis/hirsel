@@ -13,7 +13,11 @@ fn turn_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadTurn> {
         state: serde_json::from_value(serde_json::Value::String(state)).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
         })?,
-        started_at: parse_ts(&r.get::<_, String>(5)?)?,
+        accepted_at: parse_ts(&r.get::<_, String>(9)?)?,
+        started_at: r
+            .get::<_, Option<String>>(5)?
+            .map(|s| parse_ts(&s))
+            .transpose()?,
         finished_at: r
             .get::<_, Option<String>>(6)?
             .map(|s| parse_ts(&s))
@@ -21,10 +25,10 @@ fn turn_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadTurn> {
     })
 }
 pub(super) fn get(c: &Connection, id: u64) -> anyhow::Result<ThreadTurn> {
-    Ok(c.query_row("SELECT id,thread_id,owner_message_id,agent_message_id,state,started_at,finished_at,requester_thread_id,requester_turn_id FROM thread_turns WHERE id=?1",[id],turn_row)?)
+    Ok(c.query_row("SELECT id,thread_id,owner_message_id,agent_message_id,state,started_at,finished_at,requester_thread_id,requester_turn_id,accepted_at FROM thread_turns WHERE id=?1",[id],turn_row)?)
 }
 pub(super) fn turns(c: &Connection, id: u64) -> anyhow::Result<Vec<ThreadTurn>> {
-    Ok(c.prepare("SELECT id,thread_id,owner_message_id,agent_message_id,state,started_at,finished_at,requester_thread_id,requester_turn_id FROM thread_turns WHERE thread_id=?1 ORDER BY id")?.query_map([id],turn_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
+    Ok(c.prepare("SELECT id,thread_id,owner_message_id,agent_message_id,state,started_at,finished_at,requester_thread_id,requester_turn_id,accepted_at FROM thread_turns WHERE thread_id=?1 ORDER BY id")?.query_map([id],turn_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 fn activity_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadActivity> {
     Ok(ThreadActivity {
@@ -75,7 +79,7 @@ impl Storage {
         }
         let now = chrono::Utc::now().to_rfc3339();
         tx.execute(
-            "INSERT INTO thread_turns(thread_id,state,started_at,requester_thread_id) VALUES(?1,'queued',?2,(SELECT parent_thread_id FROM threads WHERE id=?1))",
+            "INSERT INTO thread_turns(thread_id,state,accepted_at,requester_thread_id) VALUES(?1,'queued',?2,(SELECT parent_thread_id FROM threads WHERE id=?1))",
             params![thread_id, now],
         )?;
         let turn_id = tx.last_insert_rowid() as u64;
@@ -122,7 +126,7 @@ impl Storage {
                 return Ok(t);
             }
         }
-        tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,started_at,requester_thread_id) VALUES(?1,?2,'queued',?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
+        tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,requester_thread_id) VALUES(?1,?2,'queued',?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
         let id = tx.last_insert_rowid() as u64;
         super::thread_execution::capture(&tx, thread_id, id, None)?;
         let t = get(&tx, id)?;
@@ -163,7 +167,7 @@ impl Storage {
                 return get(&c, id);
             }
         }
-        c.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,started_at,requester_thread_id) VALUES(?1,?2,'running',?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
+        c.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,started_at,requester_thread_id) VALUES(?1,?2,'running',?3,?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
         let id = c.last_insert_rowid() as u64;
         super::thread_execution::capture(&c, thread_id, id, None)?;
         get(&c, id)

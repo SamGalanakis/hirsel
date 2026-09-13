@@ -74,9 +74,17 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         showcased_artifact_id: r.get(16)?,
         description: r.get(2)?,
         execution: None,
-        instrument: serde_json::from_str(&r.get::<_, String>(3)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
-        })?,
+        instrument: r
+            .get::<_, Option<String>>(3)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         attention: match r.get::<_, String>(4)?.as_str() {
             "needs_owner" => ThreadAttention::NeedsOwner,
             _ => ThreadAttention::Quiet,
@@ -125,15 +133,10 @@ pub(super) fn kind_name(value: ThreadKind) -> &'static str {
         ThreadKind::Task => "task",
     }
 }
-pub(super) fn validate_instrument(instrument: &serde_json::Value) -> anyhow::Result<()> {
-    // An empty instrument is valid when ordinary work has no controls yet.
-    if instrument.is_null()
-        || instrument
-            .as_object()
-            .is_some_and(|object| object.is_empty())
-    {
+pub(super) fn validate_instrument(instrument: Option<&serde_json::Value>) -> anyhow::Result<()> {
+    let Some(instrument) = instrument else {
         return Ok(());
-    }
+    };
     crate::thread_instrument::validate(instrument)?;
     let mut pending = vec![instrument];
     while let Some(node) = pending.pop() {
@@ -175,7 +178,7 @@ fn create_in_transaction(
     client_id: &str,
     title: &str,
     description: &str,
-    instrument: &serde_json::Value,
+    instrument: Option<&serde_json::Value>,
     needs: ThreadAttention,
     kind: ThreadKind,
     parent_thread_id: Option<u64>,
@@ -200,7 +203,7 @@ fn create_in_transaction(
         get(tx, parent)?;
     }
     let now = Utc::now().to_rfc3339();
-    tx.execute("INSERT INTO threads(client_id,kind,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,1,?8)",params![client_id,kind_name(kind),title.trim(),description,serde_json::to_string(instrument)?,attention(needs),now,parent_thread_id])?;
+    tx.execute("INSERT INTO threads(client_id,kind,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,1,?8)",params![client_id,kind_name(kind),title.trim(),description,instrument.map(serde_json::to_string).transpose()?,attention(needs),now,parent_thread_id])?;
     Ok((get(tx, tx.last_insert_rowid() as u64)?, true))
 }
 
@@ -289,7 +292,7 @@ impl Storage {
         client_id: &str,
         title: &str,
         description: &str,
-        instrument: &serde_json::Value,
+        instrument: Option<&serde_json::Value>,
         needs: ThreadAttention,
         kind: ThreadKind,
         parent_thread_id: Option<u64>,
@@ -320,7 +323,7 @@ impl Storage {
         client_id: &str,
         title: &str,
         description: &str,
-        instrument: &serde_json::Value,
+        instrument: Option<&serde_json::Value>,
         needs: ThreadAttention,
         kind: ThreadKind,
         parent_thread_id: Option<u64>,
@@ -350,7 +353,7 @@ impl Storage {
         id: u64,
         title: Option<&str>,
         description: Option<&str>,
-        instrument: Option<&serde_json::Value>,
+        instrument: Option<Option<&serde_json::Value>>,
         needs: Option<ThreadAttention>,
     ) -> anyhow::Result<Thread> {
         if let Some(instrument) = instrument {
@@ -364,7 +367,7 @@ impl Storage {
         }
         let c = self.conn.lock().await;
         get(&c, id)?;
-        c.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=COALESCE(?4,instrument),attention=COALESCE(?5,attention),updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.map(serde_json::to_string).transpose()?,needs.map(attention),Utc::now().to_rfc3339()])?;
+        c.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=CASE WHEN ?7 THEN ?4 ELSE instrument END,attention=COALESCE(?5,attention),updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.flatten().map(serde_json::to_string).transpose()?,needs.map(attention),Utc::now().to_rfc3339(),instrument.is_some()])?;
         get(&c, id)
     }
     /// The Owner's own title/description edit: revision-fenced exactly like an

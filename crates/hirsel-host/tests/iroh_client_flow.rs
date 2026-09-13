@@ -31,7 +31,7 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
             "iroh-proof",
             "Iroh proof",
             "Visible over the shared protocol",
-            &serde_json::json!({"type":"text","text":"Ordinary work"}),
+            Some(&serde_json::json!({"type":"text","text":"Ordinary work"})),
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,

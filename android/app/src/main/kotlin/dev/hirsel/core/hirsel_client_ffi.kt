@@ -2265,7 +2265,7 @@ data class Thread (
     ,
     var `description`: kotlin.String
     ,
-    var `instrumentJson`: kotlin.String
+    var `instrumentJson`: kotlin.String?
     ,
     var `needsOwner`: kotlin.Boolean
     ,
@@ -2314,7 +2314,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalTypeThreadIcon.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -2339,7 +2339,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalTypeThreadIcon.allocationSize(value.`icon`) +
             FfiConverterOptionalULong.allocationSize(value.`showcasedArtifactId`) +
             FfiConverterString.allocationSize(value.`description`) +
-            FfiConverterString.allocationSize(value.`instrumentJson`) +
+            FfiConverterOptionalString.allocationSize(value.`instrumentJson`) +
             FfiConverterBoolean.allocationSize(value.`needsOwner`) +
             FfiConverterOptionalString.allocationSize(value.`settledAt`) +
             FfiConverterOptionalString.allocationSize(value.`archivedAt`) +
@@ -2363,7 +2363,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalTypeThreadIcon.write(value.`icon`, buf)
             FfiConverterOptionalULong.write(value.`showcasedArtifactId`, buf)
             FfiConverterString.write(value.`description`, buf)
-            FfiConverterString.write(value.`instrumentJson`, buf)
+            FfiConverterOptionalString.write(value.`instrumentJson`, buf)
             FfiConverterBoolean.write(value.`needsOwner`, buf)
             FfiConverterOptionalString.write(value.`settledAt`, buf)
             FfiConverterOptionalString.write(value.`archivedAt`, buf)
@@ -2608,7 +2608,9 @@ data class ThreadTurn (
     ,
     var `state`: kotlin.String
     ,
-    var `startedAt`: kotlin.String
+    var `acceptedAt`: kotlin.String
+    ,
+    var `startedAt`: kotlin.String?
     ,
     var `finishedAt`: kotlin.String?
 
@@ -2636,6 +2638,7 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -2647,7 +2650,8 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
             FfiConverterOptionalULong.allocationSize(value.`ownerMessageId`) +
             FfiConverterOptionalULong.allocationSize(value.`agentMessageId`) +
             FfiConverterString.allocationSize(value.`state`) +
-            FfiConverterString.allocationSize(value.`startedAt`) +
+            FfiConverterString.allocationSize(value.`acceptedAt`) +
+            FfiConverterOptionalString.allocationSize(value.`startedAt`) +
             FfiConverterOptionalString.allocationSize(value.`finishedAt`)
     )
 
@@ -2659,7 +2663,8 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
             FfiConverterOptionalULong.write(value.`ownerMessageId`, buf)
             FfiConverterOptionalULong.write(value.`agentMessageId`, buf)
             FfiConverterString.write(value.`state`, buf)
-            FfiConverterString.write(value.`startedAt`, buf)
+            FfiConverterString.write(value.`acceptedAt`, buf)
+            FfiConverterOptionalString.write(value.`startedAt`, buf)
             FfiConverterOptionalString.write(value.`finishedAt`, buf)
     }
 }

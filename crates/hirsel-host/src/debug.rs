@@ -273,7 +273,7 @@ async fn seed_adaptive_thread(State(state): State<AppState>) -> Result<Json<Thre
             &format!("debug-adaptive-thread:{}", Uuid::new_v4()),
             "Adaptive host proof",
             "Advance this Thread through the real Host action contract",
-            &instrument,
+            Some(&instrument),
             ThreadAttention::NeedsOwner,
             hirsel_proto::ThreadKind::Task,
             None,

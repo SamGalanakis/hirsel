@@ -5,7 +5,7 @@ import type { ChatMessage } from "../protocol";
 import type { ThreadTurn } from "./types";
 const ts = (minute: number) => `2026-09-10T12:${String(minute).padStart(2, "0")}:00Z`;
 const message = (id: number, author: "owner" | "agent"): ChatMessage => ({ id, thread_id: 1, author, body: `Message ${id}`, ref: null, ts: ts(id) });
-const turn = (id: number, owner: number | null, agent: number | null): ThreadTurn => ({ requester_thread_id: null, requester_turn_id: null, id, thread_id: 1, owner_message_id: owner, agent_message_id: agent, state: agent ? "completed" : "running", started_at: ts(owner ?? id), finished_at: agent ? ts(agent) : null });
+const turn = (id: number, owner: number | null, agent: number | null): ThreadTurn => ({ requester_thread_id: null, requester_turn_id: null, id, thread_id: 1, owner_message_id: owner, agent_message_id: agent, state: agent ? "completed" : "running", accepted_at: ts(owner ?? id), started_at: ts(owner ?? id), finished_at: agent ? ts(agent) : null });
 describe("authoritative conversation chronology", () => {
   it("joins final messages exactly and positions queued work beside its owner", () => {
     const entries = conversationEntries({ ...emptyHistory(), messages: [message(1,"owner"), message(2,"agent"), message(3,"agent"), message(4,"owner")], turns: [turn(10,1,3),turn(11,4,null)] });
@@ -16,8 +16,8 @@ describe("authoritative conversation chronology", () => {
     const firstOwner = { ...message(1, "owner"), ts: "2026-09-10T15:29:16.614Z" };
     const queuedOwner = { ...message(2, "owner"), ts: "2026-09-10T15:29:23.370Z" };
     const firstReply = { ...message(3, "agent"), ts: "2026-09-10T15:29:25.081Z" };
-    const first = { ...turn(12, 1, 3), started_at: "2026-09-10T15:29:16.994Z", finished_at: firstReply.ts };
-    const queued = { ...turn(13, 2, null), state: "queued" as const, started_at: queuedOwner.ts };
+    const first = { ...turn(12, 1, 3), accepted_at: "2026-09-10T15:29:16.994Z", started_at: "2026-09-10T15:29:16.994Z", finished_at: firstReply.ts };
+    const queued = { ...turn(13, 2, null), state: "queued" as const, accepted_at: queuedOwner.ts, started_at: null };
     const history = { ...emptyHistory(), messages: [firstOwner, queuedOwner, firstReply], turns: [first, queued] };
     expect(conversationEntries(history).map(row => row.key)).toEqual(["message-1", "message-2", "turn-13", "turn-12"]);
 
@@ -46,4 +46,11 @@ it("renders the exact current scheduled digest payload as an owner-facing chrono
   const activity={ artifact_ids: [],id:9,thread_id:0,turn_id:null,kind:'scheduled_digest',data:{job_id:'morning',text:'Your morning digest',status:'completed'},ts:ts(2)};
   expect(ownerFacingActivity(activity)).toBe(true);expect(activityText(activity)).toBe('Your morning digest');
   expect(conversationEntries({...emptyHistory(),activities:[activity]}).map(row=>row.key)).toEqual(['activity-9']);
+});
+
+it("positions cancelled queued background work by acceptance without inventing a start", () => {
+  const cancelled: ThreadTurn = { ...turn(9, null, null), state: "cancelled", accepted_at: ts(2), started_at: null, finished_at: ts(4) };
+  const history = { ...emptyHistory(), messages: [message(1, "owner"), message(3, "agent")], turns: [cancelled] };
+  expect(conversationEntries(history).map(row => row.key)).toEqual(["message-1", "turn-9", "message-3"]);
+  expect(conversationEntries({ ...history, hasMore: true, messages: [message(3, "agent")] }).map(row => row.key)).toEqual(["message-3"]);
 });

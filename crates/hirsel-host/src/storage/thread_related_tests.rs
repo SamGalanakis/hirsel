@@ -304,7 +304,7 @@ async fn related_thread_targets_are_typed_scoped_and_never_grant_foreign_context
                 title: "Child".into(),
                 parent: ThreadRef::default(),
                 description: String::new(),
-                instrument: serde_json::json!({}),
+                instrument: None,
                 attention: hirsel_proto::ThreadAttention::Quiet,
             },
         )

@@ -170,7 +170,7 @@ impl Storage {
                 &key,
                 "Test conversation",
                 "",
-                &serde_json::json!({}),
+                None,
                 hirsel_proto::ThreadAttention::Quiet,
                 hirsel_proto::ThreadKind::Space,
                 None,

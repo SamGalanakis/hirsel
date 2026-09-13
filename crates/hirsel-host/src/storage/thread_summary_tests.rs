@@ -13,7 +13,7 @@ async fn work(storage: &Storage) -> hirsel_proto::Thread {
             "work",
             "Work",
             "",
-            &json!({}),
+            None,
             ThreadAttention::NeedsOwner,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -56,7 +56,7 @@ async fn queue_wait_is_not_working_duration_and_repeated_running_keeps_actual_st
         .lock()
         .await
         .execute(
-            "UPDATE thread_turns SET started_at='2020-01-01T00:00:00Z' WHERE id=?1",
+            "UPDATE thread_turns SET accepted_at='2020-01-01T00:00:00Z' WHERE id=?1",
             [queued.id],
         )
         .unwrap();
@@ -64,7 +64,8 @@ async fn queue_wait_is_not_working_duration_and_repeated_running_keeps_actual_st
     assert!(waiting.running_turn.is_none());
     assert_eq!(waiting.queued_turn_count, 1);
     let running = storage.run_thread_turn(queued.id).await.unwrap();
-    assert!(running.started_at > ts("2020-01-01T00:00:00Z"));
+    assert!(running.started_at.unwrap() > ts("2020-01-01T00:00:00Z"));
+    assert_eq!(running.accepted_at, ts("2020-01-01T00:00:00Z"));
     storage.queue_thread_turn(thread.id, None).await.unwrap();
     let row = storage.thread(thread.id).await.unwrap().unwrap();
     assert_eq!(row.running_turn, Some(running.clone()));
@@ -186,8 +187,8 @@ async fn activity_and_latest_outcome_use_timestamp_chronology_not_ids_or_offsets
         [thread.id],
     )
     .unwrap();
-    conn.execute("UPDATE thread_turns SET state='completed',started_at='2020-01-01T00:00:00Z',finished_at='2021-01-01T10:00:00Z' WHERE id=?1", [early_id.id]).unwrap();
-    conn.execute("UPDATE thread_turns SET state='failed',started_at='2020-01-01T00:00:00Z',finished_at='2021-01-01T11:00:00+02:00' WHERE id=?1", [later_id.id]).unwrap();
+    conn.execute("UPDATE thread_turns SET state='completed',accepted_at='2020-01-01T00:00:00Z',started_at='2020-01-01T00:00:00Z',finished_at='2021-01-01T10:00:00Z' WHERE id=?1", [early_id.id]).unwrap();
+    conn.execute("UPDATE thread_turns SET state='failed',accepted_at='2020-01-01T00:00:00Z',started_at='2020-01-01T00:00:00Z',finished_at='2021-01-01T11:00:00+02:00' WHERE id=?1", [later_id.id]).unwrap();
     drop(conn);
     let row = storage.thread(thread.id).await.unwrap().unwrap();
     assert_eq!(row.last_finished_turn.unwrap().id, early_id.id);
@@ -219,7 +220,7 @@ async fn deleted_message_recency_recedes_to_remaining_facts_and_stays_thread_loc
                     "other",
                     "Other",
                     "",
-                    &json!({}),
+                    None,
                     ThreadAttention::Quiet,
                     hirsel_proto::ThreadKind::Task,
                     None,
@@ -278,7 +279,7 @@ async fn assert_precise_terminal_projection(
             (second.id, second_finished_at, "failed"),
         ] {
             conn.execute(
-                "UPDATE thread_turns SET state=?2,started_at='2020-01-01T00:00:00Z',finished_at=?3 WHERE id=?1",
+                "UPDATE thread_turns SET state=?2,accepted_at='2020-01-01T00:00:00Z',started_at='2020-01-01T00:00:00Z',finished_at=?3 WHERE id=?1",
                 rusqlite::params![id, state, finished_at],
             )
             .unwrap();

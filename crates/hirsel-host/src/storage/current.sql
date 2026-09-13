@@ -5,7 +5,7 @@ CREATE TABLE threads (
         title TEXT NOT NULL, icon TEXT,
         icon_blob_id TEXT REFERENCES blobs(id),
         showcased_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
-        description TEXT NOT NULL, instrument TEXT NOT NULL,
+        description TEXT NOT NULL, instrument TEXT CHECK(instrument IS NULL OR (json_type(instrument) IN ('object','array') AND json(instrument) NOT IN ('{}','[]'))),
         attention TEXT NOT NULL CHECK(attention IN ('quiet','needs_owner')),
         settled_at TEXT, archived_at TEXT, snoozed_until TEXT, read INTEGER NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL,
@@ -51,7 +51,9 @@ END;
         requester_thread_id INTEGER REFERENCES threads(id),
         requester_turn_id INTEGER REFERENCES thread_turns(id),
         owner_message_id INTEGER UNIQUE, agent_message_id INTEGER, state TEXT NOT NULL CHECK(state IN ($TURN_STATES)),
-        started_at TEXT NOT NULL, finished_at TEXT, cancel_requested_at TEXT,
+        accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, cancel_requested_at TEXT,
+        CHECK(state != 'queued' OR started_at IS NULL),
+        CHECK(state != 'running' OR started_at IS NOT NULL),
         CHECK((state IN ($TERMINAL_TURN_STATES)) = (finished_at IS NOT NULL)),
         CHECK(requester_turn_id IS NULL OR requester_thread_id IS NOT NULL));
 CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='running';

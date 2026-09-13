@@ -31,7 +31,8 @@ pub(super) fn populate(conn: &Connection, thread: &mut Thread) -> anyhow::Result
                 (SELECT MAX(hirsel_utc_timestamp(ts)) FROM (
                     SELECT created_at AS ts FROM threads WHERE id=?1
                     UNION ALL SELECT ts FROM chat_messages WHERE thread_id=?1
-                    UNION ALL SELECT started_at FROM thread_turns WHERE thread_id=?1
+                    UNION ALL SELECT accepted_at FROM thread_turns WHERE thread_id=?1
+                    UNION ALL SELECT started_at FROM thread_turns WHERE thread_id=?1 AND started_at IS NOT NULL
                     UNION ALL SELECT finished_at FROM thread_turns
                         WHERE thread_id=?1 AND finished_at IS NOT NULL
                     UNION ALL SELECT ts FROM thread_activities WHERE thread_id=?1

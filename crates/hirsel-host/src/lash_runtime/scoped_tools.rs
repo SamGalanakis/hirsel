@@ -143,7 +143,10 @@ impl ScopedThreadTools {
                     parent: reference(args, "parent")?,
                     description: optional_string_any_allow_empty(args, &["description"])?
                         .unwrap_or_default(),
-                    instrument: args.get("instrument").cloned().unwrap_or(Value::Null),
+                    instrument: args
+                        .get("instrument")
+                        .filter(|value| !value.is_null())
+                        .cloned(),
                     attention: args
                         .get("attention")
                         .map(|v| serde_json::from_value(v.clone()))
@@ -186,7 +189,9 @@ impl ScopedThreadTools {
                     )
                     .map_err(|e| e.to_string())?,
                     description: optional_string_any_allow_empty(args, &["description"])?,
-                    instrument: args.get("instrument").cloned(),
+                    instrument: args
+                        .get("instrument")
+                        .map(|value| (!value.is_null()).then(|| value.clone())),
                     attention: args
                         .get("attention")
                         .map(|v| serde_json::from_value(v.clone()))

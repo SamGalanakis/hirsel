@@ -176,7 +176,10 @@ impl Storage {
                 "thread is no longer active"
             );
             let validated = crate::thread_instrument::validate_action(
-                &current.instrument,
+                current
+                    .instrument
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Thread has no instrument"))?,
                 &context.action,
                 &context.data,
             )?;
@@ -250,7 +253,7 @@ impl Storage {
             request["attachments"] =
                 serde_json::to_value(super::blobs::message_attachments(&tx, id)?)?;
 
-            tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,requester_thread_id,state,started_at) VALUES(?1,?2,(SELECT parent_thread_id FROM threads WHERE id=?1),'queued',?3)",params![thread_id,id,chrono::Utc::now().to_rfc3339()])?;
+            tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,requester_thread_id,state,accepted_at) VALUES(?1,?2,(SELECT parent_thread_id FROM threads WHERE id=?1),'queued',?3)",params![thread_id,id,chrono::Utc::now().to_rfc3339()])?;
             let accepted_turn = tx.last_insert_rowid() as u64;
             super::thread_execution::capture_selected(
                 &tx,

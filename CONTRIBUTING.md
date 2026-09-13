@@ -51,6 +51,7 @@ before opening a pull request:
 ```bash
 prek run --all-files
 cargo test --workspace
+just e2e
 ```
 
 ## Product runbooks

@@ -2,16 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium } from "../app/node_modules/playwright/index.mjs";
-import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
+import { hello, isolatedUrl, launchBrowser } from "./lib/harness.mjs";
 
-const host = process.env.HIRSEL_ARTIFACT_HOST_URL;
+const host = isolatedUrl(process.env.HIRSEL_ARTIFACT_HOST_URL, "HIRSEL_ARTIFACT_HOST_URL");
 const token = process.env.HIRSEL_ARTIFACT_HOST_TOKEN;
 const database = process.env.HIRSEL_ARTIFACT_DB;
 const evidenceDir = process.env.HIRSEL_ARTIFACT_EVIDENCE;
 const threadId = Number(process.env.HIRSEL_ARTIFACT_THREAD_ID ?? "1");
 const artifactId = Number(process.env.HIRSEL_ARTIFACT_ID ?? "2");
-if (!host || new URL(host).port === "3076") throw new Error("Set HIRSEL_ARTIFACT_HOST_URL to an isolated Host, never the live Host.");
 if (!token || !database || !evidenceDir) throw new Error("Set HIRSEL_ARTIFACT_HOST_TOKEN, HIRSEL_ARTIFACT_DB, and HIRSEL_ARTIFACT_EVIDENCE.");
 await mkdir(evidenceDir, { recursive: true });
 
@@ -26,24 +24,7 @@ assert.equal(stored.kind, "file");
 assert.equal(stored.mime, "image/svg+xml");
 assert.match(stored.content, /<svg\b/i);
 
-async function hello() {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${host.replace(/^http/, "ws")}/ws`);
-    const timer = setTimeout(() => { socket.close(); reject(new Error("hello_ok timed out")); }, 10_000);
-    socket.on("error", reject);
-    socket.on("open", () => socket.send(JSON.stringify({ type: "hello", auth: { static_token: token } })));
-    socket.on("message", raw => {
-      const frame = JSON.parse(raw.toString());
-      if (frame.type === "hello_ok") {
-        clearTimeout(timer);
-        socket.close();
-        resolve(frame);
-      }
-    });
-  });
-}
-
-const greeting = await hello();
+const greeting = await hello(host, token);
 
 async function assertContainedImage(panel) {
   const image = panel.frameLocator("iframe").locator(`img[alt="${stored.title}"]`);
@@ -115,11 +96,7 @@ async function exerciseModes(page, panel, label, downloadName) {
   return { controls: await assertControlsFit(page, panel), downloadPath };
 }
 
-const browser = await chromium.launch({
-  headless: true,
-  executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    ?? "/home/sam/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell",
-});
+const browser = await launchBrowser();
 const results = [];
 try {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {

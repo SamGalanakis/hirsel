@@ -1,15 +1,20 @@
 // Run only against an isolated host/data copy; creates and settles test threads.
 // HIRSEL_THREAD_SMOKE_URL=http://127.0.0.1:PORT HIRSEL_THREAD_SMOKE_TOKEN=... node e2e/thread-smoke.mjs
 import { mkdir, writeFile } from "node:fs/promises";
-import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
-import { chromium } from "../app/node_modules/playwright/index.mjs";
-const url = process.env.HIRSEL_THREAD_SMOKE_URL;
-if (!url || new URL(url).port === "3076") throw new Error("Set HIRSEL_THREAD_SMOKE_URL to an isolated test host, never live port 3076");
+import { isolatedUrl, launchBrowser, poll, request } from "./lib/harness.mjs";
+const url = isolatedUrl(process.env.HIRSEL_THREAD_SMOKE_URL, "HIRSEL_THREAD_SMOKE_URL");
 const artifacts = process.env.HIRSEL_THREAD_SMOKE_ARTIFACTS;
 if (artifacts) await mkdir(artifacts, { recursive: true });
 const evidence = [];
 async function inventory(page) {
-  await page.getByRole("button", { name: "Spaces and Tasks", exact: true }).click();
+  const trigger = page.getByRole("button", { name: "Spaces and Tasks", exact: true });
+  if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click();
+  await page.locator('[data-slot="thread-drawer"]').waitFor();
+}
+async function createThread(page) {
+  await inventory(page);
+  await page.locator('[data-slot="thread-drawer"]')
+    .getByRole("button", { name: "New Space or Task", exact: true }).click();
   await page.getByLabel("New space or task title", { exact: true }).waitFor();
 }
 async function chooseLifecycle(page, label) {
@@ -27,7 +32,7 @@ async function overview(page) {
   if (new URL(page.url()).pathname !== "/") throw new Error("Overview did not clear the explicit selection");
   if (await page.locator("textarea").count()) throw new Error("Overview has an implicit recipient");
 }
-const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}) });
+const browser = await launchBrowser();
 try {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     const page = await browser.newPage({ viewport, hasTouch: viewport.width < 1024 });
@@ -39,6 +44,7 @@ try {
     });
     await page.addInitScript(token => { if (window === window.top) localStorage.setItem("hirsel.token", token); }, process.env.HIRSEL_THREAD_SMOKE_TOKEN ?? "dev-token");
     await page.goto(url);
+    await poll("browser hello", () => frames.some(frame => frame.type === "hello_ok"), 10_000);
     if (process.env.HIRSEL_THREAD_SMOKE_EXPECT_ID) {
       const id = process.env.HIRSEL_THREAD_SMOKE_EXPECT_ID;
       await inventory(page);
@@ -48,17 +54,21 @@ try {
       if (artifacts) await page.screenshot({ path: `${artifacts}/imported-groceries-${viewport.width}.png`, fullPage: true });
     }
     const title = `Task smoke ${viewport.width} ${Date.now()}`;
-    await inventory(page);
+    await createThread(page);
     await page.getByLabel("New space or task title").fill(title);
+    await page.getByRole("button", { name: "Kind: Space", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: "task", exact: true }).click();
     await page.getByRole("button", { name: "New Task", exact: true }).click();
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
-    const path = new URL(page.url()).pathname + new URL(page.url()).search;
+    const location = new URL(page.url());
+    const path = location.pathname;
+    const route = `${location.pathname}${location.search}`;
     const threadId = Number(path.split("/").at(-1));
     if (!/^\/t\/\d+$/.test(path)) throw new Error(`Thread create did not navigate: ${path}`);
     await page.locator("textarea").fill("This draft belongs to this thread");
     await overview(page);
     if (await page.locator("textarea").count()) throw new Error("Thread draft leaked into overview");
-    await page.goto(`${url}${path}`);
+    await page.goto(`${url}${route}`);
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
     if (await page.locator("textarea").inputValue() !== "This draft belongs to this thread") throw new Error("Thread draft was lost");
     const body = `Owned message ${viewport.width} ${Date.now()}`;
@@ -68,12 +78,16 @@ try {
     if (viewport.width < 1024) await page.getByRole("button", { name: "Send", exact: true }).click();
     else await page.locator("textarea").press("Enter");
     await page.getByRole("article", { name: "Hirsel", exact: true }).filter({ hasText: "scripted Agent mode" }).waitFor();
-    const ownedMessages = frames.filter(frame => frame.type === "msg" && frame.message.thread_id === threadId).map(frame => frame.message);
+    const ownedMessages = await poll("owned message frames", () => {
+      const messages = frames.filter(frame => frame.type === "msg" && frame.message.thread_id === threadId).map(frame => frame.message);
+      return messages.some(message => message.author === "owner" && message.body === body)
+        && messages.some(message => message.author === "agent") ? messages : null;
+    }, 5_000);
     if (!ownedMessages.some(message => message.author === "owner" && message.body === body) || !ownedMessages.some(message => message.author === "agent")) throw new Error("Host did not emit both messages with correct Thread ownership");
     if (artifacts) await page.screenshot({ path: `${artifacts}/thread-conversation-${viewport.width}.png`, fullPage: true });
     await overview(page);
     if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into overview");
-    await page.goto(`${url}${path}`);
+    await page.goto(`${url}${route}`);
     await page.getByText(body, { exact: true }).waitFor();
     await chooseLifecycle(page, "Mark task done");
     await expectLifecycle(page, "Reopen task");
@@ -94,31 +108,37 @@ try {
     const thread = await response.json();
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const sent = [];
-    page.on("websocket", ws => ws.on("framesent", event => sent.push(JSON.parse(event.payload.toString()))));
+    const received = [];
+    page.on("websocket", ws => {
+      ws.on("framesent", event => sent.push(JSON.parse(event.payload.toString())));
+      ws.on("framereceived", event => received.push(JSON.parse(event.payload.toString())));
+    });
     await page.addInitScript(value => { if (window === window.top) localStorage.setItem("hirsel.token", value); }, token);
     await page.goto(url);
-    await page.getByRole("button", {name:"Spaces and Tasks",exact:true}).click();
+    await inventory(page);
     await page.locator(`[data-thread-row="${thread.id}"]`).click();
+    await poll("adaptive Thread read acknowledgement", () => received.find(frame =>
+      frame.type === "thread_upsert" && frame.thread?.id === thread.id && frame.thread.read
+    ), 5_000);
     await page.getByLabel("Confirmation").fill("ready");
+    const receivedOffset = received.length;
     await page.getByRole("button", { name: "Continue", exact: true }).click();
+    const action = await poll(
+      "generated action frame",
+      () => sent.find(frame => frame.type === "thread_action" && frame.action === "advance"),
+      5_000,
+    );
+    const actionResult = await poll("generated action result", () => received.slice(receivedOffset).find(frame =>
+      frame.type === "error" && frame.client_id === action.client_id
+      || frame.type === "thread_upsert" && frame.thread?.id === thread.id && frame.thread.revision > action.expected_revision
+    ), 10_000);
+    if (actionResult.type === "error") throw new Error(`Generated action failed: ${actionResult.detail}`);
     await page.getByRole("heading", { name: "Adaptive host proof advanced", exact: true }).waitFor();
     await expectLifecycle(page, "Mark task done");
-    const action = sent.find(frame => frame.type === "thread_action" && frame.action === "advance");
     if (!action?.expected_revision) throw new Error("Generated action did not carry the displayed revision");
-    const request = (frame, expected) => new Promise((resolve, reject) => {
-      const ws = new WebSocket(`${url.replace(/^http/, "ws")}/ws`);
-      const timer = setTimeout(() => { ws.close(); reject(new Error(`Missing ${expected}`)); }, 5000);
-      ws.on("error", reject);
-      ws.on("open", () => ws.send(JSON.stringify({ type: "hello", auth: { static_token: token } })));
-      ws.on("message", raw => {
-        const message = JSON.parse(raw.toString());
-        if (message.type === "hello_ok") ws.send(JSON.stringify(frame));
-        else if (message.type === expected) { clearTimeout(timer); ws.close(); resolve(message); }
-      });
-    });
-    const stale = await request(action, "error");
+    const stale = await request({ url, token, frame: action, expected: "error", timeoutMs: 5_000 });
     if (!/revision|changed|stale/i.test(stale.detail)) throw new Error(`Unexpected stale action failure: ${stale.detail}`);
-    const reopened = await request({ type: "open_thread", client_id: "smoke-adaptive-open", thread_id: thread.id }, "thread_opened");
+    const reopened = await request({ url, token, frame: { type: "open_thread", client_id: "smoke-adaptive-open", thread_id: thread.id }, expected: "thread_opened", timeoutMs: 5_000 });
     if (reopened.detail.thread.id !== thread.id || reopened.detail.thread.settled_at !== null) throw new Error("Continuation changed identity or settled work");
     if (reopened.detail.messages.filter(message => message.author === "owner").length !== 1) throw new Error("Stale action appended a duplicate owner message");
     if (artifacts) await page.screenshot({ path: `${artifacts}/adaptive-thread-1440.png`, fullPage: true });

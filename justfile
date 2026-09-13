@@ -71,6 +71,25 @@ test:
 check:
     bash scripts/check-static.sh
 
+# Complete deterministic browser suite. It owns a temporary Host/data directory
+# and free loopback ports; it never connects to the live Host on port 3076.
+e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -d app/node_modules ]]; then
+        ( cd app && npm ci )
+    fi
+    if [[ -z "${CHROMIUM_EXECUTABLE:-}" ]]; then
+        ( cd app && npx playwright install chromium )
+    fi
+    ( cd app && npm run build )
+    case "${HIRSEL_E2E_PROFILE:-debug}" in
+        debug) cargo build --workspace --all-targets ;;
+        release) cargo build --release --workspace --all-targets ;;
+        *) echo "HIRSEL_E2E_PROFILE must be 'debug' or 'release'" >&2; exit 2 ;;
+    esac
+    node e2e/run.mjs
+
 # Agent-judged product scenarios. Each scenario boots an isolated real-model
 # Host and production PWA, preserves evidence, and refuses live port 3076.
 product-runbook scenario="all":

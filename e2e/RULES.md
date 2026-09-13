@@ -4,17 +4,33 @@ The real-model, agent-judged product scenarios live under [`../runbooks/`](../ru
 and follow [`../runbooks/RULES.md`](../runbooks/RULES.md). Keep those semantic
 browser checks separate from the deterministic scripted gates described here.
 
-The current product gate is `thread-smoke.mjs`: durable thread inventory,
-thread-owned conversations and drafts, explicit settlement/reopening, reconnect,
-and desktop/phone containment. All runners use the current tagged authentication and Thread contract.
+The deterministic gate is `just e2e`. It builds the production PWA and repository
+Host, starts disposable services, and runs the Thread, artifact, showcase, blob
+policy, and helper checks. All runners share `lib/harness.mjs` for browser
+selection, free ports, Host lifecycle, polling, and WebSocket requests.
 
 ## Automated runs
 
-Build the PWA and launch an isolated Rust host with `HIRSEL_AGENT=scripted`,
-`HIRSEL_DRIVER=fake`, `HIRSEL_IROH=0`, a temporary `HIRSEL_DATA_DIR`, and an
-unused non-production port. Do not point this suite at an Owner's live host.
+Run from the repository root:
 
-From `app/`:
+```bash
+just e2e
+```
+
+The entrypoint launches a scripted/fake Host on a free loopback port. Its data
+and neutral working directory are created below `$TMPDIR` and removed after the
+run. The Host binary is derived from Cargo's target directory and the repository
+root. `HIRSEL_E2E_PROFILE=release` selects the release binary; `debug` is the
+default. Do not point an individual runner at an Owner's live host.
+
+`CHROMIUM_EXECUTABLE` optionally selects an installed Chromium executable. When
+unset, `just e2e` installs and Playwright discovers the browser revision pinned
+by `app/package-lock.json`. No Playwright cache path or developer home directory
+is encoded in the suite.
+
+The top-level gate supplies service settings to its children. For focused runs,
+build the PWA and Host first, launch an isolated scripted/fake Host, then provide
+the runner-specific inputs:
 
 ```bash
 HIRSEL_THREAD_SMOKE_URL=http://127.0.0.1:TESTPORT \
@@ -22,9 +38,28 @@ HIRSEL_THREAD_SMOKE_TOKEN=development-token \
 npm run e2e:threads
 ```
 
-`CHROMIUM_EXECUTABLE` selects an installed Chromium. `HIRSEL_THREAD_SMOKE_ARTIFACTS`
-selects the screenshot directory. Set `HIRSEL_THREAD_SMOKE_ADAPTIVE=1` to seed a scripted-only Thread instrument, exercise Continue in place, and reject replay of its stale revision without another message. The script creates test threads and sends
-scripted messages; it makes no provider calls when the host is configured above.
+`HIRSEL_THREAD_SMOKE_ARTIFACTS` selects the screenshot directory. Set
+`HIRSEL_THREAD_SMOKE_ADAPTIVE=1` to include the generated-instrument continuation
+and stale-revision checks. Artifact and showcase runners use
+`HIRSEL_ARTIFACT_HOST_URL` and `HIRSEL_ARTIFACT_HOST_TOKEN`; an optional
+`HIRSEL_APP_URL` may point the showcase browser at a separate loopback app. The
+standalone artifact-runtime and SVG-preview runners use
+`HIRSEL_ARTIFACT_TEST_URL`; SVG preview additionally requires
+`HIRSEL_CAT_ARTIFACT_DB` and optionally accepts
+`HIRSEL_SVG_ARTIFACT_SCREENSHOT`.
+
+Evidence recovery uses `HIRSEL_ARTIFACT_HOST_URL`,
+`HIRSEL_ARTIFACT_HOST_TOKEN`, `HIRSEL_ARTIFACT_DB`, and
+`HIRSEL_ARTIFACT_EVIDENCE`; `HIRSEL_ARTIFACT_THREAD_ID` and
+`HIRSEL_ARTIFACT_ID` default to `1` and `2`. The responsive fixture runner uses
+`HIRSEL_RESPONSIVE_FIXTURE` and optionally `HIRSEL_RESPONSIVE_EVIDENCE`. The
+Spaces/Tasks and real-model product runbooks optionally use
+`HIRSEL_SPACES_EVIDENCE` and `HIRSEL_RUNBOOK_ARTIFACTS`. Every default evidence
+path is below `$TMPDIR`.
+
+The scripted suite creates test Threads and sends scripted messages. It makes no
+provider calls. `HIRSEL_EXPECT_UNSAFE_INLINE=1` exists only for proving the
+pre-fix blob behavior and must not be set for the normal gate.
 
 For lightweight frontend work, `npm run dev:mock` serves the same Thread
 commands with in-memory state, owned message history, idempotent message sends,

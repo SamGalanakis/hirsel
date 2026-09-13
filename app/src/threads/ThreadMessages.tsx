@@ -75,7 +75,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
           </p>
         </Show>
         <Show when={!pending()}>
-        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 max-w-[96%] rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5 sm:max-w-[80%]"}>
+        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:border-current/15 [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 max-w-[96%] rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5 sm:max-w-[80%]"}>
           {/* The Agent side is one run card: what started the turn, where it
               ran, its trace, its reply and whatever it published. The Owner
               side is the message itself, which is all there is to say. */}

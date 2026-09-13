@@ -262,7 +262,7 @@ pub fn fork_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition::raw(
             "hirsel.fork_activity_info",
             "fork_record_info",
-            "RECORD exit. Append quiet coordinator activity stating the outcome in the Owner's terms. Never paste raw logs.",
+            "RECORD exit. Append quiet Thread activity stating the outcome in the Owner's terms. Never paste raw logs.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -288,7 +288,7 @@ pub fn fork_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition::raw(
             "hirsel.fork_activity_summary",
             "fork_record_summary",
-            "RECORD exit. Append a factual coordinator digest. Never settle work.",
+            "RECORD exit. Append a factual Thread digest. Never settle work.",
             json!({
                 "type": "object",
                 "additionalProperties": false,

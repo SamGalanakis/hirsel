@@ -549,18 +549,12 @@ struct DelegateCommon {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum HostAgent {
-    Host,
+enum NativeAgent {
+    Native,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum NativeAgent {
-    Lash,
-}
-#[derive(Default, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
 enum CliAgent {
-    #[default]
     Claude,
     Codex,
 }
@@ -573,36 +567,46 @@ enum DelegateInput {
         common: DelegateCommon,
         child_thread_id: u64,
     },
-    Host {
-        #[serde(flatten)]
-        common: DelegateCommon,
-        child_thread_id: Option<u64>,
-        agent: HostAgent,
-        provider_id: Option<String>,
-        model: Option<String>,
-    },
-    Native {
-        #[serde(flatten)]
-        common: DelegateCommon,
-        child_thread_id: Option<u64>,
-        agent: NativeAgent,
-        provider_id: Option<String>,
-        model: Option<String>,
-        variant: Option<String>,
-        cwd: Option<std::path::PathBuf>,
-    },
     Cli {
         #[serde(flatten)]
         common: DelegateCommon,
         child_thread_id: Option<u64>,
-        #[serde(default)]
         agent: CliAgent,
         model: Option<String>,
         variant: Option<String>,
         cwd: Option<std::path::PathBuf>,
     },
+    /// Naming no agent at all is Native: the ordinary delegation is a child
+    /// Thread that runs the way this one does.
+    Native {
+        #[serde(flatten)]
+        common: DelegateCommon,
+        child_thread_id: Option<u64>,
+        agent: Option<NativeAgent>,
+        provider_id: Option<String>,
+        model: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+    },
 }
 impl ScopedThreadTools {
+    /// The provider and model this Thread's own accepted turn runs on, so a
+    /// delegation that names neither lands on the same route. A caller without
+    /// a captured Native execution (a CLI Thread, or a turn whose capture is
+    /// gone) inherits nothing and falls back to the Settings default.
+    async fn inherited_native_selectors(&self) -> (Option<String>, Option<String>) {
+        match self
+            .tools
+            .storage()
+            .turn_execution(self.caller.turn_id)
+            .await
+        {
+            Ok(crate::storage::ThreadExecution::Native {
+                provider_id, model, ..
+            }) => (Some(provider_id), Some(model.id)),
+            _ => (None, None),
+        }
+    }
+
     async fn resolve_assignment(&self, args: &Value) -> Result<Delegation, ToolError> {
         let input: DelegateInput = serde_json::from_value(args.clone()).map_err(ToolError::from)?;
         use crate::execution_selection::{ExecutionSelectors, resolve_execution};
@@ -611,41 +615,36 @@ impl ScopedThreadTools {
                 common,
                 child_thread_id,
             } => (common, Some(child_thread_id), None),
-            DelegateInput::Host {
-                common,
-                child_thread_id,
-                agent: HostAgent::Host,
-                provider_id,
-                model,
-            } => (
-                common,
-                child_thread_id,
-                Some(ExecutionSelectors {
-                    agent: Some("host".into()),
-                    provider_id,
-                    model,
-                    ..Default::default()
-                }),
-            ),
             DelegateInput::Native {
                 common,
                 child_thread_id,
-                agent: NativeAgent::Lash,
+                agent,
                 provider_id,
                 model,
-                variant,
                 cwd,
-            } => (
-                common,
-                child_thread_id,
-                Some(ExecutionSelectors {
-                    agent: Some("lash".into()),
-                    provider_id,
-                    model,
-                    variant,
-                    cwd,
-                }),
-            ),
+            } => {
+                let agent = match agent {
+                    None | Some(NativeAgent::Native) => "native",
+                };
+                // A child inherits the provider and model this Thread runs on
+                // unless the delegation names its own: the default answer to
+                // "where does this run" is "here".
+                let (provider_id, model) = match (provider_id, model) {
+                    (None, None) => self.inherited_native_selectors().await,
+                    named => named,
+                };
+                (
+                    common,
+                    child_thread_id,
+                    Some(ExecutionSelectors {
+                        agent: Some(agent.into()),
+                        provider_id,
+                        model,
+                        variant: None,
+                        cwd,
+                    }),
+                )
+            }
             DelegateInput::Cli {
                 common,
                 child_thread_id,
@@ -671,41 +670,16 @@ impl ScopedThreadTools {
                 }),
             ),
         };
-        let execution = if let Some(selectors) = selectors {
-            Some(resolve_execution(&self.tools, selectors).await?)
-        } else {
-            let effective = self
-                .tools
-                .storage()
-                .effective_child_execution(
-                    &self.caller,
-                    child_thread_id.expect("existing-child variant has an identity"),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            matches!(
-                effective,
-                crate::storage::ThreadExecution::LashWorker { .. }
-            )
-            .then_some(effective)
+        let execution = match selectors {
+            Some(selectors) => Some(resolve_execution(&self.tools, selectors).await?),
+            // An existing child with no new selectors keeps its accepted
+            // backend; the delegation path captures it atomically.
+            None => None,
         };
-        let native_worker = matches!(
-            &execution,
-            Some(crate::storage::ThreadExecution::LashWorker { .. })
-        );
-        if native_worker && !input.artifact_ids.is_empty() {
-            return Err(
-                "native Lash worker artifact references are not supported yet; remove artifact_ids or delegate to another backend"
-                    .into(),
-            );
-        }
-        let brief = if native_worker {
-            self.tools
-                .expand_skill(&input.brief)
-                .map_err(ToolError::from)?
-        } else {
-            input.brief
-        };
+        let brief = self
+            .tools
+            .expand_skill(&input.brief)
+            .map_err(ToolError::from)?;
         Ok(Delegation {
             title: input.title,
             brief,
@@ -738,30 +712,35 @@ mod delegate_input_tests {
                 ..
             }
         ));
+        // Naming no agent at all is Native, and it inherits both selectors.
         assert!(matches!(
-            parse(json!({"agent":"host"})).unwrap(),
-            DelegateInput::Host {
+            parse(json!({})).unwrap(),
+            DelegateInput::Native {
+                agent: None,
                 provider_id: None,
                 model: None,
                 ..
             }
         ));
-        // The coordinator now takes a provider and a model of its own; the
-        // roster, not the input shape, is what judges them.
         assert!(matches!(
-            parse(json!({"agent":"host","provider_id":"acme","model":"m"})).unwrap(),
-            DelegateInput::Host { .. }
-        ));
-        assert!(matches!(
-            parse(json!({"agent":"host","model":"m"})).unwrap(),
-            DelegateInput::Host {
-                provider_id: None,
+            parse(json!({"agent":"native"})).unwrap(),
+            DelegateInput::Native {
+                agent: Some(NativeAgent::Native),
                 ..
             }
         ));
+        // Native takes a provider, a model and a working directory of its own.
         assert!(matches!(
-            parse(json!({"agent":"lash","provider_id":"router","model":"m"})).unwrap(),
+            parse(json!({"agent":"native","provider_id":"acme","model":"m","cwd":"/tmp"})).unwrap(),
             DelegateInput::Native { .. }
+        ));
+        assert!(matches!(
+            parse(json!({"model":"m"})).unwrap(),
+            DelegateInput::Native {
+                agent: None,
+                model: Some(_),
+                ..
+            }
         ));
         for agent in ["claude", "codex"] {
             assert!(matches!(
@@ -769,20 +748,12 @@ mod delegate_input_tests {
                 DelegateInput::Cli { .. }
             ));
         }
-        assert!(matches!(
-            parse(json!({})).unwrap(),
-            DelegateInput::Cli {
-                agent: CliAgent::Claude,
-                ..
-            }
-        ));
         for invalid in [
-            // The coordinator has no reasoning variant and no working
-            // directory: both are worker selectors.
-            json!({"agent":"host","variant":"high"}),
-            json!({"agent":"host","cwd":"/tmp"}),
+            // Native has no reasoning variant: that is a CLI selector.
+            json!({"agent":"native","variant":"high"}),
+            json!({"variant":"high"}),
             json!({"agent":"codex","provider_id":"router"}),
-            json!({"child_thread_id":7,"provider_id":"router"}),
+            json!({"child_thread_id":7,"provider_id":"router","agent":"codex"}),
             json!({"agent":"typo"}),
             json!({"unknown":true}),
         ] {

@@ -1,11 +1,9 @@
 //! Lazy independent Thread sessions. A durable FIFO feeds each lane; capacity is shared.
-use super::native_worker::{NativeWorkerRunContext, NativeWorkerTurn};
 use super::*;
 use tokio::sync::{OnceCell, Semaphore};
 
 pub(super) struct ThreadRuntimeRegistry {
     cli: Arc<Mutex<HashMap<u64, Arc<CliTurn>>>>,
-    native: Arc<Mutex<HashMap<u64, Arc<NativeWorkerTurn>>>>,
     admission: Mutex<()>,
     epoch: std::sync::RwLock<(String, RuntimeTasks)>,
     config: RuntimeConfig,
@@ -30,7 +28,6 @@ impl ThreadRuntimeRegistry {
     ) -> Arc<Self> {
         Arc::new(Self {
             cli: Arc::new(Mutex::new(HashMap::new())),
-            native: Arc::new(Mutex::new(HashMap::new())),
             admission: Mutex::new(()),
             epoch: std::sync::RwLock::new((history_id, RuntimeTasks::new())),
             config,
@@ -58,14 +55,6 @@ impl ThreadRuntimeRegistry {
         });
     }
 
-    #[cfg(test)]
-    pub(super) async fn install_native_turn_for_test(
-        &self,
-        thread_id: u64,
-        work: Arc<NativeWorkerTurn>,
-    ) {
-        self.native.lock().await.insert(thread_id, work);
-    }
     pub(super) async fn refresh_execution_default(&self) -> anyhow::Result<()> {
         let model = match &self.model_selection {
             Some(selection) => selection.model_spec()?,
@@ -75,11 +64,15 @@ impl ThreadRuntimeRegistry {
                 .build()
                 .map_err(|e| anyhow::anyhow!("invalid model metadata: {e}"))?,
         };
+        // The coding operations are rooted where the host was started, until a
+        // Thread names its own directory.
+        let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
         self.tools
             .storage()
-            .set_host_execution_default(&crate::storage::ThreadExecution::Host {
+            .set_native_execution_default(&crate::storage::ThreadExecution::Native {
                 provider_id: self.config.boot_plan.label().into(),
                 model,
+                cwd,
             })
             .await
     }
@@ -145,12 +138,6 @@ impl ThreadRuntimeRegistry {
                 {
                     work.cancel.cancel();
                 }
-                let native = self.native.lock().await.get(&turn.thread_id).cloned();
-                if let Some(work) = native
-                    && work.turn_id == turn.id
-                {
-                    work.stop().await;
-                }
                 let history = self.epoch.read().expect("runtime epoch poisoned").0.clone();
                 let (turn, _) = self
                     .tools
@@ -165,8 +152,6 @@ impl ThreadRuntimeRegistry {
                 self.tools.publish_thread_turn(turn).await;
             } else if let Some(work) = self.cli.lock().await.get(&turn.thread_id) {
                 work.cancel.cancel();
-            } else if let Some(work) = self.native.lock().await.get(&turn.thread_id).cloned() {
-                work.stop().await;
             } else {
                 match self.lane(turn.thread_id).await?.as_ref() {
                     LaneRuntime::Lash(runtime) => {
@@ -184,11 +169,7 @@ impl ThreadRuntimeRegistry {
             let id = request.thread_id;
             let turn = request.stored_turn(&self.tools.storage()).await?;
             let execution = self.tools.storage().turn_execution(turn.id).await?;
-            if matches!(
-                &execution,
-                crate::storage::ThreadExecution::Cli { .. }
-                    | crate::storage::ThreadExecution::LashWorker { .. }
-            ) {
+            if matches!(&execution, crate::storage::ThreadExecution::Cli { .. }) {
                 match turn.state {
                     hirsel_proto::ThreadTurnState::Queued => {}
                     hirsel_proto::ThreadTurnState::Running => continue,
@@ -204,47 +185,7 @@ impl ThreadRuntimeRegistry {
                     }
                 }
             }
-            if !seen.insert(id)
-                || self.cli.lock().await.contains_key(&id)
-                || self.native.lock().await.contains_key(&id)
-            {
-                continue;
-            }
-            if matches!(
-                &execution,
-                crate::storage::ThreadExecution::LashWorker { .. }
-            ) {
-                let work = NativeWorkerTurn::new(turn.id);
-                self.native.lock().await.insert(id, work.clone());
-                let active = self.native.clone();
-                let tools = self.tools.clone();
-                let config = self.config.clone();
-                let capacity = self.capacity.clone();
-                self.epoch
-                    .read()
-                    .expect("runtime epoch poisoned")
-                    .1
-                    .spawn(async move {
-                        if let Err(error) = work
-                            .run(
-                                NativeWorkerRunContext {
-                                    config: &config,
-                                    tools: &tools,
-                                    capacity,
-                                },
-                                request,
-                                execution,
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                thread_id = id,
-                                %error,
-                                "native Lash worker execution could not be projected"
-                            );
-                        }
-                        active.lock().await.remove(&id);
-                    });
+            if !seen.insert(id) || self.cli.lock().await.contains_key(&id) {
                 continue;
             }
             if let crate::storage::ThreadExecution::Cli { agent, .. } = &execution {
@@ -366,24 +307,17 @@ impl ThreadRuntimeRegistry {
         for lane in self.opened().await {
             if let LaneRuntime::Lash(runtime) = lane.as_ref() {
                 runtime.fork_wake.stop().await;
+                // The coding operations own real child processes. A history
+                // reset reaps them before the lane is dropped, so nothing
+                // outlives the history it was started under.
+                runtime.coding.shutdown().await;
             }
         }
         for work in self.cli.lock().await.values() {
             work.stop().await;
         }
-        let native = self
-            .native
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for work in native {
-            work.stop().await;
-        }
         tasks.stop().await;
         self.cli.lock().await.clear();
-        self.native.lock().await.clear();
         // Quiesce provider execution too; its callbacks are already detached from
         // all host observation/pump tasks and the old binding is revoked below.
         for lane in self.opened().await {
@@ -457,10 +391,6 @@ impl ThreadRuntimeRegistry {
             work.cancel.cancel();
             return Ok(());
         }
-        if let Some(work) = self.native.lock().await.get(&id).cloned() {
-            work.stop().await;
-            return Ok(());
-        }
         let lane = self.lane(id).await?;
         match lane.as_ref() {
             LaneRuntime::Lash(r) => r.cancel_owned_turn(Some(id)).await,
@@ -487,18 +417,11 @@ impl ThreadRuntimeRegistry {
         {
             work.cancel.cancel();
         }
-        let native = self.native.lock().await.get(&id).cloned();
-        if let Some(work) = native
-            && work.turn_id == turn.id
-        {
-            work.stop().await;
-        }
         // CLI and not-yet-opened scripted lanes have no admitted provider input.
         if self.is_scripted()
             || matches!(
                 self.tools.storage().turn_execution(turn.id).await?,
                 crate::storage::ThreadExecution::Cli { .. }
-                    | crate::storage::ThreadExecution::LashWorker { .. }
             )
         {
             for lane in self.opened().await {

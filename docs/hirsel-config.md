@@ -13,7 +13,7 @@ address, regardless of its ephemeral source port. Hirsel does not trust
 a shared proxy therefore share one WebSocket authentication-throttle history
 unless a future trusted-proxy contract explicitly provides client identity.
 
-The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. The coordinator and native Lash coding worker use the TypeScript RLM dialect with process and trigger abilities; the worker retains its separate four-operation coding profile. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
+The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. Native execution is one TypeScript RLM session with process and trigger abilities, carrying the full Thread tool set and the four coding operations together. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
 History lives in `hirsel.sqlite`. New stores use the complete current schema 8
 layout. Startup accepts that exact layout or an empty store and refuses every
@@ -162,19 +162,21 @@ warning and falls back to that provider's default model.
   the same reason. The stored values are what the Host builds the handle from.
 - **Fork provider and model** — stored only. No fork runtime consumes them yet.
 
-## Per-Thread coordinators
+## Per-Thread Native routes
 
-Settings names the coordinator (the Host RLM agent) every Thread runs on by default. One Thread can run on another: the Owner picks a provider and model in Thread Info's "Runs on" row, and the Agent names the same thing as `threads.delegate` with `agent: "host"` plus an optional `provider_id` and `model`. Both are validated against the same provider roster the Settings picker offers — the instance must exist and be agent-selectable (`claude` is Sub-agents only, ADR-0015), and the model must be one the instance offers, or free text where the instance takes free text. The coordinator takes no reasoning variant and no cwd: the model's own default effort applies.
+Settings names the Native provider and model every Thread runs on by default. One Thread can run on another: the Owner picks a provider and model in Thread Info's "Runs on" row, and the Agent names the same thing as `threads.delegate` with `agent: "native"` plus an optional `provider_id` and `model`. Both are validated against the same provider roster the Settings picker offers — the instance must exist and be agent-selectable (`claude` is Sub-agents only, ADR-0015), and the model must be one the instance offers, or free text where the instance takes free text. Native takes no reasoning variant: the model's own default effort applies.
 
-The choice applies from the Thread's next turn. Its resident session opens on the booted coordinator and is rebound to the Thread's own when the next turn is admitted, so a turn already running keeps the backend it started on. Clearing the choice puts the Thread back on the Settings default the same way.
+A delegation that names neither `provider_id` nor `model` runs where its parent runs; the Settings default applies only when the parent has no Native route of its own.
 
-## Native Lash coding workers
+The choice applies from the Thread's next turn. Its resident session opens on the booted provider and is rebound to the Thread's own when the next turn is admitted, so a turn already running keeps the backend it started on. Clearing the choice puts the Thread back on the Settings default the same way.
 
-`threads.delegate` exposes `agent: "lash"` when at least one stored OpenAI-compatible provider has a non-empty API key. This runs a dedicated in-process Lash TypeScript RLM session with process and trigger abilities and a narrow read/edit/write/command tool profile; it does not change the coordinator's provider or model. Hirsel creates no default worker processes. With no explicit worker provider, Hirsel selects the configured `openrouter` instance and defaults its model to `deepseek/deepseek-v4.1-flash`. A non-OpenRouter provider requires an explicit free-text model. The worker variant is `default`.
+## The four coding operations
 
-Acceptance stores provider route identity, model, variant, canonical cwd, and tool-profile version, never an API key. A later base-URL change or provider removal cannot retarget queued work and produces a clear failure. API-key rotation remains private credential indirection for the same accepted route.
+A Native session advertises four Hirsel-owned coding tools — `read`, `edit`, `write` and `exec_command` — beside the ordinary Thread tools. The last name is bound to Lash's semantic `shell.exec` operation, but does not use Lash's coding-tool implementation. The coordinated Lash runtime/provider dependencies stay at revision `47e6e23764939c790961fbe2905ee08ff5373a95`.
 
-The worker's complete callable surface is the four Hirsel-owned tools `read`, `edit`, `write`, and `exec_command`; the last name is bound to Lash's semantic `shell.exec` operation, but does not use Lash's coding-tool implementation. The coordinated Lash runtime/provider dependencies stay at revision `47e6e23764939c790961fbe2905ee08ff5373a95`. It has no delegation, Thread management, artifact publication, browser/web, background-process, or plugin tools. Its cwd is a default path base, not a filesystem sandbox. Truncated text reads return `next_offset` and `next_byte_offset`; pass both back to continue a long Unicode line without skipping content. A child Task retains this executor preference and conversation on follow-up; changing its accepted profile opens a distinct worker-session generation with a bounded Task-only handoff.
+Acceptance stores the provider id, model and canonical cwd, never an API key. `cwd` is the directory those coding operations are rooted at — execution context, not a filesystem sandbox — so it is captured with the turn but never part of the public target. A later base-URL change or provider removal cannot retarget queued work and produces a clear failure. API-key rotation remains private credential indirection for the same accepted route.
+
+Truncated text reads return `next_offset` and `next_byte_offset`; pass both back to continue a long Unicode line without skipping content. A child Task retains its executor preference and conversation on follow-up; changing the advertised tool surface opens a distinct session generation with a bounded Task-only handoff.
 
 `exec_command` uses non-login `/bin/sh` and is currently available only on Linux hosts with `pidfd_open` and readable procfs process metadata. Hirsel preflights both capabilities before spawning and owns each one-shot process group through terminal group termination, a no-runnable-member barrier, direct-child reap, and output drain; cancellation, timeout, history reset, output-reader failure, and ordinary completion all wait for that cleanup. Same-group descendants cannot outlive the result, while a command that deliberately escapes its process group is outside this guarantee. Unsupported hosts reject the call before spawning a process.
 
@@ -219,29 +221,6 @@ enabled_variants = ["low", "medium", "high", "xhigh", "max", "ultra"]
 enabled = true
 enabled_variants = ["low", "medium", "high", "xhigh", "max"]
 ```
-
-### Native worker
-
-The in-process Lash coding worker (`agent = "lash"` in `threads.delegate`) is
-not a CLI lane: it has no curated model list and no reasoning efforts, so it has
-its own row. `enabled` is the master switch — while it is off, the `lash` branch
-is absent from the delegation contract entirely. `model` overrides the model the
-default route opens on; omit it for the shipped default
-(`deepseek/deepseek-v4.1-flash`). A delegation that names its own `model` still
-wins over both.
-
-The worker runs on the provider instances in `[providers]` that have an API key.
-A delegation that names no `provider_id` is routed through `openrouter`; any
-other eligible instance has to be named explicitly, together with a model. With
-no keyed instance configured the worker is unavailable and Settings says so.
-
-```toml
-[native_worker]
-enabled = true
-model = "deepseek/deepseek-v4.1-flash"
-```
-
-Generative-UI templates live in the templates directory; see `templates/CATALOG.md`.
 
 ## Filesystem skills
 

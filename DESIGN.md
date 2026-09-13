@@ -58,7 +58,7 @@ Every Thread carries an avatar: a generated letter default, a chosen emoji, or a
 
 A turn's work is one flat wrapping row of step pills in chronological order; the Agent's program cell is a peer of the tool calls beside it, not their parent. One step is open at a time and its detail panel opens below the whole row. Reasoning and provisional prose are full-width rows in the same sequence, and raw turn data stays in the run card's Technical details.
 
-Thread Info is a pane inside the same frame, not a separate sheet. It holds the Thread's own facts and the Owner's in-place edits: title, description and **Runs on**, which chooses the default coordinator, a coordinator provider and model, a CLI agent, or the native Lash worker. Each edit is revision-guarded and settles only when the Host's revision advances.
+Thread Info is a pane inside the same frame, not a separate sheet. It holds the Thread's own facts and the Owner's in-place edits: title, description and **Runs on**, which chooses the default Native route, a Native provider and model, or a CLI agent. Each edit is revision-guarded and settles only when the Host's revision advances.
 
 A process delivery is a structured note in its owning Thread: process name, the trigger that fired, the outcome and the body. A wake that produced nothing to read gets no card at all; consecutive ones fold into a single quiet line. Processes list one entry per process — a dense row at rest, promoted to a card while running or expanded — grouped Running and Finished, scoped to the selected Thread and its descendants, with Cancel process and Disable trigger.
 

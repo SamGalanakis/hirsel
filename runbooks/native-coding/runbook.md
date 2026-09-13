@@ -1,4 +1,4 @@
-# Native Lash coding worker product runbook
+# Native coding product runbook
 
 Follow [`../RULES.md`](../RULES.md). This runbook is a bounded real-provider product check, not a unit-test substitute.
 
@@ -7,12 +7,10 @@ Follow [`../RULES.md`](../RULES.md). This runbook is a bounded real-provider pro
 - Use a fresh data directory and unused loopback port other than `3076`.
 - Build and serve the production frontend and Host from the same reviewed checkout.
 - Configure a private `openrouter` provider entry with a usable API key. Do not copy or print the key into evidence.
-- Confirm `hello_ok` reports the intended Host configuration. The accepted worker execution must record provider `openrouter`, model `deepseek/deepseek-v4.1-flash`, variant `default`, and the isolated test checkout cwd.
-- In Settings › Thread models, confirm the Native worker row is present, enabled,
-  and reports `Runs on OpenRouter.` with the shipped default model; Settings ›
-  Providers shows the `Native worker` marker on that same instance. The row is
-  the Owner's switch: while it is off, `agent: "lash"` is absent from the
-  delegation contract and this scenario cannot start.
+- Confirm `hello_ok` reports the intended Host configuration. The accepted Native execution must record provider `openrouter`, model `deepseek/deepseek-v4.1-flash`, and the isolated test checkout cwd.
+- In Settings › Agents, confirm the Native section points at the OpenRouter
+  instance with the intended default model; Settings › Providers shows the
+  `Native` marker on that same instance.
 - Prepare a tiny repository with one focused failing test and no valuable state.
 
 Run the dedicated scenario from the repository root after building the reviewed
@@ -20,27 +18,27 @@ tree. Supply the OpenRouter key through the process environment without writing
 it into the checkout or evidence:
 
 ```bash
-just product-runbook native-lash-worker
+just product-runbook native-coding
 ```
 
 The runner refuses to start the scenario when `OPENROUTER_API_KEY` is absent.
 It creates the disposable fixture inside the evidence directory, uses a fresh
-Host config and store, and asks the coordinator to omit the child provider,
-model, and variant so their accepted defaults are observable.
+Host config and store, and asks the parent to omit the child provider and
+model so the inherited Native route is observable.
 
 ## Bounded scenario
 
-Spend at most two worker model turns: one initial delegation and one follow-up. Do not automatically retry a failed or timed-out model call.
+Spend at most two Native model turns: one initial delegation and one follow-up. Do not automatically retry a failed or timed-out model call.
 
-1. Ask the coordinator to delegate one child Task with `agent: "lash"`. The brief tells the worker to inspect the fixture, run the focused failing test, make the smallest repair, rerun it, and summarize changed files plus checks.
+1. Ask the parent to delegate one child Task with `agent: "native"`. The brief tells the child to inspect the fixture, run the focused failing test, make the smallest repair, rerun it, and summarize changed files plus checks.
 2. While the child is running, verify the parent UI remains responsive without sending another prompt.
-3. In the child timeline, verify the callable catalog contains exactly `read`, `edit`, `write`, and `exec_command`; no coordinator, delegation, browser, process-control, or plugin tools appear.
+3. In the child timeline, verify the callable catalog advertises `read`, `edit`, `write` and `exec_command` beside the ordinary Thread tools: one Native session carries the whole surface, and a Thread is never handed to a second session to touch a file.
 4. Verify chronological reasoning, tool start, tool result, and assistant output rows. The first test must visibly fail and the later focused test must pass. Reconcile DOM, `open_thread`, captured frames, and SQLite IDs.
 5. Send one follow-up to the same child asking it to identify the earlier changed file and test result without rereading the whole repository. Verify the same Task retains context and produces exactly one new terminal report to the parent.
 6. Confirm neither successful turn marks the Task done.
 
-The fixture is intentionally wrong in one numeric operation. The worker must
-use all four callable tools: read the source and test, observe the focused test
+The fixture is intentionally wrong in one numeric operation. The Native session
+must use all four coding tools: read the source and test, observe the focused test
 fail through `exec_command`, repair the unique expression through `edit`, write
 the requested summary file through `write`, and observe the same test pass
 through `exec_command`. The passing test pauses after its assertion so the

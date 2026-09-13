@@ -22,3 +22,12 @@ targets the newest active incarnation; Disable targets the latest enabled
 recurring subscription with its revision fence. The row keeps the last firing
 time and completed result, and clients remove rows that disappear from the
 authoritative projection.
+
+Execution revision (2026-09-13): the coordinator / native-worker split this
+record describes is superseded by ADR-0023. There is one Native session per
+Thread, holding the full Thread tool set and the four coding operations
+together, so "both sessions use the TypeScript RLM posture" now reads as one
+session with one posture. Nothing about process declarations, the trigger
+vocabulary, delivery, durability or the projection changes: processes are still
+Lash processes, owned by a concrete Thread, and Hirsel still creates none by
+default.

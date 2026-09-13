@@ -11,22 +11,20 @@ use hirsel_drivers::{
 use lash::{TurnActivity, TurnEvent};
 use lash_core::{ToolCallOutput, ToolCallRecord, ToolFailure, ToolFailureClass};
 
-use super::{cli_turn::cli_executor_event, native_worker::native_executor_event};
+use super::cli_turn::cli_executor_event;
 
 #[derive(Clone, Copy, Debug)]
 enum Backend {
-    Host,
-    NativeWorker,
+    Native,
     Cli,
 }
 
 impl Backend {
-    const ALL: [Self; 3] = [Self::Host, Self::NativeWorker, Self::Cli];
+    const ALL: [Self; 2] = [Self::Native, Self::Cli];
 
     fn name(self) -> &'static str {
         match self {
-            Self::Host => "host",
-            Self::NativeWorker => "native-worker",
+            Self::Native => "native",
             Self::Cli => "cli",
         }
     }
@@ -179,22 +177,12 @@ fn remote_tool_output(output: ToolCallOutput) -> Value {
     output
 }
 
-fn host_adapter(scenario: Scenario) -> Vec<ExecutorEvent> {
+fn native_adapter(scenario: Scenario) -> Vec<ExecutorEvent> {
     stream_events(scenario)
         .into_iter()
         .filter_map(|event| {
             let remote = scripted_host_event(remote_event(event));
             host_executor_event(&remote)
-        })
-        .collect()
-}
-
-fn native_adapter(scenario: Scenario) -> Vec<ExecutorEvent> {
-    stream_events(scenario)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, event)| {
-            native_executor_event((index + 1) as u64, TurnActivity::independent(event)).unwrap()
         })
         .collect()
 }
@@ -320,8 +308,7 @@ async fn cli_adapter(scenario: Scenario) -> Vec<ExecutorEvent> {
 
 async fn adapter_events(backend: Backend, scenario: Scenario) -> Vec<ExecutorEvent> {
     let mut events = match backend {
-        Backend::Host => host_adapter(scenario),
-        Backend::NativeWorker => native_adapter(scenario),
+        Backend::Native => native_adapter(scenario),
         Backend::Cli => return cli_adapter(scenario).await,
     };
     let (outcome, final_text) = terminal_projection_for(scenario);
@@ -448,7 +435,7 @@ async fn project(backend: Backend, scenario: Scenario) -> Projection {
 #[tokio::test]
 async fn every_executor_matches_the_shared_turn_contract() {
     for scenario in Scenario::ALL {
-        let expected = project(Backend::Host, scenario).await;
+        let expected = project(Backend::Native, scenario).await;
         for backend in Backend::ALL.into_iter().skip(1) {
             let actual = project(backend, scenario).await;
             assert_eq!(

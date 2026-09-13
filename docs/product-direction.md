@@ -8,7 +8,7 @@ Accepted 2026-09-09. [ADR 0016](adr/0016-threads-own-conversation.md) adopts the
 
 A **Thread** owns one durable subject and its conversation. **Messages** are things said in that Thread. A **Turn** is one Agent execution with queued/running/terminal state. **Activity** records facts about work or execution. The **instrument** is the current generated interface attached to the Thread. These are distinct records and responsibilities.
 
-The Owner uses one composer addressed to the focused Space or Task. Each agent execution may access its own conversation and descendants, with focused child assignments and upward reports. Humans can browse the whole tree. A coordinator is an ordinary root conversation; citations provide references without duplicating message ownership or granting access.
+The Owner uses one composer addressed to the focused Space or Task. Each agent execution may access its own conversation and descendants, with focused child assignments and upward reports. Humans can browse the whole tree. A coordinating Thread is an ordinary root conversation; citations provide references without duplicating message ownership or granting access.
 
 ## State
 

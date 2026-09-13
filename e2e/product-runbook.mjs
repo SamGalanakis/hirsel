@@ -20,10 +20,10 @@ const requested = process.argv[2] ?? "all";
 const scenarios = requested === "all"
   ? ["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]
   : [requested];
-const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-lash-worker", "process-wakes"]);
+const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-coding", "process-wakes"]);
 for (const scenario of scenarios) assert(knownScenarios.has(scenario), `Unknown product runbook: ${scenario}`);
-if (scenarios.includes("native-lash-worker")) {
-  assert(process.env.OPENROUTER_API_KEY?.trim(), "native-lash-worker requires OPENROUTER_API_KEY; no model call was started");
+if (scenarios.includes("native-coding")) {
+  assert(process.env.OPENROUTER_API_KEY?.trim(), "native-coding requires OPENROUTER_API_KEY; no model call was started");
 }
 
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
@@ -121,7 +121,7 @@ function storeSnapshot(dataDir, threadId) {
   };
 }
 
-function nativeWorkerStoreSnapshot(dataDir, parentThreadId, childThreadId) {
+function nativeStoreSnapshot(dataDir, parentThreadId, childThreadId) {
   const database = join(dataDir, "hirsel.sqlite");
   return {
     threads: sqliteJson(database, `SELECT id,kind,parent_thread_id,title,settled_at,archived_at,revision FROM threads WHERE id IN (${parentThreadId},${childThreadId}) ORDER BY id`),
@@ -131,7 +131,7 @@ function nativeWorkerStoreSnapshot(dataDir, parentThreadId, childThreadId) {
     reports: sqliteJson(database, `SELECT r.child_turn_id,r.operation_id,r.activity_id,a.data AS payload FROM thread_reports r JOIN thread_activities a ON a.id=r.activity_id WHERE r.child_turn_id IN (SELECT id FROM thread_turns WHERE thread_id=${childThreadId}) ORDER BY r.child_turn_id,r.activity_id`),
     pendingReportOutbox: sqliteJson(database, `SELECT id,client_id,thread_id,report_triggered FROM thread_requests WHERE thread_id=${parentThreadId} AND report_triggered=1 ORDER BY id`),
     executionPreference: sqliteJson(database, `SELECT thread_id,config FROM thread_execution_preferences WHERE thread_id=${childThreadId}`),
-    nativeWorkerMeta: sqliteJson(database, `SELECT key,value FROM meta WHERE key LIKE 'thread:${childThreadId}:native_worker_%' ORDER BY key`),
+    nativeSessionMeta: sqliteJson(database, `SELECT key,value FROM meta WHERE key LIKE 'thread:${childThreadId}:agent_session_%' ORDER BY key`),
   };
 }
 
@@ -193,9 +193,9 @@ async function capture(label, context) {
   return { dom, detail, store };
 }
 
-async function captureNativeWorker(label, context, threadId, parentThreadId, childThreadId) {
+async function captureNative(label, context, threadId, parentThreadId, childThreadId) {
   const snapshot = await capture(label, { ...context, threadId });
-  const nativeStore = nativeWorkerStoreSnapshot(context.dataDir, parentThreadId, childThreadId);
+  const nativeStore = nativeStoreSnapshot(context.dataDir, parentThreadId, childThreadId);
   await writeFile(join(context.scenarioDir, `${label}-native-store.json`), `${JSON.stringify(nativeStore, null, 2)}\n`);
   return { ...snapshot, nativeStore };
 }
@@ -871,7 +871,7 @@ async function runArtifactPresentation(context) {
   return { turnId: request.turnId, toolCallIds: starts.map(frame => frame.event.id), artifacts: stored, results, sideEffects, workerRequests };
 }
 
-async function prepareNativeWorkerFixture(scenarioDir, nonce) {
+async function prepareNativeCodingFixture(scenarioDir, nonce) {
   const fixtureDir = join(scenarioDir, "fixture");
   const passMarker = `FOCUSED_TEST_PASS_${nonce}`;
   const summaryMarker = `WORKER_SUMMARY_${nonce}`;
@@ -942,25 +942,26 @@ function executionStarted(store, turnId) {
   return parseStoredJson(row, "data");
 }
 
-function assertNativeWorkerExecution(store, turnId, fixtureDir) {
+function assertNativeExecution(store, turnId, fixtureDir) {
   const row = store.turns.find(turn => turn.id === turnId);
   const execution = parseStoredJson(row, "accepted_execution");
-  assert.equal(execution.backend, "lash_worker");
-  assert.equal(execution.provider.id, "openrouter");
-  assert.equal(execution.provider.base_url, "https://openrouter.ai/api/v1");
-  assert.match(execution.provider.revision, /^sha256:[a-f0-9]{64}$/);
-  assert.equal(execution.model, "deepseek/deepseek-v4.1-flash");
-  assert.equal(execution.variant, "default");
+  assert.equal(execution.backend, "native");
+  assert.equal(execution.provider_id, "openrouter");
+  assert.equal(execution.model.id, "deepseek/deepseek-v4.1-flash");
   assert.equal(execution.cwd, fixtureDir);
-  assert.equal(execution.tool_profile, "hirsel.native-coding.v1");
   return execution;
 }
 
+/** One Native session, one tool surface: the four coding operations are
+ * advertised beside the Thread tool set, never on a session of their own. */
 function assertNativeToolCatalog(store, childThreadId) {
-  const names = store.nativeWorkerMeta.find(row => row.key === `thread:${childThreadId}:native_worker_tool_names`);
-  assert.deepEqual(JSON.parse(names?.value ?? "null"), ["edit", "exec_command", "read", "write"]);
+  const names = store.nativeSessionMeta.find(row => row.key === `thread:${childThreadId}:agent_session_profile`);
+  const advertised = JSON.parse(names?.value ?? "null")?.tool_names ?? [];
+  for (const tool of ["read", "edit", "write", "exec_command", "threads_delegate"]) {
+    assert(advertised.includes(tool), `the Native session did not advertise ${tool}`);
+  }
   const preference = parseStoredJson(store.executionPreference[0], "config");
-  assert.equal(preference.backend, "lash_worker");
+  assert.equal(preference.backend, "native");
 }
 
 function assertChildTaskOpen(store, parentThreadId, childThreadId) {
@@ -972,9 +973,9 @@ function assertChildTaskOpen(store, parentThreadId, childThreadId) {
   );
 }
 
-async function runNativeLashWorker(context, fixture) {
+async function runNativeCoding(context, fixture) {
   const { page, frames, nonce, threadId: parentThreadId, scenarioDir } = context;
-  const childTitle = `Native worker ${nonce}`;
+  const childTitle = `Native coding ${nonce}`;
   const parentMarker = `PARENT_DELEGATED_${nonce}`;
   const finalMarker = `WORKER_FIXED_${nonce}`;
   const followupMarker = `FOLLOWUP_CONTEXT_CONFIRMED_${nonce}`;
@@ -993,8 +994,8 @@ async function runNativeLashWorker(context, fixture) {
   ].join(" ");
   const parentPrompt = [
     "Delegate exactly one new child Task using threads_delegate.",
-    `Use title ${JSON.stringify(childTitle)}, agent "lash", cwd ${JSON.stringify(fixture.fixtureDir)}, and artifact_ids [].`,
-    "Omit provider_id, model, and variant so the native worker defaults are exercised.",
+    `Use title ${JSON.stringify(childTitle)}, agent "native", cwd ${JSON.stringify(fixture.fixtureDir)}, and artifact_ids [].`,
+    "Omit provider_id and model so the inherited Native route is exercised.",
     `Use this exact assignment brief: ${JSON.stringify(brief)}.`,
     `After the delegation is accepted, do not inspect or follow up with the child; end your reply with exactly ${parentMarker}.`,
   ].join(" ");
@@ -1025,7 +1026,7 @@ async function runNativeLashWorker(context, fixture) {
   await parentComposer.fill(draftMarker);
   assert.equal(await parentComposer.inputValue(), draftMarker);
   assert.equal(await parentComposer.isEnabled(), true);
-  const responsive = await captureNativeWorker("10-parent-responsive", context, parentThreadId, parentThreadId, childThreadId);
+  const responsive = await captureNative("10-parent-responsive", context, parentThreadId, parentThreadId, childThreadId);
   const parentDom = responsive.dom.entries.find(entry => entry.messageId === String(parent.owner.id));
   assert.equal(parentDom?.text, renderedInlineCodeText(parentPrompt), "rendered parent prompt content differs from its raw Markdown");
   const parentDetail = responsive.detail.messages.find(message => message.id === parent.owner.id);
@@ -1061,7 +1062,7 @@ async function runNativeLashWorker(context, fixture) {
   assert.equal(payloadText(write, "input").includes(contextMarker), false, "write persisted the private context marker");
   const firstToolIds = firstStarts.map(event => event.id);
   await expandInlineTools(page, firstToolIds);
-  const firstCapture = await captureNativeWorker("20-initial-complete", context, childThreadId, parentThreadId, childThreadId);
+  const firstCapture = await captureNative("20-initial-complete", context, childThreadId, parentThreadId, childThreadId);
   assertTimelineSurfaces(firstCapture, frames, [firstTurn.id]);
   assertTimelineRendered(firstCapture.dom, firstTerminal, durableTimeline(firstCapture.detail, firstTurn.id));
   assertReasoningIntegrity(firstCapture.dom, firstTerminal, durableTimeline(firstCapture.detail, firstTurn.id));
@@ -1071,12 +1072,12 @@ async function runNativeLashWorker(context, fixture) {
   assert.match(initialReply, new RegExp(finalMarker));
   assert.equal(initialReply.includes(contextMarker), false, "initial reply echoed the private context marker");
   assertNativeToolCatalog(firstCapture.nativeStore, childThreadId);
-  assertNativeWorkerExecution(firstCapture.nativeStore, firstTurn.id, fixture.fixtureDir);
+  assertNativeExecution(firstCapture.nativeStore, firstTurn.id, fixture.fixtureDir);
   assertChildTaskOpen(firstCapture.nativeStore, parentThreadId, childThreadId);
   const firstSession = executionStarted(firstCapture.nativeStore, firstTurn.id);
   assert.deepEqual(
     { agent: firstSession.agent, provider: firstSession.provider_id, model: firstSession.model },
-    { agent: "lash", provider: "openrouter", model: "deepseek/deepseek-v4.1-flash" },
+    { agent: "native", provider: "openrouter", model: "deepseek/deepseek-v4.1-flash" },
   );
   const reportsBeforeFollowup = firstCapture.nativeStore.reports.length;
   assert.equal(reportsBeforeFollowup, 1, "initial child turn did not create exactly one terminal parent report");
@@ -1093,7 +1094,7 @@ async function runNativeLashWorker(context, fixture) {
   assert.equal(payloadText(followupStarts[0], "input").includes(contextMarker), false, "follow-up read input contained the context answer");
   assert.equal(payloadText(completedTool(frames, followup.turnId, followupStarts[0]), "result").includes(contextMarker), false, "worker summary leaked the context answer");
   await expandInlineTools(page, followupStarts.map(event => event.id));
-  const followupCapture = await captureNativeWorker("30-followup-complete", context, childThreadId, parentThreadId, childThreadId);
+  const followupCapture = await captureNative("30-followup-complete", context, childThreadId, parentThreadId, childThreadId);
   assertTimelineSurfaces(followupCapture, frames, [firstTurn.id, followup.turnId]);
   assertTimelineRendered(followupCapture.dom, followupTerminal, durableTimeline(followupCapture.detail, followup.turnId));
   const followupReply = agentReply(followupCapture.detail, followupTerminal).body;
@@ -1101,7 +1102,7 @@ async function runNativeLashWorker(context, fixture) {
   assert.match(followupReply, /pass/i);
   assert.match(followupReply, new RegExp(contextMarker));
   assert.match(followupReply, new RegExp(followupMarker));
-  assertNativeWorkerExecution(followupCapture.nativeStore, followup.turnId, fixture.fixtureDir);
+  assertNativeExecution(followupCapture.nativeStore, followup.turnId, fixture.fixtureDir);
   assertNativeToolCatalog(followupCapture.nativeStore, childThreadId);
   assertChildTaskOpen(followupCapture.nativeStore, parentThreadId, childThreadId);
   const followupSession = executionStarted(followupCapture.nativeStore, followup.turnId);
@@ -1164,8 +1165,8 @@ async function runScenario(scenario) {
   await mkdir(dataDir, { recursive: true });
   const token = `runbook-${crypto.randomUUID()}`;
   const nonce = `${scenario.replaceAll("-", "").slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`;
-  const nativeFixture = scenario === "native-lash-worker"
-    ? await prepareNativeWorkerFixture(scenarioDir, nonce)
+  const nativeFixture = scenario === "native-coding"
+    ? await prepareNativeCodingFixture(scenarioDir, nonce)
     : null;
   const logStream = createWriteStream(join(scenarioDir, "host.log"), { flags: "a" });
   const hostProcess = await startHost({
@@ -1198,7 +1199,7 @@ async function runScenario(scenario) {
     port,
     dataDir,
     initialModelCallBudget: scenario === "artifact-presentation" ? 1 : 2,
-    workerModelTurnBudget: scenario === "native-lash-worker" ? 2 : 0,
+    nativeModelTurnBudget: scenario === "native-coding" ? 2 : 0,
     fixtureDir: nativeFixture?.fixtureDir ?? null,
   };
   await writeFile(join(scenarioDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -1260,7 +1261,7 @@ async function runScenario(scenario) {
           ? await runArtifact(context)
           : scenario === "artifact-presentation"
             ? await runArtifactPresentation(context)
-            : await runNativeLashWorker(context, nativeFixture);
+            : await runNativeCoding(context, nativeFixture);
     assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
     result.objectiveStatus = "OBJECTIVE_PASS";
   } catch (error) {

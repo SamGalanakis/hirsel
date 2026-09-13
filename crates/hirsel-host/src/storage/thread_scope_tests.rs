@@ -603,28 +603,23 @@ async fn history_reset_reused_ids_reject_old_callers_receipts_and_revocation() {
     );
 }
 
+/// One Native session means one tool-surface profile per Thread. The session
+/// holds while the advertised surface holds, and rotates the moment the merged
+/// Thread-plus-coding surface changes under it.
 #[tokio::test]
-async fn native_worker_sessions_are_distinct_and_rotate_on_profile_change() {
+async fn the_single_agent_tool_surface_rotates_only_when_the_surface_changes() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
-    let id = thread(&storage, "worker", None).await;
-    let coordinator = storage
-        .reconcile_agent_tool_surface(id, "coordinator-v1", &["threads_context".into()])
+    let id = thread(&storage, "native", None).await;
+    let surface: Vec<String> = ["threads_context", "read", "edit", "write", "exec_command"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let original = storage
+        .reconcile_agent_tool_surface(id, "native-v1", &surface)
         .await
         .unwrap();
-    let worker = storage
-        .reconcile_native_worker_profile(
-            id,
-            "worker-profile-v1",
-            &[
-                "read".into(),
-                "edit".into(),
-                "write".into(),
-                "exec_command".into(),
-            ],
-        )
-        .await
-        .unwrap();
+    assert!(!original.rotated);
     {
         let conn = storage.conn.lock().await;
         let profile_keys = conn
@@ -636,90 +631,27 @@ async fn native_worker_sessions_are_distinct_and_rotate_on_profile_change() {
             .unwrap();
         assert_eq!(
             profile_keys,
-            vec![
-                format!("thread:{id}:agent_session_profile"),
-                format!("thread:{id}:native_worker_session_profile"),
-            ]
+            vec![format!("thread:{id}:agent_session_profile")],
+            "a Thread has exactly one session profile"
         );
     }
-    assert_ne!(coordinator.session_id, worker.session_id);
-    assert!(worker.session_id.contains("native-thread-"));
-    assert!(!worker.rotated);
 
     let unchanged = storage
-        .reconcile_native_worker_profile(
-            id,
-            "worker-profile-v1",
-            &[
-                "read".into(),
-                "edit".into(),
-                "write".into(),
-                "exec_command".into(),
-            ],
-        )
+        .reconcile_agent_tool_surface(id, "native-v1", &surface)
         .await
         .unwrap();
-    assert_eq!(unchanged.session_id, worker.session_id);
+    assert_eq!(unchanged.session_id, original.session_id);
     assert!(!unchanged.rotated);
 
+    let mut widened = surface.clone();
+    widened.push("threads_delegate".into());
     let rotated = storage
-        .reconcile_native_worker_profile(
-            id,
-            "worker-profile-v2",
-            &[
-                "read".into(),
-                "edit".into(),
-                "write".into(),
-                "exec_command".into(),
-            ],
-        )
+        .reconcile_agent_tool_surface(id, "native-v2", &widened)
         .await
         .unwrap();
-    assert_ne!(rotated.session_id, worker.session_id);
     assert!(rotated.rotated);
-}
-
-#[tokio::test]
-async fn abandoned_native_worker_session_rotates_without_crossing_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(dir.path()).await.unwrap();
-    let old_history = storage.history_id().await.unwrap();
-    let id = thread(&storage, "worker", None).await;
-    let names = vec![
-        "read".into(),
-        "edit".into(),
-        "write".into(),
-        "exec_command".into(),
-    ];
-    let original = storage
-        .reconcile_native_worker_profile(id, "worker-profile", &names)
-        .await
-        .unwrap();
-    storage
-        .abandon_native_worker_session(&old_history, id, 42)
-        .await
-        .unwrap();
-    let replacement = storage
-        .reconcile_native_worker_profile(id, "worker-profile", &names)
-        .await
-        .unwrap();
-    assert!(replacement.rotated);
-    assert_ne!(replacement.session_id, original.session_id);
-
-    storage.reset().await.unwrap();
-    let reused_id = thread(&storage, "fresh worker", None).await;
-    assert_eq!(reused_id, id);
-    assert!(
-        storage
-            .abandon_native_worker_session(&old_history, reused_id, 43)
-            .await
-            .is_err()
-    );
-    let fresh = storage
-        .reconcile_native_worker_profile(reused_id, "worker-profile", &names)
-        .await
-        .unwrap();
-    assert!(!fresh.rotated);
+    assert_ne!(rotated.session_id, original.session_id);
+    assert_eq!(rotated.added_tools, vec!["threads_delegate".to_string()]);
 }
 
 #[tokio::test]
@@ -870,21 +802,23 @@ async fn human_artifact_reference_is_atomic_explicit_and_scoped_without_peer_acc
     assert!(s.scoped_artifact(&plain, 44).await.is_err());
 }
 
+/// One Native session carries the full Thread tool set, so the Owner's input
+/// to a Native Thread is the ordinary input: artifacts and attachments are
+/// accepted, skills still expand before acceptance, and the turn captures the
+/// Thread's own Native route.
 #[tokio::test]
-async fn direct_owner_native_input_policy_is_atomic_and_preserves_text_followups() {
+async fn direct_owner_native_input_accepts_the_full_thread_surface() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
     let task = thread(&storage, "native-owner-policy", None).await;
-    let execution = ThreadExecution::LashWorker {
-        provider: crate::providers::NativeWorkerProviderSnapshot {
-            id: "openrouter".into(),
-            base_url: lash_provider_openai::OPENROUTER_BASE_URL.into(),
-            revision: "owner-policy-route".into(),
-        },
-        model: crate::providers::NATIVE_WORKER_DEFAULT_MODEL.into(),
-        variant: "default".into(),
+    let execution = ThreadExecution::Native {
+        provider_id: "openrouter".into(),
+        model: lash::ModelSpec::builder("vendor/owner-policy-model")
+            .variant(lash::provider::ReasoningSelection::ProviderDefault)
+            .context_window_tokens(200_000)
+            .build()
+            .unwrap(),
         cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
-        tool_profile: NATIVE_CODING_TOOL_PROFILE.into(),
     };
     storage
         .conn
@@ -915,83 +849,23 @@ async fn direct_owner_native_input_policy_is_atomic_and_preserves_text_followups
         .await
         .unwrap();
     let history = storage.history_id().await.unwrap();
-    let request = json!({"mode":"send","thread_action":null,"body":"unsupported input"});
-    let before = storage
-        .conn
-        .lock()
-        .await
-        .query_row(
-            "SELECT
-                (SELECT COUNT(*) FROM chat_messages),
-                (SELECT COUNT(*) FROM thread_turns),
-                (SELECT COUNT(*) FROM thread_requests),
-                (SELECT COUNT(*) FROM message_artifacts),
-                (SELECT COUNT(*) FROM message_attachments)",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, u64>(2)?,
-                    row.get::<_, u64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            },
+    let request = json!({"mode":"send","thread_action":null,"body":"supported input"});
+    let (message, inserted) = storage
+        .append_thread_owner_request(
+            &history,
+            task,
+            "native-owner-full-surface",
+            "supported input".into(),
+            &[attachment.blob.id],
+            &[],
+            &[44],
+            &request,
         )
+        .await
         .unwrap();
-    for (client_id, attachments, artifact_ids, expected) in [
-        (
-            "native-owner-artifact",
-            Vec::new(),
-            vec![44],
-            "artifact references are not supported",
-        ),
-        (
-            "native-owner-attachment",
-            vec![attachment.blob.id],
-            Vec::new(),
-            "attachments are not supported",
-        ),
-    ] {
-        let error = storage
-            .append_thread_owner_request(
-                &history,
-                task,
-                client_id,
-                "unsupported input".into(),
-                &attachments,
-                &[],
-                &artifact_ids,
-                &request,
-            )
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
-        let after = storage
-            .conn
-            .lock()
-            .await
-            .query_row(
-                "SELECT
-                    (SELECT COUNT(*) FROM chat_messages),
-                    (SELECT COUNT(*) FROM thread_turns),
-                    (SELECT COUNT(*) FROM thread_requests),
-                    (SELECT COUNT(*) FROM message_artifacts),
-                    (SELECT COUNT(*) FROM message_attachments)",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, u64>(2)?,
-                        row.get::<_, u64>(3)?,
-                        row.get::<_, u64>(4)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(after, before, "native input refusal wrote accepted state");
-    }
+    assert!(inserted);
+    assert_eq!(message.artifact_ids, vec![44]);
+    assert_eq!(message.attachments.len(), 1);
 
     let supported = json!({
         "mode":"send",
@@ -1024,13 +898,14 @@ async fn direct_owner_native_input_policy_is_atomic_and_preserves_text_followups
             .unwrap()
             .contains("Inspect the focused diff.")
     );
-    assert!(matches!(
-        storage
-            .turn_execution(accepted["turn_id"].as_u64().unwrap())
-            .await
-            .unwrap(),
-        ThreadExecution::LashWorker { .. }
-    ));
+    let ThreadExecution::Native { provider_id, .. } = storage
+        .turn_execution(accepted["turn_id"].as_u64().unwrap())
+        .await
+        .unwrap()
+    else {
+        panic!("a Native Thread must capture its own Native route");
+    };
+    assert_eq!(provider_id, "openrouter");
 }
 
 #[tokio::test]

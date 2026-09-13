@@ -25,8 +25,8 @@ pub(crate) fn selectors_from_target(
     target: &hirsel_proto::ThreadExecutionTarget,
 ) -> ExecutionSelectors {
     match target.clone() {
-        hirsel_proto::ThreadExecutionTarget::Host { provider_id, model } => ExecutionSelectors {
-            agent: Some("host".into()),
+        hirsel_proto::ThreadExecutionTarget::Native { provider_id, model } => ExecutionSelectors {
+            agent: Some("native".into()),
             provider_id: Some(provider_id),
             model: Some(model),
             ..ExecutionSelectors::default()
@@ -41,55 +41,63 @@ pub(crate) fn selectors_from_target(
             variant: Some(variant),
             ..ExecutionSelectors::default()
         },
-        hirsel_proto::ThreadExecutionTarget::Lash {
-            provider_id,
-            model,
-            variant,
-        } => ExecutionSelectors {
-            agent: Some("lash".into()),
-            provider_id: Some(provider_id),
-            model: Some(model),
-            variant: Some(variant),
-            ..ExecutionSelectors::default()
-        },
     }
+}
+
+fn resolved_cwd(requested: Option<PathBuf>) -> Result<PathBuf, String> {
+    let cwd = match requested {
+        Some(cwd) => cwd,
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    let cwd =
+        std::fs::canonicalize(cwd).map_err(|e| format!("invalid execution directory: {e}"))?;
+    if !cwd.is_dir() {
+        return Err(format!(
+            "invalid execution directory: `{}` is not a directory",
+            cwd.display()
+        ));
+    }
+    Ok(cwd)
 }
 
 pub(crate) async fn resolve_execution(
     tools: &ToolSuite,
     input: ExecutionSelectors,
 ) -> Result<crate::storage::ThreadExecution, String> {
-    if input.agent.as_deref() == Some("host") {
-        if input.variant.is_some() || input.cwd.is_some() {
+    if input.agent.as_deref().unwrap_or("native") == "native" {
+        if input.variant.is_some() {
             return Err(
-                "the coordinator takes a provider and a model; variant and cwd do not apply".into(),
+                "Native execution takes a provider, a model and a working directory; variant does not apply"
+                    .into(),
             );
         }
-        // Naming neither is the configured default coordinator — the Settings
-        // choice, still the answer for every Thread that has not overridden it.
+        // Naming neither is the configured default Native execution — the
+        // Settings choice, still the answer for every Thread that has not
+        // overridden it.
         let default = tools
             .storage()
-            .host_execution_default()
+            .native_execution_default()
             .await
             .map_err(|e| e.to_string())?;
-        if input.provider_id.is_none() && input.model.is_none() {
-            return Ok(default);
-        }
-        let crate::storage::ThreadExecution::Host {
+        let crate::storage::ThreadExecution::Native {
             provider_id: default_provider_id,
             model: default_model,
+            cwd: default_cwd,
         } = &default
         else {
-            return Err("the configured default coordinator is not a host backend".into());
+            return Err("the configured default execution is not a Native backend".into());
         };
+        if input.provider_id.is_none() && input.model.is_none() && input.cwd.is_none() {
+            return Ok(default.clone());
+        }
         let provider_id = input
             .provider_id
             .clone()
             .unwrap_or_else(|| default_provider_id.clone());
-        // The coordinator's provider is a roster instance, judged by exactly
-        // the rules the Settings picker is judged by.
+        // The Native provider is a roster instance, judged by exactly the rules
+        // the Settings picker is judged by.
         let choice = tools
-            .coordinator_provider(&provider_id)
+            .native_provider(&provider_id)
             .map_err(|e| e.to_string())?;
         let mode = crate::model_selection::SelectionMode::for_choice(&choice);
         let model_id = match input.model.clone() {
@@ -104,88 +112,33 @@ pub(crate) async fn resolve_execution(
             hirsel_proto::AgentSlot::Main,
             &model_id,
         )
-        .map_err(|e| format!("coordinator provider `{provider_id}`: {e}"))?;
+        .map_err(|e| format!("Native provider `{provider_id}`: {e}"))?;
         let model =
             crate::model_selection::spec_for(&mode, &selection).map_err(|e| e.to_string())?;
-        Ok(crate::storage::ThreadExecution::Host {
+        let cwd = match input.cwd {
+            Some(cwd) => resolved_cwd(Some(cwd))?,
+            None => default_cwd.clone(),
+        };
+        Ok(crate::storage::ThreadExecution::Native {
             provider_id: choice.id,
             model,
-        })
-    } else if input.agent.as_deref() == Some("lash") {
-        // The Owner's row is the gate. The delegation schema already drops
-        // the branch while the worker is off, so this refusal is for a
-        // stale tool surface, not the ordinary path.
-        let native_worker = tools.subagent_model_snapshot().native_worker;
-        if !native_worker.enabled {
-            return Err(
-                    "the native Lash worker is turned off in Settings; enable it to delegate with agent `lash`"
-                        .into(),
-                );
-        }
-        let provider = tools
-            .capture_native_worker_provider(input.provider_id.as_deref())
-            .map_err(|e| e.to_string())?;
-        let model = match input.model {
-            Some(model) => {
-                crate::model_selection::validate_free_text(&model)
-                    .map_err(|e| e.to_string())?
-                    .id
-            }
-            // The Owner's model override is the default for this route;
-            // an explicit `model` above still wins.
-            None if provider.id == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID => {
-                native_worker.model.clone()
-            }
-            None => {
-                return Err(format!(
-                    "native Lash worker provider `{}` requires an explicit model",
-                    provider.id
-                ));
-            }
-        };
-        let variant = input.variant.unwrap_or_else(|| "default".to_string());
-        if variant != "default" {
-            return Err(format!(
-                "native Lash worker variant `{variant}` is unsupported; available variants: default"
-            ));
-        }
-        let cwd = input
-            .cwd
-            .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
-        let cwd =
-            std::fs::canonicalize(cwd).map_err(|e| format!("invalid execution directory: {e}"))?;
-        if !cwd.is_dir() {
-            return Err(format!(
-                "invalid execution directory: `{}` is not a directory",
-                cwd.display()
-            ));
-        }
-        Ok(crate::storage::ThreadExecution::LashWorker {
-            provider,
-            model,
-            variant,
             cwd,
-            tool_profile: crate::storage::NATIVE_CODING_TOOL_PROFILE.to_string(),
         })
     } else {
         if input.provider_id.is_some() {
-            return Err("provider_id applies only to agent `host` or agent `lash`".into());
+            return Err("provider_id applies only to agent `native`".into());
         }
-        let agent =
-            crate::lash_runtime::parse_agent_kind(input.agent.as_deref().unwrap_or("claude"))?;
+        let agent = crate::lash_runtime::parse_agent_kind(
+            input.agent.as_deref().expect("the native branch took None"),
+        )?;
         let selected = tools
             .resolve_thread_cli_model(agent, input.model.as_deref(), input.variant.as_deref())
             .map_err(|e| e.to_string())?;
-        let cwd = input
-            .cwd
-            .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
-        let cwd =
-            std::fs::canonicalize(cwd).map_err(|e| format!("invalid execution directory: {e}"))?;
         Ok(crate::storage::ThreadExecution::Cli {
             agent,
             model: selected.model_id,
             variant: selected.variant,
-            cwd,
+            cwd: resolved_cwd(input.cwd)?,
         })
     }
 }

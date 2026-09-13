@@ -21,3 +21,11 @@ Artifact references are rejected before native-worker acceptance until an explic
 ## Revision (2026-09-13)
 
 The native worker now runs the same RLM protocol posture as the coordinator: the TypeScript dialect with process and trigger abilities. Its four-tool coding profile remains deliberately narrow, and Hirsel creates no default processes. One runtime posture prevents coordinator and worker protocol behavior from drifting, while RLM code cells make the worker's program visible in chat through the existing `CodeStart` and `CodeDone` timeline events; tool calls inside those cells retain their `ToolStart`, `ToolDone`, and `tool_completed` projections.
+
+## Superseded (2026-09-13)
+
+Superseded by [ADR-0023](0023-one-native-execution.md). The separate
+native-worker session, its narrow four-tool profile, its own session generation
+namespace and its artifact refusal are deleted: one Native session per Thread
+now carries the full Thread tool set and the four coding operations together.
+This record stands as history.

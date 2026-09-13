@@ -192,7 +192,7 @@ async fn message_and_activity_publish_recency_without_changing_thread_lifecycle(
 }
 
 #[tokio::test]
-async fn coordinator_chat_and_scheduled_digest_refresh_inventory() {
+async fn agent_chat_and_scheduled_digest_refresh_inventory() {
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))
         .await
@@ -213,7 +213,7 @@ async fn coordinator_chat_and_scheduled_digest_refresh_inventory() {
         .0;
     let message = state
         .tools
-        .thread_chat_send(thread.id, "Coordinator result".into(), None, Vec::new())
+        .thread_chat_send(thread.id, "Agent result".into(), None, Vec::new())
         .await
         .unwrap();
     assert_eq!(summary(&state, thread.id).last_activity_at, message.ts);

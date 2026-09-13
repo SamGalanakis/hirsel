@@ -190,42 +190,6 @@ impl AppState {
         self.subagent_models.snapshot()
     }
 
-    /// Update the native worker row and settle it like any other Sub-agent
-    /// model edit: refresh the delegation tool contract, then broadcast the
-    /// whole catalog.
-    pub async fn set_native_worker(
-        &self,
-        enabled: bool,
-        model: Option<&str>,
-    ) -> anyhow::Result<SubagentModelCatalog> {
-        let _guard = self.subagent_model_change_lock.lock().await;
-        let previous = self.subagent_model_snapshot();
-        let catalog = self
-            .subagent_models
-            .set_native_worker(enabled, model)
-            .await?;
-        if catalog != previous {
-            self.agent.refresh_subagent_model_tools(&catalog).await?;
-            self.broadcast(HostToClient::SubagentModelsChanged {
-                catalog: catalog.clone(),
-            });
-        }
-        Ok(catalog)
-    }
-
-    /// A provider edit can add or remove the instances the native worker can
-    /// run on, which is part of the Sub-agent catalog. Republish it so the
-    /// delegation contract and Settings see the same roster.
-    async fn refresh_native_worker_route(&self, previous: &[String]) -> anyhow::Result<()> {
-        if self.providers_roster.native_worker_provider_ids() == previous {
-            return Ok(());
-        }
-        let catalog = self.subagent_model_snapshot();
-        self.agent.refresh_subagent_model_tools(&catalog).await?;
-        self.broadcast(HostToClient::SubagentModelsChanged { catalog });
-        Ok(())
-    }
-
     pub async fn set_subagent_model(
         &self,
         provider: &str,
@@ -349,11 +313,8 @@ impl AppState {
         default_model: &str,
     ) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
-        let previous_worker_providers = self.providers_roster.native_worker_provider_ids();
         self.providers_roster
             .add(id, label, base_url, api_key, default_model)
-            .await?;
-        self.refresh_native_worker_route(&previous_worker_providers)
             .await?;
         self.broadcast_providers().await
     }
@@ -372,11 +333,8 @@ impl AppState {
     ) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
         let surfaces = self.agent_surfaces();
-        let previous_worker_providers = self.providers_roster.native_worker_provider_ids();
         self.providers_roster
             .update(id, label, base_url, api_key, default_model)
-            .await?;
-        self.refresh_native_worker_route(&previous_worker_providers)
             .await?;
         self.broadcast_agent_surfaces(surfaces);
         self.broadcast_providers().await
@@ -395,10 +353,7 @@ impl AppState {
     pub async fn remove_provider(&self, id: &str) -> anyhow::Result<ProviderRoster> {
         let _guard = self.provider_change_lock.lock().await;
         let surfaces = self.agent_surfaces();
-        let previous_worker_providers = self.providers_roster.native_worker_provider_ids();
         self.providers_roster.remove(id).await?;
-        self.refresh_native_worker_route(&previous_worker_providers)
-            .await?;
         self.broadcast_agent_surfaces(surfaces);
         self.broadcast_providers().await
     }

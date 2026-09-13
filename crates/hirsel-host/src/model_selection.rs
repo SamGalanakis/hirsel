@@ -216,9 +216,9 @@ pub fn validate_in_mode(
 
 /// Validate a model id under a mode when the caller names no reasoning variant.
 ///
-/// The public backend targets (`ThreadExecutionTarget::Host`, and the Agent's
-/// `threads.delegate` with `agent: "host"`) name a provider and a model and
-/// nothing else, because the coordinator's reasoning effort is the model's own
+/// The public backend targets (`ThreadExecutionTarget::Native`, and the Agent's
+/// `threads.delegate` with `agent: "native"`) name a provider and a model and
+/// nothing else, because the Native session's reasoning effort is the model's own
 /// default. Free text is validated as free text; a curated id resolves through
 /// the same registry the picker offers, at that entry's default variant.
 pub fn validate_model_id_in_mode(

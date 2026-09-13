@@ -85,7 +85,7 @@ async function mount(prompts?: PromptSnapshot) {
 describe("Settings → Prompt", () => {
   it("shows the effective prompt, next-turn timing, and ephemeral fork contract", async () => {
     const { getByLabelText, getByText } = await mount(PROMPTS);
-    expect((getByLabelText("Main agent system prompt") as HTMLTextAreaElement).value).toBe(
+    expect((getByLabelText("Native agent system prompt") as HTMLTextAreaElement).value).toBe(
       "Bundled main prompt",
     );
     expect(getByText(/applies from the next turn/i)).toBeTruthy();
@@ -99,9 +99,9 @@ describe("Settings → Prompt", () => {
 
   it("settles a save when the accepted snapshot is unchanged", async () => {
     const { getByLabelText, store } = await mount(PROMPTS);
-    const editor = getByLabelText("Main agent system prompt") as HTMLTextAreaElement;
+    const editor = getByLabelText("Native agent system prompt") as HTMLTextAreaElement;
     fireEvent.input(editor, { target: { value: "   " } });
-    fireEvent.click(getByLabelText("Save Main agent system prompt"));
+    fireEvent.click(getByLabelText("Save Native agent system prompt"));
     expect(setAgentPrompt).toHaveBeenCalledWith("   ");
     expect(editor).toBeDisabled();
 
@@ -112,8 +112,8 @@ describe("Settings → Prompt", () => {
 
   it("keeps the main prompt local until Save and settles from the broadcast", async () => {
     const { getByLabelText, store } = await mount(PROMPTS);
-    const editor = getByLabelText("Main agent system prompt") as HTMLTextAreaElement;
-    const save = getByLabelText("Save Main agent system prompt") as HTMLButtonElement;
+    const editor = getByLabelText("Native agent system prompt") as HTMLTextAreaElement;
+    const save = getByLabelText("Save Native agent system prompt") as HTMLButtonElement;
     expect(save.disabled).toBe(true);
 
     fireEvent.input(editor, { target: { value: "Owner override" } });
@@ -138,7 +138,7 @@ describe("Settings → Prompt", () => {
       agent: { text: "Owner override", is_default: false },
     };
     const { getByLabelText } = await mount(overridden);
-    fireEvent.click(getByLabelText("Reset Main agent system prompt to default"));
+    fireEvent.click(getByLabelText("Reset Native agent system prompt to default"));
     expect(setAgentPrompt).toHaveBeenCalledWith("");
   });
 
@@ -186,10 +186,10 @@ describe("Settings → Prompt", () => {
     const { getByLabelText, getByText, container } = await mount(PROMPTS);
     fireEvent.input(inlineEditor(container)!, { target: { value: "Half-written override" } });
 
-    fireEvent.click(getByLabelText("Expand Main agent system prompt"));
+    fireEvent.click(getByLabelText("Expand Native agent system prompt"));
 
     const expanded = getByLabelText(
-      "Main agent system prompt (expanded)",
+      "Native agent system prompt (expanded)",
     ) as HTMLTextAreaElement;
     expect(expanded.value).toBe("Half-written override");
     // One editor at a time: the inline row stands down while the overlay is up.
@@ -204,12 +204,12 @@ describe("Settings → Prompt", () => {
 
   it("Escape collapses the expanded editor, keeping the draft and restoring focus", async () => {
     const { getByLabelText, container } = await mount(PROMPTS);
-    visibleBox(getByLabelText("Expand Main agent system prompt"));
+    visibleBox(getByLabelText("Expand Native agent system prompt"));
     fireEvent.input(inlineEditor(container)!, {
       target: { value: "Kept across the round trip" },
     });
-    fireEvent.click(getByLabelText("Expand Main agent system prompt"));
-    fireEvent.input(getByLabelText("Main agent system prompt (expanded)"), {
+    fireEvent.click(getByLabelText("Expand Native agent system prompt"));
+    fireEvent.input(getByLabelText("Native agent system prompt (expanded)"), {
       target: { value: "Edited while expanded" },
     });
 
@@ -223,19 +223,19 @@ describe("Settings → Prompt", () => {
     expect(container.querySelector('[data-slot="settings-panel"]')).toBeTruthy();
     await waitFor(() =>
       expect(document.activeElement).toBe(
-        visibleBox(getByLabelText("Expand Main agent system prompt")),
+        visibleBox(getByLabelText("Expand Native agent system prompt")),
       ),
     );
   });
 
   it("saves from the expanded editor and settles on the prompts broadcast", async () => {
     const { getByLabelText, store, container } = await mount(PROMPTS);
-    fireEvent.click(getByLabelText("Expand Main agent system prompt"));
+    fireEvent.click(getByLabelText("Expand Native agent system prompt"));
     const expanded = getByLabelText(
-      "Main agent system prompt (expanded)",
+      "Native agent system prompt (expanded)",
     ) as HTMLTextAreaElement;
     fireEvent.input(expanded, { target: { value: "Written in the expanded editor" } });
-    fireEvent.click(getByLabelText("Save Main agent system prompt"));
+    fireEvent.click(getByLabelText("Save Native agent system prompt"));
 
     expect(setAgentPrompt).toHaveBeenCalledWith("Written in the expanded editor");
     expect(expanded).toBeDisabled();
@@ -247,7 +247,7 @@ describe("Settings → Prompt", () => {
 
     await waitFor(() => expect(expanded).not.toBeDisabled());
     expect(expanded.value).toBe("Written in the expanded editor");
-    expect((getByLabelText("Save Main agent system prompt") as HTMLButtonElement).disabled).toBe(
+    expect((getByLabelText("Save Native agent system prompt") as HTMLButtonElement).disabled).toBe(
       true,
     );
     // The editor stays open — saving is not leaving.
@@ -267,7 +267,7 @@ describe("Settings → Prompt", () => {
 
   it("hides the prompt editors for an older host with no prompt snapshot", async () => {
     const { queryByLabelText } = await mount();
-    expect(queryByLabelText("Main agent system prompt")).toBeNull();
+    expect(queryByLabelText("Native agent system prompt")).toBeNull();
     expect(queryByLabelText("Fork agent prompt")).toBeNull();
   });
 });

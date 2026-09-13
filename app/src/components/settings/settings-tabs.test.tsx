@@ -83,10 +83,10 @@ describe("Settings: side-tab navigation", () => {
     expect(getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
     // Appearance is up; the Agents panel is not merely hidden, it is unmounted.
     expect(getByLabelText("Theme")).toBeTruthy();
-    expect(queryByLabelText("Main agent model")).toBeNull();
+    expect(queryByLabelText("Native agent model")).toBeNull();
 
     fireEvent.click(getByRole("tab", { name: "Thread models" }));
-    expect(getByLabelText("Main agent model")).toBeTruthy();
+    expect(getByLabelText("Native agent model")).toBeTruthy();
     expect(queryByLabelText("Theme")).toBeNull();
   });
 

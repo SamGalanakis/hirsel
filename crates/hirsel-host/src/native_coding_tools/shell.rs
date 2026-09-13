@@ -97,7 +97,7 @@ impl ShellExecutor {
             let _ = (args, attempt_cancellation, shutdown_cancellation);
             execution_failure(
                 "native_shell_unsupported",
-                "native worker command execution requires Linux pidfd support",
+                "Native command execution requires Linux pidfd support",
             )
         }
     }
@@ -199,7 +199,7 @@ async fn execute_linux(
     }
     if let Err(error) = preflight_linux_process_control() {
         return unsupported_linux_host(format!(
-            "native worker command execution requires pidfd and readable procfs process-group support: {error}"
+            "Native command execution requires pidfd and readable procfs process-group support: {error}"
         ));
     }
     if attempt_cancellation.is_cancelled() || shutdown_cancellation.is_cancelled() {

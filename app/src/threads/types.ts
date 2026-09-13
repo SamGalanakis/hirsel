@@ -4,11 +4,10 @@ export type ThreadIcon =
   | { kind: "emoji"; value: string }
   | { kind: "image"; blob_id: string };
 /** Where the Owner chose this Thread's next turn to run. Absent or null means
- * it inherits the configured default coordinator. */
+ * it inherits the configured default Native provider and model. */
 export type ThreadExecutionTarget =
-  | { kind: "host"; provider_id: string; model: string }
-  | { kind: "cli"; agent: string; model: string; variant: string }
-  | { kind: "lash"; provider_id: string; model: string; variant: string };
+  | { kind: "native"; provider_id: string; model: string }
+  | { kind: "cli"; agent: string; model: string; variant: string };
 export interface Thread {
   id: number;
   kind: ThreadKind;

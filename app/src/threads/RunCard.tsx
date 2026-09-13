@@ -3,7 +3,8 @@ import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { Timeline } from "../components/chat/Timeline";
 import { buildTimeline, splitStreamingReply } from "../components/chat/timeline";
 import { Markdown } from "../components/Markdown";
-import { Check, ChevronRight, CircleAlert, LoaderCircle, Square } from "../components/ui/icons";
+import { CubeSpinner } from "../components/CubeSpinner";
+import { Check, ChevronRight, CircleAlert, Square } from "../components/ui/icons";
 import type { ChatMessage } from "../protocol";
 import { state } from "../store/store";
 import type { TimelineEvent } from "../store/types";
@@ -14,28 +15,24 @@ import type { ThreadActivity, ThreadTurn } from "./types";
 import { failureReason, mergePersistedToolCalls, toolSummary, workDuration, workLabel } from "./work-summary";
 
 /** Everything the run recorded while it was working: the ordered step rows the
- * live view already draws, the activity the Host kept that is not a step, and
- * the raw turn data underneath both. It is one region, disclosed as a whole. */
-function TurnTrace(props: { ref?: (node: HTMLDivElement) => void; turn?: ThreadTurn; events: TimelineEvent[]; raw: TimelineEvent[]; activities: ThreadActivity[]; live?: boolean; id: string }) {
+ * live view already draws, and the activity the Host kept that is not a step.
+ * Both are ordinary rows of the one trace — there is no second, technical
+ * surface hidden under a disclosure, and no raw protocol dump: an event log
+ * nobody outside this file can read was never the Owner's to fold away. */
+function TurnTrace(props: { ref?: (node: HTMLDivElement) => void; turn?: ThreadTurn; events: TimelineEvent[]; activities: ThreadActivity[]; live?: boolean; id: string }) {
   const settled = () => Boolean(props.turn && !["queued", "running"].includes(props.turn.state));
-  const diagnostics = () => props.activities.filter(activity => !ownerFacingActivity(activity) && !toolSummary(activity));
+  const records = () => props.activities.filter(activity => !ownerFacingActivity(activity) && !toolSummary(activity));
   return <div ref={node => props.ref?.(node)} id={props.id} data-slot="run-card-trace" class="mb-2 min-w-0 text-xs text-muted-foreground">
     <Show when={props.events.length > 0}>
       <Timeline events={props.events} live={props.live} settled={settled()} />
     </Show>
-    <Show when={props.events.length === 0 && diagnostics().length === 0}>
+    <Show when={props.events.length === 0 && records().length === 0}>
       <p class="ml-1 border-l border-border/60 pl-3 text-meta">No steps were recorded for this run.</p>
     </Show>
-    <details data-slot="run-card-technical" class="ml-1 mt-1 border-l border-border/60 pl-3 text-meta">
-      <summary class="min-h-8 cursor-pointer py-1 pointer-coarse:min-h-11">Technical details</summary>
-      <div role="region" aria-label="Technical details" data-slot="work-diagnostics">
-        <Show when={props.turn}>{turn => <p>Turn {turn().id} · {turn().state}</p>}</Show>
-        <Show when={props.raw.length > 0}>
-          <pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/25 p-2 font-mono">{JSON.stringify(props.raw.map(row => ({ seq: row.seq, event: row.event })), null, 2)}</pre>
-        </Show>
-        <For each={diagnostics()}>{activity => <div class="mt-2"><p>{activity.kind.replaceAll("_", " ")} · <time datetime={activity.ts}>{new Date(activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></p><pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/25 p-2 font-mono">{JSON.stringify(activity.data, null, 2)}</pre></div>}</For>
-      </div>
-    </details>
+    <For each={records()}>{activity => <div data-slot="run-card-record" class="ml-1 mt-1 border-l border-border/60 pl-3 text-meta">
+      <p>{activity.kind.replaceAll("_", " ")} · <time datetime={activity.ts}>{new Date(activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></p>
+      <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/25 p-2 font-mono">{JSON.stringify(activity.data, null, 2)}</pre>
+    </div>}</For>
   </div>;
 }
 
@@ -43,7 +40,7 @@ function TurnTrace(props: { ref?: (node: HTMLDivElement) => void; turn?: ThreadT
  * only has to separate finished from failed from stopped at a glance. */
 function OutcomeMark(props: { outcome: RunOutcome }) {
   return <Switch>
-    <Match when={props.outcome === "running"}><LoaderCircle class={`size-3.5 shrink-0 text-status-active ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" /></Match>
+    <Match when={props.outcome === "running"}><CubeSpinner paused={state.connection !== "connected"} /></Match>
     <Match when={props.outcome === "failed"}><CircleAlert class="size-3.5 shrink-0 text-destructive" aria-hidden="true" /></Match>
     <Match when={props.outcome === "done"}><Check class="size-3.5 shrink-0 text-status-success" aria-hidden="true" /></Match>
     <Match when={true}><Square class="size-3.5 shrink-0" aria-hidden="true" /></Match>
@@ -79,7 +76,7 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
   const originLabel = () => runOriginLabel(origin());
   /** A completed run that replied has the reply as its evidence; the word
    * "done" over it only repeats what the mark already says. */
-  const outcomeWord = () => outcome() === "done" ? null : runOutcomeLabel(outcome());
+  const outcomeWord = () => outcome() === "done" || outcome() === "running" ? null : runOutcomeLabel(outcome());
   const artifacts = () => turnArtifactIds(props.message, props.activities);
   /** A live run is open because the Owner is watching it happen; a finished one
    * is closed because its reply is the answer. Either way the Owner's own last
@@ -121,20 +118,25 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
         onClick={() => props.turn && setTurnExpanded(props.turn.id, !expanded())}
       >
         <ChevronRight class={`size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
-        <Show when={originLabel()}>{label => <span class="min-w-0 truncate" data-slot="run-card-origin">{label()}</span>}</Show>
+        {/* One fixed slot for the run's state, always the same 14px square: the
+            tumbling cube while it works, the outcome mark once it is over. The
+            elapsed time sits immediately after it and never moves, so a run
+            settling does not shuffle the line the Owner is reading. */}
+        <span class="inline-flex size-3.5 shrink-0 items-center justify-center" data-slot="run-card-outcome"><OutcomeMark outcome={outcome()} /></span>
         <Show when={duration()}>
-          <Show when={originLabel()}><span aria-hidden="true">·</span></Show>
           <span class="shrink-0 tabular-nums">{duration()}</span>
         </Show>
-        <span class="ml-auto inline-flex shrink-0 items-center gap-1" data-slot="run-card-outcome">
-          <OutcomeMark outcome={outcome()} />
-          <Show when={outcomeWord()}>{word => <span>{word()}</span>}</Show>
+        {/* Everything that is not the live state trails at the far edge, and a
+            running turn says none of it: chevron, cube, elapsed, nothing else. */}
+        <span class="ml-auto inline-flex min-w-0 items-center gap-1.5">
+          <Show when={!running() && originLabel()}>{label => <span class="min-w-0 truncate" data-slot="run-card-origin">{label()}</span>}</Show>
+          <Show when={outcomeWord()}>{word => <span class="shrink-0">{word()}</span>}</Show>
         </span>
       </button>
       <Show when={running()}><p class="sr-only" role="status">{label()}</p></Show>
     </Show>
     <Show when={expanded()}>
-      <TurnTrace ref={node => { trace = node; }} turn={props.turn} events={events()} raw={props.events} activities={props.activities} live={props.live} id={traceId()} />
+      <TurnTrace ref={node => { trace = node; }} turn={props.turn} events={events()} activities={props.activities} live={props.live} id={traceId()} />
     </Show>
     <Show when={body()}><Markdown>{body()}</Markdown></Show>
     <For each={artifacts()}>{id => <ArtifactCard id={id} />}</For>

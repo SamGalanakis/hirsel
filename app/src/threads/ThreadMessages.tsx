@@ -1,6 +1,7 @@
 import { For, onCleanup, Show } from "solid-js";
 import { Markdown } from "../components/Markdown";
-import { Clock, LoaderCircle, MessagesSquare } from "../components/ui/icons";
+import { CubeSpinner } from "../components/CubeSpinner";
+import { Clock, MessagesSquare } from "../components/ui/icons";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { getClient } from "../ws/client";
 import { buildTimeline, splitStreamingReply } from "../components/chat/timeline";
@@ -69,7 +70,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
       <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex", owner() ? "flex-row-reverse" : ""]}>
         <Show when={pending()}>
           <p data-slot="turn-pending" role="status" class="flex min-h-5 items-center text-muted-foreground">
-            <LoaderCircle class={`size-4 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
+            <CubeSpinner size={16} paused={state.connection !== "connected"} />
             <span class="sr-only">{workLabel(turn(), events(), activities(turn()?.id), 0, false)}</span>
           </p>
         </Show>

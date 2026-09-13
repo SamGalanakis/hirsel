@@ -230,15 +230,15 @@ describe("thread workspace", () => {
   it("shows informational activity content within its owning thread without creating work", () => {
     flush(() => handleThreadMessage({ type: "thread_activity", activity: { artifact_ids: [], id: 9, thread_id: 1, turn_id: null, kind: "plugin.build_finished", data: { plugin: "build", payload: { message: "All checks passed." } }, ts: "2026-09-09T10:00:00Z" } }));
     const screen = render(() => <ThreadShell />);
-    // Activity with no turn to own it keeps its raw record in the card's own
-    // Technical details, not in a separate inspector.
-    expect(screen.getByText(/"message": "All checks passed\."/).closest('[data-slot="work-diagnostics"]')).toBeInTheDocument();
+    // Activity with no turn to own it keeps its raw record as a plain row of
+    // its own card's trace, not in a separate inspector.
+    expect(screen.getByText(/"message": "All checks passed\."/).closest('[data-slot="run-card-record"]')).toBeInTheDocument();
     expect(threadState.threads).toHaveLength(3);
     expect(threadState.threads.find(t => t.id === 1)?.settled_at).toBeNull();
     flush(() => focusThread(2));
     expect(screen.queryByText(/"message": "All checks passed\."/)).toBeNull();
   });
-  it("keeps owner-facing summaries inline and technical details behind the overflow", () => {
+  it("keeps owner-facing summaries inline and raw records as plain trace rows", () => {
     flush(() => setThreadState(draft => { draft.histories[1] = { brief: { text: "", artifact_ids: [] },
       messages: [], turns: [], loaded: true, hasMore: false,
       activities: [
@@ -251,12 +251,11 @@ describe("thread workspace", () => {
     const note = screen.getByText(/Your shopping list is ready\./);
     expect(note.closest("details")).toBeNull();
     expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
-    // Raw event data stays behind a closed disclosure until it is asked for.
-    const diagnostics = screen.getByText(/"message": "Execution diagnostics"/);
-    expect(diagnostics.closest('[role="region"]')).toHaveAttribute("data-slot", "work-diagnostics");
-    const disclosure = diagnostics.closest("details")!;
-    expect(disclosure.open).toBe(false);
-    fireEvent.click(within(disclosure).getByText("Technical details"));
+    // Raw event data is an ordinary row of the card's trace, behind nothing.
+    const record = screen.getByText(/"message": "Execution diagnostics"/).closest('[data-slot="run-card-record"]')!;
+    expect(record).toBeInTheDocument();
+    expect(record.closest("details")).toBeNull();
+    expect(screen.container.querySelector("details")).toBeNull();
     expect(screen.getByRole("textbox", { name: "Message Buy groceries" })).toBeInTheDocument();
   });
   it("folds wakes that produced nothing into one quiet note instead of empty cards", () => {

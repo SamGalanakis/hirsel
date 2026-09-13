@@ -28,7 +28,7 @@ export function ArtifactList(props: { threadId?: number; onResume?: () => void; 
     <Show when={props.embedded} fallback={<h2 class="text-lg font-medium">{props.threadId === undefined ? "All artifacts" : "Artifacts"}</h2>}><h3 class="text-sm font-medium">Artifacts</h3></Show>
     <Switch>
       <Match when={artifactState.inventory.status === "loading"}><p role="status" class="mt-4 text-sm text-muted-foreground">Loading artifacts…</p></Match>
-      <Match when={inventoryError()}>{message => <div role="alert" class="mt-4 space-y-2 text-sm"><p>Couldn’t load the artifact list. Your existing results are kept.</p><button class={button} onClick={listArtifacts}>Retry loading artifacts</button><details><summary class="cursor-pointer py-2 text-muted-foreground">Technical details</summary><p class="break-words">{message()}</p></details></div>}</Match>
+      <Match when={inventoryError()}>{message => <div role="alert" class="mt-4 space-y-2 text-sm"><p>Couldn’t load the artifact list. Your existing results are kept.</p><button class={button} onClick={listArtifacts}>Retry loading artifacts</button><p class="break-words text-muted-foreground">{message()}</p></div>}</Match>
       <Match when={artifactState.inventory.status === "ready" && rows().length === 0}><p class="mt-4 max-w-prose text-sm leading-relaxed text-muted-foreground">Artifacts Hirsel creates and shares will appear here.</p></Match>
     </Switch>
     <Show when={rows().length > 0}>

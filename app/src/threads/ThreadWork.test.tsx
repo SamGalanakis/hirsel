@@ -47,7 +47,9 @@ describe("readable work outcomes", () => {
 describe("execution result preservation", () => {
   it("settles a started tool from the recorded final outcome without duplicating the invocation", () => {
     const view = render(() => <ThreadWork turn={turn("completed")} message={{ ...message, tool_calls: [{ id: "read", name: "read_file", ok: true }] }} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null, input: null } }]} activities={[]} />);
-    expect(view.getByText("Activity")).toBeTruthy();
+    // A completed turn carries no header label: the card is the Agent speaking.
+    expect(view.queryByText("Activity")).toBeNull();
+    expect(view.container.querySelector('[data-slot="thread-work"]')).toBeTruthy();
     expect(view.container.querySelector('[data-slot="work-details"]')).toBeNull();
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(1);
     expect(view.container.querySelector('[data-slot="timeline-tool"] [aria-label="ok"]')).toBeTruthy();

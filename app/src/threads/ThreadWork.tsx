@@ -69,33 +69,39 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
   const stopped = () => props.turn?.state === "cancelled" || props.turn?.state === "interrupted";
   const running = () => props.turn?.state === "running";
   const visible = () => hasDetails() || failed() || stopped() || running() || props.turn?.state === "queued" || (props.turn?.state === "completed" && !props.message);
-  const label = () => props.turn?.state === "completed" && hasDetails()
-    ? "Activity"
-    : workLabel(props.turn, resolvedEvents(), props.activities, toolCount(), Boolean(props.message));
+  /** The card says who is speaking by where it sits and whose avatar is beside
+   * it; a "Activity"/"completed" header only repeats that. A label survives
+   * only for the states that are NOT the default: queued, stopped, failed. */
+  const notable = () => props.turn?.state === "queued" || stopped() || failed();
+  const label = () => workLabel(props.turn, resolvedEvents(), props.activities, toolCount(), Boolean(props.message));
   const duration = () => workDuration(props.turn, now());
-  const statusIcon = () => <Show when={!failed() && !stopped()} fallback={<Show when={failed()} fallback={<Square class="size-3.5" />}><CircleAlert class="size-3.5 text-destructive" /></Show>}><Show when={!running()} fallback={<LoaderCircle class={`size-3.5 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} />}><Show when={props.turn?.state !== "queued"} fallback={<Clock class="size-3.5" />}><Activity class="size-3.5" /></Show></Show></Show>;
+  const statusIcon = () => <Show when={!failed() && !stopped()} fallback={<Show when={failed()} fallback={<Square class="size-3.5" />}><CircleAlert class="size-3.5 text-destructive" /></Show>}><Show when={props.turn?.state !== "queued"} fallback={<Clock class="size-3.5" />}><Activity class="size-3.5" /></Show></Show>;
   const summary = () => <span class="inline-flex min-w-0 items-center gap-2"><span aria-hidden="true">{statusIcon()}</span><span>{label()}</span><Show when={duration()}><span aria-hidden="true">·</span><span class="shrink-0 tabular-nums">{duration()}</span></Show></span>;
   const technicalId = () => `turn-${props.turn?.id ?? props.activities[0]?.id ?? "activity"}-technical`;
-  return <Show when={visible()}><section class="mb-3 min-w-0 text-xs text-muted-foreground" data-slot="thread-work" data-turn-id={props.turn?.id}>
-    <div class="flex min-h-11 min-w-0 items-center gap-2" role={running() || props.turn?.state === "queued" ? "status" : undefined}>
-      {summary()}
-      <Show when={props.turn || props.activities.length > 0 || props.events.length > 0}>
-        <DropdownMenu placement="bottom-end">
-          <DropdownMenuTrigger
-            class="ml-auto grid size-11 shrink-0 place-items-center rounded-md text-muted-foreground/70 hover:bg-muted/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Turn options"
-            aria-controls={technicalOpen() ? technicalId() : undefined}
-          >
-            <MoreHorizontal class="size-4" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent>
-            <DropdownMenuItem onSelect={() => setTechnicalOpen(value => !value)}>
-              {technicalOpen() ? "Hide technical details" : "Technical details"}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </Show>
-    </div>
+  return <Show when={visible()}><section class="group relative mb-3 min-w-0 text-xs text-muted-foreground" data-slot="thread-work" data-turn-id={props.turn?.id} title={duration() ? `Took ${duration()}` : undefined}>
+    <Show when={props.turn || props.activities.length > 0 || props.events.length > 0}>
+      {/* No header row to hang it from: the menu reveals itself over the card's
+          top-right corner on hover or keyboard focus. */}
+      <DropdownMenu placement="bottom-end">
+        <DropdownMenuTrigger
+          class="absolute right-0 top-0 z-10 grid size-11 shrink-0 place-items-center rounded-md text-muted-foreground/70 opacity-0 transition-opacity hover:bg-muted/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-focus-within:opacity-100 group-hover:opacity-100"
+          aria-label="Turn options"
+          aria-controls={technicalOpen() ? technicalId() : undefined}
+        >
+          <MoreHorizontal class="size-4" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem onSelect={() => setTechnicalOpen(value => !value)}>
+            {technicalOpen() ? "Hide technical details" : "Technical details"}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </Show>
+    <Show when={notable()}>
+      <div class="flex min-h-11 min-w-0 items-center gap-2" role={props.turn?.state === "queued" ? "status" : undefined}>
+        {summary()}
+      </div>
+    </Show>
     <Show when={resolvedEvents().length > 0}>
       <Timeline events={resolvedEvents()} live={props.live} settled={Boolean(props.turn && !["queued", "running"].includes(props.turn.state))} />
     </Show>
@@ -103,9 +109,9 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
       <div id={technicalId()} role="region" aria-label="Technical details" data-slot="work-diagnostics" class="mb-2 ml-4 border-l border-border/60 pl-3 text-meta">
         <Show when={props.turn}>{turn => <p>Turn {turn().id} · {turn().state}</p>}</Show>
         <Show when={props.events.length > 0}>
-          <pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words bg-muted/35 p-2 font-mono">{JSON.stringify(props.events.map(row => ({ seq: row.seq, event: row.event })), null, 2)}</pre>
+          <pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/25 p-2 font-mono">{JSON.stringify(props.events.map(row => ({ seq: row.seq, event: row.event })), null, 2)}</pre>
         </Show>
-        <For each={activities()}>{activity => <div class="mt-2"><p>{activity.kind.replaceAll("_", " ")} · <time datetime={activity.ts}>{new Date(activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></p><pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words bg-muted/35 p-2 font-mono">{JSON.stringify(activity.data, null, 2)}</pre></div>}</For>
+        <For each={activities()}>{activity => <div class="mt-2"><p>{activity.kind.replaceAll("_", " ")} · <time datetime={activity.ts}>{new Date(activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></p><pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/25 p-2 font-mono">{JSON.stringify(activity.data, null, 2)}</pre></div>}</For>
       </div>
     </Show>
     <Show when={failed()}><div class="max-w-prose space-y-1 pb-2 text-sm">
@@ -113,5 +119,16 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
       <p class="text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>
     </div></Show>
     <Show when={stopped()}><p class="pb-2">Your conversation is kept. Send a message to continue.</p></Show>
+    {/* What the header used to carry, after the content instead of above it: a
+        live pulse while the turn runs, else the quiet elapsed tail. */}
+    <Show when={running()}>
+      <p class="flex min-h-5 items-center gap-2" role="status" data-slot="work-live">
+        <LoaderCircle class={`size-3.5 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
+        <span class="sr-only">{label()}</span>
+      </p>
+    </Show>
+    <Show when={!running() && !notable() && duration()}>
+      <p class="text-meta tabular-nums text-muted-foreground/70" data-slot="work-elapsed">{duration()}</p>
+    </Show>
   </section></Show>;
 }

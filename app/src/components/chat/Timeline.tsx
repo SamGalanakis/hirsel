@@ -208,13 +208,13 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
       </div>
       <Show when={open() && hasDetail()}>
         <div data-slot="tool-result" data-tool-call-id={props.item.toolId} class="ml-4 space-y-1.5">
-          <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}>
+          <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}>
             {primaryPayload()}
           </pre>
           <Show when={result()?.raw}>{raw =>
             <details data-slot="tool-result-raw" class="text-meta text-muted-foreground">
               <summary class="min-h-11 cursor-pointer py-3">Raw result{done()?.resultTruncated ? " (truncated)" : ""}</summary>
-              <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md bg-muted/35 px-2 py-1.5 font-mono leading-relaxed text-foreground/75">{raw()}</pre>
+              <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono leading-relaxed text-foreground/75">{raw()}</pre>
             </details>
           }</Show>
         </div>
@@ -223,74 +223,83 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
   );
 }
 
-/** How much of a long program reads before the Owner asks for the rest. Twelve
- * lines is a screenful of intent — the imports and the first real call — without
- * turning the transcript into a source listing. */
-const CODE_PREVIEW_LINES = 12;
+/** The one line of a collapsed cell: the first statement the program runs, so
+ * the row says what the cell is without opening it. */
+function programPreview(code: string): string {
+  const line = code.split("\n").map(part => part.trim()).find(part => part.length > 0 && !part.startsWith("//")) ?? "";
+  return line.length > 90 ? `${line.slice(0, 89).trimEnd()}…` : line;
+}
 
 /**
- * One Agent program cell, as a first-class transcript entry: a labelled block
- * holding the verbatim source under the same highlighter fenced code gets in a
- * message, with the tools the cell called nested underneath in the order it
- * called them. Reading order per cell is therefore program, then its work, then
- * whatever the Agent said about it. A failed cell tints its frame so a broken
- * program is findable at a glance, and long programs open to their first
- * `CODE_PREVIEW_LINES` with the rest one click away.
+ * One Agent program cell, as a first-class transcript entry that reads like the
+ * tool rows around it: a single row — status, "Code", the language, a one-line
+ * preview, the duration — that opens to the verbatim source under the same
+ * highlighter fenced code gets in a message. The tools the cell called stay
+ * visible underneath whether or not it is open, so a turn reads Code, then its
+ * work, then the prose without expanding anything.
+ *
+ * It carries no frame of its own: the turn card is the only bordered surface,
+ * and the source lands on a tinted band rather than in a nested box.
  */
 function CodeEntry(props: { item: Extract<TimelineItem, { kind: "code" }>; settled?: boolean }) {
-  const [all, setAll] = createSignal(false);
+  const [open, setOpen] = createSignal(false);
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
   const running = () => done() === null && !props.settled;
   const failed = () => done()?.ok === false;
-  const lines = createMemo(() => props.item.code.split("\n"));
-  const long = () => lines().length > CODE_PREVIEW_LINES;
-  const source = () => (all() || !long() ? props.item.code : lines().slice(0, CODE_PREVIEW_LINES).join("\n"));
+  const hasCode = () => props.item.code.length > 0;
   const language = () => props.item.language || null;
   const duration = () => {
     const ms = done()?.durationMs;
     return ms === undefined || ms === null ? "" : formatDuration(ms);
   };
+  const detail = () => done()?.result || programPreview(props.item.code);
 
   return (
-    <li
-      class={["flex min-w-0 flex-col gap-1.5 rounded-md border px-2 py-1.5", {
-        "border-destructive/40 bg-destructive/5": failed(),
-        "border-border/60 bg-muted/20": !failed(),
-      }]}
-
-      data-slot="timeline-code"
-    >
+    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-code">
       <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-        <Braces class="size-3 shrink-0" aria-hidden="true" />
-        <span class={["shrink-0 font-medium", { "text-foreground": !failed(), "text-destructive": failed() }]}>Code</span>
         <Switch>
           <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
           <Match when={running()}><LoaderCircle class="size-3 shrink-0 animate-spin text-status-active" aria-label="running" /></Match>
           <Match when={done()?.ok}><Check class="size-3 shrink-0 text-status-success" aria-label="ok" /></Match>
           <Match when={done()}><X class="size-3 shrink-0 text-destructive" aria-label="failed" /></Match>
         </Switch>
-        <Show when={done()?.result}>
-          <span class={["min-w-0 flex-1 truncate", { "text-destructive/90": failed() }]}>{done()?.result}</span>
+        <Show
+          when={hasCode()}
+          fallback={<span class="shrink-0 font-mono text-meta text-foreground/70">Code</span>}
+        >
+          <button
+            type="button"
+            class="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-expanded={open() ? "true" : "false"}
+            aria-label={`Code — ${open() ? "hide" : "show"} source`}
+            onClick={() => setOpen(v => !v)}
+          >
+            <ChevronRight
+              class={["size-3 shrink-0 text-muted-foreground/60 transition-transform", { "rotate-90": open() }]}
+
+              aria-hidden="true"
+            />
+            <Braces class="size-3 shrink-0" aria-hidden="true" />
+            <span class={["shrink-0 font-mono text-meta", { "text-foreground": running(), "text-foreground/70": !running() }]}>Code</span>
+            <Show when={language()}>
+              <span class="shrink-0 font-mono text-meta text-muted-foreground/70">{language()}</span>
+            </Show>
+            <Show when={!open()}>
+              <span class={["min-w-0 flex-1 truncate", { "text-destructive/90": failed() }]}>{detail()}</span>
+            </Show>
+          </button>
         </Show>
         <Show when={duration()}>
           <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">{duration()}</span>
         </Show>
       </div>
-      <Show when={props.item.code.length > 0}>
-        <CodeBlock code={source()} lang={language()} wrap />
-      </Show>
-      <Show when={long()}>
-        <button
-          type="button"
-          class="w-fit rounded px-1 py-px text-left text-meta text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-expanded={all() ? "true" : "false"}
-          onClick={() => setAll(v => !v)}
-        >
-          {all() ? "Show less" : `Show all ${lines().length} lines`}
-        </button>
-      </Show>
-      <Show when={props.item.truncated}>
-        <span class="px-1 text-meta text-muted-foreground/70">… truncated by the host</span>
+      <Show when={open() && hasCode()}>
+        <div class={["ml-4 min-w-0", { "text-destructive/90": failed() }]}>
+          <CodeBlock code={props.item.code} lang={language()} wrap bare />
+          <Show when={props.item.truncated}>
+            <p class="px-1 pt-1 text-meta text-muted-foreground/70">… truncated by the host</p>
+          </Show>
+        </div>
       </Show>
       <Show when={props.item.children.length > 0}>
         <ul class="ml-1 flex min-w-0 flex-col gap-1.5 border-l border-border/60 pl-2" data-slot="timeline-code-tools">

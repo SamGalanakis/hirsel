@@ -286,33 +286,42 @@ describe("Timeline component", () => {
     expect(buildTimeline(computed).map(i => i.kind)).toEqual(["code"]);
   });
 
-  it("renders a long program clipped to its first lines until the Owner asks for the rest", () => {
+  it("keeps a long program behind one click, previewing its first statement", () => {
     const source = Array.from({ length: 20 }, (_, i) => `const step${i} = ${i};`).join("\n");
+    const { container, getByRole } = render(() => (
+      <Timeline
+        events={evs(
+          { kind: "code_start", id: "c1", language: "typescript", code: source, truncated: false },
+          { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null },
+        )}
+      />
+    ));
+    const row = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
+    // Always rendered, always collapsed: the row previews the first statement.
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain("Code");
+    expect(row.textContent).toContain("typescript");
+    expect(row.textContent).toContain("const step0 = 0;");
+    expect(row.textContent).not.toContain("const step19 = 19;");
+    // The cell's own tools read under it without opening anything.
+    expect(row.querySelector('[data-slot="timeline-code-tools"] [data-slot="timeline-tool"]')).toBeTruthy();
+    fireEvent.click(getByRole("button", { name: /Code — show source/ }));
+    expect(row.textContent).toContain("const step19 = 19;");
+    fireEvent.click(getByRole("button", { name: /Code — hide source/ }));
+    expect(row.textContent).not.toContain("const step19 = 19;");
+  });
+
+  it("opens a short program in full on the first click", () => {
+    const source = "const out = await shell.run({ cmd: \"true\" });\nfinish(out);";
     const { container, getByRole } = render(() => (
       <Timeline
         events={evs({ kind: "code_start", id: "c1", language: "typescript", code: source, truncated: false })}
       />
     ));
     const row = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
-    // Always rendered: no preference stands between the Owner and the program.
-    expect(row).toBeTruthy();
-    expect(row.textContent).toContain("Code");
-    expect(row.textContent).toContain("const step0 = 0;");
-    expect(row.textContent).not.toContain("const step19 = 19;");
-    fireEvent.click(getByRole("button", { name: /Show all 20 lines/ }));
-    expect(row.textContent).toContain("const step19 = 19;");
-  });
-
-  it("shows a short program in full with no expander", () => {
-    const source = "const out = await shell.run({ cmd: \"true\" });\nfinish(out);";
-    const { container, queryByRole } = render(() => (
-      <Timeline
-        events={evs({ kind: "code_start", id: "c1", language: "typescript", code: source, truncated: false })}
-      />
-    ));
-    const row = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
+    expect(row.textContent).not.toContain("finish(out);");
+    fireEvent.click(getByRole("button", { name: /Code — show source/ }));
     expect(row.textContent).toContain("finish(out);");
-    expect(queryByRole("button", { name: /Show all/ })).toBeNull();
   });
 });
 
@@ -335,10 +344,11 @@ describe("committed turn details: agent code cells", () => {
   );
 
   it("shows the code cell in a committed turn, with its tool row inside it", () => {
-    const { container } = render(() => <Timeline events={frozen} />);
+    const { container, getByRole } = render(() => <Timeline events={frozen} />);
     const cell = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
     expect(cell).toBeTruthy();
     expect(cell.textContent).toContain("typescript");
+    fireEvent.click(getByRole("button", { name: /Code — show source/ }));
     expect(cell.textContent).toContain("subagents_list()");
     // The tool the cell called reads under it, not beside it.
     expect(container.querySelector('[data-slot="timeline"] > [data-slot="timeline-tool"]')).toBeNull();

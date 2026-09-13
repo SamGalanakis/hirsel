@@ -45,17 +45,21 @@ export type TimelineItem =
       code: string;
       truncated: boolean;
       status: StepStatus;
-      /** The tool rows the cell called while it ran, in arrival order. They are
-       * the cell's own work, so they read under it rather than beside it. */
-      children: ToolItem[];
     };
 
-/** A tool row, the one item kind that can be nested under another. */
+/** A tool row. */
 export type ToolItem = Extract<TimelineItem, { kind: "tool" }>;
 
-/** Every tool row in the timeline, cells' nested ones included, in order. */
+/** A step the Owner can open: a tool call or an Agent program cell. Both read
+ * as pills on one flat row, so they share a shape. */
+export type StepRowItem = Extract<TimelineItem, { kind: "tool" | "code" }>;
+export function isStepRow(item: TimelineItem): item is StepRowItem {
+  return item.kind === "tool" || item.kind === "code";
+}
+
+/** Every tool row in the timeline, in order. */
 export function timelineTools(items: TimelineItem[]): ToolItem[] {
-  return items.flatMap(item => item.kind === "tool" ? [item] : item.kind === "code" ? item.children : []);
+  return items.filter((item): item is ToolItem => item.kind === "tool");
 }
 
 /** A row that a start/done pair drives. */
@@ -73,10 +77,10 @@ type StepItem = Extract<TimelineItem, { status: StepStatus }>;
  *   discarded — it inserts an already-completed row labelled from its own `name`.
  *
  * - `code_start`/`code_done` behave exactly like the tool pair, but carry the
- *   Agent's verbatim program for the cell, and every tool row that starts while
- *   the cell is open nests under it — the cell called them. A cell whose whole
- *   program is a trivial `finish()` is dropped: it is the wake protocol, not
- *   work the Owner asked about.
+ *   Agent's verbatim program for the cell. A cell and the tools it called are
+ *   peers in arrival order — the sequence is what the Owner reads, not a tree.
+ *   A cell whose whole program is a trivial `finish()` is dropped: it is the
+ *   wake protocol, not work the Owner asked about.
  *
  * Input is assumed already sorted by `seq` (the reducer keeps it so); this fold
  * never reorders.
@@ -193,10 +197,7 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const tools = stepPairing();
   const code = stepPairing();
-  // The cell currently running: its tools nest under it until its done arrives.
-  let cell: Extract<TimelineItem, { kind: "code" }> | null = null;
   const skipped = new Set<string>();
-  const sink = () => cell?.children ?? items;
 
   for (const { seq, event, at } of events) {
     switch (event.kind) {
@@ -211,7 +212,7 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
         break;
       }
       case "tool_start": {
-        tools.start(sink(), event.id, at, {
+        tools.start(items, event.id, at, {
           kind: "tool",
           key: `tool-${event.id}`,
           toolId: event.id,
@@ -226,7 +227,7 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
       case "tool_done": {
         // An orphan done is labelled from its own `name` — the start carried
         // the summary, so there is none to show.
-        tools.done(sink(), event.id, at, {
+        tools.done(items, event.id, at, {
           ok: event.ok,
           summary: event.summary,
           result: event.result?.text ?? null,
@@ -253,15 +254,12 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
           code: event.code,
           truncated: event.truncated,
           status: { state: "running" },
-          children: [],
         };
         code.start(items, event.id, at, row);
-        cell = row;
         break;
       }
       case "code_done": {
         if (skipped.has(event.id)) break;
-        if (cell?.codeId === event.id) cell = null;
         // An orphan done has no source to show, only the cell's outcome — which
         // still beats dropping it silently.
         code.done(items, event.id, at, { ok: event.ok, summary: event.summary, result: event.summary, resultTruncated: false }, () => ({
@@ -272,7 +270,6 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
           code: "",
           truncated: false,
           status: { state: "running" },
-          children: [],
         }));
         break;
       }

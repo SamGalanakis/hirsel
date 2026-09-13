@@ -1,10 +1,10 @@
-import { Bot, Braces, Check, ChevronRight, LoaderCircle, Square, X } from "@/components/ui/icons";
+import { Bot, Braces, Check, LoaderCircle, Square, Wrench, X } from "@/components/ui/icons";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 
 import type { TimelineEvent } from "../../store/types";
 import { CodeBlock } from "../markdown/CodeBlock";
 import { Markdown, renderInline } from "../Markdown";
-import { buildTimeline, type TimelineItem } from "./timeline";
+import { buildTimeline, isStepRow, type StepRowItem, type StepStatus, type TimelineItem, type ToolItem } from "./timeline";
 
 /** A tool whose job is to hand real work to a sub-agent reads differently from a
  * plain `read_file`: it earns a distinct glyph and a touch more weight so the
@@ -51,7 +51,7 @@ const LIVE_REASONING_BLOCK =
 function StreamingReasoning(props: { text: string }) {
   return (
     <li
-      class={`min-w-0 ${LIVE_REASONING_BLOCK}`}
+      class={`my-1 w-full min-w-0 ${LIVE_REASONING_BLOCK}`}
       data-slot="timeline-reasoning-stream"
       aria-busy="true"
     >
@@ -67,7 +67,7 @@ function StreamingReasoning(props: { text: string }) {
  * around every block obscures the actual sequence. */
 function ReasoningRow(props: { text: string }) {
   return (
-    <li class="min-w-0" data-slot="timeline-reasoning">
+    <li class="my-1 w-full min-w-0" data-slot="timeline-reasoning">
       <p class="max-w-prose whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground">
         {renderInline(props.text)}
       </p>
@@ -104,210 +104,175 @@ function presentToolResult(name: string, result: string | null, truncated: boole
   }
 }
 
-/** One resolved/pending tool row. While running it is the emphasized step
- * (spinner + full-strength name); once done it quiets down (dimmer name) so the
- * live cursor is always the running step. Carries a quiet right-aligned mono
- * duration once resolved, and — when it produced a result/error — click-to-
- * expand into a readable payload with the bounded raw shell envelope secondary. */
-function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled?: boolean }) {
-  const [open, setOpen] = createSignal(false);
+/** Every step wears the same four states, so a glance down the row reads as one
+ * alphabet: running, ok, failed, and "started but never reported". */
+function StatusGlyph(props: { status: StepStatus; settled?: boolean }) {
+  const done = () => (props.status.state === "done" ? props.status : null);
+  return (
+    <Switch>
+      <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
+      <Match when={!done()}><LoaderCircle class="size-3 shrink-0 animate-spin text-status-active" aria-label="running" /></Match>
+      <Match when={done()?.ok}><Check class="size-3 shrink-0 text-status-success" aria-label="ok" /></Match>
+      <Match when={done()}><X class="size-3 shrink-0 text-destructive" aria-label="failed" /></Match>
+    </Switch>
+  );
+}
+
+/** The one shape every step wears: a compact bordered capsule that wraps with
+ * its neighbours. Failure tints the border; the open step holds full contrast
+ * so the panel below is unambiguously its. */
+const PILL = "inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-9";
+function pillClass(state: { failed?: boolean; open?: boolean }): string {
+  if (state.failed) return `${PILL} border-destructive/40 bg-destructive/5 text-destructive hover:bg-destructive/10`;
+  if (state.open) return `${PILL} border-border bg-muted text-foreground`;
+  return `${PILL} border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground`;
+}
+/** The trailing muted detail never widens the row past a glance's worth. */
+const PILL_DETAIL = "min-w-0 max-w-56 truncate";
+const PILL_TIME = "shrink-0 font-mono text-meta tabular-nums text-muted-foreground/60";
+
+/** One tool call as a pill: outcome, kind, name, the condensed argument summary
+ * and its measured duration. It opens the shared detail panel below the row. */
+function ToolPill(props: { item: ToolItem; settled?: boolean; open: boolean; onToggle: () => void }) {
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
-  const result = () => presentToolResult(props.item.name, done()?.result ?? null, done()?.resultTruncated ?? false);
-  const detail = () => {
-    const outcome = done();
-    if (!outcome) return props.item.summary;
-    const identity = props.item.summary ?? outcome.summary?.replace(/^(?:ok|err)\s+/i, "") ?? null;
-    return [identity, outcome.ok ? "Succeeded" : "Failed"].filter(Boolean).join(" · ");
-  };
-  const primaryPayload = () => {
-    const sections: string[] = [];
-    const presentation = result();
-    if (presentation !== null) sections.push(`${presentation.primary}${done()?.resultTruncated && presentation.raw === null ? "\n… result truncated" : ""}`);
-    else if (done()?.summary) sections.push(`Result\n${done()!.summary}`);
-    if (props.item.input !== null) sections.push(`Input\n${props.item.input}${props.item.inputTruncated ? "\n… truncated" : ""}`);
-    return sections.join("\n\n") || detail() || "";
-  };
-  const hasDetail = () => primaryPayload().length > 0;
+  const detail = () => toolDetail(props.item);
   const running = () => done() === null && !props.settled;
-  const failed = () => done()?.ok === false;
   const delegation = () => isDelegationTool(props.item.name);
   const duration = () => {
     const ms = done()?.durationMs;
     return ms === undefined || ms === null ? "" : formatDuration(ms);
   };
-
+  const body = () => (
+    <>
+      <StatusGlyph status={props.item.status} settled={props.settled} />
+      <Show when={delegation()} fallback={<Wrench class="size-3 shrink-0 text-muted-foreground/70" aria-hidden="true" />}>
+        <Bot class="size-3 shrink-0" aria-label="delegation" />
+      </Show>
+      <span class={["shrink-0 font-mono text-meta", { "text-foreground": running() || delegation(), "font-medium": delegation() }]}>{props.item.name}</span>
+      <Show when={detail()}><span class={PILL_DETAIL}>{detail()}</span></Show>
+      <Show when={duration()}><span class={PILL_TIME}>{duration()}</span></Show>
+      <Show when={!done() && props.settled}><span class="shrink-0">No result recorded</span></Show>
+    </>
+  );
   return (
-    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-tool" data-tool-call-id={props.item.toolId}>
-      <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-        <Switch>
-          <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
-          <Match when={running()}>
-            <LoaderCircle
-              class="size-3 shrink-0 animate-spin text-status-active"
-              aria-label="running"
-            />
-          </Match>
-          <Match when={done()?.ok}>
-            <Check class="size-3 shrink-0 text-status-success" aria-label="ok" />
-          </Match>
-          <Match when={done()}>
-            <X class="size-3 shrink-0 text-destructive" aria-label="failed" />
-          </Match>
-        </Switch>
-        <Show when={delegation()}>
-          <Bot class="size-3 shrink-0 text-muted-foreground" aria-label="delegation" />
-        </Show>
-        {/* The name + summary are a toggle when there is a payload to reveal; a
-            plain span otherwise (no dead affordance). */}
-        <Show
-          when={hasDetail()}
-          fallback={
-            <span
-              class={["shrink-0 font-mono text-meta", {
-                "text-foreground": running() || delegation(),
-                "text-foreground/70": !running() && !delegation(),
-                "font-medium": delegation(),
-              }]}
-
-            >
-              {props.item.name}
-            </span>
-          }
+    <li class="min-w-0 max-w-full" data-slot="timeline-tool" data-tool-call-id={props.item.toolId}>
+      {/* A pill with nothing behind it is a label, not a dead affordance. */}
+      <Show when={toolPayload(props.item).length > 0} fallback={<span class={pillClass({ failed: done()?.ok === false })}>{body()}</span>}>
+        <button
+          type="button"
+          class={pillClass({ failed: done()?.ok === false, open: props.open })}
+          aria-expanded={props.open ? "true" : "false"}
+          aria-label={`${props.item.name} — ${props.open ? "hide" : "show"} result`}
+          onClick={props.onToggle}
         >
-          <button
-            type="button"
-            class="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-expanded={(open()) ? "true" : "false"}
-            aria-label={`${props.item.name} — ${open() ? "hide" : "show"} result`}
-            onClick={() => setOpen((v) => !v)}
-          >
-            <ChevronRight
-              class={["size-3 shrink-0 text-muted-foreground/60 transition-transform", { "rotate-90": open() }]}
-
-              aria-hidden="true"
-            />
-            <span
-              class={["shrink-0 font-mono text-meta", {
-                "text-foreground": running() || delegation(),
-                "text-foreground/70": !running() && !delegation(),
-                "font-medium": delegation(),
-              }]}
-
-            >
-              {props.item.name}
-            </span>
-            <Show when={!open()}><span class="min-w-0 flex-1 truncate">{detail()}</span></Show>
-          </button>
-        </Show>
-        <Show when={duration()}>
-          <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">
-            {duration()}
-          </span>
-        </Show>
-        <Show when={!done() && props.settled}><span>No result recorded</span></Show>
-      </div>
-      <Show when={open() && hasDetail()}>
-        <div data-slot="tool-result" data-tool-call-id={props.item.toolId} class="ml-4 space-y-1.5">
-          <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}>
-            {primaryPayload()}
-          </pre>
-          <Show when={result()?.raw}>{raw =>
-            <details data-slot="tool-result-raw" class="text-meta text-muted-foreground">
-              <summary class="min-h-11 cursor-pointer py-3">Raw result{done()?.resultTruncated ? " (truncated)" : ""}</summary>
-              <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono leading-relaxed text-foreground/75">{raw()}</pre>
-            </details>
-          }</Show>
-        </div>
+          {body()}
+        </button>
       </Show>
     </li>
   );
 }
 
 /** The one line of a collapsed cell: the first statement the program runs, so
- * the row says what the cell is without opening it. */
+ * the pill says what the cell is without opening it. */
 function programPreview(code: string): string {
   const line = code.split("\n").map(part => part.trim()).find(part => part.length > 0 && !part.startsWith("//")) ?? "";
   return line.length > 90 ? `${line.slice(0, 89).trimEnd()}…` : line;
 }
 
-/**
- * One Agent program cell, as a first-class transcript entry that reads like the
- * tool rows around it: a single row — status, "Code", the language, a one-line
- * preview, the duration — that opens to the verbatim source under the same
- * highlighter fenced code gets in a message. The tools the cell called stay
- * visible underneath whether or not it is open, so a turn reads Code, then its
- * work, then the prose without expanding anything.
- *
- * It carries no frame of its own: the turn card is the only bordered surface,
- * and the source lands on a tinted band rather than in a nested box.
- */
-function CodeEntry(props: { item: Extract<TimelineItem, { kind: "code" }>; settled?: boolean }) {
-  const [open, setOpen] = createSignal(false);
+/** One Agent program cell, a peer of the tool pills beside it. The tools the
+ * cell called sit next to it in arrival order rather than under it: the Owner
+ * reads one flat sequence of work, not a tree. */
+function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settled?: boolean; open: boolean; onToggle: () => void }) {
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
   const running = () => done() === null && !props.settled;
-  const failed = () => done()?.ok === false;
-  const hasCode = () => props.item.code.length > 0;
   const language = () => props.item.language || null;
   const duration = () => {
     const ms = done()?.durationMs;
     return ms === undefined || ms === null ? "" : formatDuration(ms);
   };
   const detail = () => done()?.result || programPreview(props.item.code);
-
+  const body = () => (
+    <>
+      <StatusGlyph status={props.item.status} settled={props.settled} />
+      <Braces class="size-3 shrink-0" aria-hidden="true" />
+      <span class={["shrink-0 font-mono text-meta", { "text-foreground": running() }]}>Code</span>
+      <Show when={language()}><span class="shrink-0 font-mono text-meta text-muted-foreground/70">{language()}</span></Show>
+      <Show when={detail()}><span class={PILL_DETAIL}>{detail()}</span></Show>
+      <Show when={duration()}><span class={PILL_TIME}>{duration()}</span></Show>
+    </>
+  );
   return (
-    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-code">
-      <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-        <Switch>
-          <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
-          <Match when={running()}><LoaderCircle class="size-3 shrink-0 animate-spin text-status-active" aria-label="running" /></Match>
-          <Match when={done()?.ok}><Check class="size-3 shrink-0 text-status-success" aria-label="ok" /></Match>
-          <Match when={done()}><X class="size-3 shrink-0 text-destructive" aria-label="failed" /></Match>
-        </Switch>
-        <Show
-          when={hasCode()}
-          fallback={<span class="shrink-0 font-mono text-meta text-foreground/70">Code</span>}
+    <li class="min-w-0 max-w-full" data-slot="timeline-code" data-code-id={props.item.codeId}>
+      <Show when={props.item.code.length > 0} fallback={<span class={pillClass({ failed: done()?.ok === false })}>{body()}</span>}>
+        <button
+          type="button"
+          class={pillClass({ failed: done()?.ok === false, open: props.open })}
+          aria-expanded={props.open ? "true" : "false"}
+          aria-label={`Code — ${props.open ? "hide" : "show"} source`}
+          onClick={props.onToggle}
         >
-          <button
-            type="button"
-            class="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-expanded={open() ? "true" : "false"}
-            aria-label={`Code — ${open() ? "hide" : "show"} source`}
-            onClick={() => setOpen(v => !v)}
-          >
-            <ChevronRight
-              class={["size-3 shrink-0 text-muted-foreground/60 transition-transform", { "rotate-90": open() }]}
+          {body()}
+        </button>
+      </Show>
+    </li>
+  );
+}
 
-              aria-hidden="true"
-            />
-            <Braces class="size-3 shrink-0" aria-hidden="true" />
-            <span class={["shrink-0 font-mono text-meta", { "text-foreground": running(), "text-foreground/70": !running() }]}>Code</span>
-            <Show when={language()}>
-              <span class="shrink-0 font-mono text-meta text-muted-foreground/70">{language()}</span>
+/** What a collapsed tool pill says about itself. */
+function toolDetail(item: ToolItem): string | null {
+  const outcome = item.status.state === "done" ? item.status : null;
+  if (!outcome) return item.summary;
+  const identity = item.summary ?? outcome.summary?.replace(/^(?:ok|err)\s+/i, "") ?? null;
+  return [identity, outcome.ok ? "Succeeded" : "Failed"].filter(Boolean).join(" · ");
+}
+/** Everything the open panel shows for a tool: its result, then its input. */
+function toolPayload(item: ToolItem): string {
+  const outcome = item.status.state === "done" ? item.status : null;
+  const sections: string[] = [];
+  const presentation = presentToolResult(item.name, outcome?.result ?? null, outcome?.resultTruncated ?? false);
+  if (presentation !== null) sections.push(`${presentation.primary}${outcome?.resultTruncated && presentation.raw === null ? "\n… result truncated" : ""}`);
+  else if (outcome?.summary) sections.push(`Result\n${outcome.summary}`);
+  if (item.input !== null) sections.push(`Input\n${item.input}${item.inputTruncated ? "\n… truncated" : ""}`);
+  return sections.join("\n\n") || toolDetail(item) || "";
+}
+
+/** A tool's own panel: the readable payload, with the bounded raw shell
+ * envelope kept secondary underneath it. */
+function ToolDetail(props: { item: ToolItem; failed: boolean }) {
+  const done = () => (props.item.status.state === "done" ? props.item.status : null);
+  const presentation = () => presentToolResult(props.item.name, done()?.result ?? null, done()?.resultTruncated ?? false);
+  return (
+    <div data-slot="tool-result" data-tool-call-id={props.item.toolId} class="space-y-1.5">
+      <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": props.failed }]}>
+        {toolPayload(props.item)}
+      </pre>
+      <Show when={presentation()?.raw}>{raw =>
+        <details data-slot="tool-result-raw" class="text-meta text-muted-foreground">
+          <summary class="min-h-11 cursor-pointer py-3">Raw result{done()?.resultTruncated ? " (truncated)" : ""}</summary>
+          <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono leading-relaxed text-foreground/75">{raw()}</pre>
+        </details>
+      }</Show>
+    </div>
+  );
+}
+
+/** The single panel the open pill reveals, rendered below the whole row so the
+ * pills never reflow into a tree. One step is open at a time. */
+function StepDetail(props: { item: StepRowItem }) {
+  const failed = () => props.item.status.state === "done" && !props.item.status.ok;
+  return (
+    <li class="w-full min-w-0" data-slot="timeline-detail">
+      <Switch>
+        <Match when={props.item.kind === "code" ? (props.item as Extract<TimelineItem, { kind: "code" }>) : null}>{cell =>
+          <div class={["min-w-0", { "text-destructive/90": failed() }]}>
+            <CodeBlock code={cell().code} lang={cell().language || null} wrap bare />
+            <Show when={cell().truncated}>
+              <p class="px-1 pt-1 text-meta text-muted-foreground/70">… truncated by the host</p>
             </Show>
-            <Show when={!open()}>
-              <span class={["min-w-0 flex-1 truncate", { "text-destructive/90": failed() }]}>{detail()}</span>
-            </Show>
-          </button>
-        </Show>
-        <Show when={duration()}>
-          <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">{duration()}</span>
-        </Show>
-      </div>
-      <Show when={open() && hasCode()}>
-        <div class={["ml-4 min-w-0", { "text-destructive/90": failed() }]}>
-          <CodeBlock code={props.item.code} lang={language()} wrap bare />
-          <Show when={props.item.truncated}>
-            <p class="px-1 pt-1 text-meta text-muted-foreground/70">… truncated by the host</p>
-          </Show>
-        </div>
-      </Show>
-      <Show when={props.item.children.length > 0}>
-        <ul class="ml-1 flex min-w-0 flex-col gap-1.5 border-l border-border/60 pl-2" data-slot="timeline-code-tools">
-          <For each={props.item.children} keyed={child => child.key}>
-            {child => <ToolRow item={child()} settled={props.settled} />}
-          </For>
-        </ul>
-      </Show>
+          </div>
+        }</Match>
+        <Match when={props.item.kind === "tool" ? (props.item as ToolItem) : null}>{tool => <ToolDetail item={tool()} failed={failed()} />}</Match>
+      </Switch>
     </li>
   );
 }
@@ -323,6 +288,19 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settl
   // Durations (tool_done.at − tool_start.at) come out of the fold on each row's
   // status, measured within that row's own id namespace.
   const items = createMemo(() => buildTimeline(props.events));
+  const [openKey, setOpenKey] = createSignal<string | null>(null);
+  const toggle = (key: string) => setOpenKey(current => (current === key ? null : key));
+  const openItem = createMemo(() => items().find(item => item.key === openKey() && isStepRow(item)) as StepRowItem | undefined);
+  /** The panel belongs below the whole run of pills the open step sits in, so
+   * opening one never splits the row it is part of. */
+  const detailAnchor = createMemo(() => {
+    const rows = items();
+    const open = openItem();
+    if (!open) return null;
+    let index = rows.indexOf(open);
+    while (index + 1 < rows.length && isStepRow(rows[index + 1])) index += 1;
+    return rows[index].key;
+  });
   // Only the LAST item of a live turn is still being written. A reasoning run
   // there is the Agent thinking at this instant, so its height is bounded while
   // streaming. Settled reasoning stays inline at full length.
@@ -334,40 +312,43 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settl
   });
   return (
     <ul
-      class="ml-1 flex min-w-0 flex-col gap-2 border-l border-border/60 pl-3"
+      class="ml-1 flex min-w-0 flex-wrap items-center gap-1 border-l border-border/60 pl-3"
       data-slot="timeline"
     >
       <For each={items()} keyed={item => item.key}>
         {(row) => (
-          <Switch>
-            <Match when={row().kind === "prose"}>
-              <li class="min-w-0" data-slot="timeline-prose">
-                <Markdown class="text-muted-foreground">
-                  {(row() as Extract<TimelineItem, { kind: "prose" }>).text}
-                </Markdown>
-              </li>
-            </Match>
-            <Match when={row().kind === "reasoning"}>
-              {/* Live tail and settled history share the same quiet prose
-                  treatment; only the actively growing tail is height-bounded. */}
-              <Show
-                when={row().key === streamingKey()}
-                fallback={
-                  <ReasoningRow text={(row() as Extract<TimelineItem, { kind: "reasoning" }>).text} />
-                }
-              >
-                <StreamingReasoning
-                  text={(row() as Extract<TimelineItem, { kind: "reasoning" }>).text}
-                />
-              </Show>
-            </Match>
-            <Match when={row().kind === "tool"}>
-              <ToolRow item={row() as Extract<TimelineItem, { kind: "tool" }>} settled={props.settled} />
-            </Match>
-            <Match when={row().kind === "code"}>
-              <CodeEntry item={row() as Extract<TimelineItem, { kind: "code" }>} settled={props.settled} />
-            </Match>
-          </Switch>
+          <>
+            <Switch>
+              <Match when={row().kind === "prose"}>
+                <li class="my-1 w-full min-w-0" data-slot="timeline-prose">
+                  <Markdown class="text-muted-foreground">
+                    {(row() as Extract<TimelineItem, { kind: "prose" }>).text}
+                  </Markdown>
+                </li>
+              </Match>
+              <Match when={row().kind === "reasoning"}>
+                {/* Live tail and settled history share the same quiet prose
+                    treatment; only the actively growing tail is height-bounded. */}
+                <Show
+                  when={row().key === streamingKey()}
+                  fallback={
+                    <ReasoningRow text={(row() as Extract<TimelineItem, { kind: "reasoning" }>).text} />
+                  }
+                >
+                  <StreamingReasoning
+                    text={(row() as Extract<TimelineItem, { kind: "reasoning" }>).text}
+                  />
+                </Show>
+              </Match>
+              <Match when={row().kind === "tool"}>
+                <ToolPill item={row() as ToolItem} settled={props.settled} open={openKey() === row().key} onToggle={() => toggle(row().key)} />
+              </Match>
+              <Match when={row().kind === "code"}>
+                <CodePill item={row() as Extract<TimelineItem, { kind: "code" }>} settled={props.settled} open={openKey() === row().key} onToggle={() => toggle(row().key)} />
+              </Match>
+            </Switch>
+            <Show when={row().key === detailAnchor() && openItem()}>{item => <StepDetail item={item()} />}</Show>
+          </>
         )}
       </For>
     </ul>

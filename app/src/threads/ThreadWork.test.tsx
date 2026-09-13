@@ -66,13 +66,20 @@ describe("execution result preservation", () => {
     const [final, setFinal] = createSignal<ChatMessage>();
     const [activities, setActivities] = createSignal<ThreadActivity[]>([]);
     const view = render(() => <ThreadWork message={final()} activities={activities()} events={events} />);
-    for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
-    const resultText = () => [...view.container.querySelectorAll('[data-slot="tool-result"]')].map(row => row.textContent);
-    expect(resultText()).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
+    // One panel is open at a time, so each pill is asked for its own payload.
+    const open = (index: number) => {
+      fireEvent.click(view.getAllByRole("button", { name: /read_file — (?:show|hide) result/ })[index]);
+      const panels = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
+      expect(panels).toHaveLength(1);
+      return [panels[0].getAttribute("data-tool-call-id"), panels[0].textContent];
+    };
+    expect(open(0)).toEqual(["call-a", "Result\nDistinct result: first file contents"]);
+    expect(open(1)).toEqual(["call-b", "Result\nDistinct error: second file permission denied"]);
     flush(() => setFinal(message));
     flush(() => setActivities([activity]));
     const results = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
-    expect(results.map(row => row.textContent)).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
+    expect(results.map(row => [row.getAttribute("data-tool-call-id"), row.textContent])).toEqual([["call-b", "Result\nDistinct error: second file permission denied"]]);
+    expect(open(0)).toEqual(["call-a", "Result\nDistinct result: first file contents"]);
     expect(view.getAllByText("read_file")).toHaveLength(2);
     expect(view.container.querySelectorAll('[aria-label="failed"]')).toHaveLength(1);
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
@@ -125,8 +132,13 @@ describe("execution result preservation", () => {
 
   it("keeps both completion payloads when only the first persisted activity has arrived", () => {
     const view = render(() => <ThreadWork activities={[activity]} events={events} live />);
-    for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
-    expect([...view.container.querySelectorAll('[data-slot="tool-result"]')].map(row => row.textContent)).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
+    const payloads = view.getAllByRole("button", { name: /read_file — show result/ }).map((_, index) => {
+      fireEvent.click(view.getAllByRole("button", { name: /read_file — (?:show|hide) result/ })[index]);
+      const panels = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
+      expect(panels).toHaveLength(1);
+      return panels[0].textContent;
+    });
+    expect(payloads).toEqual(["Result\nDistinct result: first file contents", "Result\nDistinct error: second file permission denied"]);
     expect(view.queryByRole("button", { name: /tool calls/ })).toBeNull();
   });
 });
@@ -156,9 +168,9 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
       if (row.textContent?.includes("Distinct error:")) return "b/error";
       return row.getAttribute("data-slot");
     });
-    // call-b started inside the cell, so it reads under the Code entry; every
-    // other row keeps its position.
-    const expected = ["a/result", "timeline-reasoning", "timeline-code", "timeline-reasoning"];
+    // The cell and the tool that ran inside it are peers: one flat sequence in
+    // arrival order, every row keeping its position.
+    const expected = ["a/result", "timeline-reasoning", "timeline-code", "b/error", "timeline-reasoning"];
     expect(slots()).toEqual(expected);
     // Only B's activity has been persisted; neither completion may move.
     flush(() => setActivities([{ ...activity, data: { id: "call-b", name: "read_file", ok: false } }]));
@@ -167,18 +179,22 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
     expect(slots()).toEqual(expected);
     flush(() => setActivities([{ ...activity, data: { id: "call-b", name: "read_file", ok: false } }, { ...activity, id: 2 }]));
     expect(slots()).toEqual(expected);
-    for (const button of view.getAllByRole("button", { name: /read_file — show result/ })) fireEvent.click(button);
-    const results = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
-    expect(results.map(row => [row.getAttribute("data-tool-call-id"), row.textContent])).toEqual([
-      ["call-a", "Result\nDistinct result: first file contents"],
-      ["call-b", "Result\nDistinct error: second file permission denied"],
-    ]);
+    const opened = (index: number) => {
+      fireEvent.click(view.getAllByRole("button", { name: /read_file — (?:show|hide) result/ })[index]);
+      const panels = [...view.container.querySelectorAll('[data-slot="tool-result"]')];
+      expect(panels).toHaveLength(1);
+      return [panels[0].getAttribute("data-tool-call-id"), panels[0].textContent];
+    };
+    expect(opened(0)).toEqual(["call-a", "Result\nDistinct result: first file contents"]);
+    expect(opened(1)).toEqual(["call-b", "Result\nDistinct error: second file permission denied"]);
     expect(view.getAllByText("read_file")).toHaveLength(2);
     expect(view.container.querySelectorAll('[aria-label="failed"]')).toHaveLength(1);
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
-    // b is the cell's own tool row, nested under it.
+    // b ran inside the cell but reads beside it, and its panel is a sibling of
+    // the pills rather than a branch of the Code entry.
     const cell = view.container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
-    expect([...cell.querySelectorAll('[data-slot="tool-result"]')].map(row => row.getAttribute("data-tool-call-id"))).toEqual(["call-b"]);
+    expect(cell.querySelector('[data-slot="tool-result"]')).toBeNull();
+    expect(view.container.querySelector('[data-slot="timeline"] > [data-slot="timeline-detail"] [data-tool-call-id="call-b"]')).toBeTruthy();
     expect(view.queryByText(/tool completed/)).toBeNull();
   }
 });

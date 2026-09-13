@@ -142,11 +142,13 @@ describe("Timeline component", () => {
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
     const toggle = within(row).getByRole("button");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(row.querySelector("pre")).toBeNull();
+    expect(container.querySelector('[data-slot="timeline-detail"]')).toBeNull();
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    // The full untruncated payload is now in a mono <pre> well.
-    const well = row.querySelector("pre") as HTMLElement;
+    // The full untruncated payload is now in a mono <pre> well below the row.
+    const panel = container.querySelector('[data-slot="timeline-detail"]') as HTMLElement;
+    expect(panel.previousElementSibling).toBe(row);
+    const well = panel.querySelector("pre") as HTMLElement;
     expect(well).toBeTruthy();
     expect(well.textContent).toContain("line 3");
     expect(getByText("grep")).toBeTruthy();
@@ -166,7 +168,7 @@ describe("Timeline component", () => {
     expect(row.textContent).toContain("Succeeded");
     expect(row.textContent).not.toContain("ok status 0");
     fireEvent.click(within(row).getByRole("button"));
-    const payload = row.querySelector('[data-slot="tool-result"]') as HTMLElement;
+    const payload = container.querySelector('[data-slot="tool-result"]') as HTMLElement;
     const primary = payload.querySelector(":scope > pre") as HTMLElement;
     expect(primary.textContent).toContain("Output");
     expect(primary.textContent).toContain("hello");
@@ -190,7 +192,7 @@ describe("Timeline component", () => {
     )} />);
     const row = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
     fireEvent.click(within(row).getByRole("button"));
-    expect(row.querySelector('[data-slot="tool-result"]')?.textContent).toContain(`${text}\n… result truncated`);
+    expect(container.querySelector('[data-slot="tool-result"]')?.textContent).toContain(`${text}\n… result truncated`);
   });
 
   it("keeps completed shell rows distinguishable by their bounded start summaries", () => {
@@ -235,7 +237,7 @@ describe("Timeline component", () => {
     expect(row.querySelector('[aria-label="delegation"]')).toBeNull();
   });
 
-  it("folds an agent code cell into the timeline and nests the tools it called", () => {
+  it("folds an agent code cell into the timeline as a peer of the tools it called", () => {
     const events = evs(
       { kind: "code_start", id: "c1", language: "typescript", code: "finish(1);", truncated: false },
       { kind: "tool_start", id: "t1", name: "read_file", summary: "x.ts", input: null },
@@ -244,18 +246,18 @@ describe("Timeline component", () => {
       { kind: "tool_start", id: "t2", name: "read_file", summary: "y.ts", input: null },
     );
     const items = buildTimeline(events);
-    // The cell is a top-level entry; the tool it ran is inside it, and the one
-    // that ran after it closed is not.
-    expect(items.map(i => i.kind)).toEqual(["code", "tool"]);
+    // One flat sequence in arrival order: the cell, the tool it ran, then the
+    // tool that ran after it closed. Nothing is nested.
+    expect(items.map(i => i.kind)).toEqual(["code", "tool", "tool"]);
     expect(items[0]).toMatchObject({
       kind: "code",
       language: "typescript",
       code: "finish(1);",
       status: { state: "done", ok: true, result: "12ms" },
     });
-    expect(items[0].kind === "code" && items[0].children.map(child => child.toolId)).toEqual(["t1"]);
-    expect(items[0].kind === "code" && items[0].children[0].status).toMatchObject({ state: "done", ok: true });
-    // Nested or not, every tool row is reachable in order.
+    expect(items[1]).toMatchObject({ kind: "tool", toolId: "t1", status: { state: "done", ok: true } });
+    expect(items[2]).toMatchObject({ kind: "tool", toolId: "t2", status: { state: "running" } });
+    // Every tool row is reachable in order.
     expect(timelineTools(items).map(tool => tool.toolId)).toEqual(["t1", "t2"]);
   });
 
@@ -297,18 +299,20 @@ describe("Timeline component", () => {
       />
     ));
     const row = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
-    // Always rendered, always collapsed: the row previews the first statement.
+    // Always rendered, always collapsed: the pill previews the first statement.
     expect(row).toBeTruthy();
     expect(row.textContent).toContain("Code");
     expect(row.textContent).toContain("typescript");
     expect(row.textContent).toContain("const step0 = 0;");
-    expect(row.textContent).not.toContain("const step19 = 19;");
-    // The cell's own tools read under it without opening anything.
-    expect(row.querySelector('[data-slot="timeline-code-tools"] [data-slot="timeline-tool"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("const step19 = 19;");
+    // The tool the cell called is a pill beside it, at the same level.
+    expect(container.querySelector('[data-slot="timeline"] > [data-slot="timeline-tool"]')).toBeTruthy();
     fireEvent.click(getByRole("button", { name: /Code — show source/ }));
-    expect(row.textContent).toContain("const step19 = 19;");
+    const panel = container.querySelector('[data-slot="timeline-detail"]') as HTMLElement;
+    expect(panel.textContent).toContain("const step19 = 19;");
     fireEvent.click(getByRole("button", { name: /Code — hide source/ }));
-    expect(row.textContent).not.toContain("const step19 = 19;");
+    expect(container.querySelector('[data-slot="timeline-detail"]')).toBeNull();
+    expect(container.textContent).not.toContain("const step19 = 19;");
   });
 
   it("opens a short program in full on the first click", () => {
@@ -321,7 +325,7 @@ describe("Timeline component", () => {
     const row = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
     expect(row.textContent).not.toContain("finish(out);");
     fireEvent.click(getByRole("button", { name: /Code — show source/ }));
-    expect(row.textContent).toContain("finish(out);");
+    expect(container.querySelector('[data-slot="timeline-detail"]')?.textContent).toContain("finish(out);");
   });
 });
 
@@ -343,16 +347,28 @@ describe("committed turn details: agent code cells", () => {
     { kind: "code_done", id: "code:1", ok: true, summary: "34ms" },
   );
 
-  it("shows the code cell in a committed turn, with its tool row inside it", () => {
+  it("shows the code cell in a committed turn, with its tool pill beside it", () => {
     const { container, getByRole } = render(() => <Timeline events={frozen} />);
     const cell = container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
     expect(cell).toBeTruthy();
     expect(cell.textContent).toContain("typescript");
     fireEvent.click(getByRole("button", { name: /Code — show source/ }));
-    expect(cell.textContent).toContain("subagents_list()");
-    // The tool the cell called reads under it, not beside it.
-    expect(container.querySelector('[data-slot="timeline"] > [data-slot="timeline-tool"]')).toBeNull();
-    expect(within(cell).getByText("subagents_list")).toBeTruthy();
+    expect(container.querySelector('[data-slot="timeline-detail"]')?.textContent).toContain("subagents_list()");
+    // The tool the cell called reads beside it, at the same level and in order.
+    const flat = [...container.querySelectorAll('[data-slot="timeline"] > li')].map(row => row.getAttribute("data-slot"));
+    expect(flat).toEqual(["timeline-prose", "timeline-code", "timeline-tool", "timeline-detail"]);
+    const tool = container.querySelector('[data-slot="timeline-tool"]') as HTMLElement;
+    expect(within(tool).getByText("subagents_list")).toBeTruthy();
+  });
+  it("keeps one detail panel open at a time across pills", () => {
+    const { container, getByRole } = render(() => <Timeline events={frozen} />);
+    fireEvent.click(getByRole("button", { name: /Code — show source/ }));
+    expect(container.querySelectorAll('[data-slot="timeline-detail"]')).toHaveLength(1);
+    fireEvent.click(getByRole("button", { name: /subagents_list — show result/ }));
+    const panels = [...container.querySelectorAll('[data-slot="timeline-detail"]')];
+    expect(panels).toHaveLength(1);
+    expect(panels[0].querySelector('[data-slot="tool-result"]')).toBeTruthy();
+    expect(getByRole("button", { name: /Code — show source/ }).getAttribute("aria-expanded")).toBe("false");
   });
 });
 

@@ -409,7 +409,7 @@ it("keeps the same expanded tool result and focus when the live turn becomes its
   expect(view.getAllByText("File checked")).toHaveLength(1);
   const timeline = view.container.querySelector('[data-message-id="93"] [data-slot="timeline"]')!;
   const reply = view.getByText("File checked");
-  expect([...timeline.children].map(row => row.getAttribute("data-slot"))).toEqual(["timeline-reasoning", "timeline-tool"]);
+  expect([...timeline.children].map(row => row.getAttribute("data-slot"))).toEqual(["timeline-reasoning", "timeline-tool", "timeline-detail"]);
   expect(timeline.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 

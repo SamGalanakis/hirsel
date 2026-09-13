@@ -308,7 +308,7 @@ async fn set_agent_model_rejects_cross_provider_models_and_variants() {
     );
     assert!(
         state
-            .set_agent_model("codex", "google/gemini-3.7-flash", "default")
+            .set_agent_model("codex", "deepseek/deepseek-v4.1-flash", "default")
             .await
             .is_err()
     );
@@ -613,7 +613,7 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
     let mut config = test_config(dir.path());
     config.provider = ProviderMode::OpenRouter;
     config.openrouter_api_key = Some("sk-fake-openrouter-key".to_string());
-    config.model = "google/gemini-3.7-flash".to_string();
+    config.model = "deepseek/deepseek-v4.1-flash".to_string();
     let state = build_state(config).await.unwrap();
     // Booted shape: OpenRouter is an OpenAI-compatible endpoint, so the Model
     // row is one free-text id with no reasoning ladder at all.
@@ -664,7 +664,7 @@ async fn moving_the_main_agent_to_codex_reshapes_the_model_surface_at_once() {
         .agent
         .next_turn_model_spec()
         .expect("OpenRouter runtime has a selectable model");
-    assert_eq!(spec.id, "google/gemini-3.7-flash");
+    assert_eq!(spec.id, "deepseek/deepseek-v4.1-flash");
 
     // ...and a fresh hello serves the reshaped snapshot too.
     assert_eq!(
@@ -741,7 +741,7 @@ async fn set_agent_provider_seeds_the_model_and_broadcasts_both_surfaces() {
     assert!(error.contains("configured for `codex`"), "{error}");
     assert!(
         state
-            .set_fork_model("codex", "google/gemini-3.7-flash", "default")
+            .set_fork_model("codex", "deepseek/deepseek-v4.1-flash", "default")
             .await
             .is_err()
     );

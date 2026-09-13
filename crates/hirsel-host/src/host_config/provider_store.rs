@@ -50,7 +50,7 @@ pub struct EnvBootstrap {
 /// boot environment gives it a reason to exist.
 const SEED_PROVIDER_ID: &str = "openrouter";
 const SEED_PROVIDER_LABEL: &str = "OpenRouter";
-const SEED_PROVIDER_DEFAULT_MODEL: &str = "google/gemini-3.7-flash";
+const SEED_PROVIDER_DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 
 pub(crate) fn non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str> {
     let trimmed = value.trim();
@@ -306,7 +306,7 @@ mod tests {
             seeded[0].base_url,
             lash_provider_openai::OPENROUTER_BASE_URL
         );
-        assert_eq!(seeded[0].default_model, "google/gemini-3.7-flash");
+        assert_eq!(seeded[0].default_model, "deepseek/deepseek-v4.1-flash");
         assert_eq!(seeded[0].api_key.as_deref(), Some("sk-first-key"));
         assert_eq!(
             store

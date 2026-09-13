@@ -71,12 +71,12 @@ const CODEX_FORK_REGISTRY: &[RegistryEntry] = &[
     },
 ];
 
-// OpenRouter routes to Gemini 3.7 Flash, which reasons on its own schedule:
+// OpenRouter routes to DeepSeek V4.1 Flash, which reasons on its own schedule:
 // there is no host-selectable effort ladder to offer, so the entry carries the
 // single provider-default variant.
 const OPENROUTER_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
-    id: "google/gemini-3.7-flash",
-    label: "Gemini 3.7 Flash",
+    id: "deepseek/deepseek-v4.1-flash",
+    label: "DeepSeek V4.1 Flash",
     variants: &[PROVIDER_DEFAULT_VARIANT],
     default_variant: PROVIDER_DEFAULT_VARIANT,
     context_window_tokens: 1_000_000,
@@ -84,8 +84,8 @@ const OPENROUTER_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
 }];
 
 const OPENROUTER_FORK_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
-    id: "google/gemini-3.7-flash",
-    label: "Gemini 3.7 Flash",
+    id: "deepseek/deepseek-v4.1-flash",
+    label: "DeepSeek V4.1 Flash",
     variants: &[PROVIDER_DEFAULT_VARIANT],
     default_variant: PROVIDER_DEFAULT_VARIANT,
     context_window_tokens: 1_000_000,
@@ -99,7 +99,7 @@ const OPENROUTER_FORK_REGISTRY: &[RegistryEntry] = &[RegistryEntry {
 fn default_fork_model_id(provider: ProviderMode) -> Option<&'static str> {
     match provider {
         ProviderMode::Codex => Some("gpt-5.6-luna"),
-        ProviderMode::OpenRouter => Some("google/gemini-3.7-flash"),
+        ProviderMode::OpenRouter => Some("deepseek/deepseek-v4.1-flash"),
         ProviderMode::Anthropic => None,
     }
 }

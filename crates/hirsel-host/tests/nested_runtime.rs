@@ -175,7 +175,7 @@ variant = "default"
         .env("HIRSEL_AGENT", "lash")
         .env("HIRSEL_DRIVER", "real")
         .env("HIRSEL_PROVIDER", "openrouter")
-        .env("HIRSEL_MODEL", "google/gemini-3.7-flash")
+        .env("HIRSEL_MODEL", "deepseek/deepseek-v4.1-flash")
         .env("HIRSEL_TOKEN", "offline-proof")
         .env("HIRSEL_IROH", "0")
         .env("HIRSEL_DEBUG", "1")

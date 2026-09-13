@@ -683,7 +683,7 @@ fn provider_ops_use_snake_case_protocol_names() {
             label: "OpenRouter".to_string(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
             api_key: "sk-or-v1-secret".to_string(),
-            default_model: "google/gemini-3.7-flash".to_string(),
+            default_model: "deepseek/deepseek-v4.1-flash".to_string(),
         })
         .unwrap(),
         json!({
@@ -692,7 +692,7 @@ fn provider_ops_use_snake_case_protocol_names() {
             "label": "OpenRouter",
             "base_url": "https://openrouter.ai/api/v1",
             "api_key": "sk-or-v1-secret",
-            "default_model": "google/gemini-3.7-flash"
+            "default_model": "deepseek/deepseek-v4.1-flash"
         })
     );
     // An omitted patch field is absent on the wire, which is how the host
@@ -758,7 +758,7 @@ fn providers_changed_round_trips_and_masks_stay_masked() {
                     present: true,
                     tail: "cret".to_string(),
                 },
-                default_model: "google/gemini-3.7-flash".to_string(),
+                default_model: "deepseek/deepseek-v4.1-flash".to_string(),
                 detection: None,
                 agent_selectable: true,
                 selection: Some(ProviderSelection::FreeText),

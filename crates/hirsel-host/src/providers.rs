@@ -610,7 +610,7 @@ mod tests {
                 "Router",
                 "https://example.invalid/v1",
                 FAKE_KEY,
-                "google/gemini-3.7-flash",
+                "deepseek/deepseek-v4.1-flash",
             )
             .await
             .unwrap();
@@ -635,7 +635,7 @@ mod tests {
         assert!(
             main.iter()
                 .chain(fork)
-                .all(|model| !model.id.contains("gemini"))
+                .all(|model| !model.id.contains("deepseek"))
         );
         assert_eq!(
             instance(&snapshot, "router").selection,

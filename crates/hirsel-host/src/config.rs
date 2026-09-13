@@ -82,7 +82,7 @@ impl Config {
         let model = env::var("HIRSEL_MODEL").unwrap_or_else(|_| match provider {
             ProviderMode::Anthropic => "claude-opus-4-7".to_string(),
             ProviderMode::Codex => "gpt-5.6-sol".to_string(),
-            ProviderMode::OpenRouter => "google/gemini-3.7-flash".to_string(),
+            ProviderMode::OpenRouter => "deepseek/deepseek-v4.1-flash".to_string(),
         });
         let data_dir = env::var_os("HIRSEL_DATA_DIR")
             .map(PathBuf::from)

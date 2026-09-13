@@ -63,7 +63,7 @@ kind = "openai_compatible"
 label = "OpenRouter"
 base_url = "https://openrouter.ai/api/v1"
 api_key = "sk-or-v1-..."
-default_model = "google/gemini-3.7-flash"
+default_model = "deepseek/deepseek-v4.1-flash"
 ```
 
 Instance ids are `[a-z0-9][a-z0-9_-]{0,31}`. `base_url` and `default_model` are
@@ -79,7 +79,7 @@ logged — a warning names the instance id and the reason only.
 
 The first time the Host writes a `[providers]` table for a config file, it seeds
 one OpenAI-compatible instance (`openrouter`, pointed at OpenRouter's base URL
-with `google/gemini-3.7-flash` as its default model) — but only when the
+with `deepseek/deepseek-v4.1-flash` as its default model) — but only when the
 environment gives it a reason to exist: `OPENROUTER_API_KEY` is set and
 non-empty, or `HIRSEL_PROVIDER=openrouter` (that mode needs the row to exist
 before a key is pasted into it). A Host booting on Codex with no OpenRouter key
@@ -103,7 +103,7 @@ variant = "high"
 
 [fork]
 provider = "openrouter"
-model = "google/gemini-3.7-flash"
+model = "deepseek/deepseek-v4.1-flash"
 variant = "default"
 ```
 

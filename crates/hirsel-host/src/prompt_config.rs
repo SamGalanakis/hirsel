@@ -337,7 +337,7 @@ mod tests {
         );
         assert!(
             prompts
-                .set_fork_model("google/gemini-3.7-flash", "default")
+                .set_fork_model("deepseek/deepseek-v4.1-flash", "default")
                 .await
                 .is_err()
         );
@@ -447,7 +447,7 @@ mod tests {
         let fork = prompts.fork().unwrap();
         assert_eq!(fork.prompt.text, FORK_PROMPT);
         assert!(fork.prompt.is_default);
-        assert_eq!(fork.model.current.id, "google/gemini-3.7-flash");
+        assert_eq!(fork.model.current.id, "deepseek/deepseek-v4.1-flash");
         assert!(
             fork.model
                 .available

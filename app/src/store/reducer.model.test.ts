@@ -95,7 +95,7 @@ describe("model config: model_changed", () => {
   it("reshapes free-text into a curated registry when the provider moves", () => {
     const seeded = helloOk({
       model: {
-        current: { id: "google/gemini-3.7-flash", variant: "default" },
+        current: { id: "deepseek/deepseek-v4.1-flash", variant: "default" },
         available: [],
         provider_id: "openrouter",
         free_text_model: true,

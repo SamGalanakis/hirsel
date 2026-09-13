@@ -120,12 +120,19 @@ fn registries_are_scoped_to_their_provider() {
             .into_iter()
             .map(|model| model.id)
             .collect::<Vec<_>>(),
-        vec!["google/gemini-3.7-flash".to_string()]
+        vec!["deepseek/deepseek-v4.1-flash".to_string()]
     );
     // A model from the other provider's registry is unknown here, and vice
     // versa; Anthropic mode offers nothing selectable at all.
     assert!(validate_selection(ProviderMode::OpenRouter, "gpt-5.6-sol", "high").is_err());
-    assert!(validate_selection(ProviderMode::Codex, "google/gemini-3.7-flash", "default").is_err());
+    assert!(
+        validate_selection(
+            ProviderMode::Codex,
+            "deepseek/deepseek-v4.1-flash",
+            "default"
+        )
+        .is_err()
+    );
     assert!(available_models(ProviderMode::Anthropic).is_empty());
 }
 
@@ -133,7 +140,7 @@ fn registries_are_scoped_to_their_provider() {
 fn openrouter_offers_a_single_provider_default_variant() {
     let models = available_models(ProviderMode::OpenRouter);
     let entry = models.first().expect("OpenRouter registry entry");
-    assert_eq!(entry.label, "Gemini 3.7 Flash");
+    assert_eq!(entry.label, "DeepSeek V4.1 Flash");
     assert_eq!(entry.variants, vec!["default".to_string()]);
     assert_eq!(entry.default_variant, "default");
     assert!(validate_selection(ProviderMode::OpenRouter, &entry.id, "high").is_err());
@@ -197,14 +204,14 @@ async fn a_selection_from_another_provider_falls_back_to_the_configured_model() 
         ProviderMode::OpenRouter,
         store,
         roster,
-        "google/gemini-3.7-flash",
+        "deepseek/deepseek-v4.1-flash",
     )
     .await
     .unwrap();
     assert_eq!(
         state.current(),
         ModelSelection {
-            id: "google/gemini-3.7-flash".to_string(),
+            id: "deepseek/deepseek-v4.1-flash".to_string(),
             variant: "default".to_string(),
         }
     );
@@ -287,7 +294,7 @@ async fn the_codex_registry_stays_curated_when_it_is_the_selected_provider() {
         ProviderMode::OpenRouter,
         store,
         roster,
-        "google/gemini-3.7-flash",
+        "deepseek/deepseek-v4.1-flash",
     )
     .await
     .unwrap();
@@ -384,12 +391,12 @@ fn openrouter_model_spec_defers_reasoning_to_the_provider() {
     let spec = model_spec(
         ProviderMode::OpenRouter,
         &ModelSelection {
-            id: "google/gemini-3.7-flash".to_string(),
+            id: "deepseek/deepseek-v4.1-flash".to_string(),
             variant: "default".to_string(),
         },
     )
     .unwrap();
-    assert_eq!(spec.id, "google/gemini-3.7-flash");
+    assert_eq!(spec.id, "deepseek/deepseek-v4.1-flash");
     assert_eq!(spec.variant, ReasoningSelection::ProviderDefault);
     assert_eq!(spec.limits.context_window_tokens.get(), 1_000_000);
     assert!(spec.capability.reasoning.is_none());

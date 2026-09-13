@@ -431,7 +431,7 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 # high, xhigh, max) and gpt-6-astra (the same plus ultra). A model change applies
 # from the Agent's next turn; a provider change applies at the next host start.
 [model]
-id = "google/gemini-3.7-flash"
+id = "deepseek/deepseek-v4.1-flash"
 variant = "default"
 
 # The Agent's system prompt. With no `prompt` key (or an empty one) the Agent

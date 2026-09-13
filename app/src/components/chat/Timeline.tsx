@@ -196,7 +196,7 @@ function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settle
       <StatusGlyph status={props.item.status} settled={props.settled} />
       <Braces class="size-3 shrink-0" aria-hidden="true" />
       <span class={["shrink-0 font-mono text-meta", { "text-foreground": running() }]}>Code</span>
-      <Show when={language()}><span class="shrink-0 font-mono text-meta text-muted-foreground/70">{language()}</span></Show>
+      <Show when={language()}><span class="shrink-0 font-mono text-meta text-muted-foreground">{language()}</span></Show>
       <Show when={detail()}><span class={PILL_DETAIL}>{detail()}</span></Show>
       <Show when={duration()}><span class={PILL_TIME}>{duration()}</span></Show>
     </>

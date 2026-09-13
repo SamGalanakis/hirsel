@@ -89,12 +89,12 @@ try {
     if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into overview");
     await page.goto(`${url}${route}`);
     await page.getByText(body, { exact: true }).waitFor();
-    await chooseLifecycle(page, "Mark task done");
-    await expectLifecycle(page, "Reopen task");
+    await chooseLifecycle(page, "Mark Task done");
+    await expectLifecycle(page, "Reopen Task");
     await page.reload();
-    await expectLifecycle(page, "Reopen task");
-    await chooseLifecycle(page, "Reopen task");
-    await expectLifecycle(page, "Mark task done");
+    await expectLifecycle(page, "Reopen Task");
+    await chooseLifecycle(page, "Reopen Task");
+    await expectLifecycle(page, "Mark Task done");
     const dimensions = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
     if (dimensions.scroll > dimensions.width) throw new Error("Horizontal overflow");
     if (errors.length) throw new Error(`Browser errors: ${errors.join("; ")}`);
@@ -134,7 +134,7 @@ try {
     ), 10_000);
     if (actionResult.type === "error") throw new Error(`Generated action failed: ${actionResult.detail}`);
     await page.getByRole("heading", { name: "Adaptive host proof advanced", exact: true }).waitFor();
-    await expectLifecycle(page, "Mark task done");
+    await expectLifecycle(page, "Mark Task done");
     if (!action?.expected_revision) throw new Error("Generated action did not carry the displayed revision");
     const stale = await request({ url, token, frame: action, expected: "error", timeoutMs: 5_000 });
     if (!/revision|changed|stale/i.test(stale.detail)) throw new Error(`Unexpected stale action failure: ${stale.detail}`);

@@ -7,6 +7,7 @@ import {
   processesRestoreTarget,
 } from "../../lib/focus";
 import { closeRightRegion, state } from "../../store/store";
+import { threadState } from "../../threads/store";
 import { PaneHeader } from "../ui/PaneHeader";
 import { ProcessesView } from "./ProcessesView";
 
@@ -22,6 +23,9 @@ const RAIL_MQ = "(min-width: 1100px)";
 function ProcessesPanel() {
   let panelRef: HTMLDivElement | undefined;
   const phone = createMediaFlag("(max-width: 1099.98px)");
+  /** The pane is scoped to the selected Thread and its descendants, so it says
+   * whose processes these are instead of a bare noun. */
+  const scope = () => threadState.threads.find(thread => thread.id === threadState.focusedId);
 
   createFocusTrap(() => panelRef, {
       onEscape: closeRightRegion,
@@ -62,7 +66,7 @@ function ProcessesPanel() {
           trailing × that dismisses it. */}
       <PaneHeader
         icon={<Activity class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
-        title="Processes"
+        title={scope() ? `Processes · ${scope()!.title}` : "Processes"}
         titleId="processes-pane-title"
         onClose={closeRightRegion}
         closeLabel="Close Processes"

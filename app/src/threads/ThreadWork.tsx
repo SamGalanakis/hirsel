@@ -70,7 +70,7 @@ export function WorkTail(props: { turn?: ThreadTurn; activities: ThreadActivity[
   const label = () => workLabel(props.turn, props.events, props.activities, buildTimeline(props.events).filter(item => item.kind === "tool").length, Boolean(props.message));
   return <Show when={props.turn && worked()}>
     <Show when={running()} fallback={<Show when={duration()}>
-      <p class="mt-1 text-right text-meta tabular-nums text-muted-foreground/70" data-slot="work-elapsed">{duration()}</p>
+      <p class="mt-1 text-right text-meta tabular-nums text-muted-foreground" data-slot="work-elapsed">{duration()}</p>
     </Show>}>
       <p class="mt-1 flex min-h-5 items-center justify-end" role="status" data-slot="work-live">
         <LoaderCircle class={`size-3.5 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />

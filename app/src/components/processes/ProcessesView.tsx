@@ -11,6 +11,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { ProcessRow } from "./ProcessRow";
 
 export function ProcessesView() {
+  const scope = () => threadState.threads.find(thread => thread.id === threadState.focusedId);
   const groups = createMemo(() => partitionProcesses(scopedProcesses(state.processes, threadState.threads, threadState.focusedId)));
   const cancel = (process: ProcessInfo) => {
     const history = historyId();
@@ -35,7 +36,7 @@ export function ProcessesView() {
               </EmptyMedia>
               <EmptyTitle>No processes</EmptyTitle>
               <EmptyDescription>
-                Lash processes for this Thread and its descendants will appear here.
+                Lash processes for {scope() ? `“${scope()!.title}”` : "this Thread"} and its descendants will appear here.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -45,9 +46,9 @@ export function ProcessesView() {
       <div class="flex flex-1 flex-col gap-3 overflow-y-auto py-3 pb-6">
         <Show when={groups().running.length > 0}>
           <section class="flex flex-col gap-3">
-            <h2 class="mx-3 text-xs font-medium text-muted-foreground">
+            <h3 class="mx-3 text-meta font-medium uppercase tracking-wider text-muted-foreground">
               Running ({groups().running.length})
-            </h2>
+            </h3>
             <For each={groups().running}>
               {(process) => <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />}
             </For>
@@ -56,9 +57,9 @@ export function ProcessesView() {
 
         <Show when={groups().finished.length > 0}>
           <section class="flex flex-col gap-3">
-            <h2 class="mx-3 text-xs font-medium text-muted-foreground">
+            <h3 class="mx-3 text-meta font-medium uppercase tracking-wider text-muted-foreground">
               Finished ({groups().finished.length})
-            </h2>
+            </h3>
             <For each={groups().finished}>
               {(process) => <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />}
             </For>

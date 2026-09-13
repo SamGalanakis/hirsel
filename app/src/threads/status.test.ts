@@ -39,12 +39,18 @@ describe("authoritative Thread row status", () => {
 describe("dense row summary", () => {
   it("prefers the owner's attention over live work and keeps the full sentence", () => {
     const thread = makeThread(1, { running_turn: turn, queued_turn_count: 2, attention: "needs_owner" });
-    expect(threadRowSummary(thread, now, true)).toEqual({ indicator: "attention", meta: "12m", sentence: "Needs you · Working 12m · 2 queued" });
+    expect(threadRowSummary(thread, now, true)).toEqual({ indicator: "attention", meta: "needs you", tone: "attention", age: "12m", sentence: "Needs you · Working 12m · 2 queued" });
   });
-  it("measures running work, then the queue, then the relative time", () => {
-    expect(threadRowSummary(makeThread(1, { running_turn: turn }), now, true)).toMatchObject({ indicator: "running", meta: "12m" });
-    expect(threadRowSummary(makeThread(1, { queued_turn_count: 2 }), now, true)).toMatchObject({ indicator: "queued", meta: "2 queued" });
+  it("names the state in the row and leaves recency to the tooltip", () => {
+    expect(threadRowSummary(makeThread(1, { running_turn: turn }), now, true)).toMatchObject({ indicator: "running", meta: "running", tone: "active", age: "12m" });
+    expect(threadRowSummary(makeThread(1, { queued_turn_count: 2 }), now, true)).toMatchObject({ indicator: "queued", meta: "queued 2" });
+    expect(threadRowSummary(makeThread(1, { last_finished_turn: { ...turn, state: "failed", finished_at: "2026-09-09T12:07:00Z" } }), now, true)).toMatchObject({ meta: "failed", tone: "danger" });
     expect(threadRowSummary(makeThread(1, { last_finished_turn: { ...turn, state: "completed", finished_at: "2026-09-09T12:07:00Z" } }), now, true)).toMatchObject({ indicator: "none", meta: "5m" });
+  });
+  it("says when a snoozed Thread wakes instead of how long ago it spoke", () => {
+    const summary = threadRowSummary(makeThread(1, { snoozed_until: "2026-09-09T14:30:00Z" }), now, true);
+    expect(summary.meta).toMatch(/^until /);
+    expect(summary.sentence).toContain("Snoozed until");
   });
   it("marks a done Task and says nothing for quiet idle work", () => {
     expect(threadRowSummary(makeThread(1, { kind: "task", settled_at: "2026-09-09T11:00:00Z" }), now, true)).toMatchObject({ indicator: "done", sentence: "Done" });

@@ -33,7 +33,7 @@ try{for(const viewport of [{width:1440,height:900},{width:390,height:844}]){
  await page.locator('[data-slot="artifact-preview"]').waitFor({state:'detached'});
  assert.equal(await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().evaluate(el=>document.activeElement===el),true);
  assert.equal(await page.locator('textarea').inputValue(),'Keep this conversation draft');
- await page.getByRole('button',{name:'Related',exact:true}).click();await page.getByRole('button',{name:/Updated shared counter/}).waitFor();
+ await page.getByRole('tab',{name:'Related',exact:true}).click();await page.getByRole('button',{name:/Updated shared counter/}).waitFor();
  assert.equal(new URL(page.url()).pathname,`/t/${a.id}`);
  assert.match(await page.locator('textarea').getAttribute('aria-label'),new RegExp(a.title));
  await publish(b.id,artifact.id,undefined);

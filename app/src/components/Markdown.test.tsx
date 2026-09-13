@@ -204,3 +204,17 @@ describe("Markdown safety and streaming", () => {
     }
   });
 });
+
+describe("Markdown inside a 390px bubble", () => {
+  it("floors a bubble's h1 at the h3 scale so it cannot outrank the pane", () => {
+    const { container } = render(() => <Markdown>{"# shout"}</Markdown>);
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.querySelector("h3")?.textContent).toBe("shout");
+  });
+  it("indents lists with padding, so the marker stays inside the bubble", () => {
+    const { container } = render(() => <Markdown>{"- one\n- two"}</Markdown>);
+    const list = container.querySelector("ul")!;
+    expect(list.className).toContain("ps-4");
+    expect(list.className).not.toMatch(/(^|\s)-?ml-/);
+  });
+});

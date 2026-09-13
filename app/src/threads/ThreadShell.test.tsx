@@ -15,7 +15,13 @@ const sent: ThreadClientMessage[] = [];
 function responsiveMedia(initialWidth: number) {
   let width = initialWidth;
   const queries = new Map<string, { media: string; matches: boolean; onchange: null; listeners: Set<() => void>; addEventListener: (_: string, listener: () => void) => void; removeEventListener: (_: string, listener: () => void) => void; addListener: (listener: () => void) => void; removeListener: (listener: () => void) => void; dispatchEvent: () => boolean }>();
-  const evaluate = (query: string) => query === "(min-width: 1280px)" ? width >= 1280 : query === "(max-width: 1023px)" ? width <= 1023 : false;
+  const evaluate = (query: string) => {
+    const min = /^\(min-width:\s*([\d.]+)px\)$/.exec(query);
+    if (min) return width >= Number(min[1]);
+    const max = /^\(max-width:\s*([\d.]+)px\)$/.exec(query);
+    if (max) return width <= Number(max[1]);
+    return false;
+  };
   vi.stubGlobal("matchMedia", ((query: string) => {
     if (!queries.has(query)) {
       const listeners = new Set<() => void>();
@@ -129,7 +135,7 @@ describe("thread workspace", () => {
     row.focus(); fireEvent.keyDown(row, { key: "F10", shiftKey: true });
     const menu = await view.findByRole("menu", { name: "Actions for Holiday" });
     expect(menu.closest("dialog")).toBe(view.getByRole("dialog", { name: "Spaces and Tasks" }));
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive thread" }));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive Space" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 2, action: "archive" }));
     expect(threadState.focusedId).toBe(1);
     expect(row).toBeInTheDocument();
@@ -146,7 +152,7 @@ describe("thread workspace", () => {
     expect(fireEvent.keyDown(row2, { key: "Tab" })).toBe(true);
     fireEvent.contextMenu(row2);
     const menu = await view.findByRole("menu", { name: "Actions for Holiday" });
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive thread" }));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive Space" }));
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(2, { title: "Holiday", archived_at: "2026-09-09T10:00:00Z", revision: 2 }) }));
     await waitFor(() => expect(document.activeElement).toBe(row1));
     expect(threadState.focusedId).toBe(1);
@@ -288,7 +294,7 @@ describe("thread workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "send_thread_message", thread_id: 1, body: "Follow up in groceries", mode: "send" }));
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark task done" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark Task done" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 1, action: "settle" }));
   });
 
@@ -324,7 +330,9 @@ describe("thread workspace", () => {
     expect(element.getAttribute("aria-label")).toContain("Working");
     expect(element.getAttribute("title")).toContain("Working");
     expect(element.querySelector('[data-slot="thread-row-indicator"]')).toHaveAttribute("data-indicator", "attention");
-    expect(element.querySelector('[data-slot="thread-row-meta"]')?.textContent).toMatch(/^\d+[mhd]/);
+    // The row states what it IS; recency moves into the tooltip beside the sentence.
+    expect(element.querySelector('[data-slot="thread-row-meta"]')?.textContent).toBe("needs you");
+    expect(element.getAttribute("title")).toMatch(/\d+[mhd] ago/);
     for (const [section, id] of [["done", 2], ["snoozed", 3], ["archived", 4]] as const) {
       fireEvent.click(screen.getByRole("button", { name: /Filter work:/ }));
       fireEvent.click(screen.getByRole("menuitemradio", { name: section }));
@@ -339,12 +347,12 @@ describe("thread workspace", () => {
   it("settles only through explicit action, preserving read as independent state", () => {
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark task done" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark Task done" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "settle", data: {}, expected_revision: undefined }));
     expect(threadState.threads.find(t => t.id === 1)?.settled_at).toBeNull();
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { kind: "task", settled_at: "2026-09-09T10:00:00Z", revision: 2 }) }));
     fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    expect(within(document.body).getByRole("menuitem", { name: "Reopen task" })).toBeInTheDocument();
+    expect(within(document.body).getByRole("menuitem", { name: "Reopen Task" })).toBeInTheDocument();
   });
 });
 
@@ -422,7 +430,7 @@ describe("nested Thread workspace", () => {
 
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(view.getByRole("button", { name: "Actions for Buy groceries" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "New child task" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "New child Task" }));
     expect(view.queryByRole("button", { name: "New Space" })).toBeNull();
     fireEvent.input(view.getByLabelText("New space or task title"), { target: { value: "Review" } });
     fireEvent.click(view.getByRole("button", { name: "New Task" }));
@@ -447,7 +455,7 @@ describe("nested Thread workspace", () => {
   it("pins a top-level Thread first once within its lifecycle filter", async () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Pin thread" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Pin Task" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "test-history", thread_id: 1, action: "pin", data: {}, expected_revision: 1 }));
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { read: true, pinned_at: "2026-09-10T10:00:00Z", revision: 2 }) }));
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
@@ -464,8 +472,8 @@ describe("nested Thread workspace", () => {
     flush(() => setThreadState(draft => { draft.threads[1].parent_thread_id = 0; draft.threads[1].pinned_at = "2026-09-10T10:00:00Z"; }));
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
-    expect(view.queryByRole("menuitem", { name: "Pin thread" })).toBeNull();
-    expect(view.queryByRole("menuitem", { name: "Unpin thread" })).toBeNull();
+    expect(view.queryByRole("menuitem", { name: "Pin Space" })).toBeNull();
+    expect(view.queryByRole("menuitem", { name: "Unpin Space" })).toBeNull();
     fireEvent.keyDown(window, { key: "Escape" });
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     const rows = view.container.querySelectorAll('[data-thread-row]');
@@ -536,7 +544,7 @@ it("keeps current brief reachable beyond the visible history page without moving
   expect(view.container.querySelector('[data-activity-id="10"]')).toBeNull();
   expect(view.getByText("Latest conversation")).toBeInTheDocument();
   // The brief is a fact about the Thread, so it lives in the Info pane.
-  fireEvent.click(view.getByRole("button", { name: "Info" }));
+  fireEvent.click(view.getByRole("tab", { name: "Info" }));
   const brief = () => view.container.querySelector('[data-fact="Current brief"]')!;
   expect(brief()).toHaveTextContent("Review only the keyboard flow.");
   expect(brief().querySelector('[data-artifact-ref="44"]')).toBeInTheDocument();
@@ -579,7 +587,7 @@ describe("contextual Thread errors", () => {
     fireEvent.click(view.getByRole("button", {name:"Spaces and Tasks"}));
     const drawer = view.getByRole("dialog", {name:"Spaces and Tasks"});
     fireEvent.click(within(drawer).getByRole("button", {name:"Actions for Holiday"}));
-    fireEvent.click(within(await view.findByRole("menu", {name:"Actions for Holiday"})).getByRole("menuitem", {name:"Archive thread"}));
+    fireEvent.click(within(await view.findByRole("menu", {name:"Actions for Holiday"})).getByRole("menuitem", {name:"Archive Space"}));
     const action = sent.findLast(frame => frame.type === "thread_action");
     if (action?.type !== "thread_action") throw new Error("Missing action");
     expect(action).toMatchObject({history_id:"test-history",thread_id:2,action:"archive"});
@@ -637,6 +645,134 @@ it("renders array instruments and clears them while Thread Info stays usable", (
   expect(view.getByText("Instrument choice")).toBeInTheDocument();
   flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { kind: "task", instrument: null, revision: 2 }) }));
   expect(view.queryByText("Instrument choice")).toBeNull();
-  fireEvent.click(view.getByRole("button", { name: "Info" }));
+  fireEvent.click(view.getByRole("tab", { name: "Info" }));
   expect(view.getByRole("button", { name: "Rename thread" })).toBeInTheDocument();
+});
+
+describe("attention first", () => {
+  const waiting = () => flush(() => setThreadState(draft => {
+    Object.assign(draft, {
+      focusedId: null,
+      threads: [
+        makeThread(1, { title: "Rollback", attention: "needs_owner", last_activity_at: "2026-09-09T09:00:00Z", read: true }),
+        makeThread(2, { title: "Indexing", running_turn: { requester_thread_id: null, requester_turn_id: null, id: 7, thread_id: 2, owner_message_id: null, agent_message_id: null, state: "running", accepted_at: "2026-09-09T11:00:00Z", started_at: "2026-09-09T11:00:00Z", finished_at: null }, last_activity_at: "2026-09-09T11:00:00Z", read: true }),
+        makeThread(3, { title: "Holiday", last_activity_at: "2026-09-09T11:50:00Z", read: true }),
+      ],
+      histories: { 1: { brief: { text: "", artifact_ids: [] }, messages: [{ id: 9, thread_id: 1, author: "agent", body: "I read the logs.\n\n**Should I roll back to 1.4?**", ref: null, ts: "2026-09-09T09:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false } },
+    });
+  }));
+  it("opens on the attention queue, waiting Threads first with the question they asked", () => {
+    responsiveMedia(1440);
+    waiting();
+    const view = render(() => <ThreadShell />);
+    const queue = view.container.querySelector('[data-slot="attention-queue"]')!;
+    expect(queue).toBeVisible();
+    expect([...queue.querySelectorAll("[data-queue-thread]")].map(row => row.getAttribute("data-queue-group")))
+      .toEqual(["attention", "running", "recent"]);
+    expect(within(queue as HTMLElement).getByText("Should I roll back to 1.4?")).toBeInTheDocument();
+    expect(within(queue as HTMLElement).getByRole("heading", { name: "Needs you (1)" })).toBeInTheDocument();
+    fireEvent.click(queue.querySelector('[data-queue-thread="1"]')!);
+    expect(threadState.focusedId).toBe(1);
+  });
+  it("keeps 'Choose a Space or Task' only for an account with none", () => {
+    responsiveMedia(1440);
+    flush(() => setThreadState(draft => { Object.assign(draft, { focusedId: null, threads: [] }); }));
+    const view = render(() => <ThreadShell />);
+    expect(view.container.querySelector('[data-slot="attention-queue"]')).toBeNull();
+    expect(view.getByRole("heading", { name: "Start with a Space or Task" })).toBeInTheDocument();
+  });
+  it("says 'Needs you' in the header and bands the waiting Threads at the top of the tree", () => {
+    responsiveMedia(1440);
+    waiting();
+    flush(() => focusThread(1));
+    const view = render(() => <ThreadShell />);
+    const pill = view.container.querySelector('[data-slot="needs-you-pill"]')!;
+    expect(pill.textContent).toContain("Needs you");
+    // At 390 the words take their own line instead of squeezing the Thread's
+    // name out of the header, which is what pushed the row past the viewport.
+    expect(pill.className).toContain("w-full");
+    expect(pill.className).toContain("split:w-auto");
+    expect(view.container.querySelector('[data-slot="thread-context"]')!.className).toContain("flex-wrap");
+    const band = view.container.querySelector('[data-slot="thread-attention-band"]')!;
+    expect(band.getAttribute("aria-label")).toBe("Needs you (1)");
+    expect(band.querySelectorAll("[data-attention-thread]")).toHaveLength(1);
+  });
+});
+
+describe("one column, three shapes", () => {
+  it("docks at rail, collapses to an icon column below it, and becomes a labelled bar on a phone", () => {
+    const resize = responsiveMedia(1100);
+    const view = render(() => <ThreadShell />);
+    expect(view.getByRole("complementary", { name: "Spaces and Tasks" })).toBeVisible();
+    expect(view.container.querySelector('[data-slot="thread-compact-column"]')).toBeNull();
+
+    resize(1000);
+    expect(view.queryByRole("complementary", { name: "Spaces and Tasks" })).toBeNull();
+    const compact = view.container.querySelector('[data-slot="thread-compact-column"]')!;
+    expect(compact).toBeVisible();
+    fireEvent.click(compact.querySelector('[data-slot="thread-compact-expand"]')!);
+    expect(view.getByRole("dialog", { name: "Spaces and Tasks" })).toBeVisible();
+    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
+
+    resize(390);
+    expect(view.container.querySelector('[data-slot="thread-compact-column"]')).toBeNull();
+    const bar = view.container.querySelector('[data-slot="icon-rail"]')!;
+    for (const label of ["Threads", "New", "Artifacts", "Processes"]) expect(within(bar as HTMLElement).getByText(label)).toBeInTheDocument();
+  });
+  it("gives the utility pane and the showcase turns below four panes, with a tab back", () => {
+    const resize = responsiveMedia(1600);
+    flush(() => setThreadState(draft => { draft.threads = draft.threads.map(thread => thread.id === 1 ? { ...thread, showcased_artifact_id: 4 } : thread); }));
+    const view = render(() => <ThreadShell />);
+    fireEvent.click(view.getByRole("button", { name: "Processes" }));
+    expect(view.container.querySelector('[data-slot="collapsed-pane-tab"]')).toBeNull();
+    resize(1440);
+    const tab = view.container.querySelector('[data-slot="collapsed-pane-tab"]')!;
+    expect(tab).toBeVisible();
+    fireEvent.click(tab);
+    expect(view.container.querySelector('[data-slot="collapsed-pane-tab"]')).toBeNull();
+  });
+});
+
+describe("tree keyboard model", () => {
+  it("keeps one tab stop in the tree and moves the stop with the arrows", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    const dock = view.getByRole("complementary", { name: "Spaces and Tasks" });
+    const rows = () => [...dock.querySelectorAll("[data-thread-row]")] as HTMLElement[];
+    expect(rows().filter(row => row.tabIndex === 0)).toHaveLength(1);
+    const first = rows()[0];
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+    const stops = rows().filter(row => row.tabIndex === 0);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).not.toBe(first);
+  });
+  it("switches Conversation, Info and Related as one tablist", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    const tabs = view.getAllByRole("tab");
+    expect(tabs.map(tab => tab.getAttribute("aria-label"))).toEqual(["Conversation", "Info", "Related"]);
+    expect(tabs.filter(tab => tab.tabIndex === 0)).toHaveLength(1);
+    fireEvent.click(view.getByRole("tab", { name: "Info" }));
+    expect(view.getByRole("tab", { name: "Info" })).toHaveAttribute("aria-selected", "true");
+    expect(view.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "false");
+  });
+});
+
+describe("row actions menu", () => {
+  it("separates the three groups, marks Archive destructive, and drills into snooze durations", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    fireEvent.click(view.getByRole("button", { name: "Thread actions" }));
+    const menu = within(document.body);
+    expect(document.body.querySelectorAll('[data-slot="dropdown-menu-separator"]').length).toBe(2);
+    expect(menu.getByRole("menuitem", { name: /Archive Task/ }).className).toContain("text-destructive");
+    const snooze = menu.getByRole("menuitem", { name: /Snooze Task/ });
+    expect(snooze).toHaveAttribute("aria-haspopup", "menu");
+    fireEvent.click(snooze);
+    expect(menu.queryByRole("menuitem", { name: /Archive Task/ })).toBeNull();
+    expect(document.body.querySelectorAll('[data-slot="dropdown-menu-item"]').length).toBe(5);
+    fireEvent.click(menu.getByRole("menuitem", { name: "For an hour" }));
+    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 1, action: "snooze" }));
+  });
 });

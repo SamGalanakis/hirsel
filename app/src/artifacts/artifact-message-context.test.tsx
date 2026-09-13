@@ -38,7 +38,7 @@ describe("explicit human artifact context", () => {
     expect(artifactState.summaries.find(row=>row.id===44)?.thread_ids).toEqual([2]);
     fireEvent.click(within(view.getByLabelText("Artifact preview")).getByRole("button",{name:"Back to conversation"}));
     expect(view.getByText("About Review findings")).toBeInTheDocument();expect(threadState.focusedId).toBe(1);
-    fireEvent.click(view.getByRole("button",{name:"Conversation"}));
+    fireEvent.click(view.getByRole("tab",{name:"Conversation"}));
     expect(view.getByRole("textbox",{name:"Message A"})).toHaveValue("Make this simpler");
     fireEvent.click(view.getByRole("button",{name:"Send"}));
     const sent=frames.find(frame=>frame.type==="send_thread_message");expect(sent).toMatchObject({thread_id:1,body:"Make this simpler",artifact_ids:[44],attachments:[],mentions:[]});expect(draftArtifact(1)).toBeNull();

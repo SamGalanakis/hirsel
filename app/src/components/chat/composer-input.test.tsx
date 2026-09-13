@@ -258,3 +258,14 @@ describe("the upload lifecycle on the staged file", () => {
     );
   });
 });
+
+describe("composer placeholder", () => {
+  it("names the Thread, shortens it on a phone, and truncates a long title", async () => {
+    const { composerPlaceholder } = await import("./Composer");
+    expect(composerPlaceholder("Message Buy groceries", "Message #12", false)).toBe("Message Buy groceries");
+    expect(composerPlaceholder("Message Buy groceries", "Message #12", true)).toBe("Message #12");
+    const long = `Message ${"Quarterly planning ".repeat(4)}`;
+    expect(composerPlaceholder(long, undefined, false)).toHaveLength(44);
+    expect(composerPlaceholder(long, undefined, false).endsWith("…")).toBe(true);
+  });
+});

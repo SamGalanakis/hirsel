@@ -58,7 +58,9 @@ export function PaneHeader(props: Props) {
         {props.icon}
         <span
           id={props.titleId}
-          class="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
+          /* A pane title that matches its body type is not a title. `text-lg`
+             sits 1.29x above the `text-sm` body the panes are written in. */
+          class="min-w-0 flex-1 truncate text-lg font-semibold text-foreground"
         >
           {props.title}
         </span>

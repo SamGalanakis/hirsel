@@ -40,7 +40,7 @@ function stubMedia() {
 
 function openInfo() {
   const view = render(() => <ThreadShell />);
-  fireEvent.click(view.getByRole("button", { name: "Info" }));
+  fireEvent.click(view.getByRole("tab", { name: "Info" }));
   const pane = () => view.container.querySelector<HTMLElement>('[data-slot="thread-info"]')!;
   return { ...view, pane };
 }
@@ -66,12 +66,12 @@ describe("thread info pane", () => {
   it("replaces the conversation with the Thread's own facts and hands it back", () => {
     const view = render(() => <ThreadShell />);
     expect(view.container.querySelector('[data-slot="thread-info"]')).toBeNull();
-    const info = view.getByRole("button", { name: "Info" });
-    expect(info).toHaveAttribute("aria-pressed", "false");
+    const info = view.getByRole("tab", { name: "Info" });
+    expect(info).toHaveAttribute("aria-selected", "false");
 
     fireEvent.click(info);
-    expect(info).toHaveAttribute("aria-pressed", "true");
-    expect(view.getByRole("button", { name: "Conversation" })).toHaveAttribute("aria-pressed", "false");
+    expect(info).toHaveAttribute("aria-selected", "true");
+    expect(view.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "false");
     expect(view.container.querySelector('[data-slot="thread-scroll"] [data-author]')).toBeNull();
     const pane = view.container.querySelector<HTMLElement>('[data-slot="thread-info"]')!;
     expect(within(pane).getByRole("heading", { name: "Kitchen" })).toBeVisible();
@@ -84,9 +84,9 @@ describe("thread info pane", () => {
     expect(pane.querySelector('[data-fact="Current brief"]')).toBeNull();
     expect(pane.querySelector('[data-fact="Related"]')).toBeNull();
 
-    fireEvent.click(view.getByRole("button", { name: "Conversation" }));
+    fireEvent.click(view.getByRole("tab", { name: "Conversation" }));
     expect(view.container.querySelector('[data-slot="thread-info"]')).toBeNull();
-    expect(info).toHaveAttribute("aria-pressed", "false");
+    expect(info).toHaveAttribute("aria-selected", "false");
   });
 
   it("renames and describes the Thread with revision-fenced actions, keeping a refused draft", () => {

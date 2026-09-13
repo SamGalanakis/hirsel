@@ -502,8 +502,7 @@ request=json.loads(sys.stdin.readline()); time.sleep(5)
     let result = session
         .request(
             json!({"type":"control_request","request_id":id,"request":{"subtype":"interrupt"}}),
-            id,
-            false,
+            super::RequestId::Control(id),
             Duration::from_millis(100),
         )
         .await;
@@ -884,4 +883,40 @@ async fn empty_success_and_cancel_without_final_emit_no_assistant_output() {
         ));
         driver.retire(&handle).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn input_and_control_ids_cannot_replace_or_acknowledge_each_other() {
+    let (output, events) = initialized_claude_output();
+    let session = ProcessSession {
+        events,
+        stdin: tokio::sync::Mutex::new(None),
+        pending: Mutex::new(HashMap::new()),
+        process_group: ProcessGroup::new(0),
+        output: Mutex::new(output),
+        ready: tokio::sync::Notify::new(),
+    };
+    let (input_tx, mut input_rx) = oneshot::channel();
+    let (control_tx, control_rx) = oneshot::channel();
+    session
+        .pending
+        .lock()
+        .unwrap()
+        .insert(RequestId::Input("same".into()), input_tx);
+    session
+        .pending
+        .lock()
+        .unwrap()
+        .insert(RequestId::Control("same".into()), control_tx);
+    session.handle(
+        &json!({"type":"control_response","response":{"request_id":"same","subtype":"success"}}),
+    );
+    assert!(control_rx.await.unwrap().is_ok());
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    session.handle(&json!({"type":"user","uuid":"same","parent_tool_use_id":null}));
+    assert!(input_rx.await.unwrap().is_ok());
+    assert!(session.pending.lock().unwrap().is_empty());
 }

@@ -24,7 +24,7 @@ pub struct NewThread {
     pub title: String,
     pub description: String,
     /// Constrained semantic UI, validated by the same host catalog as Agent instruments.
-    pub instrument: Value,
+    pub instrument: Option<Value>,
     pub needs_owner: bool,
 }
 
@@ -34,13 +34,13 @@ impl NewThread {
             kind,
             title: title.into(),
             description: description.into(),
-            instrument: Value::Null,
+            instrument: None,
             needs_owner: false,
         }
     }
 
     pub fn with_instrument(mut self, instrument: Value) -> Self {
-        self.instrument = instrument;
+        self.instrument = Some(instrument);
         self
     }
 

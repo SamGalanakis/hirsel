@@ -54,7 +54,7 @@ pub struct Thread {
     pub icon: Option<ThreadIcon>,
     pub showcased_artifact_id: Option<u64>,
     pub description: String,
-    pub instrument_json: String,
+    pub instrument_json: Option<String>,
     pub needs_owner: bool,
     pub settled_at: Option<String>,
     pub archived_at: Option<String>,
@@ -79,7 +79,7 @@ impl From<core::Thread> for Thread {
             icon: t.icon.map(Into::into),
             showcased_artifact_id: t.showcased_artifact_id,
             description: t.description,
-            instrument_json: t.instrument.to_string(),
+            instrument_json: t.instrument.map(|ui| ui.to_string()),
             needs_owner: t.attention == core::ThreadAttention::NeedsOwner,
             settled_at: t.settled_at.map(|t| t.to_rfc3339()),
             archived_at: t.archived_at.map(|t| t.to_rfc3339()),
@@ -104,7 +104,8 @@ pub struct ThreadTurn {
     pub owner_message_id: Option<u64>,
     pub agent_message_id: Option<u64>,
     pub state: String,
-    pub started_at: String,
+    pub accepted_at: String,
+    pub started_at: Option<String>,
     pub finished_at: Option<String>,
 }
 impl From<core::ThreadTurn> for ThreadTurn {
@@ -121,7 +122,8 @@ impl From<core::ThreadTurn> for ThreadTurn {
                 .as_str()
                 .unwrap()
                 .to_string(),
-            started_at: t.started_at.to_rfc3339(),
+            accepted_at: t.accepted_at.to_rfc3339(),
+            started_at: t.started_at.map(|time| time.to_rfc3339()),
             finished_at: t.finished_at.map(|t| t.to_rfc3339()),
         }
     }
@@ -208,8 +210,24 @@ mod tests {
         assert_eq!(thread.queued_turn_count, 0);
         assert_eq!(thread.last_activity_at, "2026-09-09T10:00:00+00:00");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&thread.instrument_json).unwrap()["text"],
+            serde_json::from_str::<serde_json::Value>(thread.instrument_json.as_deref().unwrap())
+                .unwrap()["text"],
             "Milk"
+        );
+    }
+    #[test]
+    fn queued_cancellation_preserves_absent_start_in_ffi() {
+        let wire = serde_json::json!({
+            "id":1,"thread_id":1,"owner_message_id":null,"agent_message_id":null,
+            "requester_thread_id":null,"requester_turn_id":null,"state":"cancelled",
+            "accepted_at":"2026-09-09T10:00:00Z","started_at":null,"finished_at":"2026-09-09T10:01:00Z"
+        });
+        let turn = ThreadTurn::from(serde_json::from_value::<core::ThreadTurn>(wire).unwrap());
+        assert_eq!(turn.accepted_at, "2026-09-09T10:00:00+00:00");
+        assert_eq!(turn.started_at, None);
+        assert_eq!(
+            turn.finished_at.as_deref(),
+            Some("2026-09-09T10:01:00+00:00")
         );
     }
     #[test]
@@ -222,18 +240,19 @@ mod tests {
                 "created_at": "2026-09-09T10:00:00Z", "updated_at": "2026-09-09T12:00:00Z",
                 "running_turn": {
                     "id": 12, "thread_id": 5, "requester_thread_id":2,"requester_turn_id":null,"owner_message_id": 20, "agent_message_id": null,
-                    "state": "running", "started_at": "2026-09-09T10:02:00Z", "finished_at": null
+                    "state": "running", "accepted_at": "2026-09-09T10:02:00Z", "started_at": "2026-09-09T10:02:00Z", "finished_at": null
                 },
                 "queued_turn_count": 2,
                 "last_finished_turn": {
                     "id": 11, "thread_id": 5, "requester_thread_id":2,"requester_turn_id":null,"owner_message_id": 18, "agent_message_id": 19,
-                    "state": outcome, "started_at": "2026-09-09T10:00:00Z",
+                    "state": outcome, "accepted_at": "2026-09-09T10:00:00Z", "started_at": "2026-09-09T10:00:00Z",
                     "finished_at": "2026-09-09T10:01:00Z"
                 },
                 "last_activity_at": "2026-09-09T10:02:30Z"
             });
             let thread = Thread::from(serde_json::from_value::<core::Thread>(wire).unwrap());
             assert_eq!(thread.queued_turn_count, 2);
+            assert_eq!(thread.instrument_json, None);
             assert_eq!(thread.last_activity_at, "2026-09-09T10:02:30+00:00");
             assert_ne!(thread.last_activity_at, thread.updated_at);
             assert!(thread.read && thread.needs_owner && thread.settled_at.is_none());
@@ -248,7 +267,8 @@ mod tests {
                     owner_message_id: Some(20),
                     agent_message_id: None,
                     state: "running".into(),
-                    started_at: "2026-09-09T10:02:00+00:00".into(),
+                    accepted_at: "2026-09-09T10:02:00+00:00".into(),
+                    started_at: Some("2026-09-09T10:02:00+00:00".into()),
                     finished_at: None,
                 })
             );
@@ -262,7 +282,8 @@ mod tests {
                     owner_message_id: Some(18),
                     agent_message_id: Some(19),
                     state: outcome.into(),
-                    started_at: "2026-09-09T10:00:00+00:00".into(),
+                    accepted_at: "2026-09-09T10:00:00+00:00".into(),
+                    started_at: Some("2026-09-09T10:00:00+00:00".into()),
                     finished_at: Some("2026-09-09T10:01:00+00:00".into()),
                 })
             );

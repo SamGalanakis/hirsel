@@ -20,22 +20,25 @@ pub(super) fn register_timestamp_function(conn: &Connection) -> rusqlite::Result
 pub(super) fn populate(conn: &Connection, thread: &mut Thread) -> anyhow::Result<()> {
     let (running, queued, finished, activity): (Option<u64>, u64, Option<u64>, String) = conn
         .query_row(
-            "SELECT
+            &format!(
+                "SELECT
                 (SELECT id FROM thread_turns WHERE thread_id=?1 AND state='running'
                  ORDER BY id LIMIT 1),
                 (SELECT COUNT(*) FROM thread_turns WHERE thread_id=?1 AND state='queued'),
                 (SELECT id FROM thread_turns WHERE thread_id=?1
-                 AND state IN ('completed','failed','cancelled','interrupted')
-                 AND finished_at IS NOT NULL
+                 AND state IN ({terminal})
                  ORDER BY hirsel_utc_timestamp(finished_at) DESC, id DESC LIMIT 1),
                 (SELECT MAX(hirsel_utc_timestamp(ts)) FROM (
                     SELECT created_at AS ts FROM threads WHERE id=?1
                     UNION ALL SELECT ts FROM chat_messages WHERE thread_id=?1
-                    UNION ALL SELECT started_at FROM thread_turns WHERE thread_id=?1
+                    UNION ALL SELECT accepted_at FROM thread_turns WHERE thread_id=?1
+                    UNION ALL SELECT started_at FROM thread_turns WHERE thread_id=?1 AND started_at IS NOT NULL
                     UNION ALL SELECT finished_at FROM thread_turns
                         WHERE thread_id=?1 AND finished_at IS NOT NULL
                     UNION ALL SELECT ts FROM thread_activities WHERE thread_id=?1
                 ))",
+                terminal = super::schema::state_list(Some(true))
+            ),
             [thread.id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;

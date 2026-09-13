@@ -60,7 +60,7 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
             "root",
             "Root",
             "",
-            &Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -279,8 +279,8 @@ async fn icons_roundtrip_through_agent_and_owner_edits_with_replay_and_revision_
 #[test]
 fn existing_generated_update_action_remains_valid_but_icon_action_is_reserved() {
     let instrument = |action| json!({"type":"card","children":[{"type":"submit","action":action,"label":"Update","settles":false}]});
-    assert!(threads::validate_instrument(&instrument("update")).is_ok());
-    assert!(threads::validate_instrument(&instrument("set_icon")).is_err());
+    assert!(threads::validate_instrument(Some(&instrument("update"))).is_ok());
+    assert!(threads::validate_instrument(Some(&instrument("set_icon"))).is_err());
 }
 
 #[tokio::test]
@@ -295,7 +295,7 @@ async fn owner_image_icons_validate_uploaded_blobs_and_remain_reachable() {
             "image-owner",
             "Garden",
             "",
-            &serde_json::Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Space,
             None,
@@ -442,7 +442,7 @@ async fn agent_image_artifacts_are_normalized_and_scope_is_enforced() {
             "foreign-icon",
             "Foreign",
             "",
-            &serde_json::Value::Null,
+            None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,

@@ -984,3 +984,22 @@ async fn intermediate_messages_and_malformed_completion_never_invent_final_outpu
         driver.retire(&handle).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn request_after_success_fails_before_writing_to_transport() {
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "done").await.unwrap();
+    let session = driver.sessions.get(&handle).unwrap();
+    session.events.wait_terminal().await.unwrap();
+    let before = peer.requests();
+    assert!(matches!(
+        session
+            .request("thread/read", json!({"method":"thread/read","params":{}}))
+            .await,
+        Err(DriverError::SessionClosed)
+    ));
+    assert_eq!(peer.requests(), before);
+    assert!(lock(&session.state).unwrap().pending.is_empty());
+    driver.retire(&handle).await.unwrap();
+}

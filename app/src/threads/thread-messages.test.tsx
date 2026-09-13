@@ -40,7 +40,7 @@ describe("who is speaking", () => {
     }
   });
   it("shows a started turn with nothing to say as one spinner on the margin, with no card", () => {
-    const turn: ThreadTurn = { id: 4, requester_thread_id: null, requester_turn_id: null, thread_id: 1, owner_message_id: null, agent_message_id: null, state: "running", started_at: "2026-09-09T10:00:00Z", finished_at: null };
+    const turn: ThreadTurn = { id: 4, requester_thread_id: null, requester_turn_id: null, thread_id: 1, owner_message_id: null, agent_message_id: null, state: "running", accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: null };
     flush(() => { dispatch({ type: "connection_status", status: "connected" }); setThreadState(draft => { draft.turnDetails = {}; }); });
     const view = render(() => <ThreadMessage entry={{ key: "turn-4", kind: "turn", turn }} history={emptyHistory()} threadId={1} />);
     const spinner = view.container.querySelector<HTMLElement>('[data-slot="turn-pending"]')!;
@@ -67,4 +67,12 @@ describe("who is speaking", () => {
     const long = render(() => <ActivityEntry activity={{ ...activity, artifact_ids: [3] }} />);
     expect(long.container.querySelector('[data-slot="conversation-note"]')).toBeNull();
   });
+});
+
+it("renders stopped queued work without an execution duration or running avatar", () => {
+  const turn: ThreadTurn = { id: 44, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "cancelled", accepted_at: "2026-09-09T09:00:00Z", started_at: null, finished_at: "2026-09-09T10:00:00Z" };
+  const view = render(() => <ThreadMessage entry={{ key: "turn-44", kind: "turn", turn }} history={emptyHistory()} threadId={1} />);
+  expect(view.getByText("Stopped")).toBeInTheDocument();
+  expect(view.container.querySelector(".animate-spin")).toBeNull();
+  expect(view.container.textContent).not.toContain("1h");
 });

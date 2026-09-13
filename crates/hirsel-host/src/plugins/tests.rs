@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 
-use super::{PluginHost, PluginStatus, SupervisorConfig, http::masked_values};
+use super::{PluginHost, PluginRuntime, SupervisorConfig, http::masked_values};
 use crate::{
     BroadcastLog,
     storage::Storage,
@@ -445,7 +445,12 @@ async fn a_crash_looping_daemon_is_restarted_then_parked_as_errored() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if matches!(host.status("panicky").await, PluginStatus::Errored { .. }) {
+        if host
+            .inspect_runtime("panicky", |runtime| {
+                matches!(runtime, PluginRuntime::Errored { .. })
+            })
+            .await
+        {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "daemon never parked");
@@ -453,11 +458,13 @@ async fn a_crash_looping_daemon_is_restarted_then_parked_as_errored() {
     }
     // Restarted after each panic until the crash limit stopped it.
     assert_eq!(runs.load(Ordering::SeqCst), 3);
-    let status = host.status("panicky").await;
-    assert!(
-        matches!(status, PluginStatus::Errored { ref detail } if !detail.is_empty()),
-        "an errored plugin reports why"
-    );
+    let has_error = host
+        .inspect_runtime(
+            "panicky",
+            |runtime| matches!(runtime, PluginRuntime::Errored { detail } if !detail.is_empty()),
+        )
+        .await;
+    assert!(has_error, "an errored plugin reports why");
     assert!(!host.is_running("panicky").await);
     assert!(
         tools.plugin_tools().names().is_empty(),
@@ -523,7 +530,11 @@ async fn concurrent_double_enable_starts_one_supervisor_and_disable_aborts_it() 
         tokio::task::yield_now().await;
     }
     assert_eq!(starts.load(Ordering::SeqCst), 1);
-    assert_eq!(host.status("blocking").await, PluginStatus::Running);
+    assert_eq!(
+        host.inspect_runtime("blocking", PluginRuntime::as_str)
+            .await,
+        "running"
+    );
 
     assert!(host.set_enabled("blocking", false).await.unwrap());
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -535,7 +546,11 @@ async fn concurrent_double_enable_starts_one_supervisor_and_disable_aborts_it() 
         tokio::task::yield_now().await;
     }
     assert_eq!(starts.load(Ordering::SeqCst), 1, "no daemon leaked");
-    assert_eq!(host.status("blocking").await, PluginStatus::Disabled);
+    assert_eq!(
+        host.inspect_runtime("blocking", PluginRuntime::as_str)
+            .await,
+        "disabled"
+    );
 }
 
 #[tokio::test]
@@ -559,7 +574,10 @@ async fn disabling_a_plugin_removes_its_tools_and_reenabling_restores_them() {
         "idempotent"
     );
     assert!(tools.plugin_tools().names().is_empty());
-    assert_eq!(host.status("quiet").await, PluginStatus::Disabled);
+    assert_eq!(
+        host.inspect_runtime("quiet", PluginRuntime::as_str).await,
+        "disabled"
+    );
     assert_eq!(
         storage.plugin_enabled_flags().await.unwrap().get("quiet"),
         Some(&false)
@@ -623,7 +641,7 @@ async fn plugin_threads_and_activity_have_distinct_durable_identities() {
             "plugin-origin",
             "Plugin origin",
             "",
-            &json!({}),
+            None,
             hirsel_proto::ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Task,
             None,

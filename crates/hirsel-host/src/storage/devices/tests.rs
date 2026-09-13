@@ -14,7 +14,7 @@ async fn device_tokens_are_pinned_revocable_and_persistent() {
                         "fixture-Conversation",
                         "Conversation",
                         "",
-                        &serde_json::Value::Null,
+                        None,
                         hirsel_proto::ThreadAttention::Quiet,
                         hirsel_proto::ThreadKind::Task,
                         None,

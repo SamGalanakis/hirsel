@@ -53,6 +53,26 @@ struct StoreInner {
     source: String,
 }
 
+pub(crate) struct SlotKeys {
+    pub section: &'static str,
+    pub model: &'static str,
+}
+
+impl SlotKeys {
+    pub(crate) const fn for_slot(slot: hirsel_proto::AgentSlot) -> Self {
+        match slot {
+            hirsel_proto::AgentSlot::Main => Self {
+                section: "model",
+                model: "id",
+            },
+            hirsel_proto::AgentSlot::Fork => Self {
+                section: "fork",
+                model: "model",
+            },
+        }
+    }
+}
+
 impl ConfigStore {
     pub async fn load(
         path: PathBuf,
@@ -138,14 +158,15 @@ impl ConfigStore {
         inner.source = source;
     }
 
-    pub fn model_selection(&self) -> Option<(String, String)> {
+    pub fn model_selection(&self, slot: hirsel_proto::AgentSlot) -> Option<(String, String)> {
         self.reload_if_changed();
         let inner = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let section = inner.document.get("model")?.as_table()?;
-        let id = section.get("id")?.as_str()?.to_string();
+        let keys = SlotKeys::for_slot(slot);
+        let section = inner.document.get(keys.section)?.as_table()?;
+        let id = section.get(keys.model)?.as_str()?.to_string();
         let variant = section.get("variant")?.as_str()?.to_string();
         Some((id, variant))
     }
@@ -289,20 +310,6 @@ impl ConfigStore {
         (!text.trim().is_empty()).then(|| text.to_string())
     }
 
-    /// The fork agent's persisted model selection, or `None` when the `[fork]`
-    /// section carries no usable pair.
-    pub fn fork_model_selection(&self) -> Option<(String, String)> {
-        self.reload_if_changed();
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let section = inner.document.get("fork")?.as_table()?;
-        let id = section.get("model")?.as_str()?.to_string();
-        let variant = section.get("variant")?.as_str()?.to_string();
-        Some((id, variant))
-    }
-
     /// Store an Agent prompt override, or remove it when `text` is `None`.
     pub async fn set_agent_prompt(&self, text: Option<&str>) -> anyhow::Result<()> {
         self.set_prompt("agent", text).await
@@ -341,7 +348,12 @@ impl ConfigStore {
         self.persist_and_replace(document, contents).await
     }
 
-    pub async fn set_fork_model(&self, model_id: &str, variant: &str) -> anyhow::Result<()> {
+    pub async fn set_model_selection(
+        &self,
+        slot: hirsel_proto::AgentSlot,
+        model_id: &str,
+        variant: &str,
+    ) -> anyhow::Result<()> {
         let _guard = self.write_lock.lock().await;
         self.reload_if_changed();
         let (document, contents) = {
@@ -350,27 +362,10 @@ impl ConfigStore {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             let mut document = inner.document.clone();
-            ensure_table(&mut document, "fork");
-            document["fork"]["model"] = value(model_id);
-            document["fork"]["variant"] = value(variant);
-            let contents = document.to_string();
-            (document, contents)
-        };
-        self.persist_and_replace(document, contents).await
-    }
-
-    pub async fn set_model_selection(&self, model_id: &str, variant: &str) -> anyhow::Result<()> {
-        let _guard = self.write_lock.lock().await;
-        self.reload_if_changed();
-        let (document, contents) = {
-            let inner = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let mut document = inner.document.clone();
-            ensure_table(&mut document, "model");
-            document["model"]["id"] = value(model_id);
-            document["model"]["variant"] = value(variant);
+            let keys = SlotKeys::for_slot(slot);
+            ensure_table(&mut document, keys.section);
+            document[keys.section][keys.model] = value(model_id);
+            document[keys.section]["variant"] = value(variant);
             let contents = document.to_string();
             (document, contents)
         };
@@ -644,7 +639,13 @@ mod tests {
             .unwrap()
             .set_times(FileTimes::new().set_modified(modified))
             .unwrap();
-        assert_eq!(store.model_selection().unwrap().1, "max");
+        assert_eq!(
+            store
+                .model_selection(hirsel_proto::AgentSlot::Main)
+                .unwrap()
+                .1,
+            "max"
+        );
     }
 
     #[tokio::test]
@@ -659,7 +660,13 @@ mod tests {
         .await
         .unwrap();
         std::fs::write(&path, "not = [valid").unwrap();
-        assert_eq!(store.model_selection().unwrap().1, "default");
+        assert_eq!(
+            store
+                .model_selection(hirsel_proto::AgentSlot::Main)
+                .unwrap()
+                .1,
+            "default"
+        );
 
         let repaired = default_document(Path::new("/docs/config.md"))
             .unwrap()
@@ -669,6 +676,12 @@ mod tests {
             repaired.replace("variant = \"default\"", "variant = \"high\""),
         )
         .unwrap();
-        assert_eq!(store.model_selection().unwrap().1, "high");
+        assert_eq!(
+            store
+                .model_selection(hirsel_proto::AgentSlot::Main)
+                .unwrap()
+                .1,
+            "high"
+        );
     }
 }

@@ -14,7 +14,7 @@ async fn native_worker_rlm_persists_code_tool_activity_and_final_message() {
     let (executor, storage, _log, dir) = super::super::tests::test_event_executor().await;
     let route = executor.anchors.lock().await.active.clone().unwrap();
     let thread_id = route.thread_id;
-    let turn_id = route.thread_turn_id.unwrap();
+    let turn_id = route.thread_turn_id;
     let fixture_dir = dir.path().join("fixture");
     std::fs::create_dir(&fixture_dir).unwrap();
     std::fs::write(fixture_dir.join("probe.txt"), "opened-session-probe\n").unwrap();

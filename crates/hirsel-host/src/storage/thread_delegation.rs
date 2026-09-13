@@ -29,7 +29,7 @@ pub(super) fn enqueue(
     requester_turn_id: Option<u64>,
     report_triggered: bool,
 ) -> anyhow::Result<u64> {
-    c.execute("INSERT INTO thread_turns(thread_id,requester_thread_id,requester_turn_id,state,started_at) VALUES(?1,?2,?3,'queued',?4)",params![thread_id,requester_thread_id,requester_turn_id,chrono::Utc::now().to_rfc3339()])?;
+    c.execute("INSERT INTO thread_turns(thread_id,requester_thread_id,requester_turn_id,state,accepted_at) VALUES(?1,?2,?3,'queued',?4)",params![thread_id,requester_thread_id,requester_turn_id,chrono::Utc::now().to_rfc3339()])?;
     let turn_id = c.last_insert_rowid() as u64;
     super::thread_execution::capture(c, thread_id, turn_id, None)?;
     let history_id: String =
@@ -93,7 +93,7 @@ impl Storage {
             id
         } else {
             let now = chrono::Utc::now().to_rfc3339();
-            tx.execute("INSERT INTO threads(kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES('task',?1,?2,'','{}','quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
+            tx.execute("INSERT INTO threads(kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES('task',?1,?2,'',NULL,'quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
             tx.last_insert_rowid() as u64
         };
         if let Some(execution) = &assignment.execution {
@@ -159,27 +159,36 @@ pub(super) fn report(
     let parent = turn
         .requester_thread_id
         .ok_or_else(|| anyhow::anyhow!("turn has no requesting parent"))?;
-    let payload = serde_json::to_string(
-        &json!({"status":status,"summary":summary,"artifact_ids":artifact_ids}),
-    )?;
-    if let Some((old,id))=c.query_row("SELECT payload,activity_id FROM thread_reports WHERE child_turn_id=?1 AND operation_id=?2",params![turn.id,operation_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?))).optional()? {
-        anyhow::ensure!(old==payload,"report operation payload changed");return Ok(id);
+    if let Some(id) = c
+        .query_row(
+            "SELECT activity_id FROM thread_reports WHERE child_turn_id=?1 AND operation_id=?2",
+            params![turn.id, operation_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .optional()?
+    {
+        let activity = super::thread_activity::activity(c, id)?;
+        anyhow::ensure!(
+            activity.data["status"] == status
+                && activity.data["summary"] == summary
+                && activity.data["artifact_ids"] == json!(artifact_ids),
+            "report operation payload changed"
+        );
+        return Ok(id);
     }
     // Validate source authority before the destination reference can grant it.
     for id in artifact_ids {
         thread_scope::authorize_artifact(c, turn.thread_id, *id)?;
     }
-    let seq: u64 = c.query_row(
-        "SELECT COALESCE(MAX(report_seq),0)+1 FROM thread_reports WHERE child_turn_id=?1",
-        [turn.id],
-        |r| r.get(0),
-    )?;
-    let data = json!({"child_thread_id":turn.thread_id,"child_turn_id":turn.id,"requester_turn_id":turn.requester_turn_id,"report_seq":seq,"status":status,"summary":summary});
+    let data = json!({"child_thread_id":turn.thread_id,"child_turn_id":turn.id,"requester_turn_id":turn.requester_turn_id,"status":status,"summary":summary,"artifact_ids":artifact_ids});
     c.execute("INSERT INTO thread_activities(thread_id,turn_id,kind,data,ts) VALUES(?1,NULL,'child_report',?2,?3)",params![parent,serde_json::to_string(&data)?,chrono::Utc::now().to_rfc3339()])?;
     let activity_id = c.last_insert_rowid() as u64;
     link_artifacts(c, activity_id, artifact_ids)?;
-    c.execute("INSERT INTO thread_reports(child_turn_id,operation_id,report_seq,payload,activity_id) VALUES(?1,?2,?3,?4,?5)",params![turn.id,operation_id,seq,payload,activity_id])?;
-    let request_id = format!("child-report:{}:{seq}", turn.id);
+    c.execute(
+        "INSERT INTO thread_reports(child_turn_id,operation_id,activity_id) VALUES(?1,?2,?3)",
+        params![turn.id, operation_id, activity_id],
+    )?;
+    let request_id = format!("child-report:{}:{activity_id}", turn.id);
     // The parent sees concise provenance, never the child's private transcript.
     let body = format!(
         "Child Thread #{} report ({status}):\n{summary}\nArtifact references: {}",

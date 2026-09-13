@@ -4,17 +4,6 @@ use super::*;
 use hirsel_proto::ThreadTurnState;
 
 impl LashAgentRuntime {
-    pub(super) async fn enqueue_thread_request(&self, turn: OwnerTurn) -> anyhow::Result<()> {
-        let stored = turn.stored_turn(&self.tools.storage()).await?;
-        self.tools
-            .storage()
-            .save_thread_request(&turn.client_id, &serde_json::to_value(&turn)?)
-            .await?;
-        self.tools.publish_thread_turn(stored).await;
-        self.notify.notify_one();
-        Ok(())
-    }
-
     pub(super) async fn publish_background_acceptance(
         &self,
         client_id: &str,
@@ -96,7 +85,7 @@ impl LashAgentRuntime {
         if detail
             .turns
             .iter()
-            .any(|t| t.id == queued.id && t.finished_at.is_some())
+            .any(|t| t.id == queued.id && t.state.is_terminal())
         {
             anyhow::ensure!(
                 self.cancel_lash_request(&client_id).await?,
@@ -106,8 +95,7 @@ impl LashAgentRuntime {
                 .storage()
                 .remove_thread_request(&client_id)
                 .await?;
-            self.anchors.lock().await.active = None;
-            self.set_active_turn_id(None).await;
+            *self.anchors.lock().await = TurnAnchorState::default();
             drop(_request_guard);
             return Box::pin(self.admit_next_thread_request()).await;
         }
@@ -167,7 +155,7 @@ impl LashAgentRuntime {
         let anchors = TurnAnchors {
             request_id: Some(client_id.clone()),
             thread_id: turn.thread_id,
-            thread_turn_id: Some(queued.id),
+            thread_turn_id: queued.id,
         };
         // A crash can leave a queued Thread request already accepted by Lash.
         // Reuse that exact input: the Thread title/history may have changed since
@@ -193,8 +181,10 @@ impl LashAgentRuntime {
             .storage()
             .bind_thread_execution(&self.history_id, &self.session_id, &drain_id, queued.id)
             .await?;
-        self.anchors.lock().await.active = Some(anchors);
-        self.set_active_turn_id(Some(drain_id)).await;
+        *self.anchors.lock().await = TurnAnchorState {
+            active: Some(anchors),
+            drain_id: Some(drain_id),
+        };
         Ok(Some(client_id))
     }
 
@@ -245,34 +235,31 @@ impl LashAgentRuntime {
         &self,
         output: Option<&lash::TurnOutput>,
     ) -> anyhow::Result<()> {
-        let active = self.anchors.lock().await.active.clone();
+        let (active, drain_id) = {
+            let ownership = self.anchors.lock().await;
+            (ownership.active.clone(), ownership.drain_id.clone())
+        };
         if let Some(active) = active {
             if output.is_some() {
-                let drain_id =
-                    self.active_turn_id.lock().await.clone().ok_or_else(|| {
-                        anyhow::anyhow!("active timeline commit identity is missing")
-                    })?;
+                let drain_id = drain_id
+                    .ok_or_else(|| anyhow::anyhow!("active timeline commit identity is missing"))?;
                 if let Err(error) = self.timeline_commits.wait(&drain_id).await {
-                    if let Some(turn_id) = active.thread_turn_id {
-                        self.tools
-                            .fail_turn_timeline_integrity(turn_id, &error.to_string())
-                            .await;
-                    }
+                    self.tools
+                        .fail_turn_timeline_integrity(active.thread_turn_id, &error.to_string())
+                        .await;
                     return Err(error);
                 }
             }
-            if let Some(turn_id) = active.thread_turn_id {
-                let (outcome, final_text, tool_calls) = lash_terminal_projection(output);
-                TurnIngest::complete(
-                    &self.tools,
-                    &self.history_id,
-                    turn_id,
-                    outcome,
-                    final_text,
-                    tool_calls,
-                )
-                .await?;
-            }
+            let (outcome, final_text, tool_calls) = lash_terminal_projection(output);
+            TurnIngest::complete(
+                &self.tools,
+                &self.history_id,
+                active.thread_turn_id,
+                outcome,
+                final_text,
+                tool_calls,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -323,21 +310,15 @@ impl LashAgentRuntime {
         // Admission and Stop share this gate so the ownership check and exact
         // cancellation cannot straddle a switch to a different Thread.
         let _request_guard = self.request_lock.lock().await;
+        let mut ownership = self.anchors.lock().await;
+        let route = ownership.active.as_ref();
         if let Some(thread_id) = thread_id {
             anyhow::ensure!(
-                self.anchors
-                    .lock()
-                    .await
-                    .active
-                    .as_ref()
-                    .is_some_and(|a| a.thread_id == thread_id),
+                route.is_some_and(|route| route.thread_id == thread_id),
                 "Thread #{thread_id} has no running turn"
             );
         }
-        let active = self.active_turn_id.lock().await;
-        if let Some(id) = active.as_ref() {
-            // Exact cancellation also reaches a drain before it enters Lash's
-            // process-local registry. Drop prevents undelivered input replay.
+        if let Some(id) = ownership.drain_id.as_ref() {
             self.session
                 .request_turn_cancel_with_disposition(
                     id,
@@ -347,8 +328,34 @@ impl LashAgentRuntime {
                     lash_core::facade_support::TurnCancelDisposition::Drop,
                 )
                 .await?;
-        } else if let Some(thread_id) = thread_id {
-            anyhow::bail!("Thread #{thread_id} has no running turn");
+        } else if let Some(route) = route {
+            // An empty drain retains ownership while waiting for its retry.
+            // No physical turn exists to cancel; revoke the durable turn first,
+            // then discard its unclaimed input before releasing ownership.
+            let (turn, _) = self
+                .tools
+                .storage()
+                .complete_thread_turn(
+                    &self.history_id,
+                    route.thread_turn_id,
+                    hirsel_proto::ThreadTurnState::Cancelled,
+                    None,
+                )
+                .await?;
+            self.tools.publish_thread_turn(turn).await;
+            if let Some(request_id) = &route.request_id {
+                anyhow::ensure!(
+                    self.cancel_lash_request(request_id).await?,
+                    "cancelled Thread input still holds a live Lash claim"
+                );
+                self.tools
+                    .storage()
+                    .remove_thread_request(request_id)
+                    .await?;
+            } else {
+                self.reconcile_unowned_inputs().await?;
+            }
+            *ownership = TurnAnchorState::default();
         }
         Ok(())
     }
@@ -373,7 +380,7 @@ impl LashAgentRuntime {
                 };
                 if active
                     .as_ref()
-                    .is_some_and(|a| a.thread_turn_id == Some(queued_id))
+                    .is_some_and(|a| a.thread_turn_id == queued_id)
                 {
                     return Ok(CancelQueuedResult::AlreadyClaimed);
                 }

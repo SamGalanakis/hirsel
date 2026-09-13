@@ -6,7 +6,7 @@ pub use thread_action::ThreadActionSnapshot;
 
 #[derive(Clone)]
 pub struct AgentRuntime {
-    pub(super) backend: Arc<AgentBackend>,
+    pub(super) registry: Arc<ThreadRuntimeRegistry>,
     pub(super) model_selection: Option<ModelSelectionState>,
 }
 
@@ -53,24 +53,19 @@ pub enum CancelQueuedResult {
     AlreadyClaimed,
 }
 
-pub(super) enum AgentBackend {
-    Threaded(Arc<ThreadRuntimeRegistry>),
+pub(super) enum LaneRuntime {
     Scripted(Arc<ScriptedAgentRuntime>),
     Lash(Arc<LashAgentRuntime>),
-    Degraded(Arc<DegradedAgentRuntime>),
+    Degraded,
 }
 
 impl AgentRuntime {
     pub fn readiness(&self) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(_) | AgentBackend::Scripted(_) | AgentBackend::Lash(_) => Ok(()),
-            AgentBackend::Degraded(_) => anyhow::bail!("Lash store is unavailable"),
-        }
+        Ok(())
     }
 
     pub fn is_scripted(&self) -> bool {
-        matches!(self.backend.as_ref(), AgentBackend::Scripted(_))
-            || matches!(self.backend.as_ref(), AgentBackend::Threaded(r) if r.is_scripted())
+        self.registry.is_scripted()
     }
 
     pub async fn start(
@@ -106,16 +101,13 @@ impl AgentRuntime {
         }
         registry.spawn_poller();
         Ok(Self {
-            backend: Arc::new(AgentBackend::Threaded(registry)),
+            registry,
             model_selection,
         })
     }
 
     pub(crate) async fn reset_history(&self) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(registry) => registry.reset_history().await,
-            _ => anyhow::bail!("history reset requires the Thread runtime registry"),
-        }
+        self.registry.reset_history().await
     }
 
     pub fn model_snapshot(&self) -> Option<ModelSnapshot> {
@@ -139,12 +131,7 @@ impl AgentRuntime {
         if !state.applies_to_live_session() {
             return Ok(selection);
         }
-        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
-            registry.refresh_execution_default().await?;
-        }
-        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
-            runtime.apply_selected_model().await?;
-        }
+        self.registry.refresh_execution_default().await?;
         Ok(selection)
     }
 
@@ -152,14 +139,9 @@ impl AgentRuntime {
     /// the scripted and degraded backends, which have no Lash session to
     /// reprompt; the config store is still the authority for both.
     pub async fn apply_agent_prompt(&self) -> anyhow::Result<()> {
-        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
-            runtime.apply_agent_prompt().await?;
-        }
-        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
-            for lane in registry.opened().await {
-                if let AgentBackend::Lash(runtime) = lane.as_ref() {
-                    runtime.apply_agent_prompt().await?;
-                }
+        for lane in self.registry.opened().await {
+            if let LaneRuntime::Lash(runtime) = lane.as_ref() {
+                runtime.apply_agent_prompt().await?;
             }
         }
         Ok(())
@@ -169,14 +151,9 @@ impl AgentRuntime {
         &self,
         catalog: &SubagentModelCatalog,
     ) -> anyhow::Result<()> {
-        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
-            runtime.refresh_subagent_model_tools(catalog).await?;
-        }
-        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
-            for lane in registry.opened().await {
-                if let AgentBackend::Lash(runtime) = lane.as_ref() {
-                    runtime.refresh_subagent_model_tools(catalog).await?;
-                }
+        for lane in self.registry.opened().await {
+            if let LaneRuntime::Lash(runtime) = lane.as_ref() {
+                runtime.refresh_subagent_model_tools(catalog).await?;
             }
         }
         Ok(())
@@ -186,14 +163,9 @@ impl AgentRuntime {
     /// disabled. A no-op on the scripted and degraded backends, which have no
     /// lash session to refresh.
     pub async fn refresh_plugin_tools(&self, tool_names: &[String]) -> anyhow::Result<()> {
-        if let AgentBackend::Lash(runtime) = self.backend.as_ref() {
-            runtime.refresh_plugin_tools(tool_names).await?;
-        }
-        if let AgentBackend::Threaded(registry) = self.backend.as_ref() {
-            for lane in registry.opened().await {
-                if let AgentBackend::Lash(runtime) = lane.as_ref() {
-                    runtime.refresh_plugin_tools(tool_names).await?;
-                }
+        for lane in self.registry.opened().await {
+            if let LaneRuntime::Lash(runtime) = lane.as_ref() {
+                runtime.refresh_plugin_tools(tool_names).await?;
             }
         }
         Ok(())
@@ -209,12 +181,7 @@ impl AgentRuntime {
     }
 
     pub async fn enqueue(&self, turn: OwnerTurn) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(runtime) => runtime.enqueue(turn).await,
-            AgentBackend::Scripted(runtime) => runtime.enqueue(turn).await,
-            AgentBackend::Lash(runtime) => runtime.enqueue_inner(turn).await,
-            AgentBackend::Degraded(runtime) => runtime.enqueue(turn).await,
-        }
+        self.registry.enqueue(turn).await
     }
 
     pub async fn cancel_thread_turn(
@@ -222,59 +189,23 @@ impl AgentRuntime {
         expected_history: &str,
         thread_id: u64,
     ) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(runtime) => runtime.cancel(expected_history, thread_id).await?,
-            AgentBackend::Scripted(runtime) => {
-                let state = runtime.state.lock().await;
-                let active = state
-                    .active
-                    .as_ref()
-                    .filter(|a| a.thread_id == thread_id)
-                    .ok_or_else(|| anyhow::anyhow!("Thread #{thread_id} has no running turn"))?;
-                active.cancel.cancel();
-            }
-            AgentBackend::Lash(runtime) => runtime.cancel_owned_turn(Some(thread_id)).await?,
-            AgentBackend::Degraded(_) => anyhow::bail!("Thread #{thread_id} has no running turn"),
-        }
-        Ok(())
+        self.registry.cancel(expected_history, thread_id).await
     }
 
     pub async fn cancel_turn(&self) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(_) => anyhow::bail!("cancellation requires an explicit Thread"),
-            AgentBackend::Scripted(runtime) => runtime.cancel_turn().await,
-            AgentBackend::Lash(runtime) => runtime.cancel_turn().await,
-            AgentBackend::Degraded(runtime) => runtime.cancel_turn().await,
-        }
+        anyhow::bail!("cancellation requires an explicit Thread")
     }
 
     pub async fn cancel_queued(&self, client_id: &str) -> anyhow::Result<CancelQueuedResult> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(runtime) => runtime.cancel_queued(client_id).await,
-            AgentBackend::Scripted(runtime) => runtime.cancel_queued(client_id).await,
-            AgentBackend::Lash(runtime) => runtime.cancel_queued(client_id).await,
-            AgentBackend::Degraded(runtime) => runtime.cancel_queued(client_id).await,
-        }
+        self.registry.cancel_queued(client_id).await
     }
 
     pub async fn process_snapshot(&self) -> anyhow::Result<Vec<hirsel_proto::ProcessInfo>> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(registry) => registry.process_snapshot().await,
-            AgentBackend::Lash(runtime) => runtime.process_snapshot().await,
-            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(Vec::new()),
-        }
+        self.registry.process_snapshot().await
     }
 
     pub async fn cancel_process(&self, thread_id: u64, process_id: &str) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(registry) => {
-                registry.cancel_process(thread_id, process_id).await
-            }
-            AgentBackend::Lash(runtime) if runtime.thread_id == thread_id => {
-                runtime.cancel_process(process_id).await
-            }
-            _ => anyhow::bail!("process runtime is unavailable"),
-        }
+        self.registry.cancel_process(thread_id, process_id).await
     }
 
     pub async fn disable_process_trigger(
@@ -283,30 +214,16 @@ impl AgentRuntime {
         subscription_key: &str,
         expected_revision: u64,
     ) -> anyhow::Result<()> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(registry) => {
-                registry
-                    .disable_trigger(thread_id, subscription_key, expected_revision)
-                    .await
-            }
-            AgentBackend::Lash(runtime) if runtime.thread_id == thread_id => {
-                runtime
-                    .disable_trigger(subscription_key, expected_revision)
-                    .await
-            }
-            _ => anyhow::bail!("trigger runtime is unavailable"),
-        }
+        self.registry
+            .disable_trigger(thread_id, subscription_key, expected_revision)
+            .await
     }
 
     pub async fn dispatch_fork_wake(
         &self,
         message: crate::fork_wake::WakeMessage,
     ) -> anyhow::Result<bool> {
-        match self.backend.as_ref() {
-            AgentBackend::Threaded(registry) => registry.dispatch_fork_wake(message).await,
-            AgentBackend::Lash(runtime) => Ok(runtime.fork_wake.dispatch(message)),
-            _ => Ok(false),
-        }
+        self.registry.dispatch_fork_wake(message).await
     }
 }
 
@@ -387,7 +304,7 @@ pub(super) fn start_scripted_runtime(
 
 pub(super) enum LashStartup {
     Ready(Arc<LashAgentRuntime>),
-    Unavailable(Arc<DegradedAgentRuntime>),
+    Unavailable,
 }
 
 pub(crate) struct LashAgentRuntime {
@@ -412,13 +329,11 @@ pub(crate) struct LashAgentRuntime {
     pub(super) pump_lock: Mutex<()>,
     pub(super) request_lock: Mutex<()>,
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
-    pub(super) active_turn_id: Arc<Mutex<Option<String>>>,
     pub(super) timeline_commits: TimelineCommitBarrier,
     pub(super) drain_seq: AtomicU64,
     pub(super) drain_boot_ms: u64,
     pub(super) drain_retry_scheduled: AtomicBool,
     pub(super) drain_retry_attempts: AtomicU64,
-    pub(super) model_selection: Option<ModelSelectionState>,
     pub(super) prompts: PromptConfig,
     /// The handoff seed this session opened with, kept so a prompt edit can
     /// rebuild the session guidance without dropping the seed the rotation
@@ -436,10 +351,11 @@ pub(crate) struct LashAgentRuntime {
 pub(super) struct TurnAnchors {
     pub(super) request_id: Option<String>,
     pub(super) thread_id: u64,
-    pub(super) thread_turn_id: Option<u64>,
+    pub(super) thread_turn_id: u64,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct TurnAnchorState {
+    pub(super) drain_id: Option<String>,
     pub(super) active: Option<TurnAnchors>,
 }

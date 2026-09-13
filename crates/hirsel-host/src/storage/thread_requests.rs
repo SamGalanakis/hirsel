@@ -56,7 +56,7 @@ impl Storage {
         &self,
     ) -> anyhow::Result<Vec<hirsel_proto::ThreadTurn>> {
         let c = self.conn.lock().await;
-        let ids=c.prepare("SELECT t.id FROM thread_cancellations r JOIN thread_turns t ON t.id=r.turn_id WHERE t.state IN ('queued','running')")?.query_map([],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let ids=c.prepare(&format!("SELECT id FROM thread_turns WHERE cancel_requested_at IS NOT NULL AND state IN ({})", super::schema::state_list(Some(false))))?.query_map([],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         ids.into_iter()
             .map(|id| super::thread_activity::get(&c, id))
             .collect()

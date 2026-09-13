@@ -544,7 +544,7 @@ mod tests {
                 "push-test",
                 "Choose",
                 "Decision",
-                &serde_json::json!({}),
+                None,
                 ThreadAttention::NeedsOwner,
                 hirsel_proto::ThreadKind::Task,
                 None,

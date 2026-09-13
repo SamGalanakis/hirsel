@@ -112,7 +112,7 @@ describe("thread transport projection", () => {
     const page = openThread(1, 100);
     const frame = sent.at(-1);
     if (frame?.type !== "open_thread") throw new Error("expected open command");
-    const completed = { requester_thread_id: null, requester_turn_id: null, id: 10, thread_id: 1, owner_message_id: 9, agent_message_id: 11, state: "completed" as const, started_at: "2026-09-10T10:00:00Z", finished_at: "2026-09-10T10:00:05Z" };
+    const completed = { requester_thread_id: null, requester_turn_id: null, id: 10, thread_id: 1, owner_message_id: 9, agent_message_id: 11, state: "completed" as const, accepted_at: "2026-09-10T10:00:00Z", started_at: "2026-09-10T10:00:00Z", finished_at: "2026-09-10T10:00:05Z" };
     flush(() => handleThreadMessage({ type: "thread_turn", turn: completed }));
     const staleRunning = { ...completed, state: "running" as const, agent_message_id: null, finished_at: null };
     const older = { id: 8, thread_id: 1, author: "owner" as const, body: "Earlier context", ref: null, ts: "2026-09-10T09:59:00Z" };
@@ -158,7 +158,7 @@ describe("thread transport projection", () => {
     const opening = openThread(1);
     const frame = sent.at(-1);
     if (frame?.type !== "open_thread") throw new Error("expected open command");
-    const turn = { requester_thread_id: null, requester_turn_id: null, id: 31, thread_id: 1, owner_message_id: 30, agent_message_id: null, state: "running" as const, started_at: "2026-09-10T10:00:00Z", finished_at: null };
+    const turn = { requester_thread_id: null, requester_turn_id: null, id: 31, thread_id: 1, owner_message_id: 30, agent_message_id: null, state: "running" as const, accepted_at: "2026-09-10T10:00:00Z", started_at: "2026-09-10T10:00:00Z", finished_at: null };
     const second = { seq: 2, event: { kind: "prose" as const, text: "newer live" } };
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 31, ...second }));
     flush(() => handleThreadMessage({ type: "thread_opened", client_id: frame.client_id, detail: {
@@ -231,7 +231,7 @@ describe("thread transport projection", () => {
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 1, event: { kind: "prose", text: "old" } }));
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 11, seq: 1, event: { kind: "prose", text: "new" } }));
     flush(() => handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 10, seq: 2, event: { kind: "prose", text: "late" } }));
-    flush(() => handleThreadMessage({ type: "thread_turn", turn: { requester_thread_id: null, requester_turn_id: null, id: 10, thread_id: 1, owner_message_id: 1, agent_message_id: 2, state: "completed", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:01Z" } }));
+    flush(() => handleThreadMessage({ type: "thread_turn", turn: { requester_thread_id: null, requester_turn_id: null, id: 10, thread_id: 1, owner_message_id: 1, agent_message_id: 2, state: "completed", accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:01Z" } }));
     expect(threadState.turnDetails[11].map(row => row.event)).toEqual([{ kind: "prose", text: "new" }]);
     expect(threadState.turnDetails[10].map(row => row.event)).toEqual([{ kind: "prose", text: "old" }, { kind: "prose", text: "late" }]);
   });
@@ -241,7 +241,7 @@ describe("thread transport projection", () => {
     flush(() => handleThreadMessage({ type: "msg", message: cancelled }));
     flush(() => handleThreadMessage({ type: "msg", message: retained }));
     flush(() => setThreadState(draft => {
-      draft.histories[1].turns = [{ requester_thread_id: null, requester_turn_id: null, id: 90, thread_id: 1, owner_message_id: cancelled.id, agent_message_id: null, state: "cancelled", started_at: cancelled.ts, finished_at: cancelled.ts }];
+      draft.histories[1].turns = [{ requester_thread_id: null, requester_turn_id: null, id: 90, thread_id: 1, owner_message_id: cancelled.id, agent_message_id: null, state: "cancelled", accepted_at: cancelled.ts, started_at: cancelled.ts, finished_at: cancelled.ts }];
       draft["turnDetails"][90] = [{ seq: 1, event: { kind: "prose", text: "old detail" } }];
     }));
     const opening = openThread(1);
@@ -284,7 +284,7 @@ describe("thread transport projection", () => {
 
 describe("running turn with a newer queued request", () => {
   it("admits the running turn, ignores queued cancellation, then moves to the next actual run", () => {
-    const turn = (id: number, state: "running" | "queued" | "completed" | "cancelled", agent_message_id: number | null = null) => ({ requester_thread_id: null, requester_turn_id: null, id, thread_id: 1, owner_message_id: id, agent_message_id, state, started_at: "2026-09-09T10:00:00Z", finished_at: state === "completed" || state === "cancelled" ? "2026-09-09T10:00:01Z" : null });
+    const turn = (id: number, state: "running" | "queued" | "completed" | "cancelled", agent_message_id: number | null = null) => ({ requester_thread_id: null, requester_turn_id: null, id, thread_id: 1, owner_message_id: id, agent_message_id, state, accepted_at: "2026-09-09T10:00:00Z", started_at: state === "queued" || state === "cancelled" ? null : "2026-09-09T10:00:00Z", finished_at: state === "completed" || state === "cancelled" ? "2026-09-09T10:00:01Z" : null });
     const stream = (turn_id:number,seq:number,text:string) => handleThreadMessage({type:"turn_event",thread_id:1,turn_id,seq,event:{kind:"prose",text}});
     flush(() => { handleThreadMessage({type:"thread_turn",turn:turn(10,"running")}); stream(10,1,"first"); handleThreadMessage({type:"thread_turn",turn:turn(11,"queued")}); stream(10,2,"second"); });
     expect(threadState.turnDetails[10]).toHaveLength(2);
@@ -298,7 +298,7 @@ describe("running turn with a newer queued request", () => {
   });
 
   it.each(["failed", "cancelled", "interrupted"] as const)("retains the exact live timeline when a turn ends %s without a final message", state => {
-    const turn = { requester_thread_id: null, requester_turn_id: null, id: 20, thread_id: 1, owner_message_id: 7, agent_message_id: null, state: "running" as const, started_at: "2026-09-09T10:00:00Z", finished_at: null };
+    const turn = { requester_thread_id: null, requester_turn_id: null, id: 20, thread_id: 1, owner_message_id: 7, agent_message_id: null, state: "running" as const, accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: null };
     flush(() => {
       handleThreadMessage({ type: "thread_turn", turn });
       handleThreadMessage({ type: "turn_event", thread_id: 1, turn_id: 20, seq: 1, event: { kind: "reasoning", text: "Checking the page" } });

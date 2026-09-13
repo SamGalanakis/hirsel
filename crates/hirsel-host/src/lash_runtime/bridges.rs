@@ -10,7 +10,7 @@ impl LashAgentRuntime {
         let tools = self.tools.clone();
         let history_id = self.history_id.clone();
         let timeline_commits = self.timeline_commits.clone();
-        let active_turn_id = self.active_turn_id.clone();
+        let ownership = self.anchors.clone();
         self.tasks.spawn(async move {
             let mut cursor = initial_cursor;
             let mut ingest = TurnIngest::unrouted(&history_id, json!({"agent":"host"}));
@@ -31,7 +31,7 @@ impl LashAgentRuntime {
                         tokio::select! {
                             item = stream.next() => process_observation_stream_item(
                                 item, &broadcast_log, &broadcaster, &tools, &mut ingest,
-                                &timeline_commits, &active_turn_id,
+                                &timeline_commits, &ownership,
                             ).await,
                             () = tokio::time::sleep(flush_delay) => {
                                 if let Err(error) = ingest.flush(&tools).await {
@@ -48,7 +48,7 @@ impl LashAgentRuntime {
                             &tools,
                             &mut ingest,
                             &timeline_commits,
-                            &active_turn_id,
+                            &ownership,
                         )
                         .await
                     };
@@ -73,7 +73,7 @@ pub(super) async fn process_observation_stream_item<E>(
     tools: &ToolSuite,
     ingest: &mut TurnIngest,
     timeline_commits: &TimelineCommitBarrier,
-    active_turn_id: &Mutex<Option<String>>,
+    ownership: &Mutex<TurnAnchorState>,
 ) -> bool
 where
     E: std::fmt::Display,
@@ -84,7 +84,7 @@ where
         return true;
     }
     let keep =
-        handle_observation_stream_item(item, tools, ingest, timeline_commits, active_turn_id).await;
+        handle_observation_stream_item(item, tools, ingest, timeline_commits, ownership).await;
     if let Some(turn_id) = committed {
         timeline_commits.record(turn_id).await;
     }
@@ -107,7 +107,7 @@ async fn handle_observation_stream_item<E>(
     tools: &ToolSuite,
     ingest: &mut TurnIngest,
     timeline_commits: &TimelineCommitBarrier,
-    active_turn_id: &Mutex<Option<String>>,
+    ownership: &Mutex<TurnAnchorState>,
 ) -> bool
 where
     E: std::fmt::Display,
@@ -129,7 +129,7 @@ where
         }
         Some(Ok(RemoteSessionObservationStreamItem::Gap { gap, .. })) => {
             let _ = ingest.flush(tools).await;
-            if let Some(drain_id) = active_turn_id.lock().await.clone()
+            if let Some(drain_id) = ownership.lock().await.drain_id.clone()
                 && let Some((_thread_id, turn_id)) = observation_thread_route(&drain_id)
             {
                 let reason = format!(

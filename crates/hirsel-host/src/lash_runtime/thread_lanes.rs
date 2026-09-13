@@ -13,7 +13,7 @@ pub(super) struct ThreadRuntimeRegistry {
     tools: ToolSuite,
     broadcaster: broadcast::Sender<HostToClient>,
     broadcast_log: BroadcastLog,
-    lanes: Mutex<HashMap<u64, Arc<OnceCell<Arc<AgentBackend>>>>>,
+    lanes: Mutex<HashMap<u64, Arc<OnceCell<Arc<LaneRuntime>>>>>,
     pub(super) capacity: Arc<Semaphore>,
 }
 impl ThreadRuntimeRegistry {
@@ -83,7 +83,7 @@ impl ThreadRuntimeRegistry {
             })
             .await
     }
-    pub(super) async fn lane(&self, id: u64) -> anyhow::Result<Arc<AgentBackend>> {
+    pub(super) async fn lane(&self, id: u64) -> anyhow::Result<Arc<LaneRuntime>> {
         anyhow::ensure!(
             self.tools.storage().thread(id).await?.is_some(),
             "Thread is unavailable"
@@ -99,7 +99,7 @@ impl ThreadRuntimeRegistry {
         let lane = cell
             .get_or_try_init(|| async {
                 let lane = match self.config.agent_mode {
-                    AgentMode::Scripted => AgentBackend::Scripted(start_scripted_runtime(
+                    AgentMode::Scripted => LaneRuntime::Scripted(start_scripted_runtime(
                         self.config.clone(),
                         self.tools.clone(),
                         self.broadcaster.clone(),
@@ -121,8 +121,8 @@ impl ThreadRuntimeRegistry {
                     )
                     .await?
                     {
-                        LashStartup::Ready(runtime) => AgentBackend::Lash(runtime),
-                        LashStartup::Unavailable(runtime) => AgentBackend::Degraded(runtime),
+                        LashStartup::Ready(runtime) => LaneRuntime::Lash(runtime),
+                        LashStartup::Unavailable => LaneRuntime::Degraded,
                     },
                 };
                 Ok::<_, anyhow::Error>(Arc::new(lane))
@@ -169,10 +169,10 @@ impl ThreadRuntimeRegistry {
                 work.stop().await;
             } else {
                 match self.lane(turn.thread_id).await?.as_ref() {
-                    AgentBackend::Lash(runtime) => {
+                    LaneRuntime::Lash(runtime) => {
                         runtime.cancel_owned_turn(Some(turn.thread_id)).await?
                     }
-                    AgentBackend::Scripted(runtime) => runtime.cancel_turn().await?,
+                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn().await?,
                     _ => {}
                 }
             }
@@ -261,12 +261,12 @@ impl ThreadRuntimeRegistry {
             }
             match self.lane(id).await {
                 Ok(lane) => match lane.as_ref() {
-                    AgentBackend::Lash(r) => r.notify.notify_one(),
-                    AgentBackend::Scripted(r) => {
+                    LaneRuntime::Lash(r) => r.notify.notify_one(),
+                    LaneRuntime::Scripted(r) => {
                         r.recover_pending().await?;
                         r.notify.notify_one();
                     }
-                    AgentBackend::Degraded(_) => {
+                    LaneRuntime::Degraded => {
                         let (turn, _) = self
                             .tools
                             .storage()
@@ -279,7 +279,6 @@ impl ThreadRuntimeRegistry {
                             .await?;
                         self.tools.publish_thread_turn(turn).await;
                     }
-                    AgentBackend::Threaded(_) => unreachable!(),
                 },
                 Err(error) => {
                     tracing::warn!(thread_id=id,%error,"Thread lane failed to initialize");
@@ -323,7 +322,7 @@ impl ThreadRuntimeRegistry {
         self.open_persisted_process_lanes().await?;
         let mut processes = Vec::new();
         for lane in self.opened().await {
-            if let AgentBackend::Lash(runtime) = lane.as_ref() {
+            if let LaneRuntime::Lash(runtime) = lane.as_ref() {
                 processes.extend(runtime.process_snapshot().await?);
             }
         }
@@ -341,7 +340,7 @@ impl ThreadRuntimeRegistry {
         process_id: &str,
     ) -> anyhow::Result<()> {
         match self.lane(thread_id).await?.as_ref() {
-            AgentBackend::Lash(runtime) => runtime.cancel_process(process_id).await,
+            LaneRuntime::Lash(runtime) => runtime.cancel_process(process_id).await,
             _ => anyhow::bail!("process runtime is unavailable"),
         }
     }
@@ -353,7 +352,7 @@ impl ThreadRuntimeRegistry {
         expected_revision: u64,
     ) -> anyhow::Result<()> {
         match self.lane(thread_id).await?.as_ref() {
-            AgentBackend::Lash(runtime) => {
+            LaneRuntime::Lash(runtime) => {
                 runtime
                     .disable_trigger(subscription_key, expected_revision)
                     .await
@@ -365,7 +364,7 @@ impl ThreadRuntimeRegistry {
         let _admission = self.admission.lock().await;
         let tasks = self.epoch.read().expect("runtime epoch poisoned").1.clone();
         for lane in self.opened().await {
-            if let AgentBackend::Lash(runtime) = lane.as_ref() {
+            if let LaneRuntime::Lash(runtime) = lane.as_ref() {
                 runtime.fork_wake.stop().await;
             }
         }
@@ -389,10 +388,10 @@ impl ThreadRuntimeRegistry {
         // all host observation/pump tasks and the old binding is revoked below.
         for lane in self.opened().await {
             match lane.as_ref() {
-                AgentBackend::Lash(runtime) => {
+                LaneRuntime::Lash(runtime) => {
                     let _ = runtime.cancel_owned_turn(Some(runtime.thread_id)).await;
                 }
-                AgentBackend::Scripted(runtime) => {
+                LaneRuntime::Scripted(runtime) => {
                     runtime.cancel_turn().await?;
                 }
                 _ => {}
@@ -412,11 +411,11 @@ impl ThreadRuntimeRegistry {
     ) -> anyhow::Result<bool> {
         let _admission = self.admission.lock().await;
         match self.lane(message.thread_id).await?.as_ref() {
-            AgentBackend::Lash(runtime) => Ok(runtime.fork_wake.dispatch(message)),
+            LaneRuntime::Lash(runtime) => Ok(runtime.fork_wake.dispatch(message)),
             _ => Ok(false),
         }
     }
-    pub(super) async fn opened(&self) -> Vec<Arc<AgentBackend>> {
+    pub(super) async fn opened(&self) -> Vec<Arc<LaneRuntime>> {
         self.lanes
             .lock()
             .await
@@ -464,10 +463,9 @@ impl ThreadRuntimeRegistry {
         }
         let lane = self.lane(id).await?;
         match lane.as_ref() {
-            AgentBackend::Lash(r) => r.cancel_owned_turn(Some(id)).await,
-            AgentBackend::Scripted(r) => r.cancel_turn().await,
-            AgentBackend::Degraded(_) => anyhow::bail!("Thread has no running turn"),
-            AgentBackend::Threaded(_) => unreachable!(),
+            LaneRuntime::Lash(r) => r.cancel_owned_turn(Some(id)).await,
+            LaneRuntime::Scripted(r) => r.cancel_turn().await,
+            LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
         }
     }
     pub(super) async fn cancel_queued(
@@ -504,7 +502,7 @@ impl ThreadRuntimeRegistry {
             )
         {
             for lane in self.opened().await {
-                if let AgentBackend::Scripted(runtime) = lane.as_ref() {
+                if let LaneRuntime::Scripted(runtime) = lane.as_ref() {
                     runtime
                         .state
                         .lock()
@@ -527,10 +525,9 @@ impl ThreadRuntimeRegistry {
             return Ok(CancelQueuedResult::Cancelled);
         }
         match self.lane(id).await?.as_ref() {
-            AgentBackend::Lash(r) => r.cancel_queued(client_id).await,
-            AgentBackend::Scripted(r) => r.cancel_queued(client_id).await,
-            AgentBackend::Degraded(r) => r.cancel_queued(client_id).await,
-            AgentBackend::Threaded(_) => unreachable!(),
+            LaneRuntime::Lash(r) => r.cancel_queued(client_id).await,
+            LaneRuntime::Scripted(r) => r.cancel_queued(client_id).await,
+            LaneRuntime::Degraded => Ok(CancelQueuedResult::AlreadyClaimed),
         }
     }
 }

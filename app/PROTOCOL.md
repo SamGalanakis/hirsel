@@ -45,6 +45,10 @@ The final assistant message joins its execution disclosure using the exact `agen
 
 Artifacts are explicitly published global results without owners or revisions. Current kinds are solid, html and file. Cards resolve current content through `artifact_upsert`, `list_artifacts`/`artifacts_listed`, and `open_artifact`/`artifact_opened`, correlated by client ID. Only explicit Markdown MIME/filename file artifacts render Markdown; ordinary text remains preformatted. Source downloads preserve original bytes. Preview documents are isolated with no network or backend bridge.
 
+Thread turns carry immutable `accepted_at:string` separately from `started_at:string|null`. Queued turns have no start; admission to execution sets it once. A turn cancelled while queued retains a null start and has a terminal `finished_at`; clients use acceptance for its chronology and show no execution duration. Direct execution records both timestamps. Running turns always have a start.
+
+`Thread.instrument` is `null` or a validated nonempty component object or nonempty component array. Arrays remain supported. Empty `{}` and `[]` are invalid; absence is SQL NULL, projected as JSON `null`. Agent `threads_update` omits `instrument` to preserve it and sends `instrument:null` to clear it. Instrument controls remain revision-fenced.
+
 Current host-authored Canvas Views retain `view_upsert {instance_id,thread_id,spec}`, `view_removed {instance_id}`, and `view_event {instance_id,action,data}`. Thread instruments have their own constrained JSON controls and revision validation.
 
 ProcessInfo requires `thread_id,id,name,trigger_recurring,cancellable,state,started_ts,last_event_ts` and carries optional `active_process_id`, nullable trigger subscription metadata, `last_fired_ts`, and `last_outcome`. Its `id` is a stable identity for one process name within its owning Thread, not an execution ID. Subscriptions and all runs of that name fold into one row; `process_upsert {process}` replaces it and `process_removed {thread_id,id}` removes a row absent from the authoritative projection. `hello_ok` replaces the full list on reconnect.

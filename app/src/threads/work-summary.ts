@@ -34,7 +34,7 @@ export function remainingTools(calls: ToolCall[], items: TimelineItem[]): ToolCa
   });
 }
 export function workDuration(turn: ThreadTurn | undefined, now: number): string {
-  if (!turn || turn.state === "queued") return "";
+  if (!turn?.started_at) return "";
   const end = turn.finished_at ? Date.parse(turn.finished_at) : now;
   const seconds = Math.max(0, Math.floor((end - Date.parse(turn.started_at)) / 1000));
   if (!Number.isFinite(seconds)) return "";

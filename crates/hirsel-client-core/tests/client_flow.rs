@@ -44,7 +44,7 @@ fn thread(id: u64, read: bool, settled: bool) -> Thread {
         title: format!("thread-{id}"),
         description: "Work".into(),
         execution: None,
-        instrument: serde_json::json!({"type":"card","children":[]}),
+        instrument: Some(serde_json::json!({"type":"card","children":[]})),
         attention: ThreadAttention::Quiet,
         settled_at: settled.then(Utc::now),
         archived_at: None,

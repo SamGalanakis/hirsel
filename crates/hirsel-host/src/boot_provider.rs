@@ -123,7 +123,7 @@ fn fallback_label(mode: ProviderMode) -> &'static str {
 /// OpenAI-compatible instance needs a stored key, and `codex` needs a readable
 /// login. Both checks are the same ones the Providers tab reports.
 pub async fn resolve(store: &ConfigStore, mode: ProviderMode, home: Option<&Path>) -> BootProvider {
-    let Some(id) = store.agent_provider("model") else {
+    let Some(id) = store.agent_provider(hirsel_proto::AgentSlot::Main) else {
         return BootProvider::env_default(mode);
     };
     // The legacy anthropic boot path has no roster and no model-selection
@@ -230,7 +230,12 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_agent_provider_and_model("model", "acme", "id", "acme/model", "default")
+            .set_agent_provider_and_model(
+                hirsel_proto::AgentSlot::Main,
+                "acme",
+                "acme/model",
+                "default",
+            )
             .await
             .unwrap();
         store
@@ -279,7 +284,12 @@ mod tests {
             (CLAUDE_ID, "Sub-agents only"),
         ] {
             store
-                .set_agent_provider_and_model("model", id, "id", "whatever", "default")
+                .set_agent_provider_and_model(
+                    hirsel_proto::AgentSlot::Main,
+                    id,
+                    "whatever",
+                    "default",
+                )
                 .await
                 .unwrap();
             let boot = resolve(&store, ProviderMode::OpenRouter, Some(dir.path())).await;
@@ -297,7 +307,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir).await;
         store
-            .set_agent_provider_and_model("model", CODEX_ID, "id", "gpt-5.6-sol", "high")
+            .set_agent_provider_and_model(
+                hirsel_proto::AgentSlot::Main,
+                CODEX_ID,
+                "gpt-5.6-sol",
+                "high",
+            )
             .await
             .unwrap();
 

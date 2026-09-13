@@ -148,8 +148,8 @@ impl ProviderRosterState {
     /// key is absent or no longer usable — in which case the caller falls back
     /// to the booted provider's own curated selection.
     pub fn agent_provider(&self, agent: AgentSlot) -> Option<AgentProviderChoice> {
-        let section = section_for(agent);
-        let id = self.config_store.agent_provider(section)?;
+        let section = crate::host_config::SlotKeys::for_slot(agent).section;
+        let id = self.config_store.agent_provider(agent)?;
         match self.choice(&id) {
             Some(choice) if choice.kind == ProviderKind::Claude => {
                 tracing::warn!(
@@ -213,13 +213,7 @@ impl ProviderRosterState {
         seed: &ModelSelection,
     ) -> anyhow::Result<()> {
         self.config_store
-            .set_agent_provider_and_model(
-                section_for(agent),
-                &choice.id,
-                model_key_for(agent),
-                &seed.id,
-                &seed.variant,
-            )
+            .set_agent_provider_and_model(agent, &choice.id, &seed.id, &seed.variant)
             .await
     }
 
@@ -434,23 +428,6 @@ fn native_worker_snapshot(provider: &StoredProvider) -> NativeWorkerProviderSnap
         id: provider.id.clone(),
         base_url: provider.base_url.clone(),
         revision: format!("sha256:{:x}", hasher.finalize()),
-    }
-}
-
-/// The `hirsel.toml` section that holds one agent's provider and model.
-fn section_for(agent: AgentSlot) -> &'static str {
-    match agent {
-        AgentSlot::Main => "model",
-        AgentSlot::Fork => "fork",
-    }
-}
-
-/// The key that section stores the model id under. The two agents disagree for
-/// historical reasons: `[model] id` predates `[fork] model`.
-fn model_key_for(agent: AgentSlot) -> &'static str {
-    match agent {
-        AgentSlot::Main => "id",
-        AgentSlot::Fork => "model",
     }
 }
 
@@ -804,7 +781,12 @@ mod tests {
         for id in [CLAUDE_ID, "retired"] {
             state
                 .config_store
-                .set_agent_provider_and_model("model", id, "id", "whatever", "default")
+                .set_agent_provider_and_model(
+                    hirsel_proto::AgentSlot::Main,
+                    id,
+                    "whatever",
+                    "default",
+                )
                 .await
                 .unwrap();
             assert_eq!(state.agent_provider(AgentSlot::Main), None);
@@ -816,7 +798,7 @@ mod tests {
             .unwrap();
         state
             .config_store
-            .set_agent_provider_and_model("fork", "router", "model", "m", "default")
+            .set_agent_provider_and_model(hirsel_proto::AgentSlot::Fork, "router", "m", "default")
             .await
             .unwrap();
         let choice = state.agent_provider(AgentSlot::Fork).unwrap();

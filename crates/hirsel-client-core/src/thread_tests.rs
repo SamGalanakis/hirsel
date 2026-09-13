@@ -16,7 +16,7 @@ fn thread(revision: u64) -> Thread {
         title: "Groceries".into(),
         description: "Buy milk".into(),
         execution: None,
-        instrument: serde_json::json!({"type":"text","text":"Milk"}),
+        instrument: Some(serde_json::json!({"type":"text","text":"Milk"})),
         attention: ThreadAttention::Quiet,
         settled_at: None,
         archived_at: None,
@@ -98,7 +98,8 @@ fn unopened_thread_accepts_same_revision_execution_and_activity_projections() {
         owner_message_id: Some(1),
         agent_message_id: None,
         state: ThreadTurnState::Running,
-        started_at,
+        accepted_at: started_at,
+        started_at: Some(started_at),
         finished_at: None,
     };
     work.running_turn = Some(turn.clone());
@@ -205,7 +206,8 @@ fn thread_stream_rejects_prior_turn_duplicate_sequence_and_terminal_deltas() {
         owner_message_id: None,
         agent_message_id: Some(8),
         state: ThreadTurnState::Completed,
-        started_at: Utc::now(),
+        accepted_at: Utc::now(),
+        started_at: Some(Utc::now()),
         finished_at: Some(Utc::now()),
     };
     store.upsert_turn(turn);
@@ -313,7 +315,8 @@ fn queued_later_turn_does_not_own_running_stream() {
         owner_message_id: Some(1),
         agent_message_id: None,
         state: ThreadTurnState::Running,
-        started_at: now,
+        accepted_at: now,
+        started_at: Some(now),
         finished_at: None,
     });
     store.apply_delta(
@@ -332,7 +335,8 @@ fn queued_later_turn_does_not_own_running_stream() {
         owner_message_id: Some(2),
         agent_message_id: None,
         state: ThreadTurnState::Queued,
-        started_at: now,
+        accepted_at: now,
+        started_at: None,
         finished_at: None,
     });
     store.apply_delta(

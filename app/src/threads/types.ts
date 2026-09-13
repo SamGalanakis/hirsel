@@ -41,7 +41,8 @@ export interface ThreadTurn {
   owner_message_id: number | null;
   agent_message_id: number | null;
   state: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
-  started_at: string;
+  accepted_at: string;
+  started_at: string | null;
   finished_at: string | null;
 }
 export interface ThreadActivity {

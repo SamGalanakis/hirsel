@@ -37,7 +37,7 @@ async fn push_tokens_survive_reopening_current_store() {
                         "fixture-Conversation",
                         "Conversation",
                         "",
-                        &serde_json::Value::Null,
+                        None,
                         hirsel_proto::ThreadAttention::Quiet,
                         hirsel_proto::ThreadKind::Task,
                         None,

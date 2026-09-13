@@ -12,7 +12,6 @@ use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use hirsel_drivers::AgentKind;
 use hirsel_proto::{
     AgentActivityState, Blob, HostToClient, ModelSelection, ModelSnapshot, SendMode,
     SubagentModelCatalog, ToolCallSummary, TurnEventKind,

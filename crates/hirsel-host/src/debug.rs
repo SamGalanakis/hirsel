@@ -273,7 +273,7 @@ async fn seed_adaptive_thread(State(state): State<AppState>) -> Result<Json<Thre
             &format!("debug-adaptive-thread:{}", Uuid::new_v4()),
             "Adaptive host proof",
             "Advance this Thread through the real Host action contract",
-            &instrument,
+            Some(&instrument),
             ThreadAttention::NeedsOwner,
             hirsel_proto::ThreadKind::Task,
             None,
@@ -575,7 +575,9 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, D
         latest_msg_id: state.storage.latest_msg_id().await?,
         debug: state.debug_enabled,
         started_at_unix,
-        model: state.model_snapshot().map(|snapshot| snapshot.current),
+        model: state
+            .model_snapshot()
+            .map(|snapshot| snapshot.model.current),
     }))
 }
 

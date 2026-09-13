@@ -71,9 +71,7 @@ impl LashAgentRuntime {
             Ok(provider) => provider,
             Err(ProviderUnavailable { message }) => {
                 tracing::warn!(%message, "Lash Agent provider unavailable; using degraded runtime");
-                return Ok(LashStartup::Unavailable(Arc::new(DegradedAgentRuntime {
-                    reason: message,
-                })));
+                return Ok(LashStartup::Unavailable);
             }
         };
 
@@ -227,7 +225,6 @@ impl LashAgentRuntime {
             pump_lock: Mutex::new(()),
             request_lock: Mutex::new(()),
             anchors,
-            active_turn_id: Arc::new(Mutex::new(None)),
             timeline_commits: TimelineCommitBarrier::default(),
             drain_seq: AtomicU64::new(0),
             drain_boot_ms: std::time::SystemTime::now()
@@ -236,7 +233,6 @@ impl LashAgentRuntime {
                 .unwrap_or(0),
             drain_retry_scheduled: AtomicBool::new(false),
             drain_retry_attempts: AtomicU64::new(0),
-            model_selection,
             prompts: config.prompts.clone(),
             handoff_seed: session_bootstrap.handoff_seed,
             fork_wake: fork_wake.clone(),
@@ -264,25 +260,6 @@ impl LashAgentRuntime {
             "Lash Agent runtime opened session"
         );
         Ok(LashStartup::Ready(runtime))
-    }
-
-    pub(super) async fn apply_selected_model(&self) -> anyhow::Result<()> {
-        let Some(selection) = &self.model_selection else {
-            return Ok(());
-        };
-        let spec = selection.model_spec()?;
-        if self.session.policy_snapshot().model == spec {
-            return Ok(());
-        }
-        self.session
-            .admin()
-            .config()
-            .update(lash::SessionConfigPatch {
-                model: Some(spec),
-                ..lash::SessionConfigPatch::default()
-            })
-            .await
-            .context("apply selected model to main-agent Lash session")
     }
 
     /// Reconcile the live session's prompt with the Owner's configuration.
@@ -352,10 +329,6 @@ impl LashAgentRuntime {
             .context("enqueue plugin tool-catalog refresh")?;
         self.notify.notify_one();
         Ok(())
-    }
-
-    pub(super) async fn enqueue_inner(&self, turn: OwnerTurn) -> anyhow::Result<()> {
-        self.enqueue_thread_request(turn).await
     }
 
     pub(super) async fn notify_if_work_pending(&self) {
@@ -452,11 +425,7 @@ impl LashAgentRuntime {
                             }
                         }
                     }
-                    let drain_id = runtime
-                        .active_turn_id
-                        .lock()
-                        .await
-                        .clone()
+                    let drain_id = runtime.anchors.lock().await.drain_id.clone()
                         .expect("every admitted drain has an execution identity");
                     let result = runtime.run_admitted_drain(&drain_id).await;
 
@@ -539,27 +508,22 @@ impl LashAgentRuntime {
         // a persistent session store (store_commit_failed on first turn).
         format!(
             "host-queue-drain:{}:{seq}:thread:{}:turn:{}",
-            self.drain_boot_ms,
-            route.thread_id,
-            route.thread_turn_id.expect("drain turn identity")
+            self.drain_boot_ms, route.thread_id, route.thread_turn_id
         )
     }
 
-    pub(super) async fn set_active_turn_id(&self, id: Option<String>) {
-        *self.active_turn_id.lock().await = id;
-    }
-
     pub(super) async fn clear_active_turn_id(&self, id: &str) {
-        let mut active = self.active_turn_id.lock().await;
-        if active.as_deref() == Some(id) {
-            *active = None;
+        let mut ownership = self.anchors.lock().await;
+        if ownership.drain_id.as_deref() == Some(id) {
+            ownership.drain_id = None;
             self.timeline_commits.clear(id).await;
         }
     }
 
     pub(super) async fn activate_background_turn(&self) -> anyhow::Result<bool> {
         let _request_guard = self.request_lock.lock().await;
-        if let Some(route) = self.anchors.lock().await.active.clone() {
+        let route = self.anchors.lock().await.active.clone();
+        if let Some(route) = route {
             let drain_id = self.next_drain_id(&route);
             self.tools
                 .storage()
@@ -567,10 +531,10 @@ impl LashAgentRuntime {
                     &self.history_id,
                     &self.session_id,
                     &drain_id,
-                    route.thread_turn_id.expect("owned turn"),
+                    route.thread_turn_id,
                 )
                 .await?;
-            self.set_active_turn_id(Some(drain_id)).await;
+            self.anchors.lock().await.drain_id = Some(drain_id);
             return Ok(true);
         }
         if self.session.queued_work().await?.is_empty()
@@ -586,25 +550,23 @@ impl LashAgentRuntime {
         let route = TurnAnchors {
             request_id: None,
             thread_id: self.thread_id,
-            thread_turn_id: Some(turn.id),
+            thread_turn_id: turn.id,
         };
         let drain_id = self.next_drain_id(&route);
         self.tools
             .storage()
             .bind_thread_execution(&self.history_id, &self.session_id, &drain_id, turn.id)
             .await?;
-        self.set_active_turn_id(Some(drain_id)).await;
-        self.anchors.lock().await.active = Some(route);
+        *self.anchors.lock().await = TurnAnchorState {
+            active: Some(route),
+            drain_id: Some(drain_id),
+        };
         self.tools.publish_thread_turn(turn).await;
         Ok(true)
     }
 
     pub(super) async fn clear_active_anchor(&self) {
-        self.anchors.lock().await.active = None;
-    }
-
-    pub(super) async fn cancel_turn(&self) -> anyhow::Result<()> {
-        self.cancel_owned_turn(None).await
+        *self.anchors.lock().await = TurnAnchorState::default();
     }
 
     pub(super) async fn cancel_queued(
@@ -689,7 +651,7 @@ impl LashAgentRuntime {
         tracing::warn!(%error, "Lash queued turn failed");
         let active = self.anchors.lock().await.active.clone();
         let thread_id = self.thread_id;
-        let turn_id = active.as_ref().and_then(|a| a.thread_turn_id);
+        let turn_id = active.as_ref().map(|a| a.thread_turn_id);
         match self
             .tools
             .storage()

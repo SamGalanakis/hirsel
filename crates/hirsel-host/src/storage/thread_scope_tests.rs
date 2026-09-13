@@ -6,7 +6,7 @@ async fn thread(s: &Storage, key: &str, parent: Option<u64>) -> u64 {
         key,
         key,
         "",
-        &json!({}),
+        None,
         ThreadAttention::Quiet,
         hirsel_proto::ThreadKind::Task,
         parent,
@@ -368,7 +368,7 @@ async fn scoped_artifact_receipts_hide_peer_backlinks_and_cancelled_writes_have_
                 title: "late".into(),
                 parent: ThreadRef::default(),
                 description: String::new(),
-                instrument: json!({}),
+                instrument: None,
                 attention: ThreadAttention::Quiet
             }
         )
@@ -1011,4 +1011,63 @@ async fn direct_owner_native_input_policy_is_atomic_and_preserves_text_followups
             .unwrap(),
         ThreadExecution::LashWorker { .. }
     ));
+}
+
+#[tokio::test]
+async fn report_receipt_uses_activity_payload_and_preserves_exact_artifact_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let parent = thread(&storage, "report-parent", None).await;
+    let child = thread(&storage, "report-child", Some(parent)).await;
+    let actor = caller(&storage, child).await;
+    let mut ids = Vec::new();
+    for title in ["First", "Second"] {
+        let draft = ArtifactDraft {
+            title: title.into(),
+            kind: hirsel_proto::ArtifactKind::File,
+            mime: "text/plain".into(),
+            filename: None,
+            content: title.into(),
+            expected_content: None,
+        };
+        let (artifact, _) = storage
+            .publish_artifact(title, &json!({"title":title}), &actor, None, Some(draft))
+            .await
+            .unwrap();
+        ids.push(artifact.summary.id);
+    }
+    let refs = [ids[1], ids[0], ids[1]];
+    let first = storage
+        .report_thread_progress(&actor, "report", "Progress", &refs)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .report_thread_progress(&actor, "report", "Progress", &refs)
+            .await
+            .unwrap(),
+        first
+    );
+    assert!(
+        storage
+            .report_thread_progress(&actor, "report", "Changed", &refs)
+            .await
+            .is_err()
+    );
+    assert!(
+        storage
+            .report_thread_progress(&actor, "report", "Progress", &[ids[0], ids[1]])
+            .await
+            .is_err()
+    );
+    let detail = storage.thread_detail(parent, None, 100).await.unwrap();
+    let reports: Vec<_> = detail
+        .activities
+        .iter()
+        .filter(|activity| activity.kind == "child_report")
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].id, first);
+    assert_eq!(reports[0].data["artifact_ids"], json!(refs));
+    assert!(reports[0].data.get("report_seq").is_none());
 }

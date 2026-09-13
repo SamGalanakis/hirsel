@@ -10,12 +10,34 @@ use tokio::sync::RwLock;
 
 use super::{bind::bind_spec, spec::validate};
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ParamType {
+    String,
+    Number,
+    Boolean,
+    Array,
+    Object,
+}
+
+impl std::fmt::Display for ParamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Array => "array",
+            Self::Object => "object",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TemplateFile {
     id: String,
     title: String,
     #[serde(default)]
-    params_schema: BTreeMap<String, String>,
+    params_schema: BTreeMap<String, ParamType>,
     spec: Value,
 }
 
@@ -133,7 +155,7 @@ fn validate_template_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_params(schema: &BTreeMap<String, String>, params: &Value) -> anyhow::Result<()> {
+fn validate_params(schema: &BTreeMap<String, ParamType>, params: &Value) -> anyhow::Result<()> {
     let params = params
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("template params must be an object"))?;
@@ -141,13 +163,12 @@ fn validate_params(schema: &BTreeMap<String, String>, params: &Value) -> anyhow:
         let value = params
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("missing template param `{name}`"))?;
-        let valid = match expected.as_str() {
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "array" => value.is_array(),
-            "object" => value.is_object(),
-            other => anyhow::bail!("unsupported params_schema type `{other}` for `{name}`"),
+        let valid = match expected {
+            ParamType::String => value.is_string(),
+            ParamType::Number => value.is_number(),
+            ParamType::Boolean => value.is_boolean(),
+            ParamType::Array => value.is_array(),
+            ParamType::Object => value.is_object(),
         };
         if !valid {
             anyhow::bail!(
@@ -167,5 +188,26 @@ fn value_kind(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn misspelled_parameter_type_fails_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("typo.json"),
+            r#"{"id":"typo","title":"Typo","params_schema":{"name":"strnig"},"spec":{}}"#,
+        )
+        .await
+        .unwrap();
+        let error = TemplateStore::load(dir.path().to_path_buf())
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("strnig"), "{error}");
     }
 }

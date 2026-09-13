@@ -12,7 +12,7 @@ pub struct ThreadActionSnapshot {
     pub kind: ThreadKind,
     pub title: String,
     pub description: String,
-    pub instrument: Value,
+    pub instrument: Option<Value>,
     pub attention: ThreadAttention,
     pub settled_at: Option<DateTime<Utc>>,
     pub archived_at: Option<DateTime<Utc>>,

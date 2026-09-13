@@ -30,28 +30,10 @@ pub(super) struct ScriptedQueueState {
 
 pub(super) struct ScriptedActiveTurn {
     pub(super) turn_id: Option<u64>,
-    pub(super) thread_id: u64,
     pub(super) cancel: lash::CancellationToken,
 }
 
 impl ScriptedAgentRuntime {
-    pub(super) async fn enqueue(&self, mut turn: OwnerTurn) -> anyhow::Result<()> {
-        #[cfg(test)]
-        if turn.body == "__hirsel_test_enqueue_error__" {
-            anyhow::bail!("scripted enqueue failed for test");
-        }
-        self.tools
-            .storage()
-            .save_thread_request(&turn.client_id, &serde_json::to_value(&turn)?)
-            .await?;
-        let queued = turn.stored_turn(&self.tools.storage()).await?;
-        turn.turn_id = Some(queued.id);
-        self.tools.publish_thread_turn(queued).await;
-        self.state.lock().await.queue.push_back(turn);
-        self.notify.notify_one();
-        Ok(())
-    }
-
     pub(super) async fn cancel_turn(&self) -> anyhow::Result<()> {
         if let Some(cancel) = self
             .state
@@ -114,7 +96,7 @@ impl ScriptedAgentRuntime {
                     ) {
                         continue;
                     }
-                    if record.finished_at.is_some() {
+                    if record.state.is_terminal() {
                         let _ = self.tools.storage().remove_thread_request(&client_id).await;
                         continue;
                     }
@@ -180,7 +162,6 @@ impl ScriptedAgentRuntime {
         let cancel = lash::CancellationToken::new();
         state.active = Some(ScriptedActiveTurn {
             turn_id: turn.turn_id,
-            thread_id: turn.thread_id,
             cancel: cancel.clone(),
         });
         Some((turn, cancel))
@@ -296,7 +277,7 @@ impl ScriptedAgentRuntime {
                     context.thread.id,
                     None,
                     Some(&format!("Advanced after {label}")),
-                    Some(&instrument),
+                    Some(Some(&instrument)),
                     Some(hirsel_proto::ThreadAttention::Quiet),
                 )
                 .await?;

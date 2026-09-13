@@ -15,20 +15,22 @@ unless a future trusted-proxy contract explicitly provides client identity.
 
 The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. The coordinator and native Lash coding worker use the TypeScript RLM dialect with process and trigger abilities; the worker retains its separate four-operation coding profile. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
-History lives in `hirsel.sqlite`. New stores use the complete current schema 7
+History lives in `hirsel.sqlite`. New stores use the complete current schema 8
 layout. Startup accepts that exact layout or an empty store and refuses every
 other layout before modification. Back up the data directory before replacing
 an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 project files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
-Schema 7 combines the mutually exclusive `threads.icon_blob_id` reference beside
-the emoji text column with Lash process delivery receipts and Thread authority.
-The blob foreign key retains an image for as long as a Thread uses it. The
-canonical layout includes `process_deliveries`, `thread_process_sessions`, and
-`thread_process_authorities`, and has no `monitors` table. There is no in-place
-migration: schema 6 and either earlier branch-specific schema 7 layout require
-backup and fresh-data handling before this build can start.
+Schema 8 keeps Thread icons, execution preferences and process deliveries. Its
+CHECKs link terminal states to completion timestamps and enforce absent starts
+for queued work and actual starts for running work. Immutable `accepted_at`
+records acceptance separately. Instruments use SQL NULL for absence; nonempty
+validated component objects and arrays remain supported. Cancellation intent
+lives on `thread_turns.cancel_requested_at`. Report receipts retain only the
+activity reference; activity ids provide ordering and the activity holds the
+report payload. There is no in-place migration: schema 7 and older layouts
+require backup and fresh-data handling before this build can start.
 
 Schema 5 added the append-only `thread_turn_events` timeline. The Host commits
 each typed event before broadcasting it and `open_thread` replays events only

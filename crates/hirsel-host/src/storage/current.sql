@@ -144,8 +144,9 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 PRIMARY KEY (plugin_id, key)
             );
 CREATE TABLE artifacts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, kind TEXT NOT NULL,
-        mime TEXT NOT NULL, filename TEXT, content TEXT NOT NULL,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ($ARTIFACT_KINDS)),
+        kind_data TEXT NOT NULL, content TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE message_artifacts (
         message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,

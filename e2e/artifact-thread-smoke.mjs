@@ -7,7 +7,7 @@ function request(frame, expected) { return harnessRequest({url:base,token,frame,
 async function publish(threadId,id,draft){const response=await fetch(`${base}/debug/publish-artifact`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({operation_id:crypto.randomUUID(),thread_id:threadId,artifact_id:id,draft})});if(!response.ok)throw new Error(await response.text());return response.json()}
 const a=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion A ${Date.now()}`,kind:'space'},'thread_created')).thread;
 const b=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion B ${Date.now()}`,kind:'space'},'thread_created')).thread;
-const draft=(start,title)=>({title,kind:'solid',mime:'text/jsx',filename:'counter.jsx',content:`import {createSignal} from 'solid-js'; export default function App(){const [n,setN]=createSignal(${start});return <button onClick={()=>setN(n()+1)}>Count {n()}</button>}`});
+const draft=(start,title)=>({title,kind:'solid',content:`import {createSignal} from 'solid-js'; export default function App(){const [n,setN]=createSignal(${start});return <button onClick={()=>setN(n()+1)}>Count {n()}</button>}`});
 const artifact=await publish(a.id,undefined,draft(0,'Shared counter'));
 const browser=await launchBrowser();
 const results=[];

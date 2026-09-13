@@ -41,23 +41,24 @@ impl ScopedThreadTools {
             };
             let draft = match name {
                 "artifacts_create" => {
-                    let kind: ArtifactKind = serde_json::from_value(
-                        args.get("kind").cloned().ok_or("kind is required")?,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    let mime = optional_string(args, "mime")?.unwrap_or_else(|| {
-                        match kind {
-                            ArtifactKind::Solid => "text/jsx",
-                            ArtifactKind::Html => "text/html",
-                            ArtifactKind::File => "text/plain",
-                        }
-                        .into()
-                    });
+                    // The tool keeps the ergonomic inputs an agent knows; the
+                    // render mode is decided once, here, and stored as the only
+                    // discriminator.
+                    let tag = args
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .ok_or("kind is required")?
+                        .to_string();
+                    let mime = optional_string(args, "mime")?;
+                    let filename = optional_string(args, "filename")?;
+                    let kind = ArtifactKind::from_publish_inputs(
+                        &tag,
+                        mime.as_deref(),
+                        filename.as_deref(),
+                    )?;
                     Some(ArtifactDraft {
                         title: required_string(args, "title")?,
                         kind,
-                        mime,
-                        filename: optional_string(args, "filename")?,
                         content: required_string(args, "content")?,
                         expected_content: None,
                     })
@@ -87,8 +88,6 @@ impl ScopedThreadTools {
                     Some(ArtifactDraft {
                         title: optional_string(args, "title")?.unwrap_or(current.summary.title),
                         kind: current.summary.kind,
-                        mime: current.summary.mime,
-                        filename: current.summary.filename,
                         content,
                         expected_content: Some(current.content),
                     })

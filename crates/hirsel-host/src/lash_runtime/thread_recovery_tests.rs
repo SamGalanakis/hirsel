@@ -1077,8 +1077,6 @@ async fn artifact_reference_identity_reaches_the_next_turn_context() {
             Some(crate::storage::ArtifactDraft {
                 title: "Diagram".into(),
                 kind: hirsel_proto::ArtifactKind::Html,
-                mime: "text/html".into(),
-                filename: None,
                 content: "<p>Result</p>".into(),
                 expected_content: None,
             }),

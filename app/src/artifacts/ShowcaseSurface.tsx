@@ -6,28 +6,16 @@ import { historyId } from "../lib/history";
 import { state } from "../store/store";
 import { ThreadError } from "../threads/ThreadError";
 import { threadState } from "../threads/store";
-import { useRelatedOrigin } from "../related/context";
 import type { RelatedOrigin } from "../related/store";
 import { ArtifactPreview } from "./ArtifactPreview";
-import { ArtifactPresentationToggle, hasArtifactPresentationModes, type ArtifactPresentationMode } from "./ArtifactPresentationMode";
+import { ArtifactPresentationToggle, type ArtifactPresentationMode } from "./ArtifactPresentationMode";
+import { artifactCaption, hasArtifactSource } from "./render-mode";
 import { downloadArtifact } from "./download";
 import { artifactState, inventoryError, listArtifacts } from "./store";
 import { captureShowcaseOrigin, phoneShowcase, setPhoneShowcase, setShowcasePicker, setThreadShowcase, showcasePicker, type ShowcaseOrigin } from "./showcase-actions";
 import { refreshShowcase, selectShowcase, showcaseState } from "./showcase-store";
 
 const button = "inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-lg px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
-export function ArtifactActions(props: { artifactId: number }) {
-  const origin = useRelatedOrigin();
-  let target: ShowcaseOrigin | null = null;
-  const [error, setError] = createSignal<string | null>(null);
-  return <Show when={origin}><div class="shrink-0"><DropdownMenu onOpenChange={open => { if (open) { target = captureShowcaseOrigin(origin); setError(null); } }}>
-    <DropdownMenuTrigger class={button} aria-label="Artifact actions"><MoreHorizontal class="size-4" /></DropdownMenuTrigger>
-    <DropdownMenuContent><DropdownMenuItem onSelect={() => {
-      try { if (!target) throw new Error("Reconnect and reopen this menu to choose a showcase."); setThreadShowcase(target, props.artifactId); }
-      catch (error) { setError(error instanceof Error ? error.message : "Couldn’t showcase this artifact."); }
-    }}>Showcase in this thread</DropdownMenuItem></DropdownMenuContent>
-  </DropdownMenu><Show when={error()}><p role="alert" class="max-w-60 px-2 text-xs text-status-danger">{error()}</p></Show></div></Show>;
-}
 export function ShowcaseButton(props: { threadId: number }) {
   const current = () => threadState.threads.find(thread => thread.id === props.threadId);
   return <Show when={current()?.showcased_artifact_id != null}><button class={`${button} lg:hidden`} aria-label="Show showcase" title="Show showcase" onClick={() => { const history = historyId(); if (history) setPhoneShowcase({ historyId: history, threadId: props.threadId }); }}><PanelRight class="size-4" /></button></Show>;
@@ -80,7 +68,7 @@ function ThreadShowcase(props: { origin: RelatedOrigin }) {
   };
   return <dialog ref={node => { dialog = node; }} onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }} aria-label="Thread showcase" aria-modal={phone() ? "true" : undefined} role={phone() ? "dialog" : "complementary"} data-slot="thread-showcase" class="fixed inset-0 z-40 m-0 h-full max-h-none w-full max-w-none min-h-0 min-w-0 flex-col border-0 bg-background p-0 text-foreground outline-none open:flex lg:static lg:z-auto lg:w-[44%] lg:min-w-80 lg:border-l lg:border-border">
     <header class="flex shrink-0 flex-wrap items-center gap-1 border-b border-border/60 px-4 py-3"><div class="min-w-0 w-full sm:w-auto sm:flex-1"><p class="text-xs text-muted-foreground">Showcase</p><h2 class="truncate font-semibold">{showcaseState.artifact?.title ?? "Artifact"}</h2></div>
-      <Show when={showcaseState.artifact && hasArtifactPresentationModes(showcaseState.artifact)}><ArtifactPresentationToggle mode={mode()} onChange={setMode} /></Show>
+      <Show when={showcaseState.artifact && hasArtifactSource(showcaseState.artifact)}><ArtifactPresentationToggle mode={mode()} onChange={setMode} /></Show>
       <Show when={showcaseState.artifact}><button class={button} title="Download showcase" aria-label="Download showcase" onClick={() => downloadArtifact(showcaseState.artifact!)}><ArrowDownToLine class="size-4" /></button></Show>
       <DropdownMenu onOpenChange={open => { if (open) { target = captureShowcaseOrigin(props.origin); setError(null); } }}><DropdownMenuTrigger class={button} aria-label="Showcase actions"><MoreHorizontal class="size-4" /></DropdownMenuTrigger><DropdownMenuContent><DropdownMenuItem onSelect={replace}>Replace showcase</DropdownMenuItem><DropdownMenuItem onSelect={remove}>Remove showcase</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
       <button class={`${button} lg:hidden`} aria-label="Back to conversation" onClick={close}><X class="size-5" /></button>
@@ -115,6 +103,6 @@ function ShowcasePicker() {
     <label class="mt-4 block text-sm">Find an artifact<input autofocus type="search" value={search()} onInput={event => setSearch(event.currentTarget.value)} class="mt-2 min-h-11 w-full rounded-lg border border-border bg-transparent px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /></label>
     <Show when={error() || inventoryError()}><p role="alert" class="mt-3 text-sm text-status-danger">{error() ?? inventoryError()}</p><Show when={inventoryError()}><button class={button} onClick={listArtifacts}>Retry loading artifacts</button></Show></Show>
     <Show when={artifactState.inventory.status === "loading"}><p role="status" class="py-3 text-sm text-muted-foreground">Loading artifacts…</p></Show>
-    <ul class="mt-3 divide-y divide-border"><For each={artifactState.summaries.filter(artifact => `${artifact.title} ${artifact.filename ?? ""}`.toLowerCase().includes(search().toLowerCase()))} fallback={<li class="py-4 text-sm text-muted-foreground">{artifactState.inventory.status === "loading" ? "" : "No matching artifacts."}</li>}>{artifact => <li><button class={`${button} w-full justify-start py-3 text-left`} aria-label={`Choose ${artifact.title} as showcase`} data-artifact-id={artifact.id} disabled={state.connection !== "connected"} onClick={() => choose(artifact.id)}><span class="min-w-0"><span class="block break-words font-medium text-foreground">{artifact.title}</span><span class="text-xs">{artifact.filename ?? artifact.kind}</span></span></button></li>}</For></ul>
+    <ul class="mt-3 divide-y divide-border"><For each={artifactState.summaries.filter(artifact => `${artifact.title} ${artifactCaption(artifact)}`.toLowerCase().includes(search().toLowerCase()))} fallback={<li class="py-4 text-sm text-muted-foreground">{artifactState.inventory.status === "loading" ? "" : "No matching artifacts."}</li>}>{artifact => <li><button class={`${button} w-full justify-start py-3 text-left`} aria-label={`Choose ${artifact.title} as showcase`} data-artifact-id={artifact.id} disabled={state.connection !== "connected"} onClick={() => choose(artifact.id)}><span class="min-w-0"><span class="block break-words font-medium text-foreground">{artifact.title}</span><span class="text-xs">{artifactCaption(artifact)}</span></span></button></li>}</For></ul>
   </dialog>;
 }

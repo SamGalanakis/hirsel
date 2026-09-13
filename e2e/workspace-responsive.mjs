@@ -23,7 +23,7 @@ function sqliteJson(sql) {
 const poll = (label, predicate, timeoutMs = 60_000) => harnessPoll(label, predicate, timeoutMs, 150);
 
 const [thread] = sqliteJson("SELECT id,title FROM threads ORDER BY id LIMIT 1");
-const [artifact] = sqliteJson("SELECT id,title,mime,length(content) AS bytes FROM artifacts WHERE mime='image/svg+xml' ORDER BY id LIMIT 1");
+const [artifact] = sqliteJson("SELECT id,title,json_extract(kind_data,'$.mime') AS mime,length(content) AS bytes FROM artifacts WHERE kind='image' ORDER BY id LIMIT 1");
 assert(thread && artifact, "Fixture must contain a Thread and a saved SVG artifact.");
 const [{ base: nestingBase }] = sqliteJson("SELECT COALESCE(MAX(id), 0) + 100 AS base FROM threads");
 const ancestorIds = [0, 1, 2, 3].map(offset => nestingBase + offset);

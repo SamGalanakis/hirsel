@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { artifactDocument } from "./document";
 import type { Artifact } from "./types";
-const file: Artifact = { id: 1, kind: "file", mime: "text/markdown", filename: "plan.md", title: "Plan", content: "", created_at: "a", updated_at: "a", thread_ids: [] };
-const doc = (content: string, patch: Partial<Artifact> = {}) => new DOMParser().parseFromString(artifactDocument({ ...file, ...patch, content }), "text/html");
+const file: Artifact = { id: 1, kind: "markdown", title: "Plan", content: "", created_at: "a", updated_at: "a", thread_ids: [] };
+const doc = (content: string, artifact: Artifact = file) => new DOMParser().parseFromString(artifactDocument({ ...artifact, content }), "text/html");
 describe("explicit Markdown artifacts", () => {
   it("renders headings, lists, fenced code and checked links through the common parser", () => {
     const page = doc('# Plan\n\n- Read\n- Build\n\n```ts\nconst x = "<script>";\n```\n\n[Docs](https://example.org)');
@@ -20,9 +20,8 @@ describe("explicit Markdown artifacts", () => {
     expect(page.querySelector('.markdown button')).toBeNull();
     expect(page.querySelector('meta[http-equiv]')?.getAttribute('content')).toContain("connect-src 'none'");
   });
-  it("recognizes Markdown filenames and leaves ordinary text preformatted with Escape available", () => {
-    expect(doc('# Filename', { mime: 'text/plain', filename: 'NOTES.MD' }).querySelector('h1')?.textContent).toBe('Filename');
-    const plain = doc('# Plain', { mime:'text/plain',filename:'notes.txt' });
+  it("leaves ordinary text preformatted with Escape available", () => {
+    const plain = doc('# Plain', { ...file, kind: 'file', mime: 'text/plain', filename: 'notes.txt' });
     expect(plain.querySelector('h1')).toBeNull();
     expect(plain.body.textContent).toContain('# Plain');
     expect(plain.querySelector('script')?.textContent).toContain("event.key === 'Escape'");

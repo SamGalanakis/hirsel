@@ -647,9 +647,10 @@ async fn artifacts_are_fetched_by_identity_and_references_survive_snapshot() {
             None,
             Some(crate::storage::ArtifactDraft {
                 title: "Result".into(),
-                kind: hirsel_proto::ArtifactKind::File,
-                mime: "text/plain".into(),
-                filename: Some("result.txt".into()),
+                kind: hirsel_proto::ArtifactKind::File {
+                    mime: "text/plain".into(),
+                    filename: Some("result.txt".into()),
+                },
                 content: "Hello".into(),
                 expected_content: None,
             }),

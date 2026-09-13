@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_proto::ArtifactKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AgentToolSurface {
@@ -67,8 +68,8 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.artifacts_create",
             "artifacts_create",
-            "Explicitly publish a reusable artifact and insert its card in the current conversation. Solid artifacts are self-contained JSX modules exporting default App; imports limited to solid-js and @solidjs/web (Solid 2). HTML is self-contained. Files are UTF-8 text. All interaction is local: no network, backend or Hirsel tool access. Never create artifacts automatically from every output.",
-            json!({"type":"object","additionalProperties":false,"required":["title","kind","content"],"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"kind":{"type":"string","enum":["solid","html","file"]},"content":{"type":"string","minLength":1,"maxLength":1048576},"mime":{"type":"string"},"filename":{"type":"string"}}}),
+            "Explicitly publish a reusable artifact and insert its card in the current conversation. `kind` chooses how the result is opened: solid is a self-contained JSX module exporting default App (imports limited to solid-js and @solidjs/web, Solid 2); html is a self-contained document; markdown is CommonMark/GFM source; image is SVG source or base64 bytes and needs `mime`; file is opaque UTF-8 text and may carry `mime` and `filename`. A file whose mime or filename is Markdown or an image is published as that kind instead. All interaction is local: no network, backend or Hirsel tool access. Never create artifacts automatically from every output.",
+            json!({"type":"object","additionalProperties":false,"required":["title","kind","content"],"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"kind":{"type":"string","enum":ArtifactKind::TAGS},"content":{"type":"string","minLength":1,"maxLength":1048576},"mime":{"type":"string"},"filename":{"type":"string"}}}),
             json!({"type":"object"}),
             ["artifacts"],
             "create",

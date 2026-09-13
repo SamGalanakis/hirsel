@@ -179,12 +179,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        8
+        9
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 7).unwrap();
+    conn.pragma_update(None, "user_version", 8).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -212,7 +212,7 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    for version in [7, 8] {
+    for version in [8, 9] {
         for layout in [
             include_str!("icons-only-v7.sql"),
             include_str!("processes-only-v7.sql"),
@@ -232,7 +232,7 @@ async fn branch_specific_schema_seven_layouts_are_refused_without_modification()
             drop(conn);
             let before = std::fs::read(&path).unwrap();
             let error = Storage::open(dir.path()).await.err().unwrap();
-            assert!(error.to_string().contains(if version == 7 {
+            assert!(error.to_string().contains(if version == 8 {
                 "unsupported Hirsel history schema"
             } else {
                 "unsupported Hirsel history layout"

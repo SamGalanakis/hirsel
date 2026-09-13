@@ -5,7 +5,7 @@ import { ArtifactPreview } from "./ArtifactPreview";
 import { ARTIFACT_DISMISS_MESSAGE, type Artifact } from "./types";
 
 vi.mock("./document", () => ({ artifactDocument: () => "<!doctype html><button>Preview</button>" }));
-const artifact: Artifact = { id: 4, title: "Preview", kind: "html", mime: "text/html", content: "<button>Preview</button>", thread_ids: [5], created_at: "a", updated_at: "b" };
+const artifact: Artifact = { id: 4, title: "Preview", kind: "html", content: "<button>Preview</button>", thread_ids: [5], created_at: "a", updated_at: "b" };
 
 afterEach(() => vi.unstubAllGlobals());
 describe("artifact preview recovery", () => {

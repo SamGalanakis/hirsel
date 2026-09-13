@@ -116,7 +116,7 @@ function storeSnapshot(dataDir, threadId) {
     turns: sqliteJson(database, `SELECT id,thread_id,owner_message_id,agent_message_id,state,accepted_at,started_at,finished_at FROM thread_turns WHERE thread_id=${threadId} ORDER BY id`),
     timelineEvents,
     activities: sqliteJson(database, `SELECT id,thread_id,turn_id,kind,data,ts FROM thread_activities WHERE thread_id=${threadId} ORDER BY id`),
-    artifacts: sqliteJson(database, `SELECT a.id,a.title,json_extract(a.kind,'$') AS kind,a.mime,a.filename,a.content,a.created_at,a.updated_at FROM artifacts a WHERE EXISTS (SELECT 1 FROM message_artifacts ma JOIN chat_messages m ON m.id=ma.message_id WHERE ma.artifact_id=a.id AND m.thread_id=${threadId}) ORDER BY a.id`),
+    artifacts: sqliteJson(database, `SELECT a.id,a.title,a.kind,json_extract(a.kind_data,'$.mime') AS mime,json_extract(a.kind_data,'$.filename') AS filename,a.content,a.created_at,a.updated_at FROM artifacts a WHERE EXISTS (SELECT 1 FROM message_artifacts ma JOIN chat_messages m ON m.id=ma.message_id WHERE ma.artifact_id=a.id AND m.thread_id=${threadId}) ORDER BY a.id`),
     messageArtifacts: sqliteJson(database, `SELECT ma.message_id,ma.artifact_id FROM message_artifacts ma JOIN chat_messages m ON m.id=ma.message_id WHERE m.thread_id=${threadId} ORDER BY ma.message_id,ma.artifact_id`),
   };
 }
@@ -643,7 +643,7 @@ async function runArtifact(context) {
   const storedCat = naturalCapture.store.artifacts.find(artifact => artifact.id === cat.id);
   assert.deepEqual(
     { id: storedCat?.id, title: storedCat?.title, kind: storedCat?.kind, mime: storedCat?.mime, content: storedCat?.content },
-    { id: cat.id, title: cat.title, kind: cat.kind, mime: cat.mime, content: storedCatBeforePreview.content },
+    { id: cat.id, title: cat.title, kind: cat.kind, mime: cat.mime ?? null, content: storedCatBeforePreview.content },
   );
   assertTimelineSurfaces(naturalCapture, frames, [turn.turnId, natural.turnId]);
   assertTimelineRendered(naturalCapture.dom, naturalCompleted, durableTimeline(naturalCapture.detail, natural.turnId));
@@ -662,6 +662,10 @@ function presentationArtifacts(nonce) {
       kind: "html",
       mime: "text/html",
       filename: `presentation-${nonce}.html`,
+      // The tool boundary maps these inputs onto one discriminator; the store
+      // keeps only that kind and the data the variant owns.
+      stored: { kind: "html", mime: null, filename: null },
+      downloadName: `Presentation HTML ${nonce}.html`,
       content: ` \n<!doctype html><html><body><main><h1>${marker}-HTML</h1><script>parent.postMessage("${marker}-HTML-RENDERED","*")</script></main></body></html>\n`,
       renderedText: `${marker}-HTML`,
       sideEffect: `${marker}-HTML-RENDERED`,
@@ -672,6 +676,8 @@ function presentationArtifacts(nonce) {
       kind: "file",
       mime: "text/markdown",
       filename: `presentation-${nonce}.md`,
+      stored: { kind: "markdown", mime: null, filename: null },
+      downloadName: `Presentation Markdown ${nonce}.md`,
       content: ` \n# ${marker}-MARKDOWN\n\n**Rendered** markdown with <literal-source>.\n`,
       renderedText: `${marker}-MARKDOWN`,
     },
@@ -681,6 +687,8 @@ function presentationArtifacts(nonce) {
       kind: "file",
       mime: "image/svg+xml",
       filename: `presentation-${nonce}.svg`,
+      stored: { kind: "image", mime: "image/svg+xml", filename: null },
+      downloadName: `Presentation SVG ${nonce}.svg`,
       content: ` \n<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80"><title>${marker}-SVG</title><rect width="120" height="80" rx="12" fill="#17324d"/><circle cx="38" cy="40" r="19" fill="#f5b942"/><path d="M67 56L88 22l20 34z" fill="#64c4a6"/></svg>\n`,
       renderedText: `${marker}-SVG`,
       size: { width: 120, height: 80 },
@@ -691,6 +699,8 @@ function presentationArtifacts(nonce) {
       kind: "solid",
       mime: "text/jsx",
       filename: `presentation-${nonce}.jsx`,
+      stored: { kind: "solid", mime: null, filename: null },
+      downloadName: `Presentation Solid ${nonce}.jsx`,
       content: ` \nexport default function App(){parent.postMessage("${marker}-SOLID-RENDERED","*");return <main><h1>${marker}-SOLID</h1><button onClick={e=>e.currentTarget.textContent="Pressed"}>Ready</button></main>}\n`,
       renderedText: `${marker}-SOLID`,
       sideEffect: `${marker}-SOLID-RENDERED`,
@@ -713,8 +723,8 @@ async function presentationDownload(page, panel, buttonName, expected, suffix) {
   const pending = page.waitForEvent("download");
   await panel.getByRole("button", { name: buttonName, exact: true }).click();
   const download = await pending;
-  assert.equal(download.suggestedFilename(), expected.filename);
-  const path = join(page.__presentationEvidenceDir, `${suffix}-${expected.filename}`);
+  assert.equal(download.suggestedFilename(), expected.downloadName);
+  const path = join(page.__presentationEvidenceDir, `${suffix}-${expected.downloadName}`);
   await download.saveAs(path);
   assert.deepEqual(await readFile(path), Buffer.from(expected.content), `${expected.format} download bytes differ`);
   return path;
@@ -796,7 +806,7 @@ async function runArtifactPresentation(context) {
     assert(artifact, `${item.format} artifact is absent from SQLite`);
     assert.deepEqual(
       { title: artifact.title, kind: artifact.kind, mime: artifact.mime, filename: artifact.filename, content: artifact.content },
-      { title: item.title, kind: item.kind, mime: item.mime, filename: item.filename, content: item.content },
+      { title: item.title, ...item.stored, content: item.content },
     );
     return { ...item, id: artifact.id };
   });
@@ -829,7 +839,7 @@ async function runArtifactPresentation(context) {
       await presentationRendered(panel, artifact);
       await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
 
-      await card.locator("..").getByRole("button", { name: "Artifact actions", exact: true }).click();
+      await card.locator("..").getByRole("button", { name: "Open with", exact: true }).click();
       await page.getByRole("menuitem", { name: "Showcase in this thread", exact: true }).click();
       if (phone) await page.getByRole("button", { name: "Show showcase", exact: true }).click();
       panel = page.locator('[data-slot="thread-showcase"]');

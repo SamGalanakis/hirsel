@@ -225,7 +225,7 @@ impl Storage {
             IconSource::Artifact(artifact_id) => {
                 let artifact = self.scoped_artifact(caller, artifact_id).await?;
                 let data = artifact_icon_bytes(&artifact.content)?;
-                let (data, mime) = normalize_icon(&data, &artifact.summary.mime)?;
+                let (data, mime) = normalize_icon(&data, artifact.summary.kind.download_mime())?;
                 let name = if mime == "image/webp" {
                     "thread-icon.webp"
                 } else {

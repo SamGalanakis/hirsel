@@ -24,10 +24,14 @@ export function resetGrants(): void {
   for (const id of pending.keys()) finish(id, "History changed. Open the Thread again.");
   setGrantState(draft => { draft.lists = {}; });
 }
+/** One granted Thread named the way the Owner sees it everywhere else. */
+export function grantLabel(grant: ThreadGrant): string {
+  return `${grant.kind === "space" ? "Space" : "Task"} #${grant.target_thread_id} "${grant.title}"`;
+}
 /** What a Thread can address, in the one line the Agent reads in its own context. */
 export function reachSummary(threadId: number): string {
   const grants = grantState.lists[threadId]?.grants ?? [];
-  return ["self + subtree", ...grants.map(grant => `+Thread ${grant.target_thread_id} '${grant.title}'`)].join(" · ");
+  return ["self + subtree", ...grants.map(grant => `+${grantLabel(grant)}`)].join(" · ");
 }
 export function threadGrants(threadId: number): ThreadGrant[] { return grantState.lists[threadId]?.grants ?? []; }
 function request(origin: GrantOrigin, frame: Extract<ThreadClientMessage, {client_id: string}>): Promise<void> {

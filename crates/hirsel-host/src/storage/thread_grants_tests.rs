@@ -76,7 +76,10 @@ async fn an_owner_grant_widens_reach_and_revoking_it_narrows_again() {
             .unwrap(),
         detail
     );
-    assert!(s.thread_reach(&actor).await.unwrap().contains("+Thread"));
+    assert_eq!(
+        s.thread_reach(&actor).await.unwrap(),
+        format!("self + subtree · +Task #{billing} \"billing\"")
+    );
     // Reach is one-way: the target gains nothing.
     assert!(!s.thread_in_scope(billing, worker).await.unwrap());
 

@@ -2,7 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { Plus, X } from "../components/ui/icons";
 import { filterThreadCandidates } from "../lib/thread-ref";
 import { threadState } from "../threads/store";
-import { grantReach, revokeReach, threadGrants, type GrantOrigin } from "./store";
+import { grantLabel, grantReach, revokeReach, threadGrants, type GrantOrigin } from "./store";
 
 const control = "inline-flex min-h-8 items-center gap-1 rounded-lg px-1.5 text-meta text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 const input = "min-h-11 w-full min-w-0 rounded-lg border border-input bg-surface px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -35,7 +35,7 @@ export function ReachStrip(props: { origin: GrantOrigin }) {
       <span class="shrink-0">self + subtree</span>
       <For each={grants()}>{grant => <span class="inline-flex shrink-0 items-center">
         <span aria-hidden="true">·</span>
-        <span class="ml-1" title={grant.note ?? undefined}>+Thread {grant.target_thread_id} '{grant.title}'</span>
+        <span class="ml-1" title={grant.note ?? undefined}>+{grantLabel(grant)}</span>
         <button class={`${control} px-1`} disabled={busy()} aria-label={`Remove reach to Thread ${grant.target_thread_id}`} title="Remove this reach" onClick={() => void run(() => revokeReach(props.origin, grant.target_thread_id))}><X class="size-3" /></button>
       </span>}</For>
       <button class={`${control} ml-auto shrink-0`} aria-label="Add reach to another Thread" aria-expanded={adding() ? "true" : "false"} onClick={() => { setError(null); setAdding(open => !open); }}><Plus class="size-3" />Reach</button>

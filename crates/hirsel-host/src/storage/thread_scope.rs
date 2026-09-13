@@ -4,6 +4,7 @@
 //! typed [`OutsideGrant`] the tool layer turns into a readable refusal, never a
 //! pretence that the Thread does not exist.
 use super::{Storage, thread_activity, threads};
+use crate::thread_identity::{ThreadIdentity, ThreadIdentityRef};
 use hirsel_proto::{Thread, ThreadBrief, ThreadGrant, ThreadTurnState};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -250,18 +251,13 @@ pub(crate) struct ThreadPage {
     pub next_after_id: Option<u64>,
 }
 #[derive(Debug, Serialize)]
-pub(crate) struct AncestorIdentity {
-    pub id: u64,
-    pub title: String,
-}
-#[derive(Debug, Serialize)]
 pub(crate) struct ThreadContext {
     pub history_id: String,
     pub reference_url: String,
     pub related_items: Vec<hirsel_proto::ThreadRelatedItem>,
     #[serde(rename = "self")]
     pub thread: Thread,
-    pub ancestors: Vec<AncestorIdentity>,
+    pub ancestors: Vec<ThreadIdentityRef>,
     pub brief: ThreadBrief,
     /// Durable widenings beyond self + descendants, with the one-line summary
     /// the Owner sees in the web reach strip.
@@ -337,22 +333,10 @@ impl Storage {
         let c = self.conn.lock().await;
         validate_caller(&c, caller)?;
         let thread = threads::get(&c, caller.thread_id)?;
-        let mut ancestors = vec![];
-        let mut parent = thread.parent_thread_id;
-        while let Some(id) = parent {
-            anyhow::ensure!(
-                ancestors.len() < 64,
-                "Thread ancestry exceeds context bound"
-            );
-            let (title, next): (String, Option<u64>) = c.query_row(
-                "SELECT title,parent_thread_id FROM threads WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            ancestors.push(AncestorIdentity { id, title });
-            parent = next;
-        }
-        ancestors.reverse();
+        // The identity block in every turn prompt is rendered from this exact
+        // read, so the prompt and this tool can never name different ancestry
+        // or reach.
+        let identity = identity(&c, &thread)?;
         // An accepted assignment is immutable for this execution. A later queued
         // assignment must not replace the running turn's brief or reference grants.
         let assignment: Option<(u64,String)>=c.query_row("SELECT id,json_extract(data,'$.brief') FROM thread_activities WHERE turn_id=?1 AND kind='delegation_received' ORDER BY id LIMIT 1",[caller.turn_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -374,11 +358,20 @@ impl Storage {
                 caller.thread_id,
             )?,
             thread,
-            ancestors,
+            ancestors: identity.ancestors,
             brief,
             grants: super::thread_grants::list(&c, caller.thread_id)?,
-            reach: super::thread_grants::reach_summary(&c, caller.thread_id)?,
+            reach: identity.reach,
         })
+    }
+
+    /// What the agent running in this Thread is told about itself, read
+    /// without a turn binding so the turn prompt can be rebuilt before the
+    /// turn exists.
+    pub(crate) async fn thread_identity(&self, thread_id: u64) -> anyhow::Result<ThreadIdentity> {
+        let c = self.conn.lock().await;
+        let thread = threads::get(&c, thread_id)?;
+        identity(&c, &thread)
     }
     pub(crate) async fn authorize_thread_artifact(
         &self,
@@ -541,4 +534,41 @@ impl Storage {
 
 pub(super) fn reference_url(history_id: &str, thread_id: u64) -> String {
     format!("/t/{thread_id}?history={history_id}")
+}
+
+/// Read one Thread's place in the tree: who it is, what it is for, who it sits
+/// under, and how far it may address. The single source for both the
+/// `threads.context` payload and the turn-prompt identity block.
+fn identity(c: &Connection, thread: &Thread) -> anyhow::Result<ThreadIdentity> {
+    let mut ancestors = vec![];
+    let mut parent = thread.parent_thread_id;
+    while let Some(id) = parent {
+        anyhow::ensure!(
+            ancestors.len() < 64,
+            "Thread ancestry exceeds context bound"
+        );
+        let (kind, title, next): (String, String, Option<u64>) = c.query_row(
+            "SELECT kind,title,parent_thread_id FROM threads WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        ancestors.push(ThreadIdentityRef {
+            id,
+            kind: threads::parse_kind(&kind)
+                .ok_or_else(|| anyhow::anyhow!("invalid Thread kind `{kind}`"))?,
+            title,
+        });
+        parent = next;
+    }
+    ancestors.reverse();
+    Ok(ThreadIdentity {
+        thread: ThreadIdentityRef {
+            id: thread.id,
+            kind: thread.kind,
+            title: thread.title.clone(),
+        },
+        description: thread.description.clone(),
+        ancestors,
+        reach: super::thread_grants::reach_summary(c, thread.id)?,
+    })
 }

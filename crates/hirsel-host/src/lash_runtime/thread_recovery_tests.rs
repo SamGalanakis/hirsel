@@ -1,7 +1,7 @@
 use super::*;
 use hirsel_proto::{ChatAuthor, ThreadAttention, ThreadTurnState};
 
-async fn runtime_fixture() -> (crate::AppState, tempfile::TempDir) {
+pub(super) async fn runtime_fixture() -> (crate::AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = crate::tests::test_config(dir.path());
     config.agent = AgentMode::Lash;

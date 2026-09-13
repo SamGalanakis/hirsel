@@ -67,6 +67,7 @@ export interface ThreadGrant {
   thread_id: number;
   target_thread_id: number;
   title: string;
+  kind: ThreadKind;
   granted_by: ThreadGrantSource;
   granted_at: string;
   note: string | null;

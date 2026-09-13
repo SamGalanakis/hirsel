@@ -22,17 +22,29 @@ const MAX_GRANTS: u64 = 100;
 
 pub(super) fn list(c: &Connection, thread_id: u64) -> anyhow::Result<Vec<ThreadGrant>> {
     Ok(c.prepare(
-        "SELECT g.thread_id,g.target_thread_id,t.title,g.granted_by,g.granted_by_thread_id,g.granted_at,g.note
+        "SELECT g.thread_id,g.target_thread_id,t.title,g.granted_by,g.granted_by_thread_id,g.granted_at,g.note,t.kind
          FROM thread_grants g JOIN threads t ON t.id=g.target_thread_id
          WHERE g.thread_id=?1 ORDER BY g.target_thread_id",
     )?
     .query_map([thread_id], |r| {
         let by: String = r.get(3)?;
         let by_thread: Option<u64> = r.get(4)?;
+        let kind = r.get::<_, String>(7)?;
         Ok(ThreadGrant {
             thread_id: r.get(0)?,
             target_thread_id: r.get(1)?,
             title: r.get(2)?,
+            kind: threads::parse_kind(&kind).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid Thread kind `{kind}`"),
+                    )
+                    .into(),
+                )
+            })?,
             granted_by: match by_thread {
                 Some(thread_id) if by == "thread" => ThreadGrantSource::Thread { thread_id },
                 _ => ThreadGrantSource::Owner,
@@ -50,8 +62,13 @@ pub(super) fn reach_summary(c: &Connection, thread_id: u64) -> anyhow::Result<St
     let mut summary = String::from("self + subtree");
     for grant in list(c, thread_id)? {
         summary.push_str(&format!(
-            " · +Thread {} '{}'",
-            grant.target_thread_id, grant.title
+            " · +{}",
+            crate::thread_identity::ThreadIdentityRef {
+                id: grant.target_thread_id,
+                kind: grant.kind,
+                title: grant.title,
+            }
+            .label()
         ));
     }
     Ok(summary)

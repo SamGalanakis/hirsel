@@ -43,10 +43,15 @@ pub(crate) fn agent_host_section(config: &Config) -> String {
     )
 }
 
+/// The Agent's full session guidance: where it is, then what it can do, then
+/// any handoff seed. The identity block leads because an agent that does not
+/// know which Thread it is in cannot read the rest correctly.
 pub(super) fn agent_guidance_with_handoff(
-    mut guidance: String,
+    identity: &crate::thread_identity::ThreadIdentity,
+    guidance: String,
     handoff_seed: Option<&str>,
 ) -> String {
+    let mut guidance = format!("{}\n{guidance}", identity.block());
     if let Some(handoff_seed) = handoff_seed {
         guidance.push_str("\n\n## Session handoff\n\n");
         guidance.push_str(handoff_seed);

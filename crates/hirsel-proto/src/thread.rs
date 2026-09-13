@@ -160,6 +160,8 @@ pub struct ThreadGrant {
     pub target_thread_id: u64,
     /// The target's current title, so a reach strip needs no second lookup.
     pub title: String,
+    /// The target's kind, so every surface names it the way the Owner does.
+    pub kind: ThreadKind,
     pub granted_by: ThreadGrantSource,
     pub granted_at: DateTime<Utc>,
     pub note: Option<String>,

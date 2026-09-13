@@ -10,7 +10,7 @@ import { attachGrantTransport, disconnectGrants, handleGrantMessage, reachSummar
 
 const historyId = "ab123456-1234-5678-9abc-123456789abc";
 const frames: ThreadClientMessage[] = [];
-const grant = (patch: Partial<ThreadGrant> = {}): ThreadGrant => ({ thread_id: 1, target_thread_id: 2, title: "Billing", granted_by: { kind: "owner" }, granted_at: "2026-09-13T10:00:00Z", note: null, ...patch });
+const grant = (patch: Partial<ThreadGrant> = {}): ThreadGrant => ({ thread_id: 1, target_thread_id: 2, title: "Billing", kind: "space", granted_by: { kind: "owner" }, granted_at: "2026-09-13T10:00:00Z", note: null, ...patch });
 const origin = { historyId, threadId: 1 };
 
 beforeEach(() => {
@@ -30,8 +30,8 @@ describe("Thread reach strip", () => {
     const strip = screen.getByRole("region", { name: "Thread reach" });
     expect(strip.textContent).toContain("Reach:self + subtree");
     flush(() => handleGrantMessage({ type: "thread_grants_changed", client_id: null, history_id: historyId, thread_id: 1, revision: 2, grants: [grant()] }));
-    expect(strip.textContent).toContain("+Thread 2 'Billing'");
-    expect(reachSummary(1)).toBe("self + subtree · +Thread 2 'Billing'");
+    expect(strip.textContent).toContain('+Space #2 "Billing"');
+    expect(reachSummary(1)).toBe('self + subtree · +Space #2 "Billing"');
   });
 
   it("lets the Owner grant a Thread and revoke it again", async () => {
@@ -64,8 +64,8 @@ describe("Thread reach strip", () => {
   it("keeps a reach snapshot from rolling back behind newer Thread metadata", () => {
     flush(() => handleGrantMessage({ type: "thread_grants_changed", client_id: null, history_id: historyId, thread_id: 1, revision: 5, grants: [grant()] }));
     flush(() => handleGrantMessage({ type: "thread_grants_changed", client_id: null, history_id: historyId, thread_id: 1, revision: 3, grants: [] }));
-    expect(reachSummary(1)).toContain("+Thread 2");
+    expect(reachSummary(1)).toContain("+Space #2");
     flush(() => handleGrantMessage({ type: "thread_grants_changed", client_id: null, history_id: "other-history", thread_id: 1, revision: 9, grants: [] }));
-    expect(reachSummary(1)).toContain("+Thread 2");
+    expect(reachSummary(1)).toContain("+Space #2");
   });
 });

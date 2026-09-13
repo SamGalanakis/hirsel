@@ -87,10 +87,10 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
     <Show when={open()}><div class="flex min-h-0 flex-1 flex-col gap-2 p-3">
       <button type="button" class="inline-flex h-7 w-fit items-center gap-1.5 rounded-md px-1 text-meta text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11" onClick={dismiss}><X class="size-4" />Close</button>
       <input aria-label="New space or task title" placeholder={derivedTitle(body()) || "Name it (optional)"} value={name()} onInput={event => setName(event.currentTarget.value)}
-        class="h-8 w-full min-w-0 rounded-md bg-transparent px-1 text-sm font-medium placeholder:font-normal placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11" />
+        class="h-7 w-full min-w-0 bg-transparent px-1 text-sm placeholder:text-muted-foreground focus:outline-none forced-colors:focus-visible:outline forced-colors:focus-visible:outline-1 pointer-coarse:h-11" />
       <textarea ref={node => { textarea = node; }} aria-label="First message" placeholder="What is this about? Your first message starts it off…" value={body()} onInput={event => setBody(event.currentTarget.value)}
         onKeyDown={event => handleSubmitKeys(event, { value: body, coarse, onSend: () => void submit() })}
-        class="min-h-24 w-full min-w-0 flex-1 resize-none rounded-md bg-transparent px-1 text-base leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+        class="min-h-24 w-full min-w-0 flex-1 resize-none bg-transparent px-1 text-base leading-relaxed placeholder:text-muted-foreground focus:outline-none forced-colors:focus-visible:outline forced-colors:focus-visible:outline-1" />
       <Show when={attachments.files().length > 0}>
         <ul data-slot="create-attachments" class="flex flex-wrap gap-1.5">
           <For each={attachments.files()}>{file => <li class="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-meta text-muted-foreground">

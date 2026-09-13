@@ -463,7 +463,9 @@ describe("nested Thread workspace", () => {
     if (frame?.type !== "create_thread") throw new Error("Missing create");
     flush(() => handleThreadMessage({ type: "thread_created", client_id: frame.client_id, thread: makeThread(9, { title: "Review", parent_thread_id: 2 }) }));
     await waitFor(() => expect(threadState.focusedId).toBe(9));
-    expect(view.getByRole("navigation", { name: "Thread ancestry" })).toHaveTextContent("#2 Holiday");
+    const ancestry = view.getByRole("navigation", { name: "Thread ancestry" });
+    // The ancestor is one chip: its name is the Thread's, the id only its label.
+    expect(within(ancestry).getByRole("link", { name: "Thread #2 · Holiday" })).toHaveTextContent("Holiday");
     expect(view.getByRole("textbox", { name: "Message Review" })).toBeInTheDocument();
   });
   it("pins a top-level Thread first once within its lifecycle filter", async () => {
@@ -520,7 +522,7 @@ describe("nested Thread workspace", () => {
     flush(() => { handleThreadMessage({ type: "thread_activity", activity: report }); handleThreadMessage({ type: "thread_activity", activity: report }); });
     const view = render(() => <ThreadShell />);
     const card = view.container.querySelector('[data-activity-id="33"]')!;
-    expect(card).toHaveTextContent("#2 Holiday");
+    expect(within(card as HTMLElement).getByRole("link", { name: "Thread #2 · Holiday" })).toHaveTextContent("Holiday");
     // The default outcome and the internal turn number are diagnostics, not header text.
     expect(card.textContent).not.toContain("completed");
     expect(card.textContent).not.toContain("Turn 90");
@@ -532,7 +534,8 @@ describe("nested Thread workspace", () => {
     expect(view.container.querySelectorAll('[data-activity-id="33"]')).toHaveLength(1);
     expect(card.querySelector('[data-slot="work-details"]')).toBeNull();
     expect(within(card as HTMLElement).getByRole("button", { name: /Artifact #44/ })).toBeInTheDocument();
-    fireEvent.click(within(card as HTMLElement).getByRole("link", { name: "#2 Holiday" }));
+    fireEvent.click(within(card as HTMLElement).getByRole("link", { name: "Thread #2 · Holiday" }));
+    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Open" }));
     expect(threadState.focusedId).toBe(2);
     expect(view.queryByText("Review complete. Two issues fixed.")).toBeNull();
   });

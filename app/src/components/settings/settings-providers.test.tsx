@@ -227,6 +227,23 @@ describe("Settings → Providers: the roster", () => {
     });
   });
 
+  it("keeps one panel open: adding and editing are the same slot", async () => {
+    const { getByLabelText, getByRole, getByText, queryByLabelText } = await mount();
+    fireEvent.click(getByRole("button", { name: "Add provider" }));
+    expect(getByLabelText("Provider id")).toBeTruthy();
+
+    fireEvent.click(getByLabelText("Edit OpenRouter"));
+    expect(queryByLabelText("Provider id")).toBeNull();
+    expect(getByLabelText("API key")).toBeTruthy();
+
+    fireEvent.click(getByRole("button", { name: "Add provider" }));
+    expect(getByLabelText("Provider id")).toBeTruthy();
+    expect(queryByLabelText("API key")).toBeNull();
+
+    fireEvent.click(getByText("Cancel"));
+    expect(queryByLabelText("Provider id")).toBeNull();
+  });
+
   it("closes the open editor when the authoritative roster lands", async () => {
     const { store, getByLabelText, queryByLabelText, getByText } = await mount();
     fireEvent.click(getByLabelText("Edit OpenRouter"));

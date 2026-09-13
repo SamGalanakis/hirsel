@@ -75,6 +75,7 @@ describe("artifact presentation", () => {
     let panel = view.getByRole("complementary", { name: "Artifact preview" });
     const source = within(panel).getByRole("button", { name: "Source" });
     expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+    await vi.dynamicImportSettled();
     await waitFor(() => expect(panel.querySelector("iframe")).not.toBeNull());
 
     source.focus(); fireEvent.click(source);

@@ -1,8 +1,7 @@
-import { chromium } from '../app/node_modules/playwright/index.mjs';
 import assert from 'node:assert/strict';
-const base = process.env.HIRSEL_ARTIFACT_TEST_URL;
-if (!base || new URL(base).port === '3076') throw new Error('Set HIRSEL_ARTIFACT_TEST_URL to the isolated artifact harness, never the live host.');
-const browser = await chromium.launch({ headless:true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? '/home/sam/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome' });
+import { isolatedUrl, launchBrowser } from './lib/harness.mjs';
+const base = isolatedUrl(process.env.HIRSEL_ARTIFACT_TEST_URL, 'HIRSEL_ARTIFACT_TEST_URL');
+const browser = await launchBrowser();
 try {
  const page=await browser.newPage(); const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(`${base}/tools/artifact-smoke.html`);

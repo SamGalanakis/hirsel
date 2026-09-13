@@ -1,61 +1,26 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { cp, mkdir, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { chromium } from "../app/node_modules/playwright/index.mjs";
+import { launchBrowser, poll as harnessPoll, repoRoot, startHost, stopHost } from "./lib/harness.mjs";
 
-const repo = fileURLToPath(new URL("..", import.meta.url));
+const repo = repoRoot;
 const fixture = process.env.HIRSEL_RESPONSIVE_FIXTURE;
 assert(fixture, "Set HIRSEL_RESPONSIVE_FIXTURE to a saved isolated runbook state directory.");
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
-const evidenceDir = process.env.HIRSEL_RESPONSIVE_EVIDENCE ?? join("/tmp", `hirsel-responsive-${runId}`);
+const evidenceDir = process.env.HIRSEL_RESPONSIVE_EVIDENCE ?? join(tmpdir(), `hirsel-responsive-${runId}`);
 const dataDir = join(evidenceDir, "state");
 await mkdir(evidenceDir, { recursive: true });
 await cp(fixture, dataDir, { recursive: true, force: false, errorOnExist: true });
-
-function cargoTargetDirectory() {
-  return JSON.parse(execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], { cwd: repo, encoding: "utf8" })).target_directory;
-}
 
 function sqliteJson(sql) {
   const output = execFileSync("sqlite3", ["-json", join(dataDir, "hirsel.sqlite"), sql], { encoding: "utf8" }).trim();
   return output ? JSON.parse(output) : [];
 }
 
-async function unusedPort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
-  const address = server.address();
-  assert(address && typeof address !== "string");
-  assert.notEqual(address.port, 3076);
-  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  return address.port;
-}
-
-async function poll(label, predicate, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await predicate();
-      if (value) return value;
-    } catch (error) { lastError = error; }
-    await new Promise(resolve => setTimeout(resolve, 150));
-  }
-  throw new Error(`${label} timed out${lastError ? `: ${lastError.message}` : ""}`);
-}
-
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  try { process.kill(-child.pid, "SIGTERM"); } catch { return; }
-  await Promise.race([new Promise(resolve => child.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 5_000))]);
-  if (child.exitCode === null && child.signalCode === null) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already stopped */ }
-  }
-}
+const poll = (label, predicate, timeoutMs = 60_000) => harnessPoll(label, predicate, timeoutMs, 150);
 
 const [thread] = sqliteJson("SELECT id,title FROM threads ORDER BY id LIMIT 1");
 const [artifact] = sqliteJson("SELECT id,title,mime,length(content) AS bytes FROM artifacts WHERE mime='image/svg+xml' ORDER BY id LIMIT 1");
@@ -82,28 +47,9 @@ END;
   COMMIT;
 `]);
 const token = `responsive-${crypto.randomUUID()}`;
-const port = await unusedPort();
-const url = `http://127.0.0.1:${port}`;
 const log = createWriteStream(join(evidenceDir, "host.log"));
-const host = spawn(join(cargoTargetDirectory(), "debug", "hirsel-host"), [], {
-  cwd: repo,
-  detached: true,
-  stdio: ["ignore", "pipe", "pipe"],
-  env: {
-    ...process.env,
-    HIRSEL_TOKEN: token,
-    HIRSEL_AGENT: "scripted",
-    HIRSEL_DRIVER: "fake",
-    HIRSEL_PROVIDER: "anthropic",
-    HIRSEL_DEBUG: "1",
-    HIRSEL_IROH: "0",
-    HIRSEL_DATA_DIR: dataDir,
-    HIRSEL_CONFIG: join(dataDir, "hirsel.toml"),
-    HIRSEL_TEMPLATES_DIR: join(repo, "templates"),
-    HIRSEL_APP_DIR: join(repo, "app", "dist"),
-    HIRSEL_LISTEN: `127.0.0.1:${port}`,
-  },
-});
+const hostProcess = await startHost({ root: repo, dataDir, token });
+const { child: host, url } = hostProcess;
 host.stdout.pipe(log, { end: false });
 host.stderr.pipe(log, { end: false });
 
@@ -232,7 +178,7 @@ try {
     if (host.exitCode !== null || host.signalCode !== null) throw new Error(`Host exited (${host.exitCode ?? host.signalCode})`);
     return (await fetch(`${url}/readyz`)).ok;
   });
-  browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "/home/sam/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell" });
+  browser = await launchBrowser();
   const page = await browser.newPage({ viewport: { width: 2048, height: 900 } });
   const sockets = [];
   await page.routeWebSocket("**/ws", socket => {
@@ -354,6 +300,6 @@ try {
   console.log(JSON.stringify({ objectiveStatus: "OBJECTIVE_PASS", evidenceDir, fixture, viewports: captures.map(row => row.viewport.width) }));
 } finally {
   await browser?.close();
-  await stopProcess(host);
+  await stopHost(hostProcess);
   log.end();
 }

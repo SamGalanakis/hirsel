@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { chromium } from "../app/node_modules/playwright/index.mjs";
-import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
+import { launchBrowser, poll as harnessPoll, repoRoot, request, startHost, stopHost } from "./lib/harness.mjs";
 import {
   contiguousTextBlocks,
   hasExactAdjacentDuplicate,
@@ -15,7 +13,7 @@ import {
   renderedTimelineExpectation,
 } from "./product-runbook-oracles.mjs";
 
-const repo = fileURLToPath(new URL("..", import.meta.url));
+const repo = repoRoot;
 const requested = process.argv[2] ?? "all";
 const scenarios = requested === "all"
   ? ["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]
@@ -28,7 +26,7 @@ if (scenarios.includes("native-lash-worker")) {
 
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
 const evidenceRoot = process.env.HIRSEL_RUNBOOK_ARTIFACTS
-  ?? join("/tmp", `hirsel-product-runbooks-${runId}`);
+  ?? join(tmpdir(), `hirsel-product-runbooks-${runId}`);
 const privateEvidenceValues = [process.env.OPENROUTER_API_KEY].filter(value => value);
 await mkdir(evidenceRoot, { recursive: true });
 console.log(`Product runbook evidence: ${evidenceRoot}`);
@@ -37,42 +35,7 @@ function git(...args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
-function cargoTargetDirectory() {
-  const metadata = JSON.parse(execFileSync(
-    "cargo",
-    ["metadata", "--no-deps", "--format-version", "1"],
-    { cwd: repo, encoding: "utf8" },
-  ));
-  return metadata.target_directory;
-}
-
-async function unusedPort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert(address && typeof address !== "string");
-  assert.notEqual(address.port, 3076);
-  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  return address.port;
-}
-
-async function poll(label, predicate, timeoutMs = 180_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await predicate();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise(resolve => setTimeout(resolve, 200));
-  }
-  throw new Error(`${label} timed out${lastError ? `: ${lastError.message}` : ""}`);
-}
+const poll = (label, predicate, timeoutMs = 180_000) => harnessPoll(label, predicate, timeoutMs, 200);
 
 function parseFrame(payload) {
   try {
@@ -127,30 +90,13 @@ async function waitForTurn(frames, turnId, predicate, label) {
 }
 
 async function openThread(url, token, threadId) {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${url.replace(/^http/, "ws")}/ws`);
-    const clientId = `runbook-open-${crypto.randomUUID()}`;
-    const timer = setTimeout(() => {
-      socket.close();
-      reject(new Error(`open_thread ${threadId} timed out`));
-    }, 10_000);
-    socket.on("error", reject);
-    socket.on("open", () => socket.send(JSON.stringify({ type: "hello", auth: { static_token: token } })));
-    socket.on("message", raw => {
-      const frame = parseFrame(raw);
-      if (frame?.type === "hello_ok") {
-        socket.send(JSON.stringify({ type: "open_thread", client_id: clientId, thread_id: threadId }));
-      } else if (frame?.type === "thread_opened" && frame.client_id === clientId) {
-        clearTimeout(timer);
-        socket.close();
-        resolve(frame.detail);
-      } else if (frame?.type === "error") {
-        clearTimeout(timer);
-        socket.close();
-        reject(new Error(frame.detail));
-      }
-    });
+  const frame = await request({
+    url,
+    token,
+    frame: { type: "open_thread", client_id: `runbook-open-${crypto.randomUUID()}`, thread_id: threadId },
+    expected: "thread_opened",
   });
+  return frame.detail;
 }
 
 function sqliteJson(database, sql) {
@@ -565,7 +511,7 @@ async function runTools(context) {
   await requireInlineTool(page, successTool.started.event.id, successMarker);
 
   const failureMarker = `HIRSEL-TOOL-EXPECTED-FAILURE-${nonce}`;
-  const missingDir = `/tmp/hirsel-runbook-missing-${nonce}`;
+  const missingDir = join(tmpdir(), `hirsel-runbook-missing-${nonce}`);
   const failurePrompt = `Call shell.run exactly once with cmd "pwd" and cwd "${missingDir}". It must fail because that directory does not exist. After observing the failed tool result, report the exact marker ${failureMarker} and do not claim the command succeeded.`;
   const failure = await sendMessage(page, frames, threadId, failurePrompt);
   const failureTerminal = await waitForTurn(frames, failure.turnId, turn => terminal(turn.state), "failure turn terminal");
@@ -1192,18 +1138,6 @@ async function runNativeLashWorker(context, fixture) {
   };
 }
 
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  try { process.kill(-child.pid, "SIGTERM"); } catch { return; }
-  await Promise.race([
-    new Promise(resolve => child.once("exit", resolve)),
-    new Promise(resolve => setTimeout(resolve, 5_000)),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already stopped */ }
-  }
-}
-
 async function runScenario(scenario) {
   const scenarioDir = join(evidenceRoot, scenario);
   const dataDir = join(scenarioDir, "state");
@@ -1213,31 +1147,20 @@ async function runScenario(scenario) {
   const nativeFixture = scenario === "native-lash-worker"
     ? await prepareNativeWorkerFixture(scenarioDir, nonce)
     : null;
-  const port = await unusedPort();
-  const url = `http://127.0.0.1:${port}`;
-  const binary = join(cargoTargetDirectory(), "debug", "hirsel-host");
   const logStream = createWriteStream(join(scenarioDir, "host.log"), { flags: "a" });
-  const host = spawn(binary, [], {
-    cwd: repo,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+  const hostProcess = await startHost({
+    root: repo,
+    dataDir,
+    token,
+    agent: "lash",
+    driver: "real",
+    provider: "codex",
     env: {
-      ...process.env,
-      HIRSEL_TOKEN: token,
-      HIRSEL_AGENT: "lash",
-      HIRSEL_DRIVER: "real",
-      HIRSEL_PROVIDER: "codex",
       HIRSEL_MODEL: "gpt-5.6-sol",
-      HIRSEL_DEBUG: "1",
-      HIRSEL_IROH: "0",
-      HIRSEL_DATA_DIR: dataDir,
-      HIRSEL_CONFIG: join(dataDir, "hirsel.toml"),
-      HIRSEL_TEMPLATES_DIR: join(repo, "templates"),
-      HIRSEL_APP_DIR: join(repo, "app", "dist"),
-      HIRSEL_LISTEN: `127.0.0.1:${port}`,
       RUST_LOG: "hirsel_host=info,tower_http=info",
     },
   });
+  const { child: host, port, url } = hostProcess;
   host.stdout.pipe(logStream, { end: false });
   host.stderr.pipe(logStream, { end: false });
   let browser;
@@ -1270,11 +1193,7 @@ async function runScenario(scenario) {
       if (host.exitCode !== null || host.signalCode !== null) throw new Error(`Host exited (${host.exitCode ?? host.signalCode})`);
       return (await fetch(`${url}/readyz`)).ok;
     }, 60_000);
-    browser = await chromium.launch({
-      headless: true,
-      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-        ?? "/home/sam/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell",
-    });
+    browser = await launchBrowser();
     page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     page.on("pageerror", error => browserErrors.push({ type: "pageerror", message: error.message }));
     page.on("console", message => {
@@ -1342,7 +1261,7 @@ async function runScenario(scenario) {
     );
     await writeFile(join(scenarioDir, "result.json"), `${JSON.stringify(sanitizeEvidence(result), null, 2)}\n`);
     await browser?.close();
-    await stopProcess(host);
+    await stopHost(hostProcess);
     await new Promise(resolve => logStream.end(resolve));
     await Promise.all([
       sanitizeEvidenceFile(join(dataDir, "hirsel.toml")),

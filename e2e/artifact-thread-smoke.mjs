@@ -1,21 +1,15 @@
 import assert from 'node:assert/strict';
-import { WebSocket } from '../app/node_modules/ws/wrapper.mjs';
-import { chromium } from '../app/node_modules/playwright/index.mjs';
-const base = process.env.HIRSEL_ARTIFACT_HOST_URL;
-if (!base || new URL(base).port === '3076') throw new Error('Set HIRSEL_ARTIFACT_HOST_URL to an isolated scripted host.');
+import { isolatedUrl, launchBrowser, request as harnessRequest } from './lib/harness.mjs';
+const base = isolatedUrl(process.env.HIRSEL_ARTIFACT_HOST_URL, 'HIRSEL_ARTIFACT_HOST_URL');
 const token=process.env.HIRSEL_ARTIFACT_HOST_TOKEN ?? 'dev-token';
 let currentHistory;
-function request(frame, expected) { return new Promise((resolve,reject)=>{
- const ws=new WebSocket(`${base.replace(/^http/,'ws')}/ws`);const timer=setTimeout(()=>{ws.close();reject(new Error(`Missing ${expected}`))},10000);
- ws.on('error',reject);ws.on('open',()=>ws.send(JSON.stringify({type:'hello',auth:{static_token:token}})));
- ws.on('message',raw=>{const value=JSON.parse(raw.toString());if(value.type==='hello_ok'){currentHistory=value.history_id;ws.send(JSON.stringify(frame));}else if(value.type===expected){clearTimeout(timer);ws.close();resolve(value)}});
-}); }
+function request(frame, expected) { return harnessRequest({url:base,token,frame,expected,includeHistoryId:frame.type==='create_thread',onHello:value=>{currentHistory=value.history_id;}}); }
 async function publish(threadId,id,draft){const response=await fetch(`${base}/debug/publish-artifact`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({operation_id:crypto.randomUUID(),thread_id:threadId,artifact_id:id,draft})});if(!response.ok)throw new Error(await response.text());return response.json()}
 const a=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion A ${Date.now()}`,kind:'space'},'thread_created')).thread;
 const b=(await request({type:'create_thread',parent_thread_id:null,client_id:crypto.randomUUID(),title:`Artifact discussion B ${Date.now()}`,kind:'space'},'thread_created')).thread;
 const draft=(start,title)=>({title,kind:'solid',mime:'text/jsx',filename:'counter.jsx',content:`import {createSignal} from 'solid-js'; export default function App(){const [n,setN]=createSignal(${start});return <button onClick={()=>setN(n()+1)}>Count {n()}</button>}`});
 const artifact=await publish(a.id,undefined,draft(0,'Shared counter'));
-const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? '/home/sam/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});
+const browser=await launchBrowser();
 const results=[];
 try{for(const viewport of [{width:1440,height:900},{width:390,height:844}]){
  await publish(a.id,artifact.id,draft(0,'Shared counter'));
@@ -39,7 +33,7 @@ try{for(const viewport of [{width:1440,height:900},{width:390,height:844}]){
  await page.locator('[data-slot="artifact-preview"]').waitFor({state:'detached'});
  assert.equal(await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().evaluate(el=>document.activeElement===el),true);
  assert.equal(await page.locator('textarea').inputValue(),'Keep this conversation draft');
- await page.getByRole('button',{name:'Artifacts',exact:true}).click();await page.getByRole('button',{name:/Updated shared counter/}).waitFor();
+ await page.getByRole('button',{name:'Related',exact:true}).click();await page.getByRole('button',{name:/Updated shared counter/}).waitFor();
  assert.equal(new URL(page.url()).pathname,`/t/${a.id}`);
  assert.match(await page.locator('textarea').getAttribute('aria-label'),new RegExp(a.title));
  await publish(b.id,artifact.id,undefined);

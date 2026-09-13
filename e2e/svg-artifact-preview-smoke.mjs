@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chromium } from "../app/node_modules/playwright/index.mjs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isolatedUrl, launchBrowser } from "./lib/harness.mjs";
 
-const base = process.env.HIRSEL_ARTIFACT_TEST_URL;
+const base = isolatedUrl(process.env.HIRSEL_ARTIFACT_TEST_URL, "HIRSEL_ARTIFACT_TEST_URL");
 const database = process.env.HIRSEL_CAT_ARTIFACT_DB;
-const screenshot = process.env.HIRSEL_SVG_ARTIFACT_SCREENSHOT ?? "/tmp/hirsel-svg-preview-cat.png";
-if (!base || new URL(base).port === "3076") throw new Error("Set HIRSEL_ARTIFACT_TEST_URL to the isolated artifact harness, never the live host.");
+const screenshot = process.env.HIRSEL_SVG_ARTIFACT_SCREENSHOT ?? join(tmpdir(), "hirsel-svg-preview-cat.png");
 if (!database) throw new Error("Set HIRSEL_CAT_ARTIFACT_DB to the SQLite evidence database containing artifact 2.");
 
 const rows = JSON.parse(execFileSync("sqlite3", ["-readonly", "-json", database, "select id,title,mime,filename,content from artifacts where id=2;"], { encoding: "utf8" }));
@@ -17,11 +18,7 @@ assert.equal(stored.filename, "cat.svg");
 assert.match(stored.content, /<title id="title">A cozy orange cat<\/title>/);
 const artifact = { ...stored, kind: "file", thread_ids: [], created_at: "evidence", updated_at: "evidence" };
 
-const browser = await chromium.launch({
-  headless: true,
-  executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    ?? "/home/sam/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-});
+const browser = await launchBrowser();
 try {
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
   const errors = [];

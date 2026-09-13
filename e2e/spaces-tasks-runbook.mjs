@@ -1,30 +1,20 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { chromium } from "../app/node_modules/playwright/index.mjs";
-import { WebSocket } from "../app/node_modules/ws/wrapper.mjs";
+import { hello, launchBrowser, poll as harnessPoll, repoRoot, request, startHost, stopHost } from "./lib/harness.mjs";
 
-const repo = fileURLToPath(new URL("..", import.meta.url));
+const repo = repoRoot;
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${process.pid}`;
-const evidenceDir = process.env.HIRSEL_SPACES_EVIDENCE ?? join("/tmp", `hirsel-spaces-tasks-${runId}`);
+const evidenceDir = process.env.HIRSEL_SPACES_EVIDENCE ?? join(tmpdir(), `hirsel-spaces-tasks-${runId}`);
 const dataDir = join(evidenceDir, "state");
 await mkdir(dataDir, { recursive: true });
 console.log(`Spaces and Tasks evidence: ${evidenceDir}`);
 
 function git(...args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
-}
-
-function cargoTargetDirectory() {
-  return JSON.parse(execFileSync(
-    "cargo",
-    ["metadata", "--no-deps", "--format-version", "1"],
-    { cwd: repo, encoding: "utf8" },
-  )).target_directory;
 }
 
 function sqliteJson(sql) {
@@ -40,45 +30,7 @@ function sqlText(value) {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-async function unusedPort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert(address && typeof address !== "string");
-  assert.notEqual(address.port, 3076);
-  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  return address.port;
-}
-
-async function poll(label, predicate, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await predicate();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise(resolve => setTimeout(resolve, 150));
-  }
-  throw new Error(`${label} timed out${lastError ? `: ${lastError.message}` : ""}`);
-}
-
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  try { process.kill(-child.pid, "SIGTERM"); } catch { return; }
-  await Promise.race([
-    new Promise(resolve => child.once("exit", resolve)),
-    new Promise(resolve => setTimeout(resolve, 5_000)),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already stopped */ }
-  }
-}
+const poll = (label, predicate, timeoutMs = 15_000) => harnessPoll(label, predicate, timeoutMs, 150);
 
 function parseFrame(payload) {
   try { return JSON.parse(payload.toString()); } catch { return null; }
@@ -89,52 +41,11 @@ function waitForFrame(frames, offset, label, predicate) {
 }
 
 async function socketRequest(url, token, frame, expected) {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${url.replace(/^http/, "ws")}/ws`);
-    const timer = setTimeout(() => {
-      socket.close();
-      reject(new Error(`${expected} timed out`));
-    }, 10_000);
-    socket.on("error", reject);
-    socket.on("open", () => socket.send(JSON.stringify({ type: "hello", auth: { static_token: token } })));
-    socket.on("message", raw => {
-      const message = parseFrame(raw);
-      if (message?.type === "hello_ok") socket.send(JSON.stringify(frame));
-      else if (message?.type === expected) {
-        clearTimeout(timer);
-        socket.close();
-        resolve(message);
-      } else if (message?.type === "error") {
-        clearTimeout(timer);
-        socket.close();
-        reject(new Error(message.detail));
-      }
-    });
-  });
+  return request({ url, token, frame, expected });
 }
 
 async function helloSnapshot(url, token) {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${url.replace(/^http/, "ws")}/ws`);
-    const timer = setTimeout(() => {
-      socket.close();
-      reject(new Error("hello_ok timed out"));
-    }, 10_000);
-    socket.on("error", reject);
-    socket.on("open", () => socket.send(JSON.stringify({ type: "hello", auth: { static_token: token } })));
-    socket.on("message", raw => {
-      const message = parseFrame(raw);
-      if (message?.type === "hello_ok") {
-        clearTimeout(timer);
-        socket.close();
-        resolve(message);
-      } else if (message?.type === "error") {
-        clearTimeout(timer);
-        socket.close();
-        reject(new Error(message.detail));
-      }
-    });
-  });
+  return hello(url, token);
 }
 
 async function openThread(url, token, threadId) {
@@ -302,14 +213,21 @@ async function createItem(page, frames, title, kind, parent) {
   } else {
     await chooseAction(page, parent.kind === "task" ? "New child task" : "New child");
   }
-  const drawer = await ensureDrawer(page);
-  await drawer.getByLabel("New space or task title", { exact: true }).fill(title);
+  const create = page.locator('[data-slot="thread-create"]');
+  await create.waitFor({ state: "visible" });
+  await create.getByLabel("New space or task title", { exact: true }).fill(title);
   if (parent?.kind === "task") {
-    assert.equal(await drawer.getByRole("button", { name: "New Space", exact: true }).count(), 0, "Task child form offered New Space");
+    assert.equal(await create.getByRole("button", { name: "Kind: Space", exact: true }).count(), 0, "Task child form offered Space selection");
+  } else {
+    const currentKind = create.getByRole("button", { name: /^Kind: / });
+    if (await currentKind.getAttribute("aria-label") !== `Kind: ${kind === "space" ? "Space" : "Task"}`) {
+      await currentKind.click();
+      await page.getByRole("menuitemradio", { name: kind, exact: true }).click();
+    }
   }
   const offset = frames.length;
   const sentOffset = sentFrames.length;
-  await drawer.getByRole("button", { name: kind === "space" ? "New Space" : "New Task", exact: true }).click();
+  await create.getByRole("button", { name: kind === "space" ? "New Space" : "New Task", exact: true }).click();
   const created = await waitForFrame(frames, offset, `${title} creation`, frame => frame.type === "thread_created" && frame.thread?.title === title);
   const request = sentFrames.slice(sentOffset).find(frame => frame.type === "create_thread" && frame.title === title);
   assert(request, `${title} did not use the create_thread wire action`);
@@ -384,29 +302,9 @@ function assertReadableRowTitles(dom, label) {
 }
 
 const token = `spaces-runbook-${crypto.randomUUID()}`;
-const port = await unusedPort();
-const url = `http://127.0.0.1:${port}`;
-const hostBinary = process.env.HIRSEL_SPACES_HOST_BIN ?? join(cargoTargetDirectory(), "debug", "hirsel-host");
 const log = createWriteStream(join(evidenceDir, "host.log"));
-const host = spawn(hostBinary, [], {
-  cwd: repo,
-  detached: true,
-  stdio: ["ignore", "pipe", "pipe"],
-  env: {
-    ...process.env,
-    HIRSEL_TOKEN: token,
-    HIRSEL_AGENT: "scripted",
-    HIRSEL_DRIVER: "fake",
-    HIRSEL_PROVIDER: "anthropic",
-    HIRSEL_DEBUG: "1",
-    HIRSEL_IROH: "0",
-    HIRSEL_DATA_DIR: dataDir,
-    HIRSEL_CONFIG: join(dataDir, "hirsel.toml"),
-    HIRSEL_TEMPLATES_DIR: join(repo, "templates"),
-    HIRSEL_APP_DIR: join(repo, "app", "dist"),
-    HIRSEL_LISTEN: `127.0.0.1:${port}`,
-  },
-});
+const hostProcess = await startHost({ root: repo, dataDir, token });
+const { child: host, port, url } = hostProcess;
 host.stdout.pipe(log, { end: false });
 host.stderr.pipe(log, { end: false });
 
@@ -423,12 +321,7 @@ try {
     if (host.exitCode !== null || host.signalCode !== null) throw new Error(`Host exited (${host.exitCode ?? host.signalCode})`);
     return (await fetch(`${url}/readyz`)).ok;
   }, 30_000);
-  assert.notEqual(new URL(url).port, "3076");
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-      ?? "/home/sam/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell",
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on("pageerror", error => browserErrors.push({ type: "pageerror", message: error.message }));
   page.on("console", message => {
@@ -697,6 +590,6 @@ try {
   throw error;
 } finally {
   if (browser) await browser.close();
-  await stopProcess(host);
+  await stopHost(hostProcess);
   log.end();
 }

@@ -565,6 +565,105 @@ async fn command_and_mcp_items_emit_structured_tool_pairs() {
 }
 
 #[tokio::test]
+async fn missing_ids_pair_and_all_codex_tool_payloads_are_bounded() {
+    const TOOL_VALUE_LIMIT: usize = 4096;
+
+    let peer = Peer::new();
+    let driver = CodexDriver::default();
+    let handle = peer.spawn(&driver, "tool-event-edges").await.unwrap();
+    let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
+    let structured = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SubagentEvent::ToolStarted { .. } | SubagentEvent::ToolCompleted { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(structured.len(), 6);
+    let SubagentEvent::ToolStarted {
+        call_id: command_start,
+        name: command_name,
+        args: command_args,
+    } = structured[0]
+    else {
+        panic!("first event was not the command start")
+    };
+    let SubagentEvent::ToolCompleted {
+        call_id: command_done,
+        name: command_done_name,
+        ok: true,
+        output: command_output,
+    } = structured[1]
+    else {
+        panic!("second event was not the command completion")
+    };
+    assert!(command_start.starts_with("codex:"));
+    assert_eq!(command_done, command_start);
+    assert_eq!(command_name, "shell_run");
+    assert_eq!(command_done_name, command_name);
+
+    let SubagentEvent::ToolStarted {
+        call_id: file_start,
+        name: file_name,
+        args: file_args,
+    } = structured[2]
+    else {
+        panic!("third event was not the file-change start")
+    };
+    let SubagentEvent::ToolCompleted {
+        call_id: file_done,
+        name: file_done_name,
+        ok: false,
+        output: file_output,
+    } = structured[3]
+    else {
+        panic!("fourth event was not the failed file-change completion")
+    };
+    assert_eq!(file_start, "file-1");
+    assert_eq!(file_done, file_start);
+    assert_eq!(file_name, "file_change");
+    assert_eq!(file_done_name, file_name);
+
+    let SubagentEvent::ToolStarted {
+        args: mcp_args,
+        name: mcp_name,
+        ..
+    } = structured[4]
+    else {
+        panic!("fifth event was not the MCP start")
+    };
+    let SubagentEvent::ToolCompleted {
+        output: mcp_output,
+        ok: true,
+        ..
+    } = structured[5]
+    else {
+        panic!("sixth event was not the MCP completion")
+    };
+    assert_eq!(mcp_name, "mcp__hirsel__lookup");
+
+    for payload in [
+        command_args,
+        command_output,
+        file_args,
+        file_output,
+        mcp_args,
+        mcp_output,
+    ] {
+        assert!(
+            serde_json::to_vec(payload).unwrap().len() <= TOOL_VALUE_LIMIT,
+            "retained payload exceeded the driver boundary"
+        );
+        assert_eq!(payload["_hirsel_truncated"], true);
+        assert!(payload["preview"].as_str().unwrap().contains('界'));
+    }
+    driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
 async fn complete_output_precedes_one_terminal_and_is_never_the_bounded_summary() {
     for mode in [
         "long-output",

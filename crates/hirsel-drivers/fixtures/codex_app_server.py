@@ -179,6 +179,18 @@ for line in sys.stdin:
             event('item/completed', item={'type': 'agentMessage', 'text': 'tool events complete'})
             complete()
             sys.exit(0)
+        if mode == 'tool-event-edges':
+            large = '界' * 6000
+            event('item/started', item={'type': 'commandExecution', 'command': large, 'cwd': directory, 'commandActions': [], 'status': 'inProgress'})
+            event('item/completed', item={'type': 'commandExecution', 'command': large, 'cwd': directory, 'commandActions': [], 'status': 'completed', 'aggregatedOutput': large, 'exitCode': 0, 'durationMs': 12})
+            changes = [{'path': 'src/main.rs', 'kind': 'update', 'diff': large}]
+            event('item/started', item={'type': 'fileChange', 'id': 'file-1', 'changes': changes, 'status': 'inProgress'})
+            event('item/completed', item={'type': 'fileChange', 'id': 'file-1', 'changes': changes, 'status': 'failed'})
+            event('item/started', item={'type': 'mcpToolCall', 'id': 'mcp-1', 'server': 'hirsel_thread_fixture', 'tool': 'lookup', 'arguments': {'query': large}, 'status': 'inProgress'})
+            event('item/completed', item={'type': 'mcpToolCall', 'id': 'mcp-1', 'server': 'hirsel_thread_fixture', 'tool': 'lookup', 'arguments': {'query': large}, 'status': 'completed', 'result': {'content': [{'type': 'text', 'text': large}]}, 'durationMs': 7})
+            event('item/completed', item={'type': 'agentMessage', 'text': 'tool edge events complete'})
+            complete()
+            sys.exit(0)
         if mode in ['missing-status', 'invalid-status', 'empty-done', 'long-output', 'failed-final']:
             if mode in ['long-output', 'failed-final']:
                 event('item/completed', item={'type': 'agentMessage', 'text': 'z' * 30000})

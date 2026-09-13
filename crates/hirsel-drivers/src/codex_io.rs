@@ -1,6 +1,96 @@
 //! Codex stream supervision and terminal decoding.
 use super::*;
 use futures_util::{StreamExt, stream::FuturesUnordered};
+use std::{
+    collections::{HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
+
+const TOOL_EVENT_VALUE_BYTES: usize = 4096;
+const TOOL_EVENT_TRUNCATION_MARKER: &str = "…[truncated]";
+
+#[derive(Default)]
+pub(super) struct CodexToolState {
+    next_synthetic_id: u64,
+    active: Vec<ActiveCodexTool>,
+    used_event_ids: HashSet<String>,
+    completed_source_ids: HashSet<String>,
+}
+
+struct ActiveCodexTool {
+    source_id: Option<String>,
+    event_id: String,
+    name: String,
+    fingerprint: u64,
+}
+
+impl CodexToolState {
+    pub(super) fn begin_turn(&mut self) {
+        *self = Self::default();
+    }
+
+    fn start_id(&mut self, source_id: Option<&str>) -> String {
+        self.unique_event_id(source_id)
+    }
+
+    fn completion_id(
+        &mut self,
+        source_id: Option<&str>,
+        name: &str,
+        fingerprint: u64,
+    ) -> Option<String> {
+        let position = source_id
+            .and_then(|source_id| {
+                self.active
+                    .iter()
+                    .position(|active| active.source_id.as_deref() == Some(source_id))
+            })
+            .or_else(|| {
+                source_id.is_none().then(|| {
+                    self.active.iter().position(|active| {
+                        active.source_id.is_none() && active.fingerprint == fingerprint
+                    })
+                })?
+            })
+            .or_else(|| {
+                source_id.is_none().then(|| {
+                    self.active
+                        .iter()
+                        .position(|active| active.source_id.is_none() && active.name == name)
+                })?
+            });
+        if let Some(position) = position {
+            let active = self.active.remove(position);
+            if let Some(source_id) = source_id {
+                self.completed_source_ids.insert(source_id.to_string());
+            }
+            return Some(active.event_id);
+        }
+        if source_id.is_some_and(|id| self.completed_source_ids.contains(id)) {
+            return None;
+        }
+        let event_id = self.unique_event_id(source_id);
+        if let Some(source_id) = source_id {
+            self.completed_source_ids.insert(source_id.to_string());
+        }
+        Some(event_id)
+    }
+
+    fn unique_event_id(&mut self, preferred: Option<&str>) -> String {
+        if let Some(preferred) = preferred.filter(|id| !id.is_empty())
+            && self.used_event_ids.insert(preferred.to_string())
+        {
+            return preferred.to_string();
+        }
+        loop {
+            self.next_synthetic_id += 1;
+            let candidate = format!("codex:{}", self.next_synthetic_id);
+            if self.used_event_ids.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
 
 pub(super) async fn read_codex_stdout(
     mut lines: Lines<BufReader<ChildStdout>>,
@@ -122,7 +212,7 @@ pub(super) fn codex_progress(value: &Value) -> Option<String> {
     }
 }
 
-pub(super) fn codex_tool_event(value: &Value) -> Option<SubagentEvent> {
+pub(super) fn codex_tool_event(state: &mut CodexToolState, value: &Value) -> Option<SubagentEvent> {
     let method = value.get("method").and_then(Value::as_str)?;
     let completed = match method {
         "item/started" => false,
@@ -130,30 +220,36 @@ pub(super) fn codex_tool_event(value: &Value) -> Option<SubagentEvent> {
         _ => return None,
     };
     let item = value.pointer("/params/item")?;
-    let call_id = item.get("id").and_then(Value::as_str)?.to_string();
+    let source_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
     let item_type = item.get("type").and_then(Value::as_str)?;
+    let fingerprint = codex_tool_fingerprint(item_type, item);
     let (name, args, output, ok) = match item_type {
         "commandExecution" => (
             "shell_run".to_string(),
-            json!({
+            bounded_tool_value(json!({
                 "cmd": item.get("command").cloned().unwrap_or(Value::Null),
                 "cwd": item.get("cwd").cloned().unwrap_or(Value::Null),
                 "command_actions": item.get("commandActions").cloned().unwrap_or_else(|| json!([]))
-            }),
-            json!({
+            })),
+            bounded_tool_value(json!({
                 "stdout": item.get("aggregatedOutput").cloned().unwrap_or(Value::Null),
                 "status": item.get("exitCode").cloned().unwrap_or(Value::Null),
                 "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null)
-            }),
+            })),
             item.get("status").and_then(Value::as_str) == Some("completed"),
         ),
         "fileChange" => (
             "file_change".to_string(),
-            json!({"changes": item.get("changes").cloned().unwrap_or_else(|| json!([]))}),
-            json!({
+            bounded_tool_value(
+                json!({"changes": item.get("changes").cloned().unwrap_or_else(|| json!([]))}),
+            ),
+            bounded_tool_value(json!({
                 "changes": item.get("changes").cloned().unwrap_or_else(|| json!([])),
                 "status": item.get("status").cloned().unwrap_or(Value::Null)
-            }),
+            })),
             item.get("status").and_then(Value::as_str) == Some("completed"),
         ),
         "mcpToolCall" => {
@@ -166,12 +262,14 @@ pub(super) fn codex_tool_event(value: &Value) -> Option<SubagentEvent> {
             };
             (
                 format!("mcp__{server}__{tool}"),
-                item.get("arguments").cloned().unwrap_or_else(|| json!({})),
-                item.get("result")
-                    .filter(|result| !result.is_null())
-                    .cloned()
-                    .or_else(|| item.get("error").cloned())
-                    .unwrap_or(Value::Null),
+                bounded_tool_value(item.get("arguments").cloned().unwrap_or_else(|| json!({}))),
+                bounded_tool_value(
+                    item.get("result")
+                        .filter(|result| !result.is_null())
+                        .cloned()
+                        .or_else(|| item.get("error").cloned())
+                        .unwrap_or(Value::Null),
+                ),
                 item.get("status").and_then(Value::as_str) == Some("completed")
                     && item.get("error").is_none_or(Value::is_null),
             )
@@ -179,6 +277,7 @@ pub(super) fn codex_tool_event(value: &Value) -> Option<SubagentEvent> {
         _ => return None,
     };
     if completed {
+        let call_id = state.completion_id(source_id, &name, fingerprint)?;
         Some(SubagentEvent::ToolCompleted {
             call_id,
             name,
@@ -186,11 +285,92 @@ pub(super) fn codex_tool_event(value: &Value) -> Option<SubagentEvent> {
             output,
         })
     } else {
+        let call_id = state.start_id(source_id);
+        state.active.push(ActiveCodexTool {
+            source_id: source_id.map(str::to_string),
+            event_id: call_id.clone(),
+            name: name.clone(),
+            fingerprint,
+        });
         Some(SubagentEvent::ToolStarted {
             call_id,
             name,
             args,
         })
+    }
+}
+
+fn codex_tool_fingerprint(item_type: &str, item: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    item_type.hash(&mut hasher);
+    let keys: &[&str] = match item_type {
+        "commandExecution" => &["command", "cwd"],
+        "fileChange" => &["changes"],
+        "mcpToolCall" => &["server", "tool", "arguments"],
+        _ => &[],
+    };
+    for key in keys {
+        key.hash(&mut hasher);
+        if let Some(value) = item.get(key) {
+            hash_json(value, &mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_json(value: &Value, hasher: &mut DefaultHasher) {
+    match value {
+        Value::Null => 0_u8.hash(hasher),
+        Value::Bool(value) => {
+            1_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::Number(value) => {
+            2_u8.hash(hasher);
+            value.to_string().hash(hasher);
+        }
+        Value::String(value) => {
+            3_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::Array(values) => {
+            4_u8.hash(hasher);
+            values.len().hash(hasher);
+            for value in values {
+                hash_json(value, hasher);
+            }
+        }
+        Value::Object(values) => {
+            5_u8.hash(hasher);
+            values.len().hash(hasher);
+            for (key, value) in values {
+                key.hash(hasher);
+                hash_json(value, hasher);
+            }
+        }
+    }
+}
+
+fn bounded_tool_value(value: Value) -> Value {
+    let encoded = value.to_string();
+    if encoded.len() <= TOOL_EVENT_VALUE_BYTES {
+        return value;
+    }
+    let mut end = TOOL_EVENT_VALUE_BYTES.min(encoded.len());
+    loop {
+        while !encoded.is_char_boundary(end) {
+            end -= 1;
+        }
+        let candidate = json!({
+            "_hirsel_truncated": true,
+            "preview": format!("{}{}", &encoded[..end], TOOL_EVENT_TRUNCATION_MARKER),
+        });
+        let candidate_len = candidate.to_string().len();
+        if candidate_len <= TOOL_EVENT_VALUE_BYTES {
+            return candidate;
+        }
+        let reduction = (candidate_len - TOOL_EVENT_VALUE_BYTES).max(1);
+        end = end.saturating_sub(reduction);
     }
 }
 

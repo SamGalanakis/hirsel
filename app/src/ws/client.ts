@@ -71,6 +71,12 @@ export function makeClientId(): string {
  * prefixes it. */
 let blobBase = "";
 
+/** One in-flight blob operation. The kind says which response settles it, so a
+ * frame can never resolve a promise of the other shape. */
+type PendingRequest =
+  | { kind: "upload"; resolve: (blob: Blob) => void; reject: (error: Error) => void }
+  | { kind: "blob_url"; resolve: (url: string) => void; reject: (error: Error) => void };
+
 class HirselWsClient {
   private url: string;
   private token: string;
@@ -80,10 +86,10 @@ class HirselWsClient {
   private closedByClient = false;
   private outbox: ClientMessage[] = [];
   private authenticated = false;
-  /** Unresolved upload_blob promises, keyed by their client_id. */
-  private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
-  /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
-  private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
+  /** Unresolved upload_blob and get_blob_url (D9) promises, keyed by their
+   * client_id. One id belongs to one request, so one map holds both kinds and
+   * the error path is a single lookup. */
+  private pending = new Map<string, PendingRequest>();
   private processActionIds = new Set<string>();
   private handlers: ClientHandlers;
 
@@ -117,9 +123,10 @@ class HirselWsClient {
       // correlating client_id (the canonical error shape has no id): time out so
       // the chip fails into its retry state instead of the composer hanging.
       const timer = setTimeout(() => {
-        if (this.uploads.delete(clientId)) reject(new Error("upload timed out"));
+        if (this.pending.delete(clientId)) reject(new Error("upload timed out"));
       }, UPLOAD_TIMEOUT_MS);
-      this.uploads.set(clientId, {
+      this.pending.set(clientId, {
+        kind: "upload",
         resolve: (b) => {
           clearTimeout(timer);
           resolve(b);
@@ -148,9 +155,10 @@ class HirselWsClient {
     const clientId = makeClientId();
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.blobUrlReqs.delete(clientId)) reject(new Error("blob url timed out"));
+        if (this.pending.delete(clientId)) reject(new Error("blob url timed out"));
       }, BLOB_URL_TIMEOUT_MS);
-      this.blobUrlReqs.set(clientId, {
+      this.pending.set(clientId, {
+        kind: "blob_url",
         resolve: (url) => {
           clearTimeout(timer);
           resolve(url);
@@ -465,20 +473,14 @@ class HirselWsClient {
         // Resolving the correlated promise IS the notification: the awaiting
         // `runUpload` records the done state (with this blob) on the staged
         // file. Nothing else in the app tracks uploads.
-        const pending = this.uploads.get(message.client_id);
-        if (pending) {
-          pending.resolve(message.blob);
-          this.uploads.delete(message.client_id);
-        }
+        const request = this.take(message.client_id, "upload");
+        request?.resolve(message.blob);
         break;
       }
       case "blob_url": {
-        const pending = this.blobUrlReqs.get(message.client_id);
-        if (pending) {
-          // Signed URL is host-relative; prefix the blob origin.
-          pending.resolve(`${blobBase}${message.url}`);
-          this.blobUrlReqs.delete(message.client_id);
-        }
+        const request = this.take(message.client_id, "blob_url");
+        // Signed URL is host-relative; prefix the blob origin.
+        request?.resolve(`${blobBase}${message.url}`);
         break;
       }
       case "error": {
@@ -497,15 +499,10 @@ class HirselWsClient {
         // blob-url request; reject its promise and mark the chip. Others are
         // surfaced to the log.
         if (message.client_id) {
-          const pending = this.uploads.get(message.client_id);
-          if (pending) {
-            pending.reject(new Error(message.detail));
-            this.uploads.delete(message.client_id);
-          }
-          const blobReq = this.blobUrlReqs.get(message.client_id);
-          if (blobReq) {
-            blobReq.reject(new Error(message.detail));
-            this.blobUrlReqs.delete(message.client_id);
+          const request = this.pending.get(message.client_id);
+          if (request) {
+            this.pending.delete(message.client_id);
+            request.reject(new Error(message.detail));
           }
           if (this.processActionIds.delete(message.client_id)) {
             setProtocolError(message.detail);
@@ -524,11 +521,18 @@ class HirselWsClient {
     }
   }
 
+  /** Claim a pending request of the expected kind, removing it from the map. */
+  private take<K extends PendingRequest["kind"]>(clientId: string, kind: K): Extract<PendingRequest, { kind: K }> | undefined {
+    const request = this.pending.get(clientId);
+    if (request?.kind !== kind) return undefined;
+    this.pending.delete(clientId);
+    return request as Extract<PendingRequest, { kind: K }>;
+  }
+
   private clearRequests(detail: string): void {
     this.outbox = [];
-    for (const request of this.uploads.values()) request.reject(new Error(detail));
-    for (const request of this.blobUrlReqs.values()) request.reject(new Error(detail));
-    this.uploads.clear(); this.blobUrlReqs.clear();
+    for (const request of this.pending.values()) request.reject(new Error(detail));
+    this.pending.clear();
     this.processActionIds.clear();
   }
   private flushOutbox(): void {

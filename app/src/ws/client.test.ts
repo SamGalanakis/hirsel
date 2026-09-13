@@ -196,6 +196,18 @@ describe("HirselWsClient signed blob URLs (D9)", () => {
 
     await expect(p).rejects.toThrow(/no such blob/);
   });
+
+  it("settles a pending request only with the response kind it asked for", async () => {
+    const { client } = await load();
+    const { c, ws } = connected(client);
+
+    const upload = c.uploadBlob("shared-id", "note.txt", "text/plain", "eA==");
+    // A blob_url frame carrying an upload's client_id must not resolve it, and
+    // must leave the request in the map for its own response.
+    ws.serverSend({ type: "blob_url", client_id: "shared-id", blob_id: "b", url: "/blob/b", expires_at: 1 });
+    ws.serverSend({ type: "blob_ok", client_id: "shared-id", blob: new Blob(["x"]) });
+    await expect(upload).resolves.toBeDefined();
+  });
 });
 
 

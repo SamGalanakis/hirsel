@@ -114,7 +114,7 @@ function StatusGlyph(props: { status: StepStatus; settled?: boolean }) {
  * of one scannable column of work. Chrome is now hover-only; failure tints the
  * text, and the open step takes the quiet fill so the panel below is
  * unambiguously its. */
-const ROW = "flex w-full min-w-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-meta leading-tight transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-9";
+const ROW = "flex w-full min-w-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-meta transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-9";
 function rowClass(state: { failed?: boolean; open?: boolean }): string {
   if (state.failed) return `${ROW} text-destructive hover:bg-destructive/10`;
   if (state.open) return `${ROW} bg-muted text-foreground`;
@@ -237,13 +237,13 @@ function ToolDetail(props: { item: ToolItem; failed: boolean }) {
   const presentation = () => presentToolResult(props.item.name, done()?.result ?? null, done()?.resultTruncated ?? false);
   return (
     <div data-slot="tool-result" data-tool-call-id={props.item.toolId} class="space-y-1.5">
-      <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": props.failed }]}>
+      <pre class={["max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono text-meta text-foreground/80", { "text-destructive/90": props.failed }]}>
         {toolPayload(props.item)}
       </pre>
       <Show when={presentation()?.raw}>{raw =>
         <details data-slot="tool-result-raw" class="text-meta text-muted-foreground">
           <summary class="min-h-11 cursor-pointer py-3">Raw result{done()?.resultTruncated ? " (truncated)" : ""}</summary>
-          <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono leading-relaxed text-foreground/75">{raw()}</pre>
+          <pre class="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word border-l border-border/60 pl-2 font-mono text-foreground/75">{raw()}</pre>
         </details>
       }</Show>
     </div>

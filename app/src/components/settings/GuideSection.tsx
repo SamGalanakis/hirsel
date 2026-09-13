@@ -10,7 +10,7 @@ import { Group, SectionHeader } from "./rows";
 /** A paragraph of guide prose, at the body measure the rest of Settings reads
  * at. Muted, because this is explanation rather than a value the Owner set. */
 function P(props: { children: JSX.Element }) {
-  return <p class="mt-2 text-sm leading-relaxed text-muted-foreground">{props.children}</p>;
+  return <p class="mt-2 text-sm text-muted-foreground">{props.children}</p>;
 }
 
 /** A keyboard token, same mono chip the command palette renders its hints as. */
@@ -39,7 +39,7 @@ function Shortcut(props: { keys: string[]; chord?: boolean; children: JSX.Elemen
           )}
         </For>
       </span>
-      <span class="min-w-0 text-sm leading-relaxed text-muted-foreground">{props.children}</span>
+      <span class="min-w-0 text-sm text-muted-foreground">{props.children}</span>
     </div>
   );
 }

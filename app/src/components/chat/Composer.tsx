@@ -369,7 +369,7 @@ export function Composer(props: Props) {
              by the text, not by a touch target — for a 44px capsule; a coarse
              pointer keeps the 44px one, so the capsule stays thumb-sized where
              thumbs use it. */
-          class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 leading-snug shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
+          class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
           aria-label={props.ariaLabel ?? "Message Hirsel"}
           placeholder={composerPlaceholder(props.ariaLabel ?? "Message Hirsel", props.shortLabel, narrow())}
           aria-expanded={(picker.open() ? true : undefined) ? "true" : "false"}

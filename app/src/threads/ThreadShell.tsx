@@ -20,7 +20,7 @@ import { quietWakeTurn } from "./work-summary";
 import { conversationEntries, type ConversationEntry } from "./conversation";
 import { emptyHistory } from "./model";
 import { BrandMark } from "../components/BrandMark";
-import { Activity, Settings, GitBranch, Info, LayoutGrid, ArrowLeft, MessageCircle, FileText, Plus } from "../components/ui/icons";
+import { Activity, Check, Settings, GitBranch, Info, LayoutGrid, ArrowLeft, MessageCircle, FileText, Plus } from "../components/ui/icons";
 import { ThreadLink } from "./ThreadRef";
 import { threadAncestors } from "./tree";
 import { attentionQueue, attentionThreads } from "./attention";
@@ -32,6 +32,8 @@ import { ThreadInfo } from "./ThreadInfo";
 import { ThreadActions } from "./ThreadActions";
 import { SettingsSheet } from "../components/settings/SettingsSheet";
 import { ProcessesSheet } from "../components/processes/ProcessesSheet";
+import { PaneHeader } from "../components/ui/PaneHeader";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../components/ui/empty";
 import { CanvasRail, CanvasSheet, CanvasButton } from "../components/views/CanvasSurface";
 import { ConnectionPill } from "../components/ConnectionPill";
 import { closeRightRegion, openProcesses, openSettings, state } from "../store/store";
@@ -72,29 +74,27 @@ function NeedsYouPill(props: { thread: { attention: string; last_activity_at: st
     </span>
   </Show>;
 }
-function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void }) {
+function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController }) {
   const [pane, setPane] = createSignal<"conversation" | "related" | "info">("conversation");
-  const showRelated = () => pane() === "related" || props.globalArtifacts;
+  const showRelated = () => pane() === "related";
   /** The Thread's own facts, in the frame, in place of the conversation. */
-  const showInfo = () => pane() === "info" && !props.globalArtifacts;
-  /** A pane of this Thread standing in place of its conversation. The global
-   * artifact browser is not one: it is a layer over the addressed Thread and
-   * keeps its destination, so it keeps its composer too. */
-  const threadPane = () => showInfo() || (pane() === "related" && !props.globalArtifacts);
+  const showInfo = () => pane() === "info";
+  /** A pane of this Thread standing in place of its conversation. */
+  const threadPane = () => pane() !== "conversation";
   /** Info and Related end at their content — no composer, no bottom chrome. */
   const writable = () => !threadPane();
-  /** Back has one meaning — go back. A pane or browser standing in for the
-   * conversation returns to it; otherwise the Thread this session came from;
-   * otherwise the overview. It never opens the inventory: the rail and the
-   * phone bar own that, and with the column docked opening it does nothing. */
-  const backsToConversation = () => threadPane() || props.globalArtifacts;
+  /** Back has one meaning — go back. A pane standing in for the conversation
+   * returns to it; otherwise the Thread this session came from; otherwise the
+   * overview. It never opens the inventory: the rail and the phone bar own
+   * that, and with the column docked opening it does nothing. */
+  const backsToConversation = threadPane;
   const backTitle = () => {
     if (backsToConversation()) return "Back to conversation";
     const previous = previousThread();
     return previous === null ? "Back to overview" : `Back to #${previous}`;
   };
   const goBack = () => {
-    if (backsToConversation()) { setPane("conversation"); props.onConversation(); return; }
+    if (backsToConversation()) { setPane("conversation"); return; }
     focusThread(popThreadVisit());
   };
   const attachments = props.attachments;
@@ -154,9 +154,9 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         <Show when={current()}>{thread => <NeedsYouPill thread={thread()} />}</Show>
         <Show when={current()}>{thread => <span class="hidden text-xs capitalize text-muted-foreground sm:inline">{thread().kind}{thread().kind === "task" && thread().settled_at ? " · Done" : ""}</span>}</Show>
         <div role="tablist" aria-label="Thread views" class="flex shrink-0 items-center" data-slot="thread-views">
-          <button role="tab" class={iconButton} aria-label="Conversation" title="Conversation" aria-selected={!showRelated() && !showInfo() ? "true" : "false"} tabindex={!showRelated() && !showInfo() ? 0 : -1} onClick={() => { setPane("conversation"); props.onConversation(); }}><MessageCircle class="size-4" /></button>
-          <button role="tab" class={iconButton} aria-label="Info" title="About this Thread" aria-selected={showInfo() ? "true" : "false"} tabindex={showInfo() ? 0 : -1} onClick={() => { props.onConversation(); setPane("info"); }}><Info class="size-4" /></button>
-          <button role="tab" class={`${iconButton} relative`} aria-label="Related" title="Related links and artifacts" aria-selected={pane() === "related" && !props.globalArtifacts ? "true" : "false"} tabindex={pane() === "related" && !props.globalArtifacts ? 0 : -1} onClick={() => { props.onConversation(); setPane("related"); }}><FileText class="size-4" /><Show when={relatedCount() > 0}><span aria-hidden="true" class="absolute top-0.5 right-0.5 grid min-w-3.5 place-items-center rounded-full bg-muted px-0.5 text-meta tabular-nums">{relatedCount()}</span></Show></button>
+          <button role="tab" class={iconButton} aria-label="Conversation" title="Conversation" aria-selected={!threadPane() ? "true" : "false"} tabindex={!threadPane() ? 0 : -1} onClick={() => setPane("conversation")}><MessageCircle class="size-4" /></button>
+          <button role="tab" class={iconButton} aria-label="Info" title="About this Thread" aria-selected={showInfo() ? "true" : "false"} tabindex={showInfo() ? 0 : -1} onClick={() => setPane("info")}><Info class="size-4" /></button>
+          <button role="tab" class={`${iconButton} relative`} aria-label="Related" title="Related links and artifacts" aria-selected={showRelated() ? "true" : "false"} tabindex={showRelated() ? 0 : -1} onClick={() => setPane("related")}><FileText class="size-4" /><Show when={relatedCount() > 0}><span aria-hidden="true" class="absolute top-0.5 right-0.5 grid min-w-3.5 place-items-center rounded-full bg-muted px-0.5 text-meta tabular-nums">{relatedCount()}</span></Show></button>
         </div>
         <ShowcaseButton threadId={props.id} />
         <CanvasButton />
@@ -165,7 +165,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         </Show>
       </header>
     <div ref={node => { scroller = node; }} class="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-gutter" data-slot="thread-scroll" onScroll={() => { if (scroller) following = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; }}>
-      <Show when={!showRelated()} fallback={<Show when={props.globalArtifacts} fallback={<RelatedList origin={origin} />}><ArtifactList onResume={props.onConversation} /></Show>}>
+      <Show when={!showRelated()} fallback={<RelatedList origin={origin} />}>
       <Show when={showInfo() && current()} fallback={
       <div class="mx-auto flex w-full max-w-measure flex-col gap-6">
         <Show when={current()?.parent_thread_id !== null && current()?.parent_thread_id !== undefined}><nav aria-label="Thread ancestry" class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><For each={threadAncestors(threadState.threads, props.id)}>{parent => <><ThreadLink id={parent.id} /><span aria-hidden="true">/</span></>}</For><span class="break-words">#{props.id} {current()?.title}</span></nav></Show>
@@ -216,6 +216,16 @@ function PendingMessageRow(props: { message: (typeof threadState.pending)[number
   return <article data-author="owner" class={`ml-auto max-w-reply rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 ${props.message.failed ? "" : "opacity-70"}`}><Markdown>{props.message.body}</Markdown><For each={props.message.artifactIds}>{id => <ArtifactCard id={id} />}</For><span class="text-xs">{props.message.failed ? "Failed to send" : state.connection === "connected" ? "Sending…" : "Waiting for connection…"}</span><Show when={props.message.failed}><button class={button} ref={node => { retryButton = node; }} onFocus={() => { ownsFocus = true; }} onClick={() => retryThreadMessage(props.message.clientId)}>Retry</button></Show></article>;
 }
 
+/** The global artifact inventory is a utility pane like Processes: its own
+ * header, the shared empty state, and no Thread chrome — no pill, no composer.
+ * It stands in the conversation's slot whether or not a Thread is addressed;
+ * closing it returns to whatever stood there, where the composer lives. */
+function ArtifactsPane(props: { onClose: () => void }) {
+  return <main data-slot="artifacts-pane" aria-labelledby="artifacts-pane-title" class="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background split:min-w-[26rem]">
+    <PaneHeader icon={<LayoutGrid class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />} title="All artifacts" titleId="artifacts-pane-title" onClose={props.onClose} closeLabel="Close All artifacts" />
+    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-gutter"><ArtifactList onResume={props.onClose} /></div>
+  </main>;
+}
 /** One row of the overview queue: who is waiting, for how long, and — when it
  * is the Owner they are waiting for — the actual question. */
 function QueueRow(props: { entry: ReturnType<typeof attentionQueue>[number]; onSelect: (id: number) => void }) {
@@ -241,7 +251,7 @@ function QueueRow(props: { entry: ReturnType<typeof attentionQueue>[number]; onS
  * running, then what was active last. "Choose a Space or Task" survives only
  * for an account that has none. The same view serves phone and desktop.
  */
-function ThreadStart(props: { globalArtifacts: boolean; browsable: boolean; onSelect: (id: number) => void }) {
+function ThreadStart(props: { browsable: boolean; onSelect: (id: number) => void }) {
   const [now, setNow] = createSignal(Date.now());
   const timer = setInterval(() => setNow(Date.now()), 30_000);
   onCleanup(() => clearInterval(timer));
@@ -249,10 +259,9 @@ function ThreadStart(props: { globalArtifacts: boolean; browsable: boolean; onSe
   const grouped = createMemo(() => [
     { id: "attention", label: `Needs you (${queue().filter(entry => entry.group === "attention").length})`, entries: queue().filter(entry => entry.group === "attention") },
     { id: "running", label: "Running", entries: queue().filter(entry => entry.group === "running") },
-    { id: "recent", label: "Recently active", entries: queue().filter(entry => entry.group === "recent") },
+    { id: "recent", label: "New activity", entries: queue().filter(entry => entry.group === "recent") },
   ].filter(group => group.entries.length > 0));
   return <main data-slot="thread-empty" class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-5 sm:p-8">
-    <Show when={props.globalArtifacts} fallback={
       <Show when={threadState.linkError} fallback={
         <Show when={threadState.threads.length > 0 && threadState.focusedId === null} fallback={<div class="m-auto w-full max-w-md space-y-4">
           <h1 class="text-lg font-medium">{threadState.focusedId !== null ? `Thread #${threadState.focusedId} is unavailable` : "Start with a Space or Task"}</h1>
@@ -270,7 +279,17 @@ function ThreadStart(props: { globalArtifacts: boolean; browsable: boolean; onSe
               <button class={`${button} min-w-11 split:hidden`} aria-label="Settings" title="Settings" onClick={() => openSettings()}><Settings class="size-4" /></button>
             </div>
           </div>
-          <Show when={grouped().length > 0} fallback={<p class="text-sm text-muted-foreground">Nothing is waiting on you. Open a Space or Task, or start a new one.</p>}>
+          {/* The queue is what needs the Owner and what is new, not the tree
+              again: the inventory beside it already lists every Thread. When
+              nothing needs them, the page says so with the one shared empty
+              state instead of a full copy of the tree. */}
+          <Show when={grouped().length > 0} fallback={<Empty class="border-none py-16" data-slot="attention-empty">
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><Check class="size-5" /></EmptyMedia>
+              <EmptyTitle>Nothing needs you</EmptyTitle>
+              <EmptyDescription>Every Space and Task is either working or waiting for your next word. Open one from the tree, or start a new one.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>}>
             <For each={grouped()}>{group => <section class="flex flex-col gap-1" aria-label={group.label}>
               <h2 class="px-2 text-meta font-medium uppercase tracking-wider text-muted-foreground">{group.label}</h2>
               <ul class="flex flex-col"><For each={group.entries}>{entry => <QueueRow entry={entry} onSelect={props.onSelect} />}</For></ul>
@@ -282,7 +301,6 @@ function ThreadStart(props: { globalArtifacts: boolean; browsable: boolean; onSe
         <p class="text-sm text-muted-foreground">Your drafts are kept. Choose a conversation from this history to continue.</p>
         <button class={button} onClick={() => { focusThread(null); openThreadNavigation(); }}>Return to Spaces &amp; Tasks</button>
       </div></Show>
-    }><ArtifactList /></Show>
   </main>;
 }
 export function ThreadShell() {
@@ -372,7 +390,9 @@ export function ThreadShell() {
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>
       <div class="flex min-h-0 flex-1 gap-2 py-2 pr-2 pl-2 sm:gap-3 sm:pr-3">
-        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart globalArtifacts={globalArtifacts()} browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} globalArtifacts={globalArtifacts()} onConversation={() => setGlobalArtifacts(false)} />}</Show>
+        <Show when={!globalArtifacts()} fallback={<ArtifactsPane onClose={() => setGlobalArtifacts(false)} />}>
+        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} />}</Show>
+        </Show>
         <Show when={!sideCollapsed()} fallback={<Show when={collapsedShowcase()}>
           <button type="button" data-slot="collapsed-pane-tab" class="flex w-8 shrink-0 items-center justify-center rounded-lg border border-border text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Show the showcase and close the utility pane" title="Show the showcase" onClick={closeRightRegion}>
             <span class="[writing-mode:vertical-rl] rotate-180">Showcase</span>

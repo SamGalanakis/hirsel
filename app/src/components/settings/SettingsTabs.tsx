@@ -13,9 +13,10 @@ import type { SettingsTab } from "../../store/store";
 /** Eight flat sections was a list to read, not a place to navigate: nothing
  * said which of them were about the machine, which about the agents, and which
  * about this device, so the Owner had to read all eight labels every time.
- * They are the SAME eight sections, in four named groups. The group heading
- * shows in the rail; on the phone strip, where there is no room for headings,
- * the groups survive as the order and as the gaps between them. */
+ * They are the SAME eight sections, in four named groups, and the headings
+ * travel with them: a column of labelled groups in the rail, and on the phone
+ * strip each group is a labelled cluster the strip scrolls through, so a
+ * flick never lands on eight unbroken words. */
 export const SETTINGS_GROUPS: readonly { heading: string; tabs: readonly { id: SettingsTab; label: string }[] }[] = [
   { heading: "Look & feel", tabs: [
     { id: "appearance", label: "Appearance" },
@@ -98,17 +99,18 @@ export function SettingsTabs(props: {
       tabindex={-1}
       data-slot="settings-tabs"
       onKeyDown={onKeyDown}
-      class="scroll-fade-x sticky top-0 z-10 flex shrink-0 snap-x snap-mandatory gap-1 overflow-x-auto bg-background pb-2 rail:top-6 rail:max-h-[calc(100dvh-6rem)] rail:w-52 rail:flex-col rail:gap-0 rail:overflow-x-hidden rail:overflow-y-auto rail:pb-0"
+      class="scroll-fade-x sticky top-0 z-10 flex shrink-0 snap-x snap-mandatory gap-4 overflow-x-auto bg-background pb-2 rail:top-6 rail:max-h-[calc(100dvh-6rem)] rail:w-52 rail:flex-col rail:gap-0 rail:overflow-x-hidden rail:overflow-y-auto rail:pb-0"
     >
       <For each={SETTINGS_GROUPS}>
-        {(group, groupIndex) => (
-          <>
+        {(group) => (
+          <div data-slot="settings-group" class="flex shrink-0 snap-start flex-col gap-0.5 rail:pt-4 rail:first:pt-0">
             <p
               aria-hidden="true"
-              class={`hidden text-meta font-medium uppercase tracking-wide text-muted-foreground rail:block rail:px-3 rail:pb-1 ${groupIndex() === 0 ? "" : "rail:pt-4"}`}
+              class="px-2 text-meta font-medium uppercase tracking-wide text-muted-foreground rail:px-3 rail:pb-1"
             >
               {group.heading}
             </p>
+            <div class="flex gap-1 rail:flex-col rail:gap-0">
             <For each={group.tabs}>
               {(tab) => {
                 const active = () => props.active === tab.id;
@@ -124,10 +126,7 @@ export function SettingsTabs(props: {
                     // keys move within it.
                     tabindex={active() ? 0 : -1}
                     onClick={() => props.onSelect(tab.id)}
-                    // `snap-start` is what stops the strip resting mid-label on
-                    // the phone: a flick lands on a tab's leading edge, never
-                    // half a word.
-                    class={["relative shrink-0 snap-start whitespace-nowrap rounded-md px-2 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 rail:px-3", {
+                    class={["relative shrink-0 whitespace-nowrap rounded-md px-2 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 rail:px-3", {
                       "font-medium text-foreground": active(),
                       "text-muted-foreground hover:text-foreground": !active(),
                     }]}
@@ -143,7 +142,8 @@ export function SettingsTabs(props: {
                 );
               }}
             </For>
-          </>
+            </div>
+          </div>
         )}
       </For>
     </div>

@@ -27,7 +27,12 @@ function TurnTrace(props: { ref?: (node: HTMLElement) => void; turn?: ThreadTurn
      what the block is. Opened, it used to read as unlabelled dim italics
      floating between the header and the reply, so nothing told the Owner where
      the machine's account of the run started or stopped. */
-  return <section ref={node => props.ref?.(node)} id={props.id} data-slot="run-card-trace" class="mb-2 min-w-0 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-xs text-muted-foreground" aria-label="Run steps">
+  /* The block has a height budget. A long run's reasoning and tool output used
+     to unroll the whole trace down the conversation, so opening one card pushed
+     the reply it belonged to off the screen; now the trace scrolls inside a
+     40dvh window with the app's edge fade, and the JSON records keep their own
+     smaller cap inside it. */
+  return <section ref={node => props.ref?.(node)} id={props.id} data-slot="run-card-trace" class="scroll-fade-y mb-2 max-h-[40dvh] min-w-0 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-xs text-muted-foreground" aria-label="Run steps">
     <p class="mb-1.5 text-meta font-medium uppercase tracking-wide text-muted-foreground">Steps</p>
     <Show when={props.events.length > 0}>
       <Timeline events={props.events} live={props.live} settled={settled()} />
@@ -120,7 +125,7 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
         aria-label={[runOutcomeLabel(outcome()), originLabel(), duration()].filter(Boolean).join(" · ")}
         aria-expanded={expanded() ? "true" : "false"}
         aria-controls={expanded() ? traceId() : undefined}
-        class="-mx-1 mb-1.5 flex min-h-6 w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-meta leading-tight text-muted-foreground tabular-nums transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-11"
+        class="-mx-1 mb-1.5 flex min-h-6 w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-meta text-muted-foreground tabular-nums transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-11"
         onClick={() => props.turn && setTurnExpanded(props.turn.id, !expanded())}
       >
         <ChevronRight class={`size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />

@@ -105,7 +105,7 @@ function HeadingNode(node: Node): JSX.Element {
   // scale; an explicitly nested heading steps down to h4 and stays quiet.
   if (node.level === 3) {
     return (
-      <h4 class="text-sm font-medium leading-snug text-foreground">
+      <h4 class="text-sm font-medium text-foreground">
         <Rich text={node.text} />
       </h4>
     );
@@ -151,11 +151,11 @@ function OptionListNode(node: Node): JSX.Element {
                 {key}
               </span>
               <span class="flex min-w-0 flex-col">
-                <span class="text-sm font-medium leading-snug text-foreground">
+                <span class="text-sm font-medium text-foreground">
                   <Rich text={opt.label} />
                 </span>
                 <Show when={str(opt.detail)}>
-                  <span class="mt-0.5 text-xs leading-snug text-muted-foreground">
+                  <span class="mt-0.5 text-xs text-muted-foreground">
                     <Rich text={opt.detail} />
                   </span>
                 </Show>
@@ -190,7 +190,7 @@ function FieldNode(node: Node): JSX.Element {
       </Show>
       <input
         type="text"
-        class="min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+        class="min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
         placeholder={placeholder}
         aria-label={label || placeholder || name}
         aria-required={(required || undefined) ? "true" : "false"}
@@ -271,7 +271,7 @@ function ViewSlotNode(node: Node): JSX.Element {
           </div>
         }
       >
-        <div class="py-1.5 font-mono text-xs leading-relaxed">
+        <div class="py-1.5 font-mono text-xs">
           <For each={(Array.isArray(node.lines) ? node.lines : []) as Record<string, unknown>[]}>
             {(ln) => {
               const op = str(ln.op);

@@ -104,7 +104,7 @@
 }
 
 .z-card-title {
-  @apply text-base leading-normal font-medium group-data-[size=sm]/card:text-sm;
+  @apply text-base font-medium group-data-[size=sm]/card:text-sm;
 }
 
 .z-card-description {
@@ -159,7 +159,7 @@
 
 /* MARK: Label */
 .z-label {
-  @apply gap-2 text-sm leading-none font-medium group-data-[disabled=true]:opacity-50 peer-disabled:opacity-50;
+  @apply gap-2 text-sm font-medium group-data-[disabled=true]:opacity-50 peer-disabled:opacity-50;
 }
 
 /* MARK: Separator */
@@ -219,7 +219,7 @@
 }
 
 .z-attachment-content {
-  @apply leading-tight group-data-[orientation=vertical]/attachment:px-1;
+  @apply group-data-[orientation=vertical]/attachment:px-1;
 }
 
 .z-attachment-title {

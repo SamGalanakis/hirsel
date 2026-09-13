@@ -233,7 +233,7 @@ function ListNode(node: Node): JSX.Element {
       {(raw) => {
         const item = (raw ?? {}) as Record<string, unknown>;
         return (
-          <li class={cn("text-sm leading-relaxed text-foreground", toneTextClass(str(item.tone)))}>
+          <li class={cn("text-sm text-foreground", toneTextClass(str(item.tone)))}>
             {scalarText(item.text)}
           </li>
         );
@@ -274,7 +274,7 @@ function ChecklistNode(node: Node): JSX.Element {
               <span class="flex min-w-0 flex-col">
                 <span
                   class={cn(
-                    "text-sm leading-snug",
+                    "text-sm",
                     checked ? "text-muted-foreground line-through" : "text-foreground",
                   )}
                 >
@@ -325,7 +325,7 @@ function CalloutNode(node: Node): JSX.Element {
       <Show when={title}>
         <div class="text-sm font-semibold text-foreground">{title}</div>
       </Show>
-      <div class="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{scalarText(node.body)}</div>
+      <div class="whitespace-pre-wrap text-sm text-foreground">{scalarText(node.body)}</div>
     </div>
   );
 }
@@ -411,7 +411,7 @@ function OptionSetNode(node: Node): JSX.Element {
 // unknown NODE type gets, instead of rendering a labelled void. ----
 
 const CONTROL_BASE =
-  "min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60";
+  "min-h-11 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60";
 
 interface FieldControlProps {
   /** The raw field node — kind-specific extras (e.g. `options`) live here. */

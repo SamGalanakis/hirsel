@@ -86,9 +86,11 @@ export function CodeBlock(props: { code: string; lang?: string | null; wrap?: bo
       </div>
       <pre
         class={[
-          "px-2.5 py-2 text-xs leading-5",
+          "px-2.5 py-2 text-xs",
           props.bare ? "rounded-md bg-muted/30" : "rounded-md border border-border/60",
-          props.wrap ? "whitespace-pre-wrap wrap-break-word" : "overflow-x-auto",
+          // The same edge fade a wide table wears: the app's one "there is more
+          // this way" cue, instead of a bare clipped edge.
+          props.wrap ? "whitespace-pre-wrap wrap-break-word" : "scroll-fade-x overflow-x-auto",
         ]}
       >
         {body()}

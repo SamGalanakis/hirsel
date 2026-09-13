@@ -328,7 +328,7 @@ export function Markdown(props: { children: string; class?: string }) {
          With a zero floor the block stays at its parent's width and the
          `overflow-x-auto` boxes inside it do the scrolling they were written
          to do. */
-      class={`grid grid-cols-[minmax(0,1fr)] gap-2 text-sm leading-relaxed wrap-break-word ${props.class ?? ""}`}
+      class={`grid grid-cols-[minmax(0,1fr)] gap-2 text-sm wrap-break-word ${props.class ?? ""}`}
     >
       <For each={tree().children}>{(node) => renderNodes([node])}</For>
     </div></LinkDefinitions>

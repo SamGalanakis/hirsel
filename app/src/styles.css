@@ -67,6 +67,12 @@
      the light paper, a lifted hairline-and-shade on the dark field. */
   --elevation-raised: 0 1px 2px 0 oklch(0.23 0.018 220 / 8%);
 
+  /* The one veil every overlay lowers over the canvas — drawer, dialog, palette,
+     the settings confirm sheets. A neutral ink on both canvases, never the
+     canvas colour itself: a scrim made of `--background` at 70% only muddied
+     the page a shade and left the drawer with no edge. */
+  --scrim: oklch(0 0 0 / 40%);
+
   /* Brand cube faces — theme-aware so the isometric mark's silhouette holds on
      BOTH canvases without a defensive contrast chip. LIGHT: ink-ish faces (a lit
      top, a mid side, a shadowed left, a slate facet) read solid on the off-white
@@ -119,6 +125,8 @@
   --elevation-raised:
     inset 0 1px 0 0 oklch(1 0 0 / 7%),
     0 1px 2px 0 oklch(0 0 0 / 35%);
+
+  --scrim: oklch(0 0 0 / 55%);
 
   /* Brand cube faces — DARK keeps the brand's resting near-whites (the mark's
      original fills, verbatim): a white top, an off-white right, the near-black
@@ -247,6 +255,7 @@
   --color-status-danger: var(--status-danger);
   --color-status-attention: var(--status-attention);
 
+  --color-scrim: var(--scrim);
   --shadow-raised: var(--elevation-raised);
 }
 
@@ -263,6 +272,13 @@
     @apply bg-background text-foreground;
     font-synthesis-weight: none;
     text-rendering: optimizeLegibility;
+  }
+
+  /* A placeholder is a hint, not a value: one step lighter than the muted ink
+     every real secondary text uses, so an empty field never reads as filled.
+     Declared once here; no call site writes a `placeholder:` colour. */
+  ::placeholder {
+    color: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
   }
 }
 

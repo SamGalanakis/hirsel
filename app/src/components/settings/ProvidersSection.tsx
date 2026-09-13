@@ -99,7 +99,7 @@ function ConfirmRemoveDialog(props: {
   return (
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
-      class="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-6"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-6"
       onClick={(event) => {
         if (event.target === event.currentTarget) props.onCancel();
       }}
@@ -114,7 +114,7 @@ function ConfirmRemoveDialog(props: {
         class="w-full max-w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg outline-none"
       >
         <h3 class="m-0 text-sm font-semibold text-foreground">Remove {props.label}?</h3>
-        <p class="mt-1.5 mb-4 text-sm leading-relaxed text-muted-foreground">
+        <p class="mt-1.5 mb-4 text-sm text-muted-foreground">
           The host drops this instance and its stored key. Any agent pointed at it falls back to
           the provider it booted on.
         </p>
@@ -272,7 +272,7 @@ function OpenAiRow(props: {
           disabled={props.busy}
         />
         <Show when={refusal()}>
-          <p class="mt-2 text-xs leading-snug text-muted-foreground">{refusal()}</p>
+          <p class="mt-2 text-xs text-muted-foreground">{refusal()}</p>
         </Show>
         <div class="mt-3 flex items-center gap-2">
           <Button size="sm" class="h-9" disabled={props.busy} onClick={save}>
@@ -333,14 +333,14 @@ function DetectedRow(props: {
           </Show>
           <Show when={detection() && !detection()?.detected}>
             <Show when={detection()?.detail}>
-              <p class="mt-1 text-xs leading-snug text-muted-foreground">{detection()?.detail}</p>
+              <p class="mt-1 text-xs text-muted-foreground">{detection()?.detail}</p>
             </Show>
-            <p class="mt-1 text-xs leading-snug text-muted-foreground">
+            <p class="mt-1 text-xs text-muted-foreground">
               Log in with the {cliName(props.instance)} CLI on the host machine, then check again.
             </p>
           </Show>
           <Show when={props.instance.kind === "claude"}>
-            <p class="mt-1 text-xs leading-snug text-muted-foreground">
+            <p class="mt-1 text-xs text-muted-foreground">
               Available to Sub-agents only — it cannot run the main Agent or the fork.
             </p>
           </Show>
@@ -453,7 +453,7 @@ function AddProviderForm(props: {
         disabled={props.busy}
       />
       <Show when={refusal()}>
-        <p class="mt-2 text-xs leading-snug text-muted-foreground">{refusal()}</p>
+        <p class="mt-2 text-xs text-muted-foreground">{refusal()}</p>
       </Show>
       <div class="mt-3 flex items-center gap-2">
         <Button size="sm" class="h-9" disabled={props.busy} onClick={add}>
@@ -506,7 +506,7 @@ export function ProvidersSection(): JSX.Element {
     <Show
       when={roster()}
       fallback={
-        <p class="text-xs leading-snug text-muted-foreground">
+        <p class="text-xs text-muted-foreground">
           This host reports no provider roster.
         </p>
       }
@@ -516,7 +516,7 @@ export function ProvidersSection(): JSX.Element {
         * waiting and coral for genuine blockage, so this standing line speaks
         * in the muted voice — it reports, it does not alarm. */}
       <Show when={roster()?.boot_notice}>
-        <p class="mb-2 text-xs leading-snug text-muted-foreground">{roster()?.boot_notice}</p>
+        <p class="mb-2 text-xs text-muted-foreground">{roster()?.boot_notice}</p>
       </Show>
       <Group class="divide-y divide-border">
         <For each={roster()?.instances ?? []}>
@@ -569,7 +569,7 @@ export function ProvidersSection(): JSX.Element {
           />
         </Show>
       </Group>
-      <p class="mt-2 text-xs leading-snug text-muted-foreground">
+      <p class="mt-2 text-xs text-muted-foreground">
         Keys are stored on the host. This browser only ever learns that a key is set and how it
         ends.
       </p>

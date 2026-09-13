@@ -46,7 +46,7 @@ export function ForkAgentSection(props: { fork: () => ForkAgentConfig }): JSX.El
   return (
     <>
       <SubHeading>Fork agent</SubHeading>
-      <p class="mb-2 text-xs leading-snug text-muted-foreground">
+      <p class="mb-2 text-xs text-muted-foreground">
         Runs once per incoming event to triage it. This provider, model and prompt are stored for
         the fork runtime and do not affect the current Agent.
       </p>

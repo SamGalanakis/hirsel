@@ -11,7 +11,7 @@ import type { ReachTarget } from "../threads/types";
 const remove = "inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
 const option = "flex min-h-11 w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
 const row = "flex min-h-9 items-start gap-2 rounded-md px-2 py-1.5 text-sm";
-const field = "h-9 w-full min-w-0 rounded-md border border-border bg-background px-2 text-sm font-normal normal-case tracking-normal text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11";
+const field = "h-9 w-full min-w-0 rounded-md border border-border bg-background px-2 text-sm font-normal normal-case tracking-normal text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11";
 
 interface Candidate { key: string; label: string; detail: string; target: ReachTarget }
 
@@ -79,7 +79,7 @@ export function ReachDialog() {
     onCancel={event => { event.preventDefault(); close(); }}
     onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); } }}
     onPointerDown={event => { if (event.target === dialog) close(); }}
-    class="m-auto max-h-[calc(100dvh-2rem)] w-[min(30rem,calc(100vw-2rem))] max-w-none flex-col overflow-y-auto rounded-xl border border-border bg-surface p-0 text-foreground shadow-raised backdrop:bg-background/70 open:flex">
+    class="m-auto max-h-[calc(100dvh-2rem)] w-[min(30rem,calc(100vw-2rem))] max-w-none flex-col overflow-y-auto rounded-xl border border-border bg-surface p-0 text-foreground shadow-raised backdrop:bg-scrim open:flex">
     <Show when={threadReachTarget()}>{target => <div class="flex min-h-0 flex-col gap-3 p-4">
       <h2 class="text-lg font-medium text-foreground">{reachDialogTitle(target().thread)}</h2>
       <ul class="flex flex-col gap-0.5 text-sm">

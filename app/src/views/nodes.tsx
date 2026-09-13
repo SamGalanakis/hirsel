@@ -143,7 +143,7 @@ export function createSharedNodes(style: NodeStyle): Record<string, (node: Node)
 
   function TextNode(node: Node): JSX.Element {
     return (
-      <p class={cn(style.textLead, "text-sm leading-relaxed text-foreground", toneTextClass(str(node.tone)))}>
+      <p class={cn(style.textLead, "text-sm text-foreground", toneTextClass(str(node.tone)))}>
         <Text text={node.text} />
       </p>
     );

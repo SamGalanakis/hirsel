@@ -191,7 +191,7 @@ export const CommandPalette: Component<{
                 autocorrect="off"
                 spellcheck={false}
                 placeholder={props.intent === "threads" ? "Search Spaces and Tasks…" : "Search commands, Spaces and Tasks…"}
-                class="h-11 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+                class="h-11 w-full bg-transparent text-sm text-foreground outline-none"
                 value={query()}
                 onInput={(e) => {
                   setQuery(e.currentTarget.value);
@@ -313,7 +313,7 @@ function ModalPanel(props: {onClose: () => void; label: string; class: string; c
     else panel.setAttribute("open", "");
   });
   return <dialog ref={node => { panel = node; }} aria-label={props.label} aria-modal="true"
-    class={cn("fixed inset-x-0 top-[14dvh] bottom-auto mx-auto my-0 w-[calc(100%_-_2rem)] rounded-xl border border-border bg-card text-foreground shadow-lg outline-none backdrop:bg-background/70", props.class)}
+    class={cn("fixed inset-x-0 top-[14dvh] bottom-auto mx-auto my-0 w-[calc(100%_-_2rem)] rounded-xl border border-border bg-card text-foreground shadow-lg outline-none backdrop:bg-scrim", props.class)}
     onCancel={(event) => { event.preventDefault(); props.onClose(); }}
     onPointerDown={(event) => {
       if (event.target !== panel) return;

@@ -9,10 +9,13 @@ import type { ThreadActivity } from "./types";
 /** A line owned by neither party: centred, muted, one line, between the two
  * columns of the conversation. */
 export function ConversationNote(props: { title?: string; children: JSX.Element; expanded?: boolean }) {
+  /* The words take their natural width and the two rules share what is left:
+     as three equal flex-1 siblings the text got a third of the measure and
+     truncated at 1440px with room to spare on either side. */
   return <div data-slot="conversation-note" title={props.title} class="flex items-center gap-3 text-meta text-muted-foreground">
-    <Show when={!props.expanded}><span aria-hidden="true" class="h-px flex-1 bg-border/60" /></Show>
-    <div class={props.expanded ? "min-w-0 max-w-full flex-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2" : "min-w-0 flex-1 truncate text-center"}>{props.children}</div>
-    <Show when={!props.expanded}><span aria-hidden="true" class="h-px flex-1 bg-border/60" /></Show>
+    <Show when={!props.expanded}><span aria-hidden="true" class="h-px min-w-4 flex-1 bg-border/60" /></Show>
+    <div class={props.expanded ? "min-w-0 max-w-full flex-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2" : "min-w-0 max-w-full shrink truncate text-center"}>{props.children}</div>
+    <Show when={!props.expanded}><span aria-hidden="true" class="h-px min-w-4 flex-1 bg-border/60" /></Show>
   </div>;
 }
 export function ActivityEntry(props: { activity: ThreadActivity }) {

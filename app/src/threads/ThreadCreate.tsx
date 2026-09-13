@@ -16,7 +16,7 @@ const chip = "inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-full
  * size, the box itself at the reading size with a real border and a real focus
  * ring. */
 const fieldLabel = "flex flex-col gap-1 text-meta font-medium uppercase tracking-wide text-muted-foreground";
-const fieldBox = "w-full min-w-0 rounded-lg border border-border bg-background px-2.5 text-sm font-normal normal-case tracking-normal text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const fieldBox = "w-full min-w-0 rounded-lg border border-border bg-background px-2.5 text-sm font-normal normal-case tracking-normal text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const icon = "inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
 /** The Thread's name is the first thing the Owner wrote, unless they say otherwise. */
 export function derivedTitle(body: string): string {
@@ -89,7 +89,7 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
   return <dialog ref={node => { dialog = node; }} aria-label="New Space or Task" data-slot="thread-create"
     onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }}
     onPointerDown={event => { if (event.target === dialog) dismiss(event); }}
-    class="m-auto w-[min(38rem,calc(100vw-2rem))] max-w-none flex-col rounded-xl border border-border bg-surface p-0 text-foreground shadow-raised backdrop:bg-background/70 open:flex max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:rounded-none">
+    class="m-auto w-[min(38rem,calc(100vw-2rem))] max-w-none flex-col rounded-xl border border-border bg-surface p-0 text-foreground shadow-raised backdrop:bg-scrim open:flex max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:rounded-none">
     {/* Closed, the modal holds no fields: the draft lives in this component's
         state, so nothing outside it can find a stray textarea. */}
     <Show when={open()}><div class="flex min-h-0 flex-1 flex-col gap-2 p-3">

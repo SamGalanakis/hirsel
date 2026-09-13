@@ -37,8 +37,9 @@ describe("explicit human artifact context", () => {
     expect(draftArtifact(1)).toEqual({id:44,title:"Review findings"});expect(frames).toEqual([]);
     expect(artifactState.summaries.find(row=>row.id===44)?.thread_ids).toEqual([2]);
     fireEvent.click(within(view.getByLabelText("Artifact preview")).getByRole("button",{name:"Back to conversation"}));
-    expect(view.getByText("About Review findings")).toBeInTheDocument();expect(threadState.focusedId).toBe(1);
-    fireEvent.click(view.getByRole("tab",{name:"Conversation"}));
+    expect(view.queryByRole("textbox",{name:"Message A"})).toBeNull();expect(threadState.focusedId).toBe(1);
+    fireEvent.click(view.getByRole("button",{name:"Close All artifacts"}));
+    expect(view.getByText("About Review findings")).toBeInTheDocument();
     expect(view.getByRole("textbox",{name:"Message A"})).toHaveValue("Make this simpler");
     fireEvent.click(view.getByRole("button",{name:"Send"}));
     const sent=frames.find(frame=>frame.type==="send_thread_message");expect(sent).toMatchObject({thread_id:1,body:"Make this simpler",artifact_ids:[44],attachments:[],mentions:[]});expect(draftArtifact(1)).toBeNull();
@@ -51,6 +52,7 @@ describe("explicit human artifact context", () => {
     flush(()=>focusThread(2));expect(draftArtifact(2)).toBeNull();expect(draftArtifact(1)?.id).toBe(44);
     fireEvent.click(view.getByRole("button",{name:"Use in message"}));expect(draftArtifact(2)?.id).toBe(44);
     flush(()=>{closeArtifact();focusThread(1);});preview(view,55);flush(closeArtifact);expect(draftArtifact(1)?.id).toBe(55);
+    fireEvent.click(view.getByRole("button",{name:"Close All artifacts"}));
     fireEvent.click(view.getByRole("button",{name:"Remove artifact context: Release notes"}));expect(draftArtifact(1)).toBeNull();
     flush(()=>handleArtifactMessage({type:"artifact_upsert",artifact:artifact(55,"Release notes")}));expect(draftArtifact(1)).toBeNull();
     fireEvent.input(view.getByRole("textbox",{name:"Message A"}),{target:{value:"Edit artifact44"}});fireEvent.click(view.getByRole("button",{name:"Send"}));expect(frames.find(frame=>frame.type==="send_thread_message")).toMatchObject({artifact_ids:[]});

@@ -176,11 +176,11 @@ function PluginRow(props: { plugin: PluginInfo; onChanged: () => void }) {
             </span>
           </div>
           <Show when={props.plugin.state === "errored" && props.plugin.error}>
-            <p class="mt-0.5 text-xs leading-snug text-destructive">{props.plugin.error}</p>
+            <p class="mt-0.5 text-xs text-destructive">{props.plugin.error}</p>
           </Show>
           <Show when={loadFailure()}>
             {(failure) => (
-              <p class="mt-0.5 text-xs leading-snug text-destructive">
+              <p class="mt-0.5 text-xs text-destructive">
                 UI failed to load: {failure().detail}
               </p>
             )}

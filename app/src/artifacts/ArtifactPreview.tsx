@@ -44,12 +44,12 @@ export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPres
   });
   return <Show when={(props.mode ?? "rendered") === "source"} fallback={<Show when={!error()} fallback={<div role="alert" class="space-y-4 p-6 text-sm">
     <p class="font-medium">This artifact couldn’t be displayed.</p>
-    <p class="max-w-prose leading-relaxed text-muted-foreground">Try the preview again. If it still fails, ask Hirsel to repair artifact #{props.artifact.id}, “{props.artifact.title}”. Your conversation and draft are kept.</p>
+    <p class="max-w-prose text-muted-foreground">Try the preview again. If it still fails, ask Hirsel to repair artifact #{props.artifact.id}, “{props.artifact.title}”. Your conversation and draft are kept.</p>
     <div class="flex flex-wrap gap-2"><button class="min-h-11 rounded-lg bg-muted px-3 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setAttempt(value => value + 1)}>Try preview again</button><Show when={props.onReturnToComposer}><button class="min-h-11 rounded-lg px-3 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={props.onReturnToComposer}>Return to composer</button></Show></div>
     <pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{error()}</pre>
   </div>}>
     <Show when={document()} fallback={<p role="status" class="p-6 text-sm text-muted-foreground">Preparing preview…</p>}>
       <iframe ref={node => { frame = node; }} title={props.artifact.title} srcdoc={document()} sandbox="allow-scripts" referrerpolicy="no-referrer" class="h-full min-h-64 w-full border-0 bg-white" />
     </Show>
-  </Show>}><pre data-slot="artifact-source" class="min-h-full overflow-auto whitespace-pre p-4 font-mono text-sm leading-relaxed text-foreground">{props.artifact.content}</pre></Show>;
+  </Show>}><pre data-slot="artifact-source" class="min-h-full overflow-auto whitespace-pre p-4 font-mono text-sm text-foreground">{props.artifact.content}</pre></Show>;
 }

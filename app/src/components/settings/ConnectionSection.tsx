@@ -67,7 +67,7 @@ export function ConnectionSection(props: {
           </Button>
         </div>
       </Group>
-      <p class="mt-2 text-xs leading-snug text-muted-foreground">
+      <p class="mt-2 text-xs text-muted-foreground">
         Pairing and the device roster live on the Host — the web client holds only this browser's
         token, so it can't list or unpair other devices.
       </p>
@@ -88,7 +88,7 @@ export function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: ()
     // the backdrop (not the card) cancels; Escape cancels via the focus trap.
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
-      class="absolute inset-0 z-50 flex items-center justify-center bg-background/70 p-6"
+      class="absolute inset-0 z-50 flex items-center justify-center bg-scrim p-6"
       onClick={(e) => {
         if (e.target === e.currentTarget) props.onCancel();
       }}
@@ -101,7 +101,7 @@ export function ConfirmForgetDialog(props: { onConfirm: () => void; onCancel: ()
         class="w-full max-w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg outline-none"
       >
         <h3 class="m-0 text-sm font-semibold text-foreground">Forget this token?</h3>
-        <p class="mt-1.5 mb-4 text-sm leading-relaxed text-muted-foreground">
+        <p class="mt-1.5 mb-4 text-sm text-muted-foreground">
           Clears the access token stored in this browser and reloads to the connect screen. You'll
           need the token again to reconnect. The Host and its history are untouched.
         </p>

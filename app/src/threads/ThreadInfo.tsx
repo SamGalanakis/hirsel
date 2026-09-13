@@ -21,7 +21,7 @@ import type { Thread, ThreadExecutionTarget } from "./types";
 const quiet = "inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:text-sm";
 const action = "inline-flex h-8 items-center justify-center rounded-md px-3 text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11";
 const primary = `${action} bg-primary text-primary-foreground hover:bg-primary/90`;
-const field = "w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const field = "w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 /** The request error this Thread is carrying, shown beside the control that
  * caused it so a refused edit stays open on the draft the Owner typed. */
@@ -77,7 +77,7 @@ function TitleRow(props: { thread: Thread; historyId: string }) {
   const open = () => { setDraft(props.thread.title); edit.setEditing(true); };
   const save = () => { if (draft().trim() && draft().trim() !== props.thread.title) edit.submit("set_title", { title: draft().trim() }); else edit.setEditing(false); };
   return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-0.5">
-    <h2 class="min-w-0 truncate text-lg font-semibold leading-tight">{props.thread.title}</h2>
+    <h2 class="min-w-0 truncate text-lg font-semibold">{props.thread.title}</h2>
     <button type="button" class={`${quiet} shrink-0`} aria-label="Rename thread" title="Rename" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1.5">
@@ -104,7 +104,9 @@ function DescriptionSection(props: { thread: Thread; historyId: string }) {
   return <section class="flex flex-col gap-1.5" data-slot="thread-description">
     <Show when={edit.editing()} fallback={<>
       <div class="flex items-center gap-0.5">
-        <h3 class="text-meta font-medium uppercase tracking-wider text-muted-foreground">Description</h3>
+        {/* The same sentence-case meta label every other fact in this pane
+            wears; one label system, not an eyebrow over a table of plain ones. */}
+        <h3 class="text-meta text-muted-foreground">Description</h3>
         <button type="button" class={`${quiet} shrink-0`} aria-label="Edit description" title="Edit description" onClick={open}><SquarePen class="size-3.5" /></button>
       </div>
       <Show when={props.thread.description} fallback={<p class="text-sm text-muted-foreground">No description yet — add one</p>}>

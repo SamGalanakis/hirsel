@@ -26,7 +26,9 @@ export function ArtifactList(props: { threadId?: number; onResume?: () => void; 
   const rows = () => artifactState.summaries.filter(row => props.threadId === undefined || row.thread_ids.includes(props.threadId));
   const resume = (id: number) => { props.onResume?.(); closeArtifact(); focusThread(id); };
   return <div data-slot="artifact-list" class="mx-auto w-full max-w-measure">
-    <Show when={props.embedded} fallback={<h2 class="text-lg font-medium">{props.threadId === undefined ? "All artifacts" : "Artifacts"}</h2>}><h3 class="text-sm font-medium">Artifacts</h3></Show>
+    {/* The global list is titled by its pane header; only the copy embedded
+        in Related carries its own heading. */}
+    <Show when={props.embedded}><h3 class="text-sm font-medium">Artifacts</h3></Show>
     <Switch>
       <Match when={artifactState.inventory.status === "loading"}><p role="status" class="mt-4 text-sm text-muted-foreground">Loading artifacts…</p></Match>
       <Match when={inventoryError()}>{message => <div role="alert" class="mt-4 space-y-2 text-sm"><p>Couldn’t load the artifact list. Your existing results are kept.</p><button class={button} onClick={listArtifacts}>Retry loading artifacts</button><p class="break-words text-muted-foreground">{message()}</p></div>}</Match>

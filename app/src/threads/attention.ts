@@ -57,10 +57,10 @@ export function attentionThreads(threads: Thread[], now: number): Thread[] {
 
 /**
  * The overview's attention queue: Threads that need the Owner first (longest
- * wait leading), then the ones currently working, then whatever was active
- * most recently. Archived Threads never appear; snoozed ones only return when
- * their snooze has expired. Waiting Threads are never dropped by `limit` —
- * the tail is what gets trimmed.
+ * wait leading), then the ones currently working, then those with activity
+ * the Owner has not seen. Archived Threads never appear; snoozed ones only
+ * return when their snooze has expired. Waiting Threads are never dropped by
+ * `limit` — the tail is what gets trimmed.
  */
 export function attentionQueue(
   threads: Thread[],
@@ -78,7 +78,10 @@ export function attentionQueue(
     && !(thread.kind === "task" && thread.settled_at));
   const busy = eligible.filter(thread => thread.running_turn || thread.queued_turn_count > 0).sort((a, b) => since(b) - since(a));
   const running = new Set(busy.map(thread => thread.id));
-  const rest = eligible.filter(thread => !running.has(thread.id)).sort((a, b) => since(b) - since(a));
+  /* "Recent" is news, not the inventory: a Thread with activity the Owner has
+     not seen yet. One they have already read stands in the tree beside the
+     queue, and repeating it there made the overview a copy of the tree. */
+  const rest = eligible.filter(thread => !running.has(thread.id) && !thread.read).sort((a, b) => since(b) - since(a));
   const entry = (thread: Thread, group: AttentionGroup): AttentionEntry => ({
     thread,
     group,

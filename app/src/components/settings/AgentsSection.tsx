@@ -109,7 +109,7 @@ function MainAgent() {
               {/* One caption for both rows above it: a provider change and a
                   model change are on the same clock, because a Thread session
                   is rebound to the stored choice before its next turn. */}
-              <p class="pb-3 text-xs leading-snug text-muted-foreground">
+              <p class="pb-3 text-xs text-muted-foreground">
                 Applies from the Agent's next turn.
               </p>
             </div>
@@ -117,7 +117,7 @@ function MainAgent() {
         </Show>
         <Show when={state.prompts}>
           <div>
-            <p class="pt-3 text-xs leading-snug text-muted-foreground">
+            <p class="pt-3 text-xs text-muted-foreground">
               The editable body applies from the next turn. Host configuration is appended
               automatically and is not part of this field.
             </p>
@@ -272,7 +272,7 @@ function SubagentModels() {
   return (
     <Show when={catalog()}>
       <SubHeading>Delegation models</SubHeading>
-      <p class="mb-2 text-xs leading-snug text-muted-foreground">
+      <p class="mb-2 text-xs text-muted-foreground">
         Choose models and reasoning levels for focused child Threads that run on a CLI agent.
         A child Thread that names no agent runs Native, on the provider and model its parent runs
         on. Progress and results return to the parent conversation either way.

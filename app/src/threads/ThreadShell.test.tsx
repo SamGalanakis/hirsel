@@ -286,18 +286,22 @@ describe("thread workspace", () => {
     fireEvent.click(screen.container.querySelector('[data-thread-row="1"]')!);
     expect(screen.container.querySelector('[data-thread-id="1"]')).toHaveClass("thread-focus-frame");
   });
-  it("keeps the visible destination and addressed send while browsing all artifacts", () => {
+  it("browses all artifacts as a utility pane and returns to the addressed composer", () => {
     const screen = render(() => <ThreadShell />);
+    fireEvent.input(screen.getByRole("textbox", { name: "Message Buy groceries" }), { target: { value: "Follow up in groceries" } });
     fireEvent.click(screen.getByRole("button", { name: "All artifacts" }));
+    const pane = screen.getByRole("main", { name: "All artifacts" });
+    expect(pane.querySelector("#artifacts-pane-title")).toHaveTextContent("All artifacts");
+    expect(screen.queryByRole("textbox", { name: "Message Buy groceries" })).toBeNull();
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.container.querySelector('[data-slot="thread-context"]')).toBeNull();
+    expect(threadState.focusedId).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Close All artifacts" }));
+    expect(screen.queryByRole("main", { name: "All artifacts" })).toBeNull();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Buy groceries");
-    expect(screen.getAllByRole("heading", { name: "All artifacts" })).toHaveLength(1);
-    const input = screen.getByRole("textbox", { name: "Message Buy groceries" });
-    fireEvent.input(input, { target: { value: "Follow up in groceries" } });
+    expect(screen.getByRole("textbox", { name: "Message Buy groceries" })).toHaveValue("Follow up in groceries");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(sent).toContainEqual(expect.objectContaining({ type: "send_thread_message", thread_id: 1, body: "Follow up in groceries", mode: "send" }));
-    fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Mark Task done" }));
-    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 1, action: "settle" }));
   });
 
   it("opens the actual Thread drawer with g then t and focuses its selected Thread", async () => {
@@ -673,7 +677,7 @@ describe("attention first", () => {
       threads: [
         makeThread(1, { title: "Rollback", attention: "needs_owner", last_activity_at: "2026-09-09T09:00:00Z", read: true }),
         makeThread(2, { title: "Indexing", running_turn: { requester_thread_id: null, requester_turn_id: null, id: 7, thread_id: 2, owner_message_id: null, agent_message_id: null, state: "running", accepted_at: "2026-09-09T11:00:00Z", started_at: "2026-09-09T11:00:00Z", finished_at: null }, last_activity_at: "2026-09-09T11:00:00Z", read: true }),
-        makeThread(3, { title: "Holiday", last_activity_at: "2026-09-09T11:50:00Z", read: true }),
+        makeThread(3, { title: "Holiday", last_activity_at: "2026-09-09T11:50:00Z", read: false }),
       ],
       histories: { 1: { brief: { text: "", artifact_ids: [] }, messages: [{ id: 9, thread_id: 1, author: "agent", body: "I read the logs.\n\n**Should I roll back to 1.4?**", ref: null, ts: "2026-09-09T09:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false } },
     });

@@ -45,7 +45,7 @@ export function Field(props: { title: string; subtitle?: string }) {
     <div class="flex min-w-0 flex-col">
       <span class="text-sm text-foreground">{props.title}</span>
       <Show when={props.subtitle}>
-        <span class="mt-0.5 text-xs leading-snug text-muted-foreground">{props.subtitle}</span>
+        <span class="mt-0.5 text-xs text-muted-foreground">{props.subtitle}</span>
       </Show>
     </div>
   );

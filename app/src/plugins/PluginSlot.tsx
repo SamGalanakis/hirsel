@@ -26,7 +26,7 @@ export function PluginSlot(props: { name: SlotName; ctx?: SlotCtx }): JSX.Elemen
               role="note"
               data-slot="plugin-error"
               data-plugin={entry.pluginId}
-              class="rounded-lg border border-border bg-card px-3 py-2 text-xs leading-snug text-muted-foreground"
+              class="rounded-lg border border-border bg-card px-3 py-2 text-xs text-muted-foreground"
             >
               <span class="text-foreground">{entry.label}</span> couldn’t render:{" "}
               {failureDetail(error())}

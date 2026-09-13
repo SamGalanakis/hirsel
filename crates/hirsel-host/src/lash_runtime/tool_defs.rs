@@ -300,47 +300,9 @@ pub(super) fn hirsel_tool_definitions(
             "list_templates",
         ),
         tool_definition(
-            "hirsel.monitors_create",
-            "monitors_create",
-            "Create a persisted host monitor that wakes the Agent when its condition fires. Monitors and timers are the way to watch for a condition instead of polling in-turn.",
-            monitors_create_input_schema(),
-            monitors_create_output_schema(),
-            ["monitors"],
-            "create",
-        ),
-        tool_definition(
-            "hirsel.monitors_list",
-            "monitors_list",
-            "List persisted host monitors.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {}
-            }),
-            monitors_list_output_schema(),
-            ["monitors"],
-            "list",
-        ),
-        tool_definition(
-            "hirsel.monitors_cancel",
-            "monitors_cancel",
-            "Cancel a persisted host monitor.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["monitor_id"],
-                "properties": {
-                    "monitor_id": { "type": "string" }
-                }
-            }),
-            monitors_cancel_output_schema(),
-            ["monitors"],
-            "cancel",
-        ),
-        tool_definition(
             "hirsel.shell_run",
             "shell_run",
-            "Run a bounded shell command and return stdout, stderr, status, and timeout state. For quick commands only (seconds); anything slow or watch-like goes to a Sub-agent or monitor with a wake — do not wait in-turn.",
+            "Run a bounded shell command and return stdout, stderr, status, and timeout state. For quick commands only (seconds); anything slow or recurring belongs in a Lash process attached to a trigger — do not wait or poll in-turn.",
             json!({
                 "type": "object",
                 "additionalProperties": false,

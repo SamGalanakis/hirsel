@@ -74,12 +74,30 @@ impl StaticToolExecute for HirselToolExecutor {
 
 impl HirselToolExecutor {
     pub(super) async fn execute_inner(&self, call: ToolCall<'_>) -> Result<Value, String> {
-        let caller = self
-            .tools
-            .storage()
-            .execution_caller(call.context.session_id(), call.context.execution_scope_id())
-            .await
-            .map_err(|e| e.to_string())?;
+        let caller = match call.context.runtime_process_id() {
+            Some(process_id) => match call.context.process_execution_env_spec().policy.session_id {
+                Some(owner_session_id) => {
+                    self.tools
+                        .storage()
+                        .process_caller(
+                            &owner_session_id,
+                            process_id,
+                            call.context.execution_scope_id(),
+                        )
+                        .await
+                }
+                None => Err(anyhow::anyhow!(
+                    "process execution environment has no owning session"
+                )),
+            },
+            None => {
+                self.tools
+                    .storage()
+                    .execution_caller(call.context.session_id(), call.context.execution_scope_id())
+                    .await
+            }
+        }
+        .map_err(|e| e.to_string())?;
         let key = call
             .context
             .replay_key()
@@ -156,10 +174,4 @@ pub(super) fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
         "codex" => Ok(AgentKind::Codex),
         other => Err(format!("agent must be claude or codex, got `{other}`")),
     }
-}
-
-pub(super) fn parse_monitor_condition(args: &Value) -> Result<MonitorCondition, String> {
-    let wake_on = required_string(args, "wake_on")?;
-    let pattern = optional_string_any_allow_empty(args, &["pattern"])?;
-    MonitorCondition::parse(&wake_on, pattern).map_err(|error| error.to_string())
 }

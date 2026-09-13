@@ -149,7 +149,7 @@ export function GuideSection(): JSX.Element {
 
         <SectionHeader>Where to poke around</SectionHeader>
         <P>
-          The activity icon in the rail opens Processes, where you can inspect monitors and their
+          The activity icon in the rail opens Processes, where you can inspect Lash processes and their
           latest summaries.
         </P>
         <P>

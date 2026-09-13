@@ -110,6 +110,7 @@ impl BridgeState {
         drop(telemetry);
         if let Err(error) = crate::lash_runtime::TurnIngest::record_tool_completion(
             &self.tools,
+            &self.caller.history_id,
             (self.caller.thread_id, self.caller.turn_id),
             &summary,
         )

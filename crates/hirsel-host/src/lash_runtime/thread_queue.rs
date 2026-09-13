@@ -24,6 +24,7 @@ impl LashAgentRuntime {
             .tools
             .storage()
             .append_thread_activity_once(
+                &self.history_id,
                 &format!("background-request:{client_id}"),
                 turn.thread_id,
                 Some(turn.id),

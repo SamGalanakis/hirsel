@@ -360,6 +360,19 @@ async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     )
     .await
     .unwrap();
+    assert!(
+        state
+            .tools
+            .recorded_thread_triggers()
+            .await
+            .iter()
+            .any(|event| {
+                event.source_type == crate::lash_runtime::THREAD_MESSAGE_SOURCE_TYPE
+                    && event.event_type == crate::lash_runtime::THREAD_MESSAGE_EVENT_TYPE
+                    && event.thread_id == fresh.id
+                    && event.payload == "slow:5"
+            })
+    );
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if state

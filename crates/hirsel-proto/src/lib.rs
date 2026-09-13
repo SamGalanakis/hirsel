@@ -25,7 +25,7 @@ pub use models::{
     AvailableModel, ForkAgentConfig, ModelSelection, ModelSnapshot, PromptDoc, PromptSnapshot,
     SubagentModel, SubagentModelCatalog, SubagentNativeWorker, SubagentProviderModels,
 };
-pub use process::{ProcessInfo, ProcessKind, ProcessState};
+pub use process::{ProcessInfo, ProcessState};
 pub use providers::{
     DetectionStatus, MaskedSecret, ProviderInstance, ProviderKind, ProviderRoster,
     ProviderSelection,

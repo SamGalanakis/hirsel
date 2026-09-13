@@ -21,9 +21,22 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         "inbox_items",
         "side_chat_messages",
         "taste_decisions",
+        "monitors",
     ] {
         assert!(!names.iter().any(|n| n == obsolete));
     }
+    for required in [
+        "process_deliveries",
+        "thread_process_sessions",
+        "thread_process_authorities",
+    ] {
+        assert!(names.iter().any(|name| name == required));
+    }
+    let icon_foreign_key: (String, String) = conn.query_row(
+        r#"SELECT "table", "to" FROM pragma_foreign_key_list('threads') WHERE "from"='icon_blob_id'"#,
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(icon_foreign_key, ("blobs".into(), "id".into()));
     assert_eq!(
         conn.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, u64>(0))
             .unwrap(),
@@ -167,6 +180,35 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
         drop(conn);
         let before = std::fs::read(&path).unwrap();
         assert!(Storage::open(dir.path()).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join("hirsel.sqlite-wal").exists());
+    }
+}
+
+#[tokio::test]
+async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
+    for layout in [
+        include_str!("icons-only-v7.sql"),
+        include_str!("processes-only-v7.sql"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hirsel.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(layout).unwrap();
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('history_id',?1)",
+            [uuid::Uuid::new_v4().to_string()],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        let error = Storage::open(dir.path()).await.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Hirsel history layout")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(!dir.path().join("hirsel.sqlite-wal").exists());
     }

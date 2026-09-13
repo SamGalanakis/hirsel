@@ -1,9 +1,9 @@
-# Thread-local ephemeral triage for monitor and scheduled wakes
+# Thread-local ephemeral triage for process and scheduled wakes
 
 Updated for the nested Thread decision in [ADR-0016](0016-threads-own-conversation.md).
 
 Each Lash-backed Thread has its own lazy resident session. Human input and
-child reports enter that Thread's durable FIFO directly. Monitor and scheduled
+child reports enter that Thread's durable FIFO directly. Process and scheduled
 wakes carry their originating Thread and history; an ephemeral triage fork
 receives only that Thread's context. No global resident or Task transcript is
 retained.
@@ -15,8 +15,8 @@ conversations, invoke shell/plugin tools, or choose another destination.
 Triage policy remains in the editable fork prompt; the host enforces resource
 scope and validates execution/history at storage boundaries.
 
-A monitor emits one current process event type, `monitor.wake`, with no direct
-resident wake selector. The installed Thread dispatcher performs triage. There
+A Lash process emits durable wake and terminal events with no direct resident
+wake selector. The installed Thread dispatcher performs triage. There
 is no alternate pre-triage event or fallback into a global Agent. Fork failure
 uses the current Thread-addressed fallback brief and preserves provenance.
 

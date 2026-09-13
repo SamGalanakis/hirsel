@@ -1,55 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn monitor_create_accepts_only_valid_condition_variants() {
-    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
-    let caller = storage.test_running_caller().await;
-    let mut tools = ScopedThreadTools {
-        tools: executor.tools,
-        caller,
-        operation_id: "invalid-regex".into(),
-    };
-
-    for (name, condition) in [
-        ("missing", json!({"wake_on": "regex"})),
-        ("empty", json!({"wake_on": "regex", "pattern": ""})),
-        ("malformed", json!({"wake_on": "regex", "pattern": "["})),
-        (
-            "irrelevant",
-            json!({"wake_on": "changed", "pattern": "ignored"}),
-        ),
-    ] {
-        tools.operation_id = format!("invalid-{name}");
-        let mut args = condition;
-        args["cmd"] = json!("printf ready");
-        args["label"] = json!(format!("invalid {name}"));
-        args["every_secs"] = json!(30);
-        let error = tools.execute("monitors_create", &args).await.unwrap_err();
-        assert!(!error.is_empty());
-        assert!(storage.active_monitors().await.unwrap().is_empty());
-        assert!(storage.monitor_snapshot().await.unwrap().is_empty());
-    }
-
-    for (name, condition) in [
-        ("changed", json!({"wake_on": "changed"})),
-        ("exit-zero", json!({"wake_on": "exit_zero"})),
-        ("exit-nonzero", json!({"wake_on": "exit_nonzero"})),
-        ("regex", json!({"wake_on": "regex", "pattern": "ready"})),
-        ("space-regex", json!({"wake_on": "regex", "pattern": " "})),
-        ("nul-regex", json!({"wake_on": "regex", "pattern": "\u{0}"})),
-    ] {
-        tools.operation_id = format!("valid-{name}");
-        let mut args = condition;
-        args["cmd"] = json!("printf ready");
-        args["label"] = json!(format!("valid {name}"));
-        args["every_secs"] = json!(30);
-        tools.execute("monitors_create", &args).await.unwrap();
-    }
-    assert_eq!(storage.active_monitors().await.unwrap().len(), 6);
-}
-
-#[tokio::test]
-async fn scoped_views_monitors_and_shell_reject_foreign_or_cancelled_execution() {
+async fn scoped_views_and_shell_reject_foreign_or_cancelled_execution() {
     let (executor, storage, _log, dir) = super::tests::test_event_executor().await;
     let a = storage.test_running_caller().await;
     let b = storage.test_running_caller().await;
@@ -79,27 +31,6 @@ async fn scoped_views_monitors_and_shell_reject_foreign_or_cancelled_execution()
             .await
             .is_err()
     );
-    let monitor = own
-        .execute(
-            "monitors_create",
-            &json!({"cmd":"printf safe","label":"A monitor","every_secs":30,"wake_on":"changed"}),
-        )
-        .await
-        .unwrap();
-    let id = monitor["monitor_id"].as_str().unwrap();
-    assert!(
-        peer.execute("monitors_cancel", &json!({"monitor_id":id}))
-            .await
-            .is_err()
-    );
-    assert!(
-        storage
-            .background_monitor(&a.history_id, b.thread_id, id)
-            .await
-            .is_err()
-    );
-    assert_eq!(storage.scoped_monitors(&a).await.unwrap().len(), 1);
-    assert!(storage.scoped_monitors(&b).await.unwrap().is_empty());
     storage
         .request_thread_cancellation(&a.history_id, a.thread_id)
         .await
@@ -119,23 +50,61 @@ async fn scoped_views_monitors_and_shell_reject_foreign_or_cancelled_execution()
             .await
             .is_err()
     );
-    assert!(
-        own.execute(
-            "monitors_create",
-            &json!({"cmd":"printf forbidden","label":"late","every_secs":30,"wake_on":"changed"})
+    storage.reset().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_child_report_emits_the_typed_report_trigger() {
+    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
+    let (parent, _) = storage
+        .create_thread(
+            "report-parent",
+            "Parent",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
         )
         .await
-        .is_err()
-    );
-    assert_eq!(storage.active_monitors().await.unwrap().len(), 1);
-    let old_history = a.history_id;
-    storage.reset().await.unwrap();
-    assert!(
-        storage
-            .background_monitor(&old_history, a.thread_id, id)
-            .await
-            .is_err()
-    );
+        .unwrap();
+    let (child, _) = storage
+        .create_thread(
+            "report-child",
+            "Child",
+            "",
+            &json!({}),
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            Some(parent.id),
+        )
+        .await
+        .unwrap();
+    let turn = storage.start_thread_turn(child.id, None).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+    let caller = storage
+        .bind_thread_execution(&history, "report-session", "report-execution", turn.id)
+        .await
+        .unwrap();
+    ScopedThreadTools {
+        tools: executor.tools.clone(),
+        caller,
+        operation_id: "report-trigger".into(),
+    }
+    .execute(
+        "threads_report",
+        &json!({"summary":"ready for review", "artifact_ids":[]}),
+    )
+    .await
+    .unwrap();
+
+    let events = executor.tools.recorded_thread_triggers().await;
+    assert!(events.iter().any(|event| {
+        event.source_type == THREAD_REPORTED_SOURCE_TYPE
+            && event.event_type == THREAD_REPORTED_EVENT_TYPE
+            && event.thread_id == child.id
+            && event.payload == "ready for review"
+    }));
 }
 
 #[tokio::test]

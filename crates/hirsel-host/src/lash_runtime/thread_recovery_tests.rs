@@ -704,7 +704,7 @@ async fn observation_gap_midturn_fails_before_a_later_commit_can_publish_success
         .unwrap()
         .thread_turn_id
         .unwrap();
-    let mut timeline = TurnIngest::default();
+    let mut timeline = TurnIngest::unrouted(&runtime.history_id, json!({"agent":"host"}));
     process_observation_fixture(
         &runtime,
         &mut timeline,
@@ -777,7 +777,7 @@ async fn observation_gap_across_commit_releases_only_a_failed_terminal_projectio
         .unwrap()
         .thread_turn_id
         .unwrap();
-    let mut timeline = TurnIngest::default();
+    let mut timeline = TurnIngest::unrouted(&runtime.history_id, json!({"agent":"host"}));
     process_observation_fixture(&runtime, &mut timeline, remote_observation_gap()).await;
 
     let output = super::tests::test_turn_output(
@@ -837,7 +837,7 @@ async fn rlm_observer_retains_integrity_failure_until_recovery_and_failed_termin
     )
     .unwrap();
 
-    let mut timeline = TurnIngest::default();
+    let mut timeline = TurnIngest::unrouted(&runtime.history_id, json!({"agent":"host"}));
     process_observation_fixture(
         &runtime,
         &mut timeline,

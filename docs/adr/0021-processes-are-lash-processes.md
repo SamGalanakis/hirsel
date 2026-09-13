@@ -1,0 +1,13 @@
+# Processes are Lash processes
+
+Accepted 2026-09-13.
+
+The coordinator creates arbitrary Lashlang `process` declarations directly in its TypeScript RLM program. It registers them on Lash trigger subscriptions and their bodies call the same ordinary Hirsel tools as the surrounding coordinator turn. Hirsel does not provide a second process engine, a shell-process wrapper, or built-in recurring jobs. The previous host-owned monitor layer, its tools, storage, schema, runtime engine, and protocol discriminator are deleted.
+
+Hirsel contributes the trigger vocabulary that depends on its domain. `timer.Schedule` produces `timer.Tick`; Lash already supplies `cron.Schedule` and `cron.Tick`. `thread.Reported`, `thread.Completed`, `thread.Messaged`, and `thread.Turned` produce `thread.Report`, `thread.Complete`, `thread.Message`, and `thread.Turn`. Their descriptors address a Thread id, while their bounded events carry that id, its title, and the durable fact's payload. Emission reuses the same self-and-descendants scope enforced by `threads.*`, so a subscription cannot observe a peer or ancestor event.
+
+The Processes view projects each owning Thread's Lash process registry together with its trigger subscriptions. It shows process name, trigger, lifecycle, last firing, and bounded terminal outcome, and exposes fenced process cancellation and trigger disable. The focused Thread sees only itself and its visible subtree. Both the coordinator and native Lash coding worker use the TypeScript RLM posture with process and trigger abilities. The worker still has only its dedicated read/edit/write/command tool profile, and Hirsel creates no default processes for either session.
+
+A process wake or terminal completion, failure, or cancellation is first staged in Hirsel's receipt store, then appended once to the owning Thread as an agent-authored system-equivalent message. The message contains the process name, trigger provenance, outcome, and bounded process result. Only after that durable conversation fact exists is the event sent through ADR 0015's one-fork-per-message triage path; it never directly turns the resident coordinator.
+
+Lash durably owns process registrations, events, queued wakes, and trigger subscriptions in the Thread lane's process and trigger stores. Hirsel reopens lanes that have persisted process state, resumes trigger-source polling, reconstructs the registry projection, and retries any staged message not yet appended. It does not infer that abandoned or interrupted work should restart. The Hirsel history schema is current-only; removing the old table requires the normal same-schema deployment or fresh-data handling rather than a compatibility shim.

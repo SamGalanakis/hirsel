@@ -155,7 +155,7 @@ logic, and broadcast/runtime projection ownership had no independent
 material finding. The device-label value returned while pairing is
 deliberately ignored in favor of the app-supplied label (existing protocol
 fixture proves that intent), so it was not promoted. Inline blob behavior,
-provider required fields, malformed monitor regex, shell timeout stderr,
+provider required fields, malformed retired-probe regex, shell timeout stderr,
 latest-activity display, and all other exclusion items were skipped.
 
 Final source check after writing this report:

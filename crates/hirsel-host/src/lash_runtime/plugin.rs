@@ -1,16 +1,9 @@
 use super::*;
 
 #[derive(Clone)]
-pub(super) struct HirselProcessPluginFactory {
-    pub(super) history_id: String,
-    pub(super) thread_id: u64,
-    pub(super) tools: ToolSuite,
-    /// Handed to the monitor engine so a monitor wake is triaged by a fork
-    /// instead of turning the main Agent (ADR-0015).
-    pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
-}
+pub(super) struct HirselPluginFactory;
 
-impl PluginFactory for HirselProcessPluginFactory {
+impl PluginFactory for HirselPluginFactory {
     fn id(&self) -> &'static str {
         "hirsel_processes"
     }
@@ -26,18 +19,6 @@ impl PluginFactory for HirselProcessPluginFactory {
                 Vec::new()
             }
         }
-    }
-
-    fn process_engine_contributions(
-        &self,
-        _ctx: &ProcessEngineContributionContext<'_>,
-    ) -> Result<Vec<Arc<dyn ProcessEngine>>, PluginError> {
-        Ok(vec![Arc::new(HirselMonitorEngine {
-            history_id: self.history_id.clone(),
-            thread_id: self.thread_id,
-            tools: self.tools.clone(),
-            fork_wake: self.fork_wake.clone(),
-        })])
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -117,6 +98,47 @@ pub(super) fn hirsel_lashlang_surface() -> lash::rlm::LashlangSurfaceContributio
             .expect("valid timer.Tick type"),
         )
         .expect("valid timer.Schedule trigger source");
+    for (constructor, event_type) in [
+        (THREAD_REPORTED_SOURCE_TYPE, THREAD_REPORTED_EVENT_TYPE),
+        (THREAD_COMPLETED_SOURCE_TYPE, THREAD_COMPLETED_EVENT_TYPE),
+        (THREAD_MESSAGE_SOURCE_TYPE, THREAD_MESSAGE_EVENT_TYPE),
+        (THREAD_TURN_SOURCE_TYPE, THREAD_TURN_EVENT_TYPE),
+    ] {
+        let (namespace, name) = constructor
+            .split_once('.')
+            .expect("Thread trigger constructor has a namespace");
+        resources
+            .add_trigger_source_constructor(
+                [namespace, name],
+                lash::rlm::TypeExpr::Object(vec![lash::rlm::TypeField {
+                    name: "thread_id".into(),
+                    ty: lash::rlm::TypeExpr::Int,
+                    optional: false,
+                }]),
+                lash::rlm::NamedDataType::object(
+                    event_type,
+                    vec![
+                        lash::rlm::TypeField {
+                            name: "thread_id".into(),
+                            ty: lash::rlm::TypeExpr::Int,
+                            optional: false,
+                        },
+                        lash::rlm::TypeField {
+                            name: "title".into(),
+                            ty: lash::rlm::TypeExpr::Str,
+                            optional: false,
+                        },
+                        lash::rlm::TypeField {
+                            name: "payload".into(),
+                            ty: lash::rlm::TypeExpr::Str,
+                            optional: false,
+                        },
+                    ],
+                )
+                .expect("valid Thread event type"),
+            )
+            .expect("valid Thread trigger source");
+    }
     lash::rlm::LashlangSurfaceContribution::new(
         lash::rlm::LashlangAbilities::default(),
         lash::rlm::LashlangLanguageFeatures::default(),

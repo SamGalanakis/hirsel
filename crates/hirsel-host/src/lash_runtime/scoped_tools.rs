@@ -97,34 +97,6 @@ impl ScopedThreadTools {
                     .map_err(|e| e.to_string())?;
                 shell_run_result(&output)
             }
-            "monitors_create" => {
-                let record = storage
-                    .create_scoped_monitor(
-                        &self.caller,
-                        required_string(args, "cmd")?,
-                        args.get("every_secs").and_then(Value::as_u64).unwrap_or(30),
-                        parse_monitor_condition(args)?,
-                        required_string(args, "label")?,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                self.tools.broadcast_monitor_upsert(&record);
-                monitors_create_result(&record)
-            }
-            "monitors_list" => monitors_list_result(
-                &storage
-                    .scoped_monitors(&self.caller)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            ),
-            "monitors_cancel" => {
-                let record = storage
-                    .cancel_scoped_monitor(&self.caller, &required_string(args, "monitor_id")?)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                self.tools.broadcast_monitor_upsert(&record);
-                Ok(monitors_cancel_result(&record.id))
-            }
             "views_show" => self.views_show(args).await,
             "views_update" => self.views_update(args).await,
             "views_clear" => self.views_clear(args).await,
@@ -290,6 +262,15 @@ impl ScopedThreadTools {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                self.tools
+                    .emit_thread_trigger(
+                        THREAD_REPORTED_SOURCE_TYPE,
+                        THREAD_REPORTED_EVENT_TYPE,
+                        self.caller.thread_id,
+                        required_string(args, "summary")?,
+                        format!("thread-report:{id}"),
+                    )
+                    .await;
                 Ok(json!({"activity_id":id}))
             }
             "artifacts_list" => {

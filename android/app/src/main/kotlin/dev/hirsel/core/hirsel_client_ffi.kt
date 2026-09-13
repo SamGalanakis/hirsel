@@ -344,7 +344,7 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
         }
     }
 }
-// Initial value and increment amount for handles.
+// Initial value and increment amount for handles. 
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -354,7 +354,7 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    // Start
+    // Start 
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -748,75 +748,75 @@ internal object IntegrityCheckingUniffiLib {
     external fun ffi_hirsel_client_ffi_uniffi_contract_version(
     ): Int
 
-
+        
 }
 
 internal object UniffiLib {
-
+    
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
-
+    
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "hirsel_client_ffi"))
         uniffiCallbackInterfaceClientObserver.register(this)
-
+        
     }
-    external fun uniffi_hirsel_client_ffi_fn_clone_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_clone_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_free_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_free_client(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new(`host`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new(`host`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(`ticket`: RustBuffer.ByValue,`deviceToken`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(`ticket`: RustBuffer.ByValue,`deviceToken`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`deviceLabel`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`deviceLabel`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_method_client_add_thread_related(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`target`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_add_thread_related(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`target`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_connect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`historyId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`parentThreadId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_create_thread(`ptr`: Long,`historyId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`parentThreadId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_open_related_thread(`ptr`: Long,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_open_related_thread(`ptr`: Long,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_open_thread(`ptr`: Long,`threadId`: Long,`beforeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_open_thread(`ptr`: Long,`threadId`: Long,`beforeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_register_push_token(`ptr`: Long,`platform`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_remove_thread_related(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`itemId`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_remove_thread_related(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`itemId`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_retry_send(`ptr`: Long,`clientId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_retry_send(`ptr`: Long,`clientId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`body`: RustBuffer.ByValue,`attachments`: RustBuffer.ByValue,`mentions`: RustBuffer.ByValue,`artifactIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`body`: RustBuffer.ByValue,`attachments`: RustBuffer.ByValue,`mentions`: RustBuffer.ByValue,`artifactIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_thread_action(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`action`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,`expectedRevision`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_thread_action(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`action`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,`expectedRevision`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_update_thread_icon(`ptr`: Long,`expectedHistory`: RustBuffer.ByValue,`threadId`: Long,`icon`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_update_thread_icon(`ptr`: Long,`expectedHistory`: RustBuffer.ByValue,`threadId`: Long,`icon`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_hirsel_client_ffi_fn_method_client_update_thread_showcase(`ptr`: Long,`expectedHistory`: RustBuffer.ByValue,`threadId`: Long,`artifactId`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_method_client_update_thread_showcase(`ptr`: Long,`expectedHistory`: RustBuffer.ByValue,`threadId`: Long,`artifactId`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_init_callback_vtable_clientobserver(`vtable`: UniffiVTableCallbackInterfaceClientObserver,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_func_generate_iroh_identity(uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_func_generate_iroh_identity(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_hirsel_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_hirsel_client_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_hirsel_client_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun ffi_hirsel_client_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_hirsel_client_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -824,7 +824,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u8(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -832,7 +832,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i8(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun ffi_hirsel_client_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -840,7 +840,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u16(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -848,7 +848,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i16(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
     external fun ffi_hirsel_client_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -856,7 +856,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u32(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -864,7 +864,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i32(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_hirsel_client_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -872,7 +872,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_u64(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun ffi_hirsel_client_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -880,7 +880,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_i64(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun ffi_hirsel_client_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -888,7 +888,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_f32(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Float
     external fun ffi_hirsel_client_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -896,7 +896,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_f64(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
     external fun ffi_hirsel_client_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -904,7 +904,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_rust_buffer(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_hirsel_client_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -912,10 +912,10 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_hirsel_client_ffi_rust_future_free_void(`handle`: Long,
     ): Unit
-    external fun ffi_hirsel_client_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_hirsel_client_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
 
-
+        
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -1070,7 +1070,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/**
+/** 
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
  *
  * This is the first argument for interface constructors that input a raw handle. It exists is that
@@ -1081,7 +1081,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * */
 object UniffiWithHandle
 
-/**
+/** 
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1406,17 +1406,17 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 
 
 public interface ClientInterface {
-
+    
     fun `addThreadRelated`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `target`: ThreadRelatedTarget, `title`: kotlin.String?): SendReceipt
-
+    
     fun `cancelTurn`(`historyId`: kotlin.String, `threadId`: kotlin.ULong): kotlin.Boolean
-
+    
     fun `connect`()
-
+    
     fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `kind`: ThreadKind, `parentThreadId`: kotlin.ULong?): SendReceipt?
-
+    
     fun `disconnect`()
-
+    
     /**
      * Returns the device token issued by a successful pairing handshake.
      *
@@ -1424,27 +1424,27 @@ public interface ClientInterface {
      * use `new_iroh` for later connections.
      */
     fun `issuedDeviceToken`(): kotlin.String?
-
+    
     fun `openRelatedThread`(`target`: ThreadRelatedTarget): SendReceipt?
-
+    
     fun `openThread`(`threadId`: kotlin.ULong, `beforeId`: kotlin.ULong?): SendReceipt
-
+    
     fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
-
+    
     fun `removeThreadRelated`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `itemId`: kotlin.ULong): SendReceipt
-
+    
     fun `retrySend`(`clientId`: kotlin.String)
-
+    
     fun `sendThreadMessage`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>, `artifactIds`: List<kotlin.ULong>): SendReceipt?
-
+    
     fun `snapshot`(): ClientSnapshot
-
+    
     fun `threadAction`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?): SendReceipt?
-
+    
     fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: ThreadIcon?, `expectedRevision`: kotlin.ULong): SendReceipt?
-
+    
     fun `updateThreadShowcase`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `artifactId`: kotlin.ULong?, `expectedRevision`: kotlin.ULong): SendReceipt?
-
+    
     companion object
 }
 
@@ -1473,11 +1473,11 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         this.cleanable = null
     }
     constructor(`host`: kotlin.String, `token`: kotlin.String, `observer`: ClientObserver) :
-        this(UniffiWithHandle,
+        this(UniffiWithHandle, 
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new(
-
-
+    
+        
         FfiConverterString.lower(`host`),
         FfiConverterString.lower(`token`),
         FfiConverterTypeClientObserver.lower(`observer`),_status)
@@ -1566,7 +1566,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_add_thread_related(
         it,
-
+        
         FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterTypeThreadRelatedTarget.lower(`target`),
@@ -1575,7 +1575,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-
+    
 
     override fun `cancelTurn`(`historyId`: kotlin.String, `threadId`: kotlin.ULong): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -1583,18 +1583,18 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_cancel_turn(
         it,
-
+        
         FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),_status)
 }
     }
     )
     }
+    
 
-
-
+    
     @Throws(ClientException::class)override fun `connect`()
-        =
+        = 
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_connect(
@@ -1602,8 +1602,8 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         _status)
 }
     }
-
-
+    
+    
 
     override fun `createThread`(`historyId`: kotlin.String, `title`: kotlin.String, `kind`: ThreadKind, `parentThreadId`: kotlin.ULong?): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
@@ -1611,7 +1611,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_create_thread(
         it,
-
+        
         FfiConverterString.lower(`historyId`),
         FfiConverterString.lower(`title`),
         FfiConverterTypeThreadKind.lower(`kind`),
@@ -1620,11 +1620,11 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
+    
 
-
-
+    
     @Throws(ClientException::class)override fun `disconnect`()
-        =
+        = 
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_disconnect(
@@ -1632,10 +1632,10 @@ open class Client: Disposable, AutoCloseable, ClientInterface
         _status)
 }
     }
+    
+    
 
-
-
-
+    
     /**
      * Returns the device token issued by a successful pairing handshake.
      *
@@ -1652,7 +1652,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-
+    
 
     override fun `openRelatedThread`(`target`: ThreadRelatedTarget): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
@@ -1660,13 +1660,13 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_open_related_thread(
         it,
-
+        
         FfiConverterTypeThreadRelatedTarget.lower(`target`),_status)
 }
     }
     )
     }
-
+    
 
     override fun `openThread`(`threadId`: kotlin.ULong, `beforeId`: kotlin.ULong?): SendReceipt {
             return FfiConverterTypeSendReceipt.lift(
@@ -1674,29 +1674,29 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_open_thread(
         it,
-
+        
         FfiConverterULong.lower(`threadId`),
         FfiConverterOptionalULong.lower(`beforeId`),_status)
 }
     }
     )
     }
+    
 
-
-
+    
     @Throws(ClientException::class)override fun `registerPushToken`(`platform`: kotlin.String, `token`: kotlin.String)
-        =
+        = 
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_register_push_token(
         it,
-
+        
         FfiConverterString.lower(`platform`),
         FfiConverterString.lower(`token`),_status)
 }
     }
-
-
+    
+    
 
     override fun `removeThreadRelated`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `itemId`: kotlin.ULong): SendReceipt {
             return FfiConverterTypeSendReceipt.lift(
@@ -1704,7 +1704,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_remove_thread_related(
         it,
-
+        
         FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterULong.lower(`itemId`),_status)
@@ -1712,20 +1712,20 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-
+    
 
     override fun `retrySend`(`clientId`: kotlin.String)
-        =
+        = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_retry_send(
         it,
-
+        
         FfiConverterString.lower(`clientId`),_status)
 }
     }
-
-
+    
+    
 
     override fun `sendThreadMessage`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `body`: kotlin.String, `attachments`: List<kotlin.String>, `mentions`: List<kotlin.ULong>, `artifactIds`: List<kotlin.ULong>): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
@@ -1733,7 +1733,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_send_thread_message(
         it,
-
+        
         FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterString.lower(`body`),
@@ -1744,7 +1744,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-
+    
 
     override fun `snapshot`(): ClientSnapshot {
             return FfiConverterTypeClientSnapshot.lift(
@@ -1757,16 +1757,16 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
+    
 
-
-
+    
     @Throws(ClientException::class)override fun `threadAction`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
     callWithHandle {
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_thread_action(
         it,
-
+        
         FfiConverterString.lower(`historyId`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterString.lower(`action`),
@@ -1776,7 +1776,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-
+    
 
     override fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: ThreadIcon?, `expectedRevision`: kotlin.ULong): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
@@ -1784,7 +1784,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_update_thread_icon(
         it,
-
+        
         FfiConverterString.lower(`expectedHistory`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterOptionalTypeThreadIcon.lower(`icon`),
@@ -1793,7 +1793,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
-
+    
 
     override fun `updateThreadShowcase`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `artifactId`: kotlin.ULong?, `expectedRevision`: kotlin.ULong): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
@@ -1801,7 +1801,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_update_thread_showcase(
         it,
-
+        
         FfiConverterString.lower(`expectedHistory`),
         FfiConverterULong.lower(`threadId`),
         FfiConverterOptionalULong.lower(`artifactId`),
@@ -1810,16 +1810,16 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
     )
     }
+    
+
+    
+
+    
 
 
-
-
-
-
-
-
+    
     companion object {
-
+        
     /**
      * Creates an iroh client authenticated by a previously issued device token.
      */
@@ -1827,8 +1827,8 @@ open class Client: Disposable, AutoCloseable, ClientInterface
             return FfiConverterTypeClient.lift(
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(
-
-
+    
+        
         FfiConverterString.lower(`ticket`),
         FfiConverterString.lower(`deviceToken`),
         FfiConverterString.lower(`irohSecretKey`),
@@ -1836,9 +1836,9 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 }
     )
     }
+    
 
-
-
+        
     /**
      * Creates an iroh client that redeems a one-time pairing code.
      */
@@ -1846,8 +1846,8 @@ open class Client: Disposable, AutoCloseable, ClientInterface
             return FfiConverterTypeClient.lift(
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(
-
-
+    
+        
         FfiConverterString.lower(`ticket`),
         FfiConverterString.lower(`code`),
         FfiConverterString.lower(`deviceLabel`),
@@ -1856,11 +1856,11 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 }
     )
     }
+    
 
-
-
+        
     }
-
+    
 }
 
 
@@ -1891,15 +1891,15 @@ public object FfiConverterTypeClient: FfiConverter<Client, Long> {
 
 data class AgentActivity (
     var `state`: AgentActivityState
-    ,
+    , 
     var `text`: kotlin.String?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -1929,19 +1929,19 @@ public object FfiConverterTypeAgentActivity: FfiConverterRustBuffer<AgentActivit
 
 data class Blob (
     var `id`: kotlin.String
-    ,
+    , 
     var `name`: kotlin.String
-    ,
+    , 
     var `mime`: kotlin.String
-    ,
+    , 
     var `size`: kotlin.ULong
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -1977,37 +1977,37 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 data class ChatMessage (
     var `error`: kotlin.String?
-    ,
+    , 
     var `threadId`: kotlin.ULong
-    ,
+    , 
     var `mentions`: List<kotlin.ULong>
-    ,
+    , 
     var `artifactIds`: List<kotlin.ULong>
-    ,
+    , 
     var `id`: kotlin.ULong?
-    ,
+    , 
     var `author`: ChatAuthor
-    ,
+    , 
     var `body`: kotlin.String
-    ,
+    , 
     var `replyTo`: kotlin.ULong?
-    ,
+    , 
     var `timestamp`: kotlin.String
-    ,
+    , 
     var `attachments`: List<Blob>
-    ,
+    , 
     var `toolCalls`: List<ToolCall>
-    ,
+    , 
     var `clientId`: kotlin.String?
-    ,
+    , 
     var `pending`: kotlin.Boolean
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2070,42 +2070,42 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
 
 data class ClientSnapshot (
     var `connection`: ConnectionState
-    ,
+    , 
     var `messages`: List<ChatMessage>
-    ,
+    , 
     var `threads`: List<Thread>
-    ,
+    , 
     var `turns`: List<ThreadTurn>
-    ,
+    , 
     var `activities`: List<ThreadActivity>
-    ,
+    , 
     var `briefs`: List<ThreadBrief>
-    ,
+    , 
     var `relatedItems`: List<ThreadRelatedItem>
-    ,
+    , 
     var `streams`: List<ThreadStream>
-    ,
+    , 
     var `openedThreads`: List<kotlin.ULong>
-    ,
+    , 
     var `historyHasMore`: List<kotlin.ULong>
-    ,
+    , 
     var `createdThreads`: List<CreatedThread>
-    ,
+    , 
     var `historyId`: kotlin.String?
-    ,
+    , 
     var `recoveredDrafts`: List<kotlin.String>
-    ,
+    , 
     /**
      * Host build identity from the last `hello_ok`; `None` until reported.
      */
     var `hostVersion`: kotlin.String?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2171,15 +2171,15 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
 
 data class CreatedThread (
     var `clientId`: kotlin.String
-    ,
+    , 
     var `threadId`: kotlin.ULong
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2209,13 +2209,13 @@ public object FfiConverterTypeCreatedThread: FfiConverterRustBuffer<CreatedThrea
 
 data class SendReceipt (
     var `clientId`: kotlin.String
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2242,53 +2242,53 @@ public object FfiConverterTypeSendReceipt: FfiConverterRustBuffer<SendReceipt> {
 
 data class Thread (
     var `kind`: ThreadKind
-    ,
+    , 
     var `parentThreadId`: kotlin.ULong?
-    ,
+    , 
     var `pinnedAt`: kotlin.String?
-    ,
+    , 
     var `id`: kotlin.ULong
-    ,
+    , 
     var `title`: kotlin.String
-    ,
+    , 
     var `icon`: ThreadIcon?
-    ,
+    , 
     var `showcasedArtifactId`: kotlin.ULong?
-    ,
+    , 
     var `description`: kotlin.String
-    ,
+    , 
     var `instrumentJson`: kotlin.String
-    ,
+    , 
     var `needsOwner`: kotlin.Boolean
-    ,
+    , 
     var `settledAt`: kotlin.String?
-    ,
+    , 
     var `archivedAt`: kotlin.String?
-    ,
+    , 
     var `snoozedUntil`: kotlin.String?
-    ,
+    , 
     var `read`: kotlin.Boolean
-    ,
+    , 
     var `createdAt`: kotlin.String
-    ,
+    , 
     var `updatedAt`: kotlin.String
-    ,
+    , 
     var `revision`: kotlin.ULong
-    ,
+    , 
     var `runningTurn`: ThreadTurn?
-    ,
+    , 
     var `queuedTurnCount`: kotlin.ULong
-    ,
+    , 
     var `lastFinishedTurn`: ThreadTurn?
-    ,
+    , 
     var `lastActivityAt`: kotlin.String
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2375,25 +2375,25 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
 
 data class ThreadActivity (
     var `artifactIds`: List<kotlin.ULong>
-    ,
+    , 
     var `id`: kotlin.ULong
-    ,
+    , 
     var `threadId`: kotlin.ULong
-    ,
+    , 
     var `turnId`: kotlin.ULong?
-    ,
+    , 
     var `kind`: kotlin.String
-    ,
+    , 
     var `dataJson`: kotlin.String
-    ,
+    , 
     var `timestamp`: kotlin.String
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2438,17 +2438,17 @@ public object FfiConverterTypeThreadActivity: FfiConverterRustBuffer<ThreadActiv
 
 data class ThreadBrief (
     var `threadId`: kotlin.ULong
-    ,
+    , 
     var `text`: kotlin.String
-    ,
+    , 
     var `artifactIds`: List<kotlin.ULong>
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2481,21 +2481,21 @@ public object FfiConverterTypeThreadBrief: FfiConverterRustBuffer<ThreadBrief> {
 
 data class ThreadRelatedItem (
     var `id`: kotlin.ULong
-    ,
+    , 
     var `threadId`: kotlin.ULong
-    ,
+    , 
     var `target`: ThreadRelatedTarget
-    ,
+    , 
     var `title`: kotlin.String?
-    ,
+    , 
     var `createdAt`: kotlin.String
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2534,21 +2534,21 @@ public object FfiConverterTypeThreadRelatedItem: FfiConverterRustBuffer<ThreadRe
 
 data class ThreadStream (
     var `threadId`: kotlin.ULong
-    ,
+    , 
     var `turnId`: kotlin.ULong
-    ,
+    , 
     var `eventsJson`: kotlin.String
-    ,
+    , 
     var `activity`: AgentActivity
-    ,
+    , 
     var `finished`: kotlin.Boolean
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2587,29 +2587,29 @@ public object FfiConverterTypeThreadStream: FfiConverterRustBuffer<ThreadStream>
 
 data class ThreadTurn (
     var `requesterThreadId`: kotlin.ULong?
-    ,
+    , 
     var `requesterTurnId`: kotlin.ULong?
-    ,
+    , 
     var `id`: kotlin.ULong
-    ,
+    , 
     var `threadId`: kotlin.ULong
-    ,
+    , 
     var `ownerMessageId`: kotlin.ULong?
-    ,
+    , 
     var `agentMessageId`: kotlin.ULong?
-    ,
+    , 
     var `state`: kotlin.String
-    ,
+    , 
     var `startedAt`: kotlin.String
-    ,
+    , 
     var `finishedAt`: kotlin.String?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2660,17 +2660,17 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
 
 data class ToolCall (
     var `id`: kotlin.String
-    ,
+    , 
     var `name`: kotlin.String
-    ,
+    , 
     var `ok`: kotlin.Boolean
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2703,11 +2703,11 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
 
 
 enum class AgentActivityState {
-
+    
     THINKING,
     IDLE;
 
-
+    
 
 
     companion object
@@ -2737,11 +2737,11 @@ public object FfiConverterTypeAgentActivityState: FfiConverterRustBuffer<AgentAc
 
 
 enum class ChatAuthor {
-
+    
     OWNER,
     AGENT;
 
-
+    
 
 
     companion object
@@ -2772,60 +2772,60 @@ public object FfiConverterTypeChatAuthor: FfiConverterRustBuffer<ChatAuthor> {
 
 
 sealed class ClientException: kotlin.Exception() {
-
+    
     class InvalidAction(
-
+        
         val `detail`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "detail=${ `detail` }"
     }
-
+    
     class InvalidConfig(
-
+        
         val `detail`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "detail=${ `detail` }"
     }
-
+    
     class AlreadyRunning(
         ) : ClientException() {
         override val message
             get() = ""
     }
-
+    
     class UnsupportedPushPlatform(
-
+        
         val `platform`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "platform=${ `platform` }"
     }
-
+    
     class EmptyPushToken(
         ) : ClientException() {
         override val message
             get() = ""
     }
-
+    
     class Runtime(
-
+        
         val `detail`: kotlin.String
         ) : ClientException() {
         override val message
             get() = "detail=${ `detail` }"
     }
+    
 
-
-
+    
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<ClientException> {
         override fun lift(error_buf: RustBuffer.ByValue): ClientException = FfiConverterTypeClientError.lift(error_buf)
     }
 
-
+    
 }
 
 /**
@@ -2833,7 +2833,7 @@ sealed class ClientException: kotlin.Exception() {
  */
 public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientException> {
     override fun read(buf: ByteBuffer): ClientException {
-
+        
 
         return when(buf.getInt()) {
             1 -> ClientException.InvalidAction(
@@ -2926,12 +2926,12 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
 
 
 enum class ConnectionState {
-
+    
     CONNECTING,
     ONLINE,
     OFFLINE;
 
-
+    
 
 
     companion object
@@ -2960,75 +2960,75 @@ public object FfiConverterTypeConnectionState: FfiConverterRustBuffer<Connection
 
 
 sealed class LifecycleEvent {
-
+    
     data class Connecting(
         val `attempt`: kotlin.UInt) : LifecycleEvent()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     object Online : LifecycleEvent()
-
-
+    
+    
     data class Offline(
         val `reason`: kotlin.String?) : LifecycleEvent()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     data class ProtocolError(
-        val `detail`: kotlin.String,
+        val `detail`: kotlin.String, 
         val `clientId`: kotlin.String?) : LifecycleEvent()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     data class ThreadActionApplied(
-        val `clientId`: kotlin.String,
-        val `historyId`: kotlin.String,
+        val `clientId`: kotlin.String, 
+        val `historyId`: kotlin.String, 
         val `threadId`: kotlin.ULong) : LifecycleEvent()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     data class ThreadOpened(
-        val `clientId`: kotlin.String,
+        val `clientId`: kotlin.String, 
         val `threadId`: kotlin.ULong) : LifecycleEvent()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     data class ThreadRelatedChanged(
-        val `historyId`: kotlin.String,
-        val `threadId`: kotlin.ULong,
+        val `historyId`: kotlin.String, 
+        val `threadId`: kotlin.ULong, 
         val `clientId`: kotlin.String?) : LifecycleEvent()
-
+        
     {
-
+        
 
         companion object
     }
+    
 
+    
 
-
-
-
-
+    
+    
 
 
     companion object
@@ -3177,30 +3177,30 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
 
 
 sealed class ThreadIcon {
-
+    
     data class Emoji(
         val `value`: kotlin.String) : ThreadIcon()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     data class Image(
         val `blobId`: kotlin.String) : ThreadIcon()
-
+        
     {
-
+        
 
         companion object
     }
+    
 
+    
 
-
-
-
-
+    
+    
 
 
     companion object
@@ -3261,11 +3261,11 @@ public object FfiConverterTypeThreadIcon : FfiConverterRustBuffer<ThreadIcon>{
 
 
 enum class ThreadKind {
-
+    
     SPACE,
     TASK;
 
-
+    
 
 
     companion object
@@ -3294,31 +3294,31 @@ public object FfiConverterTypeThreadKind: FfiConverterRustBuffer<ThreadKind> {
 
 
 sealed class ThreadRelatedTarget {
-
+    
     data class Url(
         val `url`: kotlin.String) : ThreadRelatedTarget()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     data class Thread(
-        val `historyId`: kotlin.String,
+        val `historyId`: kotlin.String, 
         val `threadId`: kotlin.ULong) : ThreadRelatedTarget()
-
+        
     {
-
+        
 
         companion object
     }
+    
 
+    
 
-
-
-
-
+    
+    
 
 
     companion object
@@ -3383,11 +3383,11 @@ public object FfiConverterTypeThreadRelatedTarget : FfiConverterRustBuffer<Threa
 
 
 public interface ClientObserver {
-
+    
     fun `onStateChanged`(`snapshot`: ClientSnapshot)
-
+    
     fun `onLifecycleEvent`(`event`: LifecycleEvent)
-
+    
     companion object
 }
 
@@ -3954,11 +3954,11 @@ public object FfiConverterSequenceTypeToolCall: FfiConverterRustBuffer<List<Tool
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_func_generate_iroh_identity(
-
+    
         _status)
 }
     )
     }
-
+    
 
 

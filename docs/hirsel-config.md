@@ -13,7 +13,7 @@ address, regardless of its ephemeral source port. Hirsel does not trust
 a shared proxy therefore share one WebSocket authentication-throttle history
 unless a future trusted-proxy contract explicitly provides client identity.
 
-The Host runs addressed Thread conversations plus current subagent, monitor and fork-triage resources. There are no side-session compatibility flags or Event/Ping APIs.
+The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. The coordinator and native Lash coding worker use the TypeScript RLM dialect with process and trigger abilities; the worker retains its separate four-operation coding profile. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
 History lives in `hirsel.sqlite`. New stores use the complete current schema 7
 layout. Startup accepts that exact layout or an empty store and refuses every
@@ -22,10 +22,13 @@ an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 project files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
-Schema 7 adds the mutually exclusive `threads.icon_blob_id` reference beside the
-emoji text column. The foreign key retains an image blob for as long as a Thread
-uses it. There is no in-place migration: live schema 6 data needs backup and
-fresh-data handling before this build can start.
+Schema 7 combines the mutually exclusive `threads.icon_blob_id` reference beside
+the emoji text column with Lash process delivery receipts and Thread authority.
+The blob foreign key retains an image for as long as a Thread uses it. The
+canonical layout includes `process_deliveries`, `thread_process_sessions`, and
+`thread_process_authorities`, and has no `monitors` table. There is no in-place
+migration: schema 6 and either earlier branch-specific schema 7 layout require
+backup and fresh-data handling before this build can start.
 
 Schema 5 added the append-only `thread_turn_events` timeline. The Host commits
 each typed event before broadcasting it and `open_thread` replays events only
@@ -156,7 +159,7 @@ warning and falls back to that provider's default model.
 
 ## Native Lash coding workers
 
-`threads.delegate` exposes `agent: "lash"` when at least one stored OpenAI-compatible provider has a non-empty API key. This runs a dedicated in-process Lash standard session; it does not change the coordinator's provider or RLM mode. With no explicit worker provider, Hirsel selects the configured `openrouter` instance and defaults its model to `deepseek/deepseek-v4.1-flash`. A non-OpenRouter provider requires an explicit free-text model. The worker variant is `default`.
+`threads.delegate` exposes `agent: "lash"` when at least one stored OpenAI-compatible provider has a non-empty API key. This runs a dedicated in-process Lash TypeScript RLM session with process and trigger abilities and a narrow read/edit/write/command tool profile; it does not change the coordinator's provider or model. Hirsel creates no default worker processes. With no explicit worker provider, Hirsel selects the configured `openrouter` instance and defaults its model to `deepseek/deepseek-v4.1-flash`. A non-OpenRouter provider requires an explicit free-text model. The worker variant is `default`.
 
 Acceptance stores provider route identity, model, variant, canonical cwd, and tool-profile version, never an API key. A later base-URL change or provider removal cannot retarget queued work and produces a clear failure. API-key rotation remains private credential indirection for the same accepted route.
 

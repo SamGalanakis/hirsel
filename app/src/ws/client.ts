@@ -84,6 +84,7 @@ class HirselWsClient {
   private uploads = new Map<string, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
   /** Unresolved get_blob_url promises, keyed by their client_id (D9). */
   private blobUrlReqs = new Map<string, { resolve: (url: string) => void; reject: (e: Error) => void }>();
+  private processActionIds = new Set<string>();
   private handlers: ClientHandlers;
 
   constructor(url: string, token: string, handlers: ClientHandlers = {}) {
@@ -274,6 +275,36 @@ class HirselWsClient {
     this.enqueue({ type: "remove_provider", id });
   }
 
+  cancelProcess(history_id: string, thread_id: number, process_id: string): void {
+    const client_id = makeClientId();
+    this.processActionIds.add(client_id);
+    this.enqueue({
+      type: "cancel_process",
+      client_id,
+      history_id,
+      thread_id,
+      process_id,
+    });
+  }
+
+  disableProcessTrigger(
+    history_id: string,
+    thread_id: number,
+    subscription_key: string,
+    expected_revision: number,
+  ): void {
+    const client_id = makeClientId();
+    this.processActionIds.add(client_id);
+    this.enqueue({
+      type: "disable_process_trigger",
+      client_id,
+      history_id,
+      thread_id,
+      subscription_key,
+      expected_revision,
+    });
+  }
+
   /** Re-probe an OAuth provider's local credentials on the host machine. */
   redetectProvider(id: string): void {
     this.enqueue({ type: "redetect_provider", id });
@@ -396,6 +427,9 @@ class HirselWsClient {
         dispatch({ type: "process_upsert", payload: message });
         break;
       }
+      case "process_action_applied":
+        this.processActionIds.delete(message.client_id);
+        break;
       case "view_upsert": {
         dispatch({ type: "view_upsert", payload: message });
         break;
@@ -473,6 +507,9 @@ class HirselWsClient {
             blobReq.reject(new Error(message.detail));
             this.blobUrlReqs.delete(message.client_id);
           }
+          if (this.processActionIds.delete(message.client_id)) {
+            setProtocolError(message.detail);
+          }
         } else {
           // An uncorrelated error that arrives AFTER authentication is a runtime
           // protocol error (the pre-auth reject path returned above). Surface it
@@ -492,6 +529,7 @@ class HirselWsClient {
     for (const request of this.uploads.values()) request.reject(new Error(detail));
     for (const request of this.blobUrlReqs.values()) request.reject(new Error(detail));
     this.uploads.clear(); this.blobUrlReqs.clear();
+    this.processActionIds.clear();
   }
   private flushOutbox(): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;

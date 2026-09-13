@@ -6,14 +6,17 @@ import type { ProcessInfo } from "../protocol";
 function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
   return { thread_id: 1,
     id: "proc-1",
-    kind: "monitor",
-    label: "Do the thing",
-    agent: null,
-    model: null,
+    name: "Do the thing",
+    trigger: null,
+    trigger_subscription_key: null,
+    trigger_revision: null,
+    trigger_enabled: null,
+    cancellable: true,
     state: "running",
     started_ts: "2026-07-09T00:00:00Z",
     last_event_ts: "2026-07-09T00:00:00Z",
-    summary: null,
+    last_fired_ts: null,
+    last_outcome: null,
     ...overrides,
   };
 }
@@ -32,22 +35,22 @@ describe("process_upsert", () => {
   it("appends a new process and updates an existing one in place", () => {
     const s1 = reduce(initialState(), {
       type: "process_upsert",
-      payload: { type: "process_upsert", process: proc({ summary: "starting…" }) },
+      payload: { type: "process_upsert", process: proc({ last_outcome: "starting…" }) },
     });
     expect(s1.processes).toHaveLength(1);
-    expect(s1.processes[0].summary).toBe("starting…");
+    expect(s1.processes[0].last_outcome).toBe("starting…");
 
     const s2 = reduce(s1, {
       type: "process_upsert",
       payload: {
         type: "process_upsert",
-        process: proc({ state: "done", summary: "finished" }),
+        process: proc({ state: "done", last_outcome: "finished" }),
       },
     });
-    // Same id → replaced in place (no duplicate row), new state/summary applied.
+    // Same id → replaced in place (no duplicate row), new state/outcome applied.
     expect(s2.processes).toHaveLength(1);
     expect(s2.processes[0].state).toBe("done");
-    expect(s2.processes[0].summary).toBe("finished");
+    expect(s2.processes[0].last_outcome).toBe("finished");
 
     const s3 = reduce(s2, {
       type: "process_upsert",

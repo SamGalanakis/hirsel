@@ -27,8 +27,8 @@ Hirsel is a Rust Host/SQLite agent workspace with a Solid web client and a share
 - #30: Keep prompt save status visible beside its close control
 - #29: Validate required provider fields when reading editable config
 - #28: Preserve shell diagnostics when a command times out
-- #27: Reject invalid monitor conditions before installation
-- #26: Describe monitor timestamps as activity rather than firing
+- #27: Retired with the deleted probe layer
+- #26: Retired with the deleted probe layer
 - #25: Resolve blob locations from the current data root
 - #24: Keep active uploaded image documents out of inline app-origin delivery
 - #23: Correlate Thread action results with the originating Thread

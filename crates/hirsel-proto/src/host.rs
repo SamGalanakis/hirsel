@@ -39,6 +39,9 @@ pub enum HostToClient {
     ProcessUpsert {
         process: ProcessInfo,
     },
+    ProcessActionApplied {
+        client_id: String,
+    },
     TurnEvent {
         turn_id: u64,
         thread_id: u64,

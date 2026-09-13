@@ -243,6 +243,7 @@ impl CliTurn {
             },
         };
         let mut ingest = TurnIngest::new(
+            &request.history_id,
             request.thread_id,
             self.turn_id,
             json!({"agent":agent,"model":model,"variant":variant}),

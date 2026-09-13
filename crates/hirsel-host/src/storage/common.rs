@@ -34,10 +34,3 @@ pub(super) fn parse_ts(value: &str) -> rusqlite::Result<DateTime<Utc>> {
         .map(|ts| ts.with_timezone(&Utc))
         .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
 }
-
-pub(super) fn u64_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
-    let value: i64 = row.get(index)?;
-    u64::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(error))
-    })
-}

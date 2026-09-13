@@ -40,26 +40,47 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
 }
 
-/** A host-tracked monitor probe the Agent has running (v1.4). Surfaced in the
- * Processes tab. */
-export type ProcessKind = "monitor";
-
-/** `running` is the only non-terminal state; the rest are terminal. `failed` /
- * `abandoned` get a warning tint in the UI. */
-export type ProcessState = "running" | "done" | "failed" | "cancelled" | "abandoned";
+/** Lifecycle of a Lash process from the owning Thread's durable registry. */
+export type ProcessState =
+  | "running"
+  | "waiting"
+  | "done"
+  | "failed"
+  | "cancelled"
+  | "abandoned"
+  | "caller_departed";
 
 export interface ProcessInfo {
   thread_id: number;
   id: string;
-  kind: ProcessKind;
-  label: string;
-  /** Nullable wire metadata retained for current server/native clients. */
-  agent: string | null;
-  model: string | null;
+  name: string;
+  trigger: string | null;
+  trigger_subscription_key: string | null;
+  trigger_revision: number | null;
+  trigger_enabled: boolean | null;
+  cancellable: boolean;
   state: ProcessState;
   started_ts: string; // RFC3339
   last_event_ts: string; // RFC3339, drives newest-activity-first ordering
-  summary: string | null; // latest progress line, single-line truncated in UI
+  last_fired_ts: string | null;
+  last_outcome: string | null;
+}
+
+export interface CancelProcessMsg {
+  type: "cancel_process";
+  client_id: string;
+  history_id: string;
+  thread_id: number;
+  process_id: string;
+}
+
+export interface DisableProcessTriggerMsg {
+  type: "disable_process_trigger";
+  client_id: string;
+  history_id: string;
+  thread_id: number;
+  subscription_key: string;
+  expected_revision: number;
 }
 
 /** Generative-UI tier (view templates): a resolved, concrete component tree the
@@ -396,6 +417,8 @@ export type ClientMessage =
   | GetBlobUrlMsg
   | CancelTurnMsg
   | CancelQueuedMsg
+  | CancelProcessMsg
+  | DisableProcessTriggerMsg
   | ViewEventMsg
   | SetModelMsg
   | SetSubagentModelMsg
@@ -468,6 +491,11 @@ export interface MsgRemovedMsg {
 export interface ProcessUpsertMsg {
   type: "process_upsert";
   process: ProcessInfo;
+}
+
+export interface ProcessActionAppliedMsg {
+  type: "process_action_applied";
+  client_id: string;
 }
 
 /** v1.5: one ordered event in the running turn's timeline. Tagged by `kind`.
@@ -575,6 +603,7 @@ export type ServerMessage =
   | BlobUrlMsg
   | MsgRemovedMsg
   | ProcessUpsertMsg
+  | ProcessActionAppliedMsg
   | TurnEventMsg
   | ErrorMsg
   | ViewUpsertMsg

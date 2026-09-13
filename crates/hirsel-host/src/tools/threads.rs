@@ -1,7 +1,7 @@
 use super::ToolSuite;
-use hirsel_proto::{
-    ChatAuthor, ChatMessage, HostToClient, Thread, ThreadActivity, ThreadTurn, ToolCallSummary,
-};
+#[cfg(test)]
+use hirsel_proto::{ChatAuthor, ToolCallSummary};
+use hirsel_proto::{ChatMessage, HostToClient, Thread, ThreadActivity, ThreadTurn};
 
 impl ToolSuite {
     pub(crate) async fn publish_thread_related(
@@ -90,6 +90,26 @@ impl ToolSuite {
         let terminal = turn.finished_at.is_some();
         self.broadcast(HostToClient::ThreadTurn { turn });
         self.publish_thread_summary(thread_id).await;
+        if terminal {
+            self.emit_thread_trigger(
+                crate::lash_runtime::THREAD_TURN_SOURCE_TYPE,
+                crate::lash_runtime::THREAD_TURN_EVENT_TYPE,
+                thread_id,
+                format!("turn #{turn_id} completed"),
+                format!("thread-turn:{turn_id}"),
+            )
+            .await;
+            if parent.is_some() {
+                self.emit_thread_trigger(
+                    crate::lash_runtime::THREAD_COMPLETED_SOURCE_TYPE,
+                    crate::lash_runtime::THREAD_COMPLETED_EVENT_TYPE,
+                    thread_id,
+                    format!("child turn #{turn_id} completed"),
+                    format!("thread-complete:{turn_id}"),
+                )
+                .await;
+            }
+        }
         if terminal && let Some(parent) = parent {
             match self.storage.thread_detail(parent, None, 1).await {
                 Ok(detail) => {
@@ -106,6 +126,7 @@ impl ToolSuite {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn thread_chat_send(
         &self,
         thread_id: u64,

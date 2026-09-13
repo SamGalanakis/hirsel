@@ -56,6 +56,7 @@ pub(crate) enum ExecutorTerminalOutcome {
 }
 
 pub(crate) struct TurnIngest {
+    history_id: String,
     pub(super) thread_id: Option<u64>,
     pub(super) turn_id: Option<u64>,
     provenance: Value,
@@ -88,22 +89,17 @@ enum TextKind {
     Reasoning,
 }
 
-impl Default for TurnIngest {
-    fn default() -> Self {
-        Self::unrouted(json!({"agent":"host"}))
-    }
-}
-
 impl TurnIngest {
-    pub(super) fn new(thread_id: u64, turn_id: u64, provenance: Value) -> Self {
-        let mut ingest = Self::unrouted(provenance);
+    pub(super) fn new(history_id: &str, thread_id: u64, turn_id: u64, provenance: Value) -> Self {
+        let mut ingest = Self::unrouted(history_id, provenance);
         ingest.thread_id = Some(thread_id);
         ingest.turn_id = Some(turn_id);
         ingest
     }
 
-    pub(super) fn unrouted(provenance: Value) -> Self {
+    pub(super) fn unrouted(history_id: &str, provenance: Value) -> Self {
         Self {
+            history_id: history_id.into(),
             thread_id: None,
             turn_id: None,
             provenance,
@@ -245,7 +241,8 @@ impl TurnIngest {
                     name: name.clone(),
                     ok,
                 };
-                Self::record_tool_completion(tools, self.route()?, &summary).await?;
+                Self::record_tool_completion(tools, &self.history_id, self.route()?, &summary)
+                    .await?;
                 self.completed_tools.insert(id);
                 self.tool_calls.push(summary);
                 self.publish_activity(
@@ -371,6 +368,13 @@ impl TurnIngest {
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
         let integrity_failure = tools.turn_timeline_integrity_failure(turn_id);
+        if integrity_failure.is_none() {
+            let turn = tools.storage().thread_turn(turn_id).await?;
+            for tool in &tool_calls {
+                Self::record_tool_completion(tools, history_id, (turn.thread_id, turn_id), tool)
+                    .await?;
+            }
+        }
         let (state, output, reason) = if let Some(reason) = integrity_failure.as_ref() {
             (ThreadTurnState::Failed, None, Some(reason.clone()))
         } else {
@@ -407,12 +411,14 @@ impl TurnIngest {
 
     pub(crate) async fn record_tool_completion(
         tools: &ToolSuite,
+        history_id: &str,
         (thread_id, turn_id): (u64, u64),
         tool: &ToolCallSummary,
     ) -> anyhow::Result<()> {
         let (activity, inserted) = tools
             .storage()
             .append_thread_activity_once(
+                history_id,
                 &format!("turn:{turn_id}:tool:{}", tool.id),
                 thread_id,
                 Some(turn_id),
@@ -543,6 +549,7 @@ impl TurnIngest {
         let (activity, inserted) = tools
             .storage()
             .append_thread_activity_once(
+                &self.history_id,
                 &format!("turn:{turn_id}:{kind}"),
                 thread_id,
                 Some(turn_id),

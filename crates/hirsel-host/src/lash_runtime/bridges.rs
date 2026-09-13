@@ -8,11 +8,12 @@ impl LashAgentRuntime {
         let broadcaster = self.broadcaster.clone();
         let broadcast_log = self.broadcast_log.clone();
         let tools = self.tools.clone();
+        let history_id = self.history_id.clone();
         let timeline_commits = self.timeline_commits.clone();
         let active_turn_id = self.active_turn_id.clone();
         self.tasks.spawn(async move {
             let mut cursor = initial_cursor;
-            let mut ingest = TurnIngest::default();
+            let mut ingest = TurnIngest::unrouted(&history_id, json!({"agent":"host"}));
             let mut retry = ObservationRetryBackoff::default();
             loop {
                 let mut stream = match observable.subscribe_and_recover_remote(cursor.clone()) {

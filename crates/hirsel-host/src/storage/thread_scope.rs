@@ -24,6 +24,13 @@ pub(crate) struct ThreadCaller {
     pub execution_id: String,
     pub thread_id: u64,
     pub turn_id: u64,
+    authority: ThreadCallerAuthority,
+}
+
+#[derive(Debug, Clone)]
+enum ThreadCallerAuthority {
+    Turn,
+    Process { process_id: String },
 }
 
 pub(super) fn authorize(c: &Connection, caller: u64, target: u64) -> anyhow::Result<()> {
@@ -43,6 +50,26 @@ pub(super) fn validate_history(c: &Connection, history_id: &str) -> anyhow::Resu
     Ok(())
 }
 pub(super) fn validate_caller(c: &Connection, caller: &ThreadCaller) -> anyhow::Result<()> {
+    if let ThreadCallerAuthority::Process { process_id } = &caller.authority {
+        let active: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_process_authorities a
+             JOIN thread_process_sessions s ON s.session_id=a.session_id
+             JOIN thread_turns t ON t.id=a.turn_id AND t.thread_id=s.thread_id
+             JOIN meta m ON m.key='history_id' AND m.value=s.history_id
+             WHERE s.history_id=?1 AND s.session_id=?2 AND a.process_id=?3
+             AND a.turn_id=?4 AND s.thread_id=?5)",
+            params![
+                caller.history_id,
+                caller.session_id,
+                process_id,
+                caller.turn_id,
+                caller.thread_id
+            ],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(active, "Thread process authority is unavailable");
+        return Ok(());
+    }
     let active: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM thread_execution_bindings b
          JOIN thread_turns t ON t.id=b.turn_id
@@ -135,6 +162,15 @@ pub(crate) struct ThreadContext {
     pub brief: ThreadBrief,
 }
 impl Storage {
+    pub(crate) async fn thread_in_scope(
+        &self,
+        caller_thread_id: u64,
+        target_thread_id: u64,
+    ) -> anyhow::Result<bool> {
+        let c = self.conn.lock().await;
+        Ok(authorize(&c, caller_thread_id, target_thread_id).is_ok())
+    }
+
     pub(crate) async fn resolve_thread(
         &self,
         caller: &ThreadCaller,
@@ -259,6 +295,7 @@ impl Storage {
             execution_id: execution_id.into(),
             thread_id: turn.thread_id,
             turn_id,
+            authority: ThreadCallerAuthority::Turn,
         };
         validate_caller(&c, &caller)?;
         Ok(caller)
@@ -269,7 +306,50 @@ impl Storage {
         execution_id: &str,
     ) -> anyhow::Result<ThreadCaller> {
         let c = self.conn.lock().await;
-        let caller=c.query_row("SELECT b.history_id,t.thread_id,t.id FROM thread_execution_bindings b JOIN thread_turns t ON t.id=b.turn_id WHERE b.session_id=?1 AND b.execution_id=?2",params![session_id,execution_id],|r|Ok(ThreadCaller{history_id:r.get(0)?,session_id:session_id.into(),execution_id:execution_id.into(),thread_id:r.get(1)?,turn_id:r.get(2)?})).optional()?.ok_or_else(||anyhow::anyhow!("Thread execution binding is unavailable"))?;
+        let caller=c.query_row("SELECT b.history_id,t.thread_id,t.id FROM thread_execution_bindings b JOIN thread_turns t ON t.id=b.turn_id WHERE b.session_id=?1 AND b.execution_id=?2",params![session_id,execution_id],|r|Ok(ThreadCaller{history_id:r.get(0)?,session_id:session_id.into(),execution_id:execution_id.into(),thread_id:r.get(1)?,turn_id:r.get(2)?,authority:ThreadCallerAuthority::Turn})).optional()?.ok_or_else(||anyhow::anyhow!("Thread execution binding is unavailable"))?;
+        validate_caller(&c, &caller)?;
+        Ok(caller)
+    }
+
+    /// Resolve a durable process to its owning Thread. The first tool call for
+    /// one process pins the Thread's latest turn as a receipt namespace; that
+    /// turn is attribution only and does not need to remain running.
+    pub(crate) async fn process_caller(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        execution_id: &str,
+    ) -> anyhow::Result<ThreadCaller> {
+        let c = self.conn.lock().await;
+        c.execute(
+            "INSERT OR IGNORE INTO thread_process_authorities(session_id,process_id,turn_id)
+             SELECT s.session_id,?2,t.id FROM thread_process_sessions s
+             JOIN thread_turns t ON t.thread_id=s.thread_id
+             JOIN meta m ON m.key='history_id' AND m.value=s.history_id
+             WHERE s.session_id=?1 ORDER BY t.id DESC LIMIT 1",
+            params![session_id, process_id],
+        )?;
+        let caller = c
+            .query_row(
+                "SELECT s.history_id,s.thread_id,a.turn_id FROM thread_process_authorities a
+                 JOIN thread_process_sessions s ON s.session_id=a.session_id
+                 WHERE a.session_id=?1 AND a.process_id=?2",
+                params![session_id, process_id],
+                |r| {
+                    Ok(ThreadCaller {
+                        history_id: r.get(0)?,
+                        session_id: session_id.into(),
+                        execution_id: execution_id.into(),
+                        thread_id: r.get(1)?,
+                        turn_id: r.get(2)?,
+                        authority: ThreadCallerAuthority::Process {
+                            process_id: process_id.into(),
+                        },
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("Thread process authority is unavailable"))?;
         validate_caller(&c, &caller)?;
         Ok(caller)
     }

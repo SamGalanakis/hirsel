@@ -69,13 +69,18 @@ impl Storage {
         if let Some(generation) = next_generation {
             set_meta_value(&tx, &generation_key, &generation.to_string())?;
         }
+        let session_id = format!(
+            "thread-{history_id}-{thread_id}-g{}",
+            next_generation.unwrap_or(0)
+        );
+        tx.execute(
+            "INSERT INTO thread_process_sessions(history_id,session_id,thread_id) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET history_id=excluded.history_id,thread_id=excluded.thread_id",
+            params![history_id, session_id, thread_id],
+        )?;
         tx.commit()?;
 
         Ok(AgentSessionState {
-            session_id: format!(
-                "thread-{history_id}-{thread_id}-g{}",
-                next_generation.unwrap_or(0)
-            ),
+            session_id,
             rotated,
             added_tools,
         })

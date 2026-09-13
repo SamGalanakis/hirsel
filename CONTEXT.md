@@ -30,7 +30,7 @@ _Avoid_: Event as a work object
 
 **Generated instrument:** A constrained semantic interface attached to a Thread. It may change through multiple stages while the Thread's identity and conversation remain stable.
 
-**Process:** An observable Sub-agent or monitor run coordinated by the Agent. Its execution lifecycle is separate from Task completion.
+**Process:** An observable Lashlang workflow or Sub-agent run coordinated by the Agent. Its execution lifecycle is separate from Task completion.
 
 **Sub-agent:** An external coding agent driven through a native Sub-agent Driver. It reports to the Agent.
 

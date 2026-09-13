@@ -387,6 +387,7 @@ async fn project(backend: Backend, scenario: Scenario) -> Projection {
     let (executor, storage, log, _dir) = super::tests::test_event_executor().await;
     let caller = storage.test_running_caller().await;
     let mut ingest = TurnIngest::new(
+        &caller.history_id,
         caller.thread_id,
         caller.turn_id,
         json!({"agent": "executor-conformance"}),
@@ -516,6 +517,7 @@ async fn replayed_activity_is_not_broadcast_twice() {
     for _ in 0..2 {
         TurnIngest::record_tool_completion(
             &executor.tools,
+            &caller.history_id,
             (caller.thread_id, caller.turn_id),
             &tool,
         )

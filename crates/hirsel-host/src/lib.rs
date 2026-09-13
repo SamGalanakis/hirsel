@@ -11,7 +11,6 @@ pub mod iroh;
 mod json_spec;
 pub mod lash_runtime;
 pub mod model_selection;
-pub mod monitors;
 // This slice lands before the worker runtime that consumes it. Keep the
 // crate-private integration surface lint-clean in isolation.
 #[allow(dead_code)]
@@ -28,7 +27,6 @@ pub mod skills;
 pub mod storage;
 pub mod subagent_models;
 pub mod templates;
-mod text;
 mod thread_commands;
 pub mod thread_instrument;
 pub mod thread_tool_bridge;
@@ -55,7 +53,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     config::Config,
     lash_runtime::{AgentRuntime, CancelQueuedResult},
-    storage::{MonitorCondition, MonitorRecord, Storage, monitor_process_info},
+    storage::Storage,
     tools::{ToolSuite, ToolsConfig},
 };
 
@@ -555,63 +553,44 @@ impl AppState {
     }
 
     pub async fn process_snapshot(&self) -> anyhow::Result<Vec<ProcessInfo>> {
-        let all = self.storage.monitor_snapshot().await?;
-        let mut running = Vec::new();
-        let mut terminal = Vec::new();
-        for process in all {
-            if matches!(process.state, hirsel_proto::ProcessState::Running) {
-                running.push(process);
-            } else {
-                terminal.push(process);
-            }
-        }
-        running.sort_by(|left, right| {
-            left.started_ts
-                .cmp(&right.started_ts)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        terminal.sort_by(|left, right| {
-            left.last_event_ts
-                .cmp(&right.last_event_ts)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        if terminal.len() > 10 {
-            terminal.drain(..terminal.len() - 10);
-        }
-        running.extend(terminal);
-        Ok(running)
+        self.agent.process_snapshot().await
     }
 
-    pub async fn create_monitor(
+    pub async fn cancel_process(
         &self,
+        expected_history: &str,
         thread_id: u64,
-        cmd: String,
-        every_secs: u64,
-        condition: MonitorCondition,
-        label: String,
-    ) -> anyhow::Result<MonitorRecord> {
-        let record = self
-            .storage
-            .create_monitor(thread_id, cmd, every_secs, condition, label)
-            .await?;
-        self.broadcast_monitor(&record);
-        self.agent.start_monitor_process(&record).await?;
-        Ok(record)
+        process_id: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.storage.history_id().await? == expected_history,
+            "process action belongs to an old history"
+        );
+        self.storage
+            .thread(thread_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Thread is unavailable"))?;
+        self.agent.cancel_process(thread_id, process_id).await
     }
 
-    pub async fn cancel_monitor(&self, monitor_id: &str) -> anyhow::Result<Option<MonitorRecord>> {
-        let record = self.storage.cancel_monitor(monitor_id).await?;
-        if let Some(record) = &record {
-            self.broadcast_monitor(record);
-        }
-        self.agent.cancel_monitor_process(monitor_id).await?;
-        Ok(record)
-    }
-
-    pub fn broadcast_monitor(&self, record: &MonitorRecord) {
-        self.broadcast(HostToClient::ProcessUpsert {
-            process: monitor_process_info(record),
-        });
+    pub async fn disable_process_trigger(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+        subscription_key: &str,
+        expected_revision: u64,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.storage.history_id().await? == expected_history,
+            "process action belongs to an old history"
+        );
+        self.storage
+            .thread(thread_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Thread is unavailable"))?;
+        self.agent
+            .disable_process_trigger(thread_id, subscription_key, expected_revision)
+            .await
     }
 }
 

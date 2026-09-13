@@ -32,7 +32,7 @@ use crate::{storage::Storage, tools::ToolSuite};
 /// How many triage forks may be in flight at once.
 ///
 /// Four: enough that a Sub-agent fan-out finishing together is triaged
-/// promptly, small enough that a monitor storm cannot open dozens of provider
+/// promptly, small enough that a process-event storm cannot open dozens of provider
 /// sessions at once. Forks are single-turn and short, so the queue behind this
 /// drains quickly; the alternative — unbounded spawning — turns a burst of
 /// cheap events into a rate-limit incident on the provider the *main* Agent
@@ -107,8 +107,7 @@ impl ForkWake {
     }
 
     /// Spawn exactly one triage fork for one non-owner message and return
-    /// immediately. Wake sites are on hot paths (a process bridge, a monitor
-    /// loop) and must not block on a model turn.
+    /// immediately. Wake sites are on hot paths and must not block on a model turn.
     pub fn dispatch(self: &Arc<Self>, message: WakeMessage) {
         let fork = Arc::clone(self);
         self.tasks.spawn(async move {
@@ -243,11 +242,9 @@ impl ForkWake {
 
 /// A late-bound reference to the dispatcher.
 ///
-/// The wake sites that feed forks are wired before the dispatcher can exist:
-/// the monitor process engine is registered into the lash core *while that
-/// core is being built*, and the dispatcher needs the finished runtime to
-/// escalate into. This handle closes that loop — cloned into the wake sites at
-/// build time, filled in once at the end of `LashAgentRuntime::start`.
+/// The wake sites that feed forks are wired before the dispatcher can exist,
+/// while the dispatcher itself needs the finished runtime to escalate into.
+/// This handle closes that loop and is filled once at the end of startup.
 ///
 /// Backends with no lash session (scripted, degraded) simply never install
 /// one, and keep their pre-ADR-0015 wake behaviour.

@@ -1,12 +1,33 @@
 import type { ProcessState, ProcessInfo, ViewInstance } from "../protocol";
+import type { Thread } from "../threads/types";
 export function isProcessRunning(state: ProcessState): boolean {
-  return state === "running";
+  return state === "running" || state === "waiting";
 }
 
 /** Count backing the Processes utility badge: running processes only.
  * Deliberately independent of Thread attention state and document.title. */
 export function runningProcessCount(processes: ProcessInfo[]): number {
   return processes.filter((p) => isProcessRunning(p.state)).length;
+}
+
+export function scopedProcesses(
+  processes: ProcessInfo[],
+  threads: Thread[],
+  focusedId: number | null,
+): ProcessInfo[] {
+  if (focusedId === null) return [];
+  const visible = new Set([focusedId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const thread of threads) {
+      if (thread.parent_thread_id !== null && visible.has(thread.parent_thread_id) && !visible.has(thread.id)) {
+        visible.add(thread.id);
+        changed = true;
+      }
+    }
+  }
+  return processes.filter(process => visible.has(process.thread_id));
 }
 
 // ---- Generative-UI tier (view templates) ----

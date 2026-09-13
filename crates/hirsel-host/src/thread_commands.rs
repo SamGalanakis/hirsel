@@ -105,6 +105,15 @@ impl AppState {
                 return Err(error);
             }
             self.tools.publish_thread_message(message.clone()).await;
+            self.tools
+                .emit_thread_trigger(
+                    crate::lash_runtime::THREAD_MESSAGE_SOURCE_TYPE,
+                    crate::lash_runtime::THREAD_MESSAGE_EVENT_TYPE,
+                    thread_id,
+                    message.body.clone(),
+                    format!("thread-message:{}", message.id),
+                )
+                .await;
         }
         Ok(OwnerSubmission {
             client_id,

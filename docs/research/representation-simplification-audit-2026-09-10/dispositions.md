@@ -11,11 +11,10 @@ Fixed snapshot 3ee0621. Worker recommendations are candidates; verified notes an
 | C05-DELEGATION-SCOPE | [workers/C05-DELEGATION-SCOPE.md](workers/C05-DELEGATION-SCOPE.md); [verified/C05-F01-disposition.md](verified/C05-F01-disposition.md) |
 | C06-ARTIFACTS | [workers/C06-ARTIFACTS.md](workers/C06-ARTIFACTS.md); [verified/C06-F1-disposition.md](verified/C06-F1-disposition.md) |
 | C07-RELATED | [workers/C07-RELATED.md](workers/C07-RELATED.md); [verified/C07-F01-disposition.md](verified/C07-F01-disposition.md) |
-| C08-PROCESS-WAKE | [workers/C08-PROCESS-WAKE.md](workers/C08-PROCESS-WAKE.md); [verified/F08-monitor-activity-label.md](verified/F08-monitor-activity-label.md); [verified/C08-01-disposition.md](verified/C08-01-disposition.md) |
 | C09-CODEX-DRIVER | [workers/C09-CODEX-DRIVER.md](workers/C09-CODEX-DRIVER.md); [verified/C09-dispositions.md](verified/C09-dispositions.md) |
 | C10-CLAUDE-DRIVER | [workers/C10-CLAUDE-DRIVER.md](workers/C10-CLAUDE-DRIVER.md); [verified/C10-dispositions.md](verified/C10-dispositions.md) |
 | C11-DRIVER-SHARED | [workers/C11-DRIVER-SHARED.md](workers/C11-DRIVER-SHARED.md); [verified/F10-shell-timeout-stderr.md](verified/F10-shell-timeout-stderr.md) |
-| C12-LASH-RUNTIME | [workers/C12-LASH-RUNTIME.md](workers/C12-LASH-RUNTIME.md); [verified/F09-monitor-condition-validation.md](verified/F09-monitor-condition-validation.md) |
+| C12-LASH-RUNTIME | [workers/C12-LASH-RUNTIME.md](workers/C12-LASH-RUNTIME.md) |
 | C13-CONFIG | [workers/C13-CONFIG.md](workers/C13-CONFIG.md); [verified/F11-provider-file-validation.md](verified/F11-provider-file-validation.md); [verified/C13-02-disposition.md](verified/C13-02-disposition.md) |
 | C14-PROTOCOL-CONNECTION | [workers/C14-PROTOCOL-CONNECTION.md](workers/C14-PROTOCOL-CONNECTION.md); [verified/F03-view-removal-dedupe.md](verified/F03-view-removal-dedupe.md); [verified/F04-reconnect-auth-phase.md](verified/F04-reconnect-auth-phase.md) |
 | C15-WEB-THREADS | [workers/C15-WEB-THREADS.md](workers/C15-WEB-THREADS.md); [verified/F05-action-error-ownership.md](verified/F05-action-error-ownership.md) |
@@ -41,7 +40,6 @@ All independently recorded narrowed/rejected proposals:
 - [C05-F01-disposition.md](verified/C05-F01-disposition.md)
 - [C06-F1-disposition.md](verified/C06-F1-disposition.md)
 - [C07-F01-disposition.md](verified/C07-F01-disposition.md)
-- [C08-01-disposition.md](verified/C08-01-disposition.md)
 - [C09-dispositions.md](verified/C09-dispositions.md)
 - [C10-dispositions.md](verified/C10-dispositions.md)
 - [C13-02-disposition.md](verified/C13-02-disposition.md)

@@ -30,6 +30,30 @@ pub(super) async fn reconcile_opened_session_provider(
     Ok(())
 }
 
+/// The protocol posture shared by the coordinator and native coding worker.
+/// Keeping the execution bounds and Lashlang abilities here prevents the two
+/// resident RLM session families from drifting.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HirselRlmSession {
+    Coordinator,
+    NativeWorker,
+}
+
+pub(super) fn hirsel_rlm_config(
+    _session: HirselRlmSession,
+) -> lash_protocol_rlm::RlmProtocolPluginConfig {
+    lash_protocol_rlm::RlmProtocolPluginConfig::builder()
+        .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
+        .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
+        .memory_limit(lash_protocol_rlm::MemoryBound::mebibytes(64))
+        .build()
+        .with_lashlang_abilities(
+            lash_protocol_rlm::RlmAbilities::default()
+                .with_processes()
+                .with_triggers(),
+        )
+}
+
 impl LashAgentRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn start(
@@ -100,16 +124,7 @@ impl LashAgentRuntime {
         // Execution bounds have no defaults on the plugin config: the host names
         // every one. These match the reference-host budgets — a cell may run a
         // million instructions, for thirty seconds, inside 64 MiB.
-        let rlm_config = lash_protocol_rlm::RlmProtocolPluginConfig::builder()
-            .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
-            .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
-            .memory_limit(lash_protocol_rlm::MemoryBound::mebibytes(64))
-            .build()
-            .with_lashlang_abilities(
-                lash_protocol_rlm::RlmAbilities::default()
-                    .with_processes()
-                    .with_triggers(),
-            );
+        let rlm_config = hirsel_rlm_config(HirselRlmSession::Coordinator);
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
         let mut tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
@@ -137,13 +152,12 @@ impl LashAgentRuntime {
         let anchors = executor.anchors.clone();
         let tool_provider = Arc::new(HirselToolProvider { executor });
         let notify = Arc::new(Notify::new());
-        // ADR-0015's dispatcher cannot exist yet — it escalates into a runtime
-        // that is built below, and the monitor engine that feeds it is
-        // registered while the core is still under construction. The handle
-        // closes that loop; it is installed at the end of this function.
+        let process_notify = Arc::new(Notify::new());
+        // The process bridge is installed after the runtime is built; this
+        // late-bound handle closes its edge back into the Thread queue.
         let fork_wake = crate::fork_wake::ForkWakeHandle::default();
         let queued_work_driver = NativeQueuedWork::new(Arc::new(HirselQueuedWorkNotifier {
-            notify: Arc::clone(&notify),
+            notify: Arc::clone(&process_notify),
         }));
         let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, rlm_factory)
             .provider(provider.clone())
@@ -157,12 +171,7 @@ impl LashAgentRuntime {
             .process_registry(process_registry)
             .trigger_store(Arc::clone(&trigger_store))
             .tools(tool_provider)
-            .plugin(Arc::new(HirselProcessPluginFactory {
-                history_id: history_id.clone(),
-                thread_id,
-                tools: tools.clone(),
-                fork_wake: fork_wake.clone(),
-            }))
+            .plugin(Arc::new(HirselPluginFactory))
             .with_queued_work(Arc::new(queued_work_driver))
             // lash's documented recommended starting point (1 MiB / 512 nodes),
             // matching its reference hosts; tune if SQLite commit latency drifts.
@@ -214,6 +223,7 @@ impl LashAgentRuntime {
             broadcaster: broadcaster.clone(),
             broadcast_log,
             notify,
+            process_notify,
             pump_lock: Mutex::new(()),
             request_lock: Mutex::new(()),
             anchors,
@@ -230,12 +240,18 @@ impl LashAgentRuntime {
             prompts: config.prompts.clone(),
             handoff_seed: session_bootstrap.handoff_seed,
             fork_wake: fork_wake.clone(),
+            trigger_store: Arc::clone(&trigger_store),
+            last_processes: Mutex::new(HashMap::new()),
         });
         fork_wake.install(runtime.build_fork_wake());
+        tools
+            .register_thread_trigger_runtime(thread_id, Arc::downgrade(&runtime))
+            .await;
         runtime.reconcile_unowned_inputs().await?;
         runtime.spawn_observation_bridge();
+        runtime.spawn_process_bridge();
         runtime.spawn_turn_pump();
-        runtime.notify.notify_one();
+        runtime.process_notify.notify_one();
         runtime.spawn_timer_trigger_source(trigger_store);
         runtime.notify_if_work_pending().await;
         tracing::info!(
@@ -344,7 +360,7 @@ impl LashAgentRuntime {
 
     pub(super) async fn notify_if_work_pending(&self) {
         if self.work_pending().await {
-            self.notify.notify_one();
+            self.process_notify.notify_one();
         }
     }
 
@@ -596,22 +612,6 @@ impl LashAgentRuntime {
         client_id: &str,
     ) -> anyhow::Result<CancelQueuedResult> {
         self.cancel_thread_request(client_id).await
-    }
-
-    pub(super) async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
-        self.core
-            .processes()
-            .start(
-                monitor_start_request(
-                    record,
-                    &self.session_id,
-                    host_process_env_spec(self.session.policy_snapshot()),
-                ),
-                inline_trigger_scope(format!("monitor-debug-create:{}", record.id)),
-            )
-            .await?;
-        self.notify.notify_one();
-        Ok(())
     }
 
     /// Build the ADR-0015 dispatcher for this runtime.

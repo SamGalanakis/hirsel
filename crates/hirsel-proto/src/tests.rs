@@ -322,14 +322,17 @@ fn process_upsert_round_trips() {
     let process = ProcessInfo {
         thread_id: 1,
         id: "proc-1".to_string(),
-        kind: ProcessKind::Monitor,
-        label: "watch file".to_string(),
-        agent: None,
-        model: None,
+        name: "watch file".to_string(),
+        trigger: Some("every 30s".to_string()),
+        trigger_subscription_key: Some("watch-file".to_string()),
+        trigger_revision: Some(2),
+        trigger_enabled: Some(true),
+        cancellable: true,
         state: ProcessState::Done,
         started_ts: ts,
         last_event_ts: ts,
-        summary: None,
+        last_fired_ts: Some(ts),
+        last_outcome: Some("ready".to_string()),
     };
     let upsert = HostToClient::ProcessUpsert {
         process: process.clone(),
@@ -337,7 +340,7 @@ fn process_upsert_round_trips() {
     let encoded = serde_json::to_string(&upsert).unwrap();
     assert_eq!(
         encoded,
-        r#"{"type":"process_upsert","process":{"thread_id":1,"id":"proc-1","kind":"monitor","label":"watch file","agent":null,"model":null,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","summary":null}}"#
+        r#"{"type":"process_upsert","process":{"thread_id":1,"id":"proc-1","name":"watch file","trigger":"every 30s","trigger_subscription_key":"watch-file","trigger_revision":2,"trigger_enabled":true,"cancellable":true,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","last_fired_ts":"2026-07-09T12:00:00Z","last_outcome":"ready"}}"#
     );
     let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, upsert);

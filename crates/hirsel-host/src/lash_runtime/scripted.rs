@@ -95,58 +95,6 @@ impl ScriptedAgentRuntime {
         Ok(CancelQueuedResult::AlreadyClaimed)
     }
 
-    pub(super) async fn deliver_monitor_wake(&self, text: String) -> anyhow::Result<()> {
-        self.tools
-            .thread_chat_send(self.thread_id, text, None, Vec::new())
-            .await?;
-
-        Ok(())
-    }
-
-    pub(super) fn spawn_standalone_monitor(self: &Arc<Self>, monitor_id: String) {
-        let runtime = Arc::clone(self);
-        self.tasks.spawn(async move {
-            loop {
-                let record = match runtime.tools.monitor(&monitor_id).await {
-                    Ok(Some(record)) if record.cancelled_ts.is_none() => record,
-                    Ok(_) => break,
-                    Err(error) => {
-                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor lookup failed");
-                        break;
-                    }
-                };
-                tokio::time::sleep(Duration::from_secs(record.every_secs)).await;
-                let record = match runtime.tools.monitor(&monitor_id).await {
-                    Ok(Some(record)) if record.cancelled_ts.is_none() => record,
-                    Ok(_) => break,
-                    Err(error) => {
-                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor lookup failed");
-                        break;
-                    }
-                };
-                let tick = run_monitor_tick(&record).await;
-                match runtime
-                    .tools
-                    .record_monitor_tick(&monitor_id, tick.probe.output.clone(), tick.summary)
-                    .await
-                {
-                    Ok(Some(_)) => {}
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor tick persist failed");
-                        continue;
-                    }
-                }
-                if tick.wake
-                    && let Some(text) = tick.wake_text
-                    && let Err(error) = runtime.deliver_monitor_wake(text).await
-                {
-                    tracing::warn!(%error, monitor_id = %monitor_id, "scripted standalone monitor wake delivery failed");
-                }
-            }
-        });
-    }
-
     pub(super) async fn recover_pending(&self) -> anyhow::Result<()> {
         match self.tools.storage().pending_thread_requests().await {
             Ok(requests) => {
@@ -254,6 +202,7 @@ impl ScriptedAgentRuntime {
             active.turn_id = Some(record.id);
         }
         let mut ingest = TurnIngest::new(
+            &turn.history_id,
             turn.thread_id,
             record.id,
             json!({"agent":"host","model":self.config.model,"driver":"scripted"}),

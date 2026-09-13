@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createSignal, flush } from "solid-js";
 import { fireEvent, render } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -100,13 +102,47 @@ describe("the run card", () => {
     expect(view.getByText("No result recorded")).toBeInTheDocument();
     expect(view.container.querySelector('[data-slot="timeline"] [aria-label="running"]')).toBeNull();
   });
-  it("keeps the run's identity and raw events behind Technical details", () => {
-    const view = render(() => <RunCard turn={turn("completed")} message={message} events={events} activities={[]} />);
+  it("keeps recorded non-step activity as a plain trace row, behind no disclosure", () => {
+    const diagnostic: ThreadActivity = { ...activity, id: 7, kind: "turn_error", data: { message: "Execution diagnostics" } };
+    const view = render(() => <RunCard turn={turn("completed")} message={message} events={events} activities={[diagnostic]} />);
     flush(() => setTurnExpanded(1, true));
-    const technical = view.container.querySelector('[data-slot="run-card-technical"]')!;
-    expect(technical.querySelector('[role="region"]')).toHaveAttribute("data-slot", "work-diagnostics");
-    expect(technical.textContent).toContain("Turn 1 · completed");
-    expect(technical.textContent).toContain("call-a");
+    const record = view.container.querySelector('[data-slot="run-card-record"]')!;
+    expect(record.textContent).toContain("turn error");
+    expect(record.textContent).toContain("Execution diagnostics");
+    expect(view.container.querySelector("details")).toBeNull();
+  });
+  it("marks a running turn with the tumbling brand cube and says the word only aloud", () => {
+    const [current, setCurrent] = createSignal(turn("running"));
+    const view = render(() => <RunCard turn={current()} events={events} activities={[]} live />);
+    const header = view.getByRole("button", { name: /running/ });
+    const slot = header.querySelector('[data-slot="run-card-outcome"]')!;
+    const spinner = slot.querySelector('[data-slot="cube-spinner"]')!;
+    expect(spinner).toBeInTheDocument();
+    // The whole cube keeps its three faces: the shading turns, the solid does not go anywhere.
+    expect(spinner.querySelectorAll("[data-face]")).toHaveLength(3);
+    expect(spinner).toHaveAttribute("aria-hidden", "true");
+    // The visible line is chevron, cube, elapsed — the word is spoken, not shown.
+    expect(header.textContent).not.toContain("running");
+    expect(header.getAttribute("aria-label")).toContain("running");
+    expect(view.container.querySelector('p[role="status"]')).toBeInTheDocument();
+    // The outcome mark inherits the very same slot, so the line cannot shuffle.
+    flush(() => setCurrent(turn("completed")));
+    expect(view.container.querySelectorAll('[data-slot="cube-spinner"]')).toHaveLength(0);
+    expect(view.container.querySelector('[data-slot="run-card-outcome"]')).toBe(slot);
+    expect(view.container.querySelector('p[role="status"]')).toBeNull();
+  });
+});
+
+/** The disclosure the Owner never opened and could not have read is gone for
+ * good: an error line says its error, a trace shows its rows. This holds the
+ * whole app, not just the run card, so it cannot creep back in one component. */
+describe("the retired diagnostics disclosure", () => {
+  const needle = ["Technical", "details"].join(" ");
+  const sources = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
+    .flatMap(entry => entry.isDirectory() ? sources(join(dir, entry.name)) : /\.(ts|tsx|css)$/.test(entry.name) ? [join(dir, entry.name)] : []);
+  it("appears in no source file under app/src", () => {
+    const offenders = sources(join(process.cwd(), "src")).filter(path => readFileSync(path, "utf8").includes(needle));
+    expect(offenders).toEqual([]);
   });
 });
 

@@ -402,3 +402,85 @@ textarea {
 .hljs-strong {
   font-weight: 600;
 }
+
+/* --- The working indicator: the brand cube, tumbling. -----------------------
+
+   A running turn is marked by the hirsel mark itself rather than a generic
+   ring spinner. Nothing rotates geometrically; the SHADING rotates. Each face
+   hands its token to the next face on a 1.5s cycle, offset by a third of the
+   cycle each, so at every instant the three faces still hold the three
+   distinct `--brand-cube-*` values — the solid never stops reading as a cube,
+   it just keeps turning under the light. Each quarter-turn eases over and then
+   rests (the paired keyframe stops), which is what deliberate work looks like,
+   and the whole thing borrows no colour the resting mark does not already own,
+   on either canvas.
+
+   It is CSS on the data-slot rather than a JS timer, so a page of live cards
+   costs one compositor cycle. `data-paused` freezes it (a dropped socket: the
+   mark stays, the work does not pretend to continue). */
+@keyframes cube-spinner-tumble {
+  0%,
+  18% {
+    fill: var(--brand-cube-top);
+  }
+
+  33.334%,
+  51.334% {
+    fill: var(--brand-cube-right);
+  }
+
+  66.667%,
+  84.667% {
+    fill: var(--brand-cube-left);
+  }
+
+  100% {
+    fill: var(--brand-cube-top);
+  }
+}
+
+/* A breath at exactly twice the tumble, so the two never drift against each
+   other. 3% is below the threshold of "pulsing" and above "nothing". */
+@keyframes cube-spinner-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+[data-slot="cube-spinner"] [data-face] {
+  fill: var(--cube-face);
+  animation: cube-spinner-tumble 1.5s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+[data-slot="cube-spinner"] [data-face="right"] {
+  animation-delay: -0.5s;
+}
+
+[data-slot="cube-spinner"] [data-face="left"] {
+  animation-delay: -1s;
+}
+
+[data-slot="cube-spinner"] svg {
+  transform-origin: 50% 50%;
+  animation: cube-spinner-breathe 3s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+[data-slot="cube-spinner"][data-paused] svg,
+[data-slot="cube-spinner"][data-paused] [data-face] {
+  animation-play-state: paused;
+}
+
+/* Reduced motion gets the resting mark, not the last keyframe of a stopped
+   animation (the global guard would leave every face on the top token). */
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="cube-spinner"] svg,
+  [data-slot="cube-spinner"] [data-face] {
+    animation: none;
+    transform: none;
+  }
+}

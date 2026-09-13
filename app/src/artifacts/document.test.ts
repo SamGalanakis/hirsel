@@ -31,7 +31,9 @@ describe("artifact isolation", () => {
     expect(panel.textContent).toContain("This artifact stopped working.");
     expect(panel.textContent).toContain('ask Hirsel to repair artifact #1, “<img src=x onerror="bad()">”');
     expect(panel.querySelector("img")).toBeNull();
-    expect(panel.querySelector("details")?.open).toBe(false);
+    // The failure reason is the line itself; nothing is folded away from it.
+    expect(panel.querySelector("details")).toBeNull();
+    expect(panel.querySelector("#artifact-details")).not.toBeNull();
     expect(panel.querySelector("button")?.textContent).toBe("Close preview");
     expect(code).toContain("Runtime failed");
   });

@@ -45,7 +45,7 @@ describe("who is speaking", () => {
     const view = render(() => <ThreadMessage entry={{ key: "turn-4", kind: "turn", turn }} history={emptyHistory()} threadId={1} />);
     const spinner = view.container.querySelector<HTMLElement>('[data-slot="turn-pending"]')!;
     expect(spinner).toHaveAttribute("role", "status");
-    expect(spinner.querySelector(".animate-spin")).toBeInTheDocument();
+    expect(spinner.querySelector('[data-slot="cube-spinner"]')).toBeInTheDocument();
     expect(spinner.textContent).toContain("Hirsel is working");
     expect(view.container.querySelector('[data-slot="agent-message"]')).toBeNull();
     expect(view.container.querySelector('[data-slot="run-card"]')).toBeNull();
@@ -58,7 +58,8 @@ describe("who is speaking", () => {
     // A live run card opens on arrival: the Owner is watching it happen.
     const header = view.container.querySelector('[data-slot="run-card-header"]')!;
     expect(header).toHaveAttribute("aria-expanded", "true");
-    expect(header.textContent).toContain("running");
+    expect(header.querySelector('[data-slot="cube-spinner"]')).toBeInTheDocument();
+    expect(header.getAttribute("aria-label")).toContain("running");
     expect(view.container.querySelector('[data-slot="run-card-trace"]')).toBeInTheDocument();
   });
   it("renders a routine note as one centred line owned by neither party", () => {

@@ -9,7 +9,7 @@ const artifact: Artifact = { id: 4, title: "Preview", kind: "html", content: "<b
 
 afterEach(() => vi.unstubAllGlobals());
 describe("artifact preview recovery", () => {
-  it("offers retry and return to the composer while keeping diagnostics disclosed", async () => {
+  it("offers retry and return to the composer with the failure reason in plain sight", async () => {
     const workers: FakeWorker[] = [];
     class FakeWorker {
       onmessage: ((event: MessageEvent) => void) | null = null;
@@ -22,7 +22,7 @@ describe("artifact preview recovery", () => {
     await waitFor(() => expect(workers).toHaveLength(1));
     workers[0].onmessage?.(new MessageEvent("message", { data: { error: "SyntaxError: Unexpected token" } }));
     await waitFor(() => expect(view.getByRole("alert")).toHaveTextContent("ask Hirsel to repair artifact #4"));
-    expect(view.container.querySelector("details")?.open).toBe(false);
+    expect(view.container.querySelector("details")).toBeNull();
     expect(view.getByText("SyntaxError: Unexpected token")).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: "Try preview again" }));
     await waitFor(() => expect(workers).toHaveLength(2));

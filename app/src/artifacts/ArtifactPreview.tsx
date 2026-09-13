@@ -46,7 +46,7 @@ export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPres
     <p class="font-medium">This artifact couldn’t be displayed.</p>
     <p class="max-w-prose leading-relaxed text-muted-foreground">Try the preview again. If it still fails, ask Hirsel to repair artifact #{props.artifact.id}, “{props.artifact.title}”. Your conversation and draft are kept.</p>
     <div class="flex flex-wrap gap-2"><button class="min-h-11 rounded-lg bg-muted px-3 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setAttempt(value => value + 1)}>Try preview again</button><Show when={props.onReturnToComposer}><button class="min-h-11 rounded-lg px-3 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={props.onReturnToComposer}>Return to composer</button></Show></div>
-    <details><summary class="min-h-11 cursor-pointer py-3 text-muted-foreground">Technical details</summary><pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{error()}</pre></details>
+    <pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{error()}</pre>
   </div>}>
     <Show when={document()} fallback={<p role="status" class="p-6 text-sm text-muted-foreground">Preparing preview…</p>}>
       <iframe ref={node => { frame = node; }} title={props.artifact.title} srcdoc={document()} sandbox="allow-scripts" referrerpolicy="no-referrer" class="h-full min-h-64 w-full border-0 bg-white" />

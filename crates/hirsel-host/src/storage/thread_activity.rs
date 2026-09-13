@@ -67,6 +67,7 @@ impl Storage {
                 .ok_or_else(|| anyhow::anyhow!("background history is required"))?,
         )?;
         threads::get(&tx, thread_id)?;
+        super::thread_archive::ensure_accepts_work(&tx, thread_id)?;
         let key = format!("background-request:{client_id}");
         if let Some(id) = tx.query_row(
             "SELECT a.turn_id FROM thread_activity_keys k JOIN thread_activities a ON a.id=k.activity_id WHERE k.key=?1",

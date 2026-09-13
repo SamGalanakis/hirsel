@@ -887,6 +887,15 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         vec![json!({"thread_id":1,"thread":thread})],
     );
     results.insert("threads_list", vec![json!({"threads":[thread]})]);
+    let archive_activity = json!({"id":9,"thread_id":1,"turn_id":2,"kind":"archived","data":{},"artifact_ids":[],"ts":now});
+    results.insert(
+        "threads_archive",
+        vec![json!({"thread_id":1,"archived":true,"threads":[thread],"cancelled_turn_ids":[4],"activity":archive_activity})],
+    );
+    results.insert(
+        "threads_unarchive",
+        vec![json!({"thread_id":1,"archived":false,"threads":[thread],"cancelled_turn_ids":[],"activity":archive_activity})],
+    );
     results.insert(
         "threads_read",
         vec![json!({"thread":thread,"messages":[],"turns":[],"activities":[],"has_more":false})],

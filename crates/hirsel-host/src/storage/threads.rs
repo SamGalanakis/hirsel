@@ -456,19 +456,31 @@ impl Storage {
         )?;
         get(&c, id)
     }
+    /// The Owner archive action. It runs the same [`super::thread_archive`]
+    /// path the agent's `threads.archive` tool runs: subtree, cancellation,
+    /// attention and the single activity row are identical by construction.
     pub(crate) async fn archive_addressed_thread(
         &self,
         expected_history: &str,
         id: u64,
         archived: bool,
-    ) -> anyhow::Result<Thread> {
-        self.set_addressed_thread_field(
-            expected_history,
+    ) -> anyhow::Result<super::ArchiveOutcome> {
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        let outcome = super::thread_archive::apply(
+            &tx,
             id,
-            "archived_at",
-            archived.then(|| Utc::now().to_rfc3339()),
-        )
-        .await
+            archived,
+            &super::thread_archive::ArchiveActor {
+                thread_id: id,
+                turn_id: None,
+                actor: "owner",
+                keep_turn_id: None,
+            },
+        )?;
+        tx.commit()?;
+        Ok(outcome)
     }
     pub(crate) async fn snooze_addressed_thread(
         &self,

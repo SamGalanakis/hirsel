@@ -8,6 +8,17 @@ export type ConversationEntry =
 function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 /** A refusal is a durable fact the Owner reads in the conversation: what the
  * Thread tried to address, and why its reach did not cover it. */
+/** Archiving is the only removal, so its one row names exactly what left the
+ * active tree and who took it there. */
+function archivedText(data: Record<string, unknown>): string {
+  const actor = data.actor === "owner" ? "Owner" : "Agent";
+  const noun = data.thread_kind === "space" ? "Space" : "Task";
+  const title = typeof data.title === "string" && data.title.length > 0 ? ` “${data.title}”` : "";
+  const verb = data.archived === false ? "unarchived" : "archived";
+  const cancelled = typeof data.cancelled_turns === "number" && data.cancelled_turns > 0 ? `; ${data.cancelled_turns} running or queued turn${data.cancelled_turns === 1 ? "" : "s"} cancelled` : "";
+  const count = typeof data.thread_count === "number" && data.thread_count > 1 ? ` and its ${data.thread_count - 1} nested Thread${data.thread_count === 2 ? "" : "s"}` : "";
+  return `${actor} ${verb} ${noun} #${String(data.thread_id)}${title}${count}${cancelled}`;
+}
 function refusalText(data: Record<string, unknown>): string {
   const target = record(data.target);
   const named = target.kind === "artifact" ? `Artifact ${String(target.artifact_id)}` : `Thread ${String(target.thread_id)}`;
@@ -20,6 +31,7 @@ export function activityText(activity: ThreadActivity): string {
   const data = activity.kind.startsWith("plugin.") ? record(record(activity.data).payload) : record(activity.data);
   const kind = activity.kind.replace(/^plugin\./, "");
   if (kind === "refusal") return refusalText(data);
+  if (kind === "archived") return archivedText(data);
   const fields = kind === "child_report" ? [data.summary] : kind === "delegation_received" ? [data.brief] : kind === "info" || kind === "summary" ? [data.description, data.content_md] : kind === "process_completed" ? [data.summary] : kind === "scheduled_digest" ? [data.text] : [];
   return fields.filter((value): value is string => typeof value === "string" && value.length > 0).join("\n\n");
 }

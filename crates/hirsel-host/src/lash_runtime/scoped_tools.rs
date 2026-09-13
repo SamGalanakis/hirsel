@@ -109,6 +109,13 @@ impl ScopedThreadTools {
                 })
                 .await
             }
+            "threads_archive" | "threads_unarchive" => {
+                self.thread_mutation(crate::storage::ThreadMutation::Archive {
+                    thread: reference(args, "thread")?,
+                    archived: name == "threads_archive",
+                })
+                .await
+            }
             "threads_cancel" => {
                 self.thread_mutation(crate::storage::ThreadMutation::Cancel {
                     thread: reference(args, "thread")?,
@@ -528,6 +535,18 @@ impl ScopedThreadTools {
                 .publish_showcase_artifacts(&self.caller.history_id, &ids)
                 .await
                 .map_err(ToolError::from)?;
+        }
+        if let Some(threads) = result.get("threads").and_then(Value::as_array) {
+            // An archive moves a whole subtree at once; every affected Thread
+            // is published so each client's tree updates live.
+            for thread in threads {
+                self.tools
+                    .publish_thread(
+                        &self.caller.history_id,
+                        serde_json::from_value(thread.clone()).map_err(ToolError::from)?,
+                    )
+                    .await;
+            }
         }
         if let Some(thread) = result.get("thread") {
             self.tools

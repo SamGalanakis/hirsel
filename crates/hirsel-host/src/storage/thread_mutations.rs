@@ -42,6 +42,12 @@ pub(crate) enum ThreadMutation {
     Cancel {
         thread: ThreadRef,
     },
+    /// The only removal. Archiving takes the whole subtree out of the active
+    /// tree, cancels its open work and keeps every conversation.
+    Archive {
+        thread: ThreadRef,
+        archived: bool,
+    },
     Create {
         client_id: String,
         kind: ThreadKind,
@@ -132,14 +138,33 @@ impl Storage {
             }
             ThreadMutation::Cancel { thread } => {
                 let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
-                let turn:Option<u64>=tx.query_row(&format!("SELECT id FROM thread_turns WHERE thread_id=?1 AND state IN ({}) ORDER BY CASE state WHEN 'running' THEN 0 ELSE 1 END,id LIMIT 1", super::schema::state_list(Some(false))),[id],|r|r.get(0)).optional()?;
-                if let Some(turn) = turn {
-                    tx.execute(
-                        "UPDATE thread_turns SET cancel_requested_at=COALESCE(cancel_requested_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?1",
-                        [turn],
-                    )?;
-                }
+                let turn = super::thread_archive::request_cancel(&tx, id, true, None)?
+                    .first()
+                    .copied();
                 json!({"thread_id":id,"turn_id":turn,"cancellation_requested":turn.is_some()})
+            }
+            ThreadMutation::Archive { thread, archived } => {
+                let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
+                // The caller's own turn survives, so a Thread that archives
+                // itself finishes this turn and is stopped at the next wake.
+                let outcome = super::thread_archive::apply(
+                    &tx,
+                    id,
+                    *archived,
+                    &super::thread_archive::ArchiveActor {
+                        thread_id: caller.thread_id,
+                        turn_id: Some(caller.turn_id),
+                        actor: "agent",
+                        keep_turn_id: Some(caller.turn_id),
+                    },
+                )?;
+                json!({
+                    "thread_id": id,
+                    "archived": archived,
+                    "threads": outcome.threads,
+                    "cancelled_turn_ids": outcome.cancelled_turn_ids,
+                    "activity": outcome.activity,
+                })
             }
             ThreadMutation::Create {
                 client_id,

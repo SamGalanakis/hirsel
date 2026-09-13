@@ -44,6 +44,10 @@ pub(super) fn thread_activity_schema() -> Value {
 pub(super) fn thread_result_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"required":["thread_id","thread"],"properties":{"thread_id":{"type":"integer","minimum":0},"thread":{"type":"object"},"previous_showcased_artifact_id":{"type":["integer","null"],"description":"Previous artifact reference when a showcase was explicitly changed."},"history_id":{"type":"string"},"reference_url":{"type":"string","description":"Canonical relative URL for ordinary Markdown Thread references."}}})
 }
+/// An archive reports the whole subtree it moved, not just its root.
+pub(super) fn thread_archive_result_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["thread_id","archived","threads","cancelled_turn_ids","activity"],"properties":{"thread_id":{"type":"integer","minimum":0},"archived":{"type":"boolean"},"threads":{"type":"array","items":{"type":"object"}},"cancelled_turn_ids":{"type":"array","items":{"type":"integer","minimum":1}},"activity":{"type":"object"},"history_id":{"type":"string"},"reference_url":{"type":"string","description":"Canonical relative URL for ordinary Markdown Thread references."}}})
+}
 pub(super) fn thread_send_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"required":["client_id","thread","text"],"properties":{"client_id":{"type":"string","minLength":1},"thread":thread_ref_schema(),"text":{"type":"string","minLength":1},"artifact_ids":{"type":"array","maxItems":100,"items":{"type":"integer","minimum":1}}}})
 }

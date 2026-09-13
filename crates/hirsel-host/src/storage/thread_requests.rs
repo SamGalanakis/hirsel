@@ -36,7 +36,10 @@ impl Storage {
     ) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
         let c = self.conn.lock().await;
         let rows = c
-            .prepare("SELECT r.client_id,r.payload FROM thread_requests r JOIN threads t ON t.id=r.thread_id WHERE r.report_triggered=0 OR (t.archived_at IS NULL AND (t.snoozed_until IS NULL OR hirsel_utc_timestamp(t.snoozed_until)<=hirsel_utc_timestamp(?1))) ORDER BY r.id")?
+            // Admission, not acceptance: an archived Thread holds every
+            // queued request — including one accepted just before it was
+            // archived — until the Owner or the Agent unarchives it.
+            .prepare("SELECT r.client_id,r.payload FROM thread_requests r JOIN threads t ON t.id=r.thread_id WHERE t.archived_at IS NULL AND (r.report_triggered=0 OR (t.snoozed_until IS NULL OR hirsel_utc_timestamp(t.snoozed_until)<=hirsel_utc_timestamp(?1))) ORDER BY r.id")?
             .query_map([chrono::Utc::now().to_rfc3339()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()

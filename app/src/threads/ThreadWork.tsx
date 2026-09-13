@@ -106,10 +106,14 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
   const notable = () => props.turn?.state === "queued" || stopped() || failed();
   const label = () => workLabel(props.turn, resolvedEvents(), props.activities, toolCount(), Boolean(props.message));
   const duration = () => workDuration(props.turn, now());
+  /** A turn that is visible but has produced nothing yet draws no box of its
+   * own: without content the section keeps no height and no bottom margin, so
+   * a freshly started turn is one short line with the live pulse. */
+  const blank = () => !notable() && resolvedEvents().length === 0 && !technicalOpen() && !failed() && !stopped();
   const statusIcon = () => <Show when={!failed() && !stopped()} fallback={<Show when={failed()} fallback={<Square class="size-3.5" />}><CircleAlert class="size-3.5 text-destructive" /></Show>}><Show when={props.turn?.state !== "queued"} fallback={<Clock class="size-3.5" />}><Activity class="size-3.5" /></Show></Show>;
   const summary = () => <span class="inline-flex min-w-0 items-center gap-2"><span aria-hidden="true">{statusIcon()}</span><span>{label()}</span><Show when={duration()}><span aria-hidden="true">·</span><span class="shrink-0 tabular-nums">{duration()}</span></Show></span>;
   const technicalId = () => `turn-${props.turn?.id ?? props.activities[0]?.id ?? "activity"}-technical`;
-  return <Show when={visible()}><section class="group relative mb-3 min-w-0 text-xs text-muted-foreground" data-slot="thread-work" data-turn-id={props.turn?.id} title={duration() ? `Took ${duration()}` : undefined}>
+  return <Show when={visible()}><section class={`group relative min-w-0 text-xs text-muted-foreground ${blank() ? "" : "mb-3"}`} data-slot="thread-work" data-turn-id={props.turn?.id} title={duration() ? `Took ${duration()}` : undefined}>
     <Show when={props.turn || props.activities.length > 0 || props.events.length > 0}>
       {/* No header row to hang it from: the menu reveals itself over the card's
           top-right corner on hover or keyboard focus. */}

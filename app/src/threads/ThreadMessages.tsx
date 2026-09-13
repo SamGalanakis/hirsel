@@ -46,10 +46,12 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
       {/* Who is speaking is readable before a word is: the Owner sits right in
           the filled emphasis pair (a near-white fill on the dark theme, the
           accent on the light one) at conversational width, the Agent sits left
-          on a neutral surface that keeps the measure for its work and results. */}
+          on a neutral surface that hugs its own content, so the two never share an
+          edge and the column reads left against right. Wide work rows and code
+          scroll inside the card, never the page. */}
       <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex items-start gap-2 sm:gap-3", owner() ? "flex-row-reverse" : ""]}>
         <span class="grid size-8 shrink-0 place-items-center rounded-full bg-muted/45" aria-hidden="true"><Show when={owner()} fallback={<BrandMark size={22} />}><UserRound class="size-4 text-muted-foreground" /></Show></span>
-        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 flex-1 rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5"}>
+        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 max-w-[92%] rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5 sm:max-w-[80%]"}>
           <Show when={!owner()}><ThreadWork message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} /></Show>
           <Markdown>{message()?.body ?? splitStreamingReply(events()).reply}</Markdown>
           <For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For>

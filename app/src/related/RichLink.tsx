@@ -46,7 +46,9 @@ export function RichLink(props: { href: string; title?: string; label: string; c
     <a href={href()} target="_blank" rel="noopener noreferrer nofollow" title={props.title ?? href()}
       class="rounded-sm underline decoration-dotted decoration-current/50 underline-offset-4 hover:decoration-solid hover:decoration-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       onClick={event => { if (localThread() && plainPrimaryClick(event)) { event.preventDefault(); focusThread(localThread()!.id); } }}>
-      <Show when={!props.imageOnly && (threadTarget() || link())}><span class="mr-1 inline-flex align-text-bottom"><Show when={localThread()} fallback={<LinkIcon kind={threadTarget() ? "thread" : link()!.kind} />}>{thread => <ThreadAvatar thread={thread()} small />}</Show></span></Show>
+      <Show when={!props.imageOnly && (threadTarget() || link())}><span class="mr-1 inline-flex align-text-bottom">{/* The inline chip carries the Thread's own icon at list size: an uploaded
+            image is a 16px cover-cropped avatar, an emoji or the generated
+            initial the same box. */}<Show when={localThread()} fallback={<LinkIcon kind={threadTarget() ? "thread" : link()!.kind} />}>{thread => <ThreadAvatar thread={thread()} dense />}</Show></span></Show>
       <Show when={bare() && target()} fallback={props.children}>{label()}</Show>
     </a>
     <Show when={target()}><DropdownMenu><DropdownMenuTrigger aria-label={`Link actions: ${label()}`} title="Link actions" class="ml-0.5 inline-flex size-6 items-center justify-center rounded align-middle text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:size-11"><ChevronDown class="size-3" /></DropdownMenuTrigger><DropdownMenuContent>

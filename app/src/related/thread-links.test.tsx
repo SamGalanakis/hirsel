@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
 import { Markdown } from "../components/Markdown";
@@ -9,6 +9,7 @@ import { disconnectThreads, setThreadState, threadState } from "../threads/store
 import { RelatedContext } from "./context";
 import { attachRelatedTransport, disconnectRelated, handleRelatedMessage, resetRelated } from "./store";
 import type { ThreadClientMessage } from "../threads/types";
+vi.mock("../ws/client",async importOriginal=>({...await importOriginal<typeof import("../ws/client")>(),getClient:()=>({getBlobUrl:async(id:string)=>`https://example.test/blob/${id}`})}));
 const historyId="ab123456-1234-5678-9abc-123456789abc";
 const target={kind:"thread" as const,history_id:historyId,thread_id:2};
 const frames:ThreadClientMessage[]=[];const clipboard=vi.fn();
@@ -26,6 +27,19 @@ describe("Thread rich links",()=>{
   fireEvent.click(screen.getByRole('button',{name:/Link actions:/}));fireEvent.click(screen.getByRole('menuitem',{name:'Add to Related'}));
   expect(frames[0]).toMatchObject({type:'add_thread_related',history_id:historyId,thread_id:1,target,title:null});
   flush(()=>handleRelatedMessage({type:'thread_related_changed',client_id:(frames[0] as {client_id:string}).client_id,history_id:historyId,thread_id:1,revision:2,items:[{id:1,thread_id:1,target,title:null,created_at:'now'}]}));
+ });
+ it("shows an image icon as a cover-cropped avatar in the inline chip",async()=>{
+  flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"image",blob_id:"project-image"}})];}));
+  mount();const avatar=screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')!;
+  expect(avatar.className).toContain('size-4');expect(avatar.className).toContain('overflow-hidden');
+  const image=await waitFor(()=>{const node=avatar.querySelector('img');expect(node).not.toBeNull();return node!;});
+  expect(image).toHaveAttribute('src','https://example.test/blob/project-image');expect(image.className).toContain('object-cover');expect(image).toHaveAttribute('alt','');
+ });
+ it("shows an emoji icon in the inline chip and the initial without one",()=>{
+  flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"emoji",value:"\u{1F331}"}})];}));
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("\u{1F331}");
+  cleanup();flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project"})];}));
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("C");
  });
  it("never hydrates a cached title before hello or after a history replacement",()=>{
   mount();flush(disconnectThreads);expect(screen.queryByRole('link',{name:/Current project/})).toBeNull();

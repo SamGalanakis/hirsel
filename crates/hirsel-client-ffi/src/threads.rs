@@ -5,6 +5,28 @@ pub enum ThreadKind {
     Space,
     Task,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ThreadIcon {
+    Emoji { value: String },
+    Image { blob_id: String },
+}
+impl From<core::ThreadIcon> for ThreadIcon {
+    fn from(icon: core::ThreadIcon) -> Self {
+        match icon {
+            core::ThreadIcon::Emoji { value } => Self::Emoji { value },
+            core::ThreadIcon::Image { blob_id } => Self::Image { blob_id },
+        }
+    }
+}
+impl From<ThreadIcon> for core::ThreadIcon {
+    fn from(icon: ThreadIcon) -> Self {
+        match icon {
+            ThreadIcon::Emoji { value } => Self::Emoji { value },
+            ThreadIcon::Image { blob_id } => Self::Image { blob_id },
+        }
+    }
+}
 impl From<core::ThreadKind> for ThreadKind {
     fn from(kind: core::ThreadKind) -> Self {
         match kind {
@@ -29,7 +51,7 @@ pub struct Thread {
     pub pinned_at: Option<String>,
     pub id: u64,
     pub title: String,
-    pub icon: Option<String>,
+    pub icon: Option<ThreadIcon>,
     pub showcased_artifact_id: Option<u64>,
     pub description: String,
     pub instrument_json: String,
@@ -54,7 +76,7 @@ impl From<core::Thread> for Thread {
             pinned_at: t.pinned_at.map(|t| t.to_rfc3339()),
             id: t.id,
             title: t.title,
-            icon: t.icon,
+            icon: t.icon.map(Into::into),
             showcased_artifact_id: t.showcased_artifact_id,
             description: t.description,
             instrument_json: t.instrument.to_string(),
@@ -165,12 +187,17 @@ mod tests {
     use super::*;
     #[test]
     fn thread_ffi_keeps_lifecycle_instrument_and_revision() {
-        let wire = serde_json::json!({"id":5,"kind":"task","parent_thread_id":2,"pinned_at":"2026-09-09T10:00:00Z","title":"Groceries","icon":"🧑🏽‍💻","showcased_artifact_id":42,"description":"Milk","instrument":{"type":"text","text":"Milk"},"attention":"needs_owner","settled_at":null,"archived_at":null,"snoozed_until":null,"read":true,"created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z","revision":8,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":"2026-09-09T10:00:00Z"});
+        let wire = serde_json::json!({"id":5,"kind":"task","parent_thread_id":2,"pinned_at":"2026-09-09T10:00:00Z","title":"Groceries","icon":{"kind":"emoji","value":"🧑🏽‍💻"},"showcased_artifact_id":42,"description":"Milk","instrument":{"type":"text","text":"Milk"},"attention":"needs_owner","settled_at":null,"archived_at":null,"snoozed_until":null,"read":true,"created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z","revision":8,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":"2026-09-09T10:00:00Z"});
         let thread = Thread::from(serde_json::from_value::<core::Thread>(wire).unwrap());
         assert_eq!(thread.id, 5);
         assert_eq!(thread.kind, ThreadKind::Task);
         assert_eq!(thread.showcased_artifact_id, Some(42));
-        assert_eq!(thread.icon.as_deref(), Some("🧑🏽‍💻"));
+        assert_eq!(
+            thread.icon,
+            Some(ThreadIcon::Emoji {
+                value: "🧑🏽‍💻".into()
+            })
+        );
         assert_eq!(thread.parent_thread_id, Some(2));
         assert!(thread.pinned_at.is_some());
         assert_eq!(thread.revision, 8);

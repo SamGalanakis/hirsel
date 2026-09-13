@@ -2,11 +2,17 @@ use super::*;
 use crate::ConnectionState;
 use serde_json::json;
 
+fn emoji(value: &str) -> hirsel_proto::ThreadIcon {
+    hirsel_proto::ThreadIcon::Emoji {
+        value: value.to_owned(),
+    }
+}
+
 #[test]
 fn icon_edits_reject_reused_thread_identity_after_history_change() {
     let client = Client::new(ClientConfig::new("localhost:3000".into(), "test".into())).unwrap();
     let thread: hirsel_proto::Thread = serde_json::from_value(json!({
-        "id":5,"kind":"space","parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":"🐙",
+        "id":5,"kind":"space","parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":{"kind":"emoji","value":"🐙"},
         "description":"","instrument":null,"attention":"quiet","settled_at":null,
         "archived_at":null,"snoozed_until":null,"read":false,
         "created_at":"2026-09-10T10:00:00Z","updated_at":"2026-09-10T10:00:00Z","revision":7,
@@ -28,23 +34,23 @@ fn icon_edits_reject_reused_thread_identity_after_history_change() {
     }
     assert!(
         client
-            .update_thread_icon("history-a".into(), 5, Some("🔬".into()), 7)
+            .update_thread_icon("history-a".into(), 5, Some(emoji("🔬")), 7)
             .is_none()
     );
     assert!(
         client
-            .update_thread_icon("history-b".into(), 5, Some("🔬".into()), 6)
+            .update_thread_icon("history-b".into(), 5, Some(emoji("🔬")), 6)
             .is_none()
     );
     assert!(
         client
-            .update_thread_icon("history-b".into(), 99, Some("🔬".into()), 7)
+            .update_thread_icon("history-b".into(), 99, Some(emoji("🔬")), 7)
             .is_none()
     );
     client.inner.write_store().connection = ConnectionState::Offline;
     assert!(
         client
-            .update_thread_icon("history-b".into(), 5, Some("🔬".into()), 7)
+            .update_thread_icon("history-b".into(), 5, Some(emoji("🔬")), 7)
             .is_none()
     );
     assert!(client.inner.pending_frames.lock().unwrap().is_empty());

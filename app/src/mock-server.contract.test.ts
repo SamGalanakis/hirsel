@@ -168,10 +168,10 @@ describe("dev mock Thread contract", () => {
     expect(settled.settled_at).not.toBeNull();
     await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "settled-convert", thread_id: created.id, action: "set_kind", data: { kind: "space" }, expected_revision: settled.revision }), "Reopen this Task");
     expect(settled.icon).toBeNull();
-    const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: "👩🏽‍💻" }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
-    expect(withIcon.icon).toBe("👩🏽‍💻");
-    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-stale", thread_id: created.id, action: "set_icon", data: { icon: "🌱" }, expected_revision: settled.revision }), "changed");
-    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-invalid", thread_id: created.id, action: "set_icon", data: { icon: "x\n" }, expected_revision: withIcon.revision }), "Invalid thread icon");
+    const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: { kind: "emoji", value: "👩🏽‍💻" } }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
+    expect(withIcon.icon).toEqual({ kind: "emoji", value: "👩🏽‍💻" });
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-stale", thread_id: created.id, action: "set_icon", data: { icon: { kind: "emoji", value: "🌱" } }, expected_revision: settled.revision }), "changed");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-invalid", thread_id: created.id, action: "set_icon", data: { icon: { kind: "emoji", value: "x\n" } }, expected_revision: withIcon.revision }), "Invalid thread icon");
     const reset = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: null }, expected_revision: withIcon.revision }, "thread_upsert")).thread as Thread;
     expect(reset.icon).toBeNull();
     await close(connection.ws);

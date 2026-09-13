@@ -605,7 +605,7 @@ mod tests {
                 "history_id": history_id,
                 "thread_id": second.id,
                 "action": "set_icon",
-                "data": {"icon": "x"}
+                "data": {"icon": {"kind": "emoji", "value": "x"}}
             })
             .to_string(),
         ))

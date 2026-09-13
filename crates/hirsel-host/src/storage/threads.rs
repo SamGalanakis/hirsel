@@ -1,6 +1,6 @@
 use super::{Storage, common::parse_ts};
 use chrono::{DateTime, Utc};
-use hirsel_proto::{Thread, ThreadAttention, ThreadKind};
+use hirsel_proto::{Thread, ThreadAttention, ThreadIcon, ThreadKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +24,7 @@ impl ThreadPublication {
     }
 }
 
-pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,showcased_artifact_id,kind";
+pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,icon_blob_id,showcased_artifact_id,kind";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     let parent_thread_id = r.get::<_, Option<u64>>(12)?;
     let time = |i| -> rusqlite::Result<Option<DateTime<Utc>>> {
@@ -34,12 +34,12 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     };
     Ok(Thread {
         id: r.get(0)?,
-        kind: match r.get::<_, String>(16)?.as_str() {
+        kind: match r.get::<_, String>(17)?.as_str() {
             "space" => ThreadKind::Space,
             "task" => ThreadKind::Task,
             kind => {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
-                    16,
+                    17,
                     rusqlite::types::Type::Text,
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -52,8 +52,26 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         parent_thread_id,
         pinned_at: time(13)?,
         title: r.get(1)?,
-        icon: r.get(14)?,
-        showcased_artifact_id: r.get(15)?,
+        icon: match (
+            r.get::<_, Option<String>>(14)?,
+            r.get::<_, Option<String>>(15)?,
+        ) {
+            (Some(value), None) => Some(ThreadIcon::Emoji { value }),
+            (None, Some(blob_id)) => Some(ThreadIcon::Image { blob_id }),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    14,
+                    rusqlite::types::Type::Text,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Thread has both emoji and image icons",
+                    )
+                    .into(),
+                ));
+            }
+        },
+        showcased_artifact_id: r.get(16)?,
         description: r.get(2)?,
         instrument: serde_json::from_str(&r.get::<_, String>(3)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))

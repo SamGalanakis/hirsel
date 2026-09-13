@@ -137,7 +137,7 @@ impl AppState {
                     .update_thread_icon(
                         expected_history,
                         id,
-                        icon.as_ref().map(|value| value.as_deref()),
+                        icon.as_ref().map(|value| value.as_ref()),
                         revision,
                     )
                     .await?

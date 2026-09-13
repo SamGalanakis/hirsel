@@ -507,11 +507,16 @@ impl Client {
         &self,
         expected_history: String,
         thread_id: u64,
-        icon: Option<String>,
+        icon: Option<threads::ThreadIcon>,
         expected_revision: u64,
     ) -> Option<SendReceipt> {
         self.core
-            .update_thread_icon(expected_history, thread_id, icon, expected_revision)
+            .update_thread_icon(
+                expected_history,
+                thread_id,
+                icon.map(Into::into),
+                expected_revision,
+            )
             .map(|receipt| SendReceipt {
                 client_id: receipt.client_id,
             })

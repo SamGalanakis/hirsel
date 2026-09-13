@@ -1,12 +1,15 @@
 import type { ChatMessage, ThreadTurnTimeline, ViewSpec } from "../protocol";
 export type ThreadKind = "space" | "task";
+export type ThreadIcon =
+  | { kind: "emoji"; value: string }
+  | { kind: "image"; blob_id: string };
 export interface Thread {
   id: number;
   kind: ThreadKind;
   parent_thread_id: number | null;
   pinned_at: string | null;
   title: string;
-  icon: string | null;
+  icon: ThreadIcon | null;
   showcased_artifact_id: number | null;
   description: string;
   instrument: ViewSpec | ViewSpec[] | null;

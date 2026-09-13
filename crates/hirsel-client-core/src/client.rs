@@ -400,7 +400,7 @@ impl Client {
         &self,
         expected_history: String,
         thread_id: u64,
-        icon: Option<String>,
+        icon: Option<hirsel_proto::ThreadIcon>,
         expected_revision: u64,
     ) -> Option<SendReceipt> {
         self.update_thread_presentation(

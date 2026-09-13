@@ -18,6 +18,14 @@ pub enum ThreadAttention {
     NeedsOwner,
 }
 
+/// A Thread's optional, durable identity mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThreadIcon {
+    Emoji { value: String },
+    Image { blob_id: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thread {
     pub id: u64,
@@ -25,9 +33,9 @@ pub struct Thread {
     pub parent_thread_id: Option<u64>,
     pub pinned_at: Option<DateTime<Utc>>,
     pub title: String,
-    /// Custom compact emoji/symbol; None selects the client-generated avatar.
+    /// Custom emoji or retained image blob; None selects the client-generated avatar.
     #[serde(default)]
-    pub icon: Option<String>,
+    pub icon: Option<ThreadIcon>,
     /// One persistent artifact presented beside this Thread conversation.
     #[serde(default)]
     pub showcased_artifact_id: Option<u64>,

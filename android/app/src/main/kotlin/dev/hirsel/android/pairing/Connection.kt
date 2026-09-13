@@ -17,6 +17,7 @@ import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.LifecycleEvent
 import dev.hirsel.core.SendReceipt
 import dev.hirsel.core.ThreadRelatedTarget
+import dev.hirsel.core.ThreadIcon
 import dev.hirsel.core.ThreadKind
 
 /** How a hirsel iroh connection should be established. */
@@ -137,7 +138,7 @@ class Connection internal constructor(
         trackRequest(receipt, PendingRequestKind.Action, historyId, threadId)
     }
 
-    fun updateThreadIcon(historyId: String, threadId: ULong, icon: String?, revision: ULong): Boolean {
+    fun updateThreadIcon(historyId: String, threadId: ULong, icon: ThreadIcon?, revision: ULong): Boolean {
         val receipt = client?.updateThreadIcon(historyId, threadId, icon, revision) ?: return false
         trackRequest(receipt, PendingRequestKind.Action, historyId, threadId)
         return true

@@ -4,6 +4,7 @@ import { createOverlayPresence } from "../lib/focus";
 import { historyId } from "../lib/history";
 import { filterThreadCandidates } from "../lib/thread-ref";
 import { threadState } from "../threads/store";
+import { ThreadAvatar } from "../threads/ThreadAvatar";
 import { closeThreadReach, reachDialogTitle, threadReachTarget } from "./reach";
 import { grantLabel, grantReach, holdsRoot, revokeReach, threadGrants, type GrantOrigin } from "./store";
 import type { ReachTarget } from "../threads/types";
@@ -91,12 +92,13 @@ export function ReachDialog() {
           </li>
         </Show>
         <For each={grants()}>{grant => <Show when={grant.target.kind === "thread" ? grant.target : null}>{thread => <li class={row}>
+          <Show when={threadState.threads.find(candidate => candidate.id === thread().thread_id)}>{found => <ThreadAvatar thread={found()} dense />}</Show>
           <span class="min-w-0 flex-1 wrap-break-word" title={grant.note ?? undefined}>{grantLabel(thread())}</span>
           <button type="button" class={remove} disabled={busy()} aria-label={`Remove reach to Thread ${thread().thread_id}`} title="Remove this reach" onClick={() => drop(thread().thread_id)}><X class="size-3.5" /></button>
         </li>}</Show>}</For>
       </ul>
       <Show when={!root()} fallback={<p class="text-meta text-muted-foreground">Root reach already covers every Thread. Remove it to grant single Threads again.</p>}>
-        <label class="flex flex-col gap-1 text-meta font-medium uppercase tracking-wide text-muted-foreground">
+        <label class="flex flex-col gap-1 text-meta text-muted-foreground">
           <span class="inline-flex items-center gap-1"><Plus class="size-3" />Add reach</span>
           <input ref={node => { search = node; }} class={field} type="search" aria-label="Add reach to another Thread" placeholder="Everything, a title, or #number" value={query()}
             onInput={event => setQuery(event.currentTarget.value)}
@@ -110,7 +112,8 @@ export function ReachDialog() {
         <ul class="max-h-56 overflow-y-auto">
           <For each={candidates()}>{candidate => <li>
             <button type="button" class={option} disabled={busy()} onClick={() => add(candidate.target)}>
-              <span class="min-w-0 wrap-break-word">{candidate.label}</span>
+              <Show when={typeof candidate.target === "number" ? threadState.threads.find(thread => thread.id === candidate.target) : null}>{found => <ThreadAvatar thread={found()} dense />}</Show>
+              <span class="min-w-0 flex-1 wrap-break-word">{candidate.label}</span>
               <span class="shrink-0 text-meta tabular-nums text-muted-foreground">{candidate.detail}</span>
             </button>
           </li>}</For>

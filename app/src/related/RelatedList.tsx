@@ -2,6 +2,7 @@ import { ThreadAvatar } from "../threads/ThreadAvatar";
 import { createSignal, For, onSettled, Show } from "solid-js";
 import { ArtifactList } from "../artifacts/ArtifactSurface";
 import { ArrowUpRight, Copy, MoreHorizontal, Plus, X } from "../components/ui/icons";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../components/ui/empty";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
 import { historyId } from "../lib/history";
 import { filterThreadCandidates } from "../lib/thread-ref";
@@ -80,7 +81,13 @@ export function RelatedList(props: { origin: RelatedOrigin }) {
     <section aria-labelledby={`saved-references-${props.origin.threadId}`}><h3 id={`saved-references-${props.origin.threadId}`} class="text-sm font-medium">Saved references</h3>
       <Show when={list()?.loading}><p role="status" class="mt-3 text-sm text-muted-foreground">Loading references…</p></Show>
       <Show when={list()?.error}><div role="alert" class="mt-3 text-sm"><p>{list()?.error}</p><button class={control} onClick={() => void loadRelated(props.origin)}>Retry loading references</button></div></Show>
-      <Show when={list()?.loaded && !list()?.error && list()?.items.length === 0}><p class="mt-3 text-sm text-muted-foreground">Keep useful links and threads here. Add one above or use Link actions in a message.</p></Show>
+      <Show when={list()?.loaded && !list()?.error && list()?.items.length === 0}><Empty class="border-none" data-slot="related-empty">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><LinkIcon kind="web" class="size-5" /></EmptyMedia>
+          <EmptyTitle>No saved references</EmptyTitle>
+          <EmptyDescription>Keep useful links and threads here. Add one above or use Link actions in a message.</EmptyDescription>
+        </EmptyHeader>
+      </Empty></Show>
       <ul class="mt-2 divide-y divide-border"><For each={list()?.items ?? []}>{item => <SavedReference item={item} origin={props.origin} />}</For></ul>
     </section>
     <section class="mt-8"><ArtifactList threadId={props.origin.threadId} embedded /></section>

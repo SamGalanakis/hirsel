@@ -155,7 +155,7 @@ export function ThreadIconPicker() {
         <Show when={!empty()} fallback={<p class="py-6 text-center text-meta text-muted-foreground">No symbol matches “{query()}”.</p>}>
           <For each={groups()}>{group => <section class="pt-2">
             <h3 class="pb-1 text-meta uppercase tracking-wide text-muted-foreground">{group.label}</h3>
-            <div class="flex flex-wrap gap-1" role="group" aria-label={group.label}>
+            <div class="grid grid-cols-8 justify-items-center gap-1 pointer-coarse:grid-cols-6" role="group" aria-label={group.label}>
               <For each={group.names}>{name => <button type="button" class={swatch} aria-label={name} title={name}
                 aria-pressed={symbol() === name && !image() ? "true" : "false"} onClick={() => chooseSymbol(name)}>
                 <ThreadSymbolGlyph name={name} class="size-4" />

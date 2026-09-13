@@ -52,8 +52,9 @@
   /* One step ABOVE the canvas, in the canvas's own hue family. It used to be
      oklch(0.97 0.001 286) — darker than `--background` and two hue families
      away, so every raised thing (agent card, dialog, sheet) read as a dent in
-     the paper instead of a card on it. */
-  --surface: oklch(0.99 0.006 190);
+     the paper instead of a card on it. A full step (ΔL 0.025, the same
+     distance dark keeps) — at 0.99 the card vanished into the paper. */
+  --surface: oklch(1 0.004 190);
   --surface-foreground: oklch(0.45 0.02 220);
 
   --status-active: oklch(0.52 0.12 221);
@@ -65,8 +66,9 @@
   /* Thread icon tints: a closed palette for the identity tile. The tile is the
      hue at low chroma with the glyph in the same hue held to AA on it, so a
      chosen icon reads as part of the system rather than as decoration.
-     `neutral` is the quiet default and the monogram's ground. */
-  --tint-neutral: oklch(0.945 0.012 190);
+     `neutral` is the quiet default and the monogram's ground, one lightness
+     step off `--muted` so a tile still reads on a muted ground. */
+  --tint-neutral: oklch(0.92 0.012 190);
   --tint-neutral-foreground: oklch(0.49 0.035 205);
   --tint-red: oklch(0.93 0.03 20);
   --tint-red-foreground: oklch(0.42 0.09 20);
@@ -144,7 +146,7 @@
   --status-attention: oklch(0.79 0.16 82);
 
   /* Thread icon tints, dark: the hue sunk into the field with a light glyph. */
-  --tint-neutral: oklch(0.235 0.016 220);
+  --tint-neutral: oklch(0.27 0.016 220);
   --tint-neutral-foreground: oklch(0.72 0.025 175);
   --tint-red: oklch(0.27 0.035 20);
   --tint-red-foreground: oklch(0.80 0.09 20);

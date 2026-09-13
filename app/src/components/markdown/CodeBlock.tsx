@@ -37,7 +37,7 @@ export function CopyButton(props: { text: string }) {
   return (
     <button
       type="button"
-      class="inline-flex min-h-5 items-center gap-1 rounded px-1 text-meta text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+      class="inline-flex min-h-5 items-center gap-1 rounded px-1 text-meta text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
       aria-label={copied() ? "Copied" : "Copy code"}
       onClick={copy}
     >

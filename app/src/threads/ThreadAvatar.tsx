@@ -23,21 +23,20 @@ export interface ThreadAvatarIdentity { id: number; kind: "space" | "task"; titl
  * layout box in a list or a header, where a fixed pixel size is the point.
  *
  * The monogram is type and obeys the ramp's floor: `text-meta` (11px) in the
- * 20px and 24px tiles, `text-xs` in the 28px header tile. The inline tile is
- * 1.3em of its sentence — 18px in prose, 16px in the `text-xs` trace — and the
- * letters stay `text-meta`; where the tile is too small to hold them (under
- * 17px, the trace) the tile itself hides its letters and stands as a plain
- * tinted mark, the same shape and tint, rather than shrinking the type below
- * the floor. */
+ * 20px and 24px tiles, `text-xs` in the 28px header tile, `text-xl` at 64px.
+ * The inline tile is 1.3em of its sentence — 18px in prose, 16px in the
+ * `text-xs` trace — too small for two letters at the floor, so it carries the
+ * title's first initial alone: one `text-meta` letter fits every size the
+ * sentence can be, and the tile is never a blank disc. */
 const TILE = {
   // em-relative on purpose: the inline tile is sized by the sentence it rides.
   // The box keeps the sentence's font-size so its em is the sentence's em; the
-  // letters alone step down to `text-meta`, and hide when the box is too small.
-  inline: { box: "@container size-[1.3em]", glyph: "size-[0.8em]", letters: "text-meta @max-[17px]:hidden" },
+  // letters alone step down to `text-meta`.
+  inline: { box: "size-[1.3em]", glyph: "size-[0.8em]", letters: "text-meta" },
   dense: { box: "size-5 text-meta", glyph: "size-3", letters: "" },
   small: { box: "size-6 text-meta", glyph: "size-3.5", letters: "" },
   header: { box: "size-7 text-xs", glyph: "size-4", letters: "" },
-  large: { box: "size-16 text-2xl", glyph: "size-10", letters: "" },
+  large: { box: "size-16 text-xl", glyph: "size-10", letters: "" },
 } as const;
 export function ThreadAvatar(props: { thread: ThreadAvatarIdentity; small?: boolean; dense?: boolean; inline?: boolean; large?: boolean }) {
   const imageId = () => props.thread.icon?.kind === "image" ? props.thread.icon.blob_id : null;
@@ -62,9 +61,9 @@ export function ThreadAvatar(props: { thread: ThreadAvatarIdentity; small?: bool
   return <span aria-hidden="true" data-slot="thread-avatar" data-thread-avatar={props.thread.id}
     data-thread-kind={props.thread.kind} data-thread-symbol={symbol()?.name} data-thread-tint={tint()}
     style={tintStyle(tint())}
-    class={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden align-middle font-semibold leading-none ${props.thread.kind === "space" ? "rounded-md" : "rounded-full"} ${tile().box}`}>
+    class={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden align-middle font-semibold ${props.thread.kind === "space" ? "rounded-md" : "rounded-full"} ${tile().box}`}>
     <Show when={imageId() && imageUrl() && !failed()} fallback={
-      <Show when={symbol()} fallback={<span class={tile().letters}>{threadMonogram(props.thread.title)}</span>}>
+      <Show when={symbol()} fallback={<span class={tile().letters}>{props.inline ? Array.from(threadMonogram(props.thread.title))[0] ?? "" : threadMonogram(props.thread.title)}</span>}>
         {chosen => <ThreadSymbolGlyph name={chosen().name} class={tile().glyph} />}
       </Show>
     }>

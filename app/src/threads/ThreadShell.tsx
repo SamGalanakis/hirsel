@@ -152,7 +152,6 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         <ThreadAvatar thread={{ id: props.id, kind: current()?.kind ?? "space", title: current()?.title ?? "Thread", icon: current()?.icon }} />
         <h1 class="min-w-0 flex-1 text-sm font-medium"><button class="block min-h-11 w-full truncate rounded-lg px-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={current()?.title ?? "Loading thread…"} title="Show full name in Spaces and Tasks" aria-controls="thread-navigation" onClick={() => openThreadNavigation()}><span class="flex min-w-0 items-center gap-1.5"><span class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">#{props.id}</span><span class="truncate">{current()?.title ?? "Loading thread…"}</span></span></button></h1>
         <Show when={current()}>{thread => <NeedsYouPill thread={thread()} />}</Show>
-        <Show when={current()}>{thread => <span class="hidden text-xs capitalize text-muted-foreground sm:inline">{thread().kind}{thread().kind === "task" && thread().settled_at ? " · Done" : ""}</span>}</Show>
         <div role="tablist" aria-label="Thread views" class="flex shrink-0 items-center" data-slot="thread-views">
           <button role="tab" class={iconButton} aria-label="Conversation" title="Conversation" aria-selected={!threadPane() ? "true" : "false"} tabindex={!threadPane() ? 0 : -1} onClick={() => setPane("conversation")}><MessageCircle class="size-4" /></button>
           <button role="tab" class={iconButton} aria-label="Info" title="About this Thread" aria-selected={showInfo() ? "true" : "false"} tabindex={showInfo() ? 0 : -1} onClick={() => setPane("info")}><Info class="size-4" /></button>
@@ -187,7 +186,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     </div>
     <ThreadError threadId={props.id} />
     <Show when={writable()}>
-    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} shortLabel={`Message #${props.id}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
+    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
         sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds);
       }}
@@ -274,9 +273,9 @@ function ThreadStart(props: { browsable: boolean; onSelect: (id: number) => void
             <h1 class="text-lg font-medium">What needs you</h1>
             <div class="flex items-center gap-1">
               <Show when={props.browsable}><button class={button} onClick={() => openThreadNavigation()}>Browse Spaces &amp; Tasks</button></Show>
-              <button class={`${button} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />New</button>
-              {/* Phone reaches Settings from the overview: there is no icon rail. */}
-              <button class={`${button} min-w-11 split:hidden`} aria-label="Settings" title="Settings" onClick={() => openSettings()}><Settings class="size-4" /></button>
+              {/* Below `split` the bottom bar owns New and Settings; the
+                  header does not say them twice. */}
+              <button class={`${button} hidden bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground split:inline-flex`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />New</button>
             </div>
           </div>
           {/* The queue is what needs the Owner and what is new, not the tree

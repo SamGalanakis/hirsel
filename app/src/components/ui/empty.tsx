@@ -14,7 +14,8 @@ const Empty = (props: EmptyProps) => {
     <div
       data-slot="empty"
       class={cn(
-        "z-empty flex w-full min-w-0 flex-1 flex-col items-center justify-center text-balance text-center",
+        // One height: an empty pane lands at the same place whichever pane it is.
+        "z-empty flex min-h-40 w-full min-w-0 flex-1 flex-col items-center justify-center text-balance text-center",
         local.class,
       )}
       {...others}

@@ -124,10 +124,11 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       </Show>
       <Show when={error()}><p role="alert" class="px-1 text-meta text-destructive">{error()}</p></Show>
     </div>
-    {/* The chips shrink and truncate before anything wraps, and the primary
-        button is `ml-auto` so that when a phone width does wrap it, it lands
-        whole on its own right-hugging line instead of clipping. */}
-    <footer class="flex flex-wrap items-center gap-1.5 border-t border-border/60 px-3 py-2">
+    {/* Two layouts, not a wrap fallback: below `split` the options are one row
+        and the primary is a full-width row under them, above the safe area;
+        from `split` up it is one line with the primary at the right. */}
+    <footer class="flex flex-col gap-2 border-t border-border/60 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] split:flex-row split:items-center split:gap-1.5 split:pb-2">
+      <div class="flex min-w-0 items-center gap-1.5 split:contents">
       <Show when={canBeSpace()}>
         <DropdownMenu>
           <DropdownMenuTrigger class={`${chip} shrink-0`} aria-label={`Kind: ${resolvedKind() === "space" ? "Space" : "Task"}`} title="Spaces hold ongoing context. Tasks hold work you can mark done."><Layers class="size-3.5" />{resolvedKind() === "space" ? "Space" : "Task"}</DropdownMenuTrigger>
@@ -145,7 +146,8 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       </DropdownMenu>
       <input ref={node => { fileInput = node; }} type="file" multiple class="hidden" onChange={event => { if (event.currentTarget.files) attachments.addFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
       <button type="button" class={icon} aria-label="Attach files" title="Attach files" onClick={() => fileInput?.click()}><Paperclip class="size-4" /></button>
-      <button type="button" data-slot="create-submit" class="ml-auto inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11" title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
+      </div>
+      <button type="button" data-slot="create-submit" class="inline-flex min-h-9 shrink-0 items-center justify-center split:ml-auto gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11" title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
         disabled={!ready()} onClick={() => void submit()}>{resolvedKind() === "space" ? "Create Space" : "Create Task"}<ArrowRight class="size-4" /></button>
     </footer></Show>
   </dialog>;

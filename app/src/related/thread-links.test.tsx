@@ -22,7 +22,7 @@ describe("Thread rich links",()=>{
   // One object: avatar + name on a quiet ground. No second element beside it,
   // no underline, and the id is never drawn into the sentence.
   expect(link.querySelector('[data-slot="thread-chip-label"]')?.textContent).toBe('Current project');expect(link).toHaveAttribute('title','Thread #2 · Current project');
-  expect(link.className).toContain('bg-muted/40');expect(link.className).toContain('no-underline');expect(link.className).not.toContain('decoration');
+  expect(link.className).not.toContain('bg-');expect(link.className).not.toContain('px-');expect(link.className).toContain('no-underline');
   expect(container.querySelectorAll('button')).toHaveLength(0);expect(container.querySelectorAll('[data-link-kind] > *')).toHaveLength(1);
   const modified=new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true});link.dispatchEvent(modified);expect(modified.defaultPrevented).toBe(false);expect(threadState.focusedId).toBe(1);
  });
@@ -30,9 +30,10 @@ describe("Thread rich links",()=>{
   const {container}=render(()=><RelatedContext value={{historyId,threadId:1}}><Markdown>{"Working in #2 now."}</Markdown></RelatedContext>);
   // The agent writes the id; the sentence reads as the name, exactly once.
   expect(container.querySelectorAll('a')).toHaveLength(1);expect(container.querySelector('[data-slot="thread-chip-label"]')?.textContent).toBe('Current project');
-  // Only the avatar's own monogram sits between the prose and the name.
+  // Only the avatar's own initial sits between the prose and the name: one
+  // letter, because the inline tile is too small for two at the type floor.
   const monogram=container.querySelector('[data-slot="thread-avatar"]')?.textContent??'';
-  expect(monogram).toBe('CP');
+  expect(monogram).toBe('C');
   expect(container.textContent?.replace(monogram,'')).toBe('Working in Current project now.');
   expect(screen.getByRole('link',{name:'Thread #2 · Current project'})).toHaveTextContent('Current project');
  });
@@ -59,7 +60,7 @@ describe("Thread rich links",()=>{
   flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"symbol",name:"leaf",tint:"green"}})];}));
   mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveAttribute('data-thread-symbol','leaf');
   cleanup();flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project"})];}));
-  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("CP");
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("C");
  });
  it("never hydrates a cached title before hello or after a history replacement",()=>{
   mount();flush(disconnectThreads);expect(screen.queryByRole('link',{name:/Current project/})).toBeNull();

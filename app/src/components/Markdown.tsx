@@ -156,8 +156,10 @@ function TableBlock(props: { node: Table }) {
     /* Wide tables scroll inside their own box; the message column never
        widens. `scroll-fade-x` is the app's one "there is more this way"
        affordance (the same one the attachment row uses) — without it a table
-       cut off at 390px looked like a table that simply ended. */
-    <div class="scroll-fade-x -mx-1 overflow-x-auto px-1">
+       cut off at 390px looked like a table that simply ended. Inside an
+       Agent card the box bleeds into the card's own inset, so a wide table
+       has the whole card, not the card minus its padding. */
+    <div class="scroll-fade-x -mx-1 overflow-x-auto px-1 in-data-[slot=agent-message]:-mx-3.5 in-data-[slot=agent-message]:px-3.5">
       <table class="w-max min-w-full border-collapse text-sm">
         <thead>
           <For each={rows().slice(0, 1)}>

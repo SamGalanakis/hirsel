@@ -96,7 +96,7 @@ function rowAlignClass(align: unknown): string {
 function headingClass(level: unknown): string {
   switch (level) {
     case 1:
-      return "text-2xl font-medium tracking-[-0.02em] text-foreground";
+      return "text-xl font-medium tracking-[-0.02em] text-foreground";
     case 3:
       return "text-sm font-semibold text-foreground";
     case 4:

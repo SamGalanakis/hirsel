@@ -143,7 +143,8 @@ function ToolPill(props: { item: ToolItem; settled?: boolean; open: boolean; onT
         <Bot class="size-3 shrink-0" aria-label="delegation" />
       </Show>
       <span class={["shrink-0 font-mono", { "text-foreground": running() || delegation(), "font-medium": delegation() }]}>{props.item.name}</span>
-      <Show when={detail()}><span class={ROW_DETAIL}>{detail()}</span></Show>
+      {/* Always present, even empty: it is the spring that pins the time. */}
+      <span class={ROW_DETAIL}>{detail() ?? ""}</span>
       <Show when={duration()}><span class={ROW_TIME}>{duration()}</span></Show>
       <Show when={!done() && props.settled}><span class="shrink-0">No result recorded</span></Show>
     </>
@@ -191,7 +192,7 @@ function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settle
       <Braces class="size-3 shrink-0" aria-hidden="true" />
       <span class={["shrink-0 font-mono", { "text-foreground": running() }]}>Code</span>
       <Show when={language()}><span class="shrink-0 font-mono text-muted-foreground">{language()}</span></Show>
-      <Show when={detail()}><span class={ROW_DETAIL}>{detail()}</span></Show>
+      <span class={ROW_DETAIL}>{detail() ?? ""}</span>
       <Show when={duration()}><span class={ROW_TIME}>{duration()}</span></Show>
     </>
   );
@@ -212,11 +213,18 @@ function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settle
   );
 }
 
-/** What a collapsed tool pill says about itself. */
+/** An opaque identifier — a UUID, a hex handle — names nothing to the Owner;
+ * a row carrying one as its summary says less than a row carrying nothing. */
+const OPAQUE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{16,}$/i;
+/** What a collapsed tool row says about itself: its bounded start summary (the
+ * argument that tells two calls of one tool apart), else the tool's own
+ * outcome summary, else nothing — and never a bare id. */
 function toolDetail(item: ToolItem): string | null {
   const outcome = item.status.state === "done" ? item.status : null;
-  if (!outcome) return item.summary;
-  const identity = item.summary ?? outcome.summary?.replace(/^(?:ok|err)\s+/i, "") ?? null;
+  const readable = (text: string | null | undefined) => text && !OPAQUE_ID.test(text.trim()) ? text : null;
+  const start = readable(item.summary);
+  if (!outcome) return start;
+  const identity = start ?? readable(outcome.summary?.replace(/^(?:ok|err)\s+/i, ""));
   return [identity, outcome.ok ? "Succeeded" : "Failed"].filter(Boolean).join(" · ");
 }
 /** Everything the open panel shows for a tool: its result, then its input. */

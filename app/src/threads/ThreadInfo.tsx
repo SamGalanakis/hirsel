@@ -102,25 +102,24 @@ function TitleRow(props: { thread: Thread; historyId: string }) {
   </Show>;
 }
 
-function DescriptionSection(props: { thread: Thread; historyId: string }) {
+/** One grammar for the whole pane: the description is a fact row like the
+ * rest — label column, value, pencil after the value — not a section of its
+ * own with a different pencil placement. */
+function DescriptionRow(props: { thread: Thread; historyId: string }) {
   const edit = createEdit(() => props.thread, () => props.historyId);
   const [draft, setDraft] = createSignal(props.thread.description);
   const open = () => { setDraft(props.thread.description); edit.setEditing(true); };
   const save = () => { if (draft() !== props.thread.description) edit.submit("set_description", { description: draft() }); else edit.setEditing(false); };
-  return <section class="flex flex-col gap-1.5" data-slot="thread-description">
-    <Show when={edit.editing()} fallback={<>
-      {/* The same sentence-case meta label every other fact in this pane
-          wears; one label system, not an eyebrow over a table of plain ones. */}
-      <h3 class="text-meta text-muted-foreground">Description</h3>
+  return <div class="flex flex-col gap-1.5" data-slot="thread-description">
+    <Show when={edit.editing()} fallback={
       <div class="flex items-start gap-1">
         <div class="min-w-0 flex-1">
-          <Show when={props.thread.description} fallback={<p class="text-sm text-muted-foreground">No description yet — add one</p>}>
+          <Show when={props.thread.description} fallback={<p class="text-muted-foreground">No description yet — add one</p>}>
             <Markdown>{props.thread.description}</Markdown>
           </Show>
         </div>
         <button type="button" class={pencil} aria-label="Edit description" title="Edit description" onClick={open}><SquarePen class="size-3.5" /></button>
-      </div>
-    </>}>
+      </div>}>
       <textarea class={`${field} min-h-28 resize-y`} aria-label="Thread description" value={draft()} disabled={edit.saving()} autofocus
         onInput={event => setDraft(event.currentTarget.value)}
         onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); edit.setEditing(false); } }} />
@@ -130,7 +129,7 @@ function DescriptionSection(props: { thread: Thread; historyId: string }) {
       </div>
       <Failure threadId={props.thread.id} />
     </Show>
-  </section>;
+  </div>;
 }
 
 type Backend = "native" | `cli:${string}`;
@@ -290,8 +289,8 @@ export function ThreadInfo(props: { thread: Thread; historyId: string; onRelated
         <span class="text-meta capitalize text-muted-foreground">{props.thread.kind === "space" ? "Space" : "Task"}{props.thread.kind === "task" && props.thread.settled_at ? " · Done" : ""}</span>
       </div>
     </div>
-    <DescriptionSection thread={props.thread} historyId={props.historyId} />
     <dl class="divide-y divide-border/60 border-t border-border/60">
+      <Fact label="Description"><DescriptionRow thread={props.thread} historyId={props.historyId} /></Fact>
       <Fact label="Runs on"><RunsOnRow thread={props.thread} historyId={props.historyId} /></Fact>
       <Fact label="Parent"><Show when={parent() !== null} fallback={<span class="text-muted-foreground">Top level</span>}><ThreadLink id={parent()!} /></Show></Fact>
       <Show when={children().length > 0}><Fact label="Children">

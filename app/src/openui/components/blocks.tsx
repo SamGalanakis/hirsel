@@ -64,7 +64,7 @@ const CALLOUT: Record<string, string> = {
 };
 export const Callout: OpenUiRenderer<{ text?: string; variant?: string; title?: string }> = p =>
   <div role={p.props.variant === "danger" ? "alert" : undefined} data-slot="openui-callout" data-variant={p.props.variant ?? "info"}
-    class={cn("flex min-w-0 flex-col gap-1 rounded-lg border-l-2 bg-muted/40 px-3 py-2", CALLOUT[p.props.variant ?? "info"] ?? CALLOUT.info)}>
+    class={cn("flex min-w-0 flex-col gap-1 rounded-lg border bg-muted/40 px-3 py-2", CALLOUT[p.props.variant ?? "info"] ?? CALLOUT.info)}>
     <Show when={p.props.title}><span class="text-sm font-semibold">{p.props.title}</span></Show>
     <span class="text-sm">{p.props.text}</span>
   </div>;

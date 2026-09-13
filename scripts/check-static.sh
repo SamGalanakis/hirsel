@@ -15,9 +15,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 # carries its own line height, so a `leading-*` utility at a call site is a
 # second rhythm. ThreadAvatar is the one exception: a glyph centred in a box
 # has no line to keep, so its `leading-none` is geometry, not type.
-if grep -rn -E '\bleading-' app/src --include=*.tsx --include=*.ts --include=*.css \
-  | grep -v -E '^app/src/(styles\.css|threads/ThreadAvatar\.tsx):'; then
-  echo "leading-* utilities belong to the type ramp in app/src/styles.css, not to call sites" >&2
+# `leading-none` included: a box centres its glyph with flex, not with a
+# collapsed line. The ramp ends at `text-xl` and `text-display`; Tailwind's
+# own `text-2xl`/`text-3xl` are steps the ramp does not have.
+if grep -rn -E '\b(leading-|text-[23]xl)' app/src --include=*.tsx --include=*.ts --include=*.css \
+  | grep -v -E '^app/src/styles\.css:'; then
+  echo "leading-* and text-2xl/3xl utilities belong to the type ramp in app/src/styles.css, not to call sites" >&2
   exit 1
 fi
 node app/scripts/openui-prompt.mjs --check

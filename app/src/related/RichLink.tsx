@@ -28,20 +28,23 @@ export async function copyLink(url: string): Promise<void> {
  * mid-sentence. Clicking the chip opens its actions, "Open" first; a modified
  * click is left to the browser, so ⌘-click still opens the Thread in a tab.
  *
- * The chip has no leading, padding or baseline shift of its own: it is exactly
- * as tall as the line it sits in, and the label — `self-baseline`, the one item
- * that sets the flex container's baseline — keeps the sentence's own baseline,
- * so the run trace's `text-xs` and prose's `text-sm` both hold their rhythm. */
+ * The chip has no ground, padding, leading or baseline shift of its own: it is
+ * the tile and the name, exactly as tall as the line it sits in, with no pill
+ * behind it to open a gap before the punctuation that follows; the label —
+ * `self-baseline`, the one item that sets the flex container's baseline —
+ * keeps the sentence's own baseline, so the run trace's `text-xs` and prose's
+ * `text-sm` both hold their rhythm. The pointer gets the same 1px hairline a
+ * web link gets, under the name alone. */
 function ThreadChip(props: { href: string; name: string; text: string; thread?: ThreadAvatarIdentity; actionable: boolean }) {
   const trigger = useDropdownTrigger();
   return <a href={props.href} ref={trigger.ref} target="_blank" rel="noopener noreferrer nofollow"
     aria-label={props.name} title={props.name}
     aria-haspopup={props.actionable ? "menu" : undefined} aria-expanded={props.actionable ? (trigger.open() ? "true" : "false") : undefined}
-    class="inline-flex max-w-full items-center gap-[0.25em] rounded-[0.4em] bg-muted/40 px-[0.3em] no-underline transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    class="group/chip inline-flex max-w-full items-center gap-[0.25em] rounded-sm no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     onClick={event => { if (!props.actionable || !plainPrimaryClick(event)) return; event.preventDefault(); trigger.toggle(); }}
     onKeyDown={props.actionable ? trigger.onKeyDown : undefined}>
     <Show when={props.thread} fallback={<LinkIcon kind="thread" class="size-[1.05em] shrink-0" />}>{thread => <ThreadAvatar thread={thread()} inline />}</Show>
-    <span data-slot="thread-chip-label" class="self-baseline truncate">{props.text}</span>
+    <span data-slot="thread-chip-label" class="self-baseline truncate decoration-1 decoration-current/25 underline-offset-2 group-hover/chip:underline">{props.text}</span>
   </a>;
 }
 

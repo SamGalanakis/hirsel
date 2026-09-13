@@ -162,6 +162,12 @@ warning and falls back to that provider's default model.
   the same reason. The stored values are what the Host builds the handle from.
 - **Fork provider and model** — stored only. No fork runtime consumes them yet.
 
+## Per-Thread coordinators
+
+Settings names the coordinator (the Host RLM agent) every Thread runs on by default. One Thread can run on another: the Owner picks a provider and model in Thread Info's "Runs on" row, and the Agent names the same thing as `threads.delegate` with `agent: "host"` plus an optional `provider_id` and `model`. Both are validated against the same provider roster the Settings picker offers — the instance must exist and be agent-selectable (`claude` is Sub-agents only, ADR-0015), and the model must be one the instance offers, or free text where the instance takes free text. The coordinator takes no reasoning variant and no cwd: the model's own default effort applies.
+
+The choice applies from the Thread's next turn. Its resident session opens on the booted coordinator and is rebound to the Thread's own when the next turn is admitted, so a turn already running keeps the backend it started on. Clearing the choice puts the Thread back on the Settings default the same way.
+
 ## Native Lash coding workers
 
 `threads.delegate` exposes `agent: "lash"` when at least one stored OpenAI-compatible provider has a non-empty API key. This runs a dedicated in-process Lash TypeScript RLM session with process and trigger abilities and a narrow read/edit/write/command tool profile; it does not change the coordinator's provider or model. Hirsel creates no default worker processes. With no explicit worker provider, Hirsel selects the configured `openrouter` instance and defaults its model to `deepseek/deepseek-v4.1-flash`. A non-OpenRouter provider requires an explicit free-text model. The worker variant is `default`.

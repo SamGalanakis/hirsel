@@ -8,7 +8,7 @@ import { makeThread } from "./fixtures";
 import { closeThreadNavigation } from "./navigation";
 import { closeThreadCreate } from "./create";
 import { attachThreadTransport, disconnectThreads, handleThreadMessage, setThreadState } from "./store";
-import type { SubagentModelCatalog } from "../protocol";
+import type { ProviderRoster, SubagentModelCatalog } from "../protocol";
 import type { Thread, ThreadClientMessage } from "./types";
 
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn(), getBlobUrl: async (id: string) => `https://example.test/blob/${id}` }), makeClientId: () => crypto.randomUUID() }));
@@ -20,6 +20,17 @@ const CATALOG: SubagentModelCatalog = {
     { id: "claude-sonnet-4-7", label: "Sonnet 4.7", variants: ["default"], enabled_variants: ["default"], enabled: false },
   ] }],
   native_worker: { label: "Native worker", enabled: false, provider_id: null, eligible_provider_ids: [], model: "local-model", default_model: "local-model", model_override: null },
+};
+/** Two coordinator-capable instances: one curated (Codex) and one free-text
+ * OpenAI-compatible endpoint, so the model control is exercised in both shapes. */
+const ROSTER: ProviderRoster = {
+  booted_provider_id: "codex",
+  instances: [
+    { id: "codex", kind: "codex", label: "Codex (ChatGPT login)", agent_selectable: true, removable: false, default_model: "gpt-5.6-sol",
+      selection: { mode: "curated", main: [{ id: "gpt-5.6-sol", label: "Sol", variants: ["high"], default_variant: "high" }, { id: "gpt-6-astra", label: "Astra", variants: ["medium", "high"], default_variant: "medium" }], fork: [] } },
+    { id: "acme", kind: "openai_compatible", label: "Acme", agent_selectable: true, removable: true, default_model: "acme/fast", base_url: "https://acme.invalid/v1", selection: { mode: "free_text" } },
+    { id: "claude", kind: "claude", label: "Claude (CLI login)", agent_selectable: false, removable: false },
+  ],
 };
 const space = (patch: Partial<Thread> = {}) => makeThread(4, { title: "Kitchen", kind: "space", description: "Everything about the kitchen.", read: true, revision: 3, created_at: "2026-09-09T10:00:00Z", updated_at: "2026-09-09T11:00:00Z", ...patch });
 
@@ -41,6 +52,7 @@ beforeEach(() => {
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   flush(() => dispatch({ type: "connection_status", status: "connected" }));
   flush(() => dispatch({ type: "subagent_models_changed", catalog: CATALOG }));
+  flush(() => dispatch({ type: "providers_changed", roster: { instances: [] } }));
   flush(() => dispatch({ type: "model_changed", model: { current: { id: "claude-opus-4-7", variant: "default" }, available: [], provider_id: "anthropic" } }));
   flush(() => setHistoryId("test-history"));
   flush(() => closeThreadNavigation());
@@ -157,6 +169,49 @@ describe("thread info pane", () => {
 
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: { kind: "lash", provider_id: "anthropic", model: "local-model", variant: "default" } }) }));
     expect(runsOn()).toHaveTextContent("Native worker · anthropic · local-model · Default");
+  });
+
+  it("lets the Owner name this Thread's coordinator provider and model", () => {
+    flush(() => dispatch({ type: "providers_changed", roster: ROSTER }));
+    const view = openInfo();
+    const runsOn = () => view.container.querySelector<HTMLElement>('[data-fact="Runs on"]')!;
+
+    fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
+    const backend = view.getByLabelText("Where this Thread runs") as HTMLSelectElement;
+    expect([...backend.options].map(option => option.value)).toEqual(["default", "host", "cli:claude"]);
+    fireEvent.change(backend, { target: { value: "host" } });
+
+    // Only agent-selectable instances host the coordinator: claude is Sub-agents only.
+    const provider = view.getByLabelText("Coordinator provider") as HTMLSelectElement;
+    expect([...provider.options].map(option => option.value)).toEqual(["codex", "acme"]);
+    // A curated provider offers its own models, at the model's own default effort.
+    const model = view.getByLabelText("This Thread model") as HTMLSelectElement;
+    expect([...model.options].map(option => option.value)).toEqual(["gpt-5.6-sol", "gpt-6-astra"]);
+    fireEvent.change(model, { target: { value: "gpt-6-astra" } });
+    fireEvent.click(view.getByRole("button", { name: "Save where this Thread runs" }));
+    expect(sent.at(-1)).toMatchObject({ action: "set_execution", expected_revision: 3, data: { execution: { kind: "host", provider_id: "codex", model: "gpt-6-astra" } } });
+
+    // A refusal keeps the Owner's choice on screen with the reason beside it.
+    flush(() => setThreadState(draft => { draft.error = { operation: "request", detail: "coordinator provider `codex`: model `gpt-6-astra` is not available on this provider", threadId: 4 }; }));
+    expect(within(view.pane()).getByRole("alert")).toHaveTextContent("not available on this provider");
+    expect(view.getByLabelText("Where this Thread runs")).toHaveValue("host");
+
+    // A free-text endpoint types its model id, seeded with the provider's default.
+    fireEvent.change(view.getByLabelText("Coordinator provider"), { target: { value: "acme" } });
+    expect(view.getByLabelText("This Thread model id")).toHaveValue("acme/fast");
+    fireEvent.input(view.getByLabelText("This Thread model id"), { target: { value: "acme/deep" } });
+    fireEvent.click(view.getByRole("button", { name: "Save This Thread model id" }));
+    fireEvent.click(view.getByRole("button", { name: "Save where this Thread runs" }));
+    expect(sent.at(-1)).toMatchObject({ action: "set_execution", data: { execution: { kind: "host", provider_id: "acme", model: "acme/deep" } } });
+
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "host", provider_id: "acme", model: "acme/deep" } }) }));
+    expect(runsOn()).toHaveTextContent("Coordinator · Acme · acme/deep");
+
+    // Reopening the editor opens on the stored coordinator, not the default.
+    fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
+    expect(view.getByLabelText("Where this Thread runs")).toHaveValue("host");
+    expect(view.getByLabelText("Coordinator provider")).toHaveValue("acme");
+    expect(view.getByLabelText("This Thread model id")).toHaveValue("acme/deep");
   });
 
   it("says why the backend select is alone rather than showing a dead control", () => {

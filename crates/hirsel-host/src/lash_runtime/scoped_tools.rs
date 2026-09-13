@@ -516,6 +516,8 @@ enum DelegateInput {
         common: DelegateCommon,
         child_thread_id: Option<u64>,
         agent: HostAgent,
+        provider_id: Option<String>,
+        model: Option<String>,
     },
     Native {
         #[serde(flatten)]
@@ -552,11 +554,15 @@ impl ScopedThreadTools {
                 common,
                 child_thread_id,
                 agent: HostAgent::Host,
+                provider_id,
+                model,
             } => (
                 common,
                 child_thread_id,
                 Some(ExecutionSelectors {
                     agent: Some("host".into()),
+                    provider_id,
+                    model,
                     ..Default::default()
                 }),
             ),
@@ -673,7 +679,24 @@ mod delegate_input_tests {
         ));
         assert!(matches!(
             parse(json!({"agent":"host"})).unwrap(),
+            DelegateInput::Host {
+                provider_id: None,
+                model: None,
+                ..
+            }
+        ));
+        // The coordinator now takes a provider and a model of its own; the
+        // roster, not the input shape, is what judges them.
+        assert!(matches!(
+            parse(json!({"agent":"host","provider_id":"acme","model":"m"})).unwrap(),
             DelegateInput::Host { .. }
+        ));
+        assert!(matches!(
+            parse(json!({"agent":"host","model":"m"})).unwrap(),
+            DelegateInput::Host {
+                provider_id: None,
+                ..
+            }
         ));
         assert!(matches!(
             parse(json!({"agent":"lash","provider_id":"router","model":"m"})).unwrap(),
@@ -693,7 +716,9 @@ mod delegate_input_tests {
             }
         ));
         for invalid in [
-            json!({"agent":"host","model":"m"}),
+            // The coordinator has no reasoning variant and no working
+            // directory: both are worker selectors.
+            json!({"agent":"host","variant":"high"}),
             json!({"agent":"host","cwd":"/tmp"}),
             json!({"agent":"codex","provider_id":"router"}),
             json!({"child_thread_id":7,"provider_id":"router"}),

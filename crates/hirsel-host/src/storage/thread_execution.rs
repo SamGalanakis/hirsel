@@ -157,10 +157,11 @@ pub(super) fn select(
             .map(|s| serde_json::from_str::<ThreadExecution>(&s))
             .transpose()?;
         match preferred {
-            Some(
-                preferred @ (ThreadExecution::Cli { .. } | ThreadExecution::LashWorker { .. }),
-            ) => Some(preferred),
-            _ => c
+            // Every stored backend is the Thread's own, the coordinator
+            // included: a Host preference names the provider and model this
+            // Thread's coordinator session runs on, not the Settings default.
+            Some(preferred) => Some(preferred),
+            None => c
                 .query_row(
                     "SELECT value FROM meta WHERE key='host_execution_default'",
                     [],

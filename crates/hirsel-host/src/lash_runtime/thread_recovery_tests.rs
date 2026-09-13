@@ -1297,3 +1297,160 @@ async fn stop_during_empty_drain_retry_cancels_owned_input_without_provider() {
     );
     assert!(runtime.admit_next_thread_request().await.unwrap().is_none());
 }
+
+/// A Thread may name its own coordinator. The session opens on the booted one
+/// and is rebound when a turn accepted for another coordinator is admitted —
+/// before the input is enqueued, so the turn runs on what the Owner chose and a
+/// turn already running keeps the backend it started on.
+#[tokio::test]
+async fn an_admitted_turn_rebinds_the_session_to_this_threads_coordinator() {
+    let (state, _dir) = runtime_fixture().await;
+    state
+        .providers_roster
+        .add(
+            "acme",
+            "Acme",
+            "https://acme.invalid/v1",
+            "test-key-no-inference",
+            "acme/fast",
+        )
+        .await
+        .unwrap();
+    let runtime = runtime_lane(&state, None).await;
+    let _pump = runtime.pump_lock.lock().await;
+    let history = state.storage.history_id().await.unwrap();
+    let booted = runtime.coordinator_provider_id();
+    assert_eq!(booted, "anthropic");
+    let thread = state
+        .storage
+        .thread(runtime.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let target = hirsel_proto::ThreadExecutionTarget::Host {
+        provider_id: "acme".into(),
+        model: "acme/deep".into(),
+    };
+    let chosen = state
+        .handle_addressed_thread_action(
+            &history,
+            thread.id,
+            "set_execution".into(),
+            json!({ "execution": target }),
+            Some(thread.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chosen.execution, Some(target));
+    // Stored, not applied: the running session keeps the coordinator it opened
+    // on until a turn accepted for the new one is admitted.
+    assert_eq!(runtime.coordinator_provider_id(), booted);
+
+    state
+        .submit_addressed_thread_message(
+            &history,
+            "coordinator-turn".into(),
+            thread.id,
+            "run somewhere else".into(),
+            vec![],
+            vec![],
+            SendMode::Send,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .admit_next_thread_request()
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("coordinator-turn")
+    );
+
+    assert_eq!(runtime.coordinator_provider_id(), "acme");
+    assert_eq!(runtime.session.policy_snapshot().model.id, "acme/deep");
+    // The live session config, not just the host's own bookkeeping, names it.
+    let expected_kind = openai_compatible_handle(
+        "unused-in-this-assertion".to_string(),
+        "https://acme.invalid/v1".to_string(),
+    )
+    .kind()
+    .to_string();
+    assert_eq!(runtime.coordinator_provider().kind(), expected_kind);
+    assert_eq!(
+        runtime.session.policy_snapshot().recorded_provider_id(),
+        expected_kind
+    );
+
+    // Back to the Settings default. The booted coordinator is a boot label,
+    // not a roster instance (the legacy `anthropic` mode has no roster entry),
+    // so a Thread that clears its preference must still be able to return.
+    let default = state.storage.host_execution_default().await.unwrap();
+    let crate::storage::ThreadExecution::Host { provider_id, model } = default else {
+        panic!("the configured default coordinator is a host backend");
+    };
+    assert_eq!(provider_id, booted);
+    runtime
+        .bind_coordinator(&provider_id, model.clone())
+        .await
+        .unwrap();
+    assert_eq!(runtime.coordinator_provider_id(), booted);
+    assert_eq!(runtime.session.policy_snapshot().model, model);
+}
+
+/// The Owner and the Agent name a coordinator the same way and are refused for
+/// the same reasons: an unknown instance, a Sub-agents-only one, and selectors
+/// the coordinator has no use for.
+#[tokio::test]
+async fn a_coordinator_target_is_judged_by_the_provider_roster() {
+    let (state, _dir) = runtime_fixture().await;
+    let history = state.storage.history_id().await.unwrap();
+    let (thread, _) = state
+        .storage
+        .create_thread(
+            "coordinator-refusals",
+            "Refusals",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap();
+    for (execution, expected) in [
+        (
+            json!({"kind":"host","provider_id":"nonesuch","model":"m"}),
+            "unknown provider instance",
+        ),
+        (
+            json!({"kind":"host","provider_id":"claude","model":"m"}),
+            "Sub-agents only",
+        ),
+        (
+            json!({"kind":"host","provider_id":"codex","model":"not-a-codex-model"}),
+            "is not available on this provider",
+        ),
+    ] {
+        let error = state
+            .handle_addressed_thread_action(
+                &history,
+                thread.id,
+                "set_execution".into(),
+                json!({ "execution": execution }),
+                Some(thread.revision),
+            )
+            .await
+            .expect_err("the roster refuses this coordinator");
+        assert!(
+            error.to_string().contains(expected),
+            "{error} does not explain {expected}"
+        );
+        assert_eq!(
+            state.storage.thread(thread.id).await.unwrap().unwrap(),
+            thread
+        );
+    }
+}

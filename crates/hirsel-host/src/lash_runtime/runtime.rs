@@ -307,16 +307,30 @@ pub(super) enum LashStartup {
     Unavailable,
 }
 
+/// Which coordinator this Thread's session is currently bound to.
+///
+/// The provider is a roster id, not a transport kind: two OpenAI-compatible
+/// instances are the same `ProviderHandle::kind()` and different coordinators,
+/// so the id is what a rebind compares. The handle travels with it because an
+/// ephemeral triage fork opens on the same transport the main session rides
+/// (ADR-0015) — the fork differs in model, not provider.
+pub(super) struct CoordinatorBinding {
+    pub(super) provider_id: String,
+    pub(super) provider: ProviderHandle,
+}
+
 pub(crate) struct LashAgentRuntime {
     pub(super) tasks: RuntimeTasks,
     pub(super) history_id: String,
     pub(super) thread_id: u64,
-    pub(super) provider_id: String,
+    /// The coordinator this session runs on. A Thread may name its own
+    /// provider and model; the binding follows it at the next admission.
+    pub(super) coordinator: std::sync::RwLock<CoordinatorBinding>,
+    /// Kept so a coordinator rebind can build a handle for another roster
+    /// instance without reaching back through the registry.
+    pub(super) config: RuntimeConfig,
     pub(super) capacity: Arc<tokio::sync::Semaphore>,
     pub(super) core: lash::LashCore,
-    /// Kept so an ephemeral triage fork can open on the same transport the
-    /// main session rides (ADR-0015); the fork differs in model, not provider.
-    pub(super) provider: ProviderHandle,
     pub(super) session: lash::LashSession,
     pub(super) session_id: String,
     pub(super) tools: ToolSuite,

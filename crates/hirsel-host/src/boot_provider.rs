@@ -162,28 +162,49 @@ pub async fn resolve(store: &ConfigStore, mode: ProviderMode, home: Option<&Path
             }
         }
         CLAUDE_ID => BootProvider::fell_back(mode, &id, CLAUDE_NOT_SELECTABLE),
-        _ => {
-            let Some(stored) = store
-                .providers()
-                .into_iter()
-                .find(|provider| provider.id == id)
-            else {
-                return BootProvider::fell_back(mode, &id, "it is not in the provider roster");
-            };
-            let Some(api_key) = stored.api_key.filter(|key| !key.is_empty()) else {
-                return BootProvider::fell_back(mode, &id, "no API key is stored");
-            };
-            BootProvider {
-                id: Some(stored.id.clone()),
-                plan: BootPlan::OpenAiCompatible {
-                    id: stored.id,
-                    base_url: stored.base_url,
-                    api_key,
-                },
+        _ => match stored_plan(store, &id) {
+            Ok(plan) => BootProvider {
+                id: Some(id),
+                plan,
                 notice: None,
-            }
-        }
+            },
+            Err(reason) => BootProvider::fell_back(mode, &id, &reason),
+        },
     }
+}
+
+/// One roster id resolved to how a provider handle is built for it, with no
+/// fallback: the caller either gets the named instance or the reason it cannot
+/// be used.
+///
+/// This is the boot resolution above minus the boot: it is what a per-Thread
+/// coordinator choice resolves through, so a Thread and the host default can
+/// never disagree about what an instance id means. `codex` is not probed here
+/// — building the handle reads the login and reports its own failure — so the
+/// only refusals are roster facts.
+pub fn plan_for(store: &ConfigStore, id: &str) -> Result<BootPlan, String> {
+    match id {
+        CODEX_ID => Ok(BootPlan::Codex),
+        CLAUDE_ID => Err(CLAUDE_NOT_SELECTABLE.to_string()),
+        _ => stored_plan(store, id),
+    }
+}
+
+fn stored_plan(store: &ConfigStore, id: &str) -> Result<BootPlan, String> {
+    let stored = store
+        .providers()
+        .into_iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| "it is not in the provider roster".to_string())?;
+    let api_key = stored
+        .api_key
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| "no API key is stored".to_string())?;
+    Ok(BootPlan::OpenAiCompatible {
+        id: stored.id,
+        base_url: stored.base_url,
+        api_key,
+    })
 }
 
 #[cfg(test)]

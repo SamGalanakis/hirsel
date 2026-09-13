@@ -25,8 +25,10 @@ pub(crate) fn selectors_from_target(
     target: &hirsel_proto::ThreadExecutionTarget,
 ) -> ExecutionSelectors {
     match target.clone() {
-        hirsel_proto::ThreadExecutionTarget::Host { .. } => ExecutionSelectors {
+        hirsel_proto::ThreadExecutionTarget::Host { provider_id, model } => ExecutionSelectors {
             agent: Some("host".into()),
+            provider_id: Some(provider_id),
+            model: Some(model),
             ..ExecutionSelectors::default()
         },
         hirsel_proto::ThreadExecutionTarget::Cli {
@@ -58,21 +60,57 @@ pub(crate) async fn resolve_execution(
     input: ExecutionSelectors,
 ) -> Result<crate::storage::ThreadExecution, String> {
     if input.agent.as_deref() == Some("host") {
-        if input.provider_id.is_some()
-            || input.model.is_some()
-            || input.variant.is_some()
-            || input.cwd.is_some()
-        {
+        if input.variant.is_some() || input.cwd.is_some() {
             return Err(
-                "host delegation uses configured provider/model; worker selectors do not apply"
-                    .into(),
+                "the coordinator takes a provider and a model; variant and cwd do not apply".into(),
             );
         }
-        Ok(tools
+        // Naming neither is the configured default coordinator — the Settings
+        // choice, still the answer for every Thread that has not overridden it.
+        let default = tools
             .storage()
             .host_execution_default()
             .await
-            .map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        if input.provider_id.is_none() && input.model.is_none() {
+            return Ok(default);
+        }
+        let crate::storage::ThreadExecution::Host {
+            provider_id: default_provider_id,
+            model: default_model,
+        } = &default
+        else {
+            return Err("the configured default coordinator is not a host backend".into());
+        };
+        let provider_id = input
+            .provider_id
+            .clone()
+            .unwrap_or_else(|| default_provider_id.clone());
+        // The coordinator's provider is a roster instance, judged by exactly
+        // the rules the Settings picker is judged by.
+        let choice = tools
+            .coordinator_provider(&provider_id)
+            .map_err(|e| e.to_string())?;
+        let mode = crate::model_selection::SelectionMode::for_choice(&choice);
+        let model_id = match input.model.clone() {
+            Some(model) => model,
+            // The provider changed but the model did not: the stored model
+            // means nothing on the new route, so its own default applies.
+            None if provider_id == *default_provider_id => default_model.id.clone(),
+            None => choice.default_model.clone(),
+        };
+        let selection = crate::model_selection::validate_model_id_in_mode(
+            &mode,
+            hirsel_proto::AgentSlot::Main,
+            &model_id,
+        )
+        .map_err(|e| format!("coordinator provider `{provider_id}`: {e}"))?;
+        let model =
+            crate::model_selection::spec_for(&mode, &selection).map_err(|e| e.to_string())?;
+        Ok(crate::storage::ThreadExecution::Host {
+            provider_id: choice.id,
+            model,
+        })
     } else if input.agent.as_deref() == Some("lash") {
         // The Owner's row is the gate. The delegation schema already drops
         // the branch while the worker is off, so this refusal is for a
@@ -131,7 +169,7 @@ pub(crate) async fn resolve_execution(
         })
     } else {
         if input.provider_id.is_some() {
-            return Err("provider_id applies only to agent `lash`".into());
+            return Err("provider_id applies only to agent `host` or agent `lash`".into());
         }
         let agent =
             crate::lash_runtime::parse_agent_kind(input.agent.as_deref().unwrap_or("claude"))?;

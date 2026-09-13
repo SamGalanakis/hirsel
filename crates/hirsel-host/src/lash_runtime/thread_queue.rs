@@ -136,20 +136,7 @@ impl LashAgentRuntime {
         let crate::storage::ThreadExecution::Host { provider_id, model } = execution else {
             anyhow::bail!("CLI turn must run on the CLI lane");
         };
-        anyhow::ensure!(
-            provider_id == self.provider_id,
-            "accepted provider is unavailable on this host"
-        );
-        if self.session.policy_snapshot().model != model {
-            self.session
-                .admin()
-                .config()
-                .update(lash::SessionConfigPatch {
-                    model: Some(model),
-                    ..Default::default()
-                })
-                .await?;
-        }
+        self.bind_coordinator(&provider_id, model).await?;
         let input = owner_turn_input(&turn, &self.tools.storage()).await?;
         let source_key = owner_turn_source_key(&client_id);
         let anchors = TurnAnchors {

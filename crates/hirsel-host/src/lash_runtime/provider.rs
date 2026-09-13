@@ -48,7 +48,18 @@ pub(super) struct ProviderUnavailable {
 pub(super) async fn build_provider(
     config: &RuntimeConfig,
 ) -> Result<ProviderHandle, ProviderUnavailable> {
-    match &config.boot_plan {
+    build_provider_for_plan(config, &config.boot_plan).await
+}
+
+/// Build the transport for one resolved plan. The host boots on
+/// `config.boot_plan`; a Thread that names its own coordinator resolves a plan
+/// of its own through `boot_provider::plan_for` and arrives here with it, so
+/// both routes construct the same handles from the same credentials.
+pub(super) async fn build_provider_for_plan(
+    config: &RuntimeConfig,
+    plan: &BootPlan,
+) -> Result<ProviderHandle, ProviderUnavailable> {
+    match plan {
         BootPlan::Env(ProviderMode::Anthropic) => {
             let Some(api_key) = config.anthropic_api_key.clone() else {
                 return Err(ProviderUnavailable {

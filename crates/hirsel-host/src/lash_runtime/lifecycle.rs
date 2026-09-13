@@ -211,10 +211,13 @@ impl LashAgentRuntime {
             thread_id,
             history_id,
             tasks,
-            provider_id: config.boot_plan.label().into(),
+            coordinator: std::sync::RwLock::new(CoordinatorBinding {
+                provider_id: config.boot_plan.label().into(),
+                provider,
+            }),
+            config: config.clone(),
             capacity,
             core: core.clone(),
-            provider,
             session,
             session_id: session_bootstrap.session_id,
             tools: tools.clone(),
@@ -260,6 +263,100 @@ impl LashAgentRuntime {
             "Lash Agent runtime opened session"
         );
         Ok(LashStartup::Ready(runtime))
+    }
+
+    /// The transport the coordinator session currently rides.
+    pub(super) fn coordinator_provider(&self) -> ProviderHandle {
+        self.coordinator
+            .read()
+            .expect("coordinator binding poisoned")
+            .provider
+            .clone()
+    }
+
+    /// The roster id of the coordinator this session currently runs on.
+    pub(super) fn coordinator_provider_id(&self) -> String {
+        self.coordinator
+            .read()
+            .expect("coordinator binding poisoned")
+            .provider_id
+            .clone()
+    }
+
+    /// Point the live session at the coordinator an admitted turn was accepted
+    /// for.
+    ///
+    /// A Thread may name its own provider and model, so the session that
+    /// opened on the booted coordinator is rebound here, before the input is
+    /// enqueued and therefore before the turn runs on it — which is exactly
+    /// what "applies from the next turn" means. Idempotent: an unchanged
+    /// binding writes nothing. The provider is compared by roster id, never by
+    /// transport kind, because two OpenAI-compatible instances are different
+    /// coordinators with the same kind.
+    pub(super) async fn bind_coordinator(
+        &self,
+        provider_id: &str,
+        model: lash::ModelSpec,
+    ) -> anyhow::Result<()> {
+        if self.coordinator_provider_id() == provider_id {
+            if self.session.policy_snapshot().model != model {
+                self.session
+                    .admin()
+                    .config()
+                    .update(lash::SessionConfigPatch {
+                        model: Some(model),
+                        ..Default::default()
+                    })
+                    .await?;
+            }
+            return Ok(());
+        }
+        // The coordinator the host booted on is always reachable, roster or
+        // not: the legacy `anthropic` mode and the env provider modes are boot
+        // labels rather than roster instances, and a Thread returning to the
+        // Settings default names one of them.
+        let plan = if provider_id == self.config.boot_plan.label() {
+            self.config.boot_plan.clone()
+        } else {
+            crate::boot_provider::plan_for(&self.config.config_store, provider_id).map_err(
+                |reason| {
+                    anyhow::anyhow!("coordinator provider `{provider_id}` is unavailable: {reason}")
+                },
+            )?
+        };
+        let provider = build_provider_for_plan(&self.config, &plan).await.map_err(
+            |ProviderUnavailable { message }| {
+                anyhow::anyhow!("coordinator provider `{provider_id}` is unavailable: {message}")
+            },
+        )?;
+        self.session
+            .admin()
+            .config()
+            .update(lash::SessionConfigPatch {
+                provider: Some(provider.clone()),
+                model: Some(model),
+                ..lash::SessionConfigPatch::default()
+            })
+            .await
+            .context("rebind the coordinator session to this Thread's provider")?;
+        let previous = std::mem::replace(
+            &mut *self
+                .coordinator
+                .write()
+                .expect("coordinator binding poisoned"),
+            CoordinatorBinding {
+                provider_id: provider_id.to_string(),
+                provider,
+            },
+        );
+        tracing::info!(
+            session_id = %self.session_id,
+            thread_id = self.thread_id,
+            old_provider = %previous.provider_id,
+            new_provider = provider_id,
+            "Thread coordinator rebound"
+        );
+        Ok(())
     }
 
     /// Reconcile the live session's prompt with the Owner's configuration.
@@ -587,7 +684,7 @@ impl LashAgentRuntime {
             self.history_id.clone(),
             crate::fork_wake::LashForkRunner::new(
                 self.core.clone(),
-                self.provider.clone(),
+                self.coordinator_provider(),
                 self.prompts.clone(),
                 self.session_id.clone(),
             ),

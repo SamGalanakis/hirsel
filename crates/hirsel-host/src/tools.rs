@@ -118,6 +118,16 @@ impl ToolSuite {
         self.subagent_models.snapshot()
     }
 
+    /// Resolve one roster instance as a coordinator (Host RLM) provider. The
+    /// same roster rules the Settings picker obeys: the instance must exist,
+    /// and `claude` is Sub-agents only (ADR-0015).
+    pub(crate) fn coordinator_provider(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<crate::providers::AgentProviderChoice> {
+        self.providers.selection_for(id)
+    }
+
     pub(crate) fn capture_native_worker_provider(
         &self,
         provider_id: Option<&str>,

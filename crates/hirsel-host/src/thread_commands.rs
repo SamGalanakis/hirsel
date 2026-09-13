@@ -225,18 +225,6 @@ impl AppState {
                     ),
                     None => None,
                 };
-                // The coordinator's provider and model are one Settings-wide
-                // choice, not a per-Thread one: naming a different pair here
-                // would silently run somewhere else.
-                if let (Some(hirsel_proto::ThreadExecutionTarget::Host { .. }), Some(resolved)) =
-                    (&requested, execution.as_ref())
-                {
-                    let effective = crate::storage::public_execution_target(resolved.clone());
-                    anyhow::ensure!(
-                        Some(&effective) == requested.as_ref(),
-                        "the coordinator's provider and model are set in Settings; this Thread would run on a different one"
-                    );
-                }
                 self.storage
                     .set_addressed_thread_execution(
                         expected_history,

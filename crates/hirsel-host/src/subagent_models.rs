@@ -422,8 +422,12 @@ fn delegation_input_schema(catalog: &SubagentModelCatalog) -> Value {
         &[]
     };
     let mut agents = vec!["host", "claude", "codex"];
+    // The coordinator takes a provider and a model, both optional: omitting
+    // both is the configured default coordinator. They are free strings here
+    // because the roster they are judged against is the Owner's, not a
+    // registry — the host validates them and refuses with the reason.
     let mut branches = vec![
-        json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["provider_id"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}),
+        json!({"required":["agent"],"properties":{"agent":{"const":"host"}},"not":{"anyOf":[{"required":["variant"]},{"required":["cwd"]}]}}),
     ];
     // An existing child with no new selectors keeps its accepted backend.
     branches.push(json!({"required":["child_thread_id"],"not":{"anyOf":[{"required":["agent"]},{"required":["provider_id"]},{"required":["model"]},{"required":["variant"]},{"required":["cwd"]}]}}));

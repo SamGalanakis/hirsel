@@ -40,6 +40,7 @@ import { getClient } from "../ws/client";
 import { ThreadNavigation, type ThreadNavigationMode } from "./ThreadNavigation";
 import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThreadNavigation, closeThreadNavigation } from "./navigation";
 import { artifactState } from "../artifacts/store";
+import type { Thread } from "./types";
 import { focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
@@ -149,7 +150,11 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       <div class="mx-auto flex w-full max-w-measure flex-col gap-6">
         <Show when={current()?.parent_thread_id !== null && current()?.parent_thread_id !== undefined}><nav aria-label="Thread ancestry" class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><For each={threadAncestors(threadState.threads, props.id)}>{parent => <><ThreadLink id={parent.id} /><span aria-hidden="true">/</span></>}</For><span class="break-words">#{props.id} {current()?.title}</span></nav></Show>
         <Show when={current()?.instrument}>
-          <Show when={current()?.revision} keyed>{revision => <ThreadInstrument ui={current()?.instrument ?? undefined} allowSettlement={current()?.kind === "task"} onAction={(action, data) => threadAction(props.historyId, props.id, action, data, revision)} />}</Show>
+          {/* Keyed on the instrument itself, not the revision: an unrelated
+              revision bump (a message, a read receipt) must not remount the
+              card and discard what the Owner has typed. The action carries the
+              revision read at submit time, which the Host checks exactly. */}
+          <Show when={JSON.stringify(current()?.instrument)} keyed>{spec => <ThreadInstrument ui={JSON.parse(spec) as Thread["instrument"] ?? undefined} allowSettlement={current()?.kind === "task"} onAction={(action, data) => threadAction(props.historyId, props.id, action, data, current()?.revision)} />}</Show>
         </Show>
         <Show when={history()?.hasMore}><button class={button} disabled={loading()} onClick={() => void earlier()}>{loading() ? "Loading…" : "Load earlier messages"}</button></Show>
         <Show when={!history()?.loaded && !(threadState.error?.operation === "load" && threadState.error.threadId === props.id)}><p role="status" class="text-sm text-muted-foreground">Loading conversation…</p></Show>

@@ -1,7 +1,8 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  launchBrowser,
   poll,
   repoRoot,
   startHost,
@@ -59,6 +60,10 @@ try {
 
   const vitePort = await unusedPort();
   const viteUrl = `http://127.0.0.1:${vitePort}`;
+  // Start the optimizer cold so the dependency scan is guaranteed to report,
+  // and never reuse a half-populated cache from an earlier run.
+  await rm(join(repoRoot, "app", "node_modules", ".vite-artifact-preview"), { recursive: true, force: true });
+  const viteLogs = [];
   vite = startProcess(process.execPath, [
     join(repoRoot, "app", "node_modules", "vite", "bin", "vite.js"),
     "--config",
@@ -68,13 +73,35 @@ try {
     "--port",
     String(vitePort),
     "--strictPort",
-  ], { cwd: join(repoRoot, "app"), env: process.env });
-  await poll("artifact preview readiness", async () => {
+  ], { cwd: join(repoRoot, "app"), env: process.env, logs: viteLogs });
+  const previewAlive = () => {
     if (vite.exitCode !== null || vite.signalCode !== null) {
       throw new Error(`Artifact preview exited (${vite.exitCode ?? vite.signalCode})`);
     }
+    return true;
+  };
+  await poll("artifact preview readiness", async () => {
+    previewAlive();
     return (await fetch(`${viteUrl}/tools/artifact-smoke.html`)).ok;
   }, 30_000);
+  // The dev server discovers dynamically imported dependencies only while a
+  // browser walks the module graph, and finishes by reloading every open page
+  // ("optimized dependencies changed. reloading"). Landing mid-test, that
+  // reload resets the smoke's artifact and its assertions time out on content
+  // that was replaced by the reload. Walk the graph here and wait for the
+  // optimizer's own completion line, so the reload is spent before the smoke.
+  const warmup = await launchBrowser();
+  try {
+    const page = await warmup.newPage();
+    await page.goto(`${viteUrl}/tools/artifact-smoke.html`);
+    await page.frameLocator("iframe").getByRole("button", { name: "Count 0", exact: true }).waitFor();
+    await poll("artifact preview dependency optimization", () => {
+      previewAlive();
+      return viteLogs.some(line => /dependencies optimized/.test(line));
+    }, 120_000);
+  } finally {
+    await warmup.close();
+  }
   await run("Artifact runtime smoke", process.execPath, ["e2e/artifact-runtime-smoke.mjs"], {
     HIRSEL_ARTIFACT_TEST_URL: viteUrl,
   });

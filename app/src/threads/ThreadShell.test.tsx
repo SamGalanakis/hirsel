@@ -790,3 +790,20 @@ describe("row actions menu", () => {
     expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", thread_id: 1, action: "snooze" }));
   });
 });
+
+it("keeps typed instrument field values across an unrelated revision bump and submits the current revision", () => {
+  const instrument = [
+    { type: "field", name: "confirmation", kind: "text", label: "Confirmation", required: true },
+    { type: "submit", action: "advance", label: "Continue", settles: false },
+  ];
+  flush(() => setThreadState(draft => { draft.threads = draft.threads.map(thread => thread.id === 1 ? { ...thread, kind: "task", instrument, revision: 1 } : thread); }));
+  const view = render(() => <ThreadShell />);
+  const field = view.getByLabelText("Confirmation") as HTMLInputElement;
+  fireEvent.input(field, { target: { value: "ready" } });
+  flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { kind: "task", instrument, revision: 2, read: true }) }));
+  expect((view.getByLabelText("Confirmation") as HTMLInputElement).value).toBe("ready");
+  fireEvent.click(view.getByRole("button", { name: "Continue" }));
+  const action = sent.find(frame => frame.type === "thread_action") as { data: Record<string, unknown>; expected_revision: number } | undefined;
+  expect(action?.data).toEqual({ confirmation: "ready" });
+  expect(action?.expected_revision).toBe(2);
+});

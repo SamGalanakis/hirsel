@@ -82,6 +82,14 @@ impl ThreadIdentity {
             ));
         }
         block.push_str(&format!("Reach: {}\n", self.reach));
+        // The block spells Threads out in full for the agent's own orientation;
+        // its prose must not. The interface draws a `#id` citation as the
+        // Thread's avatar and title, so an agent that also writes the title
+        // beside the id has the surface say the name twice.
+        block.push_str(
+            "Refer to Threads by `#id` alone; the interface renders the name. \
+             Never write the title next to the id.\n",
+        );
         block
     }
 }

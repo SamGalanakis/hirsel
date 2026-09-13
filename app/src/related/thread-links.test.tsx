@@ -17,14 +17,31 @@ beforeEach(()=>{frames.length=0;const storage=new Map<string,string>();vi.stubGl
 afterEach(()=>{cleanup();disconnectRelated();disconnectThreads();vi.restoreAllMocks();vi.unstubAllGlobals();});
 const mount=()=>render(()=><RelatedContext value={{historyId,threadId:1}}><Markdown>{threadUrl(target)}</Markdown></RelatedContext>);
 describe("Thread rich links",()=>{
- it("hydrates the current title, keeps modifier navigation native, and switches only on plain click",()=>{
-  mount();const link=screen.getByRole('link',{name:'Thread #2 · Current project'});
+ it("reads as one chip carrying the Thread's own name, with the id only in its label",()=>{
+  const {container}=mount();const link=screen.getByRole('link',{name:'Thread #2 · Current project'});
+  // One object: avatar + name on a quiet ground. No second element beside it,
+  // no underline, and the id is never drawn into the sentence.
+  expect(link.querySelector('[data-slot="thread-chip-label"]')?.textContent).toBe('Current project');expect(link).toHaveAttribute('title','Thread #2 · Current project');
+  expect(link.className).toContain('bg-muted/40');expect(link.className).toContain('no-underline');expect(link.className).not.toContain('decoration');
+  expect(container.querySelectorAll('button')).toHaveLength(0);expect(container.querySelectorAll('[data-link-kind] > *')).toHaveLength(1);
   const modified=new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true});link.dispatchEvent(modified);expect(modified.defaultPrevented).toBe(false);expect(threadState.focusedId).toBe(1);
-  fireEvent.click(link);expect(threadState.focusedId).toBe(2);expect(location.search).toBe(`?history=${historyId}`);
+ });
+ it("renders a bare #id written in prose as that same one chip",()=>{
+  const {container}=render(()=><RelatedContext value={{historyId,threadId:1}}><Markdown>{"Working in #2 now."}</Markdown></RelatedContext>);
+  // The agent writes the id; the sentence reads as the name, exactly once.
+  expect(container.querySelectorAll('a')).toHaveLength(1);expect(container.querySelector('[data-slot="thread-chip-label"]')?.textContent).toBe('Current project');
+  // Only the avatar's own glyph sits between the prose and the name.
+  expect(container.textContent?.replace('C','')).toBe('Working in Current project now.');
+  expect(screen.getByRole('link',{name:'Thread #2 · Current project'})).toHaveTextContent('Current project');
+ });
+ it("opens its actions from the chip itself, Open first",async()=>{
+  mount();fireEvent.click(screen.getByRole('link',{name:'Thread #2 · Current project'}));
+  expect((await screen.findAllByRole('menuitem')).map(item=>item.textContent)).toEqual(['Open','Open in new tab','Copy link','Copy reference','Add to Related']);
+  fireEvent.click(screen.getByRole('menuitem',{name:'Open'}));expect(threadState.focusedId).toBe(2);expect(location.search).toBe(`?history=${historyId}`);
  });
  it("copies an ordinary Markdown reference and saves an explicit typed association to its origin",async()=>{
-  mount();fireEvent.click(screen.getByRole('button',{name:/Link actions:/}));fireEvent.click(screen.getByRole('menuitem',{name:'Copy reference'}));expect(clipboard).toHaveBeenCalledWith(`[Thread #2](${threadUrl(target)})`);
-  fireEvent.click(screen.getByRole('button',{name:/Link actions:/}));fireEvent.click(screen.getByRole('menuitem',{name:'Add to Related'}));
+  mount();fireEvent.click(screen.getByRole('link',{name:/Thread #2/}));fireEvent.click(screen.getByRole('menuitem',{name:'Copy reference'}));expect(clipboard).toHaveBeenCalledWith(`[Thread #2](${threadUrl(target)})`);
+  fireEvent.click(screen.getByRole('link',{name:/Thread #2/}));fireEvent.click(screen.getByRole('menuitem',{name:'Add to Related'}));
   expect(frames[0]).toMatchObject({type:'add_thread_related',history_id:historyId,thread_id:1,target,title:null});
   flush(()=>handleRelatedMessage({type:'thread_related_changed',client_id:(frames[0] as {client_id:string}).client_id,history_id:historyId,thread_id:1,revision:2,items:[{id:1,thread_id:1,target,title:null,created_at:'now'}]}));
  });
@@ -44,8 +61,10 @@ describe("Thread rich links",()=>{
  });
  it("never hydrates a cached title before hello or after a history replacement",()=>{
   mount();flush(disconnectThreads);expect(screen.queryByRole('link',{name:/Current project/})).toBeNull();
-  const link=screen.getByRole('link',{name:'Thread #2 · unavailable'});const click=new MouseEvent('click',{bubbles:true,cancelable:true});link.dispatchEvent(click);expect(click.defaultPrevented).toBe(false);
+  // An unknown Thread degrades to the id the author typed; "unavailable" is
+  // the chip's label, never words in the middle of the sentence.
+  const link=screen.getByRole('link',{name:'Thread #2 · unavailable'});expect(link.textContent).toBe('#2');
   flush(()=>{setHistoryId('ab123456-1234-5678-9abc-123456789abd');setThreadState(draft=>{draft.ready=true;draft.threads=[makeThread(2,{title:'Unrelated private title'})];});});
-  expect(screen.queryByText(/Unrelated private title/)).toBeNull();fireEvent.click(screen.getByRole('button',{name:/Link actions:/}));expect(screen.getByRole('menuitem',{name:'Thread unavailable'})).toBeDisabled();expect(frames).toEqual([]);
+  expect(screen.queryByText(/Unrelated private title/)).toBeNull();fireEvent.click(screen.getByRole('link',{name:/Thread #2/}));expect(screen.getByRole('menuitem',{name:'Thread unavailable'})).toBeDisabled();expect(frames).toEqual([]);
  });
 });

@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 interface MenuState {
   open: () => boolean;
   setOpen: (open: boolean) => void;
-  trigger?: HTMLButtonElement;
+  trigger?: HTMLElement;
   content?: HTMLDivElement;
   first: "first" | "last";
   gutter: number;
@@ -34,17 +34,30 @@ function DropdownMenu(props: { children: JSX.Element; placement?: "bottom-end"; 
   };
   return <MenuContext value={menu}>{props.children}</MenuContext>;
 }
-function DropdownMenuTrigger(props: ComponentProps<"button">) {
+/** The trigger contract on its own, for an element that cannot be a `<button>`:
+ * an inline Thread chip is simultaneously the link to the Thread and the anchor
+ * its actions hang from, and a link inside a button is not markup. Spread the
+ * ref, the ARIA pair and the two handlers onto whatever element opens the menu;
+ * the panel still positions against it and Escape still returns focus to it. */
+function useDropdownTrigger() {
   const menu = menuContext();
-  return <button type="button" {...props} ref={(element) => { menu.trigger = element; }}
-    aria-haspopup="menu" aria-expanded={menu.open() ? "true" : "false"}
-    onClick={() => { menu.first = "first"; menu.setOpen(!menu.open()); }}
-    onKeyDown={(event) => {
+  return {
+    ref: (element: HTMLElement) => { menu.trigger = element; },
+    open: menu.open,
+    toggle: () => { menu.first = "first"; menu.setOpen(!menu.open()); },
+    onKeyDown: (event: KeyboardEvent) => {
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       event.preventDefault();
       menu.first = event.key === "ArrowUp" ? "last" : "first";
       menu.setOpen(true);
-    }} />;
+    },
+  };
+}
+function DropdownMenuTrigger(props: ComponentProps<"button">) {
+  const trigger = useDropdownTrigger();
+  return <button type="button" {...props} ref={trigger.ref}
+    aria-haspopup="menu" aria-expanded={trigger.open() ? "true" : "false"}
+    onClick={() => trigger.toggle()} onKeyDown={trigger.onKeyDown} />;
 }
 function DropdownMenuContent(props: ComponentProps<"div">) {
   const menu = menuContext();
@@ -139,4 +152,4 @@ function DropdownMenuSeparator(props: ComponentProps<"div">) {
   const others = omit(props, "class");
   return <div {...others} role="separator" class={cn("-mx-1 my-1 h-px bg-border", local.class)} data-slot="dropdown-menu-separator" />;
 }
-export { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator };
+export { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, useDropdownTrigger };

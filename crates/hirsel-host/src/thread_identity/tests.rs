@@ -26,7 +26,9 @@ fn top_level_space_states_its_own_name_and_omits_the_ancestor_line() {
         "## Where you are\n\
          You are the agent of Space #2 \"lash\" (top level).\n\
          Description: Everything about the lash runtime.\n\
-         Reach: self + subtree\n"
+         Reach: self + subtree\n\
+         Refer to Threads by `#id` alone; the interface renders the name. \
+         Never write the title next to the id.\n"
     );
 }
 
@@ -44,7 +46,9 @@ fn a_nested_task_lists_its_ancestors_root_first() {
          You are the agent of Task #9 \"Ship the identity block\".\n\
          Description: Name the Thread in the system prompt.\n\
          Ancestors: Space #1 \"Hirsel\" › Task #4 \"Prompt work\"\n\
-         Reach: self + subtree\n"
+         Reach: self + subtree\n\
+         Refer to Threads by `#id` alone; the interface renders the name. \
+         Never write the title next to the id.\n"
     );
 }
 
@@ -74,4 +78,16 @@ fn a_grant_widens_the_reach_line() {
             .block()
             .contains("Reach: self + subtree · +Space #7 \"Billing\"\n")
     );
+}
+
+#[test]
+fn the_block_tells_the_agent_to_cite_a_thread_by_id_alone() {
+    let block = identity(reference(2, ThreadKind::Space, "lash")).block();
+    // The block's own lines keep the full `Space #2 "lash"` form; the rule is
+    // about what the agent writes in its reply, where the chip draws the name.
+    assert!(block.contains("You are the agent of Space #2 \"lash\""));
+    assert!(block.ends_with(
+        "Refer to Threads by `#id` alone; the interface renders the name. \
+         Never write the title next to the id.\n"
+    ));
 }

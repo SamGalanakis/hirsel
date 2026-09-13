@@ -12,7 +12,7 @@ import {
 import { type Component, createEffect, createMemo, createSignal, For, Show, onSettled } from "solid-js";
 import { type JSX, Portal } from "@solidjs/web";
 import { focusThread, threadState } from "../threads/store";
-import { threadPath } from "../threads/tree";
+import { pathIn, threadIndex } from "../threads/tree";
 import { threadSection } from "../threads/model";
 import { closeThreadNavigation } from "../threads/navigation";
 import { ThreadAvatar } from "../threads/ThreadAvatar";
@@ -110,10 +110,12 @@ export const CommandPalette: Component<{
     const thread = threadState.threads.find(t => t.id === threadState.focusedId);
     if (thread) for (const action of threadActions(thread)) out.push({ id: `${action.id}-thread`, label: action.label, icon: <ThreadActionSymbol name={action.icon} />, run: action.run });
 
+    const index = threadIndex(threadState.threads);
     for (const destination of threadState.threads) {
       const section = threadSection(destination);
-      const description = [threadPath(threadState.threads, destination.id), destination.parent_thread_id === null && destination.pinned_at ? "Pinned" : null, section === "active" ? null : section, destination.attention === "needs_owner" ? "Needs you" : null, !destination.read ? "Unread" : null].filter(Boolean).join(" · ");
-      out.push({ id: `open-thread-${destination.id}`, label: destination.title, description, keywords: `thread ${threadPath(threadState.threads, destination.id)} ${section}`, icon: <ThreadAvatar thread={destination} />, run: () => { closeThreadNavigation(); focusThread(destination.id); focusComposer(); } });
+      const path = pathIn(index, destination.id);
+      const description = [path, destination.parent_thread_id === null && destination.pinned_at ? "Pinned" : null, section === "active" ? null : section, destination.attention === "needs_owner" ? "Needs you" : null, !destination.read ? "Unread" : null].filter(Boolean).join(" · ");
+      out.push({ id: `open-thread-${destination.id}`, label: destination.title, description, keywords: `thread ${path} ${section}`, icon: <ThreadAvatar thread={destination} />, run: () => { closeThreadNavigation(); focusThread(destination.id); focusComposer(); } });
     }
     return out;
   });

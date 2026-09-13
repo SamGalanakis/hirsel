@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeThread } from "./fixtures";
-import { threadAncestors, threadPath, threadTree } from "./tree";
+import type { Thread } from "./types";
+import { ancestorsIn, pathIn, threadAncestors, threadIndex, threadPath, threadTree } from "./tree";
 const now = Date.parse("2026-09-10T12:00:00Z");
 describe("human Thread hierarchy", () => {
   const threads = [makeThread(0, { title: "General" }), makeThread(4, { title: "Website", pinned_at: "2026-09-09T10:00:00Z" }), makeThread(7, { title: "Review", parent_thread_id: 4 }), makeThread(8, { title: "Review", parent_thread_id: 7 })];
@@ -28,6 +29,19 @@ describe("human Thread hierarchy", () => {
     const forest = [makeThread(1, { archived_at: "2026-09-01T00:00:00Z" }), makeThread(2, { parent_thread_id: 1 }), makeThread(3, { parent_thread_id: 2, settled_at: "2026-09-01T00:00:00Z" })];
     expect(threadTree(forest, "settled", now, new Set()).map(row => [row.thread.id, row.context])).toEqual([[1,true],[2,true],[3,false]]);
     expect(forest[0].archived_at).not.toBeNull();
+  });
+  it("builds one ancestry index per snapshot, not one per ancestry walk", () => {
+    // threadIndex is the only caller of the snapshot array's own `map`, so
+    // counting that call counts index builds across the whole tree pass.
+    const rows: Thread[] = [makeThread(1, { title: "Root" }), makeThread(2, { parent_thread_id: 1 }), makeThread(3, { parent_thread_id: 2 }), makeThread(4, { parent_thread_id: 1 })];
+    let builds = 0;
+    const map = rows.map.bind(rows);
+    Object.defineProperty(rows, "map", { value: (...args: Parameters<typeof map>) => { builds++; return map(...args); } });
+    expect(threadTree(rows, "active", now, new Set([1, 2])).map(row => row.thread.id)).toEqual([1, 2, 3, 4]);
+    expect(builds).toBe(1);
+    const index = threadIndex(rows);
+    expect(ancestorsIn(index, 3).map(thread => thread.id)).toEqual([1, 2]);
+    expect(pathIn(index, 3)).toBe(threadPath(rows, 3));
   });
   it("keeps missing-parent and cyclic snapshots reachable once with bounded ancestry", () => {
     const broken = [makeThread(1, { parent_thread_id: 90 }), makeThread(2, { parent_thread_id: 3 }), makeThread(3, { parent_thread_id: 2 })];

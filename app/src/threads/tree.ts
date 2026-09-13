@@ -2,24 +2,39 @@ import { instant } from "./conversation";
 import { threadSection, type ThreadSection } from "./model";
 import type { Thread } from "./types";
 
-/** Identity paths for humans. Agent reference resolution and access live in the host. */
-export function threadAncestors(threads: Thread[], id: number): Thread[] {
-  const byId = new Map(threads.map(thread => [thread.id, thread]));
+/** A snapshot's threads keyed by id. Ancestry is a walk over this index, so
+ * anything that resolves more than one thread builds it once and reuses it
+ * instead of rebuilding a Map per lookup. */
+export type ThreadIndex = ReadonlyMap<number, Thread>;
+export function threadIndex(threads: Thread[]): ThreadIndex {
+  return new Map(threads.map(thread => [thread.id, thread]));
+}
+export function ancestorsIn(index: ThreadIndex, id: number): Thread[] {
   const seen = new Set([id]);
   const parents: Thread[] = [];
-  let parent = byId.get(id)?.parent_thread_id;
+  let parent = index.get(id)?.parent_thread_id;
   while (parent != null && !seen.has(parent)) {
     seen.add(parent);
-    const thread = byId.get(parent);
+    const thread = index.get(parent);
     if (!thread) break;
     parents.unshift(thread);
     parent = thread.parent_thread_id;
   }
   return parents;
 }
-export function threadPath(threads: Thread[], id: number): string {
-  return [...threadAncestors(threads, id), ...threads.filter(thread => thread.id === id)]
+export function pathIn(index: ThreadIndex, id: number): string {
+  const self = index.get(id);
+  return [...ancestorsIn(index, id), ...(self ? [self] : [])]
     .map(thread => `${thread.title} #${thread.id}`).join(" / ");
+}
+/** Identity paths for humans. Agent reference resolution and access live in the
+ * host. These one-shot forms are for a single lookup (one row, one tooltip);
+ * callers resolving many threads from the same snapshot take an index instead. */
+export function threadAncestors(threads: Thread[], id: number): Thread[] {
+  return ancestorsIn(threadIndex(threads), id);
+}
+export function threadPath(threads: Thread[], id: number): string {
+  return pathIn(threadIndex(threads), id);
 }
 function rootOrder(a: Thread, b: Thread): number {
   const leftPin = a.parent_thread_id === null ? a.pinned_at : null;
@@ -36,12 +51,13 @@ export interface ThreadTreeRow { thread: Thread; depth: number; context: boolean
 export type ThreadExpansion = ReadonlySet<number> | ((thread: Thread, depth: number) => boolean);
 export function threadTree(threads: Thread[], section: ThreadSection, now: number, expanded: ThreadExpansion): ThreadTreeRow[] {
   const isExpanded = typeof expanded === "function" ? expanded : (thread: Thread) => expanded.has(thread.id);
+  const index = threadIndex(threads);
   const included = new Set<number>();
   const matches = new Set(threads.filter(thread => threadSection(thread, now) === section).map(thread => thread.id));
   const contextParents = new Set<number>();
   for (const id of matches) {
     included.add(id);
-    for (const parent of threadAncestors(threads, id)) {
+    for (const parent of ancestorsIn(index, id)) {
       included.add(parent.id);
       if (!matches.has(parent.id)) contextParents.add(parent.id);
     }

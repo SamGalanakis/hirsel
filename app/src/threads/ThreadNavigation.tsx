@@ -8,7 +8,7 @@ import type { Thread } from "./types";
 import { ThreadAvatar } from "./ThreadAvatar";
 import { ThreadError } from "./ThreadError";
 import { ThreadActions } from "./ThreadActions";
-import { threadAncestors, threadPath, threadTree } from "./tree";
+import { ancestorsIn, pathIn, threadAncestors, threadIndex, threadTree } from "./tree";
 import { openThreadCreate } from "./create";
 import { threadRowSummary } from "./status";
 import { state } from "../store/store";
@@ -113,7 +113,8 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
     const matches = threadState.threads.filter(thread => thread.title.toLocaleLowerCase().includes(needle));
     const keep = new Set(matches.map(thread => thread.id));
     const ancestors = new Set<number>();
-    for (const match of matches) for (const parent of threadAncestors(threadState.threads, match.id)) { keep.add(parent.id); ancestors.add(parent.id); }
+    const index = threadIndex(threadState.threads);
+    for (const match of matches) for (const parent of ancestorsIn(index, match.id)) { keep.add(parent.id); ancestors.add(parent.id); }
     return { keep, ancestors };
   });
   const selectedAncestry = createMemo(() => new Set(threadAncestors(threadState.threads, threadState.focusedId ?? -1).map(thread => thread.id)));
@@ -125,6 +126,8 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
     return depth <= 1;
   };
   const tree = createMemo(() => threadTree(threadState.threads, section(), now(), expandedFor));
+  /** One index for the whole list: each row's ancestry tooltip is a walk, not a rebuild. */
+  const rowIndex = createMemo(() => threadIndex(threadState.threads));
   const visibleRows = createMemo(() => tree().filter(row => !search() || search()!.keep.has(row.thread.id)).map(row => ({ ...row, key: `tree:${row.thread.id}` })));
   const sectionLabel = () => section() === "active" ? "Threads" : section() === "settled" ? "Done" : section();
   /** Pinned roots keep their own band; the rest sit under one quiet heading. */
@@ -206,7 +209,7 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
             return <>
               <li data-thread-entry={row().key} data-thread-row={thread().id} data-row-key={row().key} data-context={row().context ? "true" : undefined}
                 role="treeitem" tabindex="0" aria-level={row().depth + 1} aria-selected={threadState.focusedId === thread().id ? "true" : "false"} aria-expanded={row().hasChildren ? (row().expanded ? "true" : "false") : undefined}
-                aria-current={threadState.focusedId === thread().id ? "page" : undefined} aria-label={describe()} title={`${threadPath(threadState.threads, thread().id)}${summary().sentence ? ` — ${summary().sentence}` : ""}`}
+                aria-current={threadState.focusedId === thread().id ? "page" : undefined} aria-label={describe()} title={`${pathIn(rowIndex(), thread().id)}${summary().sentence ? ` — ${summary().sentence}` : ""}`}
                 class={`group relative flex ${ROW} shrink-0 cursor-default items-center gap-1.5 rounded-md pr-0.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${threadState.focusedId === thread().id ? "bg-muted text-foreground before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-primary" : "bg-background text-muted-foreground hover:bg-muted"}`}
                 style={{ "padding-left": `${Math.min(row().depth, 6) * 12}px` }}
                 onClick={event => { if (!(event.target as HTMLElement).closest("button")) props.onSelect(thread().id); }}

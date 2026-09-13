@@ -39,21 +39,18 @@ function writeExpansion(history: string | null, choices: Record<string, boolean>
   try { localStorage.setItem(expansionKey(history), JSON.stringify(choices)); }
   catch { /* The current session still expands when storage is unavailable. */ }
 }
-function Indicator(props: { thread: Thread; now: number }) {
+/** The row's state mark — running, waiting, queued or done — is the bullet of
+ * the state word it marks ("needs you", "running"), never a badge riding the
+ * avatar's corner: the tile is identity and stays clean at 20px. The compact
+ * column has no words, so there the mark sits in the button's own corner
+ * instead (`class`). */
+function Indicator(props: { thread: Thread; now: number; class?: string }) {
   const summary = () => threadRowSummary(props.thread, props.now, state.connection === "connected");
-  return <span aria-hidden="true" data-slot="thread-row-indicator" data-indicator={summary().indicator} class="pointer-events-none absolute -right-0.5 -bottom-0.5 inline-flex items-center justify-center rounded-full bg-inherit p-px empty:hidden">
+  return <span aria-hidden="true" data-slot="thread-row-indicator" data-indicator={summary().indicator} class={`pointer-events-none inline-flex shrink-0 items-center justify-center empty:hidden ${props.class ?? ""}`}>
     <Show when={summary().indicator === "running"}><span class="size-1.5 rounded-full bg-status-active motion-safe:animate-pulse" /></Show>
     <Show when={summary().indicator === "attention"}><span class="size-1.5 rounded-full bg-status-attention" /></Show>
     <Show when={summary().indicator === "queued"}><Clock class="size-2.5 text-muted-foreground" /></Show>
     <Show when={summary().indicator === "done"}><Check class="size-2.5 text-muted-foreground" /></Show>
-  </span>;
-}
-/** A Thread's own avatar, marked done without losing its identity: the check
- * rides the corner as an indicator, the way every other row state does. */
-function RowIcon(props: { thread: Thread; now: number }) {
-  return <span class="relative shrink-0 bg-inherit">
-    <ThreadAvatar thread={props.thread} dense />
-    <Indicator thread={props.thread} now={props.now} />
   </span>;
 }
 export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: ThreadNavigationIntent | null; onClose: () => void; onSelect: (id: number) => void; onExpand: () => void }) {
@@ -216,7 +213,8 @@ export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: Th
     <nav data-slot="thread-compact-column" aria-label="Spaces and Tasks" class="flex w-14 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-border py-2">
       <button class={control} aria-label="Open Spaces and Tasks" title="Open Spaces and Tasks" data-slot="thread-compact-expand" aria-controls="thread-navigation" onClick={props.onExpand}><PanelRight class="size-4" /></button>
       <For each={visibleRows()}>{row => <button type="button" data-compact-thread={row.thread.id} class={`relative flex size-9 shrink-0 items-center justify-center rounded-md pointer-coarse:size-11 ${threadState.focusedId === row.thread.id ? "bg-muted" : "hover:bg-muted"}`} aria-label={describe(row.thread, row.context)} aria-current={threadState.focusedId === row.thread.id ? "page" : undefined} title={pathIn(rowIndex(), row.thread.id)} onClick={() => props.onSelect(row.thread.id)}>
-        <RowIcon thread={row.thread} now={now()} />
+        <ThreadAvatar thread={row.thread} dense />
+        <Indicator thread={row.thread} now={now()} class="absolute right-0.5 top-0.5 rounded-full bg-inherit p-px" />
       </button>}</For>
     </nav>
   </Show>
@@ -250,7 +248,7 @@ export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: Th
         <p class={`${label} pt-1 text-status-attention`}>Needs you ({waiting().length})</p>
         <ul class="flex flex-col">
           <For each={waiting()}>{thread => <li><button type="button" data-attention-thread={thread.id} class={`flex ${ROW} w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring`} aria-label={describe(thread, false)} onClick={() => props.onSelect(thread.id)}>
-            <RowIcon thread={thread} now={now()} />
+            <ThreadAvatar thread={thread} dense />
             <span class="min-w-0 flex-1 truncate">{thread.title}</span>
             <span aria-hidden="true" class="shrink-0 whitespace-nowrap text-meta tabular-nums text-status-attention">{threadRowSummary(thread, now(), state.connection === "connected").age}</span>
           </button></li>}</For>
@@ -287,10 +285,10 @@ export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: Th
                     <ChevronRight class={`size-3 transition-transform ${row().expanded ? "rotate-90" : ""}`} />
                   </button>
                 </Show>
-                <RowIcon thread={thread()} now={now()} />
+                <ThreadAvatar thread={thread()} dense />
                 <span data-slot="thread-row-title" class={`min-w-0 flex-1 truncate ${done() ? "text-muted-foreground" : thread().read ? "text-foreground" : "font-medium text-foreground"}`}>{thread().title}</span>
                 <Show when={!thread().read}><span role="img" aria-label="Unread" title="Unread" class="size-1.5 shrink-0 rounded-full bg-primary" /></Show>
-                <Show when={summary().meta}>{meta => <span data-slot="thread-row-meta" aria-hidden="true" class={`shrink-0 whitespace-nowrap text-meta tabular-nums ${metaTone[summary().tone]}`}>{meta()}</span>}</Show>
+                <Show when={summary().meta}>{meta => <span data-slot="thread-row-meta" aria-hidden="true" class={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-meta tabular-nums ${metaTone[summary().tone]}`}><Indicator thread={thread()} now={now()} />{meta()}</span>}</Show>
                 {/* Out of the layout until it is wanted: at rest the row's state
                     token owns the right edge instead of sitting under an
                     invisible menu glyph. */}

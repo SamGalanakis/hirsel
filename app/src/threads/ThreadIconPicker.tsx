@@ -142,7 +142,7 @@ export function ThreadIconPicker() {
         <input ref={node => { fileInput = node; }} type="file" accept={THREAD_ICON_MIMES.join(",")} class="hidden" aria-label="Choose icon image" onChange={event => void upload(event.currentTarget.files?.[0])} />
         <div class="flex items-center gap-1.5">
           <input type="search" aria-label="Search symbols" placeholder="Search symbols" value={query()} onInput={event => setQuery(event.currentTarget.value)}
-            class="h-8 min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11" />
+            class="h-8 min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11" />
         </div>
         <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Tint">
           <For each={THREAD_TINTS}>{name => <button type="button" aria-label={name} title={name} aria-pressed={tint() === name ? "true" : "false"}

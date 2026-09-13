@@ -37,7 +37,7 @@ export function CopyButton(props: { text: string }) {
   return (
     <button
       type="button"
-      class="inline-flex items-center gap-1 rounded px-1 py-px text-meta text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+      class="inline-flex min-h-5 items-center gap-1 rounded px-1 text-meta text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
       aria-label={copied() ? "Copied" : "Copy code"}
       onClick={copy}
     >
@@ -50,9 +50,11 @@ export function CopyButton(props: { text: string }) {
 }
 
 /**
- * A fenced code block: language label, copy affordance, and highlighting that
- * lazy-loads. Plain mono text paints first and is replaced in place once the
- * highlighter chunk resolves, so nothing blocks the message.
+ * A fenced code block: one frame, with the language label and the copy
+ * affordance together on its top edge — a caption inside the thing it names,
+ * not a loose word floating above it — and highlighting that lazy-loads. Plain
+ * mono text paints first and is replaced in place once the highlighter chunk
+ * resolves, so nothing blocks the message.
  *
  * `wrap` trades the sideways scrollbar for wrapped lines — what a transcript
  * entry wants, where a horizontal scroll would hide most of the program.
@@ -77,8 +79,8 @@ export function CodeBlock(props: { code: string; lang?: string | null; wrap?: bo
   );
 
   return (
-    <div class="group relative flex flex-col gap-1">
-      <div class={["flex items-center gap-2 pr-0.5", props.bare ? "justify-end" : "justify-between"]}>
+    <div class={["group relative flex flex-col rounded-md", props.bare ? "bg-muted/30" : "border border-border/60"]}>
+      <div class="flex items-center justify-end gap-2 px-1.5 pt-1">
         <Show when={!props.bare}>
           <span class="font-mono text-meta text-muted-foreground">{props.lang ?? "text"}</span>
         </Show>
@@ -86,8 +88,7 @@ export function CodeBlock(props: { code: string; lang?: string | null; wrap?: bo
       </div>
       <pre
         class={[
-          "px-2.5 py-2 text-xs",
-          props.bare ? "rounded-md bg-muted/30" : "rounded-md border border-border/60",
+          "rounded-md px-2.5 pb-2 text-xs",
           // The same edge fade a wide table wears: the app's one "there is more
           // this way" cue, instead of a bare clipped edge.
           props.wrap ? "whitespace-pre-wrap wrap-break-word" : "scroll-fade-x overflow-x-auto",

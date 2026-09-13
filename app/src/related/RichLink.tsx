@@ -17,6 +17,8 @@ export async function copyLink(url: string): Promise<void> {
   catch { throw new Error("Couldn’t copy the link. Use your browser’s Copy link address action."); }
 }
 
+/* `size-[1.05em]` on the link icons is em-relative on purpose: an inline
+ * reference's icon is sized by the sentence it sits in, not by the ramp. */
 /** A Thread citation is ONE object: the Thread's own avatar and the Thread's own
  * name, on a quiet ground, at the size of the sentence citing it. The four-part
  * form this replaced — a loose avatar, an underlined `#1`, a chevron, and the
@@ -24,17 +26,22 @@ export async function copyLink(url: string): Promise<void> {
  * and said the name twice. The id is no longer drawn: it lives in the accessible
  * name and the tooltip, which is also where `· unavailable` goes rather than
  * mid-sentence. Clicking the chip opens its actions, "Open" first; a modified
- * click is left to the browser, so ⌘-click still opens the Thread in a tab. */
+ * click is left to the browser, so ⌘-click still opens the Thread in a tab.
+ *
+ * The chip has no leading, padding or baseline shift of its own: it is exactly
+ * as tall as the line it sits in, and the label — `self-baseline`, the one item
+ * that sets the flex container's baseline — keeps the sentence's own baseline,
+ * so the run trace's `text-xs` and prose's `text-sm` both hold their rhythm. */
 function ThreadChip(props: { href: string; name: string; text: string; thread?: ThreadAvatarIdentity; actionable: boolean }) {
   const trigger = useDropdownTrigger();
   return <a href={props.href} ref={trigger.ref} target="_blank" rel="noopener noreferrer nofollow"
     aria-label={props.name} title={props.name}
     aria-haspopup={props.actionable ? "menu" : undefined} aria-expanded={props.actionable ? (trigger.open() ? "true" : "false") : undefined}
-    class="inline-flex max-w-full items-center gap-[0.25em] rounded-[0.4em] bg-muted/40 px-[0.3em] py-[0.05em] align-[-0.06em] leading-[1.35] no-underline transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    class="inline-flex max-w-full items-center gap-[0.25em] rounded-[0.4em] bg-muted/40 px-[0.3em] no-underline transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     onClick={event => { if (!props.actionable || !plainPrimaryClick(event)) return; event.preventDefault(); trigger.toggle(); }}
     onKeyDown={props.actionable ? trigger.onKeyDown : undefined}>
     <Show when={props.thread} fallback={<LinkIcon kind="thread" class="size-[1.05em] shrink-0" />}>{thread => <ThreadAvatar thread={thread()} inline />}</Show>
-    <span data-slot="thread-chip-label" class="truncate">{props.text}</span>
+    <span data-slot="thread-chip-label" class="self-baseline truncate">{props.text}</span>
   </a>;
 }
 

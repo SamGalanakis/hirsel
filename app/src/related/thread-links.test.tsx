@@ -50,8 +50,8 @@ describe("Thread rich links",()=>{
  it("shows an image icon as a cover-cropped avatar in the inline chip",async()=>{
   flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"image",blob_id:"project-image"}})];}));
   mount();const avatar=screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')!;
-  // The inline mark rides the sentence: an em-relative box, not the 16px list avatar.
-  expect(avatar.className).toContain('size-[1.15em]');expect(avatar.className).toContain('overflow-hidden');
+  // The inline mark rides the sentence: an em-relative box, not the 20px row tile.
+  expect(avatar.className).toContain('size-[1.3em]');expect(avatar.className).toContain('overflow-hidden');
   const image=await waitFor(()=>{const node=avatar.querySelector('img');expect(node).not.toBeNull();return node!;});
   expect(image).toHaveAttribute('src','https://example.test/blob/project-image');expect(image.className).toContain('object-cover');expect(image).toHaveAttribute('alt','');
  });

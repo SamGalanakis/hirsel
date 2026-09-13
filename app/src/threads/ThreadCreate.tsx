@@ -11,7 +11,7 @@ import { closeThreadCreate, threadCreateIntent } from "./create";
 import { threadPath } from "./tree";
 import type { ThreadKind } from "./types";
 
-const chip = "inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:text-sm";
+const chip = "inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:text-sm";
 /** ONE labelled-field shape for this dialog: the label above the box at meta
  * size, the box itself at the reading size with a real border and a real focus
  * ring. */
@@ -124,10 +124,13 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       </Show>
       <Show when={error()}><p role="alert" class="px-1 text-meta text-destructive">{error()}</p></Show>
     </div>
-    <footer class="flex items-center gap-1.5 border-t border-border/60 px-3 py-2">
+    {/* The chips shrink and truncate before anything wraps, and the primary
+        button is `ml-auto` so that when a phone width does wrap it, it lands
+        whole on its own right-hugging line instead of clipping. */}
+    <footer class="flex flex-wrap items-center gap-1.5 border-t border-border/60 px-3 py-2">
       <Show when={canBeSpace()}>
         <DropdownMenu>
-          <DropdownMenuTrigger class={chip} aria-label={`Kind: ${resolvedKind() === "space" ? "Space" : "Task"}`} title="Spaces hold ongoing context. Tasks hold work you can mark done."><Layers class="size-3.5" />{resolvedKind() === "space" ? "Space" : "Task"}</DropdownMenuTrigger>
+          <DropdownMenuTrigger class={`${chip} shrink-0`} aria-label={`Kind: ${resolvedKind() === "space" ? "Space" : "Task"}`} title="Spaces hold ongoing context. Tasks hold work you can mark done."><Layers class="size-3.5" />{resolvedKind() === "space" ? "Space" : "Task"}</DropdownMenuTrigger>
           <DropdownMenuContent>
             <For each={["space", "task"] as const}>{option => <DropdownMenuItem role="menuitemradio" aria-checked={resolvedKind() === option ? "true" : "false"} class="min-h-11 capitalize" onSelect={() => setKind(option)}><Check class={resolvedKind() === option ? "size-4" : "size-4 invisible"} />{option}</DropdownMenuItem>}</For>
           </DropdownMenuContent>
@@ -142,8 +145,7 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       </DropdownMenu>
       <input ref={node => { fileInput = node; }} type="file" multiple class="hidden" onChange={event => { if (event.currentTarget.files) attachments.addFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
       <button type="button" class={icon} aria-label="Attach files" title="Attach files" onClick={() => fileInput?.click()}><Paperclip class="size-4" /></button>
-      <div class="flex-1" />
-      <button type="button" data-slot="create-submit" class="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11" title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
+      <button type="button" data-slot="create-submit" class="ml-auto inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11" title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
         disabled={!ready()} onClick={() => void submit()}>{resolvedKind() === "space" ? "Create Space" : "Create Task"}<ArrowRight class="size-4" /></button>
     </footer></Show>
   </dialog>;

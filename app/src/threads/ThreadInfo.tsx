@@ -18,7 +18,11 @@ import { openThreadIconPicker } from "./icon-picker";
 import { setThreadState, threadAction, threadState } from "./store";
 import type { Thread, ThreadExecutionTarget } from "./types";
 
-const quiet = "inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:text-sm";
+/** ONE edit affordance: a pencil at the end of the value it edits — title,
+ * description, where it runs — the height of the line it sits on, so an
+ * editable row is exactly as tall as a plain one. On coarse pointers it grows
+ * into the row's own padding rather than growing the row. */
+const pencil = "inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:-my-2 pointer-coarse:size-9";
 const action = "inline-flex h-8 items-center justify-center rounded-md px-3 text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11";
 const primary = `${action} bg-primary text-primary-foreground hover:bg-primary/90`;
 const field = "w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -55,9 +59,11 @@ function createEdit(thread: () => Thread, historyId: () => string) {
   return { editing, saving, setEditing, submit };
 }
 
+/** One row rhythm: a 20px line inside 6px of padding, the meta label centred
+ * on the value's first line, whether the value is a word, a link or a pencil. */
 function Fact(props: { label: string; children: JSX.Element }) {
-  return <div class="flex gap-3 py-1.5" data-slot="thread-fact" data-fact={props.label}>
-    <dt class="w-28 shrink-0 text-meta text-muted-foreground">{props.label}</dt>
+  return <div class="flex items-start gap-3 py-1.5" data-slot="thread-fact" data-fact={props.label}>
+    <dt class="w-28 shrink-0 py-0.5 text-meta text-muted-foreground">{props.label}</dt>
     <dd class="min-w-0 flex-1 text-sm">{props.children}</dd>
   </div>;
 }
@@ -76,9 +82,9 @@ function TitleRow(props: { thread: Thread; historyId: string }) {
   const [draft, setDraft] = createSignal(props.thread.title);
   const open = () => { setDraft(props.thread.title); edit.setEditing(true); };
   const save = () => { if (draft().trim() && draft().trim() !== props.thread.title) edit.submit("set_title", { title: draft().trim() }); else edit.setEditing(false); };
-  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-0.5">
+  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-1">
     <h2 class="min-w-0 truncate text-lg font-semibold">{props.thread.title}</h2>
-    <button type="button" class={`${quiet} shrink-0`} aria-label="Rename thread" title="Rename" onClick={open}><SquarePen class="size-3.5" /></button>
+    <button type="button" class={pencil} aria-label="Rename thread" title="Rename" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1.5">
       <input class={field} aria-label="Thread title" value={draft()} disabled={edit.saving()} autofocus
@@ -103,15 +109,17 @@ function DescriptionSection(props: { thread: Thread; historyId: string }) {
   const save = () => { if (draft() !== props.thread.description) edit.submit("set_description", { description: draft() }); else edit.setEditing(false); };
   return <section class="flex flex-col gap-1.5" data-slot="thread-description">
     <Show when={edit.editing()} fallback={<>
-      <div class="flex items-center gap-0.5">
-        {/* The same sentence-case meta label every other fact in this pane
-            wears; one label system, not an eyebrow over a table of plain ones. */}
-        <h3 class="text-meta text-muted-foreground">Description</h3>
-        <button type="button" class={`${quiet} shrink-0`} aria-label="Edit description" title="Edit description" onClick={open}><SquarePen class="size-3.5" /></button>
+      {/* The same sentence-case meta label every other fact in this pane
+          wears; one label system, not an eyebrow over a table of plain ones. */}
+      <h3 class="text-meta text-muted-foreground">Description</h3>
+      <div class="flex items-start gap-1">
+        <div class="min-w-0 flex-1">
+          <Show when={props.thread.description} fallback={<p class="text-sm text-muted-foreground">No description yet — add one</p>}>
+            <Markdown>{props.thread.description}</Markdown>
+          </Show>
+        </div>
+        <button type="button" class={pencil} aria-label="Edit description" title="Edit description" onClick={open}><SquarePen class="size-3.5" /></button>
       </div>
-      <Show when={props.thread.description} fallback={<p class="text-sm text-muted-foreground">No description yet — add one</p>}>
-        <Markdown>{props.thread.description}</Markdown>
-      </Show>
     </>}>
       <textarea class={`${field} min-h-28 resize-y`} aria-label="Thread description" value={draft()} disabled={edit.saving()} autofocus
         onInput={event => setDraft(event.currentTarget.value)}
@@ -204,9 +212,12 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
   };
   const open = () => { setDraft(initial()); edit.setEditing(true); };
   const summary = () => executionLabel(props.thread.execution);
-  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 flex-wrap items-center gap-0.5">
-    <span class={`min-w-0 ${summary().muted ? "text-muted-foreground" : ""}`} data-slot="thread-execution">{summary().text}</span>
-    <button type="button" class={`${quiet} shrink-0`} aria-label="Change where this Thread runs" title="Change where this Thread runs" onClick={open}><SquarePen class="size-3.5" /></button>
+  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-1">
+    {/* One line on every width: a long provider/model path truncates and
+        keeps its full text in the tooltip, rather than wrapping under the
+        label and pushing the pencil onto a line of its own. */}
+    <span class={`min-w-0 flex-1 truncate ${summary().muted ? "text-muted-foreground" : ""}`} data-slot="thread-execution" title={summary().text}>{summary().text}</span>
+    <button type="button" class={pencil} aria-label="Change where this Thread runs" title="Change where this Thread runs" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1" data-slot="thread-execution-editor">
       {/* The `dt` beside this editor already says "Runs on"; a second label

@@ -122,7 +122,7 @@ describe("Thread icons", () => {
       return node!;
     });
     expect(image).toHaveAttribute("alt", "");
-    expect(view.container.firstElementChild).toHaveClass("size-4", "rounded-md");
+    expect(view.container.firstElementChild).toHaveClass("size-5", "rounded-md");
     fireEvent.error(image);
     expect(view.container.firstElementChild).toHaveTextContent("G");
     expect(view.container.querySelector("img")).toBeNull();

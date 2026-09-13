@@ -9,14 +9,14 @@ const database = process.env.HIRSEL_CAT_ARTIFACT_DB;
 const screenshot = process.env.HIRSEL_SVG_ARTIFACT_SCREENSHOT ?? join(tmpdir(), "hirsel-svg-preview-cat.png");
 if (!database) throw new Error("Set HIRSEL_CAT_ARTIFACT_DB to the SQLite evidence database containing artifact 2.");
 
-const rows = JSON.parse(execFileSync("sqlite3", ["-readonly", "-json", database, "select id,title,mime,filename,content from artifacts where id=2;"], { encoding: "utf8" }));
+const rows = JSON.parse(execFileSync("sqlite3", ["-readonly", "-json", database, "select id,title,kind,json_extract(kind_data,'$.mime') as mime,content from artifacts where id=2;"], { encoding: "utf8" }));
 assert.equal(rows.length, 1);
 const stored = rows[0];
 assert.equal(stored.title, "Cat picture");
+assert.equal(stored.kind, "image");
 assert.equal(stored.mime, "image/svg+xml");
-assert.equal(stored.filename, "cat.svg");
 assert.match(stored.content, /<title id="title">A cozy orange cat<\/title>/);
-const artifact = { ...stored, kind: "file", thread_ids: [], created_at: "evidence", updated_at: "evidence" };
+const artifact = { ...stored, kind: "image", thread_ids: [], created_at: "evidence", updated_at: "evidence" };
 
 const browser = await launchBrowser();
 try {

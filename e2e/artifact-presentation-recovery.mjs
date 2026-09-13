@@ -18,11 +18,13 @@ function sqliteJson(sql) {
   return output ? JSON.parse(output) : [];
 }
 
-const [stored] = sqliteJson(`select id,title,json_extract(kind,'$') as kind,mime,filename,content from artifacts where id=${artifactId}`);
+const [stored] = sqliteJson(`select id,title,kind,json_extract(kind_data,'$.mime') as mime,json_extract(kind_data,'$.filename') as filename,content from artifacts where id=${artifactId}`);
 assert(stored, `artifact ${artifactId} is absent from the evidence database`);
-assert.equal(stored.kind, "file");
+assert.equal(stored.kind, "image");
 assert.equal(stored.mime, "image/svg+xml");
 assert.match(stored.content, /<svg\b/i);
+// An image carries no filename of its own; the download name derives from its kind.
+const storedFilename = stored.filename ?? `${stored.title}.svg`;
 
 const greeting = await hello(host, token);
 
@@ -89,8 +91,8 @@ async function exerciseModes(page, panel, label, downloadName) {
   const downloadPromise = page.waitForEvent("download");
   await panel.getByRole("button", { name: downloadName, exact: true }).click();
   const download = await downloadPromise;
-  assert.equal(download.suggestedFilename(), stored.filename);
-  const downloadPath = join(evidenceDir, `${label}-${stored.filename}`);
+  assert.equal(download.suggestedFilename(), storedFilename);
+  const downloadPath = join(evidenceDir, `${label}-${storedFilename}`);
   await download.saveAs(downloadPath);
   assert.deepEqual(await readFile(downloadPath), Buffer.from(stored.content), "download differs from stored artifact bytes");
   return { controls: await assertControlsFit(page, panel), downloadPath };
@@ -138,7 +140,7 @@ try {
     await page.screenshot({ path: join(evidenceDir, `${phone ? "phone" : "desktop"}-preview-reloaded.png`), fullPage: true });
     await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
 
-    const actions = card.locator("..").getByRole("button", { name: "Artifact actions", exact: true });
+    const actions = card.locator("..").getByRole("button", { name: "Open with", exact: true });
     if (!phone) {
       await actions.click();
       await page.getByRole("menuitem", { name: "Showcase in this thread", exact: true }).click();

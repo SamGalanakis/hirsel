@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ARTIFACT_CSP, ARTIFACT_SANDBOX, artifactDocument } from "./document";
 import { compileArtifact } from "./compiler";
 import type { Artifact } from "./types";
-const artifact: Artifact = { id: 1, title: "Counter", kind: "solid", mime: "text/jsx", content: "", thread_ids: [3], created_at: "2026-09-09", updated_at: "2026-09-09" };
+const artifact: Artifact = { id: 1, title: "Counter", kind: "solid", content: "", thread_ids: [3], created_at: "2026-09-09", updated_at: "2026-09-09" };
 describe("artifact isolation", () => {
   it("allows local scripts without granting origin, forms, popups or a network", () => {
     expect(ARTIFACT_SANDBOX).toBe("allow-scripts");
@@ -36,19 +36,18 @@ describe("artifact isolation", () => {
     expect(code).toContain("Runtime failed");
   });
   it("escapes file content, including HTML masquerading as a file", () => {
-    const document = artifactDocument({ ...artifact, kind: "file", content: '<script>alert("x")</script>' });
+    const document = artifactDocument({ ...artifact, kind: "file", mime: "text/plain", filename: null, content: '<script>alert("x")</script>' });
     expect(document).toContain("&lt;script&gt;");
     expect(document).not.toContain('<script>alert("x")</script>');
     expect(document).toContain("event.key === 'Escape'");
   });
-  it("renders explicit SVG files as encoded image data with safe accessible text", () => {
+  it("renders image artifacts as encoded image data with safe accessible text", () => {
     const content = '<svg xmlns="http://www.w3.org/2000/svg"><text>Cat & moon</text></svg>';
     const title = 'Cat <picture> "night"';
     const page = new DOMParser().parseFromString(artifactDocument({
       ...artifact,
-      kind: "file",
-      mime: " Image/SVG+XML ; charset=UTF-8 ",
-      filename: "cat.svg",
+      kind: "image",
+      mime: "image/svg+xml",
       title,
       content,
     }), "text/html");
@@ -59,7 +58,18 @@ describe("artifact isolation", () => {
     expect(page.querySelector("svg")).toBeNull();
     expect(page.querySelectorAll("script")).toHaveLength(1);
   });
-  it("does not infer SVG rendering from the filename", () => {
+  it("renders raster image bytes without treating them as text", () => {
+    const bytes = "iVBORw0KGgo=";
+    const page = new DOMParser().parseFromString(artifactDocument({
+      ...artifact,
+      kind: "image",
+      mime: "image/png",
+      content: bytes,
+    }), "text/html");
+    expect(page.querySelector<HTMLImageElement>("img.artifact-image")?.src).toBe(`data:image/png;base64,${bytes}`);
+    expect(page.querySelector("body > pre")).toBeNull();
+  });
+  it("keeps a file that only looks like markup preformatted", () => {
     const page = new DOMParser().parseFromString(artifactDocument({
       ...artifact,
       kind: "file",

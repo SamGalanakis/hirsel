@@ -53,9 +53,10 @@ async fn artifact_edit_remains_newer_than_a_future_showcase_touch() {
     let id = thread(&s, "owner", None).await;
     let draft = super::super::artifacts::ArtifactDraft {
         title: "Result".into(),
-        kind: hirsel_proto::ArtifactKind::File,
-        mime: "text/plain".into(),
-        filename: None,
+        kind: hirsel_proto::ArtifactKind::File {
+            mime: "text/plain".into(),
+            filename: None,
+        },
         content: "first".into(),
         expected_content: None,
     };
@@ -86,9 +87,10 @@ async fn artifact_edit_remains_newer_than_a_future_showcase_touch() {
 
     let edited = super::super::artifacts::ArtifactDraft {
         title: "Result".into(),
-        kind: hirsel_proto::ArtifactKind::File,
-        mime: "text/plain".into(),
-        filename: None,
+        kind: hirsel_proto::ArtifactKind::File {
+            mime: "text/plain".into(),
+            filename: None,
+        },
         content: "second".into(),
         expected_content: Some("first".into()),
     };
@@ -267,7 +269,7 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
     let history = s.history_id().await.unwrap();
     {
         let c = s.conn.lock().await;
-        c.execute("INSERT INTO artifacts(id,title,kind,mime,content,created_at,updated_at) VALUES(42,'Result','\"file\"','text/plain','bytes','2026-09-10T00:00:00Z','2026-09-10T00:00:00Z')", []).unwrap();
+        c.execute("INSERT INTO artifacts(id,title,kind,kind_data,content,created_at,updated_at) VALUES(42,'Result','file','{\"mime\":\"text/plain\",\"filename\":null}','bytes','2026-09-10T00:00:00Z','2026-09-10T00:00:00Z')", []).unwrap();
     }
     let revision = s.thread(id).await.unwrap().unwrap().revision;
     for (data, expected) in [
@@ -344,7 +346,7 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
             .showcased_artifact_id,
         Some(42)
     );
-    s.conn.lock().await.execute("INSERT INTO artifacts(id,title,kind,mime,content,created_at,updated_at) SELECT 43,'Replacement',kind,mime,content,created_at,updated_at FROM artifacts WHERE id=42", []).unwrap();
+    s.conn.lock().await.execute("INSERT INTO artifacts(id,title,kind,kind_data,content,created_at,updated_at) SELECT 43,'Replacement',kind,kind_data,content,created_at,updated_at FROM artifacts WHERE id=42", []).unwrap();
     let replacement = state
         .handle_addressed_thread_action(
             &state.storage.history_id().await.unwrap(),

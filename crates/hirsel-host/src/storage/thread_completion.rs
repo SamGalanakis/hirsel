@@ -89,9 +89,10 @@ impl Storage {
             output.filter(|(text, calls)| !text.trim().is_empty() || !calls.is_empty())
         {
             tx.execute("INSERT INTO chat_messages(author,body,ref,ts,thread_id,tool_calls) VALUES('agent',?1,?2,?3,?4,?5)",params![text,before.owner_message_id,chrono::Utc::now().to_rfc3339(),before.thread_id,serde_json::to_string(&calls)?])?;
-            let mid = tx.last_insert_rowid() as u64;
-            tx.execute("INSERT INTO message_artifacts(message_id,artifact_id) SELECT ?1,artifact_id FROM turn_output_artifacts WHERE turn_id=?2",params![mid,id])?;
-            Some(mid)
+            // Publication already committed the one durable card for each
+            // artifact this turn produced. Copying the turn's outputs onto the
+            // terminal message too would show every result twice.
+            Some(tx.last_insert_rowid() as u64)
         } else {
             before.agent_message_id
         };

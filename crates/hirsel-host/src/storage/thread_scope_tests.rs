@@ -249,9 +249,10 @@ async fn scoped_artifact_receipts_hide_peer_backlinks_and_cancelled_writes_have_
     let input = json!({"create":"shared"});
     let draft = ArtifactDraft {
         title: "Shared".into(),
-        kind: hirsel_proto::ArtifactKind::File,
-        mime: "text/plain".into(),
-        filename: None,
+        kind: hirsel_proto::ArtifactKind::File {
+            mime: "text/plain".into(),
+            filename: None,
+        },
         content: "original".into(),
         expected_content: None,
     };
@@ -517,9 +518,10 @@ async fn history_reset_reused_ids_reject_old_callers_receipts_and_revocation() {
                 None,
                 Some(ArtifactDraft {
                     title: "must not exist".into(),
-                    kind: hirsel_proto::ArtifactKind::File,
-                    mime: "text/plain".into(),
-                    filename: None,
+                    kind: hirsel_proto::ArtifactKind::File {
+                        mime: "text/plain".into(),
+                        filename: None,
+                    },
                     content: "old".into(),
                     expected_content: None,
                 }),
@@ -732,7 +734,7 @@ async fn human_artifact_reference_is_atomic_explicit_and_scoped_without_peer_acc
     {
         let db = s.conn.lock().await;
         let now = chrono::Utc::now().to_rfc3339();
-        db.execute("INSERT INTO artifacts(id,title,kind,mime,filename,content,created_at,updated_at) VALUES(44,'Shared result','\"file\"','text/plain',NULL,'original',?1,?1)",[now]).unwrap();
+        db.execute("INSERT INTO artifacts(id,title,kind,kind_data,content,created_at,updated_at) VALUES(44,'Shared result','file','{\"mime\":\"text/plain\",\"filename\":null}','original',?1,?1)",[now]).unwrap();
     }
     s.publish_artifact_human("publish-b", &json!({}), b, Some(44), None)
         .await
@@ -779,9 +781,10 @@ async fn human_artifact_reference_is_atomic_explicit_and_scoped_without_peer_acc
         Some(44),
         Some(ArtifactDraft {
             title: "Shared result".into(),
-            kind: hirsel_proto::ArtifactKind::File,
-            mime: "text/plain".into(),
-            filename: None,
+            kind: hirsel_proto::ArtifactKind::File {
+                mime: "text/plain".into(),
+                filename: None,
+            },
             content: "simpler".into(),
             expected_content: Some("original".into()),
         }),
@@ -898,7 +901,7 @@ async fn direct_owner_native_input_policy_is_atomic_and_preserves_text_followups
         .lock()
         .await
         .execute(
-            "INSERT INTO artifacts(id,title,kind,mime,filename,content,created_at,updated_at) VALUES(44,'Native input','\"file\"','text/plain',NULL,'content',?1,?1)",
+            "INSERT INTO artifacts(id,title,kind,kind_data,content,created_at,updated_at) VALUES(44,'Native input','file','{\"mime\":\"text/plain\",\"filename\":null}','content',?1,?1)",
             [&now],
         )
         .unwrap();
@@ -1041,9 +1044,10 @@ async fn report_receipt_uses_activity_payload_and_preserves_exact_artifact_order
     for title in ["First", "Second"] {
         let draft = ArtifactDraft {
             title: title.into(),
-            kind: hirsel_proto::ArtifactKind::File,
-            mime: "text/plain".into(),
-            filename: None,
+            kind: hirsel_proto::ArtifactKind::File {
+                mime: "text/plain".into(),
+                filename: None,
+            },
             content: title.into(),
             expected_content: None,
         };

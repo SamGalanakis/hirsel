@@ -2,11 +2,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/te
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
 import { ArtifactCard, ArtifactList, ArtifactSurface } from "./ArtifactSurface";
-import { attachArtifactTransport, closeArtifact, disconnectArtifacts, openArtifact, previewedArtifactId, setArtifactState, handleArtifactMessage, listArtifacts } from "./store";
+import { attachArtifactTransport, closeArtifact, disconnectArtifacts, openArtifact, previewMode, previewedArtifactId, setArtifactState, handleArtifactMessage, listArtifacts } from "./store";
+import { RelatedContext } from "../related/context";
+import { setHistoryId } from "../lib/history";
 import { setThreadState, threadState } from "../threads/store";
 import { makeThread } from "../threads/fixtures";
-import type { ArtifactSummary } from "./types";
-const artifact: ArtifactSummary = { id: 4, title: "Architecture", kind: "solid", mime: "text/jsx", thread_ids: [2, 5], created_at: "a", updated_at: "b" };
+import type { ArtifactKind, ArtifactSummary } from "./types";
+const artifact: ArtifactSummary = { id: 4, title: "Architecture", kind: "solid", thread_ids: [2, 5], created_at: "a", updated_at: "b" };
 afterEach(() => { cleanup(); disconnectArtifacts(); closeArtifact(); });
 describe("artifact navigation", () => {
   it("opens a referenced artifact without changing the addressed Thread", () => {
@@ -68,11 +70,10 @@ describe("artifact navigation", () => {
   });
 });
 describe("artifact presentation", () => {
-  const opened = (id: number, patch: Partial<ArtifactSummary & { content: string }> = {}) => ({
-    ...artifact, id, kind: "html" as const, mime: "text/html", content: "<p>Rendered</p>", ...patch,
-  });
-  it("defaults to Rendered, keeps Source through same-artifact refresh, and resets for a different artifact or reopened viewer", async () => {
-    setArtifactState({ preview: { status: "ready", id: 4, artifact: opened(4) } });
+  const opened = (id: number, content: string, kind: ArtifactKind = { kind: "html" }) =>
+    ({ ...artifact, ...kind, id, content });
+  it("defaults to Rendered, keeps Source through same-artifact refresh, and resets when another artifact is opened", async () => {
+    setArtifactState({ preview: { status: "ready", id: 4, artifact: opened(4, "<p>Rendered</p>") } });
     const view = render(() => <ArtifactSurface />);
     let panel = view.getByRole("complementary", { name: "Artifact preview" });
     const source = within(panel).getByRole("button", { name: "Source" });
@@ -83,14 +84,15 @@ describe("artifact presentation", () => {
     source.focus(); fireEvent.click(source);
     expect(document.activeElement).toBe(source);
     expect(panel.querySelector('[data-slot="artifact-source"]')).toHaveTextContent("<p>Rendered</p>");
-    flush(() => setArtifactState({ preview: { status: "ready", id: 4, artifact: opened(4, { content: "  <em>Updated</em>\n" }) } }));
+    flush(() => setArtifactState({ preview: { status: "ready", id: 4, artifact: opened(4, "  <em>Updated</em>\n") } }));
     expect(source).toHaveAttribute("aria-pressed", "true");
     expect(panel.querySelector('[data-slot="artifact-source"]')?.textContent).toBe("  <em>Updated</em>\n");
 
-    flush(() => setArtifactState({ preview: { status: "ready", id: 5, artifact: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) } }));
+    // Choosing an opener for another artifact carries its own reading.
+    flush(() => { openArtifact(5, "rendered"); setArtifactState({ preview: { status: "ready", id: 5, artifact: opened(5, "# Notes", { kind: "markdown" }) } }); });
     expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
     flush(closeArtifact);
-    flush(() => setArtifactState({ preview: { status: "ready", id: 5, artifact: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) } }));
+    flush(() => { openArtifact(5, "rendered"); setArtifactState({ preview: { status: "ready", id: 5, artifact: opened(5, "# Notes", { kind: "markdown" }) } }); });
     panel = view.getByRole("complementary", { name: "Artifact preview" });
     expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
   });
@@ -107,5 +109,40 @@ describe("artifact presentation", () => {
     attachArtifactTransport(send);
     fireEvent.click(retry); flush();
     expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "open_artifact", artifact_id: 4 }));
+  });
+});
+
+describe("open with", () => {
+  it("offers the openers its kind supports and opens the chosen reading", async () => {
+    setHistoryId("history-a");
+    setThreadState(draft => Object.assign(draft, { ready: true, threads: [makeThread(1)], focusedId: 1 }));
+    setArtifactState({ summaries: [{ ...artifact, id: 4, thread_ids: [1] }] });
+    const send = vi.fn(); attachArtifactTransport(send);
+    const view = render(() => <RelatedContext value={{ historyId: "history-a", threadId: 1 }}><ArtifactCard id={4} /></RelatedContext>);
+    fireEvent.click(view.getByRole("button", { name: "Open with" }));
+    const items = (await screen.findAllByRole("menuitem")).map(item => item.textContent);
+    expect(items).toEqual(["Preview", "Source", "Download", "Showcase in this thread"]);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Source" })); flush();
+    expect(previewMode()).toBe("source");
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "open_artifact", artifact_id: 4 }));
+  });
+  it("downloads a listed result without opening the preview", async () => {
+    setArtifactState({ summaries: [{ ...artifact, id: 4, kind: "file", mime: "text/plain", filename: "notes.txt", thread_ids: [1] }] });
+    const send = vi.fn(); attachArtifactTransport(send);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const url = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:artifact");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const view = render(() => <RelatedContext value={{ historyId: "history-a", threadId: 1 }}><ArtifactCard id={4} /></RelatedContext>);
+    fireEvent.click(view.getByRole("button", { name: "Open with" }));
+    const items = (await screen.findAllByRole("menuitem")).map(item => item.textContent);
+    // A file is its own source, so no duplicate reading is offered.
+    expect(items).toEqual(["Preview", "Download", "Showcase in this thread"]);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Download" })); flush();
+    const frame = send.mock.calls.at(-1)![0];
+    handleArtifactMessage({ type: "artifact_opened", client_id: frame.client_id, artifact: { ...artifact, id: 4, kind: "file", mime: "text/plain", filename: "notes.txt", content: "notes" } }); flush();
+    expect(click).toHaveBeenCalled();
+    expect(url).toHaveBeenCalled();
+    expect(previewedArtifactId()).toBeNull();
+    click.mockRestore(); vi.restoreAllMocks();
   });
 });

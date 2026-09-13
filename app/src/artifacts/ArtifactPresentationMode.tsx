@@ -1,17 +1,6 @@
 import { For } from "solid-js";
-import { isMarkdownArtifact } from "./markdown";
-import type { Artifact } from "./types";
 
 export type ArtifactPresentationMode = "rendered" | "source";
-
-/** Formats with a meaningful rendered representation and an inspectable source. */
-export function hasArtifactPresentationModes(artifact: Artifact): boolean {
-  const mime = artifact.mime.split(";", 1)[0].trim().toLowerCase();
-  return artifact.kind === "solid"
-    || artifact.kind === "html"
-    || isMarkdownArtifact(artifact)
-    || mime === "image/svg+xml";
-}
 
 const modes = ["rendered", "source"] as const;
 

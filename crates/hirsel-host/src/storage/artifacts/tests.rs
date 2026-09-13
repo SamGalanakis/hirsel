@@ -3,8 +3,6 @@ fn draft(content: &str) -> ArtifactDraft {
     ArtifactDraft {
         title: "Architecture".into(),
         kind: ArtifactKind::Html,
-        mime: "text/html".into(),
-        filename: None,
         content: content.into(),
         expected_content: None,
     }
@@ -151,7 +149,10 @@ async fn invalid_content_thread_or_stale_edit_leaves_no_partial_artifact_or_card
         .is_err()
     );
     let mut invalid = draft("safe");
-    invalid.filename = Some("../secret".into());
+    invalid.kind = ArtifactKind::File {
+        mime: "text/plain".into(),
+        filename: Some("../secret".into()),
+    };
     assert!(
         s.publish_artifact_human("path", &input, caller.thread_id, None, Some(invalid))
             .await
@@ -193,4 +194,106 @@ async fn invalid_content_thread_or_stale_edit_leaves_no_partial_artifact_or_card
     );
     s.reset().await.unwrap();
     assert!(s.artifacts(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn every_kind_round_trips_and_the_store_rejects_an_unknown_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let caller = s.test_running_caller().await;
+    let kinds = [
+        ArtifactKind::Solid,
+        ArtifactKind::Html,
+        ArtifactKind::Markdown,
+        ArtifactKind::Image {
+            mime: "image/svg+xml".into(),
+        },
+        ArtifactKind::File {
+            mime: "text/plain".into(),
+            filename: Some("notes.txt".into()),
+        },
+        ArtifactKind::File {
+            mime: "text/plain".into(),
+            filename: None,
+        },
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let draft = ArtifactDraft {
+            title: format!("Result {index}"),
+            kind: kind.clone(),
+            content: "body".into(),
+            expected_content: None,
+        };
+        let (published, _) = s
+            .publish_artifact_human(
+                &format!("create-{index}"),
+                &serde_json::json!({ "index": index }),
+                caller.thread_id,
+                None,
+                Some(draft),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.summary.kind, kind);
+        let reread = s.artifact(published.summary.id).await.unwrap();
+        assert_eq!(reread.summary.kind, kind);
+        let stored: (String, String) = s
+            .conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT kind,kind_data FROM artifacts WHERE id=?1",
+                [published.summary.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, kind.tag());
+        assert!(!stored.1.contains("\"kind\""));
+    }
+    let refused = s.conn.lock().await.execute(
+        "INSERT INTO artifacts(title,kind,kind_data,content,created_at,updated_at) VALUES('Bad','scroll','{}','body','2026-09-10T00:00:00Z','2026-09-10T00:00:00Z')",
+        [],
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("CHECK constraint failed"),
+    );
+}
+
+#[tokio::test]
+async fn one_published_artifact_yields_exactly_one_card_in_the_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let caller = s.test_running_caller().await;
+    let (published, _) = s
+        .publish_artifact(
+            "turn-create",
+            &serde_json::json!({"content":"body"}),
+            &caller,
+            None,
+            Some(draft("body")),
+        )
+        .await
+        .unwrap();
+    let history = s.history_id().await.unwrap();
+    s.complete_thread_turn(
+        &history,
+        caller.turn_id,
+        hirsel_proto::ThreadTurnState::Completed,
+        Some(("Published the result.".into(), vec![])),
+    )
+    .await
+    .unwrap();
+    let messages = s
+        .thread_detail(caller.thread_id, None, 100)
+        .await
+        .unwrap()
+        .messages;
+    let cards = messages
+        .iter()
+        .filter(|message| message.artifact_ids.contains(&published.summary.id))
+        .count();
+    assert_eq!(cards, 1, "{messages:#?}");
 }

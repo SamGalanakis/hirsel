@@ -2,7 +2,7 @@
 use super::Storage;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 pub(super) fn state_list(terminal: Option<bool>) -> String {
     hirsel_proto::ThreadTurnState::ALL
@@ -21,10 +21,21 @@ pub(super) fn state_list(terminal: Option<bool>) -> String {
         .join(",")
 }
 
+/// The stored artifact discriminator, quoted for the artifacts CHECK. The list
+/// comes from the enum itself so the store and the protocol cannot drift.
+fn artifact_kind_list() -> String {
+    hirsel_proto::ArtifactKind::TAGS
+        .into_iter()
+        .map(|tag| format!("'{tag}'"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn current_schema() -> String {
     include_str!("current.sql")
         .replace("$TURN_STATES", &state_list(None))
         .replace("$TERMINAL_TURN_STATES", &state_list(Some(true)))
+        .replace("$ARTIFACT_KINDS", &artifact_kind_list())
 }
 
 /// Match the complete current layout before touching an existing store.

@@ -104,7 +104,7 @@ async fn lash_parent_delegates_real_cli_and_receives_durable_report_with_human_r
     {
         let c = rusqlite::Connection::open(data.join("hirsel.sqlite")).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
-        c.execute("INSERT INTO artifacts(id,title,kind,mime,filename,content,created_at,updated_at) VALUES(44,'Shared notes','\"file\"','text/plain','notes.txt','Original notes',?1,?1)",[now]).unwrap();
+        c.execute("INSERT INTO artifacts(id,title,kind,kind_data,content,created_at,updated_at) VALUES(44,'Shared notes','file','{\"mime\":\"text/plain\",\"filename\":\"notes.txt\"}','Original notes',?1,?1)",[now]).unwrap();
         c.execute(
             "INSERT INTO message_artifacts(message_id,artifact_id) VALUES(?1,44)",
             [message.id],

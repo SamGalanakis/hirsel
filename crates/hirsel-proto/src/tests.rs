@@ -864,9 +864,23 @@ fn a_boot_notice_is_absent_from_the_wire_until_there_is_one() {
 
 #[test]
 fn artifact_content_frames_and_optional_message_references_round_trip() {
-    let value = json!({"type":"artifact_opened","client_id":"open-1","artifact":{"id":7,"title":"Result","kind":"solid","mime":"text/jsx","filename":null,"created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[0,2],"content":"export default function App(){return <p>Hello</p>}"}});
+    let value = json!({"type":"artifact_opened","client_id":"open-1","artifact":{"id":7,"title":"Result","kind":"solid","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[0,2],"content":"export default function App(){return <p>Hello</p>}"}});
     let frame: HostToClient = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(frame).unwrap(), value);
+    // Variant data travels flat beside its tag, so one field decides the mode.
+    let file = json!({"type":"artifact_opened","client_id":"open-2","artifact":{"id":8,"title":"Notes","kind":"file","mime":"text/plain","filename":"notes.txt","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[1],"content":"plain"}});
+    let frame: HostToClient = serde_json::from_value(file.clone()).unwrap();
+    assert_eq!(serde_json::to_value(frame).unwrap(), file);
+    let image = json!({"id":9,"title":"Cat","kind":"image","mime":"image/svg+xml","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]});
+    let summary: ArtifactSummary = serde_json::from_value(image.clone()).unwrap();
+    assert_eq!(
+        summary.kind,
+        ArtifactKind::Image {
+            mime: "image/svg+xml".into()
+        }
+    );
+    assert_eq!(serde_json::to_value(summary).unwrap(), image);
+    assert!(serde_json::from_value::<ArtifactSummary>(json!({"id":9,"title":"Cat","kind":"scroll","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]})).is_err());
     let list: ClientToHost =
         serde_json::from_value(json!({"type":"list_artifacts","client_id":"all"})).unwrap();
     assert!(matches!(
@@ -997,4 +1011,71 @@ fn fork_model_config_is_flattened_with_unchanged_wire_fields() {
     let fork: ForkAgentConfig = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(fork.model.current.id, "m");
     assert_eq!(serde_json::to_value(fork).unwrap(), wire);
+}
+
+#[test]
+fn publish_inputs_map_onto_one_render_discriminator() {
+    use ArtifactKind::*;
+    let infer = |kind: &str, mime: Option<&str>, filename: Option<&str>| {
+        ArtifactKind::from_publish_inputs(kind, mime, filename)
+    };
+    assert_eq!(infer("solid", Some("text/jsx"), None).unwrap(), Solid);
+    assert_eq!(infer("html", None, None).unwrap(), Html);
+    assert_eq!(infer("markdown", None, None).unwrap(), Markdown);
+    // The old disagreeing inputs now resolve once, here, not per reader.
+    assert_eq!(
+        infer(
+            "file",
+            Some("text/markdown; charset=utf-8"),
+            Some("plan.txt")
+        )
+        .unwrap(),
+        Markdown
+    );
+    assert_eq!(infer("file", None, Some("PLAN.MD")).unwrap(), Markdown);
+    assert_eq!(
+        infer("file", Some("text/plain"), Some("cat.svg")).unwrap(),
+        File {
+            mime: "text/plain".into(),
+            filename: Some("cat.svg".into())
+        }
+    );
+    assert_eq!(
+        infer("file", Some("Image/SVG+XML"), Some("cat.svg")).unwrap(),
+        Image {
+            mime: "image/svg+xml".into()
+        }
+    );
+    assert_eq!(
+        infer("image", None, Some("icon.png")).unwrap(),
+        Image {
+            mime: "image/png".into()
+        }
+    );
+    assert_eq!(
+        infer("file", None, None).unwrap(),
+        File {
+            mime: "text/plain".into(),
+            filename: None
+        }
+    );
+    assert!(infer("image", None, Some("icon.bin")).is_err());
+    assert!(infer("scroll", None, None).is_err());
+    assert_eq!(Solid.download_mime(), "text/jsx");
+    assert_eq!(Markdown.download_mime(), "text/markdown");
+    assert_eq!(
+        Image {
+            mime: "image/png".into()
+        }
+        .download_mime(),
+        "image/png"
+    );
+    for tag in ArtifactKind::TAGS {
+        assert_eq!(
+            ArtifactKind::from_publish_inputs(tag, Some("image/png"), None)
+                .unwrap()
+                .tag(),
+            if tag == "file" { "image" } else { tag }
+        );
+    }
 }

@@ -1,13 +1,9 @@
 import type { Nodes } from "mdast";
 import { parseMarkdown, mdastToString } from "../components/markdown/parse";
 import { safeHref } from "../components/markdown/url";
-import type { Artifact } from "./types";
 
 export function escapeHtml(source: string): string {
   return source.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-}
-export function isMarkdownArtifact(artifact: Artifact): boolean {
-  return artifact.kind === "file" && (artifact.mime.split(";", 1)[0].trim().toLowerCase() === "text/markdown" || /\.(?:md|markdown)$/i.test(artifact.filename ?? ""));
 }
 /** Same CommonMark/GFM parser and URL policy as conversation Markdown. Only
  * explicit safe tags become markup; raw HTML is literal, and references have

@@ -1,6 +1,8 @@
 import { attachShowcaseTransport, disconnectShowcase, handleShowcaseMessage, resetShowcase } from "./showcase-store";
 import { resetDraftArtifacts } from "./draft-context";
-import { createStore } from "solid-js";
+import { downloadArtifact } from "./download";
+import type { ArtifactPresentationMode } from "./ArtifactPresentationMode";
+import { createSignal, createStore } from "solid-js";
 import type { ServerMessage } from "../protocol";
 import type { Artifact, ArtifactClientMessage, ArtifactSummary } from "./types";
 
@@ -51,7 +53,15 @@ export function openedArtifact(): Artifact | null {
 let latestOpenRequest: string | null = null;
 let latestListRequest: string | null = null;
 let transport: ((frame: ArtifactClientMessage) => void) | null = null;
-const requests = new Map<string, { artifactId?: number; timer: ReturnType<typeof setTimeout> }>();
+/** A request is either the inventory, the preview, or a direct download; the
+ * record says which so a failure lands on the surface that asked for it. */
+interface ArtifactRequest { artifactId?: number; download?: boolean; timer: ReturnType<typeof setTimeout> }
+const requests = new Map<string, ArtifactRequest>();
+/** Which reading of the opened artifact the preview shows. A view state: the
+ * artifact itself is never rewritten to change how it is displayed. */
+export const [previewMode, setPreviewMode] = createSignal<ArtifactPresentationMode>("rendered");
+/** A failure from an opener that has no surface of its own yet. */
+export const [openerError, setOpenerError] = createSignal<{ id: number; message: string } | null>(null);
 function finish(id: string) {
   const request = requests.get(id);
   if (request) clearTimeout(request.timer);
@@ -66,15 +76,17 @@ export function disconnectArtifacts() {
   if (preview.status === "loading") setArtifactState({ preview: { status: "error", id: preview.id, message: "Reconnect to load this artifact." } });
   setArtifactState({ inventory: { status: "error", message: "Reconnect to load artifacts." } });
 }
-function requestFailed(artifactId: number | undefined, detail: string) {
+function requestFailed(request: Pick<ArtifactRequest, "artifactId" | "download">, detail: string) {
+  const { artifactId, download } = request;
   if (artifactId === undefined) setArtifactState({ inventory: { status: "error", message: detail } });
+  else if (download) setOpenerError({ id: artifactId, message: detail });
   else if (previewedArtifactId() === artifactId) setArtifactState({ preview: { status: "error", id: artifactId, message: detail } });
 }
-function send(frame: ArtifactClientMessage, artifactId?: number) {
-  if (!transport) { requestFailed(artifactId, "Reconnect to load artifacts."); return; }
-  requests.set(frame.client_id, { artifactId, timer: setTimeout(() => {
+function send(frame: ArtifactClientMessage, pending: Pick<ArtifactRequest, "artifactId" | "download"> = {}) {
+  if (!transport) { requestFailed(pending, "Reconnect to load artifacts."); return; }
+  requests.set(frame.client_id, { ...pending, timer: setTimeout(() => {
     finish(frame.client_id);
-    requestFailed(artifactId, "Artifact request timed out. Try again.");
+    requestFailed(pending, "Artifact request timed out. Try again.");
   }, 20_000) });
   transport(frame);
 }
@@ -84,11 +96,19 @@ export function listArtifacts() {
   setArtifactState({ inventory: { status: "loading" } });
   send({ type: "list_artifacts", client_id: latestListRequest });
 }
-export function openArtifact(id: number) {
+/** Opening with an explicit mode is how a chosen opener reaches the preview;
+ * a refresh omits it and keeps whatever reading the Owner selected. */
+export function openArtifact(id: number, mode?: ArtifactPresentationMode) {
+  if (mode) setPreviewMode(mode);
   setArtifactState({ preview: { status: "loading", id } });
   if (latestOpenRequest) finish(latestOpenRequest);
   latestOpenRequest = crypto.randomUUID();
-  send({ type: "open_artifact", client_id: latestOpenRequest, artifact_id: id }, id);
+  send({ type: "open_artifact", client_id: latestOpenRequest, artifact_id: id }, { artifactId: id });
+}
+/** The Download opener from a list row, where only the summary is loaded. */
+export function downloadArtifactById(id: number) {
+  setOpenerError(null);
+  send({ type: "open_artifact", client_id: crypto.randomUUID(), artifact_id: id }, { artifactId: id, download: true });
 }
 export function closeArtifact() { setArtifactState({ preview: { status: "idle" } }); }
 function mergeSummary(rows: ArtifactSummary[], artifact: ArtifactSummary) {
@@ -137,8 +157,10 @@ export function handleArtifactMessage(message: ServerMessage) {
       break;
     case "artifact_opened": {
       const pending = finish(message.client_id);
-      if (pending?.artifactId !== message.artifact.id || previewedArtifactId() !== message.artifact.id) break;
+      if (pending?.artifactId !== message.artifact.id) break;
       upsert(message.artifact);
+      if (pending.download) { downloadArtifact(message.artifact); break; }
+      if (previewedArtifactId() !== message.artifact.id) break;
       setArtifactState({ preview: { status: "ready", id: message.artifact.id, artifact: message.artifact } });
       break;
     }
@@ -147,7 +169,7 @@ export function handleArtifactMessage(message: ServerMessage) {
       if (previewedArtifactId() === message.artifact.id) openArtifact(message.artifact.id);
       break;
     case "error":
-      if (message.client_id) { const request = finish(message.client_id); if (request) requestFailed(request.artifactId, message.detail); }
+      if (message.client_id) { const request = finish(message.client_id); if (request) requestFailed(request, message.detail); }
       break;
   }
   });
@@ -156,5 +178,6 @@ export function handleArtifactMessage(message: ServerMessage) {
 export function resetArtifacts(): void {
   resetDraftArtifacts(); resetShowcase();
   disconnectArtifacts(); latestOpenRequest = null; latestListRequest = null;
+  setPreviewMode("rendered"); setOpenerError(null);
   setArtifactState({ summaries: [], preview: { status: "idle" }, inventory: { status: "idle" } });
 }

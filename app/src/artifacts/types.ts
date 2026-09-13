@@ -1,17 +1,24 @@
 /** UI-only signal from an opaque preview; never a host command. */
 export const ARTIFACT_DISMISS_MESSAGE = "hirsel:artifact-dismiss";
 
-export interface ArtifactSummary {
+/** The one render discriminator, mirroring `hirsel_proto::ArtifactKind`. It
+ * travels flat beside the rest of the summary, and each variant carries only
+ * the data its own surface needs: no second field can disagree about how a
+ * result opens. */
+export type ArtifactKind =
+  | { kind: "solid" }
+  | { kind: "html" }
+  | { kind: "markdown" }
+  | { kind: "image"; mime: string }
+  | { kind: "file"; mime: string; filename?: string | null };
+export type ArtifactSummary = ArtifactKind & {
   id: number;
   title: string;
-  kind: "solid" | "html" | "file";
-  mime: string;
-  filename?: string | null;
   created_at: string;
   updated_at: string;
   thread_ids: number[];
-}
-export interface Artifact extends ArtifactSummary { content: string }
+};
+export type Artifact = ArtifactSummary & { content: string };
 export type ArtifactClientMessage =
   | { type: "list_artifacts"; client_id: string; thread_id?: number }
   | { type: "open_artifact"; client_id: string; artifact_id: number };

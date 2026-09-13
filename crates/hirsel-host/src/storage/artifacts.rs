@@ -8,9 +8,8 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ArtifactDraft {
     pub title: String,
+    #[serde(flatten)]
     pub kind: ArtifactKind,
-    pub mime: String,
-    pub filename: Option<String>,
     pub content: String,
     #[serde(skip)]
     pub expected_content: Option<String>,
@@ -19,29 +18,53 @@ impl ArtifactDraft {
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.title.trim().is_empty() && self.title.len() <= 200,
-            "title must contain 1–200 bytes"
+            "title must contain 1\u{2013}200 bytes"
         );
         anyhow::ensure!(
             self.content.len() <= 1_048_576,
             "artifact content exceeds 1 MiB"
         );
-        anyhow::ensure!(
-            !self.mime.is_empty()
-                && self.mime.len() <= 120
-                && !self.mime.chars().any(char::is_control),
-            "invalid artifact MIME type"
-        );
-        if let Some(name) = &self.filename {
+        if let ArtifactKind::Image { mime } | ArtifactKind::File { mime, .. } = &self.kind {
+            anyhow::ensure!(
+                !mime.is_empty() && mime.len() <= 120 && !mime.chars().any(char::is_control),
+                "invalid artifact MIME type"
+            );
+        }
+        if let ArtifactKind::File {
+            filename: Some(name),
+            ..
+        } = &self.kind
+        {
             anyhow::ensure!(
                 !name.is_empty()
                     && name.len() <= 255
                     && !name.contains(['/', '\\'])
                     && !name.chars().any(char::is_control),
-                "filename must be a simple name of 1–255 bytes"
+                "filename must be a simple name of 1\u{2013}255 bytes"
             );
         }
         Ok(())
     }
+}
+
+/// The discriminator is stored as its plain tag, under a CHECK, with the
+/// variant's own data beside it as JSON. Splitting and rejoining happen only
+/// here, so a stored row can never carry data for the wrong variant.
+fn kind_columns(kind: &ArtifactKind) -> anyhow::Result<(String, String)> {
+    let mut value = serde_json::to_value(kind)?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("artifact kind serializes to an object"))?;
+    fields.remove("kind");
+    Ok((kind.tag().to_string(), serde_json::to_string(fields)?))
+}
+fn kind_from_columns(tag: &str, data: &str) -> anyhow::Result<ArtifactKind> {
+    let mut value: serde_json::Value = serde_json::from_str(data)?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("artifact kind data is not an object"))?
+        .insert("kind".into(), tag.into());
+    Ok(serde_json::from_value(value)?)
 }
 
 pub(super) fn message_artifacts(c: &Connection, message_id: u64) -> rusqlite::Result<Vec<u64>> {
@@ -52,24 +75,22 @@ pub(super) fn message_artifacts(c: &Connection, message_id: u64) -> rusqlite::Re
 pub(super) fn summary(c: &Connection, id: u64) -> anyhow::Result<ArtifactSummary> {
     let mut artifact = c
         .query_row(
-            "SELECT id,title,kind,mime,filename,created_at,updated_at FROM artifacts WHERE id=?1",
+            "SELECT id,title,kind,kind_data,created_at,updated_at FROM artifacts WHERE id=?1",
             [id],
             |r| {
-                let kind: String = r.get(2)?;
+                let (tag, data): (String, String) = (r.get(2)?, r.get(3)?);
                 Ok(ArtifactSummary {
                     id: r.get(0)?,
                     title: r.get(1)?,
-                    kind: serde_json::from_str(&kind).map_err(|e| {
+                    kind: kind_from_columns(&tag, &data).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
                             rusqlite::types::Type::Text,
-                            Box::new(e),
+                            e.into(),
                         )
                     })?,
-                    mime: r.get(3)?,
-                    filename: r.get(4)?,
-                    created_at: parse_ts(&r.get::<_, String>(5)?)?,
-                    updated_at: parse_ts(&r.get::<_, String>(6)?)?,
+                    created_at: parse_ts(&r.get::<_, String>(4)?)?,
+                    updated_at: parse_ts(&r.get::<_, String>(5)?)?,
                     thread_ids: vec![],
                 })
             },
@@ -194,11 +215,13 @@ impl Storage {
                     );
                 }
                 let updated_at = next_updated_at(&tx, id)?;
-                tx.execute("UPDATE artifacts SET title=?2,kind=?3,mime=?4,filename=?5,content=?6,updated_at=?7 WHERE id=?1",params![id,draft.title,serde_json::to_string(&draft.kind)?,draft.mime,draft.filename,draft.content,updated_at])?;
+                let (tag, data) = kind_columns(&draft.kind)?;
+                tx.execute("UPDATE artifacts SET title=?2,kind=?3,kind_data=?4,content=?5,updated_at=?6 WHERE id=?1",params![id,draft.title,tag,data,draft.content,updated_at])?;
                 id
             }
             (None, Some(draft)) => {
-                tx.execute("INSERT INTO artifacts(title,kind,mime,filename,content,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)",params![draft.title,serde_json::to_string(&draft.kind)?,draft.mime,draft.filename,draft.content,ts])?;
+                let (tag, data) = kind_columns(&draft.kind)?;
+                tx.execute("INSERT INTO artifacts(title,kind,kind_data,content,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5)",params![draft.title,tag,data,draft.content,ts])?;
                 tx.last_insert_rowid() as u64
             }
             (Some(id), None) => {

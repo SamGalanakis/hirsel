@@ -28,7 +28,7 @@ mod thread_scope;
 mod thread_summary;
 mod threads;
 pub(crate) use thread_execution::{NATIVE_CODING_TOOL_PROFILE, ThreadExecution};
-pub(crate) use thread_icons::parse_icon;
+pub(crate) use thread_icons::{parse_agent_icon, parse_icon};
 pub(crate) use threads::ThreadPublication;
 mod thread_mutations;
 mod thread_read;
@@ -124,11 +124,11 @@ impl Storage {
                 DELETE FROM thread_turns;
                 DELETE FROM message_attachments;
                 DELETE FROM client_blobs;
-                DELETE FROM blobs;
                 DELETE FROM client_messages;
                 DELETE FROM monitors;
                 DELETE FROM chat_messages;
                 DELETE FROM threads;
+                DELETE FROM blobs;
                 DELETE FROM sqlite_sequence
                 WHERE name IN ('chat_messages', 'threads', 'thread_turns', 'thread_activities', 'thread_related_items');
                 ",

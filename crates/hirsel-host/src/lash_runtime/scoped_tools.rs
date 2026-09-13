@@ -160,14 +160,14 @@ impl ScopedThreadTools {
                 .map_err(|e| e.to_string())
             }
             "threads_create" => {
+                self.resolve(args, "parent").await?;
+                let icon = self.prepared_icon(args).await?.flatten();
                 let mutation = crate::storage::ThreadMutation::Create {
                     client_id: required_string(args, "client_id")?,
                     kind: serde_json::from_value(args.get("kind").cloned().ok_or("kind required")?)
                         .map_err(|e| e.to_string())?,
                     title: required_string(args, "title")?,
-                    icon: crate::storage::parse_icon(args)
-                        .map_err(|e| e.to_string())?
-                        .flatten(),
+                    icon,
                     parent: reference(args, "parent")?,
                     description: optional_string_any_allow_empty(args, &["description"])?
                         .unwrap_or_default(),
@@ -202,10 +202,12 @@ impl ScopedThreadTools {
                 .map_err(|e| e.to_string())
             }
             "threads_update" => {
+                self.resolve(args, "thread").await?;
+                let icon = self.prepared_icon(args).await?;
                 self.thread_mutation(crate::storage::ThreadMutation::Update {
                     thread: reference(args, "thread")?,
                     title: optional_string_any_allow_empty(args, &["title"])?,
-                    icon: crate::storage::parse_icon(args).map_err(|e| e.to_string())?,
+                    icon,
                     showcased_artifact_id: crate::storage::parse_showcase(
                         args,
                         "showcased_artifact_id",
@@ -417,6 +419,30 @@ impl ScopedThreadTools {
 }
 
 impl ScopedThreadTools {
+    async fn prepared_icon(
+        &self,
+        args: &Value,
+    ) -> Result<Option<Option<hirsel_proto::ThreadIcon>>, String> {
+        let parsed = crate::storage::parse_agent_icon(args).map_err(|e| e.to_string())?;
+        match parsed {
+            None => Ok(None),
+            Some(None) => Ok(Some(None)),
+            Some(Some(source)) => {
+                let client_id = format!(
+                    "agent-thread-icon:{}:{}",
+                    self.caller.turn_id, self.operation_id
+                );
+                self.tools
+                    .storage()
+                    .prepare_agent_thread_icon(&self.caller, source, &client_id)
+                    .await
+                    .map(Some)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+
     async fn thread_mutation(
         &self,
         mutation: crate::storage::ThreadMutation,

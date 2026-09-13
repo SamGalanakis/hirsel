@@ -30,10 +30,13 @@ import dev.hirsel.android.HirselField
 import dev.hirsel.android.pairing.Connection
 import dev.hirsel.android.ui.LocalHirselColors
 import dev.hirsel.core.Thread
+import dev.hirsel.core.ThreadIcon
 import dev.hirsel.core.ThreadKind
 
-internal fun threadIconText(thread: Thread): String = thread.icon
-    ?: thread.title.trim().let { if (it.isEmpty()) "#" else String(Character.toChars(it.codePointAt(0))).uppercase() }
+internal fun threadIconText(thread: Thread): String = when (val icon = thread.icon) {
+    is ThreadIcon.Emoji -> icon.value
+    else -> thread.title.trim().let { if (it.isEmpty()) "#" else String(Character.toChars(it.codePointAt(0))).uppercase() }
+}
 
 internal fun threadIconError(icon: String?): String? {
     if (icon == null) return null
@@ -58,7 +61,7 @@ internal fun ThreadAvatar(thread: Thread) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ThreadIconPicker(thread: Thread, history: String, connection: Connection, onClose: () -> Unit) {
-    var icon by remember(thread.id, thread.revision) { mutableStateOf(thread.icon) }
+    var icon by remember(thread.id, thread.revision) { mutableStateOf((thread.icon as? ThreadIcon.Emoji)?.value) }
     var saveError by remember { mutableStateOf<String?>(null) }
     val c = LocalHirselColors.current
     val error = threadIconError(icon)
@@ -66,7 +69,7 @@ internal fun ThreadIconPicker(thread: Thread, history: String, connection: Conne
     AlertDialog(onDismissRequest = onClose, title = { Text("Change thread icon") }, text = {
         Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                ThreadAvatar(thread.copy(icon = icon))
+                ThreadAvatar(thread.copy(icon = icon?.let { ThreadIcon.Emoji(it) }))
                 Text(thread.title)
             }
             FlowRow {
@@ -81,7 +84,7 @@ internal fun ThreadIconPicker(thread: Thread, history: String, connection: Conne
         }
     }, confirmButton = {
         TextButton(enabled = error == null && connection.isOnline, onClick = {
-            val accepted = runCatching { connection.updateThreadIcon(history, thread.id, icon, thread.revision) }
+            val accepted = runCatching { connection.updateThreadIcon(history, thread.id, icon?.let { ThreadIcon.Emoji(it) }, thread.revision) }
             if (accepted.getOrDefault(false)) onClose()
             else saveError = accepted.exceptionOrNull()?.message ?: "Thread or connection changed. Close and reopen the icon picker to try again."
         }) { Text("Save icon") }

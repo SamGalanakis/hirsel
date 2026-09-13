@@ -8,11 +8,11 @@ export function openThreadIconPicker(thread: Thread): void {
   const history = historyId();
   if (history) setThreadIconTarget({ thread: { ...thread }, history });
 }
-export function threadIconError(icon: string | null): string | null {
-  if (icon === null) return null;
-  if (!icon.trim()) return "Choose an emoji or symbol, or use the default icon.";
-  if (/\p{Cc}|\u2028|\u2029/u.test(icon)) return "Use an emoji or symbol without line breaks or control characters.";
-  if (Array.from(icon).length > 16 || new TextEncoder().encode(icon).length > 64) return "Keep the icon to 16 characters or fewer.";
+export function threadIconError(value: string | null): string | null {
+  if (value === null) return null;
+  if (!value.trim()) return "Choose an emoji or symbol, or use the default icon.";
+  if (/\p{Cc}|\u2028|\u2029/u.test(value)) return "Use an emoji or symbol without line breaks or control characters.";
+  if (Array.from(value).length > 16 || new TextEncoder().encode(value).length > 64) return "Keep the icon to 16 characters or fewer.";
   return null;
 }
 export const threadIconPresets = [

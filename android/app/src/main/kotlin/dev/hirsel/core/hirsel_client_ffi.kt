@@ -974,7 +974,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_thread_action() != 46975) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_update_thread_icon() != 37538) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_update_thread_icon() != 60171) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_update_thread_showcase() != 18585) {
@@ -1441,7 +1441,7 @@ public interface ClientInterface {
 
     fun `threadAction`(`historyId`: kotlin.String, `threadId`: kotlin.ULong, `action`: kotlin.String, `dataJson`: kotlin.String, `expectedRevision`: kotlin.ULong?): SendReceipt?
 
-    fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: kotlin.String?, `expectedRevision`: kotlin.ULong): SendReceipt?
+    fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: ThreadIcon?, `expectedRevision`: kotlin.ULong): SendReceipt?
 
     fun `updateThreadShowcase`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `artifactId`: kotlin.ULong?, `expectedRevision`: kotlin.ULong): SendReceipt?
 
@@ -1778,7 +1778,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     }
 
 
-    override fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: kotlin.String?, `expectedRevision`: kotlin.ULong): SendReceipt? {
+    override fun `updateThreadIcon`(`expectedHistory`: kotlin.String, `threadId`: kotlin.ULong, `icon`: ThreadIcon?, `expectedRevision`: kotlin.ULong): SendReceipt? {
             return FfiConverterOptionalTypeSendReceipt.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -1787,7 +1787,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
         FfiConverterString.lower(`expectedHistory`),
         FfiConverterULong.lower(`threadId`),
-        FfiConverterOptionalString.lower(`icon`),
+        FfiConverterOptionalTypeThreadIcon.lower(`icon`),
         FfiConverterULong.lower(`expectedRevision`),_status)
 }
     }
@@ -2251,7 +2251,7 @@ data class Thread (
     ,
     var `title`: kotlin.String
     ,
-    var `icon`: kotlin.String?
+    var `icon`: ThreadIcon?
     ,
     var `showcasedArtifactId`: kotlin.ULong?
     ,
@@ -2303,7 +2303,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeThreadIcon.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
@@ -2328,7 +2328,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalString.allocationSize(value.`pinnedAt`) +
             FfiConverterULong.allocationSize(value.`id`) +
             FfiConverterString.allocationSize(value.`title`) +
-            FfiConverterOptionalString.allocationSize(value.`icon`) +
+            FfiConverterOptionalTypeThreadIcon.allocationSize(value.`icon`) +
             FfiConverterOptionalULong.allocationSize(value.`showcasedArtifactId`) +
             FfiConverterString.allocationSize(value.`description`) +
             FfiConverterString.allocationSize(value.`instrumentJson`) +
@@ -2352,7 +2352,7 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalString.write(value.`pinnedAt`, buf)
             FfiConverterULong.write(value.`id`, buf)
             FfiConverterString.write(value.`title`, buf)
-            FfiConverterOptionalString.write(value.`icon`, buf)
+            FfiConverterOptionalTypeThreadIcon.write(value.`icon`, buf)
             FfiConverterOptionalULong.write(value.`showcasedArtifactId`, buf)
             FfiConverterString.write(value.`description`, buf)
             FfiConverterString.write(value.`instrumentJson`, buf)
@@ -3176,6 +3176,89 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
 
 
 
+sealed class ThreadIcon {
+
+    data class Emoji(
+        val `value`: kotlin.String) : ThreadIcon()
+
+    {
+
+
+        companion object
+    }
+
+    data class Image(
+        val `blobId`: kotlin.String) : ThreadIcon()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadIcon : FfiConverterRustBuffer<ThreadIcon>{
+    override fun read(buf: ByteBuffer): ThreadIcon {
+        return when(buf.getInt()) {
+            1 -> ThreadIcon.Emoji(
+                FfiConverterString.read(buf),
+                )
+            2 -> ThreadIcon.Image(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ThreadIcon): ULong = when(value) {
+        is ThreadIcon.Emoji -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`value`)
+            )
+        }
+        is ThreadIcon.Image -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`blobId`)
+            )
+        }
+    }
+
+    override fun write(value: ThreadIcon, buf: ByteBuffer) {
+        when(value) {
+            is ThreadIcon.Emoji -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`value`, buf)
+                Unit
+            }
+            is ThreadIcon.Image -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`blobId`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 enum class ThreadKind {
 
@@ -3494,6 +3577,38 @@ public object FfiConverterOptionalTypeThreadTurn: FfiConverterRustBuffer<ThreadT
         } else {
             buf.put(1)
             FfiConverterTypeThreadTurn.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeThreadIcon: FfiConverterRustBuffer<ThreadIcon?> {
+    override fun read(buf: ByteBuffer): ThreadIcon? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeThreadIcon.read(buf)
+    }
+
+    override fun allocationSize(value: ThreadIcon?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeThreadIcon.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ThreadIcon?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeThreadIcon.write(value, buf)
         }
     }
 }

@@ -4,7 +4,12 @@ pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
     let summary = match name {
         "shell_run" => labeled_scalar(payload, "cmd", "cmd"),
         "threads_create" => labeled_scalar(payload, "title", "thread"),
-        "threads_update" | "threads_read" | "threads_activity" => {
+        "threads_update" => payload
+            .pointer("/icon/kind")
+            .and_then(Value::as_str)
+            .map(|kind| format!("{kind} icon"))
+            .or_else(|| scalar_field(payload, "thread").map(|id| format!("thread {id}"))),
+        "threads_read" | "threads_activity" => {
             scalar_field(payload, "thread").map(|id| format!("thread {id}"))
         }
         "threads_list" => None,
@@ -32,9 +37,14 @@ pub(super) fn condense_result(name: &str, args: &Value, output: &Value) -> Optio
     let payload = tool_output_payload(output).unwrap_or(output);
     let detail = match name {
         "shell_run" => shell_result_summary(payload),
-        "threads_create" | "threads_update" => {
-            scalar_field(payload, "thread_id").map(|id| format!("thread #{id}"))
-        }
+        "threads_create" | "threads_update" => scalar_field(payload, "thread_id").map(|id| {
+            let icon = payload
+                .pointer("/thread/icon/kind")
+                .and_then(Value::as_str)
+                .map(|kind| format!(", {kind} icon"))
+                .unwrap_or_default();
+            format!("thread #{id}{icon}")
+        }),
         "views_show" | "views_update" | "views_clear" => scalar_field(payload, "instance_id")
             .or_else(|| scalar_field(args, "instance_id"))
             .map(|id| format!("view {}", tail_identifier(&id))),

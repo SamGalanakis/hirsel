@@ -3,6 +3,7 @@ CREATE TABLE threads (
         kind TEXT NOT NULL CHECK(kind IN ('space','task')),
         parent_thread_id INTEGER REFERENCES threads(id), pinned_at TEXT,
         title TEXT NOT NULL, icon TEXT,
+        icon_blob_id TEXT REFERENCES blobs(id),
         showcased_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
         description TEXT NOT NULL, instrument TEXT NOT NULL,
         attention TEXT NOT NULL CHECK(attention IN ('quiet','needs_owner')),
@@ -10,7 +11,8 @@ CREATE TABLE threads (
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL,
         CHECK(kind = 'task' OR settled_at IS NULL),
         CHECK(parent_thread_id IS NULL OR parent_thread_id != id),
-        CHECK(parent_thread_id IS NULL OR pinned_at IS NULL));
+        CHECK(parent_thread_id IS NULL OR pinned_at IS NULL),
+        CHECK(icon IS NULL OR icon_blob_id IS NULL));
 CREATE INDEX threads_parent ON threads(parent_thread_id,id);
 CREATE TRIGGER threads_parent_immutable
 BEFORE UPDATE OF parent_thread_id ON threads

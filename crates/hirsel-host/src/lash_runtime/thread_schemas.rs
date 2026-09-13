@@ -1,6 +1,14 @@
 use super::*;
 fn icon_schema() -> Value {
-    json!({"type":["string","null"],"minLength":1,"maxLength":16,"description":"Compact plain-text emoji or symbol, at most 16 Unicode code points / 64 UTF-8 bytes; no controls or line separators. Null restores the generated avatar; omit to preserve the current icon on update."})
+    json!({
+        "description":"A typed emoji or image icon. Image sources are normalized to a 256 px square retained blob. Use exactly one of blob_id or artifact_id. Null restores the generated avatar; omit to preserve on update.",
+        "oneOf":[
+            {"type":"null"},
+            {"type":"object","additionalProperties":false,"required":["kind","value"],"properties":{"kind":{"const":"emoji"},"value":{"type":"string","minLength":1,"maxLength":16,"description":"At most 16 Unicode code points / 64 UTF-8 bytes; no controls or line separators."}}},
+            {"type":"object","additionalProperties":false,"required":["kind","blob_id"],"properties":{"kind":{"const":"image"},"blob_id":{"type":"string","minLength":1}}},
+            {"type":"object","additionalProperties":false,"required":["kind","artifact_id"],"properties":{"kind":{"const":"image"},"artifact_id":{"type":"integer","minimum":1,"description":"Accessible file artifact whose content is base64-encoded PNG, JPEG, or WebP bytes."}}}
+        ]
+    })
 }
 fn attention_schema() -> Value {
     json!({"type":"string","enum":["quiet","needs_owner"]})

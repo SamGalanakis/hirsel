@@ -258,7 +258,11 @@ function handle(world, ws, frame) {
         if (!Object.hasOwn(frame.data ?? {}, "icon")) { acknowledge(); return; }
         if (Object.hasOwn(frame.data ?? {}, "icon")) {
           const icon = frame.data.icon;
-          if (icon !== null && (typeof icon !== "string" || !icon.trim() || /\p{Cc}|\u2028|\u2029/u.test(icon) || Array.from(icon).length > 16 || Buffer.byteLength(icon, "utf8") > 64)) throw new Error("Invalid thread icon");
+          if (icon !== null) {
+            if (!icon || typeof icon !== "object" || !["emoji", "image"].includes(icon.kind)) throw new Error("Invalid thread icon");
+            if (icon.kind === "emoji" && (typeof icon.value !== "string" || !icon.value.trim() || /\p{Cc}|\u2028|\u2029/u.test(icon.value) || Array.from(icon.value).length > 16 || Buffer.byteLength(icon.value, "utf8") > 64)) throw new Error("Invalid thread icon");
+            if (icon.kind === "image" && (typeof icon.blob_id !== "string" || !icon.blob_id.trim())) throw new Error("Invalid thread icon");
+          }
           patch.icon = icon;
         }
         updateThread(world, thread, patch); acknowledge(); return;

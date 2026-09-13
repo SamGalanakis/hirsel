@@ -1,6 +1,6 @@
 //! Agent Thread writes validate the execution and replay input inside the write transaction.
 use super::{Storage, ThreadCaller, ThreadRef, thread_scope, threads};
-use hirsel_proto::{ThreadAttention, ThreadKind};
+use hirsel_proto::{ThreadAttention, ThreadIcon, ThreadKind};
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -31,7 +31,7 @@ pub(crate) enum ThreadMutation {
         kind: ThreadKind,
         title: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        icon: Option<String>,
+        icon: Option<ThreadIcon>,
         parent: ThreadRef,
         description: String,
         instrument: Value,
@@ -41,7 +41,7 @@ pub(crate) enum ThreadMutation {
         thread: ThreadRef,
         title: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        icon: Option<Option<String>>,
+        icon: Option<Option<ThreadIcon>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         showcased_artifact_id: Option<Option<u64>>,
         description: Option<String>,
@@ -125,11 +125,16 @@ impl Storage {
                     !title.trim().is_empty() && !client_id.is_empty(),
                     "creation requires title and client_id"
                 );
-                super::thread_icons::validate_icon(icon.as_deref())?;
+                super::thread_icons::validate_icon(icon.as_ref())?;
                 threads::validate_instrument(instrument)?;
                 let parent = thread_scope::resolve(&tx, caller.thread_id, parent)?;
                 let key = format!("agent:{}:{operation_id}:{client_id}", caller.turn_id);
-                tx.execute("INSERT INTO threads(client_id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision,icon) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?8,1,?9)",params![key,threads::kind_name(*kind),parent,title.trim(),description,serde_json::to_string(instrument)?,threads::attention(*attention),now,icon])?;
+                let (emoji, blob_id) = match icon {
+                    Some(ThreadIcon::Emoji { value }) => (Some(value.as_str()), None),
+                    Some(ThreadIcon::Image { blob_id }) => (None, Some(blob_id.as_str())),
+                    None => (None, None),
+                };
+                tx.execute("INSERT INTO threads(client_id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision,icon,icon_blob_id) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?8,1,?9,?10)",params![key,threads::kind_name(*kind),parent,title.trim(),description,serde_json::to_string(instrument)?,threads::attention(*attention),now,emoji,blob_id])?;
                 let thread = threads::get(&tx, tx.last_insert_rowid() as u64)?;
                 json!({"thread_id":thread.id,"thread":thread})
             }
@@ -148,7 +153,7 @@ impl Storage {
                     thread_scope::authorize_artifact(&tx, caller.thread_id, *artifact_id)?;
                 }
                 if let Some(icon) = icon {
-                    super::thread_icons::validate_icon(icon.as_deref())?;
+                    super::thread_icons::validate_icon(icon.as_ref())?;
                 }
                 if let Some(title) = title {
                     anyhow::ensure!(!title.trim().is_empty(), "title must not be empty");
@@ -156,7 +161,12 @@ impl Storage {
                 if let Some(instrument) = instrument {
                     threads::validate_instrument(instrument)?;
                 }
-                tx.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=COALESCE(?4,instrument),attention=COALESCE(?5,attention),icon=CASE WHEN ?7 THEN ?8 ELSE icon END,showcased_artifact_id=CASE WHEN ?9 THEN ?10 ELSE showcased_artifact_id END,updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.as_ref().map(serde_json::to_string).transpose()?,attention.map(threads::attention),now,icon.is_some(),icon.as_ref().and_then(|v| v.as_deref()),showcased_artifact_id.is_some(),showcased_artifact_id.flatten()])?;
+                let (emoji, blob_id) = match icon.as_ref().and_then(Option::as_ref) {
+                    Some(ThreadIcon::Emoji { value }) => (Some(value.as_str()), None),
+                    Some(ThreadIcon::Image { blob_id }) => (None, Some(blob_id.as_str())),
+                    None => (None, None),
+                };
+                tx.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=COALESCE(?4,instrument),attention=COALESCE(?5,attention),icon=CASE WHEN ?7 THEN ?8 ELSE icon END,icon_blob_id=CASE WHEN ?7 THEN ?9 ELSE icon_blob_id END,showcased_artifact_id=CASE WHEN ?10 THEN ?11 ELSE showcased_artifact_id END,updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.as_ref().map(serde_json::to_string).transpose()?,attention.map(threads::attention),now,icon.is_some(),emoji,blob_id,showcased_artifact_id.is_some(),showcased_artifact_id.flatten()])?;
                 let mut result = json!({"thread_id":id,"thread":threads::get(&tx,id)?});
                 if let Some(new) = showcased_artifact_id {
                     super::thread_showcase::touch_artifacts(

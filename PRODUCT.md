@@ -10,7 +10,7 @@ The composer sends to the explicitly selected Thread. Messages belong to exactly
 
 Both kinds can exist at the top level. A Space may contain Spaces or Tasks; a Task may contain Tasks only. Each Thread has an immutable nullable parent. Only top-level Threads can be pinned; pinning keeps that root at the top of the list, appearing once with its children beneath it. Pinning does not change parentage, activity, read state or lifecycle. Nested conversations keep focused work under the conversation that requested it; a parent can continue while children run.
 
-Each Thread displays a small avatar. The Owner can choose an emoji or symbol through **Change icon** in the Thread menu, or restore the generated default. Agents can set `icon` when creating or updating an accessible Thread; omitting it preserves the current choice and `null` restores the default. Icon edits use revision checks and do not start execution or mark the conversation read.
+Each Thread displays a small avatar. The Owner can choose an emoji or upload a center-cropped PNG, JPEG or WebP image through **Change icon**, or restore the generated default. Agents can set the same typed emoji/image identity on their own Thread or its subtree from an existing blob or accessible image artifact. Icon edits use revision checks and do not start execution or mark the conversation read.
 
 ## Independent state
 

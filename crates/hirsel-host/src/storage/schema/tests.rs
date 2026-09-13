@@ -52,6 +52,7 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
             ("pinned_at".into(), "TEXT".into(), false),
             ("title".into(), "TEXT".into(), true),
             ("icon".into(), "TEXT".into(), false),
+            ("icon_blob_id".into(), "TEXT".into(), false),
             ("showcased_artifact_id".into(), "INTEGER".into(), false),
             ("description".into(), "TEXT".into(), true),
             ("instrument".into(), "TEXT".into(), true),
@@ -140,12 +141,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        6
+        7
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 5).unwrap();
+    conn.pragma_update(None, "user_version", 6).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());

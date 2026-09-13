@@ -1,5 +1,5 @@
 import { flush } from "solid-js";
-import { fireEvent, render, within } from "@solidjs/testing-library";
+import { fireEvent, render, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dispatch } from "../store/store";
 import { setHistoryId } from "../lib/history";
@@ -11,14 +11,25 @@ import { openThreadIconPicker, setThreadIconTarget, threadIconError } from "./ic
 import { attachThreadTransport, disconnectThreads, handleThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage } from "./types";
 
-vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
+vi.mock("../ws/client", () => ({
+  getClient: () => ({
+    cancelTurn: vi.fn(),
+    getBlobUrl: vi.fn(async (id: string) => `https://example.test/blob/${id}`),
+    uploadBlob: vi.fn(async () => ({ id: "image-blob", name: "thread-icon.webp", mime: "image/webp", size: 12 })),
+  }),
+  makeClientId: () => crypto.randomUUID(),
+}));
+vi.mock("./thread-icon-image", async importOriginal => ({
+  ...await importOriginal<typeof import("./thread-icon-image")>(),
+  normalizeThreadIconImage: vi.fn(async (file: File) => new File([file], "thread-icon.webp", { type: "image/webp" })),
+}));
 const sent: ThreadClientMessage[] = [];
 beforeEach(() => {
   sent.length = 0;
   flush(() => {
     setHistoryId("icon-history"); closeThreadNavigation(); setThreadIconTarget(null);
     dispatch({ type: "connection_status", status: "connected" });
-    setThreadState(draft => Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "General" }), makeThread(1, { title: "Garden", read: true }), makeThread(2, { title: "Tools", icon: "🛠️" })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }));
+    setThreadState(draft => Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "General" }), makeThread(1, { title: "Garden", read: true }), makeThread(2, { title: "Tools", icon: { kind: "emoji", value: "🛠️" } })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }));
   });
   attachThreadTransport(frame => sent.push(frame));
 });
@@ -41,9 +52,9 @@ describe("Thread icons", () => {
     const picker = view.getByRole("dialog", { name: "Change thread icon" });
     fireEvent.click(within(picker).getByRole("button", { name: "Seedling" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
-    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "icon-history", thread_id: 1, action: "set_icon", data: { icon: "🌱" }, expected_revision: 1 }));
+    expect(sent).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "icon-history", thread_id: 1, action: "set_icon", data: { icon: { kind: "emoji", value: "🌱" } }, expected_revision: 1 }));
     expect(threadState.threads[1].icon).toBeNull();
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Garden", icon: "🌱", revision: 2 }) }));
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(1, { title: "Garden", icon: { kind: "emoji", value: "🌱" }, revision: 2 }) }));
     expect(view.container.querySelector('header [data-thread-avatar="1"]')).toHaveTextContent("🌱");
     expect(view.container.querySelector('[data-thread-row="1"] [data-thread-avatar]')).toHaveTextContent("🌱");
     expect(threadState.focusedId).toBe(1);
@@ -53,13 +64,37 @@ describe("Thread icons", () => {
     flush(() => openThreadIconPicker(threadState.threads.find(thread => thread.id === 2)!));
     fireEvent.input(view.getByRole("textbox", { name: "Custom emoji or symbol" }), { target: { value: "👩🏽‍💻" } });
     fireEvent.click(view.getByRole("button", { name: "Save icon" }));
-    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: "👩🏽‍💻" }, expected_revision: 1 });
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(2, { title: "Tools", icon: "👩🏽‍💻", revision: 2 }) }));
+    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: { kind: "emoji", value: "👩🏽‍💻" } }, expected_revision: 1 });
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: makeThread(2, { title: "Tools", icon: { kind: "emoji", value: "👩🏽‍💻" }, revision: 2 }) }));
     flush(() => openThreadIconPicker(threadState.threads.find(thread => thread.id === 2)!));
     fireEvent.click(view.getByRole("button", { name: "Use default" }));
     expect(view.getByRole("dialog", { name: "Change thread icon" }).querySelector('[data-thread-avatar]')).toHaveTextContent("T");
     fireEvent.click(view.getByRole("button", { name: "Save icon" }));
     expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: null }, expected_revision: 2 });
+  });
+  it("uploads a mock image, previews the signed blob, and sends the typed image icon", async () => {
+    const view = render(() => <ThreadShell />);
+    flush(() => openThreadIconPicker(threadState.threads[1]));
+    const picker = view.getByRole("dialog", { name: "Change thread icon" });
+    const file = new File(["image bytes"], "garden.png", { type: "image/png" });
+    fireEvent.change(within(picker).getByLabelText("Choose icon image"), { target: { files: [file] } });
+    await within(picker).findByRole("button", { name: "Remove image" });
+    await waitFor(() => expect(picker.querySelector("img")).toHaveAttribute("src", "https://example.test/blob/image-blob"));
+    fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
+    expect(sent.at(-1)).toMatchObject({ data: { icon: { kind: "image", blob_id: "image-blob" } }, expected_revision: 1 });
+  });
+  it("renders an image at avatar size and falls back to the initial after a load error", async () => {
+    const view = render(() => <ThreadAvatar thread={makeThread(8, { title: "Garden", icon: { kind: "image", blob_id: "garden-image" } })} dense />);
+    const image = await waitFor(() => {
+      const node = view.container.querySelector("img");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    expect(image).toHaveAttribute("alt", "");
+    expect(view.container.firstElementChild).toHaveClass("size-4", "rounded-md");
+    fireEvent.error(image);
+    expect(view.container.firstElementChild).toHaveTextContent("G");
+    expect(view.container.querySelector("img")).toBeNull();
   });
   it("keeps the edit revision fixed and exposes rejected requests through the existing error surface", () => {
     const view = render(() => <ThreadShell />);

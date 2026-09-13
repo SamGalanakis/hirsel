@@ -12,7 +12,10 @@ import { Markdown } from "../components/Markdown";
 import { Composer } from "../components/chat/Composer";
 import { createComposerAttachments, type AttachmentsController } from "../components/chat/useAttachments";
 import { ThreadMessage } from "./ThreadMessages";
-import { conversationEntries } from "./conversation";
+import { ConversationNote } from "./ThreadWork";
+import { quietWakeTurn } from "./work-summary";
+import { showAgentCode } from "../lib/prefs";
+import { conversationEntries, type ConversationEntry } from "./conversation";
 import { emptyHistory } from "./model";
 import { BrandMark } from "../components/BrandMark";
 import { Activity, Settings, GitBranch, LayoutGrid, ArrowLeft, MessageCircle, FileText, Plus } from "../components/ui/icons";
@@ -58,6 +61,21 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   const history = () => threadState.histories[props.id];
   const messages = () => history()?.messages ?? [];
   const entries = createMemo(() => conversationEntries(history() ?? emptyHistory()));
+  /** A wake that produced nothing to read is not a card. Consecutive ones fold
+   * into one quiet note so a Space driven by child reports reads as a
+   * conversation rather than a stack of empty activity boxes. */
+  const rendered = createMemo(() => {
+    const rows: ({ key: string; entry: ConversationEntry } | { key: string; quiet: number })[] = [];
+    for (const entry of entries()) {
+      const turn = entry.kind === "turn" ? entry.turn : null;
+      const quiet = turn !== null && quietWakeTurn(turn, (history()?.activities ?? []).filter(activity => activity.turn_id === turn.id), threadState.turnDetails[turn.id] ?? [], showAgentCode());
+      const last = rows[rows.length - 1];
+      if (quiet && last && "quiet" in last) rows[rows.length - 1] = { key: last.key, quiet: last.quiet + 1 };
+      else if (quiet) rows.push({ key: `quiet-${entry.key}`, quiet: 1 });
+      else rows.push({ key: entry.key, entry });
+    }
+    return rows;
+  });
   const pending = () => threadState.pending.filter(p => p.threadId === props.id);
   const thinking = () => history()?.turns.some(t => t.state === "running" || t.state === "queued") ?? false;
   const [loading, setLoading] = createSignal(false);
@@ -115,7 +133,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         <Show when={history()?.hasMore}><button class={button} disabled={loading()} onClick={() => void earlier()}>{loading() ? "Loading…" : "Load earlier messages"}</button></Show>
         <Show when={!history()?.loaded && !(threadState.error?.operation === "load" && threadState.error.threadId === props.id)}><p role="status" class="text-sm text-muted-foreground">Loading conversation…</p></Show>
         <Show when={history()?.loaded && messages().length === 0 && pending().length === 0 && !thinking()}><p class="text-sm text-muted-foreground">Start the conversation for this thread.</p></Show>
-        <For each={entries()} keyed={entry => entry.key}>{entry => <ThreadMessage entry={entry()} history={history() ?? emptyHistory()} threadId={props.id} />}</For>
+        <For each={rendered()} keyed={row => row.key}>{row => <Show when={"entry" in row() ? row() as { entry: ConversationEntry } : undefined} fallback={<ConversationNote title="Turns that woke this Thread and left nothing to show">{(row() as { quiet: number }).quiet} quiet {(row() as { quiet: number }).quiet === 1 ? "wake" : "wakes"}</ConversationNote>}>{owned => <ThreadMessage entry={owned().entry} history={history() ?? emptyHistory()} threadId={props.id} />}</Show>}</For>
         <For each={pending()} keyed={message => message.clientId}>{message => <PendingMessageRow message={message()} />}</For>
 
       </div>

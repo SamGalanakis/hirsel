@@ -1,4 +1,4 @@
-import { buildTimeline, type TimelineItem } from "../components/chat/timeline";
+import { buildTimeline, splitStreamingReply, type TimelineItem } from "../components/chat/timeline";
 import type { ToolCall } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
@@ -76,4 +76,16 @@ export function workLabel(turn: ThreadTurn | undefined, events: TimelineEvent[],
   if (count) return `Used ${count} ${count === 1 ? "tool" : "tools"}`;
   if (turn?.state === "completed" && !hasReply) return "Finished without a reply";
   return "Activity";
+}
+
+/** A completed turn that woke the Thread and produced nothing a reader can see:
+ * no reply, no reasoning or tool rows, no artifacts, no recorded activity — at
+ * most the trivial program the wake ran. It gets no card; the conversation folds
+ * consecutive ones into a single quiet note. Live and unfinished turns always
+ * keep their card, and turning on "Show agent code" brings the program back. */
+export function quietWakeTurn(turn: ThreadTurn | undefined, activities: ThreadActivity[], events: TimelineEvent[], showCode: boolean): boolean {
+  if (!turn || turn.state !== "completed" || activities.length > 0) return false;
+  const split = splitStreamingReply(events);
+  if (split.reply.trim()) return false;
+  return buildTimeline(split.activity, showCode).length === 0;
 }

@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { Timeline } from "../components/chat/Timeline";
 import { Activity, CircleAlert, Clock, LoaderCircle, MoreHorizontal, Square } from "../components/ui/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
@@ -12,23 +13,33 @@ import { ThreadLink } from "./ThreadRef";
 import { activityText, ownerFacingActivity } from "./conversation";
 import { state } from "../store/store";
 import { failureReason, mergePersistedToolCalls, toolSummary, workDuration, workLabel } from "./work-summary";
+/** A line owned by neither party: centred, muted, one line, between the two
+ * columns of the conversation. */
+export function ConversationNote(props: { title?: string; children: JSX.Element }) {
+  return <p data-slot="conversation-note" title={props.title} class="flex items-center gap-3 text-meta text-muted-foreground">
+    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
+    <span class="min-w-0 max-w-[80%] truncate text-center">{props.children}</span>
+    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
+  </p>;
+}
 export function ActivityEntry(props: { activity: ThreadActivity }) {
   const data = () => props.activity.data as Record<string, unknown>;
   const report = () => props.activity.kind === "child_report";
   const assignment = () => props.activity.kind === "delegation_received";
+  const status = () => String(data().status ?? "");
+  /** "completed" is the default outcome and says nothing; a failure does. */
+  const notableStatus = () => report() && status() !== "" && status() !== "completed";
   /** A routine note is neither party speaking: one centred muted line between
    * the two columns, never a third bubble competing with them. */
   const note = () => !report() && !assignment() && props.activity.artifact_ids.length === 0 && ownerFacingActivity(props.activity)
     && !activityText(props.activity).includes("\n") && activityText(props.activity).length <= 120;
-  return <Show when={!note()} fallback={<article data-activity-id={props.activity.id} data-slot="conversation-note" class="flex items-center gap-3 text-meta text-muted-foreground">
-    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
-    <span class="min-w-0 max-w-[80%] truncate text-center">{activityText(props.activity)} · <time datetime={props.activity.ts}>{new Date(props.activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>
-    <span aria-hidden="true" class="h-px flex-1 bg-border/60" />
-  </article>}><article data-activity-id={props.activity.id} class="space-y-2">
+  return <Show when={!note()} fallback={<span data-activity-id={props.activity.id}><ConversationNote>{activityText(props.activity)} · <time datetime={props.activity.ts}>{new Date(props.activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></ConversationNote></span>}><article data-activity-id={props.activity.id} class="space-y-2">
     <Show when={ownerFacingActivity(props.activity)} fallback={<ThreadWork activities={[props.activity]} events={[]} />}>
-      <p class="flex flex-wrap items-center gap-x-1 text-xs font-medium text-muted-foreground">
+      {/* Identity and time are what a reader needs; the turn number and a
+          "completed" that only restates the default belong in the tooltip. */}
+      <p class="flex flex-wrap items-center gap-x-1 text-xs font-medium text-muted-foreground" title={report() ? `Turn ${String(data().child_turn_id)} · ${status()}` : undefined}>
         <Show when={report()} fallback={<Show when={assignment()} fallback="Hirsel">Brief from <ThreadLink id={Number(data().requester_thread_id)} /></Show>}>
-          <ThreadLink id={Number(data().child_thread_id)} /> · <span>{String(data().status)}</span><span>· Turn {String(data().child_turn_id)}</span>
+          <ThreadLink id={Number(data().child_thread_id)} /><Show when={notableStatus()}><span>· {status()}</span></Show>
         </Show>
         <span>·</span><time datetime={props.activity.ts}>{new Date(props.activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
       </p>

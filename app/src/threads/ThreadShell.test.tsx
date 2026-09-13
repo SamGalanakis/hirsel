@@ -8,7 +8,7 @@ import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
 import { closeThreadNavigation } from "./navigation";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
-import type { ThreadClientMessage } from "./types";
+import type { ThreadClientMessage, ThreadTurn } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
 const sent: ThreadClientMessage[] = [];
 function responsiveMedia(initialWidth: number) {
@@ -244,6 +244,19 @@ describe("thread workspace", () => {
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Technical details" }));
     expect(screen.getByText(/"message": "Execution diagnostics"/).closest('[role="region"]')).toHaveAttribute("data-slot", "work-diagnostics");
     expect(screen.getByRole("textbox", { name: "Message Buy groceries" })).toBeInTheDocument();
+  });
+  it("folds wakes that produced nothing into one quiet note instead of empty cards", () => {
+    const wake = (id: number): ThreadTurn => ({ id, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "completed", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:07Z" });
+    const events = [{ seq: 1, event: { kind: "code_start", id: "cell", language: "typescript", code: 'finish("")', truncated: false } }, { seq: 2, event: { kind: "code_done", id: "cell", ok: true, summary: null } }] as const;
+    flush(() => setThreadState(draft => {
+      draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [], activities: [], loaded: true, hasMore: false, turns: [wake(91), wake(92)] };
+      draft.turnDetails[91] = [...events]; draft.turnDetails[92] = [...events];
+    }));
+    const screen = render(() => <ThreadShell />);
+    expect(screen.container.querySelector('[data-slot="thread-work"]')).toBeNull();
+    const note = screen.getByText(/2 quiet wakes/);
+    expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
+    expect(threadState.histories[1].turns).toHaveLength(2);
   });
   it("keeps retained zero ordinary and the overview unaddressed", () => {
     flush(() => focusThread(0));
@@ -481,8 +494,13 @@ describe("nested Thread workspace", () => {
     const view = render(() => <ThreadShell />);
     const card = view.container.querySelector('[data-activity-id="33"]')!;
     expect(card).toHaveTextContent("#2 Holiday");
-    expect(card).toHaveTextContent("completed");
-    expect(card).toHaveTextContent("Turn 90");
+    // The default outcome and the internal turn number are diagnostics, not header text.
+    expect(card.textContent).not.toContain("completed");
+    expect(card.textContent).not.toContain("Turn 90");
+    expect(card.querySelector("p")).toHaveAttribute("title", "Turn 90 · completed");
+    flush(() => handleThreadMessage({ type: "thread_activity", activity: { ...report, id: 34, data: { ...report.data, status: "failed", child_turn_id: 91 } } }));
+    // An outcome that is not the default still earns its word.
+    expect(view.container.querySelector('[data-activity-id="34"]')?.textContent).toContain("failed");
     expect(card).toHaveTextContent("Review complete. Two issues fixed.");
     expect(view.container.querySelectorAll('[data-activity-id="33"]')).toHaveLength(1);
     expect(card.querySelector('[data-slot="work-details"]')).toBeNull();

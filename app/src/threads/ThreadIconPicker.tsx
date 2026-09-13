@@ -10,8 +10,11 @@ import { threadAction } from "./store";
 import { normalizeThreadIconImage, THREAD_ICON_MIMES } from "./thread-icon-image";
 import type { ThreadIcon } from "./types";
 
-const button = "inline-flex min-h-11 items-center justify-center rounded-lg px-3 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
+const quiet = "inline-flex h-8 items-center justify-center rounded-md px-2 text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:text-sm";
+const action = "inline-flex h-8 items-center justify-center rounded-md px-3 text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11";
+const swatch = "inline-flex size-9 items-center justify-center rounded-md text-xl transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-primary/15 aria-pressed:ring-1 aria-pressed:ring-primary/50 pointer-coarse:size-11";
 
+/** One dialog: a live preview that is also the dropzone, then the choices. */
 export function ThreadIconPicker() {
   let dialog: HTMLDialogElement | undefined;
   let fileInput: HTMLInputElement | undefined;
@@ -20,15 +23,25 @@ export function ThreadIconPicker() {
   const [image, setImage] = createSignal<ThreadIcon & { kind: "image" } | null>(null);
   const [uploading, setUploading] = createSignal(false);
   const [uploadError, setUploadError] = createSignal<string | null>(null);
+  const [dragging, setDragging] = createSignal(false);
   const value = (): ThreadIcon | null => image() ?? (emoji() === null ? null : { kind: "emoji", value: emoji()! });
   const close = () => setThreadIconTarget(null);
   const error = () => image() ? null : threadIconError(emoji());
-  const handleDragOver = (event: DragEvent) => { if (event.dataTransfer?.types.includes("Files")) event.preventDefault(); };
-  const handleDrop = (event: DragEvent) => { const file = filesFromDrop(event); if (file) { event.preventDefault(); void upload(file); } };
+  const notice = () => error() ?? uploadError();
+  // "Nothing changed" is the saved icon, compared by its wire shape.
+  const same = (left: ThreadIcon | null, right: ThreadIcon | null) => left === right
+    || (left?.kind === "emoji" && right?.kind === "emoji" && left.value === right.value)
+    || (left?.kind === "image" && right?.kind === "image" && left.blob_id === right.blob_id);
+  const changed = () => !same(value(), threadIconTarget()?.thread.icon ?? null);
+  const caption = () => uploading() ? "Preparing…" : image() ? "Uploaded image" : emoji() === null ? "Default" : "Emoji";
+  const handleDragOver = (event: DragEvent) => { if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); setDragging(true); } };
+  const handleDragLeave = (event: DragEvent) => { if (!(event.relatedTarget instanceof Node) || !dialog?.contains(event.relatedTarget)) setDragging(false); };
+  const handleDrop = (event: DragEvent) => { setDragging(false); const file = filesFromDrop(event); if (file) { event.preventDefault(); void upload(file); } };
   const handlePaste = (event: ClipboardEvent) => { const file = filesFromClipboard(event); if (file) { event.preventDefault(); void upload(file); } };
   createOverlayPresence(() => threadIconTarget() !== null);
   onCleanup(() => {
     dialog?.removeEventListener("dragover", handleDragOver);
+    dialog?.removeEventListener("dragleave", handleDragLeave);
     dialog?.removeEventListener("drop", handleDrop);
     dialog?.removeEventListener("paste", handlePaste);
     dialog?.close();
@@ -42,6 +55,7 @@ export function ThreadIconPicker() {
       setImage(target.thread.icon?.kind === "image" ? target.thread.icon : null);
       setUploadError(null);
       setUploading(false);
+      setDragging(false);
       restore = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (!dialog?.open) dialog?.showModal();
       const frame = requestAnimationFrame(() => dialog?.querySelector<HTMLInputElement>('input[type="text"]')?.focus());
@@ -79,7 +93,7 @@ export function ThreadIconPicker() {
   const save = (event: SubmitEvent) => {
     event.preventDefault();
     const target = threadIconTarget();
-    if (!target || target.history !== historyId() || error() || uploading() || state.connection !== "connected") return;
+    if (!target || target.history !== historyId() || error() || uploading() || !changed() || state.connection !== "connected") return;
     threadAction(target.history, target.thread.id, "set_icon", { icon: value() }, target.thread.revision);
     close();
   };
@@ -87,31 +101,49 @@ export function ThreadIconPicker() {
   return <dialog ref={node => {
     dialog = node;
     node.addEventListener("dragover", handleDragOver);
+    node.addEventListener("dragleave", handleDragLeave);
     node.addEventListener("drop", handleDrop);
     node.addEventListener("paste", handlePaste);
-  }} aria-label="Change thread icon"
+  }} aria-label="Change thread icon" data-slot="thread-icon-picker"
     onCancel={event => { event.preventDefault(); close(); }}
     onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); } }}
-    class="m-auto max-h-[calc(100dvh-2rem)] w-[min(24rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-border bg-background p-5 text-foreground backdrop:bg-black/30">
-    <div role="group" aria-label="Thread icon choices">
-    <Show when={threadIconTarget()}>{target => <form onSubmit={save} class="space-y-4">
-      <h2 class="text-base font-semibold">Change thread icon</h2>
-      <div class="flex items-center gap-2"><ThreadAvatar thread={{ ...target().thread, icon: value() }} /><span class="min-w-0 break-words text-sm">{target().thread.title}</span></div>
-      <div class="grid grid-cols-6 gap-1" role="group" aria-label="Suggested icons"><For each={threadIconPresets}>{preset => <button type="button" class={`${button} px-0 text-xl aria-pressed:bg-muted`} aria-label={preset.label} aria-pressed={emoji() === preset.icon && !image() ? "true" : "false"} title={preset.label} onClick={() => chooseEmoji(preset.icon)}>{preset.icon}</button>}</For></div>
-      <label class="block space-y-2 text-sm">Custom emoji or symbol<input type="text" value={emoji() ?? ""} onInput={event => chooseEmoji(event.currentTarget.value)} aria-invalid={error() ? "true" : undefined} aria-describedby={error() ? "thread-icon-error" : undefined} class="block min-h-11 w-full rounded-lg border border-border bg-transparent px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /></label>
-      <div class="rounded-lg border border-dashed border-border p-3 text-sm">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="text-muted-foreground">PNG, JPEG, or WebP · cropped to 256 px</span>
-          <button type="button" class={button} disabled={uploading()} onClick={() => fileInput?.click()}>{uploading() ? "Preparing…" : "Upload image"}</button>
+    onPointerDown={event => { if (event.target === dialog) close(); }}
+    class="m-auto max-h-[calc(100dvh-2rem)] w-[min(25rem,calc(100vw-2rem))] max-w-none flex-col overflow-y-auto rounded-xl border border-border bg-surface p-0 text-foreground shadow-raised backdrop:bg-background/70 open:flex">
+    <Show when={threadIconTarget()}>{target => <form onSubmit={save} class="flex min-h-0 flex-col">
+      <div class="flex flex-col gap-3 p-4">
+        <h2 class="text-sm font-semibold">Change thread icon</h2>
+        <div class="flex items-center gap-3">
+          <button type="button" data-slot="thread-icon-preview" data-dragging={dragging() ? "true" : undefined}
+            aria-label="Upload icon image" title="Drop, paste, or click to upload"
+            class={`inline-flex shrink-0 rounded-xl border border-dashed p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${dragging() ? "border-primary bg-primary/10" : "border-border/70 hover:border-border hover:bg-muted/60"}`}
+            onClick={() => fileInput?.click()}>
+            <ThreadAvatar thread={{ ...target().thread, icon: value() }} large />
+          </button>
+          <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span class="truncate text-sm">{target().thread.title}</span>
+            <span class="flex min-w-0 items-center gap-1 text-meta text-muted-foreground">
+              <span class="truncate">{caption()}</span>
+              <Show when={image()}><button type="button" aria-label="Remove image" class="rounded px-1 underline decoration-dotted underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setImage(null); setUploadError(null); }}>Remove</button></Show>
+            </span>
+          </div>
         </div>
-        <p class="mt-1 text-xs text-muted-foreground">You can also drop or paste an image here.</p>
-        <input ref={node => { fileInput = node; }} type="file" accept={THREAD_ICON_MIMES.join(",")} class="sr-only" aria-label="Choose icon image" onChange={event => void upload(event.currentTarget.files?.[0])} />
-        <Show when={image()}><button type="button" class={`${button} mt-2 text-status-danger`} onClick={() => setImage(null)}>Remove image</button></Show>
+        <p class="text-meta text-muted-foreground">Drop, paste, or click to upload · PNG, JPEG, WebP</p>
+        <Show when={notice()}><p id="thread-icon-error" role="alert" class="text-meta text-status-danger">{notice()}</p></Show>
+        <input ref={node => { fileInput = node; }} type="file" accept={THREAD_ICON_MIMES.join(",")} class="hidden" aria-label="Choose icon image" onChange={event => void upload(event.currentTarget.files?.[0])} />
+        <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Suggested icons">
+          <For each={threadIconPresets}>{preset => <button type="button" class={swatch} aria-label={preset.label} aria-pressed={emoji() === preset.icon && !image() ? "true" : "false"} title={preset.label} onClick={() => chooseEmoji(preset.icon)}>{preset.icon}</button>}</For>
+          <input type="text" aria-label="Custom emoji or symbol" placeholder="Custom" value={emoji() ?? ""} onInput={event => chooseEmoji(event.currentTarget.value)}
+            aria-invalid={error() ? "true" : undefined} aria-describedby={error() ? "thread-icon-error" : undefined}
+            class="h-9 min-w-24 flex-1 rounded-md border border-border bg-transparent px-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-invalid:border-status-danger pointer-coarse:h-11" />
+        </div>
       </div>
-      <Show when={error()}><p id="thread-icon-error" role="alert" class="text-sm text-status-danger">{error()}</p></Show>
-      <Show when={uploadError()}><p role="alert" class="text-sm text-status-danger">{uploadError()}</p></Show>
-      <div class="flex flex-wrap justify-between gap-2"><button type="button" class={button} onClick={() => chooseEmoji(null)}>Use default</button><div class="flex gap-1"><button type="button" class={button} onClick={close}>Cancel</button><button type="submit" class={`${button} bg-primary text-primary-foreground hover:bg-primary/90`} disabled={Boolean(error()) || uploading() || state.connection !== "connected"}>Save icon</button></div></div>
+      <footer class="flex items-center gap-1.5 border-t border-border/60 px-3 py-2">
+        <button type="button" class={quiet} onClick={() => chooseEmoji(null)}>Use default</button>
+        <div class="flex-1" />
+        <button type="button" class={action} onClick={close}>Cancel</button>
+        <button type="submit" aria-label="Save icon" class={`${action} bg-primary text-primary-foreground hover:bg-primary/90`}
+          disabled={Boolean(error()) || uploading() || !changed() || state.connection !== "connected"}>Save</button>
+      </footer>
     </form>}</Show>
-    </div>
   </dialog>;
 }

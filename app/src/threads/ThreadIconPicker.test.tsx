@@ -72,6 +72,35 @@ describe("Thread icons", () => {
     fireEvent.click(view.getByRole("button", { name: "Save icon" }));
     expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: null }, expected_revision: 2 });
   });
+  it("previews every selection live and enables save only once the icon changes", async () => {
+    const view = render(() => <ThreadShell />);
+    flush(() => openThreadIconPicker(threadState.threads.find(thread => thread.id === 2)!));
+    const picker = view.getByRole("dialog", { name: "Change thread icon" });
+    const preview = () => picker.querySelector('[data-slot="thread-icon-preview"] [data-thread-avatar]')!;
+    expect(preview()).toHaveTextContent("\u{1F6E0}\uFE0F");
+    expect(within(picker).getByText("Emoji")).toBeInTheDocument();
+    expect(view.getByRole("button", { name: "Save icon" })).toBeDisabled();
+    fireEvent.click(within(picker).getByRole("button", { name: "Rocket" }));
+    expect(preview()).toHaveTextContent("\u{1F680}");
+    expect(within(picker).getByRole("button", { name: "Rocket" })).toHaveAttribute("aria-pressed", "true");
+    expect(view.getByRole("button", { name: "Save icon" })).toBeEnabled();
+    fireEvent.input(within(picker).getByRole("textbox", { name: "Custom emoji or symbol" }), { target: { value: "\u{1F41D}" } });
+    expect(preview()).toHaveTextContent("\u{1F41D}");
+    expect(within(picker).getByRole("button", { name: "Rocket" })).toHaveAttribute("aria-pressed", "false");
+    const file = new File(["image bytes"], "bee.png", { type: "image/png" });
+    fireEvent.change(within(picker).getByLabelText("Choose icon image"), { target: { files: [file] } });
+    await waitFor(() => expect(preview().querySelector("img")).toHaveAttribute("src", "https://example.test/blob/image-blob"));
+    expect(within(picker).getByText("Uploaded image")).toBeInTheDocument();
+    fireEvent.click(within(picker).getByRole("button", { name: "Remove image" }));
+    expect(preview().querySelector("img")).toBeNull();
+    expect(preview()).toHaveTextContent("\u{1F41D}");
+    expect(within(picker).getByText("Emoji")).toBeInTheDocument();
+    fireEvent.click(within(picker).getByRole("button", { name: "Use default" }));
+    expect(preview()).toHaveTextContent("T");
+    expect(within(picker).getByText("Default")).toBeInTheDocument();
+    fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));
+    expect(sent.at(-1)).toMatchObject({ thread_id: 2, data: { icon: null }, expected_revision: 1 });
+  });
   it("uploads a mock image, previews the signed blob, and sends the typed image icon", async () => {
     const view = render(() => <ThreadShell />);
     flush(() => openThreadIconPicker(threadState.threads[1]));

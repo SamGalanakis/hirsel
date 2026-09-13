@@ -8,29 +8,66 @@ pub(crate) struct ScopedThreadTools {
     pub(crate) caller: ThreadCaller,
     pub(crate) operation_id: String,
 }
-fn reference(args: &Value, key: &str) -> Result<ThreadRef, String> {
+fn reference(args: &Value, key: &str) -> Result<ThreadRef, ToolError> {
     args.get(key)
-        .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+        .map(|v| serde_json::from_value(v.clone()).map_err(ToolError::from))
         .transpose()
         .map(|v| v.unwrap_or_default())
 }
-fn refs(args: &Value) -> Result<Vec<u64>, String> {
+fn refs(args: &Value) -> Result<Vec<u64>, ToolError> {
     serde_json::from_value(
         args.get("artifact_ids")
             .cloned()
             .unwrap_or_else(|| json!([])),
     )
-    .map_err(|e| e.to_string())
+    .map_err(ToolError::from)
 }
 impl ScopedThreadTools {
-    pub(crate) async fn resolve(&self, args: &Value, key: &str) -> Result<u64, String> {
+    pub(crate) async fn resolve(&self, args: &Value, key: &str) -> Result<u64, ToolError> {
         self.tools
             .storage()
             .resolve_thread(&self.caller, &reference(args, key)?)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(ToolError::from)
     }
+    /// Every ID is addressable. A call that lands outside this Thread's reach
+    /// comes back as a readable result — `{refused:true,...}` — and leaves one
+    /// durable activity row per attempt, so the Owner and the Thread's
+    /// requester both see exactly what was tried. There is no dedupe: a turn
+    /// that probes the same Thread twice logs twice.
     pub(crate) async fn execute(&self, name: &str, args: &Value) -> Result<Value, String> {
+        match self.dispatch(name, args).await {
+            Ok(value) => Ok(value),
+            Err(ToolError::Message(message)) => Err(message),
+            Err(ToolError::Refused(refusal)) => self.refuse(name, refusal).await,
+        }
+    }
+    async fn refuse(
+        &self,
+        name: &str,
+        refusal: crate::storage::OutsideGrant,
+    ) -> Result<Value, String> {
+        let storage = self.tools.storage();
+        let reach = storage
+            .thread_reach(&self.caller)
+            .await
+            .unwrap_or_else(|_| "self + subtree".into());
+        let result = json!({
+            "refused": true,
+            "reason": refusal.reason.as_str(),
+            "target": refusal.target,
+            "tool": name,
+            "grant_summary": reach,
+            "detail": refusal.to_string(),
+        });
+        let activity = storage
+            .record_refusal(&self.caller, &result)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.tools.publish_thread_activity(activity).await;
+        Ok(result)
+    }
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         let definition = scoped_mcp_catalog(&self.tools)
             .into_iter()
             .find(|tool| tool["name"] == name)
@@ -48,7 +85,7 @@ impl ScopedThreadTools {
                     target: serde_json::from_value::<crate::storage::RelatedTargetInput>(
                         args["target"].clone(),
                     )
-                    .map_err(|e| e.to_string())?,
+                    .map_err(ToolError::from)?,
                     title: optional_string_any_allow_empty(args, &["title"])?,
                 })
                 .await
@@ -72,12 +109,12 @@ impl ScopedThreadTools {
                 let guard = storage
                     .execution_guard(&self.caller)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 let running = crate::process_run::start_bash_command(
                     required_string(args, "cmd")?,
                     optional_path(args, "cwd")?,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(ToolError::from)?;
                 drop(guard);
                 let output = running
                     .finish(Duration::from_secs(
@@ -87,14 +124,14 @@ impl ScopedThreadTools {
                             .min(600),
                     ))
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 let output = crate::tools::shell::shell_output(output);
                 // Native coding tools retain filesystem access; coordination authority
                 // is checked again before exposing an awaited result.
                 storage
                     .thread_context(&self.caller)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 shell_run_result(&output)
             }
             "views_show" => self.views_show(args).await,
@@ -108,9 +145,9 @@ impl ScopedThreadTools {
                 storage
                     .thread_context(&self.caller)
                     .await
-                    .map_err(|e| e.to_string())?,
+                    .map_err(ToolError::from)?,
             )
-            .map_err(|e| e.to_string()),
+            .map_err(ToolError::from),
             "threads_list" => {
                 let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(1);
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
@@ -127,9 +164,9 @@ impl ScopedThreadTools {
                             limit as u32,
                         )
                         .await
-                        .map_err(|e| e.to_string())?,
+                        .map_err(ToolError::from)?,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(ToolError::from)
             }
             "threads_create" => {
                 self.resolve(args, "parent").await?;
@@ -137,7 +174,7 @@ impl ScopedThreadTools {
                 let mutation = crate::storage::ThreadMutation::Create {
                     client_id: required_string(args, "client_id")?,
                     kind: serde_json::from_value(args.get("kind").cloned().ok_or("kind required")?)
-                        .map_err(|e| e.to_string())?,
+                        .map_err(ToolError::from)?,
                     title: required_string(args, "title")?,
                     icon,
                     parent: reference(args, "parent")?,
@@ -151,7 +188,7 @@ impl ScopedThreadTools {
                         .get("attention")
                         .map(|v| serde_json::from_value(v.clone()))
                         .transpose()
-                        .map_err(|e| e.to_string())?
+                        .map_err(ToolError::from)?
                         .unwrap_or_default(),
                 };
                 self.thread_mutation(mutation).await
@@ -162,7 +199,7 @@ impl ScopedThreadTools {
                     .filter(|v| !v.is_null())
                     .map(|v| serde_json::from_value(v.clone()))
                     .transpose()
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 serde_json::to_value(
                     storage
                         .scoped_thread_read(
@@ -172,9 +209,9 @@ impl ScopedThreadTools {
                             args.get("limit").and_then(Value::as_u64).unwrap_or(30),
                         )
                         .await
-                        .map_err(|e| e.to_string())?,
+                        .map_err(ToolError::from)?,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(ToolError::from)
             }
             "threads_update" => {
                 self.resolve(args, "thread").await?;
@@ -187,7 +224,7 @@ impl ScopedThreadTools {
                         args,
                         "showcased_artifact_id",
                     )
-                    .map_err(|e| e.to_string())?,
+                    .map_err(ToolError::from)?,
                     description: optional_string_any_allow_empty(args, &["description"])?,
                     instrument: args
                         .get("instrument")
@@ -196,7 +233,24 @@ impl ScopedThreadTools {
                         .get("attention")
                         .map(|v| serde_json::from_value(v.clone()))
                         .transpose()
-                        .map_err(|e| e.to_string())?,
+                        .map_err(ToolError::from)?,
+                })
+                .await
+            }
+            "threads_grant" => {
+                self.thread_mutation(crate::storage::ThreadMutation::Grant {
+                    thread: reference(args, "thread")?,
+                    target: reference(args, "target")?,
+                    note: optional_string_any_allow_empty(args, &["note"])?,
+                })
+                .await
+            }
+            "threads_revoke" => {
+                self.thread_mutation(crate::storage::ThreadMutation::Revoke {
+                    thread: reference(args, "thread")?,
+                    target_thread_id: args["target_thread_id"]
+                        .as_u64()
+                        .ok_or("target_thread_id must be a positive integer")?,
                 })
                 .await
             }
@@ -212,14 +266,17 @@ impl ScopedThreadTools {
                 if let Some(receipt) = storage
                     .delegation_receipt(&self.caller, &self.operation_id, args)
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(ToolError::from)?
                 {
-                    return serde_json::to_value(receipt).map_err(|e| e.to_string());
+                    return serde_json::to_value(receipt).map_err(ToolError::from);
                 }
                 let assignment = if name == "threads_delegate" {
                     self.resolve_assignment(args).await?
                 } else {
                     let child = self.resolve(args, "thread").await?;
+                    // The one fence a grant cannot open: work reports upward,
+                    // it never messages upward.
+                    storage.refuse_upward(&self.caller, child).await?;
                     Delegation {
                         title: "Follow-up".into(),
                         brief: required_string(args, "text")?,
@@ -231,13 +288,13 @@ impl ScopedThreadTools {
                 let accepted = storage
                     .delegate_thread(&self.caller, &self.operation_id, &assignment, args)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 // Runtime admission polls the committed outbox; returning never
                 // holds the parent lane waiting for child completion.
                 let detail = storage
                     .thread_detail(accepted.thread_id, None, 1)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 self.tools
                     .publish_thread(&self.caller.history_id, detail.thread)
                     .await;
@@ -255,7 +312,7 @@ impl ScopedThreadTools {
                 {
                     self.tools.publish_thread_activity(activity).await;
                 }
-                serde_json::to_value(accepted).map_err(|e| e.to_string())
+                serde_json::to_value(accepted).map_err(ToolError::from)
             }
             "threads_report" => {
                 let id = storage
@@ -266,7 +323,7 @@ impl ScopedThreadTools {
                         &refs(args)?,
                     )
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 self.tools
                     .emit_thread_trigger(
                         THREAD_REPORTED_SOURCE_TYPE,
@@ -283,7 +340,7 @@ impl ScopedThreadTools {
                 let artifacts = storage
                     .scoped_artifacts(&self.caller, under)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ToolError::from)?;
                 Ok(json!({"artifacts":artifacts}))
             }
             _ => match self
@@ -298,8 +355,8 @@ impl ScopedThreadTools {
                 )
                 .await
             {
-                Some(result) => result,
-                None => Err(format!("Unknown scoped tool: {name}")),
+                Some(result) => result.map_err(ToolError::from),
+                None => Err(format!("Unknown scoped tool: {name}").into()),
             },
         }
     }
@@ -312,7 +369,7 @@ pub(crate) fn scoped_mcp_catalog(tools: &ToolSuite) -> Vec<Value> {
 }
 
 impl ScopedThreadTools {
-    pub(super) async fn views_show(&self, args: &Value) -> Result<Value, String> {
+    pub(super) async fn views_show(&self, args: &Value) -> Result<Value, ToolError> {
         let template_id = optional_string(args, "template_id")?;
         let spec = args.get("spec").cloned().filter(|value| !value.is_null());
         let params = args.get("params").cloned().filter(|value| !value.is_null());
@@ -321,7 +378,7 @@ impl ScopedThreadTools {
         let _execution = storage
             .execution_guard(&self.caller)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ToolError::from)?;
         let view = self
             .tools
             .views_show(
@@ -337,7 +394,7 @@ impl ScopedThreadTools {
         Ok(view_instance_result(&view))
     }
 
-    pub(super) async fn views_update(&self, args: &Value) -> Result<Value, String> {
+    pub(super) async fn views_update(&self, args: &Value) -> Result<Value, ToolError> {
         let instance_id = required_string(args, "instance_id")?;
         let view = self
             .tools
@@ -348,14 +405,14 @@ impl ScopedThreadTools {
             .storage()
             .resolve_thread(&self.caller, &crate::storage::ThreadRef::Id(view.thread_id))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ToolError::from)?;
         let params = args.get("params").cloned().filter(|value| !value.is_null());
         let patch = args.get("patch").cloned().filter(|value| !value.is_null());
         let storage = self.tools.storage();
         let _execution = storage
             .execution_guard(&self.caller)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ToolError::from)?;
         let view = self
             .tools
             .views_update(
@@ -370,7 +427,7 @@ impl ScopedThreadTools {
         Ok(view_instance_result(&view))
     }
 
-    pub(super) async fn views_clear(&self, args: &Value) -> Result<Value, String> {
+    pub(super) async fn views_clear(&self, args: &Value) -> Result<Value, ToolError> {
         let instance_id = required_string(args, "instance_id")?;
         let view = self
             .tools
@@ -381,12 +438,12 @@ impl ScopedThreadTools {
             .storage()
             .resolve_thread(&self.caller, &crate::storage::ThreadRef::Id(view.thread_id))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ToolError::from)?;
         let storage = self.tools.storage();
         let _execution = storage
             .execution_guard(&self.caller)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ToolError::from)?;
         self.tools
             .views_clear(&self.caller.history_id, view.thread_id, &instance_id)
             .await
@@ -394,13 +451,13 @@ impl ScopedThreadTools {
         Ok(json!({ "ok": true, "instance_id": instance_id }))
     }
 
-    pub(super) async fn views_list_templates(&self) -> Result<Value, String> {
+    pub(super) async fn views_list_templates(&self) -> Result<Value, ToolError> {
         let templates = self
             .tools
             .views_list_templates()
             .await
             .map_err(|error| error.to_string())?;
-        serde_json::to_value(templates).map_err(|error| error.to_string())
+        Ok(serde_json::to_value(templates)?)
     }
 }
 
@@ -408,8 +465,8 @@ impl ScopedThreadTools {
     async fn prepared_icon(
         &self,
         args: &Value,
-    ) -> Result<Option<Option<hirsel_proto::ThreadIcon>>, String> {
-        let parsed = crate::storage::parse_agent_icon(args).map_err(|e| e.to_string())?;
+    ) -> Result<Option<Option<hirsel_proto::ThreadIcon>>, ToolError> {
+        let parsed = crate::storage::parse_agent_icon(args).map_err(ToolError::from)?;
         match parsed {
             None => Ok(None),
             Some(None) => Ok(Some(None)),
@@ -424,7 +481,7 @@ impl ScopedThreadTools {
                     .await
                     .map(Some)
                     .map(Some)
-                    .map_err(|e| e.to_string())
+                    .map_err(ToolError::from)
             }
         }
     }
@@ -432,20 +489,25 @@ impl ScopedThreadTools {
     async fn thread_mutation(
         &self,
         mutation: crate::storage::ThreadMutation,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ToolError> {
         let result = self
             .tools
             .storage()
             .mutate_scoped_thread(&self.caller, &self.operation_id, &mutation)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ToolError::from)?;
+        if result.get("grants").is_some() {
+            let snapshot = serde_json::from_value::<crate::storage::ThreadGrants>(result.clone())?;
+            self.tools.publish_thread_grants(None, snapshot).await?;
+            return Ok(result);
+        }
         if result.get("related_items").is_some() {
             let links = serde_json::from_value::<crate::storage::ThreadRelated>(result.clone())
-                .map_err(|e| e.to_string())?;
+                .map_err(ToolError::from)?;
             self.tools
                 .publish_thread_related(None, links)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(ToolError::from)?;
             return Ok(result);
         }
         if result.get("previous_showcased_artifact_id").is_some() {
@@ -457,20 +519,20 @@ impl ScopedThreadTools {
             self.tools
                 .publish_showcase_artifacts(&self.caller.history_id, &ids)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(ToolError::from)?;
         }
         if let Some(thread) = result.get("thread") {
             self.tools
                 .publish_thread(
                     &self.caller.history_id,
-                    serde_json::from_value(thread.clone()).map_err(|e| e.to_string())?,
+                    serde_json::from_value(thread.clone()).map_err(ToolError::from)?,
                 )
                 .await;
         }
         if let Some(activity) = result.get("activity") {
             self.tools
                 .publish_thread_activity(
-                    serde_json::from_value(activity.clone()).map_err(|e| e.to_string())?,
+                    serde_json::from_value(activity.clone()).map_err(ToolError::from)?,
                 )
                 .await;
         }
@@ -541,9 +603,8 @@ enum DelegateInput {
     },
 }
 impl ScopedThreadTools {
-    async fn resolve_assignment(&self, args: &Value) -> Result<Delegation, String> {
-        let input: DelegateInput =
-            serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+    async fn resolve_assignment(&self, args: &Value) -> Result<Delegation, ToolError> {
+        let input: DelegateInput = serde_json::from_value(args.clone()).map_err(ToolError::from)?;
         use crate::execution_selection::{ExecutionSelectors, resolve_execution};
         let (input, child_thread_id, selectors) = match input {
             DelegateInput::Existing {
@@ -641,7 +702,7 @@ impl ScopedThreadTools {
         let brief = if native_worker {
             self.tools
                 .expand_skill(&input.brief)
-                .map_err(|e| e.to_string())?
+                .map_err(ToolError::from)?
         } else {
             input.brief
         };

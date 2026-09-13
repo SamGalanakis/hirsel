@@ -14,7 +14,13 @@ fn attention_schema() -> Value {
     json!({"type":"string","enum":["quiet","needs_owner"]})
 }
 pub(super) fn thread_ref_schema() -> Value {
-    json!({"oneOf":[{"type":"integer","minimum":0},{"type":"string","pattern":"^(\\.|\\./[0-9]+(/[0-9]+)*)$"}],"description":"Self (.), a descendant numeric ID, or actual direct-child hops ./id/id. IDs never bypass scope."})
+    json!({"oneOf":[{"type":"integer","minimum":0},{"type":"string","pattern":"^(\\.|\\./[0-9]+(/[0-9]+)*)$"}],"description":"Self (.), any Thread ID, or actual direct-child hops ./id/id. Any ID may be named; one outside your reach returns a typed refusal rather than an error."})
+}
+pub(super) fn thread_grant_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["thread","target"],"properties":{"thread":thread_ref_schema(),"target":thread_ref_schema(),"note":{"type":"string","maxLength":200,"description":"Why this reach exists. Shown to the Owner beside the grant."}}})
+}
+pub(super) fn thread_revoke_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["thread","target_thread_id"],"properties":{"thread":thread_ref_schema(),"target_thread_id":{"type":"integer","minimum":1,"description":"The granted Thread ID exactly as threads.context lists it."}}})
 }
 pub(super) fn thread_create_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"required":["client_id","kind","title"],"properties":{"client_id":{"type":"string","minLength":1},"kind":{"type":"string","enum":["space","task"]},"title":{"type":"string","minLength":1},"parent":thread_ref_schema(),"description":{"type":"string"},"icon":icon_schema(),"instrument":{"type":["object","array","null"],"description":"A nonempty instrument object or array of components; null removes the instrument. Empty objects and arrays are invalid."},"attention":attention_schema()}})

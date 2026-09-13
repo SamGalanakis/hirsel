@@ -194,29 +194,32 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
         caller: child_actor.clone(),
         operation_id: "child-self".into(),
     };
-    assert!(
-        child_tools
-            .execute(
-                "threads_update",
-                &json!({"thread":root,"showcased_artifact_id":null})
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        child_tools
-            .execute(
-                "threads_update",
-                &json!({"thread":peer,"showcased_artifact_id":artifact_id})
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        child_tools
-            .execute("threads_update", &json!({"showcased_artifact_id":99999}))
-            .await
-            .is_err()
+    // A child addressing its parent is refused in the open and writes nothing.
+    let refused = child_tools
+        .execute(
+            "threads_update",
+            &json!({"thread":root,"showcased_artifact_id":null}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused["refused"], json!(true));
+    assert_eq!(refused["reason"], json!("outside_grant"));
+    let refused = child_tools
+        .execute(
+            "threads_update",
+            &json!({"thread":peer,"showcased_artifact_id":artifact_id}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused["target"], json!({"kind":"thread","thread_id":peer}));
+    // An artifact outside reach refuses the same way a Thread does.
+    let refused = child_tools
+        .execute("threads_update", &json!({"showcased_artifact_id":99999}))
+        .await
+        .unwrap();
+    assert_eq!(
+        refused["target"],
+        json!({"kind":"artifact","artifact_id":99999})
     );
     let cleared = child_tools
         .execute("threads_update", &json!({"showcased_artifact_id":null}))
@@ -237,14 +240,24 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
     );
     // A guessed global ID cannot re-grant access after its only reference clears.
     child_tools.operation_id = "unauthorized-regrant".into();
+    let refused = child_tools
+        .execute(
+            "threads_update",
+            &json!({"showcased_artifact_id":artifact_id}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        refused["target"],
+        json!({"kind":"artifact","artifact_id":artifact_id})
+    );
     assert!(
-        child_tools
-            .execute(
-                "threads_update",
-                &json!({"showcased_artifact_id":artifact_id})
-            )
+        s.thread(child)
             .await
-            .is_err()
+            .unwrap()
+            .unwrap()
+            .showcased_artifact_id
+            .is_none()
     );
     tools.operation_id = "revoked".into();
     s.conn

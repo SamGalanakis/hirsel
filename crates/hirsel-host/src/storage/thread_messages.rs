@@ -425,9 +425,11 @@ impl Storage {
         let activities = super::thread_activity::activities(&tx, id)?;
         let brief = super::thread_read::brief(&tx, id)?;
         let related_items = super::thread_related::list(&tx, id)?;
+        let grants = super::thread_grants::list(&tx, id)?;
         tx.commit()?;
         Ok(ThreadDetail {
             related_items,
+            grants,
             brief,
             thread,
             messages,

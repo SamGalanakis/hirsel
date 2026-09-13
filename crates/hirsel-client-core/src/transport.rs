@@ -476,6 +476,16 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 store.upsert_thread(thread);
                 true
             }
+            // Reach is read-only for native clients today: the snapshot lands in
+            // the store and reaches observers, with no client-initiated op to
+            // reconcile.
+            HostToClient::ThreadGrantsChanged {
+                history_id,
+                thread_id,
+                revision,
+                grants,
+                client_id: _,
+            } => store.apply_thread_grants(&history_id, thread_id, revision, grants),
             HostToClient::ThreadRelatedChanged {
                 history_id,
                 thread_id,

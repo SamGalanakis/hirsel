@@ -1,4 +1,5 @@
 import { ShowcaseButton, ShowcaseSurface } from "../artifacts/ShowcaseSurface";
+import { ReachStrip } from "../grants/ReachStrip";
 import { RelatedContext } from "../related/context";
 import { RelatedList } from "../related/RelatedList";
 import { relatedState } from "../related/store";
@@ -160,6 +161,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       </Show>
     </div>
     <ThreadError threadId={props.id} />
+    <Show when={!showRelated() && !showInfo()}><ReachStrip origin={origin} /></Show>
     <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} shortLabel={`Message #${props.id}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
         sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds);

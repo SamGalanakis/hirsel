@@ -144,6 +144,7 @@ pub struct ClientSnapshot {
     pub activities: Vec<ThreadActivity>,
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
+    pub grants: Vec<hirsel_proto::ThreadGrant>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
@@ -159,6 +160,7 @@ pub struct ClientSnapshot {
 pub(crate) struct LocalStore {
     removed_message_ids: HashSet<u64>,
     related_revisions: HashMap<u64, u64>,
+    grant_revisions: HashMap<u64, u64>,
     pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
     pub threads: Vec<Thread>,
@@ -166,6 +168,7 @@ pub(crate) struct LocalStore {
     pub activities: Vec<ThreadActivity>,
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
+    pub grants: Vec<hirsel_proto::ThreadGrant>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
@@ -182,6 +185,7 @@ impl Default for LocalStore {
         Self {
             removed_message_ids: HashSet::new(),
             related_revisions: HashMap::new(),
+            grant_revisions: HashMap::new(),
             connection: ConnectionState::Offline,
             messages: Vec::new(),
             threads: Vec::new(),
@@ -189,6 +193,7 @@ impl Default for LocalStore {
             activities: Vec::new(),
             briefs: Vec::new(),
             related_items: Vec::new(),
+            grants: Vec::new(),
             streams: Vec::new(),
             opened_threads: Vec::new(),
             created_threads: Vec::new(),
@@ -212,6 +217,7 @@ impl LocalStore {
             activities: self.activities.clone(),
             briefs: self.briefs.clone(),
             related_items: self.related_items.clone(),
+            grants: self.grants.clone(),
             streams: self.streams.clone(),
             opened_threads: self.opened_threads.clone(),
             created_threads: self.created_threads.clone(),
@@ -358,6 +364,7 @@ impl LocalStore {
         self.pending_ops.remove(client_id);
         let thread_id = detail.thread.id;
         self.replace_related_items(thread_id, detail.thread.revision, detail.related_items);
+        self.replace_grants(thread_id, detail.thread.revision, detail.grants);
         self.briefs.retain(|b| b.thread_id != thread_id);
         self.briefs.push(ThreadBrief {
             thread_id,
@@ -419,6 +426,41 @@ impl LocalStore {
             .retain(|link| link.thread_id != thread_id);
         self.related_items.extend(items);
         true
+    }
+
+    /// Reach snapshots order only against prior reach snapshots, for the same
+    /// reason related items do: Thread metadata may already be newer.
+    fn replace_grants(
+        &mut self,
+        thread_id: u64,
+        revision: u64,
+        grants: Vec<hirsel_proto::ThreadGrant>,
+    ) -> bool {
+        if self
+            .grant_revisions
+            .get(&thread_id)
+            .is_some_and(|old| *old > revision)
+            || grants.iter().any(|grant| grant.thread_id != thread_id)
+        {
+            return false;
+        }
+        self.grant_revisions.insert(thread_id, revision);
+        self.grants.retain(|grant| grant.thread_id != thread_id);
+        self.grants.extend(grants);
+        true
+    }
+
+    pub fn apply_thread_grants(
+        &mut self,
+        history_id: &str,
+        thread_id: u64,
+        revision: u64,
+        grants: Vec<hirsel_proto::ThreadGrant>,
+    ) -> bool {
+        if self.history_id.as_deref() != Some(history_id) {
+            return false;
+        }
+        self.replace_grants(thread_id, revision, grants)
     }
 
     pub fn apply_thread_related(

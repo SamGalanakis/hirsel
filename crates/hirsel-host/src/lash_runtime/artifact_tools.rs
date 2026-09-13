@@ -7,13 +7,13 @@ impl ScopedThreadTools {
         &self,
         name: &str,
         args: &Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ToolError> {
         if name != "artifacts_create" {
             self.tools
                 .storage()
                 .authorize_thread_artifact(&self.caller, required_u64_any(args, &["artifact_id"])?)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(ToolError::from)?;
         }
         self.publish_artifact_operation(name, args, &self.operation_id)
             .await
@@ -24,13 +24,13 @@ impl ScopedThreadTools {
         name: &str,
         args: &Value,
         operation_id: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ToolError> {
         let input = json!({"tool":name,"args":args});
         let storage = self.tools.storage();
         let result = if let Some(result) = storage
             .artifact_operation(operation_id, &self.caller, &input)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(ToolError::from)?
         {
             result
         } else {
@@ -67,7 +67,7 @@ impl ScopedThreadTools {
                     let current = storage
                         .scoped_artifact(&self.caller, id.expect("edit has id"))
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(ToolError::from)?;
                     let edits = args
                         .get("edits")
                         .and_then(Value::as_array)
@@ -97,7 +97,7 @@ impl ScopedThreadTools {
             storage
                 .publish_artifact(operation_id, &input, &self.caller, id, draft)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(ToolError::from)?
         };
         self.tools.publish_artifact(result.0.summary.clone());
         if let Some(message) = result.1 {
@@ -106,8 +106,8 @@ impl ScopedThreadTools {
         let scoped = storage
             .scoped_artifact(&self.caller, result.0.summary.id)
             .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(scoped).map_err(|e| e.to_string())
+            .map_err(ToolError::from)?;
+        serde_json::to_value(scoped).map_err(ToolError::from)
     }
 }
 
@@ -159,6 +159,7 @@ mod tests {
                 .publish_artifact_operation("artifacts_edit", &edits, "edit-2")
                 .await
                 .unwrap_err()
+                .to_string()
                 .contains("exactly once")
         );
         assert_eq!(storage.artifacts(None).await.unwrap().len(), 1);

@@ -54,6 +54,18 @@ pub(crate) enum ThreadMutation {
         kind: String,
         data: Value,
     },
+    /// Widen a descendant's reach to one Thread the caller can already reach.
+    Grant {
+        thread: ThreadRef,
+        target: ThreadRef,
+        note: Option<String>,
+    },
+    /// Narrow a descendant's reach. Narrowing needs no reach of its own: an
+    /// ancestor may always remove a grant, including one the Owner made.
+    Revoke {
+        thread: ThreadRef,
+        target_thread_id: u64,
+    },
 }
 impl Storage {
     pub(crate) async fn mutate_scoped_thread(
@@ -192,13 +204,41 @@ impl Storage {
                 anyhow::ensure!(
                     !matches!(
                         kind.as_str(),
-                        "delegation_received" | "child_report" | "background_queued"
+                        "delegation_received" | "child_report" | "background_queued" | "refusal"
                     ),
                     "activity kind is reserved for host provenance"
                 );
                 let turn_id = (id == caller.thread_id).then_some(caller.turn_id);
                 tx.execute("INSERT INTO thread_activities(thread_id,turn_id,kind,data,ts) VALUES(?1,?2,?3,?4,?5)",params![id,turn_id,kind,serde_json::to_string(data)?,now])?;
                 json!({"activity":{"id":tx.last_insert_rowid(),"thread_id":id,"turn_id":turn_id,"kind":kind,"data":data,"artifact_ids":[],"ts":now}})
+            }
+            ThreadMutation::Grant {
+                thread,
+                target,
+                note,
+            } => {
+                // Both ends resolve against the caller's own reach first: a
+                // Thread can only hand on what it already holds.
+                let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
+                let target = thread_scope::resolve(&tx, caller.thread_id, target)?;
+                super::thread_grants::authorize_widening(&tx, caller.thread_id, id, Some(target))?;
+                serde_json::to_value(super::thread_grants::grant(
+                    &tx,
+                    id,
+                    target,
+                    &hirsel_proto::ThreadGrantSource::Thread {
+                        thread_id: caller.thread_id,
+                    },
+                    note.as_deref(),
+                )?)?
+            }
+            ThreadMutation::Revoke {
+                thread,
+                target_thread_id,
+            } => {
+                let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
+                super::thread_grants::authorize_widening(&tx, caller.thread_id, id, None)?;
+                serde_json::to_value(super::thread_grants::revoke(&tx, id, *target_thread_id)?)?
             }
         };
         if let Some(id) = result.get("thread_id").and_then(Value::as_u64) {

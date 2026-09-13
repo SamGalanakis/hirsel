@@ -148,9 +148,33 @@ pub struct ThreadBrief {
     pub artifact_ids: Vec<u64>,
 }
 
+/// Who widened a Thread's reach. Only the Owner or a strict ancestor can.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThreadGrantSource {
+    Owner,
+    Thread { thread_id: u64 },
+}
+
+/// One durable widening of a Thread's reach: `thread_id` may address
+/// `target_thread_id` and everything under it, exactly as if it were its own
+/// subtree. Default reach (self + descendants) is never stored as a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadGrant {
+    pub thread_id: u64,
+    pub target_thread_id: u64,
+    /// The target's current title, so a reach strip needs no second lookup.
+    pub title: String,
+    pub granted_by: ThreadGrantSource,
+    pub granted_at: DateTime<Utc>,
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDetail {
     pub related_items: Vec<ThreadRelatedItem>,
+    /// This Thread's durable widenings, visible before and during a turn.
+    pub grants: Vec<ThreadGrant>,
     pub brief: ThreadBrief,
     pub thread: Thread,
     pub messages: Vec<crate::ChatMessage>,

@@ -25,7 +25,7 @@ function worldFor(token) {
   if (!tenants.has(token)) {
     const threads = [];
     if (process.env.MOCK_SEED !== "none") threads.push(makeThread(1, "Home", "space"));
-    tenants.set(token, { token, history_id: randomUUID(), threads, messages: [], relatedItems: [], nextRelatedItem: 1, relatedReceipts: new Map(), artifacts: [], artifactOperations: new Map(), nextArtifact: 1, turns: [], activities: [], clients: new Set(), requests: new Map(), blobs: new Map(), timers: new Map(), queue: [], nextThread: Math.max(0, ...threads.map(thread => thread.id)) + 1, nextMessage: 1, nextTurn: 1 });
+    tenants.set(token, { token, history_id: randomUUID(), threads, messages: [], relatedItems: [], nextRelatedItem: 1, relatedReceipts: new Map(), grants: [], grantReceipts: new Map(), artifacts: [], artifactOperations: new Map(), nextArtifact: 1, turns: [], activities: [], clients: new Set(), requests: new Map(), blobs: new Map(), timers: new Map(), queue: [], nextThread: Math.max(0, ...threads.map(thread => thread.id)) + 1, nextMessage: 1, nextTurn: 1 });
   }
   const world = tenants.get(token);
   if (process.env.MOCK_SEED === "process-wakes" && world.messages.length === 0) {
@@ -163,7 +163,7 @@ function handle(world, ws, frame) {
     case "open_thread": {
       const thread = threadFor(world, frame.thread_id);
       const rows = world.messages.filter(row => row.thread_id === thread.id && (frame.before_id == null || row.id < frame.before_id));
-      send(ws, { type: "thread_opened", client_id: frame.client_id, detail: { related_items: world.relatedItems.filter(item => item.thread_id === thread.id), brief: { text: "", artifact_ids: [] }, thread: summary(world, thread), messages: rows.slice(-100), turns: world.turns.filter(row => row.thread_id === thread.id), turn_timelines: [], activities: world.activities.filter(row => row.thread_id === thread.id), has_more: rows.length > 100 } });
+      send(ws, { type: "thread_opened", client_id: frame.client_id, detail: { related_items: world.relatedItems.filter(item => item.thread_id === thread.id), grants: world.grants.filter(grant => grant.thread_id === thread.id), brief: { text: "", artifact_ids: [] }, thread: summary(world, thread), messages: rows.slice(-100), turns: world.turns.filter(row => row.thread_id === thread.id), turn_timelines: [], activities: world.activities.filter(row => row.thread_id === thread.id), has_more: rows.length > 100 } });
       return;
     }
     case "add_thread_related":
@@ -207,6 +207,32 @@ function handle(world, ws, frame) {
       }
       if (changed) updateThread(world, thread, {});
       broadcast(world, { type: "thread_related_changed", client_id: frame.client_id, history_id: world.history_id, thread_id: thread.id, revision: thread.revision, items: world.relatedItems.filter(item => item.thread_id === thread.id) });
+      return;
+    }
+    case "grant_thread_reach":
+    case "revoke_thread_reach": {
+      if (frame.history_id !== world.history_id) throw new Error("History changed. Open the Thread again.");
+      const thread = threadFor(world, frame.thread_id);
+      const target = threadFor(world, frame.target_thread_id);
+      if (target.id === thread.id) throw new Error("A Thread always reaches itself");
+      const payload = JSON.stringify([frame.type, frame.history_id, thread.id, target.id, frame.note ?? null]);
+      const receipt = world.grantReceipts.get(frame.client_id);
+      if (receipt !== undefined && receipt !== payload) throw new Error("client_id already used for different content");
+      let changed = false;
+      if (receipt === undefined) {
+        if (frame.type === "grant_thread_reach") {
+          if (!world.grants.some(grant => grant.thread_id === thread.id && grant.target_thread_id === target.id)) {
+            world.grants.push({ thread_id: thread.id, target_thread_id: target.id, title: target.title, granted_by: { kind: "owner" }, granted_at: now(), note: frame.note ?? null }); changed = true;
+          }
+        } else {
+          const count = world.grants.length;
+          world.grants = world.grants.filter(grant => grant.thread_id !== thread.id || grant.target_thread_id !== target.id);
+          changed = count !== world.grants.length;
+        }
+        world.grantReceipts.set(frame.client_id, payload);
+      }
+      if (changed) updateThread(world, thread, {});
+      broadcast(world, { type: "thread_grants_changed", client_id: frame.client_id, history_id: world.history_id, thread_id: thread.id, revision: thread.revision, grants: world.grants.filter(grant => grant.thread_id === thread.id) });
       return;
     }
     case "send_thread_message": {

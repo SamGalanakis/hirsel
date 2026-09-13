@@ -67,3 +67,14 @@ it("positions cancelled queued background work by acceptance without inventing a
   expect(conversationEntries(history).map(row => row.key)).toEqual(["message-1", "turn-9", "message-3"]);
   expect(conversationEntries({ ...history, hasMore: true, messages: [message(3, "agent")] }).map(row => row.key)).toEqual(["message-3"]);
 });
+
+it("renders a refusal as one readable owner-facing note naming the target and the reason", async () => {
+  const { activityText, ownerFacingActivity } = await import("./conversation");
+  const refusal = { artifact_ids: [], id: 51, thread_id: 1, turn_id: 7, kind: "refusal", data: { refused: true, reason: "outside_grant", tool: "threads_read", target: { kind: "thread", thread_id: 51 }, grant_summary: "self + subtree" }, ts: ts(5) };
+  expect(ownerFacingActivity(refusal)).toBe(true);
+  expect(activityText(refusal)).toBe("Refused: threads.read Thread 51 — outside grant");
+  const fence = { ...refusal, id: 52, data: { ...refusal.data, reason: "owner_fence", tool: "threads_send" } };
+  expect(activityText(fence)).toBe("Refused: threads.send Thread 51 — reports go to its requester, not upward");
+  const artifact = { ...refusal, id: 53, data: { ...refusal.data, tool: "artifacts_show", target: { kind: "artifact", artifact_id: 9 } } };
+  expect(activityText(artifact)).toBe("Refused: artifacts.show Artifact 9 — outside grant");
+});

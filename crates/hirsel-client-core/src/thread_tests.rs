@@ -172,6 +172,7 @@ fn open_requires_matching_request_and_message_ownership() {
     store.track_pending("open".into(), PendingOp::OpenThread { thread_id: 5 });
     let detail = ThreadDetail {
         related_items: vec![],
+        grants: vec![],
         brief: hirsel_proto::ThreadBrief {
             text: String::new(),
             artifact_ids: vec![],
@@ -245,6 +246,7 @@ fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
         "history",
         ThreadDetail {
             related_items: vec![],
+            grants: vec![],
             brief: hirsel_proto::ThreadBrief {
                 text: String::new(),
                 artifact_ids: vec![],
@@ -383,6 +385,7 @@ fn current_brief_is_per_thread_and_survives_paginated_history() {
             &request,
             ThreadDetail {
                 related_items: vec![],
+                grants: vec![],
                 thread: t,
                 brief: hirsel_proto::ThreadBrief {
                     text: text.into(),
@@ -453,6 +456,7 @@ fn link_detail(revision: u64, links: Vec<hirsel_proto::ThreadRelatedItem>) -> Th
             artifact_ids: vec![44],
         },
         related_items: links,
+        grants: vec![],
         messages: vec![],
         turns: vec![],
         turn_timelines: vec![],

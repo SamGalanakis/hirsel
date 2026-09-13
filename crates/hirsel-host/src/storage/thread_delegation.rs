@@ -84,12 +84,13 @@ impl Storage {
             return Ok(DelegatedTurn{thread_id,turn_id});
         }
         let child = if let Some(id) = assignment.child_thread_id {
-            let valid: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 AND parent_thread_id=?2)",
-                params![id, caller.thread_id],
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(valid, "dispatch requires a direct child Thread");
+            // Any Thread in reach can be addressed — a direct child today, an
+            // explicitly granted peer once the Owner or an ancestor widens it.
+            // The single exception is upward: that is a report, not a message.
+            thread_scope::authorize(&tx, caller.thread_id, id)?;
+            if thread_scope::is_ancestor(&tx, id, caller.thread_id)? {
+                return Err(thread_scope::OutsideGrant::owner_fence(id));
+            }
             id
         } else {
             let now = chrono::Utc::now().to_rfc3339();

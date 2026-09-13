@@ -5,6 +5,7 @@ import type { ChatMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
 import { RunCard } from "./RunCard";
+import { ActivityEntry } from "./ThreadWork";
 import { setThreadState, setTurnExpanded } from "./store";
 
 const events: TimelineEvent[] = [
@@ -253,4 +254,11 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
     expect(view.container.querySelector('[data-slot="timeline"] > [data-slot="timeline-detail"] [data-tool-call-id="call-b"]')).toBeTruthy();
     expect(view.queryByText(/tool completed/)).toBeNull();
   }
+});
+
+it("renders a refusal as one quiet centred note, not a third speaker", () => {
+  const refusal: ThreadActivity = { artifact_ids: [], id: 4, thread_id: 1, turn_id: 1, kind: "refusal", data: { refused: true, reason: "outside_grant", tool: "threads_read", target: { kind: "thread", thread_id: 51 }, grant_summary: "self + subtree" }, ts: activity.ts };
+  const view = render(() => <ActivityEntry activity={refusal} />);
+  const note = view.container.querySelector('[data-slot="conversation-note"]')!;
+  expect(note).toHaveTextContent("Refused: threads.read Thread 51 — outside grant");
 });

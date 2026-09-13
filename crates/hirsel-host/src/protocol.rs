@@ -466,6 +466,51 @@ where
                 .publish_thread_related(Some(client_id), result)
                 .await?;
         }
+        ClientToHost::GrantThreadReach {
+            client_id,
+            history_id,
+            thread_id,
+            target_thread_id,
+            note,
+        } => {
+            let result = state
+                .storage
+                .set_thread_reach(
+                    &client_id,
+                    &history_id,
+                    thread_id,
+                    target_thread_id,
+                    note.as_deref(),
+                    true,
+                )
+                .await?;
+            state
+                .tools
+                .publish_thread_grants(Some(client_id), result)
+                .await?;
+        }
+        ClientToHost::RevokeThreadReach {
+            client_id,
+            history_id,
+            thread_id,
+            target_thread_id,
+        } => {
+            let result = state
+                .storage
+                .set_thread_reach(
+                    &client_id,
+                    &history_id,
+                    thread_id,
+                    target_thread_id,
+                    None,
+                    false,
+                )
+                .await?;
+            state
+                .tools
+                .publish_thread_grants(Some(client_id), result)
+                .await?;
+        }
         ClientToHost::SendThreadMessage {
             client_id,
             history_id,
